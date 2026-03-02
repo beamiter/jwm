@@ -3219,9 +3219,8 @@ impl Jwm {
         let composited = backend.has_compositor();
 
         if !self.animations.has_active() {
-            if composited {
-                // No animations but compositor still needs to render
-                // (window contents may have updated via damage)
+            if composited && backend.compositor_needs_render() {
+                // No animations but compositor has dirty windows (damage, add/remove, resize)
                 let scene = self.build_compositor_scene(&HashMap::new());
                 if scene.is_empty() {
                     // Log once per second at most

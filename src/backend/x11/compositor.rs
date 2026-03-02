@@ -19,8 +19,6 @@ type GlXBindTexImageEXT =
     unsafe extern "C" fn(*mut x11::xlib::Display, x11::glx::GLXDrawable, i32, *const i32);
 type GlXReleaseTexImageEXT =
     unsafe extern "C" fn(*mut x11::xlib::Display, x11::glx::GLXDrawable, i32);
-type GlXSwapIntervalEXT =
-    unsafe extern "C" fn(*mut x11::xlib::Display, x11::glx::GLXDrawable, i32);
 
 struct TfpFunctions {
     bind: GlXBindTexImageEXT,
@@ -80,6 +78,7 @@ pub(super) struct Compositor {
     #[allow(dead_code)]
     root: u32,
     damage_event_base: u8,
+    needs_render: bool,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
@@ -249,14 +248,18 @@ impl Compositor {
             overlay_visual_id
         );
 
-        // First try: request an FBConfig matching the overlay's exact visual.
+        // First try: request a single-buffered FBConfig matching the overlay's
+        // exact visual.  We render directly to the front buffer and call
+        // glFlush() instead of glXSwapBuffers, which avoids the GPU-side
+        // blocking that can starve the X11 event loop and eventually cause
+        // the X server to close the connection.
         let ctx_attrs_visual: Vec<i32> = vec![
             x11::glx::GLX_RENDER_TYPE,
             x11::glx::GLX_RGBA_BIT,
             x11::glx::GLX_DRAWABLE_TYPE,
             x11::glx::GLX_WINDOW_BIT,
             x11::glx::GLX_DOUBLEBUFFER,
-            1,
+            0, // single-buffered — no glXSwapBuffers needed
             x11::glx::GLX_RED_SIZE,
             8,
             x11::glx::GLX_GREEN_SIZE,
@@ -379,17 +382,8 @@ impl Compositor {
             release: unsafe { std::mem::transmute(release_ptr.unwrap()) },
         };
 
-        log::info!("compositor: TFP functions loaded, enabling VSync...");
-        // 11. Try to enable VSync
-        {
-            let swap_name = CString::new("glXSwapIntervalEXT").unwrap();
-            let swap_ptr =
-                unsafe { x11::glx::glXGetProcAddress(swap_name.as_ptr() as *const u8) };
-            if let Some(ptr) = swap_ptr {
-                let swap_fn: GlXSwapIntervalEXT = unsafe { std::mem::transmute(ptr) };
-                unsafe { swap_fn(xlib_display, glx_drawable, 1) };
-            }
-        }
+        // VSync is not needed — we use single-buffered rendering (no swap)
+        // and pace frames via the calloop 20ms timer.
 
         log::info!("compositor: finding TFP FBConfigs...");
         // 12. Find FBConfigs for TFP (RGBA and RGB)
@@ -530,6 +524,7 @@ impl Compositor {
             screen_h,
             root,
             damage_event_base,
+            needs_render: true,
         })
     }
 
@@ -579,6 +574,14 @@ impl Compositor {
 
     pub(super) fn damage_event_base(&self) -> u8 {
         self.damage_event_base
+    }
+
+    pub(super) fn needs_render(&self) -> bool {
+        self.needs_render
+    }
+
+    pub(super) fn clear_needs_render(&mut self) {
+        self.needs_render = false;
     }
 
     // ----- Window management -----
@@ -756,6 +759,7 @@ impl Compositor {
                 has_rgba: use_rgba,
             },
         );
+        self.needs_render = true;
 
         log::debug!(
             "compositor: add_window 0x{:x} {}x{} at ({},{})",
@@ -780,12 +784,14 @@ impl Compositor {
         );
         self.screen_w = new_w;
         self.screen_h = new_h;
+        self.needs_render = true;
     }
 
     pub(super) fn remove_window(&mut self, x11_win: u32) {
         let Some(wt) = self.windows.remove(&x11_win) else {
             return;
         };
+        self.needs_render = true;
 
         unsafe {
             self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
@@ -805,6 +811,7 @@ impl Compositor {
             let size_changed = wt.w != w || wt.h != h;
             wt.x = x;
             wt.y = y;
+            self.needs_render = true;
 
             if size_changed && w > 0 && h > 0 {
                 wt.w = w;
@@ -886,6 +893,7 @@ impl Compositor {
     pub(super) fn mark_damaged(&mut self, x11_win: u32) {
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             wt.dirty = true;
+            self.needs_render = true;
             // Subtract damage so we get future notifications
             let _ = self.conn.damage_subtract(wt.damage, 0u32, 0u32);
         }
@@ -1027,9 +1035,10 @@ impl Compositor {
             self.gl.use_program(None);
         }
 
-        // Swap
+        // Flush GL commands to the GPU.  We use a single-buffered config so
+        // drawing goes directly to the front buffer — no swap needed.
         unsafe {
-            x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable);
+            self.gl.flush();
         }
 
         true

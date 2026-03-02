@@ -339,6 +339,10 @@ impl Backend for X11Backend {
         self.compositor.is_some()
     }
 
+    fn compositor_needs_render(&self) -> bool {
+        self.compositor.as_ref().map_or(false, |c| c.needs_render())
+    }
+
     fn compositor_render_frame(
         &mut self,
         scene: &[(u64, i32, i32, u32, u32)],
@@ -375,7 +379,9 @@ impl Backend for X11Backend {
         }
 
         let _ = self.conn.flush();
-        Ok(compositor.render_frame(&x11_scene))
+        let rendered = compositor.render_frame(&x11_scene);
+        compositor.clear_needs_render();
+        Ok(rendered)
     }
     fn as_any(&self) -> &dyn Any {
         self
@@ -648,7 +654,7 @@ impl Backend for X11Backend {
         let handle = event_loop.handle();
 
         // 1. 注册 X11 事件源
-        let mut x11_source = if let Some(src) = self._init_event_source.take() {
+        let x11_source = if let Some(src) = self._init_event_source.take() {
             src
         } else {
             X11EventSource::new(
@@ -658,11 +664,6 @@ impl Backend for X11Backend {
                 self.ids.clone(),
             )
         };
-
-        // Pass damage event base to event source if compositor is active
-        if let Some(ref compositor) = self.compositor {
-            x11_source.set_damage_event_base(compositor.damage_event_base());
-        }
 
         handle
             .insert_source(x11_source, |event, _, data| {
@@ -1452,7 +1453,6 @@ mod event_source {
         atoms: Atoms,
         root_x11: u32,
         ids: X11IdRegistry,
-        damage_event_base: Option<u8>,
     }
 
     impl X11EventSource {
@@ -1462,12 +1462,7 @@ mod event_source {
                 atoms,
                 root_x11,
                 ids,
-                damage_event_base: None,
             }
-        }
-
-        pub(super) fn set_damage_event_base(&mut self, base: u8) {
-            self.damage_event_base = Some(base);
         }
 
         fn hit_target_from_event_window(&self, event_window: u32) -> HitTarget {
@@ -1698,20 +1693,10 @@ mod event_source {
                 XEvent::Expose(e) => Some(BackendEvent::Expose {
                     window: self.ids.intern(e.window),
                 }),
-                XEvent::Unknown(ref raw) => {
-                    if let Some(base) = self.damage_event_base {
-                        if raw.len() >= 8 && (raw[0] & 0x7f) == base {
-                            // DamageNotify: bytes 4..8 contain the drawable (u32 LE)
-                            let drawable = u32::from_ne_bytes([
-                                raw[4], raw[5], raw[6], raw[7],
-                            ]);
-                            return Some(BackendEvent::DamageNotify {
-                                drawable: self.ids.intern(drawable),
-                            });
-                        }
-                    }
-                    None
-                }
+                XEvent::DamageNotify(e) => Some(BackendEvent::DamageNotify {
+                    drawable: self.ids.intern(e.drawable),
+                }),
+                XEvent::Unknown(_) => None,
                 _ => None,
             }
         }

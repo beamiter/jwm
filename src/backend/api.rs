@@ -599,6 +599,10 @@ pub trait Backend: Send {
         false
     }
 
+    fn compositor_needs_render(&self) -> bool {
+        false
+    }
+
     fn compositor_render_frame(
         &mut self,
         _scene: &[(u64, i32, i32, u32, u32)],
