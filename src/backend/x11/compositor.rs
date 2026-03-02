@@ -767,6 +767,21 @@ impl Compositor {
         );
     }
 
+    /// Update the compositor's screen dimensions (e.g. after a RandR hotplug).
+    /// The overlay window is resized automatically by the X server, but we need
+    /// to update our GL viewport and projection matrix dimensions.
+    pub(super) fn resize(&mut self, new_w: u32, new_h: u32) {
+        if new_w == self.screen_w && new_h == self.screen_h {
+            return;
+        }
+        log::info!(
+            "compositor: resize {}x{} -> {}x{}",
+            self.screen_w, self.screen_h, new_w, new_h
+        );
+        self.screen_w = new_w;
+        self.screen_h = new_h;
+    }
+
     pub(super) fn remove_window(&mut self, x11_win: u32) {
         let Some(wt) = self.windows.remove(&x11_win) else {
             return;

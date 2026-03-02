@@ -287,6 +287,16 @@ impl X11Backend {
                     compositor.mark_damaged(x11w);
                 }
             }
+            BackendEvent::ScreenLayoutChanged => {
+                // Root window may have been resized by xrandr; update compositor
+                // viewport so it covers the full virtual screen.
+                use x11rb::protocol::xproto::ConnectionExt as _;
+                if let Ok(geo) = self.conn.get_geometry(self.root_x11) {
+                    if let Ok(geo) = geo.reply() {
+                        compositor.resize(geo.width as u32, geo.height as u32);
+                    }
+                }
+            }
             _ => {}
         }
     }
