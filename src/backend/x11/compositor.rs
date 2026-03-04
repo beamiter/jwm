@@ -54,6 +54,10 @@ struct WindowTexture {
     gl_texture: glow::Texture,
     dirty: bool,
     has_rgba: bool,
+    /// When true, the pixmap needs to be recreated (deferred from update_geometry).
+    needs_pixmap_refresh: bool,
+    /// The X11 window ID, needed for deferred pixmap recreation.
+    x11_win: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -79,6 +83,7 @@ pub(super) struct Compositor {
     root: u32,
     damage_event_base: u8,
     needs_render: bool,
+    context_current: bool,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
@@ -525,6 +530,7 @@ impl Compositor {
             root,
             damage_event_base,
             needs_render: true,
+            context_current: true,
         })
     }
 
@@ -717,12 +723,12 @@ impl Compositor {
             self.gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
                 glow::TEXTURE_MIN_FILTER,
-                glow::LINEAR as i32,
+                glow::NEAREST as i32,
             );
             self.gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
                 glow::TEXTURE_MAG_FILTER,
-                glow::LINEAR as i32,
+                glow::NEAREST as i32,
             );
             self.gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
@@ -757,6 +763,8 @@ impl Compositor {
                 gl_texture,
                 dirty: true,
                 has_rgba: use_rgba,
+                needs_pixmap_refresh: false,
+                x11_win,
             },
         );
         self.needs_render = true;
@@ -816,76 +824,129 @@ impl Compositor {
             if size_changed && w > 0 && h > 0 {
                 wt.w = w;
                 wt.h = h;
+                // Defer the heavy pixmap recreation to the next render_frame()
+                // call, so multiple resize events within a single frame are batched.
+                wt.needs_pixmap_refresh = true;
+            }
+        }
+    }
 
-                // Release old texture binding and pixmap
-                unsafe {
-                    self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
-                    (self.tfp.release)(self.xlib_display, wt.glx_pixmap, GLX_FRONT_LEFT_EXT);
-                    self.gl.bind_texture(glow::TEXTURE_2D, None);
-                    x11::glx::glXDestroyPixmap(self.xlib_display, wt.glx_pixmap);
+    /// Recreate GLX pixmaps for windows that had their size changed.
+    /// Called once per frame in render_frame() to batch all pending recreations.
+    fn refresh_pixmaps(&mut self) {
+        // Collect window IDs that need refresh to avoid borrowing issues
+        let refresh_wins: Vec<u32> = self
+            .windows
+            .iter()
+            .filter(|(_, wt)| wt.needs_pixmap_refresh)
+            .map(|(&id, _)| id)
+            .collect();
+
+        if refresh_wins.is_empty() {
+            return;
+        }
+
+        // Release old pixmaps for all windows that need refresh
+        for &win in &refresh_wins {
+            let wt = self.windows.get(&win).unwrap();
+            unsafe {
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
+                (self.tfp.release)(self.xlib_display, wt.glx_pixmap, GLX_FRONT_LEFT_EXT);
+                self.gl.bind_texture(glow::TEXTURE_2D, None);
+                x11::glx::glXDestroyPixmap(self.xlib_display, wt.glx_pixmap);
+            }
+            let _ = self.conn.free_pixmap(wt.pixmap);
+        }
+
+        // Create new named pixmaps for all windows via x11rb
+        let mut new_pixmaps: Vec<(u32, u32)> = Vec::new(); // (win, pixmap)
+        for &win in &refresh_wins {
+            let wt = self.windows.get_mut(&win).unwrap();
+            let pixmap = match self.conn.generate_id() {
+                Ok(id) => id,
+                Err(_) => {
+                    wt.glx_pixmap = 0;
+                    wt.pixmap = 0;
+                    wt.needs_pixmap_refresh = false;
+                    continue;
                 }
-                let _ = self.conn.free_pixmap(wt.pixmap);
+            };
+            if self
+                .conn
+                .composite_name_window_pixmap(wt.x11_win, pixmap)
+                .is_err()
+            {
+                wt.glx_pixmap = 0;
+                wt.pixmap = 0;
+                wt.needs_pixmap_refresh = false;
+                continue;
+            }
+            wt.pixmap = pixmap;
+            new_pixmaps.push((win, pixmap));
+        }
 
-                // Re-create pixmap
-                let pixmap = match self.conn.generate_id() {
-                    Ok(id) => id,
-                    Err(_) => return,
-                };
-                if self
-                    .conn
-                    .composite_name_window_pixmap(x11_win, pixmap)
-                    .is_err()
-                {
-                    return;
-                }
-                let _ = self.conn.flush();
+        // Single flush + sync for the entire batch
+        let _ = self.conn.flush();
+        unsafe {
+            x11::xlib::XSync(self.xlib_display, 0);
+        }
 
-                let fbconfig = if wt.has_rgba {
-                    self.fbconfig_rgba
-                } else {
-                    self.fbconfig_rgb
-                };
-                let tex_fmt = if wt.has_rgba {
-                    GLX_TEXTURE_FORMAT_RGBA_EXT
-                } else {
-                    GLX_TEXTURE_FORMAT_RGB_EXT
-                };
-                let pixmap_attrs: Vec<i32> = vec![
-                    GLX_TEXTURE_TARGET_EXT,
-                    GLX_TEXTURE_2D_EXT,
-                    GLX_TEXTURE_FORMAT_EXT,
-                    tex_fmt,
-                    0,
-                ];
-                let glx_pixmap = unsafe {
-                    x11::xlib::XSync(self.xlib_display, 0);
-                    x11::glx::glXCreatePixmap(
-                        self.xlib_display,
-                        fbconfig,
-                        pixmap as _,
-                        pixmap_attrs.as_ptr(),
-                    )
-                };
-                if glx_pixmap == 0 {
-                    let _ = self.conn.free_pixmap(pixmap);
-                    return;
-                }
+        // Create GLX pixmaps and rebind textures
+        for (win, pixmap) in new_pixmaps {
+            let wt = self.windows.get_mut(&win).unwrap();
+            let fbconfig = if wt.has_rgba {
+                self.fbconfig_rgba
+            } else {
+                self.fbconfig_rgb
+            };
+            let tex_fmt = if wt.has_rgba {
+                GLX_TEXTURE_FORMAT_RGBA_EXT
+            } else {
+                GLX_TEXTURE_FORMAT_RGB_EXT
+            };
+            let pixmap_attrs: Vec<i32> = vec![
+                GLX_TEXTURE_TARGET_EXT,
+                GLX_TEXTURE_2D_EXT,
+                GLX_TEXTURE_FORMAT_EXT,
+                tex_fmt,
+                0,
+            ];
+            let glx_pixmap = unsafe {
+                x11::glx::glXCreatePixmap(
+                    self.xlib_display,
+                    fbconfig,
+                    pixmap as _,
+                    pixmap_attrs.as_ptr(),
+                )
+            };
+            if glx_pixmap == 0 {
+                let _ = self.conn.free_pixmap(pixmap);
+                wt.pixmap = 0;
+                wt.glx_pixmap = 0;
+                wt.needs_pixmap_refresh = false;
+                continue;
+            }
 
-                // Re-bind
-                unsafe {
-                    self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
-                    (self.tfp.bind)(
-                        self.xlib_display,
-                        glx_pixmap,
-                        GLX_FRONT_LEFT_EXT,
-                        std::ptr::null(),
-                    );
-                    self.gl.bind_texture(glow::TEXTURE_2D, None);
-                }
+            unsafe {
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
+                (self.tfp.bind)(
+                    self.xlib_display,
+                    glx_pixmap,
+                    GLX_FRONT_LEFT_EXT,
+                    std::ptr::null(),
+                );
+                self.gl.bind_texture(glow::TEXTURE_2D, None);
+            }
 
-                wt.pixmap = pixmap;
-                wt.glx_pixmap = glx_pixmap;
-                wt.dirty = true;
+            wt.glx_pixmap = glx_pixmap;
+            wt.dirty = true;
+            wt.needs_pixmap_refresh = false;
+        }
+
+        // Clear flag for any remaining windows (error paths above)
+        for &win in &refresh_wins {
+            if let Some(wt) = self.windows.get_mut(&win) {
+                wt.needs_pixmap_refresh = false;
             }
         }
     }
@@ -946,15 +1007,22 @@ impl Compositor {
             }
         }
 
-        // Ensure context is current
-        unsafe {
-            x11::glx::glXMakeContextCurrent(
-                self.xlib_display,
-                self.glx_drawable,
-                self.glx_drawable,
-                self.glx_context,
-            );
+        // Ensure context is current (skip if already current — single-threaded,
+        // nothing else touches GLX so it stays current after the first call).
+        if !self.context_current {
+            unsafe {
+                x11::glx::glXMakeContextCurrent(
+                    self.xlib_display,
+                    self.glx_drawable,
+                    self.glx_drawable,
+                    self.glx_context,
+                );
+            }
+            self.context_current = true;
         }
+
+        // Recreate pixmaps for windows that were resized (batched, single XSync)
+        self.refresh_pixmaps();
 
         // Refresh dirty textures
         for &(win, _, _, _, _) in scene {
@@ -1054,11 +1122,16 @@ impl Compositor {
     }
 }
 
-/// Dummy X error handler used to suppress errors from stale TFP pixmaps.
+/// X error handler that logs errors instead of calling exit().
 unsafe extern "C" fn ignore_x_error(
     _display: *mut x11::xlib::Display,
-    _event: *mut x11::xlib::XErrorEvent,
+    event: *mut x11::xlib::XErrorEvent,
 ) -> i32 {
+    let e = unsafe { &*event };
+    log::debug!(
+        "compositor: X error: type={}, error_code={}, request_code={}, minor_code={}, resourceid=0x{:x}",
+        e.type_, e.error_code, e.request_code, e.minor_code, e.resourceid
+    );
     0
 }
 
