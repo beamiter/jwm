@@ -233,6 +233,11 @@ pub struct Jwm {
     // Config hot-reload
     pub config_last_modified: Option<std::time::SystemTime>,
     pub config_reload_debounce: Option<std::time::Instant>,
+
+    /// Override-redirect windows (menus, tooltips, dmenu, etc.) that are
+    /// currently mapped.  These are not managed by the WM but must be rendered
+    /// by the compositor when COMPOSITE_REDIRECT_MANUAL is active.
+    pub override_redirect_windows: HashSet<WindowId>,
 }
 
 // =================================================================================
@@ -292,12 +297,14 @@ impl WMController for Jwm {
     }
 
     fn on_unmap_notify(&mut self, backend: &mut dyn Backend, win: WindowId, from_configure: bool) {
+        self.override_redirect_windows.remove(&win);
         if let Err(e) = self.unmapnotify(backend, win, from_configure) {
             error!("Error handling UnmapNotify for {:?}: {:?}", win, e);
         }
     }
 
     fn on_destroy_notify(&mut self, backend: &mut dyn Backend, win: WindowId) {
+        self.override_redirect_windows.remove(&win);
         if let Err(e) = self.destroynotify(backend, win) {
             error!("Error handling DestroyNotify for {:?}: {:?}", win, e);
         }
@@ -777,6 +784,12 @@ impl EventHandler for Jwm {
             BackendEvent::WindowCreated(win) => self.on_map_request(backend, win),
             BackendEvent::WindowDestroyed(win) => self.on_destroy_notify(backend, win),
             BackendEvent::WindowMapped(win) => {
+                // Track override-redirect windows so the compositor can render them.
+                if let Ok(attr) = backend.window_ops().get_window_attributes(win) {
+                    if attr.override_redirect {
+                        self.override_redirect_windows.insert(win);
+                    }
+                }
                 // Some X11 notification daemons (e.g. dunst) use override_redirect windows.
                 // Those bypass MapRequest, so they won't be managed/clamped via normal paths.
                 // Clamp them to the monitor workarea here to avoid being covered by the status bar.
@@ -1162,6 +1175,7 @@ impl Jwm {
             },
             config_last_modified: crate::config::Config::get_config_modified_time().ok(),
             config_reload_debounce: None,
+            override_redirect_windows: HashSet::new(),
         };
         if let Ok((x, y)) = backend.input_ops().get_pointer_position() {
             jwm.last_mouse_root = (x, y);
@@ -1329,9 +1343,16 @@ impl Jwm {
         if let Ok(windows) = backend.window_ops().scan_windows() {
             info!("[setup_initial_windows] Scanning {} windows", windows.len());
             for win in windows {
-                let attr = backend.window_ops().get_window_attributes(win)?;
+                // Windows may be destroyed between scan and query; skip on error.
+                let attr = match backend.window_ops().get_window_attributes(win) {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                };
                 if !attr.override_redirect && attr.map_state_viewable {
-                    let geom = backend.window_ops().get_geometry(win)?;
+                    let geom = match backend.window_ops().get_geometry(win) {
+                        Ok(g) => g,
+                        Err(_) => continue,
+                    };
                     self.manage(backend, win, &geom)?;
                 }
             }
@@ -3221,7 +3242,7 @@ impl Jwm {
         if !self.animations.has_active() {
             if composited && backend.compositor_needs_render() {
                 // No animations but compositor has dirty windows (damage, add/remove, resize)
-                let scene = self.build_compositor_scene(&HashMap::new());
+                let scene = self.build_compositor_scene(backend, &HashMap::new());
                 if scene.is_empty() {
                     // Log once per second at most
                     static LAST_EMPTY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -3281,7 +3302,7 @@ impl Jwm {
         }
 
         if composited {
-            let scene = self.build_compositor_scene(&visual_overrides);
+            let scene = self.build_compositor_scene(backend, &visual_overrides);
             let _ = backend.compositor_render_frame(&scene);
         }
 
@@ -3295,6 +3316,7 @@ impl Jwm {
     /// active animation overrides, use the interpolated rect instead of actual geometry.
     fn build_compositor_scene(
         &self,
+        backend: &dyn Backend,
         visual_overrides: &HashMap<ClientKey, Rect>,
     ) -> Vec<(u64, i32, i32, u32, u32)> {
         let mut scene = Vec::new();
@@ -3382,6 +3404,18 @@ impl Jwm {
                         w,
                         h,
                     ));
+                }
+            }
+        }
+
+        // Include override-redirect windows (menus, dmenu, tooltips) on top.
+        // These are not managed by the WM but must be composited.
+        for &or_win in &self.override_redirect_windows {
+            if let Ok(geom) = backend.window_ops().get_geometry(or_win) {
+                let w = geom.w as u32;
+                let h = geom.h as u32;
+                if w > 0 && h > 0 {
+                    scene.push((or_win.raw(), geom.x, geom.y, w, h));
                 }
             }
         }

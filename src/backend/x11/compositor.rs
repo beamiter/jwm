@@ -1027,7 +1027,7 @@ impl Compositor {
         // Refresh dirty textures
         for &(win, _, _, _, _) in scene {
             if let Some(wt) = self.windows.get_mut(&win) {
-                if wt.dirty {
+                if wt.dirty && wt.glx_pixmap != 0 {
                     unsafe {
                         self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
                         (self.tfp.release)(

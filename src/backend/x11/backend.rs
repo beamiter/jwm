@@ -208,8 +208,11 @@ impl X11Backend {
         // Compositor uses MANUAL redirect + GLX texture_from_pixmap, which requires
         // direct GLX rendering. This does NOT work in nested X servers (Xephyr/Xnest)
         // because GLX renders to the host GPU framebuffer, not the nested server's.
-        // Default: OFF. Set JWM_COMPOSITOR=1 to enable.
-        let compositor = if env::var("JWM_COMPOSITOR").map(|v| v == "1").unwrap_or(false) {
+        // Enabled via config.toml [behavior] compositor = true, or env JWM_COMPOSITOR=1.
+        let compositor_enabled = env::var("JWM_COMPOSITOR")
+            .map(|v| v == "1")
+            .unwrap_or_else(|_| crate::config::CONFIG.load().compositor_enabled());
+        let compositor = if compositor_enabled {
             match super::compositor::Compositor::new(
                 conn.clone(),
                 root_x11,

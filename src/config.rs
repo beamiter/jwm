@@ -82,6 +82,8 @@ pub struct BehaviorConfig {
     pub focus_follows_new_window: bool,
     pub resize_hints: bool,
     pub lock_fullscreen: bool,
+    #[serde(default)]
+    pub compositor: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,6 +198,7 @@ impl Default for Config {
                     focus_follows_new_window: false,
                     resize_hints: true,
                     lock_fullscreen: true,
+                    compositor: false,
                 },
                 status_bar: StatusBarConfig {
                     name: STATUS_BAR_NAME.to_string(),
@@ -660,6 +663,10 @@ impl Config {
 
     pub fn behavior(&self) -> &BehaviorConfig {
         &self.inner.behavior
+    }
+
+    pub fn compositor_enabled(&self) -> bool {
+        self.inner.behavior.compositor
     }
 
     pub fn m_fact(&self) -> f32 {
