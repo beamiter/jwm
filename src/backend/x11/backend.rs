@@ -260,10 +260,12 @@ impl X11Backend {
             Some(c) => c,
             None => return,
         };
+        let overlay = compositor.overlay_window();
         match event {
             BackendEvent::WindowMapped(win) => {
                 if let Ok(x11w) = self.ids.x11(*win) {
-                    if x11w != self.root_x11 {
+                    // Skip root and the compositor's overlay window
+                    if x11w != self.root_x11 && x11w != overlay {
                         if let Ok(geom) = self.window_ops.get_geometry(*win) {
                             compositor.add_window(x11w, geom.x, geom.y, geom.w, geom.h);
                         }
@@ -282,12 +284,18 @@ impl X11Backend {
             }
             BackendEvent::WindowConfigured { window, x, y, width, height } => {
                 if let Ok(x11w) = self.ids.x11(*window) {
-                    compositor.update_geometry(x11w, *x, *y, *width, *height);
+                    // Skip the overlay window
+                    if x11w != overlay {
+                        compositor.update_geometry(x11w, *x, *y, *width, *height);
+                    }
                 }
             }
             BackendEvent::DamageNotify { drawable } => {
                 if let Ok(x11w) = self.ids.x11(*drawable) {
-                    compositor.mark_damaged(x11w);
+                    // Skip the overlay window
+                    if x11w != overlay {
+                        compositor.mark_damaged(x11w);
+                    }
                 }
             }
             BackendEvent::ScreenLayoutChanged => {
@@ -344,6 +352,10 @@ impl Backend for X11Backend {
 
     fn compositor_needs_render(&self) -> bool {
         self.compositor.as_ref().map_or(false, |c| c.needs_render())
+    }
+
+    fn compositor_overlay_window(&self) -> Option<WindowId> {
+        self.compositor.as_ref().map(|c| self.ids.intern(c.overlay_window()))
     }
 
     fn compositor_render_frame(
@@ -1511,14 +1523,20 @@ mod event_source {
 
         fn map_event(&self, ev: XEvent) -> Option<BackendEvent> {
             match ev {
-                XEvent::ButtonPress(e) => Some(BackendEvent::ButtonPress {
-                    target: self.hit_target_from_event_window(e.event),
-                    state: e.state.bits(),
-                    detail: e.detail,
-                    time: e.time,
-                    root_x: e.root_x as f64,
-                    root_y: e.root_y as f64,
-                }),
+                XEvent::ButtonPress(e) => {
+                    log::info!(
+                        "[X11] ButtonPress: event=0x{:x} child=0x{:x} root=0x{:x} root_xy=({},{}) detail={}",
+                        e.event, e.child, self.root_x11, e.root_x, e.root_y, e.detail
+                    );
+                    Some(BackendEvent::ButtonPress {
+                        target: self.hit_target_from_event_window(e.event),
+                        state: e.state.bits(),
+                        detail: e.detail,
+                        time: e.time,
+                        root_x: e.root_x as f64,
+                        root_y: e.root_y as f64,
+                    })
+                }
                 XEvent::MotionNotify(e) => Some(BackendEvent::MotionNotify {
                     target: self.hit_target_from_event_window(e.event),
                     root_x: e.root_x as f64,
@@ -3348,6 +3366,10 @@ mod window_ops {
         ) -> Result<(), BackendError> {
             let x_mask = event_mask_from_generic(event_mask_bits);
             let w = self.ids.x11(win)?;
+            log::info!(
+                "[grab_button_any_anymod] WindowId={:?} -> X11 window=0x{:x}",
+                win, w
+            );
             self.conn.grab_button(
                 false,
                 w,

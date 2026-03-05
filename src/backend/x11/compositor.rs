@@ -183,6 +183,10 @@ impl Compositor {
 
         // 5. Make overlay input-passthrough using XFixes
         {
+            log::info!(
+                "compositor: setting empty INPUT shape on overlay 0x{:x} to pass through input",
+                overlay_window
+            );
             let region = conn.generate_id().map_err(|e| format!("gen id: {e}"))?;
             conn.xfixes_create_region(region, &[])
                 .map_err(|e| format!("create_region: {e}"))?;
@@ -196,6 +200,7 @@ impl Compositor {
             .map_err(|e| format!("set_window_shape_region: {e}"))?;
             conn.xfixes_destroy_region(region)
                 .map_err(|e| format!("destroy_region: {e}"))?;
+            log::info!("compositor: overlay input shape set successfully");
         }
 
         conn.flush().map_err(|e| format!("flush: {e}"))?;
@@ -584,6 +589,10 @@ impl Compositor {
 
     pub(super) fn needs_render(&self) -> bool {
         self.needs_render
+    }
+
+    pub(super) fn overlay_window(&self) -> u32 {
+        self.overlay_window
     }
 
     pub(super) fn clear_needs_render(&mut self) {

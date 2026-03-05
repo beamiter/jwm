@@ -610,6 +610,13 @@ pub trait Backend: Send {
         Ok(false)
     }
 
+    /// Returns the compositor overlay window ID, if any.
+    /// This window must be filtered out from normal window tracking to avoid
+    /// feedback loops where the compositor tries to render itself.
+    fn compositor_overlay_window(&self) -> Option<WindowId> {
+        None
+    }
+
     /// Request a compositor-level screenshot.
     ///
     /// On backends that own the framebuffer (udev/KMS) this captures the

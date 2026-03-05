@@ -785,15 +785,19 @@ impl EventHandler for Jwm {
             BackendEvent::WindowDestroyed(win) => self.on_destroy_notify(backend, win),
             BackendEvent::WindowMapped(win) => {
                 // Track override-redirect windows so the compositor can render them.
-                if let Ok(attr) = backend.window_ops().get_window_attributes(win) {
-                    if attr.override_redirect {
-                        self.override_redirect_windows.insert(win);
+                // BUT filter out the compositor's overlay window to avoid feedback loops.
+                let is_overlay = backend.compositor_overlay_window() == Some(win);
+                if !is_overlay {
+                    if let Ok(attr) = backend.window_ops().get_window_attributes(win) {
+                        if attr.override_redirect {
+                            self.override_redirect_windows.insert(win);
+                        }
                     }
+                    // Some X11 notification daemons (e.g. dunst) use override_redirect windows.
+                    // Those bypass MapRequest, so they won't be managed/clamped via normal paths.
+                    // Clamp them to the monitor workarea here to avoid being covered by the status bar.
+                    self.maybe_clamp_override_redirect_notification(backend, win);
                 }
-                // Some X11 notification daemons (e.g. dunst) use override_redirect windows.
-                // Those bypass MapRequest, so they won't be managed/clamped via normal paths.
-                // Clamp them to the monitor workarea here to avoid being covered by the status bar.
-                self.maybe_clamp_override_redirect_notification(backend, win);
             }
             BackendEvent::WindowUnmapped(win) => self.on_unmap_notify(backend, win, false),
             BackendEvent::WindowConfigured {
@@ -3425,7 +3429,12 @@ impl Jwm {
 
         // Include override-redirect windows (menus, dmenu, tooltips) on top.
         // These are not managed by the WM but must be composited.
+        // Filter out the compositor's overlay window to avoid feedback loops.
+        let overlay_win = backend.compositor_overlay_window();
         for &or_win in &self.override_redirect_windows {
+            if Some(or_win) == overlay_win {
+                continue;
+            }
             if let Ok(geom) = backend.window_ops().get_geometry(or_win) {
                 let w = geom.w as u32;
                 let h = geom.h as u32;
@@ -7479,6 +7488,10 @@ impl Jwm {
                 }
             }
         } else {
+            log::info!(
+                "[grabbuttons] Setting grab_button_any_anymod on unfocused window {:?}",
+                win
+            );
             let _ = backend.window_ops().grab_button_any_anymod(
                 win,
                 (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
