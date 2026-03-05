@@ -3222,6 +3222,21 @@ impl Jwm {
                     easing,
                     AnimationKind::Layout,
                 );
+                // When compositor is active, move the actual X11 window to the
+                // target position immediately.  The compositor handles visual
+                // interpolation via the scene, but the X server delivers input
+                // events based on the real window geometry — so the window must
+                // be at the correct position for clicks to work.
+                if backend.has_compositor() {
+                    backend.window_ops().configure(
+                        client.win,
+                        x,
+                        y,
+                        w as u32,
+                        h as u32,
+                        client.geometry.border_w as u32,
+                    )?;
+                }
             } else {
                 backend.window_ops().configure(
                     client.win,
@@ -7270,25 +7285,32 @@ impl Jwm {
 
         self.configure_client(backend, client_key)?;
 
-        let (x, y, w, h) = if let Some(client) = self.state.clients.get(client_key) {
-            let offscreen_x = client.geometry.x + 2 * self.s_w;
-            (
-                offscreen_x,
-                client.geometry.y,
-                client.geometry.w,
-                client.geometry.h,
-            )
-        } else {
-            return Err("Client not found".into());
-        };
-        let changes = WindowChanges {
-            x: Some(x),
-            y: Some(y),
-            width: Some(w as u32),
-            height: Some(h as u32),
-            ..Default::default()
-        };
-        backend.window_ops().apply_window_changes(win, changes)?;
+        // When the compositor is NOT active, temporarily move the window
+        // off-screen to avoid visual flicker before arrange() positions it.
+        // With the compositor, rendering is done via TFP from the off-screen
+        // pixmap, so the actual X11 position must stay correct for input
+        // event delivery.
+        if !backend.has_compositor() {
+            let (x, y, w, h) = if let Some(client) = self.state.clients.get(client_key) {
+                let offscreen_x = client.geometry.x + 2 * self.s_w;
+                (
+                    offscreen_x,
+                    client.geometry.y,
+                    client.geometry.w,
+                    client.geometry.h,
+                )
+            } else {
+                return Err("Client not found".into());
+            };
+            let changes = WindowChanges {
+                x: Some(x),
+                y: Some(y),
+                width: Some(w as u32),
+                height: Some(h as u32),
+                ..Default::default()
+            };
+            backend.window_ops().apply_window_changes(win, changes)?;
+        }
 
         if let Some(client) = self.state.clients.get(client_key) {
             self.setclientstate(backend, client.win, NORMAL_STATE as i64)?;
