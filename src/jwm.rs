@@ -3231,6 +3231,11 @@ impl Jwm {
                 // interpolation via the scene, but the X server delivers input
                 // events based on the real window geometry — so the window must
                 // be at the correct position for clicks to work.
+                //
+                // When compositor is OFF, we still need to position the X11 window
+                // at the animation's starting point (visual) so that tick_animations
+                // can animate from the correct position. Without this, the window
+                // might be off-screen or at a stale position, causing visual glitches.
                 if backend.has_compositor() {
                     backend.window_ops().configure(
                         client.win,
@@ -3238,6 +3243,15 @@ impl Jwm {
                         y,
                         w as u32,
                         h as u32,
+                        client.geometry.border_w as u32,
+                    )?;
+                } else {
+                    backend.window_ops().configure(
+                        client.win,
+                        visual.x,
+                        visual.y,
+                        visual.w as u32,
+                        visual.h as u32,
                         client.geometry.border_w as u32,
                     )?;
                 }
