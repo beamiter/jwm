@@ -51,22 +51,30 @@ fn install_panic_hook() {
 }
 
 fn run_jwm() -> Result<(), Box<dyn std::error::Error>> {
-    info!("[main] Starting JWM instance");
+    loop {
+        info!("[main] Starting JWM instance");
 
-    let mut backend = select_backend()?;
+        let mut backend = select_backend()?;
 
-    backend.check_existing_wm()?;
+        backend.check_existing_wm()?;
 
-    let mut jwm = Jwm::new(&mut *backend)?;
-    jwm.setup(&mut *backend)?;
-    jwm.setup_initial_windows(&mut *backend)?;
-    jwm.run(&mut *backend)?;
-    jwm.cleanup(&mut *backend)?;
+        let mut jwm = Jwm::new(&mut *backend)?;
+        jwm.setup(&mut *backend)?;
+        jwm.setup_initial_windows(&mut *backend)?;
+        jwm.run(&mut *backend)?;
+        jwm.cleanup(&mut *backend)?;
 
-    if !jwm.is_restarting.load(Ordering::SeqCst) {
-        if let Err(_) = Command::new("jwm-tool").arg("quit").spawn() {
-            error!("[new] Failted to quit jwm daemon");
+        if jwm.is_restarting.load(Ordering::SeqCst) {
+            info!("[main] Restarting JWM...");
+            drop(jwm);
+            drop(backend);
+            continue;
         }
+
+        if let Err(_) = Command::new("jwm-tool").arg("quit").spawn() {
+            error!("[main] Failed to quit jwm daemon");
+        }
+        break;
     }
     Ok(())
 }
