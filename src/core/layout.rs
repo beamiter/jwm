@@ -15,6 +15,13 @@ pub struct LayoutParams {
     pub gap: i32,
 }
 
+pub struct ScrollingParams {
+    pub screen_area: Rect,
+    pub column_width_ratio: f32, // 列宽占屏幕比例 (来自 m_fact)
+    pub gap: i32,
+    pub viewport_x: f32, // 当前视口偏移
+}
+
 // 通用布局结果
 pub struct LayoutResult<K> {
     pub key: K,
@@ -36,6 +43,7 @@ impl LayoutEnum {
     pub const THREE_COL: Self = Self("threecol");
     pub const TATAMI: Self = Self("tatami");
     pub const FULLSCREEN: Self = Self("fullscreen");
+    pub const SCROLLING: Self = Self("scrolling");
     pub const ANY: Self = Self("");
 
     pub fn symbol(&self) -> &str {
@@ -51,6 +59,7 @@ impl LayoutEnum {
             "threecol" => "|||",
             "tatami" => "[+]",
             "fullscreen" => "[ ]",
+            "scrolling" => "[S]",
             _ => "",
         }
     }
@@ -58,7 +67,7 @@ impl LayoutEnum {
     pub fn is_tile(&self) -> bool {
         matches!(
             self.0,
-            "tile" | "fibonacci" | "centeredmaster" | "bstack" | "grid" | "deck" | "threecol" | "tatami" | "fullscreen"
+            "tile" | "fibonacci" | "centeredmaster" | "bstack" | "grid" | "deck" | "threecol" | "tatami" | "fullscreen" | "scrolling"
         )
     }
     pub fn is_float(&self) -> bool {
@@ -84,6 +93,7 @@ impl LayoutEnum {
         Self::TATAMI,
         Self::MONOCLE,
         Self::FULLSCREEN,
+        Self::SCROLLING,
         Self::FLOAT,
     ];
 
@@ -112,6 +122,7 @@ impl From<u32> for LayoutEnum {
             8 => LayoutEnum::THREE_COL,
             9 => LayoutEnum::TATAMI,
             10 => LayoutEnum::FULLSCREEN,
+            11 => LayoutEnum::SCROLLING,
             _ => LayoutEnum::ANY,
         }
     }
@@ -858,4 +869,79 @@ pub fn calculate_fullscreen<K: Copy>(
             rect: Rect::new(screen_area.x, screen_area.y, screen_area.w, screen_area.h),
         })
         .collect()
+}
+
+/// Scrolling tiling layout (Niri-style):
+/// Columns arranged horizontally in a strip, focused column centered.
+/// Returns (layout results, new viewport_x).
+pub fn calculate_scrolling<K: Copy>(
+    params: &ScrollingParams,
+    columns: &[Vec<LayoutClient<K>>],
+    focus_col: usize,
+) -> (Vec<LayoutResult<K>>, f32) {
+    let mut results = Vec::new();
+    if columns.is_empty() {
+        return (results, 0.0);
+    }
+
+    let gap = params.gap;
+    let screen = &params.screen_area;
+    let col_w = (screen.w as f32 * params.column_width_ratio) as i32;
+
+    // Outer margin
+    let outer_gap = gap;
+    let avail_h = screen.h - 2 * outer_gap;
+
+    // Calculate total strip width and per-column x positions (in strip space, starting at 0)
+    let mut col_positions: Vec<i32> = Vec::with_capacity(columns.len());
+    let mut x_cursor = 0i32;
+    for (i, _col) in columns.iter().enumerate() {
+        col_positions.push(x_cursor);
+        x_cursor += col_w;
+        if i + 1 < columns.len() {
+            x_cursor += gap;
+        }
+    }
+
+    // Center focused column in viewport
+    let focus_col = focus_col.min(columns.len() - 1);
+    let focus_col_center = col_positions[focus_col] as f32 + col_w as f32 / 2.0;
+    let new_viewport_x = focus_col_center - screen.w as f32 / 2.0;
+
+    // Layout each column
+    for (col_idx, col) in columns.iter().enumerate() {
+        if col.is_empty() {
+            continue;
+        }
+        let strip_x = col_positions[col_idx];
+        // Screen x = strip_x - viewport_x + screen.x
+        let screen_x = strip_x as f32 - new_viewport_x + screen.x as f32;
+
+        let n = col.len() as i32;
+        let inner_gaps = (n - 1).max(0) * gap;
+        let avail_col_h = avail_h - inner_gaps;
+
+        let mut y_cursor = 0;
+        for (win_idx, client) in col.iter().enumerate() {
+            let remaining = n - win_idx as i32;
+            let h = (avail_col_h - y_cursor).max(0) / remaining.max(1);
+            let border2 = 2 * client.border_w;
+
+            let win_y = screen.y + outer_gap + y_cursor + win_idx as i32 * gap;
+
+            results.push(LayoutResult {
+                key: client.key,
+                rect: Rect::new(
+                    screen_x as i32,
+                    win_y,
+                    col_w - border2,
+                    h - border2,
+                ),
+            });
+
+            y_cursor += h;
+        }
+    }
+
+    (results, new_viewport_x)
 }

@@ -51,10 +51,10 @@ use crate::config::CONFIG;
 use crate::core::layout::LayoutEnum;
 use crate::ipc::{self, IpcEvent, IpcResponse, MonitorInfoIpc, TreeNode, WindowInfo, WorkspaceInfo};
 use crate::ipc_server::{IpcServer, IncomingIpc};
-use crate::core::models::{ClientKey, MonitorKey, Pertag, SizeHints, WMClient, WMMonitor};
+use crate::core::models::{ClientKey, MonitorKey, Pertag, ScrollingState, SizeHints, WMClient, WMMonitor};
 
 use crate::core::animation::{AnimationKind, AnimationManager};
-use crate::core::layout::{self, LayoutClient, LayoutParams, LayoutResult};
+use crate::core::layout::{self, LayoutClient, LayoutParams, LayoutResult, ScrollingParams};
 use crate::core::types::Rect;
 use shared_structures::CommandType;
 use shared_structures::SharedCommand;
@@ -238,6 +238,9 @@ pub struct Jwm {
     /// currently mapped.  These are not managed by the WM but must be rendered
     /// by the compositor when COMPOSITE_REDIRECT_MANUAL is active.
     pub override_redirect_windows: HashSet<WindowId>,
+
+    /// Per-monitor scrolling layout state
+    pub scrolling_states: HashMap<MonitorKey, ScrollingState>,
 }
 
 // =================================================================================
@@ -1180,6 +1183,7 @@ impl Jwm {
             config_last_modified: crate::config::Config::get_config_modified_time().ok(),
             config_reload_debounce: None,
             override_redirect_windows: HashSet::new(),
+            scrolling_states: HashMap::new(),
         };
         if let Ok((x, y)) = backend.input_ops().get_pointer_position() {
             jwm.last_mouse_root = (x, y);
@@ -3668,6 +3672,7 @@ impl Jwm {
             LayoutEnum::THREE_COL => self.three_col(backend, mon_key),
             LayoutEnum::TATAMI => self.tatami(backend, mon_key),
             LayoutEnum::FULLSCREEN => self.fullscreen_layout(backend, mon_key),
+            LayoutEnum::SCROLLING => self.scrolling(backend, mon_key),
             LayoutEnum::FLOAT | _ => {}
         }
     }
@@ -3792,6 +3797,97 @@ impl Jwm {
 
     fn tatami(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
         self.tiling_layout_wrapper(backend, mon_key, "tatami", layout::calculate_tatami);
+    }
+
+    fn scrolling(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
+        info!("[scrolling] via pure layout engine");
+
+        let (wx, wy, ww, wh, mfact, _nmaster, _monitor_num, _client_y_offset) =
+            self.get_monitor_info(mon_key);
+
+        let screen_area = self
+            .monitor_work_area(mon_key)
+            .unwrap_or(Rect::new(wx, wy, ww, wh));
+
+        let raw_clients = self.collect_tileable_clients(mon_key);
+        if raw_clients.is_empty() {
+            return;
+        }
+
+        let (_effective_border, effective_gap) = self.apply_smart_borders(&raw_clients);
+        let default_border = CONFIG.load().border_px() as i32;
+
+        let visible_keys: Vec<ClientKey> = raw_clients.iter().map(|&(k, _, _)| k).collect();
+
+        // Get or create scrolling state
+        let state = self.scrolling_states.entry(mon_key).or_insert_with(ScrollingState::new);
+
+        // Sync columns with currently visible clients
+        Self::sync_scrolling_columns(state, &visible_keys);
+
+        // Determine focus column
+        let sel = self.state.monitors.get(mon_key).and_then(|m| m.sel);
+        let focus_col = sel
+            .and_then(|sel_key| {
+                state.columns.iter().position(|col| col.contains(&sel_key))
+            })
+            .unwrap_or(0);
+
+        // Build layout clients grouped by column
+        let columns: Vec<Vec<LayoutClient<ClientKey>>> = state
+            .columns
+            .iter()
+            .map(|col| {
+                col.iter()
+                    .map(|&key| LayoutClient {
+                        key,
+                        factor: self.state.clients.get(key).map(|c| c.state.client_fact).unwrap_or(1.0),
+                        border_w: self.state.clients.get(key).map(|c| c.geometry.border_w).unwrap_or(default_border),
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let params = ScrollingParams {
+            screen_area,
+            column_width_ratio: mfact,
+            gap: effective_gap,
+            viewport_x: state.viewport_x,
+        };
+
+        let (results, new_vp_x) = layout::calculate_scrolling(&params, &columns, focus_col);
+
+        // Update viewport
+        self.scrolling_states.get_mut(&mon_key).unwrap().viewport_x = new_vp_x;
+
+        // Apply results
+        for res in results {
+            self.resize_client(
+                backend, res.key, res.rect.x, res.rect.y, res.rect.w, res.rect.h, false,
+            );
+        }
+    }
+
+    fn sync_scrolling_columns(state: &mut ScrollingState, visible_clients: &[ClientKey]) {
+        // 1. Remove clients that are no longer visible
+        for col in &mut state.columns {
+            col.retain(|k| visible_clients.contains(k));
+        }
+        // 2. Remove empty columns
+        state.columns.retain(|col| !col.is_empty());
+
+        // 3. Find new clients not in any column
+        let existing: HashSet<ClientKey> = state.columns.iter().flatten().copied().collect();
+        let new_clients: Vec<ClientKey> = visible_clients
+            .iter()
+            .filter(|k| !existing.contains(k))
+            .copied()
+            .collect();
+
+        // 4. Insert new clients as individual columns (at the end)
+        for key in new_clients {
+            state.columns.push(vec![key]);
+        }
     }
 
     fn fullscreen_layout(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
@@ -5353,6 +5449,11 @@ impl Jwm {
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // In scrolling layout, Alt+j/k navigates within column
+        if self.is_scrolling_layout() {
+            return self.scrolling_focus_window(backend, arg);
+        }
+
         let direction = match *arg {
             WMArgEnum::Int(i) => i,
             _ => return Ok(()),
@@ -5595,6 +5696,14 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         info!("[setcfact]");
 
+        // In scrolling layout, Alt+Shift+h/l focuses columns
+        if self.is_scrolling_layout() {
+            if let WMArgEnum::Float(f) = arg {
+                let dir = if *f > 0.0 { -1 } else { 1 };
+                return self.scrolling_focus_column(backend, &WMArgEnum::Int(dir));
+            }
+        }
+
         let client_key = match self.get_selected_client_key() {
             Some(k) => k,
             None => return Ok(()),
@@ -5635,7 +5744,11 @@ impl Jwm {
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // info!("[movestack]");
+        // In scrolling layout, Alt+Shift+j/k moves within column, Alt+Shift+h/l moves columns
+        if self.is_scrolling_layout() {
+            return self.scrolling_move_column(backend, arg);
+        }
+
         let direction = match arg {
             WMArgEnum::Int(i) => *i,
             _ => return Ok(()),
@@ -5660,6 +5773,268 @@ impl Jwm {
             }
         }
 
+        Ok(())
+    }
+
+    // =========================================================================
+    // Scrolling layout operations
+    // =========================================================================
+
+    /// Check if the current monitor is in scrolling layout
+    fn is_scrolling_layout(&self) -> bool {
+        self.state.sel_mon.and_then(|mk| {
+            self.state.monitors.get(mk).map(|m| *m.lt[m.sel_lt] == LayoutEnum::SCROLLING)
+        }).unwrap_or(false)
+    }
+
+    /// Get the current monitor's scrolling state (if in scrolling layout)
+    fn get_scrolling_state_for_sel_mon(&self) -> Option<(MonitorKey, &ScrollingState)> {
+        let mon_key = self.state.sel_mon?;
+        let monitor = self.state.monitors.get(mon_key)?;
+        let layout = &monitor.lt[monitor.sel_lt];
+        if **layout != LayoutEnum::SCROLLING {
+            return None;
+        }
+        let state = self.scrolling_states.get(&mon_key)?;
+        Some((mon_key, state))
+    }
+
+    /// Focus the column to the left/right of the current one
+    pub fn scrolling_focus_column(
+        &mut self,
+        backend: &mut dyn Backend,
+        arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let direction = match *arg {
+            WMArgEnum::Int(i) => i,
+            _ => return Ok(()),
+        };
+
+        let (mon_key, state) = match self.get_scrolling_state_for_sel_mon() {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+
+        let sel = self.state.monitors.get(mon_key).and_then(|m| m.sel);
+        let cur_col = sel
+            .and_then(|k| state.columns.iter().position(|col| col.contains(&k)))
+            .unwrap_or(0);
+
+        let n_cols = state.columns.len();
+        if n_cols == 0 {
+            return Ok(());
+        }
+
+        let new_col = if direction > 0 {
+            (cur_col + 1).min(n_cols - 1)
+        } else {
+            cur_col.saturating_sub(1)
+        };
+
+        if new_col != cur_col {
+            if let Some(&target) = state.columns.get(new_col).and_then(|col| col.first()) {
+                self.focus(backend, Some(target))?;
+                self.arrange(backend, Some(mon_key));
+            }
+        }
+        Ok(())
+    }
+
+    /// Move the current column left/right
+    pub fn scrolling_move_column(
+        &mut self,
+        backend: &mut dyn Backend,
+        arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let direction = match *arg {
+            WMArgEnum::Int(i) => i,
+            _ => return Ok(()),
+        };
+
+        let mon_key = match self.state.sel_mon {
+            Some(k) => k,
+            None => return Ok(()),
+        };
+
+        let state = match self.scrolling_states.get_mut(&mon_key) {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        let sel = self.state.monitors.get(mon_key).and_then(|m| m.sel);
+        let cur_col = match sel.and_then(|k| state.columns.iter().position(|col| col.contains(&k))) {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        let n_cols = state.columns.len();
+        let new_col = if direction > 0 {
+            if cur_col + 1 >= n_cols { return Ok(()); }
+            cur_col + 1
+        } else {
+            if cur_col == 0 { return Ok(()); }
+            cur_col - 1
+        };
+
+        state.columns.swap(cur_col, new_col);
+        self.arrange(backend, Some(mon_key));
+        Ok(())
+    }
+
+    /// Consume: merge the focused window into the adjacent column
+    pub fn scrolling_consume(
+        &mut self,
+        backend: &mut dyn Backend,
+        arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let direction = match *arg {
+            WMArgEnum::Int(i) => i,
+            _ => return Ok(()),
+        };
+
+        let mon_key = match self.state.sel_mon {
+            Some(k) => k,
+            None => return Ok(()),
+        };
+
+        let sel_key = match self.state.monitors.get(mon_key).and_then(|m| m.sel) {
+            Some(k) => k,
+            None => return Ok(()),
+        };
+
+        let state = match self.scrolling_states.get_mut(&mon_key) {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        // Find column and position of selected client
+        let (cur_col, cur_pos) = match state.columns.iter().enumerate().find_map(|(ci, col)| {
+            col.iter().position(|&k| k == sel_key).map(|pos| (ci, pos))
+        }) {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+
+        let target_col = if direction > 0 {
+            if cur_col + 1 >= state.columns.len() { return Ok(()); }
+            cur_col + 1
+        } else {
+            if cur_col == 0 { return Ok(()); }
+            cur_col - 1
+        };
+
+        // Remove from current column
+        state.columns[cur_col].remove(cur_pos);
+        // Add to target column
+        state.columns[target_col].push(sel_key);
+        // Clean up empty columns
+        state.columns.retain(|col| !col.is_empty());
+
+        self.arrange(backend, Some(mon_key));
+        Ok(())
+    }
+
+    /// Expel: take the focused window out of its column into a new standalone column
+    pub fn scrolling_expel(
+        &mut self,
+        backend: &mut dyn Backend,
+        arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let direction = match *arg {
+            WMArgEnum::Int(i) => i,
+            _ => return Ok(()),
+        };
+
+        let mon_key = match self.state.sel_mon {
+            Some(k) => k,
+            None => return Ok(()),
+        };
+
+        let sel_key = match self.state.monitors.get(mon_key).and_then(|m| m.sel) {
+            Some(k) => k,
+            None => return Ok(()),
+        };
+
+        let state = match self.scrolling_states.get_mut(&mon_key) {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        // Find column of selected client
+        let (cur_col, cur_pos) = match state.columns.iter().enumerate().find_map(|(ci, col)| {
+            col.iter().position(|&k| k == sel_key).map(|pos| (ci, pos))
+        }) {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+
+        // Only expel if the column has more than one window
+        if state.columns[cur_col].len() <= 1 {
+            return Ok(());
+        }
+
+        // Remove from current column
+        state.columns[cur_col].remove(cur_pos);
+
+        // Insert as new column in the given direction
+        let insert_idx = if direction > 0 {
+            cur_col + 1
+        } else {
+            cur_col
+        };
+        state.columns.insert(insert_idx, vec![sel_key]);
+
+        self.arrange(backend, Some(mon_key));
+        Ok(())
+    }
+
+    /// Focus the window above/below within the current column
+    pub fn scrolling_focus_window(
+        &mut self,
+        backend: &mut dyn Backend,
+        arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let direction = match *arg {
+            WMArgEnum::Int(i) => i,
+            _ => return Ok(()),
+        };
+
+        let (mon_key, state) = match self.get_scrolling_state_for_sel_mon() {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+
+        let sel = self.state.monitors.get(mon_key).and_then(|m| m.sel);
+        let sel_key = match sel {
+            Some(k) => k,
+            None => return Ok(()),
+        };
+
+        // Find the column containing the selected window
+        let (col_idx, pos) = match state.columns.iter().enumerate().find_map(|(ci, col)| {
+            col.iter().position(|&k| k == sel_key).map(|pos| (ci, pos))
+        }) {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+
+        let col = &state.columns[col_idx];
+        let n = col.len();
+        if n <= 1 {
+            return Ok(());
+        }
+
+        let new_pos = if direction > 0 {
+            (pos + 1).min(n - 1)
+        } else {
+            pos.saturating_sub(1)
+        };
+
+        if new_pos != pos {
+            let target = col[new_pos];
+            self.focus(backend, Some(target))?;
+            self.arrange(backend, Some(mon_key));
+        }
         Ok(())
     }
 

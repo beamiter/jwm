@@ -540,6 +540,37 @@ impl Config {
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
+                modifier: vec!["Mod1".to_string()],
+                key: "w".to_string(),
+                function: "setlayout".to_string(),
+                argument: ArgumentConfig::String("scrolling".to_string()),
+            },
+            // Scrolling layout: consume/expel
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
+                key: "h".to_string(),
+                function: "scrolling_consume".to_string(),
+                argument: ArgumentConfig::Int(-1),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
+                key: "l".to_string(),
+                function: "scrolling_consume".to_string(),
+                argument: ArgumentConfig::Int(1),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Control".to_string(), "Shift".to_string()],
+                key: "h".to_string(),
+                function: "scrolling_expel".to_string(),
+                argument: ArgumentConfig::Int(-1),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Control".to_string(), "Shift".to_string()],
+                key: "l".to_string(),
+                function: "scrolling_expel".to_string(),
+                argument: ArgumentConfig::Int(1),
+            },
+            KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
                 key: "q".to_string(),
                 function: "quit".to_string(),
@@ -828,6 +859,12 @@ impl Config {
             "togglescratchpad" => Some(Jwm::togglescratchpad),
             "togglepip" => Some(Jwm::togglepip),
 
+            "scrolling_focus_column" => Some(Jwm::scrolling_focus_column),
+            "scrolling_move_column" => Some(Jwm::scrolling_move_column),
+            "scrolling_consume" => Some(Jwm::scrolling_consume),
+            "scrolling_expel" => Some(Jwm::scrolling_expel),
+            "scrolling_focus_window" => Some(Jwm::scrolling_focus_window),
+
             _ => {
                 eprintln!("Unknown function: {}", func_name);
                 None
@@ -956,6 +993,7 @@ impl Config {
                 "threecol" => jwm::WMArgEnum::Layout(Rc::new(LayoutEnum::THREE_COL)),
                 "tatami" => jwm::WMArgEnum::Layout(Rc::new(LayoutEnum::TATAMI)),
                 "fullscreen" => jwm::WMArgEnum::Layout(Rc::new(LayoutEnum::FULLSCREEN)),
+                "scrolling" => jwm::WMArgEnum::Layout(Rc::new(LayoutEnum::SCROLLING)),
                 _ => jwm::WMArgEnum::StringVec(vec![s.clone()]),
             },
         }

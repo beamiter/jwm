@@ -10,6 +10,21 @@ use std::rc::Rc;
 pub type ClientKey = DefaultKey;
 pub type MonitorKey = DefaultKey;
 
+#[derive(Debug, Clone)]
+pub struct ScrollingState {
+    pub columns: Vec<Vec<ClientKey>>,
+    pub viewport_x: f32,
+}
+
+impl ScrollingState {
+    pub fn new() -> Self {
+        Self {
+            columns: Vec::new(),
+            viewport_x: 0.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct WMClient {
     pub name: String,
