@@ -195,9 +195,6 @@ impl X11Backend {
             screen.default_colormap,
         ));
 
-        let event_source =
-            X11EventSource::new(conn.clone(), atoms.clone(), screen.root, ids.clone());
-
         let caps = Capabilities {
             can_warp_pointer: true,
             supports_client_list: true,
@@ -232,6 +229,10 @@ impl X11Backend {
             log::info!("Compositor disabled (set JWM_COMPOSITOR=1 to enable)");
             None
         };
+
+        let overlay_x11 = compositor.as_ref().map(|c| c.overlay_window());
+        let event_source =
+            X11EventSource::new(conn.clone(), atoms.clone(), screen.root, overlay_x11, ids.clone());
 
         Ok(Self {
             conn,
@@ -676,6 +677,7 @@ impl Backend for X11Backend {
                 self.conn.clone(),
                 self.atoms.clone(),
                 self.screen.root,
+                self.compositor.as_ref().map(|c| c.overlay_window()),
                 self.ids.clone(),
             )
         };
@@ -1467,21 +1469,23 @@ mod event_source {
         conn: Arc<RustConnection>,
         atoms: Atoms,
         root_x11: u32,
+        overlay_x11: Option<u32>,
         ids: X11IdRegistry,
     }
 
     impl X11EventSource {
-        pub(super) fn new(conn: Arc<RustConnection>, atoms: Atoms, root_x11: u32, ids: X11IdRegistry) -> Self {
+        pub(super) fn new(conn: Arc<RustConnection>, atoms: Atoms, root_x11: u32, overlay_x11: Option<u32>, ids: X11IdRegistry) -> Self {
             Self {
                 conn,
                 atoms,
                 root_x11,
+                overlay_x11,
                 ids,
             }
         }
 
         fn hit_target_from_event_window(&self, event_window: u32) -> HitTarget {
-            if event_window == self.root_x11 {
+            if event_window == self.root_x11 || self.overlay_x11 == Some(event_window) {
                 HitTarget::Background { output: None }
             } else {
                 HitTarget::Surface(self.ids.intern(event_window))

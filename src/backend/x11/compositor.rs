@@ -183,6 +183,18 @@ impl Compositor {
 
         // 5. Make overlay input-passthrough using XFixes
         {
+            // XFixes version negotiation is REQUIRED before using xfixes_set_window_shape_region.
+            // Without this, some X servers (e.g. Ubuntu 20's Xorg) silently ignore the request,
+            // leaving the overlay opaque to input and blocking all mouse clicks to client windows.
+            let xfixes_ver = conn.xfixes_query_version(5, 0)
+                .map_err(|e| format!("xfixes_query_version: {e}"))?
+                .reply()
+                .map_err(|e| format!("xfixes version reply: {e}"))?;
+            log::info!(
+                "compositor: XFixes version {}.{}",
+                xfixes_ver.major_version, xfixes_ver.minor_version
+            );
+
             log::info!(
                 "compositor: setting empty INPUT shape on overlay 0x{:x} to pass through input",
                 overlay_window
@@ -200,10 +212,15 @@ impl Compositor {
             .map_err(|e| format!("set_window_shape_region: {e}"))?;
             conn.xfixes_destroy_region(region)
                 .map_err(|e| format!("destroy_region: {e}"))?;
-            log::info!("compositor: overlay input shape set successfully");
+            // Flush and round-trip to ensure the shape region is applied before proceeding
+            conn.flush().map_err(|e| format!("flush after shape: {e}"))?;
+            // Round-trip: get_input_focus forces the X server to process all prior requests
+            conn.get_input_focus()
+                .map_err(|e| format!("sync after shape: {e}"))?
+                .reply()
+                .map_err(|e| format!("sync reply after shape: {e}"))?;
+            log::info!("compositor: overlay input shape set successfully (verified via sync)");
         }
-
-        conn.flush().map_err(|e| format!("flush: {e}"))?;
 
         // 6. Open Xlib display for GLX
         let xlib_display = unsafe { x11::xlib::XOpenDisplay(std::ptr::null()) };
