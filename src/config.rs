@@ -84,7 +84,32 @@ pub struct BehaviorConfig {
     pub lock_fullscreen: bool,
     #[serde(default)]
     pub compositor: bool,
+    /// Corner radius in pixels for window rounding (0 = sharp corners).
+    #[serde(default = "default_corner_radius")]
+    pub corner_radius: f32,
+    /// Enable drop shadows behind windows.
+    #[serde(default = "default_true")]
+    pub shadow_enabled: bool,
+    /// Shadow blur radius in pixels.
+    #[serde(default = "default_shadow_radius")]
+    pub shadow_radius: f32,
+    /// Shadow offset (x, y) in pixels.
+    #[serde(default = "default_shadow_offset")]
+    pub shadow_offset: [f32; 2],
+    /// Shadow color as [r, g, b, a] in 0.0..1.0 range.
+    #[serde(default = "default_shadow_color")]
+    pub shadow_color: [f32; 4],
+    /// Opacity for unfocused windows (0.0..1.0). 1.0 = fully opaque (no dim).
+    #[serde(default = "default_inactive_opacity")]
+    pub inactive_opacity: f32,
 }
+
+fn default_corner_radius() -> f32 { 10.0 }
+fn default_true() -> bool { true }
+fn default_shadow_radius() -> f32 { 24.0 }
+fn default_shadow_offset() -> [f32; 2] { [4.0, 4.0] }
+fn default_shadow_color() -> [f32; 4] { [0.0, 0.0, 0.0, 0.5] }
+fn default_inactive_opacity() -> f32 { 0.92 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusBarConfig {
@@ -199,6 +224,12 @@ impl Default for Config {
                     resize_hints: true,
                     lock_fullscreen: true,
                     compositor: false,
+                    corner_radius: default_corner_radius(),
+                    shadow_enabled: default_true(),
+                    shadow_radius: default_shadow_radius(),
+                    shadow_offset: default_shadow_offset(),
+                    shadow_color: default_shadow_color(),
+                    inactive_opacity: default_inactive_opacity(),
                 },
                 status_bar: StatusBarConfig {
                     name: STATUS_BAR_NAME.to_string(),

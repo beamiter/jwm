@@ -63,6 +63,29 @@ struct WindowTexture {
 }
 
 // ---------------------------------------------------------------------------
+// Cached uniform locations
+// ---------------------------------------------------------------------------
+
+struct WindowUniforms {
+    projection: Option<glow::UniformLocation>,
+    rect: Option<glow::UniformLocation>,
+    texture: Option<glow::UniformLocation>,
+    opacity: Option<glow::UniformLocation>,
+    radius: Option<glow::UniformLocation>,
+    size: Option<glow::UniformLocation>,
+    dim: Option<glow::UniformLocation>,
+}
+
+struct ShadowUniforms {
+    projection: Option<glow::UniformLocation>,
+    rect: Option<glow::UniformLocation>,
+    shadow_color: Option<glow::UniformLocation>,
+    size: Option<glow::UniformLocation>,
+    radius: Option<glow::UniformLocation>,
+    spread: Option<glow::UniformLocation>,
+}
+
+// ---------------------------------------------------------------------------
 // Compositor
 // ---------------------------------------------------------------------------
 
@@ -82,6 +105,9 @@ pub(super) struct Compositor {
     glx_drawable: x11::glx::GLXDrawable,
     gl: glow::Context,
     program: glow::Program,
+    shadow_program: glow::Program,
+    win_uniforms: WindowUniforms,
+    shadow_uniforms: ShadowUniforms,
     quad_vao: glow::VertexArray,
     windows: HashMap<u32, WindowTexture>,
     screen_w: u32,
@@ -91,6 +117,15 @@ pub(super) struct Compositor {
     damage_event_base: u8,
     needs_render: bool,
     context_current: bool,
+    /// Hash of the last rendered scene for skip-unchanged-frame optimization.
+    last_scene_hash: u64,
+    // Compositor visual settings (read from config once at init)
+    corner_radius: f32,
+    shadow_enabled: bool,
+    shadow_radius: f32,
+    shadow_offset: [f32; 2],
+    shadow_color: [f32; 4],
+    inactive_opacity: f32,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
@@ -101,6 +136,7 @@ impl Drop for Compositor {
     fn drop(&mut self) {
         unsafe {
             self.gl.delete_program(self.program);
+            self.gl.delete_program(self.shadow_program);
             self.gl.delete_vertex_array(self.quad_vao);
         }
         let wins: Vec<u32> = self.windows.keys().copied().collect();
@@ -547,7 +583,31 @@ impl Compositor {
 
         log::info!("compositor: glow GL context created, compiling shaders...");
         // 14. Compile shaders and create program
-        let program = unsafe { Self::create_program(&gl)? };
+        let program = unsafe { Self::create_program(&gl, shaders::VERTEX_SHADER, shaders::FRAGMENT_SHADER)? };
+        let shadow_program = unsafe { Self::create_program(&gl, shaders::VERTEX_SHADER, shaders::SHADOW_FRAGMENT_SHADER)? };
+
+        // Cache uniform locations (avoids per-frame string lookups)
+        let win_uniforms = unsafe {
+            WindowUniforms {
+                projection: gl.get_uniform_location(program, "u_projection"),
+                rect: gl.get_uniform_location(program, "u_rect"),
+                texture: gl.get_uniform_location(program, "u_texture"),
+                opacity: gl.get_uniform_location(program, "u_opacity"),
+                radius: gl.get_uniform_location(program, "u_radius"),
+                size: gl.get_uniform_location(program, "u_size"),
+                dim: gl.get_uniform_location(program, "u_dim"),
+            }
+        };
+        let shadow_uniforms = unsafe {
+            ShadowUniforms {
+                projection: gl.get_uniform_location(shadow_program, "u_projection"),
+                rect: gl.get_uniform_location(shadow_program, "u_rect"),
+                shadow_color: gl.get_uniform_location(shadow_program, "u_shadow_color"),
+                size: gl.get_uniform_location(shadow_program, "u_size"),
+                radius: gl.get_uniform_location(shadow_program, "u_radius"),
+                spread: gl.get_uniform_location(shadow_program, "u_spread"),
+            }
+        };
 
         // 15. Create VAO (empty — vertex shader generates quad from gl_VertexID)
         let quad_vao = unsafe {
@@ -578,6 +638,10 @@ impl Compositor {
         // Success — defuse the guard so it doesn't undo our redirect
         guard.active = false;
 
+        // Read compositor visual settings from config
+        let cfg = crate::config::CONFIG.load();
+        let behavior = cfg.behavior();
+
         Ok(Self {
             conn,
             xlib_display,
@@ -590,6 +654,9 @@ impl Compositor {
             glx_drawable,
             gl,
             program,
+            shadow_program,
+            win_uniforms,
+            shadow_uniforms,
             quad_vao,
             windows: HashMap::new(),
             screen_w,
@@ -598,15 +665,22 @@ impl Compositor {
             damage_event_base,
             needs_render: true,
             context_current: true,
+            last_scene_hash: 0,
+            corner_radius: behavior.corner_radius,
+            shadow_enabled: behavior.shadow_enabled,
+            shadow_radius: behavior.shadow_radius,
+            shadow_offset: behavior.shadow_offset,
+            shadow_color: behavior.shadow_color,
+            inactive_opacity: behavior.inactive_opacity,
         })
     }
 
-    unsafe fn create_program(gl: &glow::Context) -> Result<glow::Program, String> {
+    unsafe fn create_program(gl: &glow::Context, vs_src: &str, fs_src: &str) -> Result<glow::Program, String> {
         unsafe {
             let vs = gl
                 .create_shader(glow::VERTEX_SHADER)
                 .map_err(|e| format!("create vs: {e}"))?;
-            gl.shader_source(vs, shaders::VERTEX_SHADER);
+            gl.shader_source(vs, vs_src);
             gl.compile_shader(vs);
             if !gl.get_shader_compile_status(vs) {
                 let info = gl.get_shader_info_log(vs);
@@ -617,7 +691,7 @@ impl Compositor {
             let fs = gl
                 .create_shader(glow::FRAGMENT_SHADER)
                 .map_err(|e| format!("create fs: {e}"))?;
-            gl.shader_source(fs, shaders::FRAGMENT_SHADER);
+            gl.shader_source(fs, fs_src);
             gl.compile_shader(fs);
             if !gl.get_shader_compile_status(fs) {
                 let info = gl.get_shader_info_log(fs);
@@ -1053,12 +1127,26 @@ impl Compositor {
 
     // ----- Rendering -----
 
+    /// Compute a simple hash of the scene + focused window for skip-unchanged detection.
+    fn scene_hash(scene: &[(u32, i32, i32, u32, u32)], focused: Option<u32>) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        scene.hash(&mut hasher);
+        focused.hash(&mut hasher);
+        hasher.finish()
+    }
+
     /// Render a composited frame.
     ///
     /// `scene` is an ordered list of (x11_win, x, y, w, h) from bottom to top.
+    /// `focused` is the X11 window ID of the focused window (if any).
     /// Returns true if a frame was rendered.
-    pub(super) fn render_frame(&mut self, scene: &[(u32, i32, i32, u32, u32)]) -> bool {
-        // One-time log to confirm rendering is happening
+    pub(super) fn render_frame(
+        &mut self,
+        scene: &[(u32, i32, i32, u32, u32)],
+        focused: Option<u32>,
+    ) -> bool {
+        // Periodic diagnostic logging
         static RENDER_LOG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let count = RENDER_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if count < 5 || count % 500 == 0 {
@@ -1068,38 +1156,20 @@ impl Compositor {
                 scene.len(),
                 self.windows.len()
             );
-            for &(win, x, y, w, h) in scene {
-                let tracked = self.windows.contains_key(&win);
-                log::info!(
-                    "  win=0x{:x} at ({},{}) {}x{} tracked={}",
-                    win, x, y, w, h, tracked
-                );
-            }
         }
 
-        // Diagnostics: log mismatches between scene and tracked windows
-        if !scene.is_empty() {
-            let mut drawn = 0usize;
-            let mut missed = 0usize;
-            for &(win, _, _, _, _) in scene {
-                if self.windows.contains_key(&win) {
-                    drawn += 1;
-                } else {
-                    missed += 1;
-                }
-            }
-            if missed > 0 {
-                log::warn!(
-                    "[compositor::render_frame] scene={} drawn={} missed={} (not tracked)",
-                    scene.len(),
-                    drawn,
-                    missed
-                );
-            }
+        // Skip-unchanged-frame: if scene hasn't changed and no textures are
+        // dirty, we can skip the entire GL render.
+        let has_dirty = scene.iter().any(|&(win, _, _, _, _)| {
+            self.windows.get(&win).map_or(false, |wt| wt.dirty || wt.needs_pixmap_refresh)
+        });
+        let hash = Self::scene_hash(scene, focused);
+        if !has_dirty && hash == self.last_scene_hash {
+            return false;
         }
+        self.last_scene_hash = hash;
 
-        // Ensure context is current (skip if already current — single-threaded,
-        // nothing else touches GLX so it stays current after the first call).
+        // Ensure context is current
         if !self.context_current {
             unsafe {
                 x11::glx::glXMakeContextCurrent(
@@ -1139,6 +1209,27 @@ impl Compositor {
             }
         }
 
+        // --- Occlusion culling ---
+        // Walk from top to bottom; track the coverage region.  If a fully
+        // opaque (non-RGBA) window covers the entire screen, everything
+        // below it is occluded and can be skipped.
+        let mut first_visible = 0usize;
+        {
+            let sw = self.screen_w as i32;
+            let sh = self.screen_h as i32;
+            for i in (0..scene.len()).rev() {
+                let (win, x, y, w, h) = scene[i];
+                let is_rgba = self.windows.get(&win).map_or(false, |wt| wt.has_rgba);
+                // An opaque window that covers the full screen occludes everything below
+                if !is_rgba && x <= 0 && y <= 0
+                    && (x + w as i32) >= sw && (y + h as i32) >= sh
+                {
+                    first_visible = i;
+                    break;
+                }
+            }
+        }
+
         // Clear
         unsafe {
             self.gl
@@ -1156,33 +1247,80 @@ impl Compositor {
             1.0,
         );
 
+        let visible_scene = &scene[first_visible..];
+
+        // === Pass 1: Draw shadows ===
+        if self.shadow_enabled && self.shadow_radius > 0.0 {
+            unsafe {
+                self.gl.use_program(Some(self.shadow_program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.shadow_uniforms.projection.as_ref(), false, &proj,
+                );
+                self.gl.bind_vertex_array(Some(self.quad_vao));
+
+                let spread = self.shadow_radius;
+                let [ox, oy] = self.shadow_offset;
+                let [sr, sg, sb, sa] = self.shadow_color;
+
+                self.gl.uniform_4_f32(
+                    self.shadow_uniforms.shadow_color.as_ref(), sr, sg, sb, sa,
+                );
+                self.gl.uniform_1_f32(
+                    self.shadow_uniforms.spread.as_ref(), spread,
+                );
+                self.gl.uniform_1_f32(
+                    self.shadow_uniforms.radius.as_ref(), self.corner_radius,
+                );
+
+                for &(win, x, y, w, h) in visible_scene {
+                    if !self.windows.contains_key(&win) {
+                        continue;
+                    }
+                    // Expand the quad by `spread` on each side for the shadow
+                    let sx = x as f32 + ox - spread;
+                    let sy = y as f32 + oy - spread;
+                    let sw = w as f32 + 2.0 * spread;
+                    let sh = h as f32 + 2.0 * spread;
+                    self.gl.uniform_4_f32(
+                        self.shadow_uniforms.rect.as_ref(), sx, sy, sw, sh,
+                    );
+                    self.gl.uniform_2_f32(
+                        self.shadow_uniforms.size.as_ref(), w as f32, h as f32,
+                    );
+                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                }
+
+                self.gl.bind_vertex_array(None);
+                self.gl.use_program(None);
+            }
+        }
+
+        // === Pass 2: Draw window textures ===
         unsafe {
             self.gl.use_program(Some(self.program));
-
-            let loc_proj = self.gl.get_uniform_location(self.program, "u_projection");
-            self.gl
-                .uniform_matrix_4_f32_slice(loc_proj.as_ref(), false, &proj);
-
-            let loc_rect = self.gl.get_uniform_location(self.program, "u_rect");
-            let loc_tex = self.gl.get_uniform_location(self.program, "u_texture");
-            let loc_opacity = self.gl.get_uniform_location(self.program, "u_opacity");
-            self.gl.uniform_1_i32(loc_tex.as_ref(), 0);
-
+            self.gl.uniform_matrix_4_f32_slice(
+                self.win_uniforms.projection.as_ref(), false, &proj,
+            );
+            self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+            self.gl.uniform_1_f32(
+                self.win_uniforms.radius.as_ref(), self.corner_radius,
+            );
             self.gl.bind_vertex_array(Some(self.quad_vao));
 
-            // Draw each window quad bottom-to-top
-            for &(win, x, y, w, h) in scene {
+            for &(win, x, y, w, h) in visible_scene {
                 if let Some(wt) = self.windows.get(&win) {
-                    // For RGBA windows, pass through the texture alpha;
-                    // for RGB windows, force opacity to 1.0 since TFP alpha is undefined.
+                    let is_focused = focused == Some(win);
+                    let dim = if is_focused { 1.0f32 } else { self.inactive_opacity };
                     let opacity = if wt.has_rgba { -1.0f32 } else { 1.0f32 };
-                    self.gl.uniform_1_f32(loc_opacity.as_ref(), opacity);
+
+                    self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), opacity);
+                    self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), dim);
+                    self.gl.uniform_2_f32(
+                        self.win_uniforms.size.as_ref(), w as f32, h as f32,
+                    );
                     self.gl.uniform_4_f32(
-                        loc_rect.as_ref(),
-                        x as f32,
-                        y as f32,
-                        w as f32,
-                        h as f32,
+                        self.win_uniforms.rect.as_ref(),
+                        x as f32, y as f32, w as f32, h as f32,
                     );
                     self.gl.active_texture(glow::TEXTURE0);
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
@@ -1194,8 +1332,7 @@ impl Compositor {
             self.gl.use_program(None);
         }
 
-        // Flush GL commands to the GPU.  We use a single-buffered config so
-        // drawing goes directly to the front buffer — no swap needed.
+        // Flush GL commands to the GPU.
         unsafe {
             self.gl.flush();
         }

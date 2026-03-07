@@ -362,6 +362,7 @@ impl Backend for X11Backend {
     fn compositor_render_frame(
         &mut self,
         scene: &[(u64, i32, i32, u32, u32)],
+        focused_window: Option<u64>,
     ) -> Result<bool, BackendError> {
         let compositor = match self.compositor.as_mut() {
             Some(c) => c,
@@ -375,6 +376,10 @@ impl Backend for X11Backend {
                 self.ids.x11(wid).ok().map(|x11w| (x11w, x, y, w, h))
             })
             .collect();
+        let focused_x11 = focused_window.and_then(|raw| {
+            let wid = WindowId::from_raw(raw);
+            self.ids.x11(wid).ok()
+        });
         if !scene.is_empty() && x11_scene.is_empty() {
             log::warn!(
                 "[compositor] scene has {} entries but x11_scene is empty (ID lookup failed)",
@@ -395,7 +400,7 @@ impl Backend for X11Backend {
         }
 
         let _ = self.conn.flush();
-        let rendered = compositor.render_frame(&x11_scene);
+        let rendered = compositor.render_frame(&x11_scene, focused_x11);
         compositor.clear_needs_render();
         Ok(rendered)
     }

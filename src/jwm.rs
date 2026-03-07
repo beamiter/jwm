@@ -3293,7 +3293,10 @@ impl Jwm {
                         log::warn!("[tick_animations] compositor scene is EMPTY (no windows to render)");
                     }
                 }
-                let _ = backend.compositor_render_frame(&scene);
+                let focused = self.get_selected_client_key()
+                    .and_then(|ck| self.state.clients.get(ck))
+                    .map(|c| c.win.raw());
+                let _ = backend.compositor_render_frame(&scene, focused);
             }
             return;
         }
@@ -3340,7 +3343,10 @@ impl Jwm {
 
         if composited {
             let scene = self.build_compositor_scene(backend, &visual_overrides);
-            let _ = backend.compositor_render_frame(&scene);
+            let focused = self.get_selected_client_key()
+                .and_then(|ck| self.state.clients.get(ck))
+                .map(|c| c.win.raw());
+            let _ = backend.compositor_render_frame(&scene, focused);
         }
 
         for key in completed {
