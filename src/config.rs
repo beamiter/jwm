@@ -889,6 +889,7 @@ impl Config {
             "togglesticky" => Some(Jwm::togglesticky),
             "togglescratchpad" => Some(Jwm::togglescratchpad),
             "togglepip" => Some(Jwm::togglepip),
+            "togglecompositor" => Some(Jwm::togglecompositor),
 
             "scrolling_focus_column" => Some(Jwm::scrolling_focus_column),
             "scrolling_move_column" => Some(Jwm::scrolling_move_column),

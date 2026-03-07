@@ -5002,6 +5002,26 @@ impl Jwm {
         Ok(())
     }
 
+    pub fn togglecompositor(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let enable = !backend.has_compositor();
+        match backend.set_compositor_enabled(enable) {
+            Ok(true) => {
+                log::info!("Compositor toggled: now {}", if enable { "ON" } else { "OFF" });
+            }
+            Ok(false) => {
+                log::info!("Compositor state unchanged");
+            }
+            Err(e) => {
+                log::warn!("Failed to toggle compositor: {e}");
+            }
+        }
+        Ok(())
+    }
+
     fn update_sticky_tags(&mut self, mon_key: MonitorKey) {
         let new_tags = if let Some(monitor) = self.state.monitors.get(mon_key) {
             monitor.tag_set[monitor.sel_tags]
@@ -9545,6 +9565,18 @@ impl Jwm {
 
         // 4. Update decoration on all visible clients
         let sel_ck = self.get_selected_client_key();
+
+        // 5. Toggle compositor if config changed
+        let compositor_wanted = cfg.compositor_enabled();
+        let compositor_active = backend.has_compositor();
+        if compositor_wanted != compositor_active {
+            match backend.set_compositor_enabled(compositor_wanted) {
+                Ok(true) => log::info!("Compositor {}", if compositor_wanted { "enabled" } else { "disabled" }),
+                Ok(false) => {}
+                Err(e) => log::warn!("Failed to set compositor: {e}"),
+            }
+        }
+
         let client_keys: Vec<ClientKey> = self.state.client_order.clone();
         for ck in client_keys {
             if let Some(client) = self.state.clients.get(ck) {

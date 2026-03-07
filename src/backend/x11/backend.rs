@@ -351,6 +351,45 @@ impl Backend for X11Backend {
         self.compositor.is_some()
     }
 
+    fn set_compositor_enabled(&mut self, enabled: bool) -> Result<bool, BackendError> {
+        let currently_enabled = self.compositor.is_some();
+        if enabled == currently_enabled {
+            return Ok(false);
+        }
+        if enabled {
+            match super::compositor::Compositor::new(
+                self.conn.clone(),
+                self.root_x11,
+                self.screen.width_in_pixels as u32,
+                self.screen.height_in_pixels as u32,
+            ) {
+                Ok(mut compositor) => {
+                    // Register all existing managed windows with the new compositor
+                    let overlay = compositor.overlay_window();
+                    for (x11w, wid) in self.ids.all_x11_windows() {
+                        if x11w == self.root_x11 || x11w == overlay {
+                            continue;
+                        }
+                        if let Ok(geom) = self.window_ops.get_geometry(wid) {
+                            compositor.add_window(x11w, geom.x, geom.y, geom.w, geom.h);
+                        }
+                    }
+                    log::info!("Compositor enabled at runtime");
+                    self.compositor = Some(compositor);
+                    Ok(true)
+                }
+                Err(e) => {
+                    log::warn!("Failed to enable compositor at runtime: {e}");
+                    Err(BackendError::Message(format!("compositor init failed: {e}")))
+                }
+            }
+        } else {
+            log::info!("Compositor disabled at runtime");
+            self.compositor.take(); // Drop triggers cleanup
+            Ok(true)
+        }
+    }
+
     fn compositor_needs_render(&self) -> bool {
         self.compositor.as_ref().map_or(false, |c| c.needs_render())
     }
@@ -803,6 +842,11 @@ mod ids {
             if let Some(id) = self.x11_to_wid.write().unwrap().remove(&x11) {
                 self.wid_to_x11.write().unwrap().remove(&id);
             }
+        }
+
+        /// Return a snapshot of all known (x11_window, WindowId) pairs.
+        pub(super) fn all_x11_windows(&self) -> Vec<(u32, WindowId)> {
+            self.x11_to_wid.read().unwrap().iter().map(|(&x, &w)| (x, w)).collect()
         }
     }
 }

@@ -618,6 +618,12 @@ pub trait Backend: Send {
         None
     }
 
+    /// Enable or disable the compositor at runtime.
+    /// Returns `Ok(true)` if the state actually changed.
+    fn set_compositor_enabled(&mut self, _enabled: bool) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
     /// Request a compositor-level screenshot.
     ///
     /// On backends that own the framebuffer (udev/KMS) this captures the
