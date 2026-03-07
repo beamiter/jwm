@@ -318,18 +318,16 @@ impl Compositor {
             overlay_visual_id
         );
 
-        // First try: request a single-buffered FBConfig matching the overlay's
-        // exact visual.  We render directly to the front buffer and call
-        // glFlush() instead of glXSwapBuffers, which avoids the GPU-side
-        // blocking that can starve the X11 event loop and eventually cause
-        // the X server to close the connection.
+        // Request a double-buffered FBConfig matching the overlay's exact visual.
+        // We use glXSwapBuffers with swap interval=1 for vsync, which eliminates
+        // tearing during window movement.
         let ctx_attrs_visual: Vec<i32> = vec![
             x11::glx::GLX_RENDER_TYPE,
             x11::glx::GLX_RGBA_BIT,
             x11::glx::GLX_DRAWABLE_TYPE,
             x11::glx::GLX_WINDOW_BIT,
             x11::glx::GLX_DOUBLEBUFFER,
-            0, // single-buffered — no glXSwapBuffers needed
+            1, // double-buffered for tear-free rendering
             x11::glx::GLX_RED_SIZE,
             8,
             x11::glx::GLX_GREEN_SIZE,
@@ -452,8 +450,34 @@ impl Compositor {
             release: unsafe { std::mem::transmute(release_ptr.unwrap()) },
         };
 
-        // VSync is not needed — we use single-buffered rendering (no swap)
-        // and pace frames via the calloop 20ms timer.
+        // VSync: set swap interval = 1 to synchronize buffer swaps with vblank,
+        // preventing tearing during window movement.
+        {
+            let swap_ext_name = CString::new("glXSwapIntervalEXT").unwrap();
+            let swap_mesa_name = CString::new("glXSwapIntervalMESA").unwrap();
+            let swap_ext_ptr = unsafe {
+                x11::glx::glXGetProcAddress(swap_ext_name.as_ptr() as *const u8)
+            };
+            let swap_mesa_ptr = unsafe {
+                x11::glx::glXGetProcAddress(swap_mesa_name.as_ptr() as *const u8)
+            };
+
+            if let Some(ptr) = swap_ext_ptr {
+                // glXSwapIntervalEXT(Display*, GLXDrawable, int interval)
+                type SwapIntervalEXT = unsafe extern "C" fn(*mut x11::xlib::Display, x11::glx::GLXDrawable, i32);
+                let swap_fn: SwapIntervalEXT = unsafe { std::mem::transmute(ptr) };
+                unsafe { swap_fn(xlib_display, glx_drawable, 1) };
+                log::info!("compositor: vsync enabled via glXSwapIntervalEXT(1)");
+            } else if let Some(ptr) = swap_mesa_ptr {
+                // glXSwapIntervalMESA(unsigned int interval)
+                type SwapIntervalMESA = unsafe extern "C" fn(u32) -> i32;
+                let swap_fn: SwapIntervalMESA = unsafe { std::mem::transmute(ptr) };
+                unsafe { swap_fn(1) };
+                log::info!("compositor: vsync enabled via glXSwapIntervalMESA(1)");
+            } else {
+                log::warn!("compositor: no swap interval extension available, tearing may occur");
+            }
+        }
 
         log::info!("compositor: finding TFP FBConfigs...");
         // 12. Find FBConfigs for TFP (RGBA and RGB)
@@ -1332,9 +1356,9 @@ impl Compositor {
             self.gl.use_program(None);
         }
 
-        // Flush GL commands to the GPU.
+        // Swap buffers (double-buffered with vsync for tear-free output).
         unsafe {
-            self.gl.flush();
+            x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable);
         }
 
         true
