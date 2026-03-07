@@ -54,6 +54,8 @@ struct WindowTexture {
     gl_texture: glow::Texture,
     dirty: bool,
     has_rgba: bool,
+    /// The TFP FBConfig used for this window's GLX pixmap.
+    fbconfig: x11::glx::GLXFBConfig,
     /// When true, the pixmap needs to be recreated (deferred from update_geometry).
     needs_pixmap_refresh: bool,
     /// The X11 window ID, needed for deferred pixmap recreation.
@@ -71,6 +73,11 @@ pub(super) struct Compositor {
     glx_context: x11::glx::GLXContext,
     fbconfig_rgba: x11::glx::GLXFBConfig,
     fbconfig_rgb: x11::glx::GLXFBConfig,
+    /// Per-visual TFP FBConfig map: visual_id -> (FBConfig, is_rgba).
+    /// On some drivers (e.g. Ubuntu 20's Mesa), TFP requires the FBConfig to
+    /// match the source window's visual exactly — a generic depth-based
+    /// fallback produces garbled textures for mismatched visuals.
+    tfp_visual_configs: HashMap<u32, (x11::glx::GLXFBConfig, bool)>,
     overlay_window: u32,
     glx_drawable: x11::glx::GLXDrawable,
     gl: glow::Context,
@@ -447,7 +454,17 @@ impl Compositor {
             0,
         ];
 
+        // Enumerate ALL TFP-compatible FBConfigs and build a per-visual map.
+        // On older drivers (e.g. Ubuntu 20's Mesa), using a FBConfig whose
+        // visual doesn't match the source pixmap's visual produces garbled
+        // textures (e.g. solid orange).  Per-visual matching fixes this.
+        let mut tfp_visual_configs: HashMap<u32, (x11::glx::GLXFBConfig, bool)> = HashMap::new();
+        let mut fbconfig_rgba: x11::glx::GLXFBConfig = std::ptr::null_mut();
+        let mut fbconfig_rgb: x11::glx::GLXFBConfig = std::ptr::null_mut();
+
         let mut n = 0i32;
+
+        // --- RGBA TFP configs ---
         let cfgs_rgba = unsafe {
             x11::glx::glXChooseFBConfig(
                 xlib_display,
@@ -456,14 +473,27 @@ impl Compositor {
                 &mut n,
             )
         };
-        let fbconfig_rgba = if !cfgs_rgba.is_null() && n > 0 {
-            let c = unsafe { *cfgs_rgba };
+        if !cfgs_rgba.is_null() && n > 0 {
+            fbconfig_rgba = unsafe { *cfgs_rgba };
+            for i in 0..n {
+                let cfg = unsafe { *cfgs_rgba.offset(i as isize) };
+                let mut vid: i32 = 0;
+                unsafe {
+                    x11::glx::glXGetFBConfigAttrib(
+                        xlib_display,
+                        cfg,
+                        x11::glx::GLX_VISUAL_ID,
+                        &mut vid,
+                    );
+                }
+                if vid != 0 {
+                    tfp_visual_configs.entry(vid as u32).or_insert((cfg, true));
+                }
+            }
             unsafe { x11::xlib::XFree(cfgs_rgba as *mut _) };
-            c
-        } else {
-            std::ptr::null_mut()
-        };
+        }
 
+        // --- RGB TFP configs ---
         let cfgs_rgb = unsafe {
             x11::glx::glXChooseFBConfig(
                 xlib_display,
@@ -472,21 +502,35 @@ impl Compositor {
                 &mut n,
             )
         };
-        let fbconfig_rgb = if !cfgs_rgb.is_null() && n > 0 {
-            let c = unsafe { *cfgs_rgb };
+        if !cfgs_rgb.is_null() && n > 0 {
+            fbconfig_rgb = unsafe { *cfgs_rgb };
+            for i in 0..n {
+                let cfg = unsafe { *cfgs_rgb.offset(i as isize) };
+                let mut vid: i32 = 0;
+                unsafe {
+                    x11::glx::glXGetFBConfigAttrib(
+                        xlib_display,
+                        cfg,
+                        x11::glx::GLX_VISUAL_ID,
+                        &mut vid,
+                    );
+                }
+                if vid != 0 {
+                    // Don't overwrite an RGBA entry — prefer RGBA for 32-bit visuals.
+                    tfp_visual_configs.entry(vid as u32).or_insert((cfg, false));
+                }
+            }
             unsafe { x11::xlib::XFree(cfgs_rgb as *mut _) };
-            c
-        } else {
-            std::ptr::null_mut()
-        };
+        }
 
         if fbconfig_rgba.is_null() && fbconfig_rgb.is_null() {
             return Err("No FBConfig for texture_from_pixmap".into());
         }
         log::info!(
-            "compositor: TFP FBConfigs: rgba={} rgb={}",
+            "compositor: TFP FBConfigs: rgba={} rgb={} per_visual={}",
             !fbconfig_rgba.is_null(),
-            !fbconfig_rgb.is_null()
+            !fbconfig_rgb.is_null(),
+            tfp_visual_configs.len(),
         );
 
         // 13. Create glow GL context
@@ -541,6 +585,7 @@ impl Compositor {
             glx_context,
             fbconfig_rgba,
             fbconfig_rgb,
+            tfp_visual_configs,
             overlay_window,
             glx_drawable,
             gl,
@@ -663,9 +708,16 @@ impl Compositor {
         // Flush x11rb AND sync Xlib so the pixmap XID is visible to GLX.
         let _ = self.conn.flush();
 
-        // Determine if we use RGBA or RGB fbconfig based on the window's depth.
-        // Most X11 windows are 24-bit (RGB); only 32-bit windows have alpha.
-        // Using the wrong fbconfig for TFP causes black textures.
+        // Select the TFP FBConfig for this window.  First try an exact match
+        // by visual ID (required on older Mesa, e.g. Ubuntu 20); fall back to
+        // the generic depth-based selection.
+        let win_visual = self
+            .conn
+            .get_window_attributes(x11_win)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .map(|a| a.visual)
+            .unwrap_or(0);
         let win_depth = self
             .conn
             .get_geometry(x11_win)
@@ -673,17 +725,33 @@ impl Compositor {
             .and_then(|c| c.reply().ok())
             .map(|g| g.depth)
             .unwrap_or(24);
-        let use_rgba = win_depth == 32 && !self.fbconfig_rgba.is_null();
-        let fbconfig = if use_rgba {
-            self.fbconfig_rgba
+
+        let (fbconfig, use_rgba) = if let Some(&(cfg, is_rgba)) =
+            self.tfp_visual_configs.get(&win_visual)
+        {
+            log::debug!(
+                "compositor: win 0x{:x} visual 0x{:x} -> per-visual FBConfig (rgba={})",
+                x11_win, win_visual, is_rgba
+            );
+            (cfg, is_rgba)
         } else {
-            self.fbconfig_rgb
+            // Fallback: depth-based selection
+            let rgba = win_depth == 32 && !self.fbconfig_rgba.is_null();
+            let cfg = if rgba {
+                self.fbconfig_rgba
+            } else {
+                self.fbconfig_rgb
+            };
+            log::debug!(
+                "compositor: win 0x{:x} visual 0x{:x} depth={} -> depth-based FBConfig (rgba={})",
+                x11_win, win_visual, win_depth, rgba
+            );
+            (cfg, rgba)
         };
         if fbconfig.is_null() {
             log::warn!(
-                "compositor: no fbconfig for depth={} win=0x{:x}",
-                win_depth,
-                x11_win
+                "compositor: no fbconfig for visual=0x{:x} depth={} win=0x{:x}",
+                win_visual, win_depth, x11_win
             );
             let _ = self.conn.free_pixmap(pixmap);
             let _ = self.conn.damage_destroy(damage_id);
@@ -789,6 +857,7 @@ impl Compositor {
                 gl_texture,
                 dirty: true,
                 has_rgba: use_rgba,
+                fbconfig,
                 needs_pixmap_refresh: false,
                 x11_win,
             },
@@ -920,11 +989,7 @@ impl Compositor {
         // Create GLX pixmaps and rebind textures
         for (win, pixmap) in new_pixmaps {
             let wt = self.windows.get_mut(&win).unwrap();
-            let fbconfig = if wt.has_rgba {
-                self.fbconfig_rgba
-            } else {
-                self.fbconfig_rgb
-            };
+            let fbconfig = wt.fbconfig;
             let tex_fmt = if wt.has_rgba {
                 GLX_TEXTURE_FORMAT_RGBA_EXT
             } else {
