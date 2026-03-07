@@ -919,6 +919,9 @@ mod adapter {
         if (bits & EventMaskBits::FOCUS_CHANGE.bits()) != 0 {
             m |= EventMask::FOCUS_CHANGE;
         }
+        if (bits & EventMaskBits::SUBSTRUCTURE_NOTIFY.bits()) != 0 {
+            m |= EventMask::SUBSTRUCTURE_NOTIFY;
+        }
         m
     }
 }

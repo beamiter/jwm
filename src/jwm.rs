@@ -6848,6 +6848,7 @@ impl Jwm {
         backend.register_wm("jwm")?;
 
         let mask = (EventMaskBits::SUBSTRUCTURE_REDIRECT
+            | EventMaskBits::SUBSTRUCTURE_NOTIFY
             | EventMaskBits::STRUCTURE_NOTIFY
             | EventMaskBits::BUTTON_PRESS
             | EventMaskBits::POINTER_MOTION

@@ -246,6 +246,7 @@ bitflags! {
         const STRUCTURE_NOTIFY     = 1 << 6;
         const SUBSTRUCTURE_REDIRECT= 1 << 7;
         const FOCUS_CHANGE         = 1 << 8;
+        const SUBSTRUCTURE_NOTIFY  = 1 << 9;
     }
 }
 
