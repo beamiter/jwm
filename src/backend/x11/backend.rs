@@ -523,9 +523,20 @@ impl Backend for X11Backend {
         }
     }
 
-    fn compositor_notify_tag_switch(&mut self, duration: std::time::Duration, direction: i32) {
+    fn compositor_notify_tag_switch(
+        &mut self,
+        duration: std::time::Duration,
+        direction: i32,
+        exclude_top: u32,
+    ) {
         if let Some(c) = self.compositor.as_mut() {
-            c.notify_tag_switch(duration, direction);
+            c.notify_tag_switch(duration, direction, exclude_top);
+        }
+    }
+
+    fn compositor_force_full_redraw(&mut self) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.force_full_redraw();
         }
     }
 

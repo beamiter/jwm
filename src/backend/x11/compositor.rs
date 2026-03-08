@@ -128,6 +128,7 @@ struct TransitionUniforms {
     rect: Option<glow::UniformLocation>,
     texture: Option<glow::UniformLocation>,
     opacity: Option<glow::UniformLocation>,
+    uv_rect: Option<glow::UniformLocation>,
 }
 
 /// Parsed opacity rule: "opacity_percent:class_name"
@@ -316,6 +317,8 @@ pub(super) struct Compositor {
     transition_duration: std::time::Duration,
     /// +1 = forward (old scene slides left), -1 = backward (old scene slides right).
     transition_direction: f32,
+    /// Pixels at the top of the screen to exclude from the transition overlay.
+    transition_exclude_top: u32,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
@@ -915,6 +918,7 @@ impl Compositor {
                 rect: gl.get_uniform_location(transition_program, "u_rect"),
                 texture: gl.get_uniform_location(transition_program, "u_texture"),
                 opacity: gl.get_uniform_location(transition_program, "u_opacity"),
+                uv_rect: gl.get_uniform_location(transition_program, "u_uv_rect"),
             }
         };
 
@@ -1121,6 +1125,7 @@ impl Compositor {
             transition_start: None,
             transition_duration: std::time::Duration::from_millis(150),
             transition_direction: 1.0,
+            transition_exclude_top: 0,
         })
     }
 
@@ -1396,7 +1401,12 @@ impl Compositor {
 
     /// Called just before a tag switch. Captures the current back-buffer into
     /// a snapshot texture so `render_frame` can slide the old scene out.
-    pub(super) fn notify_tag_switch(&mut self, duration: std::time::Duration, direction: i32) {
+    pub(super) fn notify_tag_switch(
+        &mut self,
+        duration: std::time::Duration,
+        direction: i32,
+        exclude_top: u32,
+    ) {
         // Ensure GL context is current
         if !self.context_current {
             unsafe {
@@ -1433,6 +1443,12 @@ impl Compositor {
             self.transition_start = Some(std::time::Instant::now());
             self.transition_duration = duration;
             self.transition_direction = if direction >= 0 { 1.0 } else { -1.0 };
+            self.transition_exclude_top = exclude_top.min(self.screen_h.saturating_sub(1));
+            // Tag switch can radically change visible scene; force a full redraw
+            // to avoid stale pixels from partial-damage scissor regions.
+            self.damage_regions.clear();
+            self.damage_regions
+                .push((0, 0, self.screen_w, self.screen_h));
             self.needs_render = true;
             log::debug!(
                 "compositor: tag-switch slide transition started ({:?}, dir={})",
@@ -1440,6 +1456,12 @@ impl Compositor {
                 direction
             );
         }
+    }
+
+    pub(super) fn force_full_redraw(&mut self) {
+        self.damage_regions.clear();
+        self.damage_regions.push((0, 0, self.screen_w, self.screen_h));
+        self.needs_render = true;
     }
 
     /// Returns true if a tag-switch transition is in progress.
@@ -1940,9 +1962,19 @@ impl Compositor {
     pub(super) fn update_geometry(&mut self, x11_win: u32, x: i32, y: i32, w: u32, h: u32) {
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             let size_changed = wt.w != w || wt.h != h;
+            let moved = wt.x != x || wt.y != y;
             wt.x = x;
             wt.y = y;
             self.needs_render = true;
+
+            if moved {
+                // Window move exposes old screen area and occupies new area.
+                // Damage events are not always sufficient for both regions,
+                // so request a full-frame redraw to prevent trails/ghosting.
+                self.damage_regions.clear();
+                self.damage_regions
+                    .push((0, 0, self.screen_w, self.screen_h));
+            }
 
             if size_changed && w > 0 && h > 0 {
                 wt.w = w;
@@ -2748,23 +2780,40 @@ impl Compositor {
                 let snap_tex = *snap_tex;
                 // Slide old scene off-screen based on tag movement direction.
                 let slide_x = -self.transition_direction * (self.screen_w as f32) * progress;
+                let exclude_top = self.transition_exclude_top.min(self.screen_h);
+                let draw_y = exclude_top as f32;
+                let draw_h = (self.screen_h - exclude_top) as f32;
+                let top_frac = if self.screen_h == 0 {
+                    0.0
+                } else {
+                    exclude_top as f32 / self.screen_h as f32
+                };
                 unsafe {
-                    self.gl.use_program(Some(self.transition_program));
-                    self.gl.uniform_matrix_4_f32_slice(
-                        self.transition_uniforms.projection.as_ref(), false, &proj,
-                    );
-                    self.gl.uniform_4_f32(
-                        self.transition_uniforms.rect.as_ref(),
-                        slide_x, 0.0, self.screen_w as f32, self.screen_h as f32,
-                    );
-                    self.gl.uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
-                    self.gl.uniform_1_f32(self.transition_uniforms.opacity.as_ref(), 1.0);
-                    self.gl.active_texture(glow::TEXTURE0);
-                    self.gl.bind_texture(glow::TEXTURE_2D, Some(snap_tex));
-                    self.gl.bind_vertex_array(Some(self.quad_vao));
-                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                    self.gl.bind_vertex_array(None);
-                    self.gl.use_program(None);
+                    if draw_h > 0.0 {
+                        self.gl.use_program(Some(self.transition_program));
+                        self.gl.uniform_matrix_4_f32_slice(
+                            self.transition_uniforms.projection.as_ref(), false, &proj,
+                        );
+                        self.gl.uniform_4_f32(
+                            self.transition_uniforms.rect.as_ref(),
+                            slide_x, draw_y, self.screen_w as f32, draw_h,
+                        );
+                        self.gl.uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
+                        self.gl.uniform_1_f32(self.transition_uniforms.opacity.as_ref(), 1.0);
+                        self.gl.uniform_4_f32(
+                            self.transition_uniforms.uv_rect.as_ref(),
+                            0.0,
+                            0.0,
+                            1.0,
+                            1.0 - top_frac,
+                        );
+                        self.gl.active_texture(glow::TEXTURE0);
+                        self.gl.bind_texture(glow::TEXTURE_2D, Some(snap_tex));
+                        self.gl.bind_vertex_array(Some(self.quad_vao));
+                        self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                        self.gl.bind_vertex_array(None);
+                        self.gl.use_program(None);
+                    }
                 }
             }
             true

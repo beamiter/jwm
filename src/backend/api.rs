@@ -673,9 +673,17 @@ pub trait Backend: Send {
 
     /// Notify the compositor that a tag/workspace switch is about to happen.
     /// `direction` uses +1 for forward (higher tag) and -1 for backward
-    /// (lower tag). The compositor captures the current framebuffer and slides
-    /// the old scene out over `duration`.
-    fn compositor_notify_tag_switch(&mut self, _duration: std::time::Duration, _direction: i32) {}
+    /// (lower tag). `exclude_top` skips a top strip from the transition so
+    /// persistent UI like a status bar is not included in the old snapshot.
+    fn compositor_notify_tag_switch(
+        &mut self,
+        _duration: std::time::Duration,
+        _direction: i32,
+        _exclude_top: u32,
+    ) {}
+
+    /// Force the compositor to redraw the full output on the next frame.
+    fn compositor_force_full_redraw(&mut self) {}
 }
 
 // 兼容性定义

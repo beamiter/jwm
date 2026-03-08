@@ -245,22 +245,26 @@ void main() {
 "#;
 
 // ---------------------------------------------------------------------------
-// Tag-switch crossfade transition shader
+// Tag-switch transition shader
 // ---------------------------------------------------------------------------
 
-/// Draws a fullscreen snapshot texture with fading opacity for workspace
-/// transition crossfade.
+/// Draws a snapshot texture for workspace transitions. The sampled source area
+/// can be cropped so persistent UI such as the status bar is excluded.
 pub const TRANSITION_FRAGMENT_SHADER: &str = r#"#version 330 core
 
 uniform sampler2D u_texture;
 uniform float u_opacity; // 1.0 = fully visible old scene, 0.0 = gone
+uniform vec4 u_uv_rect;  // x, y, w, h in texture UV space
 in vec2 v_uv;
 out vec4 frag_color;
 
 void main() {
     // Snapshot comes from an FBO texture, whose Y direction is opposite to
     // the GLX window textures used in the main compositor pass.
-    vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
+    vec2 uv = vec2(
+        u_uv_rect.x + v_uv.x * u_uv_rect.z,
+        u_uv_rect.y + (1.0 - v_uv.y) * u_uv_rect.w
+    );
     vec4 texel = texture(u_texture, uv);
     frag_color = vec4(texel.rgb, texel.a * u_opacity);
 }

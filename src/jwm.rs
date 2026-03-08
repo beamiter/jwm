@@ -1659,6 +1659,7 @@ impl Jwm {
         changes.width = Some(statusbar_mut.geometry.w as u32);
 
         backend.window_ops().apply_window_changes(window, changes)?;
+        backend.compositor_force_full_redraw();
 
         let monitor_key = self.current_bar_monitor_id.and_then(|id| self.get_monitor_by_id(id));
         self.arrange(backend, monitor_key);
@@ -2190,6 +2191,47 @@ impl Jwm {
         }
 
         false
+    }
+
+    fn should_animate_tag_switch(
+        &self,
+        mon_key: MonitorKey,
+        old_mask: u32,
+        new_mask: u32,
+    ) -> bool {
+        let Some(client_keys) = self.state.monitor_clients.get(mon_key) else {
+            return false;
+        };
+
+        client_keys.iter().copied().any(|client_key| {
+            if Some(client_key) == self.status_bar_client {
+                return false;
+            }
+
+            let Some(client) = self.state.clients.get(client_key) else {
+                return false;
+            };
+
+            if client.state.is_sticky {
+                return false;
+            }
+
+            let old_visible = (client.state.tags & old_mask) > 0;
+            let new_visible = (client.state.tags & new_mask) > 0;
+            old_visible != new_visible
+        })
+    }
+
+    fn tag_transition_exclude_top(&self) -> u32 {
+        let Some(bar_key) = self.status_bar_client else {
+            return 0;
+        };
+        let Some(bar) = self.state.clients.get(bar_key) else {
+            return 0;
+        };
+
+        let bottom = (bar.geometry.y + bar.geometry.h).max(0);
+        bottom as u32
     }
 
     fn nexttiled(&self, mon_key: MonitorKey, start_from: Option<ClientKey>) -> Option<ClientKey> {
@@ -6689,13 +6731,20 @@ impl Jwm {
         // Notify compositor to capture old scene for slide transition
         if backend.has_compositor() {
             let cfg = CONFIG.load();
-            if cfg.animation_enabled() {
+            if cfg.animation_enabled()
+                && self.should_animate_tag_switch(sel_mon_key, old_tag_mask, new_tag_mask)
+            {
                 let direction = Self::tag_switch_direction(
                     old_tag_mask,
                     new_tag_mask,
                     cfg.tags_length(),
                 );
-                backend.compositor_notify_tag_switch(cfg.animation_duration(), direction);
+                let exclude_top = self.tag_transition_exclude_top();
+                backend.compositor_notify_tag_switch(
+                    cfg.animation_duration(),
+                    direction,
+                    exclude_top,
+                );
             }
         }
         self.focus(backend, client_to_focus)?;
@@ -6860,13 +6909,20 @@ impl Jwm {
         // Notify compositor to capture old scene for slide transition
         if backend.has_compositor() {
             let cfg = CONFIG.load();
-            if cfg.animation_enabled() {
+            if cfg.animation_enabled()
+                && self.should_animate_tag_switch(sel_mon_key, old_tag_mask, new_tag_mask)
+            {
                 let direction = Self::tag_switch_direction(
                     old_tag_mask,
                     new_tag_mask,
                     cfg.tags_length(),
                 );
-                backend.compositor_notify_tag_switch(cfg.animation_duration(), direction);
+                let exclude_top = self.tag_transition_exclude_top();
+                backend.compositor_notify_tag_switch(
+                    cfg.animation_duration(),
+                    direction,
+                    exclude_top,
+                );
             }
         }
         self.focus(backend, None)?;
@@ -8345,6 +8401,7 @@ impl Jwm {
                     backend
                         .window_ops()
                         .apply_window_changes(client.win, changes)?;
+                    backend.compositor_force_full_redraw();
                     (client.win, Some(client.geometry.h))
                 } else {
                     let changes = WindowChanges {
@@ -8355,6 +8412,7 @@ impl Jwm {
                     backend
                         .window_ops()
                         .apply_window_changes(client.win, changes)?;
+                    backend.compositor_force_full_redraw();
                     (client.win, None)
                 }
             } else {
