@@ -239,6 +239,11 @@ pub struct Jwm {
     /// by the compositor when COMPOSITE_REDIRECT_MANUAL is active.
     pub override_redirect_windows: HashSet<WindowId>,
 
+    /// Cached geometries for override-redirect windows.  Updated from
+    /// ConfigureNotify so that `build_compositor_scene` doesn't need
+    /// synchronous GetGeometry round-trips on every frame.
+    pub or_window_geometries: HashMap<WindowId, (i32, i32, u32, u32)>,
+
     /// Per-monitor scrolling layout state
     pub scrolling_states: HashMap<MonitorKey, ScrollingState>,
 }
@@ -301,6 +306,7 @@ impl WMController for Jwm {
 
     fn on_unmap_notify(&mut self, backend: &mut dyn Backend, win: WindowId, from_configure: bool) {
         self.override_redirect_windows.remove(&win);
+        self.or_window_geometries.remove(&win);
         if let Err(e) = self.unmapnotify(backend, win, from_configure) {
             error!("Error handling UnmapNotify for {:?}: {:?}", win, e);
         }
@@ -308,6 +314,7 @@ impl WMController for Jwm {
 
     fn on_destroy_notify(&mut self, backend: &mut dyn Backend, win: WindowId) {
         self.override_redirect_windows.remove(&win);
+        self.or_window_geometries.remove(&win);
         if let Err(e) = self.destroynotify(backend, win) {
             error!("Error handling DestroyNotify for {:?}: {:?}", win, e);
         }
@@ -322,6 +329,11 @@ impl WMController for Jwm {
         width: u32,
         height: u32,
     ) {
+        // Keep the OR geometry cache up to date so build_compositor_scene
+        // doesn't need a synchronous GetGeometry round-trip per frame.
+        if self.override_redirect_windows.contains(&win) {
+            self.or_window_geometries.insert(win, (x, y, width, height));
+        }
         if let Err(e) = self.configurenotify(backend, win, x, y, width, height) {
             error!("Error handling ConfigureNotify: {:?}", e);
         }
@@ -794,6 +806,14 @@ impl EventHandler for Jwm {
                     if let Ok(attr) = backend.window_ops().get_window_attributes(win) {
                         if attr.override_redirect {
                             self.override_redirect_windows.insert(win);
+                            // Cache initial geometry so build_compositor_scene doesn't
+                            // need a synchronous GetGeometry round-trip every frame.
+                            if let Ok(geom) = backend.window_ops().get_geometry(win) {
+                                self.or_window_geometries.insert(
+                                    win,
+                                    (geom.x, geom.y, geom.w, geom.h),
+                                );
+                            }
                         }
                     }
                     // Some X11 notification daemons (e.g. dunst) use override_redirect windows.
@@ -923,6 +943,22 @@ impl EventHandler for Jwm {
 
     fn needs_tick(&self) -> bool {
         self.animations.has_active()
+    }
+
+    fn render_compositor_immediate(&mut self, backend: &mut dyn Backend) {
+        if !backend.has_compositor() || !backend.compositor_needs_render() {
+            return;
+        }
+        // Skip if animations are active — tick_animations handles rendering
+        // during animation frames, so we don't want to double-render.
+        if self.animations.has_active() {
+            return;
+        }
+        let scene = self.build_compositor_scene(backend, &HashMap::new());
+        let focused = self.get_selected_client_key()
+            .and_then(|ck| self.state.clients.get(ck))
+            .map(|c| c.win.raw());
+        let _ = backend.compositor_render_frame(&scene, focused);
     }
 }
 
@@ -1183,6 +1219,7 @@ impl Jwm {
             config_last_modified: crate::config::Config::get_config_modified_time().ok(),
             config_reload_debounce: None,
             override_redirect_windows: HashSet::new(),
+            or_window_geometries: HashMap::new(),
             scrolling_states: HashMap::new(),
         };
         if let Ok((x, y)) = backend.input_ops().get_pointer_position() {
@@ -3496,16 +3533,16 @@ impl Jwm {
         // Include override-redirect windows (menus, dmenu, tooltips) on top.
         // These are not managed by the WM but must be composited.
         // Filter out the compositor's overlay window to avoid feedback loops.
+        // Use cached geometries to avoid synchronous GetGeometry round-trips
+        // on every frame (which add per-window X11 latency).
         let overlay_win = backend.compositor_overlay_window();
         for &or_win in &self.override_redirect_windows {
             if Some(or_win) == overlay_win {
                 continue;
             }
-            if let Ok(geom) = backend.window_ops().get_geometry(or_win) {
-                let w = geom.w as u32;
-                let h = geom.h as u32;
+            if let Some(&(x, y, w, h)) = self.or_window_geometries.get(&or_win) {
                 if w > 0 && h > 0 {
-                    scene.push((or_win.raw(), geom.x, geom.y, w, h));
+                    scene.push((or_win.raw(), x, y, w, h));
                 }
             }
         }
@@ -5326,7 +5363,27 @@ impl Jwm {
         let pictures_dir = std::env::var("XDG_PICTURES_DIR")
             .or_else(|_| std::env::var("HOME").map(|h| format!("{}/Pictures", h)))
             .unwrap_or_else(|_| "/tmp".to_string());
-        let screenshot_path = format!("{}/screenshot-{}.png", pictures_dir, timestamp);
+        let mut output_dir = std::path::PathBuf::from(&pictures_dir);
+        if let Err(e) = std::fs::create_dir_all(&output_dir) {
+            warn!(
+                "[take_screenshot] cannot create output dir '{}': {}, fallback to /tmp",
+                output_dir.display(),
+                e
+            );
+            output_dir = std::path::PathBuf::from("/tmp");
+            if let Err(e2) = std::fs::create_dir_all(&output_dir) {
+                error!(
+                    "[take_screenshot] cannot create fallback dir '{}': {}",
+                    output_dir.display(),
+                    e2
+                );
+                return Ok(());
+            }
+        }
+        let screenshot_path = output_dir
+            .join(format!("screenshot-{}.png", timestamp))
+            .to_string_lossy()
+            .to_string();
 
         if Self::is_udev_backend(_backend) {
             // Use grim + slurp for interactive region selection (requires wlr-screencopy
@@ -6594,6 +6651,34 @@ impl Jwm {
 
         if self.is_same_tag(next_tag) {
             return Ok(());
+        }
+
+        let (sel_mon_key, old_tag_mask) = match self.state.sel_mon {
+            Some(k) => {
+                let old = self
+                    .state
+                    .monitors
+                    .get(k)
+                    .map(|m| m.tag_set[m.sel_tags])
+                    .unwrap_or(next_tag);
+                (k, old)
+            }
+            None => return Ok(()),
+        };
+
+        // Trigger compositor transition for loopview shortcuts (Alt+Tab/PageUp/PageDown).
+        if backend.has_compositor() {
+            let cfg = CONFIG.load();
+            if cfg.animation_enabled()
+                && self.should_animate_tag_switch(sel_mon_key, old_tag_mask, next_tag)
+            {
+                let dir = Self::tag_switch_direction(old_tag_mask, next_tag, cfg.tags_length());
+                backend.compositor_notify_tag_switch(
+                    cfg.animation_duration(),
+                    dir,
+                    self.tag_transition_exclude_top(),
+                );
+            }
         }
 
         info!(

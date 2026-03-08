@@ -528,6 +528,12 @@ pub trait EventHandler {
     fn needs_tick(&self) -> bool {
         false
     }
+
+    /// Immediately render the compositor if it has pending damage.
+    /// Called from the event loop right after processing X events to
+    /// minimise visual latency for rapidly-updating overlay windows
+    /// (e.g. flameshot screenshot selection).  The default is a no-op.
+    fn render_compositor_immediate(&mut self, _backend: &mut dyn Backend) {}
 }
 
 pub trait Backend: Send {

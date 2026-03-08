@@ -1302,6 +1302,12 @@ impl Compositor {
         if class_name.is_empty() {
             return false;
         }
+        // Screenshot overlays like Flameshot are full-screen translucent windows
+        // that update every pointer move. Running blur/shadow/rounding on them is
+        // very expensive and causes visible stutter during region selection.
+        if class_name.eq_ignore_ascii_case("flameshot") {
+            return true;
+        }
         exclude_list.iter().any(|ex| ex.eq_ignore_ascii_case(class_name))
     }
 
@@ -2506,7 +2512,17 @@ impl Compositor {
         // Recreate pixmaps for windows that were resized (batched, single XSync)
         self.refresh_pixmaps();
 
-        // Feature 14: GLX error recovery — refresh textures with error detection
+        // Refresh TFP textures for dirty windows.
+        // NOTE: We intentionally do NOT call glGetError() here.  The old code
+        // checked for GL errors after every TFP rebind and, on error, set
+        // needs_pixmap_refresh which triggers a costly pixmap recreation +
+        // XSync on the *next* frame.  For rapidly-updating windows (e.g.
+        // flameshot selection overlay) a transient TFP race could cause this
+        // error every frame, creating a cascade of XSync stalls that made
+        // the compositor lag seconds behind the actual window content.
+        // Removing the per-frame glGetError avoids the GPU pipeline sync and
+        // the refresh cascade.  Genuine pixmap invalidation (window resize)
+        // is handled by update_geometry → needs_pixmap_refresh instead.
         for &(win, _, _, _, _) in scene {
             if let Some(wt) = self.windows.get_mut(&win) {
                 if wt.dirty && wt.glx_pixmap != 0 {
@@ -2523,15 +2539,6 @@ impl Compositor {
                             GLX_FRONT_LEFT_EXT,
                             std::ptr::null(),
                         );
-                        // Feature 15: Check for GL error after TFP rebind and attempt recovery
-                        let err = self.gl.get_error();
-                        if err != glow::NO_ERROR {
-                            log::warn!(
-                                "compositor: GL error 0x{:x} rebinding TFP for 0x{:x}, marking for refresh",
-                                err, win
-                            );
-                            wt.needs_pixmap_refresh = true;
-                        }
                         self.gl.bind_texture(glow::TEXTURE_2D, None);
                     }
                     wt.dirty = false;

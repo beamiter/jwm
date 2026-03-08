@@ -875,6 +875,15 @@ impl Backend for X11Backend {
             event_loop
                 .dispatch(None, &mut loop_data)
                 .map_err(|e| BackendError::Other(Box::new(e)))?; // calloop::Error 是 Send+Sync 的，可以用 Box
+
+            // Immediate compositor render: after processing X events (including
+            // DamageNotify), render without waiting for the 20ms timer.
+            // This dramatically reduces visual latency for rapidly-updating
+            // overlay windows (e.g. flameshot screenshot selection).
+            if !loop_data.should_exit {
+                loop_data.handler.render_compositor_immediate(loop_data.backend);
+            }
+
             if loop_data.should_exit {
                 break;
             }
