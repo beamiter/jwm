@@ -270,6 +270,11 @@ impl X11Backend {
                         if let Ok(geom) = self.window_ops.get_geometry(*win) {
                             compositor.add_window(x11w, geom.x, geom.y, geom.w, geom.h);
                         }
+                        // Set window class for per-window rules
+                        let (_, cls) = self.property_ops.get_class(*win);
+                        if !cls.is_empty() {
+                            compositor.set_window_class(x11w, &cls);
+                        }
                     }
                 }
             }
@@ -288,6 +293,28 @@ impl X11Backend {
                     // Skip the overlay window
                     if x11w != overlay {
                         compositor.update_geometry(x11w, *x, *y, *width, *height);
+                    }
+                }
+            }
+            BackendEvent::WindowStateRequest { window, state, action } => {
+                // Track fullscreen state changes for unredirect optimisation
+                if *state == crate::backend::api::NetWmState::Fullscreen {
+                    if let Ok(x11w) = self.ids.x11(*window) {
+                        let is_fs = matches!(action,
+                            crate::backend::api::NetWmAction::Add | crate::backend::api::NetWmAction::Toggle
+                        );
+                        compositor.set_window_fullscreen(x11w, is_fs);
+                    }
+                }
+            }
+            BackendEvent::PropertyChanged { window, kind } => {
+                // Update class name if WM_CLASS changed
+                if matches!(kind, crate::backend::api::PropertyKind::Class) {
+                    if let Ok(x11w) = self.ids.x11(*window) {
+                        let (_, cls) = self.property_ops.get_class(*window);
+                        if !cls.is_empty() {
+                            compositor.set_window_class(x11w, &cls);
+                        }
                     }
                 }
             }

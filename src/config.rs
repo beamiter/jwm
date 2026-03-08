@@ -102,6 +102,43 @@ pub struct BehaviorConfig {
     /// Opacity for unfocused windows (0.0..1.0). 1.0 = fully opaque (no dim).
     #[serde(default = "default_inactive_opacity")]
     pub inactive_opacity: f32,
+    /// Opacity for active/focused windows (0.0..1.0). 1.0 = fully opaque.
+    #[serde(default = "default_active_opacity")]
+    pub active_opacity: f32,
+    /// Enable background blur behind translucent windows.
+    #[serde(default)]
+    pub blur_enabled: bool,
+    /// Blur strength / number of passes (1..5). Higher = more blur.
+    #[serde(default = "default_blur_strength")]
+    pub blur_strength: u32,
+    /// Enable fade-in/fade-out when windows map/unmap.
+    #[serde(default)]
+    pub fading: bool,
+    /// Fade-in step per frame (0.0..1.0). Higher = faster fade-in.
+    #[serde(default = "default_fade_step")]
+    pub fade_in_step: f32,
+    /// Fade-out step per frame (0.0..1.0). Higher = faster fade-out.
+    #[serde(default = "default_fade_step")]
+    pub fade_out_step: f32,
+    /// Window classes to exclude from shadows, e.g. ["Alacritty", "kitty"].
+    #[serde(default)]
+    pub shadow_exclude: Vec<String>,
+    /// Per-window opacity rules, e.g. ["90:Alacritty", "85:kitty"].
+    /// Format: "opacity_percent:class_name".
+    #[serde(default)]
+    pub opacity_rules: Vec<String>,
+    /// Window classes to exclude from blur.
+    #[serde(default)]
+    pub blur_exclude: Vec<String>,
+    /// Window classes to exclude from rounded corners.
+    #[serde(default)]
+    pub rounded_corners_exclude: Vec<String>,
+    /// Detect windows that manage their own opacity (skip forced opacity).
+    #[serde(default)]
+    pub detect_client_opacity: bool,
+    /// Unredirect fullscreen windows for direct scanout (better perf).
+    #[serde(default = "default_true")]
+    pub fullscreen_unredirect: bool,
 }
 
 fn default_corner_radius() -> f32 { 10.0 }
@@ -110,6 +147,9 @@ fn default_shadow_radius() -> f32 { 24.0 }
 fn default_shadow_offset() -> [f32; 2] { [4.0, 4.0] }
 fn default_shadow_color() -> [f32; 4] { [0.0, 0.0, 0.0, 0.5] }
 fn default_inactive_opacity() -> f32 { 0.92 }
+fn default_active_opacity() -> f32 { 1.0 }
+fn default_blur_strength() -> u32 { 3 }
+fn default_fade_step() -> f32 { 0.03 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusBarConfig {
@@ -230,6 +270,18 @@ impl Default for Config {
                     shadow_offset: default_shadow_offset(),
                     shadow_color: default_shadow_color(),
                     inactive_opacity: default_inactive_opacity(),
+                    active_opacity: default_active_opacity(),
+                    blur_enabled: false,
+                    blur_strength: default_blur_strength(),
+                    fading: false,
+                    fade_in_step: default_fade_step(),
+                    fade_out_step: default_fade_step(),
+                    shadow_exclude: Vec::new(),
+                    opacity_rules: Vec::new(),
+                    blur_exclude: Vec::new(),
+                    rounded_corners_exclude: Vec::new(),
+                    detect_client_opacity: false,
+                    fullscreen_unredirect: true,
                 },
                 status_bar: StatusBarConfig {
                     name: STATUS_BAR_NAME.to_string(),

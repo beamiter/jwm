@@ -76,3 +76,60 @@ void main() {
     frag_color = vec4(u_shadow_color.rgb, u_shadow_color.a * alpha);
 }
 "#;
+
+// ---------------------------------------------------------------------------
+// Dual Kawase blur shaders
+// ---------------------------------------------------------------------------
+
+/// Kawase downsample shader: samples 4 diagonal neighbours + center with offsets.
+pub const BLUR_DOWN_VERTEX: &str = r#"#version 330 core
+
+uniform vec4 u_rect; // x, y, w, h in pixels (fullscreen quad for blur pass)
+uniform mat4 u_projection;
+out vec2 v_uv;
+
+void main() {
+    vec2 pos = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1));
+    v_uv = pos;
+    vec2 pixel = u_rect.xy + pos * u_rect.zw;
+    gl_Position = u_projection * vec4(pixel, 0.0, 1.0);
+}
+"#;
+
+pub const BLUR_DOWN_FRAGMENT: &str = r#"#version 330 core
+
+uniform sampler2D u_texture;
+uniform vec2 u_halfpixel; // 0.5 / texture_size
+in vec2 v_uv;
+out vec4 frag_color;
+
+void main() {
+    vec4 sum = texture(u_texture, v_uv) * 4.0;
+    sum += texture(u_texture, v_uv - u_halfpixel);
+    sum += texture(u_texture, v_uv + u_halfpixel);
+    sum += texture(u_texture, v_uv + vec2(u_halfpixel.x, -u_halfpixel.y));
+    sum += texture(u_texture, v_uv - vec2(u_halfpixel.x, -u_halfpixel.y));
+    frag_color = sum / 8.0;
+}
+"#;
+
+/// Kawase upsample shader: blends 8 neighbours to reconstruct blurred image.
+pub const BLUR_UP_FRAGMENT: &str = r#"#version 330 core
+
+uniform sampler2D u_texture;
+uniform vec2 u_halfpixel;
+in vec2 v_uv;
+out vec4 frag_color;
+
+void main() {
+    vec4 sum = texture(u_texture, v_uv + vec2(-u_halfpixel.x * 2.0, 0.0));
+    sum += texture(u_texture, v_uv + vec2(-u_halfpixel.x, u_halfpixel.y)) * 2.0;
+    sum += texture(u_texture, v_uv + vec2(0.0, u_halfpixel.y * 2.0));
+    sum += texture(u_texture, v_uv + vec2(u_halfpixel.x, u_halfpixel.y)) * 2.0;
+    sum += texture(u_texture, v_uv + vec2(u_halfpixel.x * 2.0, 0.0));
+    sum += texture(u_texture, v_uv + vec2(u_halfpixel.x, -u_halfpixel.y)) * 2.0;
+    sum += texture(u_texture, v_uv + vec2(0.0, -u_halfpixel.y * 2.0));
+    sum += texture(u_texture, v_uv + vec2(-u_halfpixel.x, -u_halfpixel.y)) * 2.0;
+    frag_color = sum / 12.0;
+}
+"#;
