@@ -8024,6 +8024,12 @@ impl Jwm {
                 }
             }
 
+            // Update last_stacking so the compositor scene includes this popup.
+            // Without this, the compositor overlay hides newly mapped dialogs.
+            if let Some(mon_key) = client_mon_key {
+                let _ = self.restack(backend, Some(mon_key));
+            }
+
             return Ok(());
         }
         let is_on_selected_monitor = client_mon_key.is_some() && client_mon_key == current_sel_mon;
@@ -8198,9 +8204,10 @@ impl Jwm {
                         );
                     }
                 } else {
-                    info!("[handle_transient_for] parent client is None");
+                    info!("[handle_transient_for] parent client is None, still mark floating");
                     if let Some(client) = self.state.clients.get_mut(client_key) {
                         client.mon = self.state.sel_mon;
+                        client.state.is_floating = true;
                     }
                     self.applyrules_by_key(backend, client_key);
                 }
