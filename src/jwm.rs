@@ -2240,23 +2240,34 @@ impl Jwm {
             return false;
         };
 
-        client_keys.iter().copied().any(|client_key| {
+        let mut old_has_visible = false;
+        let mut new_has_visible = false;
+        let mut has_membership_change = false;
+
+        for client_key in client_keys.iter().copied() {
             if Some(client_key) == self.status_bar_client {
-                return false;
+                continue;
             }
 
             let Some(client) = self.state.clients.get(client_key) else {
-                return false;
+                continue;
             };
 
             if client.state.is_sticky {
-                return false;
+                continue;
             }
 
             let old_visible = (client.state.tags & old_mask) > 0;
             let new_visible = (client.state.tags & new_mask) > 0;
-            old_visible != new_visible
-        })
+
+            old_has_visible |= old_visible;
+            new_has_visible |= new_visible;
+            has_membership_change |= old_visible != new_visible;
+        }
+
+        // Skip compositor tag-slide when either side is empty. This avoids
+        // first-frame hitching when switching from an empty tag into a busy tag.
+        has_membership_change && old_has_visible && new_has_visible
     }
 
     fn tag_transition_exclude_top(&self) -> u32 {
