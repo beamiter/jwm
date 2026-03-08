@@ -119,6 +119,17 @@ struct BlurFboLevel {
     h: u32,
 }
 
+// ---------------------------------------------------------------------------
+// Tag-switch transition uniforms
+// ---------------------------------------------------------------------------
+
+struct TransitionUniforms {
+    projection: Option<glow::UniformLocation>,
+    rect: Option<glow::UniformLocation>,
+    texture: Option<glow::UniformLocation>,
+    opacity: Option<glow::UniformLocation>,
+}
+
 /// Parsed opacity rule: "opacity_percent:class_name"
 #[derive(Clone)]
 struct OpacityRule {
@@ -293,6 +304,18 @@ pub(super) struct Compositor {
 
     // --- Feature 14: Shadow shape ---
     shadow_bottom_extra: f32,
+
+    // --- Tag-switch slide transition ---
+    transition_program: glow::Program,
+    transition_uniforms: TransitionUniforms,
+    /// FBO + texture holding a snapshot of the old scene before tag switch.
+    transition_fbo: Option<(glow::Framebuffer, glow::Texture)>,
+    /// When Some, a slide transition is in progress.
+    transition_start: Option<std::time::Instant>,
+    /// Duration of the slide transition.
+    transition_duration: std::time::Duration,
+    /// +1 = forward (old scene slides left), -1 = backward (old scene slides right).
+    transition_direction: f32,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
@@ -309,6 +332,7 @@ impl Drop for Compositor {
             self.gl.delete_program(self.border_program);
             self.gl.delete_program(self.postprocess_program);
             self.gl.delete_program(self.hud_program);
+            self.gl.delete_program(self.transition_program);
             self.gl.delete_vertex_array(self.quad_vao);
             // Clean up blur FBOs
             for level in self.blur_fbos.drain(..) {
@@ -320,6 +344,10 @@ impl Drop for Compositor {
                 self.gl.delete_texture(tex);
             }
             if let Some((fbo, tex)) = self.postprocess_fbo.take() {
+                self.gl.delete_framebuffer(fbo);
+                self.gl.delete_texture(tex);
+            }
+            if let Some((fbo, tex)) = self.transition_fbo.take() {
                 self.gl.delete_framebuffer(fbo);
                 self.gl.delete_texture(tex);
             }
@@ -877,6 +905,19 @@ impl Compositor {
             }
         };
 
+        // Compile tag-switch transition shader
+        let transition_program = unsafe {
+            Self::create_program(&gl, shaders::BLUR_DOWN_VERTEX, shaders::TRANSITION_FRAGMENT_SHADER)?
+        };
+        let transition_uniforms = unsafe {
+            TransitionUniforms {
+                projection: gl.get_uniform_location(transition_program, "u_projection"),
+                rect: gl.get_uniform_location(transition_program, "u_rect"),
+                texture: gl.get_uniform_location(transition_program, "u_texture"),
+                opacity: gl.get_uniform_location(transition_program, "u_opacity"),
+            }
+        };
+
         // 15. Create VAO (empty — vertex shader generates quad from gl_VertexID)
         let quad_vao = unsafe {
             let vao = gl
@@ -1073,6 +1114,13 @@ impl Compositor {
             blur_use_frame_extents: behavior.blur_use_frame_extents,
             // Feature 14: shadow shape
             shadow_bottom_extra: behavior.shadow_bottom_extra,
+            // Tag-switch crossfade transition
+            transition_program,
+            transition_uniforms,
+            transition_fbo: None,
+            transition_start: None,
+            transition_duration: std::time::Duration::from_millis(150),
+            transition_direction: 1.0,
         })
     }
 
@@ -1340,6 +1388,77 @@ impl Compositor {
             || self.contrast != 1.0
             || self.invert_colors
             || self.grayscale
+    }
+
+    // =====================================================================
+    // Tag-switch slide transition
+    // =====================================================================
+
+    /// Called just before a tag switch. Captures the current back-buffer into
+    /// a snapshot texture so `render_frame` can slide the old scene out.
+    pub(super) fn notify_tag_switch(&mut self, duration: std::time::Duration, direction: i32) {
+        // Ensure GL context is current
+        if !self.context_current {
+            unsafe {
+                x11::glx::glXMakeContextCurrent(
+                    self.xlib_display,
+                    self.glx_drawable,
+                    self.glx_drawable,
+                    self.glx_context,
+                );
+            }
+            self.context_current = true;
+        }
+
+        // Create snapshot FBO if needed
+        if self.transition_fbo.is_none() {
+            self.transition_fbo = unsafe {
+                Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h).ok()
+            };
+        }
+
+        if let Some((snap_fbo, _)) = &self.transition_fbo {
+            unsafe {
+                // Blit back-buffer into snapshot FBO
+                self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+                self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(*snap_fbo));
+                self.gl.blit_framebuffer(
+                    0, 0, self.screen_w as i32, self.screen_h as i32,
+                    0, 0, self.screen_w as i32, self.screen_h as i32,
+                    glow::COLOR_BUFFER_BIT,
+                    glow::NEAREST,
+                );
+                self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            }
+            self.transition_start = Some(std::time::Instant::now());
+            self.transition_duration = duration;
+            self.transition_direction = if direction >= 0 { 1.0 } else { -1.0 };
+            self.needs_render = true;
+            log::debug!(
+                "compositor: tag-switch slide transition started ({:?}, dir={})",
+                duration,
+                direction
+            );
+        }
+    }
+
+    /// Returns true if a tag-switch transition is in progress.
+    fn transition_active(&self) -> bool {
+        self.transition_start.is_some()
+    }
+
+    /// Compute transition progress (0.0 → 1.0). Returns None if no transition.
+    fn transition_progress(&self, now: std::time::Instant) -> Option<f32> {
+        let start = self.transition_start?;
+        let elapsed = now.duration_since(start);
+        if elapsed >= self.transition_duration {
+            None // transition complete
+        } else {
+            let t = elapsed.as_secs_f32() / self.transition_duration.as_secs_f32();
+            // EaseOut cubic for smooth slide deceleration.
+            let inv = 1.0 - t;
+            Some(1.0 - inv * inv * inv)
+        }
     }
 
     // =====================================================================
@@ -1769,6 +1888,14 @@ impl Compositor {
                 self.postprocess_fbo = Self::create_scene_fbo(&self.gl, new_w, new_h).ok();
             }
         }
+        // Cancel in-progress transition on resize (screen geometry changed)
+        if let Some((fbo, tex)) = self.transition_fbo.take() {
+            unsafe {
+                self.gl.delete_framebuffer(fbo);
+                self.gl.delete_texture(tex);
+            }
+            self.transition_start = None;
+        }
     }
 
     pub(super) fn remove_window(&mut self, x11_win: u32) {
@@ -2109,7 +2236,7 @@ impl Compositor {
         let has_dirty = scene.iter().any(|&(win, _, _, _, _)| {
             self.windows.get(&win).map_or(false, |wt| wt.dirty || wt.needs_pixmap_refresh)
         });
-        let force_render = self.pending_screenshot.is_some() || self.debug_hud;
+        let force_render = self.pending_screenshot.is_some() || self.debug_hud || self.transition_active();
         let hash = Self::scene_hash(scene, focused);
         if !has_dirty && !fades_active && !force_render && hash == self.last_scene_hash {
             return false;
@@ -2615,13 +2742,48 @@ impl Compositor {
             self.capture_screenshot(&path);
         }
 
+        // === Tag-switch slide transition overlay ===
+        let transition_still_active = if let Some(progress) = self.transition_progress(std::time::Instant::now()) {
+            if let Some((_, snap_tex)) = &self.transition_fbo {
+                let snap_tex = *snap_tex;
+                // Slide old scene off-screen based on tag movement direction.
+                let slide_x = -self.transition_direction * (self.screen_w as f32) * progress;
+                unsafe {
+                    self.gl.use_program(Some(self.transition_program));
+                    self.gl.uniform_matrix_4_f32_slice(
+                        self.transition_uniforms.projection.as_ref(), false, &proj,
+                    );
+                    self.gl.uniform_4_f32(
+                        self.transition_uniforms.rect.as_ref(),
+                        slide_x, 0.0, self.screen_w as f32, self.screen_h as f32,
+                    );
+                    self.gl.uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
+                    self.gl.uniform_1_f32(self.transition_uniforms.opacity.as_ref(), 1.0);
+                    self.gl.active_texture(glow::TEXTURE0);
+                    self.gl.bind_texture(glow::TEXTURE_2D, Some(snap_tex));
+                    self.gl.bind_vertex_array(Some(self.quad_vao));
+                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    self.gl.bind_vertex_array(None);
+                    self.gl.use_program(None);
+                }
+            }
+            true
+        } else {
+            // Transition finished — clean up
+            if self.transition_start.is_some() {
+                self.transition_start = None;
+                log::debug!("compositor: tag-switch slide transition completed");
+            }
+            false
+        };
+
         // Swap buffers (double-buffered with vsync for tear-free output).
         unsafe {
             x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable);
         }
 
-        // Schedule re-render if fades are still in progress
-        if fades_active {
+        // Schedule re-render if fades or transition are still in progress
+        if fades_active || transition_still_active {
             self.needs_render = true;
         }
 

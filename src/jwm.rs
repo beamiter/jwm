@@ -6613,6 +6613,42 @@ impl Jwm {
         next_tag
     }
 
+    fn primary_tag_index(mask: u32) -> Option<usize> {
+        if mask == 0 || mask == u32::MAX {
+            return None;
+        }
+        Some(mask.trailing_zeros() as usize)
+    }
+
+    // Returns +1 for forward (higher tag), -1 for backward (lower tag).
+    // Uses shortest circular direction to keep wrap-around natural.
+    fn tag_switch_direction(old_mask: u32, new_mask: u32, tags_len: usize) -> i32 {
+        let Some(old_idx) = Self::primary_tag_index(old_mask) else {
+            return 1;
+        };
+        let Some(new_idx) = Self::primary_tag_index(new_mask) else {
+            return 1;
+        };
+        if old_idx == new_idx || tags_len == 0 {
+            return 1;
+        }
+
+        let direct = new_idx as i32 - old_idx as i32;
+        let wrap_forward = direct + tags_len as i32;
+        let wrap_backward = direct - tags_len as i32;
+
+        // Pick the delta with smallest absolute distance.
+        let mut best = direct;
+        if wrap_forward.abs() < best.abs() {
+            best = wrap_forward;
+        }
+        if wrap_backward.abs() < best.abs() {
+            best = wrap_backward;
+        }
+
+        if best >= 0 { 1 } else { -1 }
+    }
+
     pub fn view(
         &mut self,
         backend: &mut dyn Backend,
@@ -6638,14 +6674,30 @@ impl Jwm {
 
         // 2. 状态变更 (纯逻辑)
         let mut client_to_focus = None;
+        let mut old_tag_mask = 0u32;
+        let mut new_tag_mask = target_mask;
         if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
+            old_tag_mask = monitor.tag_set[monitor.sel_tags];
             monitor.view_tag(target_mask, false); // false = not toggle, direct set
+            new_tag_mask = monitor.tag_set[monitor.sel_tags];
             // 获取该 Tag 上次选中的 Client
             client_to_focus = monitor.get_selected_client_for_current_tag();
         }
         self.update_sticky_tags(sel_mon_key);
 
         // 3. 副作用 (Backend / Arrange)
+        // Notify compositor to capture old scene for slide transition
+        if backend.has_compositor() {
+            let cfg = CONFIG.load();
+            if cfg.animation_enabled() {
+                let direction = Self::tag_switch_direction(
+                    old_tag_mask,
+                    new_tag_mask,
+                    cfg.tags_length(),
+                );
+                backend.compositor_notify_tag_switch(cfg.animation_duration(), direction);
+            }
+        }
         self.focus(backend, client_to_focus)?;
         self.arrange(backend, Some(sel_mon_key));
         self.refresh_bar_visibility_on_selected_monitor(backend)?;
@@ -6795,12 +6847,28 @@ impl Jwm {
         let sel_mon_key = self.state.sel_mon.ok_or("No monitor selected")?;
 
         // 1. 状态变更
+        let mut old_tag_mask = 0u32;
+        let mut new_tag_mask = mask;
         if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
+            old_tag_mask = monitor.tag_set[monitor.sel_tags];
             monitor.view_tag(mask, true); // true = toggle
+            new_tag_mask = monitor.tag_set[monitor.sel_tags];
         }
         self.update_sticky_tags(sel_mon_key);
 
         // 2. 副作用
+        // Notify compositor to capture old scene for slide transition
+        if backend.has_compositor() {
+            let cfg = CONFIG.load();
+            if cfg.animation_enabled() {
+                let direction = Self::tag_switch_direction(
+                    old_tag_mask,
+                    new_tag_mask,
+                    cfg.tags_length(),
+                );
+                backend.compositor_notify_tag_switch(cfg.animation_duration(), direction);
+            }
+        }
         self.focus(backend, None)?;
         self.arrange(backend, Some(sel_mon_key));
         self.refresh_bar_visibility_on_selected_monitor(backend)?;

@@ -523,6 +523,12 @@ impl Backend for X11Backend {
         }
     }
 
+    fn compositor_notify_tag_switch(&mut self, duration: std::time::Duration, direction: i32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.notify_tag_switch(duration, direction);
+        }
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

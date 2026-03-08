@@ -670,6 +670,12 @@ pub trait Backend: Send {
 
     /// Set window shaped flag (for shadow adjustments).
     fn compositor_set_window_shaped(&mut self, _window: WindowId, _shaped: bool) {}
+
+    /// Notify the compositor that a tag/workspace switch is about to happen.
+    /// `direction` uses +1 for forward (higher tag) and -1 for backward
+    /// (lower tag). The compositor captures the current framebuffer and slides
+    /// the old scene out over `duration`.
+    fn compositor_notify_tag_switch(&mut self, _duration: std::time::Duration, _direction: i32) {}
 }
 
 // 兼容性定义
