@@ -250,6 +250,36 @@ void main() {
 
 /// Draws a snapshot texture for workspace transitions. The sampled source area
 /// can be cropped so persistent UI such as the status bar is excluded.
+pub const CUBE_VERTEX_SHADER: &str = r#"#version 330 core
+
+uniform mat4 u_mvp;
+uniform float u_aspect; // screen_w / workspace_h
+out vec2 v_uv;
+
+void main() {
+    vec2 pos = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1));
+    v_uv = pos;
+    // Face quad spans [-aspect, -1] to [+aspect, +1] in model space
+    vec3 vert = vec3((pos.x * 2.0 - 1.0) * u_aspect, pos.y * 2.0 - 1.0, 0.0);
+    gl_Position = u_mvp * vec4(vert, 1.0);
+}
+"#;
+
+pub const CUBE_FRAGMENT_SHADER: &str = r#"#version 330 core
+
+uniform sampler2D u_texture;
+uniform float u_brightness; // face lighting (1.0 = fully lit)
+uniform vec4 u_uv_rect;     // x, y, w, h in texture UV space
+in vec2 v_uv;
+out vec4 frag_color;
+
+void main() {
+    vec2 uv = u_uv_rect.xy + v_uv * u_uv_rect.zw;
+    vec4 texel = texture(u_texture, uv);
+    frag_color = vec4(texel.rgb * u_brightness, texel.a);
+}
+"#;
+
 pub const TRANSITION_FRAGMENT_SHADER: &str = r#"#version 330 core
 
 uniform sampler2D u_texture;

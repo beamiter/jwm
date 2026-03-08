@@ -131,6 +131,24 @@ struct TransitionUniforms {
     uv_rect: Option<glow::UniformLocation>,
 }
 
+// ---------------------------------------------------------------------------
+// Cube transition uniforms
+// ---------------------------------------------------------------------------
+
+struct CubeUniforms {
+    mvp: Option<glow::UniformLocation>,
+    aspect: Option<glow::UniformLocation>,
+    texture: Option<glow::UniformLocation>,
+    brightness: Option<glow::UniformLocation>,
+    uv_rect: Option<glow::UniformLocation>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum TransitionMode {
+    Slide,
+    Cube,
+}
+
 /// Parsed opacity rule: "opacity_percent:class_name"
 #[derive(Clone)]
 struct OpacityRule {
@@ -319,6 +337,14 @@ pub(super) struct Compositor {
     transition_direction: f32,
     /// Pixels at the top of the screen to exclude from the transition overlay.
     transition_exclude_top: u32,
+    /// Transition animation mode (slide or cube).
+    transition_mode: TransitionMode,
+
+    // --- Cube transition ---
+    cube_program: glow::Program,
+    cube_uniforms: CubeUniforms,
+    /// FBO + texture holding a snapshot of the new scene (for cube mode).
+    transition_new_fbo: Option<(glow::Framebuffer, glow::Texture)>,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
@@ -336,6 +362,7 @@ impl Drop for Compositor {
             self.gl.delete_program(self.postprocess_program);
             self.gl.delete_program(self.hud_program);
             self.gl.delete_program(self.transition_program);
+            self.gl.delete_program(self.cube_program);
             self.gl.delete_vertex_array(self.quad_vao);
             // Clean up blur FBOs
             for level in self.blur_fbos.drain(..) {
@@ -351,6 +378,10 @@ impl Drop for Compositor {
                 self.gl.delete_texture(tex);
             }
             if let Some((fbo, tex)) = self.transition_fbo.take() {
+                self.gl.delete_framebuffer(fbo);
+                self.gl.delete_texture(tex);
+            }
+            if let Some((fbo, tex)) = self.transition_new_fbo.take() {
                 self.gl.delete_framebuffer(fbo);
                 self.gl.delete_texture(tex);
             }
@@ -922,6 +953,20 @@ impl Compositor {
             }
         };
 
+        // Compile cube transition shader
+        let cube_program = unsafe {
+            Self::create_program(&gl, shaders::CUBE_VERTEX_SHADER, shaders::CUBE_FRAGMENT_SHADER)?
+        };
+        let cube_uniforms = unsafe {
+            CubeUniforms {
+                mvp: gl.get_uniform_location(cube_program, "u_mvp"),
+                aspect: gl.get_uniform_location(cube_program, "u_aspect"),
+                texture: gl.get_uniform_location(cube_program, "u_texture"),
+                brightness: gl.get_uniform_location(cube_program, "u_brightness"),
+                uv_rect: gl.get_uniform_location(cube_program, "u_uv_rect"),
+            }
+        };
+
         // 15. Create VAO (empty — vertex shader generates quad from gl_VertexID)
         let quad_vao = unsafe {
             let vao = gl
@@ -1126,6 +1171,14 @@ impl Compositor {
             transition_duration: std::time::Duration::from_millis(150),
             transition_direction: 1.0,
             transition_exclude_top: 0,
+            transition_mode: match behavior.transition_mode.as_str() {
+                "cube" => TransitionMode::Cube,
+                _ => TransitionMode::Slide,
+            },
+            // Cube transition
+            cube_program,
+            cube_uniforms,
+            transition_new_fbo: None,
         })
     }
 
@@ -1427,6 +1480,13 @@ impl Compositor {
             };
         }
 
+        // Create new-scene FBO for cube mode if needed
+        if self.transition_mode == TransitionMode::Cube && self.transition_new_fbo.is_none() {
+            self.transition_new_fbo = unsafe {
+                Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h).ok()
+            };
+        }
+
         if let Some((snap_fbo, _)) = &self.transition_fbo {
             unsafe {
                 // Blit back-buffer into snapshot FBO
@@ -1480,6 +1540,136 @@ impl Compositor {
             // EaseOut cubic for smooth slide deceleration.
             let inv = 1.0 - t;
             Some(1.0 - inv * inv * inv)
+        }
+    }
+
+    /// Render the 3D cube transition overlay.
+    /// `progress` goes from 0.0 (old scene fully visible) to 1.0 (new scene fully visible).
+    fn render_cube_transition(&mut self, progress: f32, _ortho_proj: &[f32; 16]) {
+        let old_tex = match &self.transition_fbo {
+            Some((_, tex)) => *tex,
+            None => return,
+        };
+
+        // Capture the current back-buffer (new scene) into transition_new_fbo
+        if self.transition_new_fbo.is_none() {
+            self.transition_new_fbo = unsafe {
+                Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h).ok()
+            };
+        }
+        let new_tex = match &self.transition_new_fbo {
+            Some((fbo, tex)) => {
+                let fbo = *fbo;
+                let tex = *tex;
+                unsafe {
+                    self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+                    self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
+                    self.gl.blit_framebuffer(
+                        0, 0, self.screen_w as i32, self.screen_h as i32,
+                        0, 0, self.screen_w as i32, self.screen_h as i32,
+                        glow::COLOR_BUFFER_BIT,
+                        glow::NEAREST,
+                    );
+                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                }
+                tex
+            }
+            None => return,
+        };
+
+        let exclude_top = self.transition_exclude_top.min(self.screen_h);
+        let workspace_h = self.screen_h.saturating_sub(exclude_top);
+        if workspace_h == 0 {
+            return;
+        }
+
+        let aspect = self.screen_w as f32 / workspace_h as f32;
+        let top_frac = if self.screen_h == 0 {
+            0.0
+        } else {
+            exclude_top as f32 / self.screen_h as f32
+        };
+        // UV rect: bottom portion of the FBO texture (workspace area, excluding status bar)
+        let uv_rect = [0.0f32, 0.0, 1.0, 1.0 - top_frac];
+
+        // --- Compute 3D cube matrices ---
+        // Cube face half-width = aspect, half-height = 1.0
+        // Camera at z = aspect + 1.0 (fovY = 90°, f = 1.0)
+        let fov_y = std::f32::consts::FRAC_PI_2; // 90°
+        let camera_z = aspect + 1.0;
+
+        let persp = perspective_matrix(fov_y, aspect, 0.1, camera_z * 3.0);
+        let view = translate_matrix(0.0, 0.0, -camera_z);
+
+        // Rotation angle: forward (dir=1) rotates negatively around Y
+        let angle = -self.transition_direction * progress * std::f32::consts::FRAC_PI_2;
+
+        // Old face = front face of the cube
+        let old_model = mat4_mul(&rotate_y_matrix(angle), &translate_matrix(0.0, 0.0, aspect));
+        let old_mvp = mat4_mul(&persp, &mat4_mul(&view, &old_model));
+
+        // New face = side face (right for forward, left for backward)
+        let new_face_angle = angle + self.transition_direction * std::f32::consts::FRAC_PI_2;
+        let new_model = mat4_mul(&rotate_y_matrix(new_face_angle), &translate_matrix(0.0, 0.0, aspect));
+        let new_mvp = mat4_mul(&persp, &mat4_mul(&view, &new_model));
+
+        // Face brightness based on angle relative to camera (simulates lighting)
+        let half_pi = std::f32::consts::FRAC_PI_2;
+        let old_brightness = 0.3 + 0.7 * (progress * half_pi).cos();
+        let new_brightness = 0.3 + 0.7 * (progress * half_pi).sin();
+
+        unsafe {
+            // Set viewport and scissor to workspace area (below status bar)
+            self.gl.enable(glow::SCISSOR_TEST);
+            self.gl.scissor(0, 0, self.screen_w as i32, workspace_h as i32);
+            self.gl.viewport(0, 0, self.screen_w as i32, workspace_h as i32);
+
+            // Clear workspace area for cube rendering
+            self.gl.clear(glow::COLOR_BUFFER_BIT);
+
+            self.gl.use_program(Some(self.cube_program));
+            self.gl.uniform_1_f32(self.cube_uniforms.aspect.as_ref(), aspect);
+            self.gl.uniform_1_i32(self.cube_uniforms.texture.as_ref(), 0);
+            self.gl.uniform_4_f32(
+                self.cube_uniforms.uv_rect.as_ref(),
+                uv_rect[0], uv_rect[1], uv_rect[2], uv_rect[3],
+            );
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+            self.gl.active_texture(glow::TEXTURE0);
+
+            // Draw order: farther face first (painter's algorithm)
+            if progress < 0.5 {
+                // New face is farther, draw it first
+                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &new_mvp);
+                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), new_brightness);
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+                // Old face is closer
+                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &old_mvp);
+                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), old_brightness);
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            } else {
+                // Old face is farther, draw it first
+                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &old_mvp);
+                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), old_brightness);
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+                // New face is closer
+                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &new_mvp);
+                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), new_brightness);
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
+
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+
+            // Restore viewport and disable scissor
+            self.gl.disable(glow::SCISSOR_TEST);
+            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
         }
     }
 
@@ -2774,46 +2964,54 @@ impl Compositor {
             self.capture_screenshot(&path);
         }
 
-        // === Tag-switch slide transition overlay ===
+        // === Tag-switch transition overlay ===
         let transition_still_active = if let Some(progress) = self.transition_progress(std::time::Instant::now()) {
-            if let Some((_, snap_tex)) = &self.transition_fbo {
-                let snap_tex = *snap_tex;
-                // Slide old scene off-screen based on tag movement direction.
-                let slide_x = -self.transition_direction * (self.screen_w as f32) * progress;
-                let exclude_top = self.transition_exclude_top.min(self.screen_h);
-                let draw_y = exclude_top as f32;
-                let draw_h = (self.screen_h - exclude_top) as f32;
-                let top_frac = if self.screen_h == 0 {
-                    0.0
-                } else {
-                    exclude_top as f32 / self.screen_h as f32
-                };
-                unsafe {
-                    if draw_h > 0.0 {
-                        self.gl.use_program(Some(self.transition_program));
-                        self.gl.uniform_matrix_4_f32_slice(
-                            self.transition_uniforms.projection.as_ref(), false, &proj,
-                        );
-                        self.gl.uniform_4_f32(
-                            self.transition_uniforms.rect.as_ref(),
-                            slide_x, draw_y, self.screen_w as f32, draw_h,
-                        );
-                        self.gl.uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
-                        self.gl.uniform_1_f32(self.transition_uniforms.opacity.as_ref(), 1.0);
-                        self.gl.uniform_4_f32(
-                            self.transition_uniforms.uv_rect.as_ref(),
-                            0.0,
-                            0.0,
-                            1.0,
-                            1.0 - top_frac,
-                        );
-                        self.gl.active_texture(glow::TEXTURE0);
-                        self.gl.bind_texture(glow::TEXTURE_2D, Some(snap_tex));
-                        self.gl.bind_vertex_array(Some(self.quad_vao));
-                        self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                        self.gl.bind_vertex_array(None);
-                        self.gl.use_program(None);
+            match self.transition_mode {
+                TransitionMode::Slide => {
+                    // --- Slide mode (original) ---
+                    if let Some((_, snap_tex)) = &self.transition_fbo {
+                        let snap_tex = *snap_tex;
+                        let slide_x = -self.transition_direction * (self.screen_w as f32) * progress;
+                        let exclude_top = self.transition_exclude_top.min(self.screen_h);
+                        let draw_y = exclude_top as f32;
+                        let draw_h = (self.screen_h - exclude_top) as f32;
+                        let top_frac = if self.screen_h == 0 {
+                            0.0
+                        } else {
+                            exclude_top as f32 / self.screen_h as f32
+                        };
+                        unsafe {
+                            if draw_h > 0.0 {
+                                self.gl.use_program(Some(self.transition_program));
+                                self.gl.uniform_matrix_4_f32_slice(
+                                    self.transition_uniforms.projection.as_ref(), false, &proj,
+                                );
+                                self.gl.uniform_4_f32(
+                                    self.transition_uniforms.rect.as_ref(),
+                                    slide_x, draw_y, self.screen_w as f32, draw_h,
+                                );
+                                self.gl.uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
+                                self.gl.uniform_1_f32(self.transition_uniforms.opacity.as_ref(), 1.0);
+                                self.gl.uniform_4_f32(
+                                    self.transition_uniforms.uv_rect.as_ref(),
+                                    0.0,
+                                    0.0,
+                                    1.0,
+                                    1.0 - top_frac,
+                                );
+                                self.gl.active_texture(glow::TEXTURE0);
+                                self.gl.bind_texture(glow::TEXTURE_2D, Some(snap_tex));
+                                self.gl.bind_vertex_array(Some(self.quad_vao));
+                                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                                self.gl.bind_vertex_array(None);
+                                self.gl.use_program(None);
+                            }
+                        }
                     }
+                }
+                TransitionMode::Cube => {
+                    // --- Cube mode: 3D rotating cube transition ---
+                    self.render_cube_transition(progress, &proj);
                 }
             }
             true
@@ -2821,7 +3019,7 @@ impl Compositor {
             // Transition finished — clean up
             if self.transition_start.is_some() {
                 self.transition_start = None;
-                log::debug!("compositor: tag-switch slide transition completed");
+                log::debug!("compositor: tag-switch transition completed");
             }
             false
         };
@@ -2975,5 +3173,61 @@ fn ortho(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> [
         0.0,                  0.0,                  -2.0 / (far - near),  0.0,
         tx,                   ty,                    tz,                  1.0,
     ];
+    m
+}
+
+// ---------------------------------------------------------------------------
+// 3D matrix helpers for cube transition (column-major for OpenGL)
+// ---------------------------------------------------------------------------
+
+/// Perspective projection matrix.
+fn perspective_matrix(fov_y: f32, aspect: f32, near: f32, far: f32) -> [f32; 16] {
+    let f = 1.0 / (fov_y * 0.5).tan();
+    #[rustfmt::skip]
+    let m = [
+        f / aspect, 0.0, 0.0,                              0.0,
+        0.0,        f,   0.0,                              0.0,
+        0.0,        0.0, (far + near) / (near - far),     -1.0,
+        0.0,        0.0, (2.0 * far * near) / (near - far), 0.0,
+    ];
+    m
+}
+
+/// Translation matrix.
+fn translate_matrix(x: f32, y: f32, z: f32) -> [f32; 16] {
+    #[rustfmt::skip]
+    let m = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        x,   y,   z,   1.0,
+    ];
+    m
+}
+
+/// Rotation around the Y axis.
+fn rotate_y_matrix(angle: f32) -> [f32; 16] {
+    let c = angle.cos();
+    let s = angle.sin();
+    #[rustfmt::skip]
+    let m = [
+         c,  0.0, -s,  0.0,
+        0.0, 1.0, 0.0, 0.0,
+         s,  0.0,  c,  0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    m
+}
+
+/// 4×4 matrix multiply (column-major).
+fn mat4_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut m = [0.0f32; 16];
+    for col in 0..4 {
+        for row in 0..4 {
+            m[col * 4 + row] = (0..4)
+                .map(|k| a[k * 4 + row] * b[col * 4 + k])
+                .sum();
+        }
+    }
     m
 }

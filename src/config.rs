@@ -201,6 +201,11 @@ pub struct BehaviorConfig {
     /// Extra shadow offset for bottom edge (heavier shadow below).
     #[serde(default = "default_shadow_bottom_extra")]
     pub shadow_bottom_extra: f32,
+
+    // --- Tag-switch transition mode ---
+    /// Workspace switch transition mode: "slide" (default) or "cube".
+    #[serde(default = "default_transition_mode")]
+    pub transition_mode: String,
 }
 
 fn default_corner_radius() -> f32 { 10.0 }
@@ -217,6 +222,7 @@ fn default_border_color_focused() -> [f32; 4] { [0.4, 0.6, 0.9, 1.0] }
 fn default_border_color_unfocused() -> [f32; 4] { [0.3, 0.3, 0.3, 0.6] }
 fn default_one() -> f32 { 1.0 }
 fn default_shadow_bottom_extra() -> f32 { 4.0 }
+fn default_transition_mode() -> String { "slide".to_string() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusBarConfig {
@@ -330,7 +336,7 @@ impl Default for Config {
                     focus_follows_new_window: false,
                     resize_hints: true,
                     lock_fullscreen: true,
-                    compositor: false,
+                    compositor: true,
                     corner_radius: default_corner_radius(),
                     shadow_enabled: default_true(),
                     shadow_radius: default_shadow_radius(),
@@ -364,6 +370,7 @@ impl Default for Config {
                     debug_hud: false,
                     blur_use_frame_extents: false,
                     shadow_bottom_extra: default_shadow_bottom_extra(),
+                    transition_mode: default_transition_mode(),
                 },
                 status_bar: StatusBarConfig {
                     name: STATUS_BAR_NAME.to_string(),
