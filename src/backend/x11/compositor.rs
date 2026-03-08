@@ -1545,6 +1545,11 @@ impl Compositor {
 
     /// Render the 3D cube transition overlay.
     /// `progress` goes from 0.0 (old scene fully visible) to 1.0 (new scene fully visible).
+    ///
+    /// The two tags are adjacent faces of a cube. The cube rotates 90° around
+    /// its vertical (Y) axis so the old front face turns away and the new side
+    /// face turns in.  During the rotation both faces share an edge that is
+    /// visible as a vertical line where the two tag contents meet.
     fn render_cube_transition(&mut self, progress: f32, _ortho_proj: &[f32; 16]) {
         let old_tex = match &self.transition_fbo {
             Some((_, tex)) => *tex,
@@ -1589,37 +1594,55 @@ impl Compositor {
         } else {
             exclude_top as f32 / self.screen_h as f32
         };
-        // UV rect: bottom portion of the FBO texture (workspace area, excluding status bar)
+        // UV rect: workspace portion of the FBO texture (below status bar)
         let uv_rect = [0.0f32, 0.0, 1.0, 1.0 - top_frac];
 
-        // --- Compute 3D cube matrices ---
-        // Cube face half-width = aspect, half-height = 1.0
-        // Camera at z = aspect + 1.0 (fovY = 90°, f = 1.0)
-        let fov_y = std::f32::consts::FRAC_PI_2; // 90°
-        let camera_z = aspect + 1.0;
+        // --- Cube geometry ---
+        // The face quad spans [-aspect, -1] to [+aspect, +1] in model space
+        // (vertex shader: (pos * 2 - 1) * aspect for X, (pos * 2 - 1) for Y).
+        // For a square cross-section (cube viewed from above), the half-depth
+        // from center to each face equals the face half-width = aspect.
+        let d = aspect;
 
-        let persp = perspective_matrix(fov_y, aspect, 0.1, camera_z * 3.0);
+        // Camera distance: face exactly fills screen when face-on at z=d,
+        // fov_y=90° ⟹ camera_z = 1 + d.  Zoom out slightly at the midpoint
+        // to keep the rotating cube corners within the viewport.
+        let half_pi = std::f32::consts::FRAC_PI_2;
+        let zoom = 1.0 + 0.25 * (progress * std::f32::consts::PI).sin();
+        let camera_z = (1.0 + d) * zoom;
+
+        let persp = perspective_matrix(half_pi, aspect, 0.1, camera_z * 3.0);
         let view = translate_matrix(0.0, 0.0, -camera_z);
 
-        // Rotation angle: forward (dir=1) rotates negatively around Y
-        let angle = -self.transition_direction * progress * std::f32::consts::FRAC_PI_2;
+        // Global rotation applied to the whole cube as a rigid body.
+        // direction=+1 (forward): positive Y-rotation moves the front face
+        //   left and brings the right face to the front.
+        // direction=-1 (backward): vice-versa.
+        let angle = self.transition_direction * progress * half_pi;
+        let cube_rot = rotate_y_matrix(angle);
 
-        // Old face = front face of the cube
-        let old_model = mat4_mul(&rotate_y_matrix(angle), &translate_matrix(0.0, 0.0, aspect));
+        // Old face: front face of the cube, at z = +d
+        let old_model = mat4_mul(&cube_rot, &translate_matrix(0.0, 0.0, d));
         let old_mvp = mat4_mul(&persp, &mat4_mul(&view, &old_model));
 
-        // New face = side face (right for forward, left for backward)
-        let new_face_angle = angle + self.transition_direction * std::f32::consts::FRAC_PI_2;
-        let new_model = mat4_mul(&rotate_y_matrix(new_face_angle), &translate_matrix(0.0, 0.0, aspect));
+        // New face: adjacent side face.  Start from the face template at z=+d,
+        // then rotate it ∓90° so it sits on the appropriate side of the cube.
+        // For direction=+1 the new face sits at x=+d (right side);
+        // for direction=-1 it sits at x=-d (left side).
+        let new_base = mat4_mul(
+            &rotate_y_matrix(-self.transition_direction * half_pi),
+            &translate_matrix(0.0, 0.0, d),
+        );
+        let new_model = mat4_mul(&cube_rot, &new_base);
         let new_mvp = mat4_mul(&persp, &mat4_mul(&view, &new_model));
 
-        // Face brightness based on angle relative to camera (simulates lighting)
-        let half_pi = std::f32::consts::FRAC_PI_2;
-        let old_brightness = 0.3 + 0.7 * (progress * half_pi).cos();
-        let new_brightness = 0.3 + 0.7 * (progress * half_pi).sin();
+        // Simulate directional lighting: the face that points more towards the
+        // camera is brighter, the one turning away is dimmer.
+        let old_brightness = (0.35 + 0.65 * (progress * half_pi).cos()).max(0.0);
+        let new_brightness = (0.35 + 0.65 * (progress * half_pi).sin()).max(0.0);
 
         unsafe {
-            // Set viewport and scissor to workspace area (below status bar)
+            // Restrict rendering to workspace area (below status bar)
             self.gl.enable(glow::SCISSOR_TEST);
             self.gl.scissor(0, 0, self.screen_w as i32, workspace_h as i32);
             self.gl.viewport(0, 0, self.screen_w as i32, workspace_h as i32);
@@ -1637,27 +1660,29 @@ impl Compositor {
             self.gl.bind_vertex_array(Some(self.quad_vao));
             self.gl.active_texture(glow::TEXTURE0);
 
-            // Draw order: farther face first (painter's algorithm)
+            // Painter's algorithm: draw the farther face first so the closer
+            // face correctly occludes it.  At progress < 0.5 the old face is
+            // closer; at progress > 0.5 the new face is closer.
             if progress < 0.5 {
-                // New face is farther, draw it first
+                // New face farther → draw first
                 self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &new_mvp);
                 self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), new_brightness);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-                // Old face is closer
+                // Old face closer → draw second
                 self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &old_mvp);
                 self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), old_brightness);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             } else {
-                // Old face is farther, draw it first
+                // Old face farther → draw first
                 self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &old_mvp);
                 self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), old_brightness);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-                // New face is closer
+                // New face closer → draw second
                 self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &new_mvp);
                 self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), new_brightness);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
