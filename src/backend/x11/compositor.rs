@@ -71,6 +71,14 @@ struct WindowTexture {
     opacity_override: Option<f32>,
     /// Whether this window is fullscreen.
     is_fullscreen: bool,
+    // --- Feature 3: Per-window corner radius ---
+    corner_radius_override: Option<f32>,
+    // --- Feature 4: Window scale ---
+    scale: f32,
+    // --- Feature 13: Frame extents for blur mask ---
+    frame_extents: [u32; 4], // left, right, top, bottom
+    // --- Feature 14: Window has X Shape (non-rectangular) ---
+    is_shaped: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +124,59 @@ struct BlurFboLevel {
 struct OpacityRule {
     opacity: f32, // 0.0..1.0
     class_name: String,
+}
+
+/// Parsed corner radius rule: "radius:class_name"
+#[derive(Clone)]
+struct CornerRadiusRule {
+    radius: f32,
+    class_name: String,
+}
+
+/// Parsed scale rule: "scale_percent:class_name"
+#[derive(Clone)]
+struct ScaleRule {
+    scale: f32, // 0.0..1.0
+    class_name: String,
+}
+
+// --- Feature 1: Border uniforms ---
+struct BorderUniforms {
+    projection: Option<glow::UniformLocation>,
+    rect: Option<glow::UniformLocation>,
+    border_color: Option<glow::UniformLocation>,
+    size: Option<glow::UniformLocation>,
+    radius: Option<glow::UniformLocation>,
+    border_width: Option<glow::UniformLocation>,
+}
+
+// --- Feature 9/10: Post-process uniforms ---
+struct PostprocessUniforms {
+    texture: Option<glow::UniformLocation>,
+    color_temp: Option<glow::UniformLocation>,
+    saturation: Option<glow::UniformLocation>,
+    brightness: Option<glow::UniformLocation>,
+    contrast: Option<glow::UniformLocation>,
+    invert: Option<glow::UniformLocation>,
+    grayscale: Option<glow::UniformLocation>,
+}
+
+// --- Feature 11: HUD uniforms ---
+struct HudUniforms {
+    projection: Option<glow::UniformLocation>,
+    rect: Option<glow::UniformLocation>,
+    bg_color: Option<glow::UniformLocation>,
+    fg_color: Option<glow::UniformLocation>,
+    size: Option<glow::UniformLocation>,
+}
+
+/// Frame timing statistics for the debug HUD (feature 11).
+struct FrameStats {
+    frame_count: u64,
+    last_fps_update: std::time::Instant,
+    fps: f32,
+    frame_times: Vec<f32>,
+    last_frame_time: std::time::Instant,
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +247,52 @@ pub(super) struct Compositor {
     fullscreen_unredirect: bool,
     /// Currently unredirected fullscreen window (if any)
     unredirected_window: Option<u32>,
+
+    // --- Feature 1: Window borders ---
+    border_program: glow::Program,
+    border_uniforms: BorderUniforms,
+    border_enabled: bool,
+    border_width: f32,
+    border_color_focused: [f32; 4],
+    border_color_unfocused: [f32; 4],
+
+    // --- Feature 3: Per-window corner radius rules ---
+    corner_radius_rules: Vec<CornerRadiusRule>,
+
+    // --- Feature 4: Window scale ---
+    scale_rules: Vec<ScaleRule>,
+
+    // --- Feature 6: Damage region tracking for partial redraw ---
+    damage_regions: Vec<(i32, i32, u32, u32)>,
+
+    // --- Feature 8: Color temperature / color management ---
+    postprocess_program: glow::Program,
+    postprocess_uniforms: PostprocessUniforms,
+    /// FBO for post-process pass (captures the composited scene)
+    postprocess_fbo: Option<(glow::Framebuffer, glow::Texture)>,
+    color_temperature: f32,
+    saturation: f32,
+    brightness: f32,
+    contrast: f32,
+
+    // --- Feature 10: Invert / accessibility ---
+    invert_colors: bool,
+    grayscale: bool,
+
+    // --- Feature 11: Debug HUD ---
+    hud_program: glow::Program,
+    hud_uniforms: HudUniforms,
+    debug_hud: bool,
+    frame_stats: FrameStats,
+
+    // --- Feature 12: Screenshot ---
+    pending_screenshot: Option<std::path::PathBuf>,
+
+    // --- Feature 13: Blur mask / frame extents ---
+    blur_use_frame_extents: bool,
+
+    // --- Feature 14: Shadow shape ---
+    shadow_bottom_extra: f32,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
@@ -199,6 +306,9 @@ impl Drop for Compositor {
             self.gl.delete_program(self.shadow_program);
             self.gl.delete_program(self.blur_down_program);
             self.gl.delete_program(self.blur_up_program);
+            self.gl.delete_program(self.border_program);
+            self.gl.delete_program(self.postprocess_program);
+            self.gl.delete_program(self.hud_program);
             self.gl.delete_vertex_array(self.quad_vao);
             // Clean up blur FBOs
             for level in self.blur_fbos.drain(..) {
@@ -206,6 +316,10 @@ impl Drop for Compositor {
                 self.gl.delete_texture(level.texture);
             }
             if let Some((fbo, tex)) = self.scene_fbo.take() {
+                self.gl.delete_framebuffer(fbo);
+                self.gl.delete_texture(tex);
+            }
+            if let Some((fbo, tex)) = self.postprocess_fbo.take() {
                 self.gl.delete_framebuffer(fbo);
                 self.gl.delete_texture(tex);
             }
@@ -724,6 +838,45 @@ impl Compositor {
             }
         };
 
+        // Compile border shader (feature 1)
+        let border_program = unsafe { Self::create_program(&gl, shaders::VERTEX_SHADER, shaders::BORDER_FRAGMENT_SHADER)? };
+        let border_uniforms = unsafe {
+            BorderUniforms {
+                projection: gl.get_uniform_location(border_program, "u_projection"),
+                rect: gl.get_uniform_location(border_program, "u_rect"),
+                border_color: gl.get_uniform_location(border_program, "u_border_color"),
+                size: gl.get_uniform_location(border_program, "u_size"),
+                radius: gl.get_uniform_location(border_program, "u_radius"),
+                border_width: gl.get_uniform_location(border_program, "u_border_width"),
+            }
+        };
+
+        // Compile post-process shader (features 8/9/10)
+        let postprocess_program = unsafe { Self::create_program(&gl, shaders::BLUR_DOWN_VERTEX, shaders::POSTPROCESS_FRAGMENT_SHADER)? };
+        let postprocess_uniforms = unsafe {
+            PostprocessUniforms {
+                texture: gl.get_uniform_location(postprocess_program, "u_texture"),
+                color_temp: gl.get_uniform_location(postprocess_program, "u_color_temp"),
+                saturation: gl.get_uniform_location(postprocess_program, "u_saturation"),
+                brightness: gl.get_uniform_location(postprocess_program, "u_brightness"),
+                contrast: gl.get_uniform_location(postprocess_program, "u_contrast"),
+                invert: gl.get_uniform_location(postprocess_program, "u_invert"),
+                grayscale: gl.get_uniform_location(postprocess_program, "u_grayscale"),
+            }
+        };
+
+        // Compile HUD shader (feature 11)
+        let hud_program = unsafe { Self::create_program(&gl, shaders::VERTEX_SHADER, shaders::HUD_FRAGMENT_SHADER)? };
+        let hud_uniforms = unsafe {
+            HudUniforms {
+                projection: gl.get_uniform_location(hud_program, "u_projection"),
+                rect: gl.get_uniform_location(hud_program, "u_rect"),
+                bg_color: gl.get_uniform_location(hud_program, "u_bg_color"),
+                fg_color: gl.get_uniform_location(hud_program, "u_fg_color"),
+                size: gl.get_uniform_location(hud_program, "u_size"),
+            }
+        };
+
         // 15. Create VAO (empty — vertex shader generates quad from gl_VertexID)
         let quad_vao = unsafe {
             let vao = gl
@@ -772,6 +925,36 @@ impl Compositor {
             None
         }).collect();
 
+        // Parse corner radius rules ("radius:class_name") — feature 3
+        let corner_radius_rules: Vec<CornerRadiusRule> = behavior.corner_radius_rules.iter().filter_map(|rule| {
+            let parts: Vec<&str> = rule.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                if let Ok(r) = parts[0].trim().parse::<f32>() {
+                    return Some(CornerRadiusRule {
+                        radius: r.max(0.0),
+                        class_name: parts[1].trim().to_string(),
+                    });
+                }
+            }
+            log::warn!("compositor: invalid corner radius rule: {rule}");
+            None
+        }).collect();
+
+        // Parse scale rules ("scale_percent:class_name") — feature 4
+        let scale_rules: Vec<ScaleRule> = behavior.scale_rules.iter().filter_map(|rule| {
+            let parts: Vec<&str> = rule.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                if let Ok(pct) = parts[0].trim().parse::<f32>() {
+                    return Some(ScaleRule {
+                        scale: (pct / 100.0).clamp(0.1, 2.0),
+                        class_name: parts[1].trim().to_string(),
+                    });
+                }
+            }
+            log::warn!("compositor: invalid scale rule: {rule}");
+            None
+        }).collect();
+
         // Create blur FBOs if blur is enabled
         let blur_fbos = if behavior.blur_enabled {
             unsafe { Self::create_blur_fbos(&gl, screen_w, screen_h, behavior.blur_strength) }
@@ -781,6 +964,19 @@ impl Compositor {
 
         // Create scene capture FBO for blur source
         let scene_fbo = if behavior.blur_enabled {
+            unsafe { Self::create_scene_fbo(&gl, screen_w, screen_h).ok() }
+        } else {
+            None
+        };
+
+        // Create post-process FBO (features 8/9/10) — needed if any post-processing is active
+        let needs_postprocess = behavior.color_temperature != 0.0
+            || behavior.saturation != 1.0
+            || behavior.brightness != 1.0
+            || behavior.contrast != 1.0
+            || behavior.invert_colors
+            || behavior.grayscale;
+        let postprocess_fbo = if needs_postprocess {
             unsafe { Self::create_scene_fbo(&gl, screen_w, screen_h).ok() }
         } else {
             None
@@ -836,6 +1032,47 @@ impl Compositor {
             detect_client_opacity: behavior.detect_client_opacity,
             fullscreen_unredirect: behavior.fullscreen_unredirect,
             unredirected_window: None,
+            // Feature 1: borders
+            border_program,
+            border_uniforms,
+            border_enabled: behavior.border_enabled,
+            border_width: behavior.border_width,
+            border_color_focused: behavior.border_color_focused,
+            border_color_unfocused: behavior.border_color_unfocused,
+            // Feature 3: per-window corner radius
+            corner_radius_rules,
+            // Feature 4: scale
+            scale_rules,
+            // Feature 6: damage regions
+            damage_regions: Vec::new(),
+            // Feature 8: color management
+            postprocess_program,
+            postprocess_uniforms,
+            postprocess_fbo,
+            color_temperature: behavior.color_temperature,
+            saturation: behavior.saturation,
+            brightness: behavior.brightness,
+            contrast: behavior.contrast,
+            // Feature 10: invert / accessibility
+            invert_colors: behavior.invert_colors,
+            grayscale: behavior.grayscale,
+            // Feature 11: debug HUD
+            hud_program,
+            hud_uniforms,
+            debug_hud: behavior.debug_hud,
+            frame_stats: FrameStats {
+                frame_count: 0,
+                last_fps_update: std::time::Instant::now(),
+                fps: 0.0,
+                frame_times: Vec::with_capacity(120),
+                last_frame_time: std::time::Instant::now(),
+            },
+            // Feature 12: screenshot
+            pending_screenshot: None,
+            // Feature 13: blur mask
+            blur_use_frame_extents: behavior.blur_use_frame_extents,
+            // Feature 14: shadow shape
+            shadow_bottom_extra: behavior.shadow_bottom_extra,
         })
     }
 
@@ -975,6 +1212,32 @@ impl Compositor {
         None
     }
 
+    /// Look up per-window corner radius (feature 3).
+    fn lookup_corner_radius_rule(&self, class_name: &str) -> Option<f32> {
+        if class_name.is_empty() {
+            return None;
+        }
+        for rule in &self.corner_radius_rules {
+            if rule.class_name.eq_ignore_ascii_case(class_name) {
+                return Some(rule.radius);
+            }
+        }
+        None
+    }
+
+    /// Look up per-window scale (feature 4).
+    fn lookup_scale_rule(&self, class_name: &str) -> Option<f32> {
+        if class_name.is_empty() {
+            return None;
+        }
+        for rule in &self.scale_rules {
+            if rule.class_name.eq_ignore_ascii_case(class_name) {
+                return Some(rule.scale);
+            }
+        }
+        None
+    }
+
     pub(super) fn damage_event_base(&self) -> u8 {
         self.damage_event_base
     }
@@ -1000,6 +1263,245 @@ impl Compositor {
 
     pub(super) fn clear_needs_render(&mut self) {
         self.needs_render = false;
+    }
+
+    // =====================================================================
+    // Feature 6: Mark damage region for partial redraw
+    // =====================================================================
+    pub(super) fn mark_damage_region(&mut self, x: i32, y: i32, w: u32, h: u32) {
+        self.damage_regions.push((x, y, w, h));
+    }
+
+    // =====================================================================
+    // Feature 8/9/10: Runtime post-processing toggles
+    // =====================================================================
+    pub(super) fn set_color_temperature(&mut self, temp: f32) {
+        if (self.color_temperature - temp).abs() > f32::EPSILON {
+            self.color_temperature = temp;
+            self.ensure_postprocess_fbo();
+            self.needs_render = true;
+        }
+    }
+
+    pub(super) fn set_saturation(&mut self, sat: f32) {
+        if (self.saturation - sat).abs() > f32::EPSILON {
+            self.saturation = sat;
+            self.ensure_postprocess_fbo();
+            self.needs_render = true;
+        }
+    }
+
+    pub(super) fn set_brightness(&mut self, val: f32) {
+        if (self.brightness - val).abs() > f32::EPSILON {
+            self.brightness = val;
+            self.ensure_postprocess_fbo();
+            self.needs_render = true;
+        }
+    }
+
+    pub(super) fn set_contrast(&mut self, val: f32) {
+        if (self.contrast - val).abs() > f32::EPSILON {
+            self.contrast = val;
+            self.ensure_postprocess_fbo();
+            self.needs_render = true;
+        }
+    }
+
+    pub(super) fn set_invert_colors(&mut self, invert: bool) {
+        if self.invert_colors != invert {
+            self.invert_colors = invert;
+            self.ensure_postprocess_fbo();
+            self.needs_render = true;
+        }
+    }
+
+    pub(super) fn set_grayscale(&mut self, gs: bool) {
+        if self.grayscale != gs {
+            self.grayscale = gs;
+            self.ensure_postprocess_fbo();
+            self.needs_render = true;
+        }
+    }
+
+    /// Lazily create postprocess FBO if it doesn't exist yet.
+    fn ensure_postprocess_fbo(&mut self) {
+        if self.postprocess_fbo.is_none() {
+            self.postprocess_fbo = unsafe {
+                Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h).ok()
+            };
+        }
+    }
+
+    /// Whether post-processing is active.
+    fn needs_postprocess(&self) -> bool {
+        self.color_temperature != 0.0
+            || self.saturation != 1.0
+            || self.brightness != 1.0
+            || self.contrast != 1.0
+            || self.invert_colors
+            || self.grayscale
+    }
+
+    // =====================================================================
+    // Feature 11: Debug HUD toggle
+    // =====================================================================
+    pub(super) fn set_debug_hud(&mut self, enabled: bool) {
+        self.debug_hud = enabled;
+        self.needs_render = true;
+    }
+
+    pub(super) fn debug_hud_enabled(&self) -> bool {
+        self.debug_hud
+    }
+
+    pub(super) fn frame_stats_fps(&self) -> f32 {
+        self.frame_stats.fps
+    }
+
+    // =====================================================================
+    // Feature 12: Screenshot
+    // =====================================================================
+    pub(super) fn request_screenshot(&mut self, path: std::path::PathBuf) {
+        self.pending_screenshot = Some(path);
+        self.needs_render = true;
+    }
+
+    /// Capture the current framebuffer to a PNG file.
+    fn capture_screenshot(&mut self, path: &std::path::Path) -> bool {
+        let w = self.screen_w;
+        let h = self.screen_h;
+        let mut pixels = vec![0u8; (w * h * 4) as usize];
+        unsafe {
+            self.gl.read_pixels(
+                0, 0, w as i32, h as i32,
+                glow::RGBA, glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut pixels)),
+            );
+        }
+        // OpenGL reads bottom-to-top, flip vertically
+        let row_bytes = (w * 4) as usize;
+        let mut flipped = vec![0u8; pixels.len()];
+        for y in 0..h as usize {
+            let src_row = (h as usize - 1 - y) * row_bytes;
+            let dst_row = y * row_bytes;
+            flipped[dst_row..dst_row + row_bytes].copy_from_slice(&pixels[src_row..src_row + row_bytes]);
+        }
+        // Write PNG
+        let file = match std::fs::File::create(path) {
+            Ok(f) => f,
+            Err(e) => {
+                log::warn!("compositor: screenshot create failed: {e}");
+                return false;
+            }
+        };
+        let writer = std::io::BufWriter::new(file);
+        let mut encoder = png::Encoder::new(writer, w, h);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        match encoder.write_header().and_then(|mut w| w.write_image_data(&flipped)) {
+            Ok(_) => {
+                log::info!("compositor: screenshot saved to {}", path.display());
+                true
+            }
+            Err(e) => {
+                log::warn!("compositor: screenshot encode failed: {e}");
+                false
+            }
+        }
+    }
+
+    // =====================================================================
+    // Feature 7: Window thumbnail rendering
+    // =====================================================================
+    /// Render a specific window to an off-screen FBO and return RGBA pixel data.
+    /// Returns None if the window isn't tracked. Dimensions are (width, height).
+    pub(super) fn capture_window_thumbnail(&self, x11_win: u32, max_size: u32) -> Option<(Vec<u8>, u32, u32)> {
+        let wt = self.windows.get(&x11_win)?;
+        if wt.w == 0 || wt.h == 0 {
+            return None;
+        }
+
+        // Calculate thumbnail size preserving aspect ratio
+        let aspect = wt.w as f32 / wt.h as f32;
+        let (tw, th) = if wt.w >= wt.h {
+            let tw = max_size.min(wt.w);
+            (tw, (tw as f32 / aspect) as u32)
+        } else {
+            let th = max_size.min(wt.h);
+            ((th as f32 * aspect) as u32, th)
+        };
+        let tw = tw.max(1);
+        let th = th.max(1);
+
+        unsafe {
+            // Create temp FBO
+            let tex = self.gl.create_texture().ok()?;
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            self.gl.tex_image_2d(
+                glow::TEXTURE_2D, 0, glow::RGBA8 as i32,
+                tw as i32, th as i32, 0,
+                glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None),
+            );
+            self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+            self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+            let fbo = self.gl.create_framebuffer().ok()?;
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            self.gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(tex), 0);
+
+            self.gl.viewport(0, 0, tw as i32, th as i32);
+            self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            self.gl.clear(glow::COLOR_BUFFER_BIT);
+
+            let proj = ortho(0.0, tw as f32, th as f32, 0.0, -1.0, 1.0);
+            self.gl.use_program(Some(self.program));
+            self.gl.uniform_matrix_4_f32_slice(self.win_uniforms.projection.as_ref(), false, &proj);
+            self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+            self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
+            self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), 0.0);
+            self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
+            self.gl.uniform_2_f32(self.win_uniforms.size.as_ref(), tw as f32, th as f32);
+            self.gl.uniform_4_f32(self.win_uniforms.rect.as_ref(), 0.0, 0.0, tw as f32, th as f32);
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+            self.gl.active_texture(glow::TEXTURE0);
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+            // Read pixels
+            let mut pixels = vec![0u8; (tw * th * 4) as usize];
+            self.gl.read_pixels(
+                0, 0, tw as i32, th as i32,
+                glow::RGBA, glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut pixels)),
+            );
+
+            // Cleanup temp FBO
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.gl.delete_framebuffer(fbo);
+            self.gl.delete_texture(tex);
+            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+
+            Some((pixels, tw, th))
+        }
+    }
+
+    // =====================================================================
+    // Feature 13: Set frame extents for blur mask
+    // =====================================================================
+    pub(super) fn set_frame_extents(&mut self, x11_win: u32, left: u32, right: u32, top: u32, bottom: u32) {
+        if let Some(wt) = self.windows.get_mut(&x11_win) {
+            wt.frame_extents = [left, right, top, bottom];
+        }
+    }
+
+    // =====================================================================
+    // Feature 14: Set shaped window
+    // =====================================================================
+    pub(super) fn set_window_shaped(&mut self, x11_win: u32, shaped: bool) {
+        if let Some(wt) = self.windows.get_mut(&x11_win) {
+            wt.is_shaped = shaped;
+        }
     }
 
     // ----- Window management -----
@@ -1209,6 +1711,10 @@ impl Compositor {
                 class_name: String::new(),
                 opacity_override: None,
                 is_fullscreen: false,
+                corner_radius_override: None,
+                scale: 1.0,
+                frame_extents: [0; 4],
+                is_shaped: false,
             },
         );
         self.needs_render = true;
@@ -1251,6 +1757,16 @@ impl Compositor {
                     self.gl.delete_texture(tex);
                 }
                 self.scene_fbo = Self::create_scene_fbo(&self.gl, new_w, new_h).ok();
+            }
+        }
+        // Recreate postprocess FBO
+        if self.postprocess_fbo.is_some() {
+            unsafe {
+                if let Some((fbo, tex)) = self.postprocess_fbo.take() {
+                    self.gl.delete_framebuffer(fbo);
+                    self.gl.delete_texture(tex);
+                }
+                self.postprocess_fbo = Self::create_scene_fbo(&self.gl, new_w, new_h).ok();
             }
         }
     }
@@ -1438,12 +1954,18 @@ impl Compositor {
 
     /// Set the window class name (for per-window rules).
     pub(super) fn set_window_class(&mut self, x11_win: u32, class_name: &str) {
-        // Look up opacity rule before borrowing windows mutably
+        // Look up per-window rules before borrowing windows mutably
         let opacity_override = self.lookup_opacity_rule(class_name);
+        let corner_radius_override = self.lookup_corner_radius_rule(class_name);
+        let scale = self.lookup_scale_rule(class_name);
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             if wt.class_name != class_name {
                 wt.class_name = class_name.to_string();
                 wt.opacity_override = opacity_override;
+                wt.corner_radius_override = corner_radius_override;
+                if let Some(s) = scale {
+                    wt.scale = s;
+                }
                 self.needs_render = true;
             }
         }
@@ -1559,6 +2081,9 @@ impl Compositor {
         scene: &[(u32, i32, i32, u32, u32)],
         focused: Option<u32>,
     ) -> bool {
+        // Feature 11: Frame timing start
+        let _frame_start = std::time::Instant::now();
+
         // Periodic diagnostic logging
         static RENDER_LOG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let count = RENDER_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1580,12 +2105,13 @@ impl Compositor {
         let fades_active = self.tick_fades();
 
         // Skip-unchanged-frame: if scene hasn't changed and no textures are
-        // dirty, we can skip the entire GL render.
+        // dirty, we can skip the entire GL render (unless screenshot pending or HUD active).
         let has_dirty = scene.iter().any(|&(win, _, _, _, _)| {
             self.windows.get(&win).map_or(false, |wt| wt.dirty || wt.needs_pixmap_refresh)
         });
+        let force_render = self.pending_screenshot.is_some() || self.debug_hud;
         let hash = Self::scene_hash(scene, focused);
-        if !has_dirty && !fades_active && hash == self.last_scene_hash {
+        if !has_dirty && !fades_active && !force_render && hash == self.last_scene_hash {
             return false;
         }
         self.last_scene_hash = hash;
@@ -1606,7 +2132,7 @@ impl Compositor {
         // Recreate pixmaps for windows that were resized (batched, single XSync)
         self.refresh_pixmaps();
 
-        // Refresh dirty textures
+        // Feature 14: GLX error recovery — refresh textures with error detection
         for &(win, _, _, _, _) in scene {
             if let Some(wt) = self.windows.get_mut(&win) {
                 if wt.dirty && wt.glx_pixmap != 0 {
@@ -1623,6 +2149,15 @@ impl Compositor {
                             GLX_FRONT_LEFT_EXT,
                             std::ptr::null(),
                         );
+                        // Feature 15: Check for GL error after TFP rebind and attempt recovery
+                        let err = self.gl.get_error();
+                        if err != glow::NO_ERROR {
+                            log::warn!(
+                                "compositor: GL error 0x{:x} rebinding TFP for 0x{:x}, marking for refresh",
+                                err, win
+                            );
+                            wt.needs_pixmap_refresh = true;
+                        }
                         self.gl.bind_texture(glow::TEXTURE_2D, None);
                     }
                     wt.dirty = false;
@@ -1648,6 +2183,38 @@ impl Compositor {
             }
         }
 
+        // Feature 8/9/10: If postprocessing is active, render into postprocess FBO
+        let postprocess_active = self.needs_postprocess() && self.postprocess_fbo.is_some();
+        if postprocess_active {
+            let (pp_fbo, _) = self.postprocess_fbo.as_ref().unwrap();
+            unsafe {
+                self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(*pp_fbo));
+            }
+        }
+
+        // Feature 6: Apply scissor test for partial redraw if damage regions available
+        let use_scissor = !self.damage_regions.is_empty() && !force_render;
+        if use_scissor {
+            unsafe {
+                self.gl.enable(glow::SCISSOR_TEST);
+                // Compute bounding box of all damage regions
+                let mut min_x = self.screen_w as i32;
+                let mut min_y = self.screen_h as i32;
+                let mut max_x = 0i32;
+                let mut max_y = 0i32;
+                for &(x, y, w, h) in &self.damage_regions {
+                    min_x = min_x.min(x);
+                    min_y = min_y.min(y);
+                    max_x = max_x.max(x + w as i32);
+                    max_y = max_y.max(y + h as i32);
+                }
+                // GL scissor uses bottom-left origin
+                let gl_y = self.screen_h as i32 - max_y;
+                self.gl.scissor(min_x, gl_y, max_x - min_x, max_y - min_y);
+            }
+        }
+        self.damage_regions.clear();
+
         // Clear
         unsafe {
             self.gl
@@ -1667,7 +2234,7 @@ impl Compositor {
 
         let visible_scene = &scene[first_visible..];
 
-        // === Pass 1: Draw shadows ===
+        // === Pass 1: Draw shadows (feature 14: improved shape) ===
         if self.shadow_enabled && self.shadow_radius > 0.0 {
             unsafe {
                 self.gl.use_program(Some(self.shadow_program));
@@ -1679,15 +2246,10 @@ impl Compositor {
                 let spread = self.shadow_radius;
                 let [ox, oy] = self.shadow_offset;
                 let [sr, sg, sb, sa] = self.shadow_color;
+                let bottom_extra = self.shadow_bottom_extra;
 
-                self.gl.uniform_4_f32(
-                    self.shadow_uniforms.shadow_color.as_ref(), sr, sg, sb, sa,
-                );
                 self.gl.uniform_1_f32(
                     self.shadow_uniforms.spread.as_ref(), spread,
-                );
-                self.gl.uniform_1_f32(
-                    self.shadow_uniforms.radius.as_ref(), self.corner_radius,
                 );
 
                 for &(win, x, y, w, h) in visible_scene {
@@ -1699,6 +2261,10 @@ impl Compositor {
                     if Self::class_matches_exclude(&wt.class_name, &self.shadow_exclude) {
                         continue;
                     }
+                    // Feature 14: Skip shadow for shaped windows (non-rectangular)
+                    if wt.is_shaped {
+                        continue;
+                    }
                     // Fade: modulate shadow alpha
                     let fade = wt.fade_opacity;
                     let sa_faded = sa * fade;
@@ -1708,10 +2274,24 @@ impl Compositor {
                         self.shadow_uniforms.shadow_color.as_ref(), sr, sg, sb, sa_faded,
                     );
 
+                    // Feature 3: Per-window corner radius for shadow
+                    let win_radius = wt.corner_radius_override.unwrap_or(
+                        if Self::class_matches_exclude(&wt.class_name, &self.rounded_corners_exclude) {
+                            0.0
+                        } else {
+                            self.corner_radius
+                        }
+                    );
+                    self.gl.uniform_1_f32(
+                        self.shadow_uniforms.radius.as_ref(), win_radius,
+                    );
+
+                    // Feature 14: Non-uniform shadow offset (heavier bottom)
+                    let sy_offset = oy + bottom_extra;
                     let sx = x as f32 + ox - spread;
-                    let sy = y as f32 + oy - spread;
+                    let sy = y as f32 + sy_offset - spread;
                     let sw = w as f32 + 2.0 * spread;
-                    let sh = h as f32 + 2.0 * spread;
+                    let sh = h as f32 + 2.0 * spread + bottom_extra;
                     self.gl.uniform_4_f32(
                         self.shadow_uniforms.rect.as_ref(), sx, sy, sw, sh,
                     );
@@ -1727,9 +2307,6 @@ impl Compositor {
         }
 
         // === Pass 1.5: Background blur ===
-        // We need to capture the current scene (shadows + background) into an FBO,
-        // then run the Kawase blur passes on it, and draw the blurred result
-        // behind translucent windows.
         let has_blur_windows = self.blur_enabled
             && !self.blur_fbos.is_empty()
             && self.scene_fbo.is_some()
@@ -1740,11 +2317,29 @@ impl Compositor {
                 })
             });
 
+        // Disable scissor for blur passes (they need full-screen access)
+        if use_scissor {
+            unsafe { self.gl.disable(glow::SCISSOR_TEST); }
+        }
+
         let blur_texture = if has_blur_windows {
             self.run_blur_passes(&proj)
         } else {
             None
         };
+
+        // Re-enable scissor if needed
+        if use_scissor {
+            unsafe { self.gl.enable(glow::SCISSOR_TEST); }
+        }
+
+        // Re-bind postprocess FBO if needed (blur passes may have unbound it)
+        if postprocess_active {
+            let (pp_fbo, _) = self.postprocess_fbo.as_ref().unwrap();
+            unsafe {
+                self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(*pp_fbo));
+            }
+        }
 
         // === Pass 2: Draw window textures ===
         unsafe {
@@ -1761,12 +2356,14 @@ impl Compositor {
                     let fade = wt.fade_opacity;
                     if fade <= 0.0 { continue; }
 
-                    // Per-window corner radius (exclude check)
-                    let radius = if Self::class_matches_exclude(&wt.class_name, &self.rounded_corners_exclude) {
-                        0.0
-                    } else {
-                        self.corner_radius
-                    };
+                    // Feature 3: Per-window corner radius
+                    let radius = wt.corner_radius_override.unwrap_or(
+                        if Self::class_matches_exclude(&wt.class_name, &self.rounded_corners_exclude) {
+                            0.0
+                        } else {
+                            self.corner_radius
+                        }
+                    );
                     self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
 
                     // Compute effective opacity
@@ -1777,7 +2374,6 @@ impl Compositor {
                     // detect_client_opacity: if window manages its own alpha, don't force opacity
                     let opacity = if wt.has_rgba {
                         if self.detect_client_opacity {
-                            // Let the window's own alpha through, just multiply by dim
                             -dim
                         } else {
                             -1.0f32 * fade
@@ -1786,21 +2382,42 @@ impl Compositor {
                         dim
                     };
 
-                    // Draw blurred background behind translucent windows
+                    // Feature 4: Apply per-window scale
+                    let scale = wt.scale;
+                    let (draw_x, draw_y, draw_w, draw_h) = if (scale - 1.0).abs() > f32::EPSILON {
+                        let cw = w as f32 * scale;
+                        let ch = h as f32 * scale;
+                        let cx = x as f32 + (w as f32 - cw) * 0.5;
+                        let cy = y as f32 + (h as f32 - ch) * 0.5;
+                        (cx, cy, cw, ch)
+                    } else {
+                        (x as f32, y as f32, w as f32, h as f32)
+                    };
+
+                    // Feature 13: Draw blurred background behind translucent windows (with frame extents mask)
                     if let Some(blur_tex) = blur_texture {
                         let needs_blur = (wt.has_rgba || fade < 1.0 || wt.opacity_override.map_or(false, |o| o < 1.0))
                             && !Self::class_matches_exclude(&wt.class_name, &self.blur_exclude);
                         if needs_blur {
-                            // Draw the blurred scene texture in the window area
+                            // Feature 13: If blur_use_frame_extents, crop blur to client area
+                            let (bx, by, bw, bh) = if self.blur_use_frame_extents {
+                                let [fl, fr, ft, fb] = wt.frame_extents;
+                                let bx = draw_x + fl as f32;
+                                let by = draw_y + ft as f32;
+                                let bw = (draw_w - fl as f32 - fr as f32).max(1.0);
+                                let bh = (draw_h - ft as f32 - fb as f32).max(1.0);
+                                (bx, by, bw, bh)
+                            } else {
+                                (draw_x, draw_y, draw_w, draw_h)
+                            };
                             self.gl.active_texture(glow::TEXTURE0);
                             self.gl.bind_texture(glow::TEXTURE_2D, Some(blur_tex));
                             self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), fade);
                             self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
                             self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
-                            self.gl.uniform_2_f32(self.win_uniforms.size.as_ref(), w as f32, h as f32);
+                            self.gl.uniform_2_f32(self.win_uniforms.size.as_ref(), bw, bh);
                             self.gl.uniform_4_f32(
-                                self.win_uniforms.rect.as_ref(),
-                                x as f32, y as f32, w as f32, h as f32,
+                                self.win_uniforms.rect.as_ref(), bx, by, bw, bh,
                             );
                             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                         }
@@ -1809,11 +2426,10 @@ impl Compositor {
                     self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), opacity);
                     self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), dim);
                     self.gl.uniform_2_f32(
-                        self.win_uniforms.size.as_ref(), w as f32, h as f32,
+                        self.win_uniforms.size.as_ref(), draw_w, draw_h,
                     );
                     self.gl.uniform_4_f32(
-                        self.win_uniforms.rect.as_ref(),
-                        x as f32, y as f32, w as f32, h as f32,
+                        self.win_uniforms.rect.as_ref(), draw_x, draw_y, draw_w, draw_h,
                     );
                     self.gl.active_texture(glow::TEXTURE0);
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
@@ -1823,6 +2439,180 @@ impl Compositor {
 
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
+        }
+
+        // === Pass 3: Window borders (feature 1) ===
+        if self.border_enabled && self.border_width > 0.0 {
+            unsafe {
+                self.gl.use_program(Some(self.border_program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.border_uniforms.projection.as_ref(), false, &proj,
+                );
+                self.gl.uniform_1_f32(
+                    self.border_uniforms.border_width.as_ref(), self.border_width,
+                );
+                self.gl.bind_vertex_array(Some(self.quad_vao));
+
+                for &(win, x, y, w, h) in visible_scene {
+                    let wt = match self.windows.get(&win) {
+                        Some(wt) => wt,
+                        None => continue,
+                    };
+                    let fade = wt.fade_opacity;
+                    if fade <= 0.0 { continue; }
+
+                    let is_focused = focused == Some(win);
+                    let color = if is_focused {
+                        self.border_color_focused
+                    } else {
+                        self.border_color_unfocused
+                    };
+
+                    // Per-window corner radius (feature 3)
+                    let radius = wt.corner_radius_override.unwrap_or(
+                        if Self::class_matches_exclude(&wt.class_name, &self.rounded_corners_exclude) {
+                            0.0
+                        } else {
+                            self.corner_radius
+                        }
+                    );
+
+                    // Feature 4: Apply scale
+                    let scale = wt.scale;
+                    let (draw_x, draw_y, draw_w, draw_h) = if (scale - 1.0).abs() > f32::EPSILON {
+                        let cw = w as f32 * scale;
+                        let ch = h as f32 * scale;
+                        let cx = x as f32 + (w as f32 - cw) * 0.5;
+                        let cy = y as f32 + (h as f32 - ch) * 0.5;
+                        (cx, cy, cw, ch)
+                    } else {
+                        (x as f32, y as f32, w as f32, h as f32)
+                    };
+
+                    self.gl.uniform_4_f32(
+                        self.border_uniforms.border_color.as_ref(),
+                        color[0], color[1], color[2], color[3] * fade,
+                    );
+                    self.gl.uniform_1_f32(
+                        self.border_uniforms.radius.as_ref(), radius,
+                    );
+                    self.gl.uniform_2_f32(
+                        self.border_uniforms.size.as_ref(), draw_w, draw_h,
+                    );
+                    self.gl.uniform_4_f32(
+                        self.border_uniforms.rect.as_ref(), draw_x, draw_y, draw_w, draw_h,
+                    );
+                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                }
+
+                self.gl.bind_vertex_array(None);
+                self.gl.use_program(None);
+            }
+        }
+
+        // Disable scissor (feature 6)
+        if use_scissor {
+            unsafe { self.gl.disable(glow::SCISSOR_TEST); }
+        }
+
+        // === Pass 4: Post-processing (features 8/9/10) ===
+        if postprocess_active {
+            let (_, pp_tex) = self.postprocess_fbo.as_ref().unwrap();
+            let pp_tex = *pp_tex;
+            unsafe {
+                // Switch back to default framebuffer
+                self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+                self.gl.clear(glow::COLOR_BUFFER_BIT);
+
+                self.gl.use_program(Some(self.postprocess_program));
+                // Set up fullscreen quad
+                let pp_proj = ortho(0.0, self.screen_w as f32, self.screen_h as f32, 0.0, -1.0, 1.0);
+                // The postprocess program uses blur vertex shader which has u_rect and u_projection
+                // We need to get those uniform locations
+                let pp_proj_loc = self.gl.get_uniform_location(self.postprocess_program, "u_projection");
+                let pp_rect_loc = self.gl.get_uniform_location(self.postprocess_program, "u_rect");
+                self.gl.uniform_matrix_4_f32_slice(pp_proj_loc.as_ref(), false, &pp_proj);
+                self.gl.uniform_4_f32(pp_rect_loc.as_ref(), 0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
+
+                self.gl.uniform_1_i32(self.postprocess_uniforms.texture.as_ref(), 0);
+                self.gl.uniform_1_f32(self.postprocess_uniforms.color_temp.as_ref(), self.color_temperature);
+                self.gl.uniform_1_f32(self.postprocess_uniforms.saturation.as_ref(), self.saturation);
+                self.gl.uniform_1_f32(self.postprocess_uniforms.brightness.as_ref(), self.brightness);
+                self.gl.uniform_1_f32(self.postprocess_uniforms.contrast.as_ref(), self.contrast);
+                self.gl.uniform_1_i32(self.postprocess_uniforms.invert.as_ref(), if self.invert_colors { 1 } else { 0 });
+                self.gl.uniform_1_i32(self.postprocess_uniforms.grayscale.as_ref(), if self.grayscale { 1 } else { 0 });
+
+                self.gl.active_texture(glow::TEXTURE0);
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(pp_tex));
+                self.gl.bind_vertex_array(Some(self.quad_vao));
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+                self.gl.bind_vertex_array(None);
+                self.gl.use_program(None);
+            }
+        }
+
+        // === Pass 5: Debug HUD (feature 11) ===
+        if self.debug_hud {
+            // Update frame stats
+            let now = std::time::Instant::now();
+            let dt = now.duration_since(self.frame_stats.last_frame_time).as_secs_f32();
+            self.frame_stats.last_frame_time = now;
+            self.frame_stats.frame_count += 1;
+            self.frame_stats.frame_times.push(dt);
+            if self.frame_stats.frame_times.len() > 120 {
+                self.frame_stats.frame_times.remove(0);
+            }
+            let elapsed = now.duration_since(self.frame_stats.last_fps_update).as_secs_f32();
+            if elapsed >= 1.0 {
+                self.frame_stats.fps = self.frame_stats.frame_times.len() as f32 / elapsed;
+                self.frame_stats.frame_times.clear();
+                self.frame_stats.last_fps_update = now;
+            }
+
+            // Draw HUD panel
+            let hud_w = 160.0f32;
+            let hud_h = 40.0f32;
+            let hud_x = self.screen_w as f32 - hud_w - 10.0;
+            let hud_y = 10.0f32;
+
+            unsafe {
+                self.gl.use_program(Some(self.hud_program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.hud_uniforms.projection.as_ref(), false, &proj,
+                );
+                self.gl.uniform_4_f32(
+                    self.hud_uniforms.bg_color.as_ref(), 0.0, 0.0, 0.0, 0.7,
+                );
+                self.gl.uniform_4_f32(
+                    self.hud_uniforms.fg_color.as_ref(), 0.0, 1.0, 0.0, 1.0,
+                );
+                self.gl.uniform_2_f32(
+                    self.hud_uniforms.size.as_ref(), hud_w, hud_h,
+                );
+                self.gl.uniform_4_f32(
+                    self.hud_uniforms.rect.as_ref(), hud_x, hud_y, hud_w, hud_h,
+                );
+                self.gl.bind_vertex_array(Some(self.quad_vao));
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                self.gl.bind_vertex_array(None);
+                self.gl.use_program(None);
+            }
+            // FPS logged instead of rendered as text (GL text rendering is complex)
+            if self.frame_stats.frame_count % 60 == 0 {
+                let avg_dt = if self.frame_stats.frame_times.is_empty() { 0.0 }
+                    else { self.frame_stats.frame_times.iter().sum::<f32>() / self.frame_stats.frame_times.len() as f32 };
+                log::info!(
+                    "[HUD] FPS: {:.1}, frame_time: {:.2}ms, windows: {}",
+                    self.frame_stats.fps, avg_dt * 1000.0, self.windows.len()
+                );
+            }
+        }
+
+        // === Feature 12: Screenshot capture (after all rendering, before swap) ===
+        if let Some(path) = self.pending_screenshot.take() {
+            self.capture_screenshot(&path);
         }
 
         // Swap buffers (double-buffered with vsync for tear-free output).

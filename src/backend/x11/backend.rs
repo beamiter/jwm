@@ -470,6 +470,59 @@ impl Backend for X11Backend {
         compositor.clear_needs_render();
         Ok(rendered)
     }
+
+    fn take_screenshot_to_file(&mut self, path: &std::path::Path) -> Result<bool, BackendError> {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.request_screenshot(path.to_path_buf());
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn compositor_set_color_temperature(&mut self, temp: f32) {
+        if let Some(c) = self.compositor.as_mut() { c.set_color_temperature(temp); }
+    }
+    fn compositor_set_saturation(&mut self, sat: f32) {
+        if let Some(c) = self.compositor.as_mut() { c.set_saturation(sat); }
+    }
+    fn compositor_set_brightness(&mut self, val: f32) {
+        if let Some(c) = self.compositor.as_mut() { c.set_brightness(val); }
+    }
+    fn compositor_set_contrast(&mut self, val: f32) {
+        if let Some(c) = self.compositor.as_mut() { c.set_contrast(val); }
+    }
+    fn compositor_set_invert_colors(&mut self, invert: bool) {
+        if let Some(c) = self.compositor.as_mut() { c.set_invert_colors(invert); }
+    }
+    fn compositor_set_grayscale(&mut self, gs: bool) {
+        if let Some(c) = self.compositor.as_mut() { c.set_grayscale(gs); }
+    }
+    fn compositor_set_debug_hud(&mut self, enabled: bool) {
+        if let Some(c) = self.compositor.as_mut() { c.set_debug_hud(enabled); }
+    }
+    fn compositor_fps(&self) -> f32 {
+        self.compositor.as_ref().map_or(0.0, |c| c.frame_stats_fps())
+    }
+    fn compositor_capture_thumbnail(&self, window: WindowId, max_size: u32) -> Option<(Vec<u8>, u32, u32)> {
+        let x11w = self.ids.x11(window).ok()?;
+        self.compositor.as_ref()?.capture_window_thumbnail(x11w, max_size)
+    }
+    fn compositor_set_frame_extents(&mut self, window: WindowId, left: u32, right: u32, top: u32, bottom: u32) {
+        if let Some(c) = self.compositor.as_mut() {
+            if let Ok(x11w) = self.ids.x11(window) {
+                c.set_frame_extents(x11w, left, right, top, bottom);
+            }
+        }
+    }
+    fn compositor_set_window_shaped(&mut self, window: WindowId, shaped: bool) {
+        if let Some(c) = self.compositor.as_mut() {
+            if let Ok(x11w) = self.ids.x11(window) {
+                c.set_window_shaped(x11w, shaped);
+            }
+        }
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

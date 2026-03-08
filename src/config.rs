@@ -139,6 +139,68 @@ pub struct BehaviorConfig {
     /// Unredirect fullscreen windows for direct scanout (better perf).
     #[serde(default = "default_true")]
     pub fullscreen_unredirect: bool,
+
+    // --- Feature 1: Window borders ---
+    /// Enable window border/outline rendering.
+    #[serde(default)]
+    pub border_enabled: bool,
+    /// Border width in pixels.
+    #[serde(default = "default_border_width")]
+    pub border_width: f32,
+    /// Border color for focused window [r, g, b, a].
+    #[serde(default = "default_border_color_focused")]
+    pub border_color_focused: [f32; 4],
+    /// Border color for unfocused windows [r, g, b, a].
+    #[serde(default = "default_border_color_unfocused")]
+    pub border_color_unfocused: [f32; 4],
+
+    // --- Feature 3: Per-window corner radius ---
+    /// Per-window corner radius rules, e.g. ["0:Alacritty", "20:firefox"].
+    /// Format: "radius:class_name".
+    #[serde(default)]
+    pub corner_radius_rules: Vec<String>,
+
+    // --- Feature 4: Window scale (PiP/overview) ---
+    /// Window classes that should render at a smaller scale (PiP mode).
+    #[serde(default)]
+    pub scale_rules: Vec<String>,
+
+    // --- Feature 8: Color temperature / night mode ---
+    /// Color temperature shift: 0.0 = neutral, >0 = warm (night mode), <0 = cool.
+    #[serde(default)]
+    pub color_temperature: f32,
+    /// Saturation multiplier: 1.0 = normal, 0.0 = grayscale.
+    #[serde(default = "default_one")]
+    pub saturation: f32,
+    /// Brightness multiplier.
+    #[serde(default = "default_one")]
+    pub brightness: f32,
+    /// Contrast multiplier.
+    #[serde(default = "default_one")]
+    pub contrast: f32,
+
+    // --- Feature 10: Invert / accessibility ---
+    /// Invert all colors (accessibility).
+    #[serde(default)]
+    pub invert_colors: bool,
+    /// Force grayscale (accessibility).
+    #[serde(default)]
+    pub grayscale: bool,
+
+    // --- Feature 11: Performance debug HUD ---
+    /// Show FPS / frame time debug overlay.
+    #[serde(default)]
+    pub debug_hud: bool,
+
+    // --- Feature 13: Blur mask / frame extents ---
+    /// Exclude window frame/title area from blur (use _NET_FRAME_EXTENTS).
+    #[serde(default)]
+    pub blur_use_frame_extents: bool,
+
+    // --- Feature 14: Shadow shape / non-uniform offset ---
+    /// Extra shadow offset for bottom edge (heavier shadow below).
+    #[serde(default = "default_shadow_bottom_extra")]
+    pub shadow_bottom_extra: f32,
 }
 
 fn default_corner_radius() -> f32 { 10.0 }
@@ -150,6 +212,11 @@ fn default_inactive_opacity() -> f32 { 0.92 }
 fn default_active_opacity() -> f32 { 1.0 }
 fn default_blur_strength() -> u32 { 3 }
 fn default_fade_step() -> f32 { 0.03 }
+fn default_border_width() -> f32 { 2.0 }
+fn default_border_color_focused() -> [f32; 4] { [0.4, 0.6, 0.9, 1.0] }
+fn default_border_color_unfocused() -> [f32; 4] { [0.3, 0.3, 0.3, 0.6] }
+fn default_one() -> f32 { 1.0 }
+fn default_shadow_bottom_extra() -> f32 { 4.0 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusBarConfig {
@@ -282,6 +349,21 @@ impl Default for Config {
                     rounded_corners_exclude: Vec::new(),
                     detect_client_opacity: false,
                     fullscreen_unredirect: true,
+                    border_enabled: false,
+                    border_width: default_border_width(),
+                    border_color_focused: default_border_color_focused(),
+                    border_color_unfocused: default_border_color_unfocused(),
+                    corner_radius_rules: Vec::new(),
+                    scale_rules: Vec::new(),
+                    color_temperature: 0.0,
+                    saturation: default_one(),
+                    brightness: default_one(),
+                    contrast: default_one(),
+                    invert_colors: false,
+                    grayscale: false,
+                    debug_hud: false,
+                    blur_use_frame_extents: false,
+                    shadow_bottom_extra: default_shadow_bottom_extra(),
                 },
                 status_bar: StatusBarConfig {
                     name: STATUS_BAR_NAME.to_string(),

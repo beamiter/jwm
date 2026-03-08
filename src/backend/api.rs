@@ -633,6 +633,43 @@ pub trait Backend: Send {
     fn take_screenshot_to_file(&mut self, _path: &std::path::Path) -> Result<bool, BackendError> {
         Ok(false)
     }
+
+    // --- New compositor feature APIs ---
+
+    /// Set color temperature for night mode (0.0 = neutral, >0 = warm).
+    fn compositor_set_color_temperature(&mut self, _temp: f32) {}
+
+    /// Set saturation (1.0 = normal, 0.0 = grayscale).
+    fn compositor_set_saturation(&mut self, _sat: f32) {}
+
+    /// Set brightness (1.0 = normal).
+    fn compositor_set_brightness(&mut self, _val: f32) {}
+
+    /// Set contrast (1.0 = normal).
+    fn compositor_set_contrast(&mut self, _val: f32) {}
+
+    /// Toggle color inversion (accessibility).
+    fn compositor_set_invert_colors(&mut self, _invert: bool) {}
+
+    /// Toggle grayscale mode (accessibility).
+    fn compositor_set_grayscale(&mut self, _gs: bool) {}
+
+    /// Toggle debug HUD overlay.
+    fn compositor_set_debug_hud(&mut self, _enabled: bool) {}
+
+    /// Get current FPS from compositor debug stats.
+    fn compositor_fps(&self) -> f32 { 0.0 }
+
+    /// Capture a window thumbnail (returns RGBA pixels, width, height).
+    fn compositor_capture_thumbnail(&self, _window: WindowId, _max_size: u32) -> Option<(Vec<u8>, u32, u32)> {
+        None
+    }
+
+    /// Set frame extents for a window (used for blur mask).
+    fn compositor_set_frame_extents(&mut self, _window: WindowId, _left: u32, _right: u32, _top: u32, _bottom: u32) {}
+
+    /// Set window shaped flag (for shadow adjustments).
+    fn compositor_set_window_shaped(&mut self, _window: WindowId, _shaped: bool) {}
 }
 
 // 兼容性定义
