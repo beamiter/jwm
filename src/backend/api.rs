@@ -693,6 +693,33 @@ pub trait Backend: Send {
 
     /// Force the compositor to redraw the full output on the next frame.
     fn compositor_force_full_redraw(&mut self) {}
+
+    /// Set mouse position for compositor effects (magnifier, tilt, edge glow).
+    fn compositor_set_mouse_position(&mut self, _x: f32, _y: f32) {}
+
+    /// Set window urgent state for attention animation.
+    fn compositor_set_window_urgent(&mut self, _window: WindowId, _urgent: bool) {}
+
+    /// Set window PiP state for visual treatment.
+    fn compositor_set_window_pip(&mut self, _window: WindowId, _pip: bool) {}
+
+    /// Toggle magnifier effect.
+    fn compositor_set_magnifier(&mut self, _enabled: bool) {}
+
+    /// Set overview mode for Alt-Tab window preview.
+    fn compositor_set_overview_mode(&mut self, _active: bool, _windows: &[(WindowId, f32, f32, f32, f32, bool)]) {}
+
+    /// Update overview selection highlight.
+    fn compositor_set_overview_selection(&mut self, _window: WindowId) {}
+
+    /// Notify compositor of window move start (for wobbly windows).
+    fn compositor_notify_window_move_start(&mut self, _window: WindowId) {}
+
+    /// Notify compositor of window move delta (for wobbly windows).
+    fn compositor_notify_window_move_delta(&mut self, _window: WindowId, _dx: f32, _dy: f32) {}
+
+    /// Notify compositor of window move end (for wobbly windows).
+    fn compositor_notify_window_move_end(&mut self, _window: WindowId) {}
 }
 
 // 兼容性定义

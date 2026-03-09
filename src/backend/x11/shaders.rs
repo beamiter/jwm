@@ -303,3 +303,267 @@ void main() {
     frag_color = vec4(texel.rgb, texel.a * u_opacity);
 }
 "#;
+
+// ---------------------------------------------------------------------------
+// Screen edge glow shader
+// ---------------------------------------------------------------------------
+
+pub const EDGE_GLOW_FRAGMENT_SHADER: &str = r#"#version 330 core
+
+uniform vec4  u_glow_color;     // glow RGBA
+uniform float u_glow_width;     // glow width in pixels
+uniform vec2  u_mouse;          // mouse position in pixels
+uniform vec2  u_screen_size;    // screen dimensions
+in vec2 v_uv;
+out vec4 frag_color;
+
+void main() {
+    vec2 pixel = v_uv * u_screen_size;
+    float dist_left   = pixel.x;
+    float dist_right  = u_screen_size.x - pixel.x;
+    float dist_top    = pixel.y;
+    float dist_bottom = u_screen_size.y - pixel.y;
+
+    float min_dist = min(min(dist_left, dist_right), min(dist_top, dist_bottom));
+
+    // Only glow near the edge closest to the mouse
+    float mouse_dist_left   = u_mouse.x;
+    float mouse_dist_right  = u_screen_size.x - u_mouse.x;
+    float mouse_dist_top    = u_mouse.y;
+    float mouse_dist_bottom = u_screen_size.y - u_mouse.y;
+    float mouse_min = min(min(mouse_dist_left, mouse_dist_right), min(mouse_dist_top, mouse_dist_bottom));
+
+    // Determine which edge the mouse is closest to, only glow on that edge
+    float edge_dist = u_glow_width; // default: no glow
+    if (mouse_min < u_glow_width) {
+        if (mouse_min == mouse_dist_left)        edge_dist = dist_left;
+        else if (mouse_min == mouse_dist_right)   edge_dist = dist_right;
+        else if (mouse_min == mouse_dist_top)     edge_dist = dist_top;
+        else                                      edge_dist = dist_bottom;
+    }
+
+    float alpha = 1.0 - smoothstep(0.0, u_glow_width, edge_dist);
+    alpha *= alpha; // softer falloff
+    // Also fade based on mouse proximity to edge
+    float mouse_factor = 1.0 - smoothstep(0.0, u_glow_width, mouse_min);
+    alpha *= mouse_factor;
+
+    frag_color = vec4(u_glow_color.rgb, u_glow_color.a * alpha);
+}
+"#;
+
+// ---------------------------------------------------------------------------
+// Magnifier post-process shader (extends postprocess with magnifier)
+// ---------------------------------------------------------------------------
+
+pub const MAGNIFIER_POSTPROCESS_FRAGMENT_SHADER: &str = r#"#version 330 core
+
+uniform sampler2D u_texture;
+uniform float u_color_temp;
+uniform float u_saturation;
+uniform float u_brightness;
+uniform float u_contrast;
+uniform int   u_invert;
+uniform int   u_grayscale;
+// Magnifier uniforms
+uniform int   u_magnifier_enabled;
+uniform vec2  u_magnifier_center;  // normalized [0,1] screen coords
+uniform float u_magnifier_radius;  // in normalized coords
+uniform float u_magnifier_zoom;    // zoom factor (e.g. 2.0)
+in vec2 v_uv;
+out vec4 frag_color;
+
+void main() {
+    vec2 sample_uv = v_uv;
+
+    // Magnifier effect
+    if (u_magnifier_enabled == 1) {
+        vec2 diff = v_uv - u_magnifier_center;
+        float dist = length(diff);
+        if (dist < u_magnifier_radius) {
+            // Zoom into the area around the center
+            sample_uv = u_magnifier_center + diff / u_magnifier_zoom;
+        }
+    }
+
+    vec4 c = texture(u_texture, sample_uv);
+
+    // Invert
+    if (u_invert == 1) {
+        c.rgb = 1.0 - c.rgb;
+    }
+
+    // Grayscale
+    if (u_grayscale == 1) {
+        float lum = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
+        c.rgb = vec3(lum);
+    }
+
+    // Saturation
+    float lum = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
+    c.rgb = mix(vec3(lum), c.rgb, u_saturation);
+
+    // Brightness
+    c.rgb *= u_brightness;
+
+    // Contrast
+    c.rgb = (c.rgb - 0.5) * u_contrast + 0.5;
+
+    // Color temperature (shift red/blue)
+    if (u_color_temp != 0.0) {
+        float t = u_color_temp;
+        c.r += t * 0.1;
+        c.b -= t * 0.1;
+        c.rgb = clamp(c.rgb, 0.0, 1.0);
+    }
+
+    // Magnifier border ring
+    if (u_magnifier_enabled == 1) {
+        vec2 diff = v_uv - u_magnifier_center;
+        float dist = length(diff);
+        float ring = abs(dist - u_magnifier_radius);
+        float ring_width = 0.002;
+        float ring_alpha = 1.0 - smoothstep(0.0, ring_width, ring);
+        c.rgb = mix(c.rgb, vec3(0.8, 0.8, 0.8), ring_alpha * 0.8);
+    }
+
+    frag_color = c;
+}
+"#;
+
+// ---------------------------------------------------------------------------
+// Window 3D tilt vertex shader
+// ---------------------------------------------------------------------------
+
+pub const TILT_VERTEX_SHADER: &str = r#"#version 330 core
+
+uniform vec4 u_rect;       // x, y, w, h in pixels
+uniform mat4 u_projection; // orthographic projection
+uniform vec2 u_tilt;       // tilt angles (x, y) in radians
+
+out vec2 v_uv;
+
+void main() {
+    vec2 pos = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1));
+    v_uv = pos;
+
+    // Compute pixel position
+    vec2 pixel = u_rect.xy + pos * u_rect.zw;
+
+    // Apply 3D tilt: compute center of the window
+    vec2 center = u_rect.xy + u_rect.zw * 0.5;
+    vec2 rel = pixel - center;
+
+    // Simple perspective tilt
+    float z = rel.x * sin(u_tilt.y) + rel.y * sin(u_tilt.x);
+    float perspective = 1.0 / (1.0 - z * 0.0003);
+
+    pixel = center + rel * perspective;
+
+    gl_Position = u_projection * vec4(pixel, 0.0, 1.0);
+}
+"#;
+
+// ---------------------------------------------------------------------------
+// Wobbly windows vertex shader (NxN grid with corner offsets)
+// ---------------------------------------------------------------------------
+
+pub const WOBBLY_VERTEX_SHADER: &str = r#"#version 330 core
+
+uniform vec4 u_rect;       // x, y, w, h in pixels
+uniform mat4 u_projection;
+uniform vec2 u_corner_offsets[4]; // TL, TR, BL, BR corner displacements
+uniform int  u_grid_size;  // grid subdivisions (e.g. 8)
+
+out vec2 v_uv;
+
+void main() {
+    int grid = u_grid_size;
+    int quad_id = gl_VertexID / 6;
+    int vert_in_quad = gl_VertexID % 6;
+
+    int col = quad_id % grid;
+    int row = quad_id / grid;
+
+    // Triangle strip indices for a quad: 0,1,2, 2,1,3
+    int dx, dy;
+    if (vert_in_quad == 0)      { dx = 0; dy = 0; }
+    else if (vert_in_quad == 1) { dx = 1; dy = 0; }
+    else if (vert_in_quad == 2) { dx = 0; dy = 1; }
+    else if (vert_in_quad == 3) { dx = 0; dy = 1; }
+    else if (vert_in_quad == 4) { dx = 1; dy = 0; }
+    else                        { dx = 1; dy = 1; }
+
+    float fx = float(col + dx) / float(grid);
+    float fy = float(row + dy) / float(grid);
+
+    v_uv = vec2(fx, fy);
+
+    // Bilinear interpolation of corner offsets
+    vec2 tl = u_corner_offsets[0];
+    vec2 tr = u_corner_offsets[1];
+    vec2 bl = u_corner_offsets[2];
+    vec2 br = u_corner_offsets[3];
+
+    vec2 offset = mix(mix(tl, tr, fx), mix(bl, br, fx), fy);
+
+    vec2 pixel = u_rect.xy + vec2(fx, fy) * u_rect.zw + offset;
+    gl_Position = u_projection * vec4(pixel, 0.0, 1.0);
+}
+"#;
+
+// ---------------------------------------------------------------------------
+// Particle effect shaders
+// ---------------------------------------------------------------------------
+
+pub const PARTICLE_VERTEX_SHADER: &str = r#"#version 330 core
+
+layout(location = 0) in vec2 a_position;
+layout(location = 1) in vec4 a_color;
+layout(location = 2) in float a_life; // 0.0 = dead, 1.0 = full life
+
+uniform mat4 u_projection;
+uniform float u_point_size;
+
+out vec4 v_color;
+out float v_life;
+
+void main() {
+    v_color = a_color;
+    v_life = a_life;
+    gl_Position = u_projection * vec4(a_position, 0.0, 1.0);
+    gl_PointSize = u_point_size * a_life;
+}
+"#;
+
+pub const PARTICLE_FRAGMENT_SHADER: &str = r#"#version 330 core
+
+in vec4 v_color;
+in float v_life;
+out vec4 frag_color;
+
+void main() {
+    // Circular point
+    vec2 coord = gl_PointCoord - vec2(0.5);
+    float dist = length(coord);
+    if (dist > 0.5) discard;
+
+    float alpha = v_color.a * v_life * (1.0 - smoothstep(0.3, 0.5, dist));
+    frag_color = vec4(v_color.rgb, alpha);
+}
+"#;
+
+// ---------------------------------------------------------------------------
+// Overview background shader (semi-transparent dark overlay)
+// ---------------------------------------------------------------------------
+
+pub const OVERVIEW_BG_FRAGMENT_SHADER: &str = r#"#version 330 core
+
+uniform float u_opacity;
+in vec2 v_uv;
+out vec4 frag_color;
+
+void main() {
+    frag_color = vec4(0.0, 0.0, 0.0, 0.6 * u_opacity);
+}
+"#;

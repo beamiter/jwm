@@ -79,6 +79,17 @@ struct WindowTexture {
     frame_extents: [u32; 4], // left, right, top, bottom
     // --- Feature 14: Window has X Shape (non-rectangular) ---
     is_shaped: bool,
+    // --- Scale animation ---
+    anim_scale: f32,
+    anim_scale_target: f32,
+    // --- Urgent state ---
+    is_urgent: bool,
+    // --- PiP state ---
+    is_pip: bool,
+    // --- Frosted glass ---
+    is_frosted: bool,
+    // --- Wobbly state ---
+    wobbly: Option<WobblyState>,
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +218,94 @@ struct FrameStats {
     fps: f32,
     frame_times: Vec<f32>,
     last_frame_time: std::time::Instant,
+}
+
+/// Per-window wobbly animation state.
+struct WobblyState {
+    corner_offsets: [[f32; 2]; 4],    // TL, TR, BL, BR displacement
+    corner_velocities: [[f32; 2]; 4], // velocity per corner
+}
+
+/// Entry for Alt-Tab overview mode.
+struct OverviewEntry {
+    x11_win: u32,
+    target_x: f32,
+    target_y: f32,
+    target_w: f32,
+    target_h: f32,
+    is_selected: bool,
+}
+
+/// Single particle for close animation.
+struct Particle {
+    x: f32,
+    y: f32,
+    vx: f32,
+    vy: f32,
+    color: [f32; 4],
+    lifetime: f32,
+    max_lifetime: f32,
+}
+
+/// Active particle system (one per closing window).
+struct ParticleSystem {
+    particles: Vec<Particle>,
+}
+
+/// Cached uniform locations for edge glow shader.
+struct EdgeGlowUniforms {
+    projection: Option<glow::UniformLocation>,
+    rect: Option<glow::UniformLocation>,
+    glow_color: Option<glow::UniformLocation>,
+    glow_width: Option<glow::UniformLocation>,
+    mouse: Option<glow::UniformLocation>,
+    screen_size: Option<glow::UniformLocation>,
+}
+
+/// Cached uniform locations for tilt shader.
+struct TiltUniforms {
+    projection: Option<glow::UniformLocation>,
+    rect: Option<glow::UniformLocation>,
+    texture: Option<glow::UniformLocation>,
+    opacity: Option<glow::UniformLocation>,
+    radius: Option<glow::UniformLocation>,
+    size: Option<glow::UniformLocation>,
+    dim: Option<glow::UniformLocation>,
+    tilt: Option<glow::UniformLocation>,
+}
+
+/// Cached uniform locations for wobbly shader.
+struct WobblyUniforms {
+    projection: Option<glow::UniformLocation>,
+    rect: Option<glow::UniformLocation>,
+    texture: Option<glow::UniformLocation>,
+    opacity: Option<glow::UniformLocation>,
+    radius: Option<glow::UniformLocation>,
+    size: Option<glow::UniformLocation>,
+    dim: Option<glow::UniformLocation>,
+    corner_offsets: [Option<glow::UniformLocation>; 4],
+    grid_size: Option<glow::UniformLocation>,
+}
+
+/// Cached uniform locations for overview background shader.
+struct OverviewBgUniforms {
+    projection: Option<glow::UniformLocation>,
+    rect: Option<glow::UniformLocation>,
+    opacity: Option<glow::UniformLocation>,
+}
+
+/// Magnifier uniform locations (added to PostprocessUniforms).
+struct MagnifierUniforms {
+    magnifier_enabled: Option<glow::UniformLocation>,
+    magnifier_center: Option<glow::UniformLocation>,
+    magnifier_radius: Option<glow::UniformLocation>,
+    magnifier_zoom: Option<glow::UniformLocation>,
+}
+
+/// Particle shader uniform locations.
+struct ParticleUniforms {
+    projection: Option<glow::UniformLocation>,
+    point_size: Option<glow::UniformLocation>,
 }
 
 // ---------------------------------------------------------------------------
@@ -345,6 +444,75 @@ pub(super) struct Compositor {
     cube_uniforms: CubeUniforms,
     /// FBO + texture holding a snapshot of the new scene (for cube mode).
     transition_new_fbo: Option<(glow::Framebuffer, glow::Texture)>,
+
+    // --- Window scale animation ---
+    window_animation: bool,
+    window_animation_scale: f32,
+
+    // --- Dim inactive ---
+    inactive_dim: f32,
+
+    // --- Mouse position (shared by magnifier, tilt, edge glow) ---
+    mouse_x: f32,
+    mouse_y: f32,
+
+    // --- Screen edge glow ---
+    edge_glow_program: glow::Program,
+    edge_glow_uniforms: EdgeGlowUniforms,
+    edge_glow: bool,
+    edge_glow_color: [f32; 4],
+    edge_glow_width: f32,
+
+    // --- Attention animation ---
+    attention_animation: bool,
+    attention_color: [f32; 4],
+    compositor_start_time: std::time::Instant,
+
+    // --- PiP visual treatment ---
+    pip_border_color: [f32; 4],
+    pip_border_width: f32,
+
+    // --- Magnifier ---
+    magnifier_enabled: bool,
+    magnifier_radius: f32,
+    magnifier_zoom: f32,
+    magnifier_uniforms: MagnifierUniforms,
+
+    // --- Window 3D tilt ---
+    tilt_program: glow::Program,
+    tilt_uniforms: TiltUniforms,
+    window_tilt: bool,
+    tilt_amount: f32,
+
+    // --- Frosted glass ---
+    frosted_glass_rules: Vec<String>,
+    frosted_glass_strength: u32,
+
+    // --- Alt-Tab overview ---
+    overview_active: bool,
+    overview_windows: Vec<OverviewEntry>,
+    overview_opacity: f32,
+    overview_bg_program: glow::Program,
+    overview_bg_uniforms: OverviewBgUniforms,
+
+    // --- Wobbly windows ---
+    wobbly_program: glow::Program,
+    wobbly_uniforms: WobblyUniforms,
+    wobbly_windows: bool,
+    wobbly_stiffness: f32,
+    wobbly_damping: f32,
+    wobbly_grid_size: u32,
+
+    // --- Particle effects ---
+    particle_program: glow::Program,
+    particle_uniforms: ParticleUniforms,
+    particle_effects: bool,
+    particle_count: u32,
+    particle_lifetime: f32,
+    particle_gravity: f32,
+    particle_systems: Vec<ParticleSystem>,
+    particle_vao: glow::VertexArray,
+    particle_vbo: glow::Buffer,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
@@ -363,6 +531,13 @@ impl Drop for Compositor {
             self.gl.delete_program(self.hud_program);
             self.gl.delete_program(self.transition_program);
             self.gl.delete_program(self.cube_program);
+            self.gl.delete_program(self.edge_glow_program);
+            self.gl.delete_program(self.tilt_program);
+            self.gl.delete_program(self.wobbly_program);
+            self.gl.delete_program(self.overview_bg_program);
+            self.gl.delete_program(self.particle_program);
+            self.gl.delete_buffer(self.particle_vbo);
+            self.gl.delete_vertex_array(self.particle_vao);
             self.gl.delete_vertex_array(self.quad_vao);
             // Clean up blur FBOs
             for level in self.blur_fbos.drain(..) {
@@ -913,8 +1088,8 @@ impl Compositor {
             }
         };
 
-        // Compile post-process shader (features 8/9/10)
-        let postprocess_program = unsafe { Self::create_program(&gl, shaders::BLUR_DOWN_VERTEX, shaders::POSTPROCESS_FRAGMENT_SHADER)? };
+        // Compile post-process shader (features 8/9/10 + magnifier)
+        let postprocess_program = unsafe { Self::create_program(&gl, shaders::BLUR_DOWN_VERTEX, shaders::MAGNIFIER_POSTPROCESS_FRAGMENT_SHADER)? };
         let postprocess_uniforms = unsafe {
             PostprocessUniforms {
                 texture: gl.get_uniform_location(postprocess_program, "u_texture"),
@@ -924,6 +1099,15 @@ impl Compositor {
                 contrast: gl.get_uniform_location(postprocess_program, "u_contrast"),
                 invert: gl.get_uniform_location(postprocess_program, "u_invert"),
                 grayscale: gl.get_uniform_location(postprocess_program, "u_grayscale"),
+            }
+        };
+
+        let magnifier_uniforms = unsafe {
+            MagnifierUniforms {
+                magnifier_enabled: gl.get_uniform_location(postprocess_program, "u_magnifier_enabled"),
+                magnifier_center: gl.get_uniform_location(postprocess_program, "u_magnifier_center"),
+                magnifier_radius: gl.get_uniform_location(postprocess_program, "u_magnifier_radius"),
+                magnifier_zoom: gl.get_uniform_location(postprocess_program, "u_magnifier_zoom"),
             }
         };
 
@@ -965,6 +1149,93 @@ impl Compositor {
                 brightness: gl.get_uniform_location(cube_program, "u_brightness"),
                 uv_rect: gl.get_uniform_location(cube_program, "u_uv_rect"),
             }
+        };
+
+        // Compile edge glow shader
+        let edge_glow_program = unsafe { Self::create_program(&gl, shaders::VERTEX_SHADER, shaders::EDGE_GLOW_FRAGMENT_SHADER)? };
+        let edge_glow_uniforms = unsafe {
+            EdgeGlowUniforms {
+                projection: gl.get_uniform_location(edge_glow_program, "u_projection"),
+                rect: gl.get_uniform_location(edge_glow_program, "u_rect"),
+                glow_color: gl.get_uniform_location(edge_glow_program, "u_glow_color"),
+                glow_width: gl.get_uniform_location(edge_glow_program, "u_glow_width"),
+                mouse: gl.get_uniform_location(edge_glow_program, "u_mouse"),
+                screen_size: gl.get_uniform_location(edge_glow_program, "u_screen_size"),
+            }
+        };
+
+        // Compile tilt shader (uses tilt vertex + standard fragment)
+        let tilt_program = unsafe { Self::create_program(&gl, shaders::TILT_VERTEX_SHADER, shaders::FRAGMENT_SHADER)? };
+        let tilt_uniforms = unsafe {
+            TiltUniforms {
+                projection: gl.get_uniform_location(tilt_program, "u_projection"),
+                rect: gl.get_uniform_location(tilt_program, "u_rect"),
+                texture: gl.get_uniform_location(tilt_program, "u_texture"),
+                opacity: gl.get_uniform_location(tilt_program, "u_opacity"),
+                radius: gl.get_uniform_location(tilt_program, "u_radius"),
+                size: gl.get_uniform_location(tilt_program, "u_size"),
+                dim: gl.get_uniform_location(tilt_program, "u_dim"),
+                tilt: gl.get_uniform_location(tilt_program, "u_tilt"),
+            }
+        };
+
+        // Compile wobbly shader (uses wobbly vertex + standard fragment)
+        let wobbly_program = unsafe { Self::create_program(&gl, shaders::WOBBLY_VERTEX_SHADER, shaders::FRAGMENT_SHADER)? };
+        let wobbly_uniforms = unsafe {
+            WobblyUniforms {
+                projection: gl.get_uniform_location(wobbly_program, "u_projection"),
+                rect: gl.get_uniform_location(wobbly_program, "u_rect"),
+                texture: gl.get_uniform_location(wobbly_program, "u_texture"),
+                opacity: gl.get_uniform_location(wobbly_program, "u_opacity"),
+                radius: gl.get_uniform_location(wobbly_program, "u_radius"),
+                size: gl.get_uniform_location(wobbly_program, "u_size"),
+                dim: gl.get_uniform_location(wobbly_program, "u_dim"),
+                corner_offsets: [
+                    gl.get_uniform_location(wobbly_program, "u_corner_offsets[0]"),
+                    gl.get_uniform_location(wobbly_program, "u_corner_offsets[1]"),
+                    gl.get_uniform_location(wobbly_program, "u_corner_offsets[2]"),
+                    gl.get_uniform_location(wobbly_program, "u_corner_offsets[3]"),
+                ],
+                grid_size: gl.get_uniform_location(wobbly_program, "u_grid_size"),
+            }
+        };
+
+        // Compile overview background shader
+        let overview_bg_program = unsafe { Self::create_program(&gl, shaders::VERTEX_SHADER, shaders::OVERVIEW_BG_FRAGMENT_SHADER)? };
+        let overview_bg_uniforms = unsafe {
+            OverviewBgUniforms {
+                projection: gl.get_uniform_location(overview_bg_program, "u_projection"),
+                rect: gl.get_uniform_location(overview_bg_program, "u_rect"),
+                opacity: gl.get_uniform_location(overview_bg_program, "u_opacity"),
+            }
+        };
+
+        // Compile particle shader
+        let particle_program = unsafe { Self::create_program(&gl, shaders::PARTICLE_VERTEX_SHADER, shaders::PARTICLE_FRAGMENT_SHADER)? };
+        let particle_uniforms = unsafe {
+            ParticleUniforms {
+                projection: gl.get_uniform_location(particle_program, "u_projection"),
+                point_size: gl.get_uniform_location(particle_program, "u_point_size"),
+            }
+        };
+
+        // Create particle VAO/VBO
+        let (particle_vao, particle_vbo) = unsafe {
+            let vao = gl.create_vertex_array().map_err(|e| format!("particle vao: {e}"))?;
+            let vbo = gl.create_buffer().map_err(|e| format!("particle vbo: {e}"))?;
+            gl.bind_vertex_array(Some(vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+            // Layout: vec2 position, vec4 color, float life = 7 floats per vertex
+            let stride = 7 * 4; // 7 floats * 4 bytes
+            gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, stride, 0);
+            gl.enable_vertex_attrib_array(0);
+            gl.vertex_attrib_pointer_f32(1, 4, glow::FLOAT, false, stride, 2 * 4);
+            gl.enable_vertex_attrib_array(1);
+            gl.vertex_attrib_pointer_f32(2, 1, glow::FLOAT, false, stride, 6 * 4);
+            gl.enable_vertex_attrib_array(2);
+            gl.bind_vertex_array(None);
+            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+            (vao, vbo)
         };
 
         // 15. Create VAO (empty — vertex shader generates quad from gl_VertexID)
@@ -1179,6 +1450,63 @@ impl Compositor {
             cube_program,
             cube_uniforms,
             transition_new_fbo: None,
+            // Window scale animation
+            window_animation: behavior.window_animation,
+            window_animation_scale: behavior.window_animation_scale,
+            // Dim inactive
+            inactive_dim: behavior.inactive_dim,
+            // Mouse position
+            mouse_x: 0.0,
+            mouse_y: 0.0,
+            // Edge glow
+            edge_glow_program,
+            edge_glow_uniforms,
+            edge_glow: behavior.edge_glow,
+            edge_glow_color: behavior.edge_glow_color,
+            edge_glow_width: behavior.edge_glow_width,
+            // Attention animation
+            attention_animation: behavior.attention_animation,
+            attention_color: behavior.attention_color,
+            compositor_start_time: std::time::Instant::now(),
+            // PiP visual
+            pip_border_color: behavior.pip_border_color,
+            pip_border_width: behavior.pip_border_width,
+            // Magnifier
+            magnifier_enabled: behavior.magnifier_enabled,
+            magnifier_radius: behavior.magnifier_radius,
+            magnifier_zoom: behavior.magnifier_zoom,
+            magnifier_uniforms,
+            // Window tilt
+            tilt_program,
+            tilt_uniforms,
+            window_tilt: behavior.window_tilt,
+            tilt_amount: behavior.tilt_amount,
+            // Frosted glass
+            frosted_glass_rules: behavior.frosted_glass_rules.clone(),
+            frosted_glass_strength: behavior.frosted_glass_strength,
+            // Overview
+            overview_active: false,
+            overview_windows: Vec::new(),
+            overview_opacity: 0.0,
+            overview_bg_program,
+            overview_bg_uniforms,
+            // Wobbly windows
+            wobbly_program,
+            wobbly_uniforms,
+            wobbly_windows: behavior.wobbly_windows,
+            wobbly_stiffness: behavior.wobbly_stiffness,
+            wobbly_damping: behavior.wobbly_damping,
+            wobbly_grid_size: behavior.wobbly_grid_size,
+            // Particle effects
+            particle_program,
+            particle_uniforms,
+            particle_effects: behavior.particle_effects,
+            particle_count: behavior.particle_count,
+            particle_lifetime: behavior.particle_lifetime,
+            particle_gravity: behavior.particle_gravity,
+            particle_systems: Vec::new(),
+            particle_vao,
+            particle_vbo,
         })
     }
 
@@ -1366,6 +1694,38 @@ impl Compositor {
                 }
             }
         }
+        // Need render if overview is active
+        if self.overview_active { return true; }
+        // Need render if particles are active
+        if !self.particle_systems.is_empty() { return true; }
+        // Need render if any window has active wobbly
+        if self.wobbly_windows {
+            for wt in self.windows.values() {
+                if let Some(ref w) = wt.wobbly {
+                    if w.corner_offsets.iter().any(|o| o[0].abs() > 0.1 || o[1].abs() > 0.1) {
+                        return true;
+                    }
+                }
+            }
+        }
+        // Need render if attention animation is active for any window
+        if self.attention_animation {
+            for wt in self.windows.values() {
+                if wt.is_urgent { return true; }
+            }
+        }
+        // Need render if magnifier is active (tracking mouse)
+        if self.magnifier_enabled { return true; }
+        // Need render if edge glow is active
+        if self.edge_glow { return true; }
+        // Need render if window tilt is active
+        if self.window_tilt { return true; }
+        // Need render if scale animation active
+        if self.window_animation {
+            for wt in self.windows.values() {
+                if (wt.anim_scale - wt.anim_scale_target).abs() > 0.001 { return true; }
+            }
+        }
         false
     }
 
@@ -1452,6 +1812,7 @@ impl Compositor {
             || self.contrast != 1.0
             || self.invert_colors
             || self.grayscale
+            || self.magnifier_enabled
     }
 
     // =====================================================================
@@ -2085,6 +2446,12 @@ impl Compositor {
                 scale: 1.0,
                 frame_extents: [0; 4],
                 is_shaped: false,
+                anim_scale: if self.window_animation { self.window_animation_scale } else { 1.0 },
+                anim_scale_target: 1.0,
+                is_urgent: false,
+                is_pip: false,
+                is_frosted: false,
+                wobbly: None,
             },
         );
         self.needs_render = true;
@@ -2150,11 +2517,19 @@ impl Compositor {
     }
 
     pub(super) fn remove_window(&mut self, x11_win: u32) {
+        // Spawn particles for closing window
+        if self.particle_effects {
+            if let Some(wt) = self.windows.get(&x11_win) {
+                self.spawn_particles_for_window(wt.x, wt.y, wt.w, wt.h);
+            }
+        }
+
         // If fading is enabled and the window exists, start fade-out instead of immediate remove
         if self.fading {
             if let Some(wt) = self.windows.get_mut(&x11_win) {
                 if !wt.fading_out && wt.fade_opacity > 0.0 {
                     wt.fading_out = true;
+                    wt.anim_scale_target = self.window_animation_scale;
                     self.needs_render = true;
                     return;
                 }
@@ -2371,27 +2746,44 @@ impl Compositor {
 
     /// Advance fade animations. Returns true if any fades are still in progress.
     fn tick_fades(&mut self) -> bool {
-        if !self.fading {
-            return false;
-        }
         let mut any_active = false;
         let mut to_remove = Vec::new();
 
         for (&win, wt) in self.windows.iter_mut() {
-            if wt.fading_out {
-                wt.fade_opacity -= self.fade_out_step;
-                if wt.fade_opacity <= 0.0 {
-                    wt.fade_opacity = 0.0;
-                    to_remove.push(win);
-                } else {
-                    any_active = true;
+            // Fade animation
+            if self.fading {
+                if wt.fading_out {
+                    wt.fade_opacity -= self.fade_out_step;
+                    if wt.fade_opacity <= 0.0 {
+                        wt.fade_opacity = 0.0;
+                        to_remove.push(win);
+                    } else {
+                        any_active = true;
+                    }
+                } else if wt.fade_opacity < 1.0 {
+                    wt.fade_opacity += self.fade_in_step;
+                    if wt.fade_opacity >= 1.0 {
+                        wt.fade_opacity = 1.0;
+                    } else {
+                        any_active = true;
+                    }
                 }
-            } else if wt.fade_opacity < 1.0 {
-                wt.fade_opacity += self.fade_in_step;
-                if wt.fade_opacity >= 1.0 {
-                    wt.fade_opacity = 1.0;
-                } else {
-                    any_active = true;
+            }
+
+            // Scale animation (window open/close zoom)
+            if self.window_animation {
+                let diff = wt.anim_scale_target - wt.anim_scale;
+                if diff.abs() > 0.001 {
+                    let step = if diff > 0.0 { self.fade_in_step } else { -self.fade_out_step };
+                    wt.anim_scale += step;
+                    if (wt.anim_scale_target - wt.anim_scale).abs() < 0.001
+                        || (step > 0.0 && wt.anim_scale >= wt.anim_scale_target)
+                        || (step < 0.0 && wt.anim_scale <= wt.anim_scale_target)
+                    {
+                        wt.anim_scale = wt.anim_scale_target;
+                    } else {
+                        any_active = true;
+                    }
                 }
             }
         }
@@ -2515,6 +2907,9 @@ impl Compositor {
 
         // Tick fade animations
         let fades_active = self.tick_fades();
+
+        // Tick wobbly spring physics
+        let wobbly_active = self.tick_wobbly();
 
         // Skip-unchanged-frame: if scene hasn't changed and no textures are
         // dirty, we can skip the entire GL render (unless screenshot pending or HUD active).
@@ -2701,15 +3096,20 @@ impl Compositor {
 
                     // Feature 14: Non-uniform shadow offset (heavier bottom)
                     let sy_offset = oy + bottom_extra;
-                    let sx = x as f32 + ox - spread;
-                    let sy = y as f32 + sy_offset - spread;
-                    let sw = w as f32 + 2.0 * spread;
-                    let sh = h as f32 + 2.0 * spread + bottom_extra;
+                    let anim_s = wt.anim_scale;
+                    let win_w = w as f32 * anim_s;
+                    let win_h = h as f32 * anim_s;
+                    let cx = x as f32 + (w as f32 - win_w) * 0.5;
+                    let cy = y as f32 + (h as f32 - win_h) * 0.5;
+                    let sx = cx + ox - spread;
+                    let sy = cy + sy_offset - spread;
+                    let sw = win_w + 2.0 * spread;
+                    let sh = win_h + 2.0 * spread + bottom_extra;
                     self.gl.uniform_4_f32(
                         self.shadow_uniforms.rect.as_ref(), sx, sy, sw, sh,
                     );
                     self.gl.uniform_2_f32(
-                        self.shadow_uniforms.size.as_ref(), w as f32, h as f32,
+                        self.shadow_uniforms.size.as_ref(), win_w, win_h,
                     );
                     self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 }
@@ -2782,7 +3182,8 @@ impl Compositor {
                     // Compute effective opacity
                     let base_opacity = if is_focused { self.active_opacity } else { self.inactive_opacity };
                     let rule_opacity = wt.opacity_override.unwrap_or(base_opacity);
-                    let dim = rule_opacity * fade;
+                    let inactive_dim_factor = if is_focused { 1.0 } else { self.inactive_dim };
+                    let dim = rule_opacity * fade * inactive_dim_factor;
 
                     // detect_client_opacity: if window manages its own alpha, don't force opacity
                     // For opaque (RGB) windows, set u_opacity = 1.0 so the shader
@@ -2801,7 +3202,7 @@ impl Compositor {
                     };
 
                     // Feature 4: Apply per-window scale
-                    let scale = wt.scale;
+                    let scale = wt.scale * wt.anim_scale;
                     let (draw_x, draw_y, draw_w, draw_h) = if (scale - 1.0).abs() > f32::EPSILON {
                         let cw = w as f32 * scale;
                         let ch = h as f32 * scale;
@@ -2866,9 +3267,6 @@ impl Compositor {
                 self.gl.uniform_matrix_4_f32_slice(
                     self.border_uniforms.projection.as_ref(), false, &proj,
                 );
-                self.gl.uniform_1_f32(
-                    self.border_uniforms.border_width.as_ref(), self.border_width,
-                );
                 self.gl.bind_vertex_array(Some(self.quad_vao));
 
                 for &(win, x, y, w, h) in visible_scene {
@@ -2880,10 +3278,25 @@ impl Compositor {
                     if fade <= 0.0 { continue; }
 
                     let is_focused = focused == Some(win);
-                    let color = if is_focused {
+                    let color = if wt.is_urgent && self.attention_animation {
+                        let elapsed = self.compositor_start_time.elapsed().as_secs_f32();
+                        let pulse = (elapsed * 4.0).sin() * 0.5 + 0.5;
+                        let [r, g, b, a] = self.attention_color;
+                        [r, g, b, a * pulse]
+                    } else if wt.is_pip {
+                        self.pip_border_color
+                    } else if is_focused {
                         self.border_color_focused
                     } else {
                         self.border_color_unfocused
+                    };
+
+                    let bw = if wt.is_urgent && self.attention_animation {
+                        self.border_width.max(2.0)
+                    } else if wt.is_pip {
+                        self.pip_border_width
+                    } else {
+                        self.border_width
                     };
 
                     // Per-window corner radius (feature 3)
@@ -2896,7 +3309,7 @@ impl Compositor {
                     );
 
                     // Feature 4: Apply scale
-                    let scale = wt.scale;
+                    let scale = wt.scale * wt.anim_scale;
                     let (draw_x, draw_y, draw_w, draw_h) = if (scale - 1.0).abs() > f32::EPSILON {
                         let cw = w as f32 * scale;
                         let ch = h as f32 * scale;
@@ -2907,6 +3320,9 @@ impl Compositor {
                         (x as f32, y as f32, w as f32, h as f32)
                     };
 
+                    self.gl.uniform_1_f32(
+                        self.border_uniforms.border_width.as_ref(), bw,
+                    );
                     self.gl.uniform_4_f32(
                         self.border_uniforms.border_color.as_ref(),
                         color[0], color[1], color[2], color[3] * fade,
@@ -2925,6 +3341,82 @@ impl Compositor {
 
                 self.gl.bind_vertex_array(None);
                 self.gl.use_program(None);
+            }
+        }
+
+        // === Pass 3b: Urgent/PiP borders (even if borders disabled) ===
+        if !self.border_enabled {
+            let has_special = visible_scene.iter().any(|&(win, _, _, _, _)| {
+                self.windows.get(&win).map_or(false, |wt| {
+                    (wt.is_urgent && self.attention_animation) || wt.is_pip
+                })
+            });
+            if has_special {
+                // Draw borders only for urgent/pip windows
+                unsafe {
+                    self.gl.use_program(Some(self.border_program));
+                    self.gl.uniform_matrix_4_f32_slice(
+                        self.border_uniforms.projection.as_ref(), false, &proj,
+                    );
+                    self.gl.bind_vertex_array(Some(self.quad_vao));
+
+                    for &(win, x, y, w, h) in visible_scene {
+                        let wt = match self.windows.get(&win) {
+                            Some(wt) => wt,
+                            None => continue,
+                        };
+                        if !((wt.is_urgent && self.attention_animation) || wt.is_pip) {
+                            continue;
+                        }
+                        let fade = wt.fade_opacity;
+                        if fade <= 0.0 { continue; }
+
+                        let color = if wt.is_urgent && self.attention_animation {
+                            let elapsed = self.compositor_start_time.elapsed().as_secs_f32();
+                            let pulse = (elapsed * 4.0).sin() * 0.5 + 0.5;
+                            let [r, g, b, a] = self.attention_color;
+                            [r, g, b, a * pulse]
+                        } else {
+                            self.pip_border_color
+                        };
+
+                        let bw = if wt.is_pip { self.pip_border_width } else { 2.0 };
+
+                        let radius = wt.corner_radius_override.unwrap_or(
+                            if Self::class_matches_exclude(&wt.class_name, &self.rounded_corners_exclude) {
+                                0.0
+                            } else {
+                                self.corner_radius
+                            }
+                        );
+
+                        let scale = wt.scale * wt.anim_scale;
+                        let (draw_x, draw_y, draw_w, draw_h) = if (scale - 1.0).abs() > f32::EPSILON {
+                            let cw = w as f32 * scale;
+                            let ch = h as f32 * scale;
+                            let cx = x as f32 + (w as f32 - cw) * 0.5;
+                            let cy = y as f32 + (h as f32 - ch) * 0.5;
+                            (cx, cy, cw, ch)
+                        } else {
+                            (x as f32, y as f32, w as f32, h as f32)
+                        };
+
+                        self.gl.uniform_1_f32(self.border_uniforms.border_width.as_ref(), bw);
+                        self.gl.uniform_4_f32(
+                            self.border_uniforms.border_color.as_ref(),
+                            color[0], color[1], color[2], color[3] * fade,
+                        );
+                        self.gl.uniform_1_f32(self.border_uniforms.radius.as_ref(), radius);
+                        self.gl.uniform_2_f32(self.border_uniforms.size.as_ref(), draw_w, draw_h);
+                        self.gl.uniform_4_f32(
+                            self.border_uniforms.rect.as_ref(), draw_x, draw_y, draw_w, draw_h,
+                        );
+                        self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    }
+
+                    self.gl.bind_vertex_array(None);
+                    self.gl.use_program(None);
+                }
             }
         }
 
@@ -2960,6 +3452,16 @@ impl Compositor {
                 self.gl.uniform_1_f32(self.postprocess_uniforms.contrast.as_ref(), self.contrast);
                 self.gl.uniform_1_i32(self.postprocess_uniforms.invert.as_ref(), if self.invert_colors { 1 } else { 0 });
                 self.gl.uniform_1_i32(self.postprocess_uniforms.grayscale.as_ref(), if self.grayscale { 1 } else { 0 });
+
+                // Magnifier uniforms
+                self.gl.uniform_1_i32(self.magnifier_uniforms.magnifier_enabled.as_ref(), if self.magnifier_enabled { 1 } else { 0 });
+                if self.magnifier_enabled {
+                    let cx = self.mouse_x / self.screen_w as f32;
+                    let cy = self.mouse_y / self.screen_h as f32;
+                    self.gl.uniform_2_f32(self.magnifier_uniforms.magnifier_center.as_ref(), cx, cy);
+                    self.gl.uniform_1_f32(self.magnifier_uniforms.magnifier_radius.as_ref(), self.magnifier_radius / self.screen_w as f32);
+                    self.gl.uniform_1_f32(self.magnifier_uniforms.magnifier_zoom.as_ref(), self.magnifier_zoom);
+                }
 
                 self.gl.active_texture(glow::TEXTURE0);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(pp_tex));
@@ -3026,6 +3528,46 @@ impl Compositor {
                     self.frame_stats.fps, avg_dt * 1000.0, self.windows.len()
                 );
             }
+        }
+
+        // === Pass 5b: Screen edge glow ===
+        if self.edge_glow && self.edge_glow_width > 0.0 {
+            unsafe {
+                self.gl.use_program(Some(self.edge_glow_program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.edge_glow_uniforms.projection.as_ref(), false, &proj,
+                );
+                self.gl.uniform_4_f32(
+                    self.edge_glow_uniforms.rect.as_ref(),
+                    0.0, 0.0, self.screen_w as f32, self.screen_h as f32,
+                );
+                self.gl.uniform_4_f32(
+                    self.edge_glow_uniforms.glow_color.as_ref(),
+                    self.edge_glow_color[0], self.edge_glow_color[1],
+                    self.edge_glow_color[2], self.edge_glow_color[3],
+                );
+                self.gl.uniform_1_f32(self.edge_glow_uniforms.glow_width.as_ref(), self.edge_glow_width);
+                self.gl.uniform_2_f32(self.edge_glow_uniforms.mouse.as_ref(), self.mouse_x, self.mouse_y);
+                self.gl.uniform_2_f32(
+                    self.edge_glow_uniforms.screen_size.as_ref(),
+                    self.screen_w as f32, self.screen_h as f32,
+                );
+                self.gl.bind_vertex_array(Some(self.quad_vao));
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                self.gl.bind_vertex_array(None);
+                self.gl.use_program(None);
+            }
+        }
+
+        // === Pass 5c: Particle effects ===
+        if !self.particle_systems.is_empty() {
+            self.tick_particles();
+            self.render_particles(&proj);
+        }
+
+        // === Pass 5d: Overview overlay ===
+        if self.overview_active {
+            self.render_overview(&proj, focused);
         }
 
         // === Feature 12: Screenshot capture (after all rendering, before swap) ===
@@ -3099,11 +3641,321 @@ impl Compositor {
         }
 
         // Schedule re-render if fades or transition are still in progress
-        if fades_active || transition_still_active {
+        if fades_active || transition_still_active || wobbly_active || !self.particle_systems.is_empty() || self.overview_active {
             self.needs_render = true;
         }
 
         true
+    }
+
+    // =====================================================================
+    // New feature methods
+    // =====================================================================
+
+    pub(super) fn set_mouse_position(&mut self, x: f32, y: f32) {
+        self.mouse_x = x;
+        self.mouse_y = y;
+        if self.edge_glow || self.magnifier_enabled || self.window_tilt {
+            self.needs_render = true;
+        }
+    }
+
+    pub(super) fn set_window_urgent(&mut self, x11_win: u32, urgent: bool) {
+        if let Some(wt) = self.windows.get_mut(&x11_win) {
+            wt.is_urgent = urgent;
+            self.needs_render = true;
+        }
+    }
+
+    pub(super) fn set_window_pip(&mut self, x11_win: u32, pip: bool) {
+        if let Some(wt) = self.windows.get_mut(&x11_win) {
+            wt.is_pip = pip;
+            self.needs_render = true;
+        }
+    }
+
+    pub(super) fn set_magnifier(&mut self, enabled: bool) {
+        self.magnifier_enabled = enabled;
+        self.ensure_postprocess_fbo();
+        self.needs_render = true;
+    }
+
+    pub(super) fn set_overview_mode(&mut self, active: bool, windows: Vec<(u32, f32, f32, f32, f32, bool)>) {
+        self.overview_active = active;
+        self.overview_windows = windows.into_iter().map(|(win, x, y, w, h, sel)| {
+            OverviewEntry { x11_win: win, target_x: x, target_y: y, target_w: w, target_h: h, is_selected: sel }
+        }).collect();
+        self.overview_opacity = if active { 1.0 } else { 0.0 };
+        self.needs_render = true;
+    }
+
+    pub(super) fn set_overview_selection(&mut self, x11_win: u32) {
+        for entry in &mut self.overview_windows {
+            entry.is_selected = entry.x11_win == x11_win;
+        }
+        self.needs_render = true;
+    }
+
+    pub(super) fn notify_window_move_start(&mut self, x11_win: u32) {
+        if !self.wobbly_windows { return; }
+        if let Some(wt) = self.windows.get_mut(&x11_win) {
+            wt.wobbly = Some(WobblyState {
+                corner_offsets: [[0.0; 2]; 4],
+                corner_velocities: [[0.0; 2]; 4],
+            });
+        }
+    }
+
+    pub(super) fn notify_window_move_delta(&mut self, x11_win: u32, dx: f32, dy: f32) {
+        if !self.wobbly_windows { return; }
+        if let Some(wt) = self.windows.get_mut(&x11_win) {
+            if let Some(ref mut w) = wt.wobbly {
+                // Displace non-pinned corners (pin top-left, displace others)
+                // All corners get displaced, but top-left (corner 0) returns faster
+                for i in 1..4 {
+                    w.corner_offsets[i][0] -= dx * 0.5;
+                    w.corner_offsets[i][1] -= dy * 0.5;
+                }
+            }
+            self.needs_render = true;
+        }
+    }
+
+    pub(super) fn notify_window_move_end(&mut self, x11_win: u32) {
+        // Don't clear wobbly state - let it settle naturally
+        if let Some(wt) = self.windows.get_mut(&x11_win) {
+            if let Some(ref mut w) = wt.wobbly {
+                // All corners spring back to zero
+                for i in 0..4 {
+                    // Keep the offsets, they'll spring back in tick_wobbly
+                    let _ = w.corner_velocities[i];
+                }
+            }
+        }
+    }
+
+    /// Tick wobbly spring physics. Returns true if any wobbly is active.
+    fn tick_wobbly(&mut self) -> bool {
+        if !self.wobbly_windows { return false; }
+        let dt = 1.0 / 60.0; // approximate frame time
+        let stiffness = self.wobbly_stiffness;
+        let damping = self.wobbly_damping;
+        let mut any_active = false;
+        let mut to_clear = Vec::new();
+
+        for (&win, wt) in self.windows.iter_mut() {
+            if let Some(ref mut w) = wt.wobbly {
+                let mut all_settled = true;
+                for i in 0..4 {
+                    for axis in 0..2 {
+                        let offset = w.corner_offsets[i][axis];
+                        let vel = w.corner_velocities[i][axis];
+                        let accel = -stiffness * offset - damping * vel;
+                        let new_vel = vel + accel * dt;
+                        let new_offset = offset + new_vel * dt;
+                        w.corner_offsets[i][axis] = new_offset;
+                        w.corner_velocities[i][axis] = new_vel;
+                        if new_offset.abs() > 0.1 || new_vel.abs() > 0.1 {
+                            all_settled = false;
+                        }
+                    }
+                }
+                if all_settled {
+                    to_clear.push(win);
+                } else {
+                    any_active = true;
+                }
+            }
+        }
+
+        for win in to_clear {
+            if let Some(wt) = self.windows.get_mut(&win) {
+                wt.wobbly = None;
+            }
+        }
+
+        any_active
+    }
+
+    /// Tick particle systems. Removes dead particles and empty systems.
+    fn tick_particles(&mut self) {
+        let dt = 1.0 / 60.0;
+        let gravity = self.particle_gravity;
+
+        self.particle_systems.retain_mut(|sys| {
+            sys.particles.retain_mut(|p| {
+                p.vy += gravity * dt;
+                p.x += p.vx * dt;
+                p.y += p.vy * dt;
+                p.lifetime -= dt;
+                p.lifetime > 0.0
+            });
+            !sys.particles.is_empty()
+        });
+    }
+
+    /// Render active particle systems.
+    fn render_particles(&self, proj: &[f32; 16]) {
+        if self.particle_systems.is_empty() { return; }
+
+        // Collect all particles into a flat buffer
+        let mut data: Vec<f32> = Vec::new();
+        let mut count = 0u32;
+        for sys in &self.particle_systems {
+            for p in &sys.particles {
+                let life_frac = (p.lifetime / p.max_lifetime).clamp(0.0, 1.0);
+                data.extend_from_slice(&[p.x, p.y, p.color[0], p.color[1], p.color[2], p.color[3], life_frac]);
+                count += 1;
+            }
+        }
+
+        if count == 0 { return; }
+
+        unsafe {
+            self.gl.use_program(Some(self.particle_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.particle_uniforms.projection.as_ref(), false, proj,
+            );
+            self.gl.uniform_1_f32(self.particle_uniforms.point_size.as_ref(), 4.0);
+
+            self.gl.enable(glow::PROGRAM_POINT_SIZE);
+            self.gl.bind_vertex_array(Some(self.particle_vao));
+            self.gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.particle_vbo));
+
+            let byte_data: &[u8] = std::slice::from_raw_parts(
+                data.as_ptr() as *const u8,
+                data.len() * 4,
+            );
+            self.gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, byte_data, glow::DYNAMIC_DRAW);
+            self.gl.draw_arrays(glow::POINTS, 0, count as i32);
+
+            self.gl.disable(glow::PROGRAM_POINT_SIZE);
+            self.gl.bind_buffer(glow::ARRAY_BUFFER, None);
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+        }
+    }
+
+    /// Render overview overlay (Alt-Tab preview).
+    fn render_overview(&self, proj: &[f32; 16], _focused: Option<u32>) {
+        if self.overview_windows.is_empty() { return; }
+
+        unsafe {
+            // Draw dark background overlay
+            self.gl.use_program(Some(self.overview_bg_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.overview_bg_uniforms.projection.as_ref(), false, proj,
+            );
+            self.gl.uniform_4_f32(
+                self.overview_bg_uniforms.rect.as_ref(),
+                0.0, 0.0, self.screen_w as f32, self.screen_h as f32,
+            );
+            self.gl.uniform_1_f32(self.overview_bg_uniforms.opacity.as_ref(), self.overview_opacity);
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+            // Draw window thumbnails
+            self.gl.use_program(Some(self.program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.win_uniforms.projection.as_ref(), false, proj,
+            );
+            self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+
+            for entry in &self.overview_windows {
+                let wt = match self.windows.get(&entry.x11_win) {
+                    Some(wt) => wt,
+                    None => continue,
+                };
+
+                let radius = 8.0; // fixed rounded corners for thumbnails
+                self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
+                self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
+                self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), if entry.is_selected { 1.0 } else { 0.7 });
+                self.gl.uniform_2_f32(
+                    self.win_uniforms.size.as_ref(), entry.target_w, entry.target_h,
+                );
+                self.gl.uniform_4_f32(
+                    self.win_uniforms.rect.as_ref(),
+                    entry.target_x, entry.target_y, entry.target_w, entry.target_h,
+                );
+                self.gl.active_texture(glow::TEXTURE0);
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+                // Draw highlight border for selected window
+                if entry.is_selected {
+                    self.gl.use_program(Some(self.border_program));
+                    self.gl.uniform_matrix_4_f32_slice(
+                        self.border_uniforms.projection.as_ref(), false, proj,
+                    );
+                    self.gl.uniform_1_f32(self.border_uniforms.border_width.as_ref(), 3.0);
+                    self.gl.uniform_4_f32(
+                        self.border_uniforms.border_color.as_ref(),
+                        0.4, 0.6, 0.9, 1.0,
+                    );
+                    self.gl.uniform_1_f32(self.border_uniforms.radius.as_ref(), radius);
+                    self.gl.uniform_2_f32(
+                        self.border_uniforms.size.as_ref(), entry.target_w, entry.target_h,
+                    );
+                    self.gl.uniform_4_f32(
+                        self.border_uniforms.rect.as_ref(),
+                        entry.target_x, entry.target_y, entry.target_w, entry.target_h,
+                    );
+                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+                    // Switch back to window program
+                    self.gl.use_program(Some(self.program));
+                    self.gl.uniform_matrix_4_f32_slice(
+                        self.win_uniforms.projection.as_ref(), false, proj,
+                    );
+                    self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+                }
+            }
+
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+        }
+    }
+
+    /// Spawn particles when a window is removed (particle effect).
+    fn spawn_particles_for_window(&mut self, x: i32, y: i32, w: u32, h: u32) {
+        if !self.particle_effects { return; }
+
+        let count = self.particle_count as usize;
+        let lifetime = self.particle_lifetime;
+        let mut particles = Vec::with_capacity(count);
+
+        let cols = (count as f32).sqrt().ceil() as u32;
+        let rows = (count as u32 + cols - 1) / cols;
+
+        for i in 0..count {
+            let col = i as u32 % cols;
+            let row = i as u32 / cols;
+
+            let px = x as f32 + (col as f32 + 0.5) / cols as f32 * w as f32;
+            let py = y as f32 + (row as f32 + 0.5) / rows as f32 * h as f32;
+
+            // Random velocity (using simple deterministic hash)
+            let hash = ((i * 2654435761) ^ (col as usize * 1597334677)) as f32;
+            let vx = (hash % 200.0) - 100.0;
+            let vy = -((hash / 200.0) % 300.0) - 50.0; // upward bias
+
+            // Color from window position (gradient)
+            let r = (col as f32 / cols as f32 * 0.5 + 0.5).clamp(0.3, 1.0);
+            let g = (row as f32 / rows as f32 * 0.5 + 0.5).clamp(0.3, 1.0);
+            let b = 0.8;
+
+            particles.push(Particle {
+                x: px, y: py,
+                vx, vy,
+                color: [r, g, b, 1.0],
+                lifetime,
+                max_lifetime: lifetime,
+            });
+        }
+
+        self.particle_systems.push(ParticleSystem { particles });
+        self.needs_render = true;
     }
 
     /// Capture the current framebuffer into scene_fbo, then run dual Kawase blur passes.

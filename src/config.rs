@@ -206,6 +206,94 @@ pub struct BehaviorConfig {
     /// Workspace switch transition mode: "slide" (default) or "cube".
     #[serde(default = "default_transition_mode")]
     pub transition_mode: String,
+
+    // --- Window open/close scale animation ---
+    #[serde(default = "default_true")]
+    pub window_animation: bool,
+    #[serde(default = "default_window_animation_scale")]
+    pub window_animation_scale: f32,
+
+    // --- Dim inactive windows ---
+    #[serde(default = "default_one")]
+    pub inactive_dim: f32,
+
+    // --- Screen edge glow ---
+    #[serde(default)]
+    pub edge_glow: bool,
+    #[serde(default = "default_edge_glow_color")]
+    pub edge_glow_color: [f32; 4],
+    #[serde(default = "default_edge_glow_width")]
+    pub edge_glow_width: f32,
+
+    // --- Attention animation (urgent pulse) ---
+    #[serde(default = "default_true")]
+    pub attention_animation: bool,
+    #[serde(default = "default_attention_color")]
+    pub attention_color: [f32; 4],
+
+    // --- PiP visual treatment ---
+    #[serde(default = "default_pip_border_color")]
+    pub pip_border_color: [f32; 4],
+    #[serde(default = "default_pip_border_width")]
+    pub pip_border_width: f32,
+
+    // --- Night light ---
+    #[serde(default)]
+    pub night_light: bool,
+    #[serde(default = "default_night_light_temp")]
+    pub night_light_temp: f32,
+    #[serde(default = "default_night_light_start")]
+    pub night_light_start: String,
+    #[serde(default = "default_night_light_end")]
+    pub night_light_end: String,
+    #[serde(default = "default_night_light_transition")]
+    pub night_light_transition_mins: u32,
+
+    // --- Magnifier ---
+    #[serde(default)]
+    pub magnifier_enabled: bool,
+    #[serde(default = "default_magnifier_radius")]
+    pub magnifier_radius: f32,
+    #[serde(default = "default_magnifier_zoom")]
+    pub magnifier_zoom: f32,
+
+    // --- Window 3D tilt ---
+    #[serde(default)]
+    pub window_tilt: bool,
+    #[serde(default = "default_tilt_amount")]
+    pub tilt_amount: f32,
+
+    // --- Frosted glass ---
+    #[serde(default)]
+    pub frosted_glass_rules: Vec<String>,
+    #[serde(default = "default_frosted_glass_strength")]
+    pub frosted_glass_strength: u32,
+
+    // --- Alt-Tab window overview ---
+    #[serde(default = "default_true")]
+    pub overview_enabled: bool,
+    #[serde(default = "default_overview_gap")]
+    pub overview_thumbnail_gap: f32,
+
+    // --- Wobbly windows ---
+    #[serde(default)]
+    pub wobbly_windows: bool,
+    #[serde(default = "default_wobbly_stiffness")]
+    pub wobbly_stiffness: f32,
+    #[serde(default = "default_wobbly_damping")]
+    pub wobbly_damping: f32,
+    #[serde(default = "default_wobbly_grid_size")]
+    pub wobbly_grid_size: u32,
+
+    // --- Particle effects ---
+    #[serde(default)]
+    pub particle_effects: bool,
+    #[serde(default = "default_particle_count")]
+    pub particle_count: u32,
+    #[serde(default = "default_particle_lifetime")]
+    pub particle_lifetime: f32,
+    #[serde(default = "default_particle_gravity")]
+    pub particle_gravity: f32,
 }
 
 fn default_corner_radius() -> f32 { 10.0 }
@@ -223,6 +311,27 @@ fn default_border_color_unfocused() -> [f32; 4] { [0.3, 0.3, 0.3, 0.6] }
 fn default_one() -> f32 { 1.0 }
 fn default_shadow_bottom_extra() -> f32 { 4.0 }
 fn default_transition_mode() -> String { "slide".to_string() }
+fn default_window_animation_scale() -> f32 { 0.85 }
+fn default_edge_glow_color() -> [f32; 4] { [0.3, 0.5, 1.0, 0.6] }
+fn default_edge_glow_width() -> f32 { 50.0 }
+fn default_attention_color() -> [f32; 4] { [1.0, 0.4, 0.1, 1.0] }
+fn default_pip_border_color() -> [f32; 4] { [0.0, 0.8, 1.0, 0.8] }
+fn default_pip_border_width() -> f32 { 3.0 }
+fn default_night_light_temp() -> f32 { 0.4 }
+fn default_night_light_start() -> String { "20:00".to_string() }
+fn default_night_light_end() -> String { "06:00".to_string() }
+fn default_night_light_transition() -> u32 { 30 }
+fn default_magnifier_radius() -> f32 { 100.0 }
+fn default_magnifier_zoom() -> f32 { 2.0 }
+fn default_tilt_amount() -> f32 { 5.0 }
+fn default_frosted_glass_strength() -> u32 { 2 }
+fn default_overview_gap() -> f32 { 20.0 }
+fn default_wobbly_stiffness() -> f32 { 10.0 }
+fn default_wobbly_damping() -> f32 { 5.0 }
+fn default_wobbly_grid_size() -> u32 { 8 }
+fn default_particle_count() -> u32 { 150 }
+fn default_particle_lifetime() -> f32 { 0.8 }
+fn default_particle_gravity() -> f32 { 800.0 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusBarConfig {
@@ -371,6 +480,38 @@ impl Default for Config {
                     blur_use_frame_extents: false,
                     shadow_bottom_extra: default_shadow_bottom_extra(),
                     transition_mode: default_transition_mode(),
+                    window_animation: default_true(),
+                    window_animation_scale: default_window_animation_scale(),
+                    inactive_dim: default_one(),
+                    edge_glow: false,
+                    edge_glow_color: default_edge_glow_color(),
+                    edge_glow_width: default_edge_glow_width(),
+                    attention_animation: default_true(),
+                    attention_color: default_attention_color(),
+                    pip_border_color: default_pip_border_color(),
+                    pip_border_width: default_pip_border_width(),
+                    night_light: false,
+                    night_light_temp: default_night_light_temp(),
+                    night_light_start: default_night_light_start(),
+                    night_light_end: default_night_light_end(),
+                    night_light_transition_mins: default_night_light_transition(),
+                    magnifier_enabled: false,
+                    magnifier_radius: default_magnifier_radius(),
+                    magnifier_zoom: default_magnifier_zoom(),
+                    window_tilt: false,
+                    tilt_amount: default_tilt_amount(),
+                    frosted_glass_rules: Vec::new(),
+                    frosted_glass_strength: default_frosted_glass_strength(),
+                    overview_enabled: default_true(),
+                    overview_thumbnail_gap: default_overview_gap(),
+                    wobbly_windows: false,
+                    wobbly_stiffness: default_wobbly_stiffness(),
+                    wobbly_damping: default_wobbly_damping(),
+                    wobbly_grid_size: default_wobbly_grid_size(),
+                    particle_effects: false,
+                    particle_count: default_particle_count(),
+                    particle_lifetime: default_particle_lifetime(),
+                    particle_gravity: default_particle_gravity(),
                 },
                 status_bar: StatusBarConfig {
                     name: STATUS_BAR_NAME.to_string(),
@@ -1031,6 +1172,9 @@ impl Config {
             "togglescratchpad" => Some(Jwm::togglescratchpad),
             "togglepip" => Some(Jwm::togglepip),
             "togglecompositor" => Some(Jwm::togglecompositor),
+            "toggle_overview" => Some(Jwm::toggle_overview),
+            "cycle_overview" => Some(Jwm::cycle_overview),
+            "toggle_magnifier" => Some(Jwm::toggle_magnifier),
 
             "scrolling_focus_column" => Some(Jwm::scrolling_focus_column),
             "scrolling_move_column" => Some(Jwm::scrolling_move_column),

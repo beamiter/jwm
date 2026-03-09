@@ -326,6 +326,9 @@ impl X11Backend {
                     }
                 }
             }
+            BackendEvent::MotionNotify { root_x, root_y, .. } => {
+                compositor.set_mouse_position(*root_x as f32, *root_y as f32);
+            }
             BackendEvent::ScreenLayoutChanged => {
                 // Root window may have been resized by xrandr; update compositor
                 // viewport so it covers the full virtual screen.
@@ -540,6 +543,73 @@ impl Backend for X11Backend {
     fn compositor_force_full_redraw(&mut self) {
         if let Some(c) = self.compositor.as_mut() {
             c.force_full_redraw();
+        }
+    }
+
+    fn compositor_set_mouse_position(&mut self, x: f32, y: f32) {
+        if let Some(c) = self.compositor.as_mut() { c.set_mouse_position(x, y); }
+    }
+
+    fn compositor_set_window_urgent(&mut self, window: WindowId, urgent: bool) {
+        if let Some(c) = self.compositor.as_mut() {
+            if let Ok(x11w) = self.ids.x11(window) {
+                c.set_window_urgent(x11w, urgent);
+            }
+        }
+    }
+
+    fn compositor_set_window_pip(&mut self, window: WindowId, pip: bool) {
+        if let Some(c) = self.compositor.as_mut() {
+            if let Ok(x11w) = self.ids.x11(window) {
+                c.set_window_pip(x11w, pip);
+            }
+        }
+    }
+
+    fn compositor_set_magnifier(&mut self, enabled: bool) {
+        if let Some(c) = self.compositor.as_mut() { c.set_magnifier(enabled); }
+    }
+
+    fn compositor_set_overview_mode(&mut self, active: bool, windows: &[(WindowId, f32, f32, f32, f32, bool)]) {
+        if let Some(c) = self.compositor.as_mut() {
+            let x11_windows: Vec<(u32, f32, f32, f32, f32, bool)> = windows.iter()
+                .filter_map(|(wid, x, y, w, h, sel)| {
+                    self.ids.x11(*wid).ok().map(|x11w| (x11w, *x, *y, *w, *h, *sel))
+                })
+                .collect();
+            c.set_overview_mode(active, x11_windows);
+        }
+    }
+
+    fn compositor_set_overview_selection(&mut self, window: WindowId) {
+        if let Some(c) = self.compositor.as_mut() {
+            if let Ok(x11w) = self.ids.x11(window) {
+                c.set_overview_selection(x11w);
+            }
+        }
+    }
+
+    fn compositor_notify_window_move_start(&mut self, window: WindowId) {
+        if let Some(c) = self.compositor.as_mut() {
+            if let Ok(x11w) = self.ids.x11(window) {
+                c.notify_window_move_start(x11w);
+            }
+        }
+    }
+
+    fn compositor_notify_window_move_delta(&mut self, window: WindowId, dx: f32, dy: f32) {
+        if let Some(c) = self.compositor.as_mut() {
+            if let Ok(x11w) = self.ids.x11(window) {
+                c.notify_window_move_delta(x11w, dx, dy);
+            }
+        }
+    }
+
+    fn compositor_notify_window_move_end(&mut self, window: WindowId) {
+        if let Some(c) = self.compositor.as_mut() {
+            if let Ok(x11w) = self.ids.x11(window) {
+                c.notify_window_move_end(x11w);
+            }
         }
     }
 

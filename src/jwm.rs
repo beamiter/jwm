@@ -246,6 +246,17 @@ pub struct Jwm {
 
     /// Per-monitor scrolling layout state
     pub scrolling_states: HashMap<MonitorKey, ScrollingState>,
+
+    /// Night light: last time we updated color temperature
+    pub last_night_light_update: Option<std::time::Instant>,
+
+    /// Overview mode (Alt-Tab grid)
+    pub overview_active: bool,
+    pub overview_index: usize,
+    pub overview_clients: Vec<ClientKey>,
+
+    /// Magnifier state
+    pub magnifier_enabled: bool,
 }
 
 // =================================================================================
@@ -388,6 +399,15 @@ impl WMController for Jwm {
         match backend.handle_button_release(0) {
             Ok(handled) => {
                 if handled {
+                    // Notify compositor of window move end (for wobbly windows effect)
+                    if backend.has_compositor() {
+                        if let Some(ck) = self.get_selected_client_key() {
+                            if let Some(client) = self.state.clients.get(ck) {
+                                backend.compositor_notify_window_move_end(client.win);
+                            }
+                        }
+                    }
+
                     // Sync floating window geometry after drag ends
                     self.sync_focused_floating_geometry(backend);
 
@@ -411,12 +431,28 @@ impl WMController for Jwm {
         root_y: f64,
         time: u32,
     ) {
+        // Forward mouse position to compositor for effects (magnifier, etc.)
+        if backend.has_compositor() {
+            backend.compositor_set_mouse_position(root_x as f32, root_y as f32);
+        }
+
         let win_opt = match target {
             HitTarget::Surface(w) => Some(w),
             HitTarget::Background { .. } => None,
         };
         match backend.handle_motion(root_x, root_y, time) {
             Ok(true) => {
+                // Backend is handling a drag — notify compositor of move delta (wobbly windows)
+                if backend.has_compositor() {
+                    let (prev_x, prev_y) = self.last_mouse_root;
+                    let dx = (root_x - prev_x) as f32;
+                    let dy = (root_y - prev_y) as f32;
+                    if let Some(ck) = self.get_selected_client_key() {
+                        if let Some(client) = self.state.clients.get(ck) {
+                            backend.compositor_notify_window_move_delta(client.win, dx, dy);
+                        }
+                    }
+                }
                 self.last_mouse_root = (root_x, root_y);
                 return;
             }
@@ -1052,6 +1088,12 @@ impl Jwm {
             "togglescratchpad"
         } else if eq!(Jwm::togglepip) {
             "togglepip"
+        } else if eq!(Jwm::toggle_overview) {
+            "toggle_overview"
+        } else if eq!(Jwm::cycle_overview) {
+            "cycle_overview"
+        } else if eq!(Jwm::toggle_magnifier) {
+            "toggle_magnifier"
         } else {
             "<unknown>"
         }
@@ -1221,6 +1263,11 @@ impl Jwm {
             override_redirect_windows: HashSet::new(),
             or_window_geometries: HashMap::new(),
             scrolling_states: HashMap::new(),
+            last_night_light_update: None,
+            overview_active: false,
+            overview_index: 0,
+            overview_clients: Vec::new(),
+            magnifier_enabled: false,
         };
         if let Ok((x, y)) = backend.input_ops().get_pointer_position() {
             jwm.last_mouse_root = (x, y);
@@ -3364,6 +3411,30 @@ impl Jwm {
     }
 
     fn tick_animations(&mut self, backend: &mut dyn Backend) {
+        // --- Night Light: update color temperature once per minute ---
+        if backend.has_compositor() {
+            let should_update = match self.last_night_light_update {
+                Some(last) => last.elapsed() >= Duration::from_secs(60),
+                None => true,
+            };
+            if should_update {
+                self.last_night_light_update = Some(Instant::now());
+                let cfg = CONFIG.load();
+                let behavior = cfg.behavior();
+                if behavior.night_light {
+                    let temp = Self::compute_night_light_temp(
+                        &behavior.night_light_start,
+                        &behavior.night_light_end,
+                        behavior.night_light_temp,
+                        behavior.night_light_transition_mins,
+                    );
+                    backend.compositor_set_color_temperature(temp);
+                } else {
+                    backend.compositor_set_color_temperature(0.0);
+                }
+            }
+        }
+
         let composited = backend.has_compositor();
 
         if !self.animations.has_active() {
@@ -5112,6 +5183,181 @@ impl Jwm {
         Ok(())
     }
 
+    /// Compute the night light color temperature factor (0.0 = neutral, up to
+    /// `full_temp` when fully inside the night window).  Times are given as
+    /// "HH:MM" strings.  `transition_mins` controls the linear ramp-in/out at
+    /// the edges of the night window.
+    fn compute_night_light_temp(
+        start_str: &str,
+        end_str: &str,
+        full_temp: f32,
+        transition_mins: u32,
+    ) -> f32 {
+        fn parse_hhmm(s: &str) -> Option<u32> {
+            let parts: Vec<&str> = s.split(':').collect();
+            if parts.len() != 2 { return None; }
+            let h: u32 = parts[0].parse().ok()?;
+            let m: u32 = parts[1].parse().ok()?;
+            Some(h * 60 + m)
+        }
+
+        let start = match parse_hhmm(start_str) { Some(v) => v, None => return 0.0 };
+        let end   = match parse_hhmm(end_str)   { Some(v) => v, None => return 0.0 };
+
+        // Current time in minutes since midnight
+        let now = {
+            let d = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            // Local time: offset from UTC.  Use libc localtime.
+            let secs = d as libc::time_t;
+            let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+            unsafe { libc::localtime_r(&secs, &mut tm); }
+            (tm.tm_hour as u32) * 60 + (tm.tm_min as u32)
+        };
+
+        let day = 24 * 60u32; // 1440
+        let trans = transition_mins;
+
+        // Normalize everything so that `start` is time-zero (modular arithmetic).
+        // Night window runs from 0 to `length` in the rotated space.
+        let length = if end >= start { end - start } else { end + day - start };
+        let cur = if now >= start { now - start } else { now + day - start };
+
+        if cur > length {
+            // Outside the night window — check if approaching start (ramp in)
+            let before_start = if now < start { start - now } else { start + day - now };
+            if trans > 0 && before_start < trans {
+                // Ramping in: approaching start
+                let t = 1.0 - (before_start as f32 / trans as f32);
+                return full_temp * t.clamp(0.0, 1.0);
+            }
+            return 0.0;
+        }
+
+        // Inside the night window
+        if trans > 0 && cur < trans {
+            // Ramp in at the start edge
+            let t = cur as f32 / trans as f32;
+            return full_temp * t.clamp(0.0, 1.0);
+        }
+        if trans > 0 && (length - cur) < trans {
+            // Ramp out at the end edge
+            let t = (length - cur) as f32 / trans as f32;
+            return full_temp * t.clamp(0.0, 1.0);
+        }
+        full_temp
+    }
+
+    pub fn toggle_overview(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.overview_active {
+            // End overview: focus selected window
+            if let Some(&client_key) = self.overview_clients.get(self.overview_index) {
+                self.focus(backend, Some(client_key))?;
+            }
+            self.overview_active = false;
+            backend.compositor_set_overview_mode(false, &[]);
+        } else {
+            // Start overview: collect visible windows on current monitor
+            let sel_mon_key = match self.state.sel_mon {
+                Some(k) => k,
+                None => return Ok(()),
+            };
+            let visible: Vec<ClientKey> = {
+                let mon_clients = self.state.monitor_clients.get(sel_mon_key);
+                match mon_clients {
+                    Some(clients) => clients.iter()
+                        .copied()
+                        .filter(|&ck| self.is_client_visible_by_key(ck))
+                        .filter(|&ck| Some(ck) != self.status_bar_client)
+                        .collect(),
+                    None => Vec::new(),
+                }
+            };
+
+            if visible.is_empty() { return Ok(()); }
+
+            // Calculate grid layout
+            let (screen_w, screen_h, mon_x, mon_y) = if let Some(mon) = self.state.monitors.get(sel_mon_key) {
+                (
+                    mon.geometry.w_w as f32,
+                    mon.geometry.w_h as f32,
+                    mon.geometry.w_x as f32,
+                    mon.geometry.w_y as f32,
+                )
+            } else {
+                return Ok(());
+            };
+            let gap = 20.0f32;
+            let n = visible.len();
+            let cols = (n as f32).sqrt().ceil() as usize;
+            let rows = (n + cols - 1) / cols;
+            let cell_w = (screen_w - gap * (cols as f32 + 1.0)) / cols as f32;
+            let cell_h = (screen_h - gap * (rows as f32 + 1.0)) / rows as f32;
+
+            let mut layout: Vec<(WindowId, f32, f32, f32, f32, bool)> = Vec::new();
+            for (i, &ck) in visible.iter().enumerate() {
+                let col = i % cols;
+                let row = i / cols;
+                let x = mon_x + gap + col as f32 * (cell_w + gap);
+                let y = mon_y + gap + row as f32 * (cell_h + gap);
+
+                if let Some(client) = self.state.clients.get(ck) {
+                    let is_selected = i == 0;
+                    layout.push((client.win, x, y, cell_w, cell_h, is_selected));
+                }
+            }
+
+            self.overview_active = true;
+            self.overview_index = 0;
+            self.overview_clients = visible;
+            backend.compositor_set_overview_mode(true, &layout);
+        }
+        Ok(())
+    }
+
+    pub fn cycle_overview(
+        &mut self,
+        backend: &mut dyn Backend,
+        arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.overview_active || self.overview_clients.is_empty() { return Ok(()); }
+
+        let direction = match arg {
+            WMArgEnum::Int(d) => *d,
+            _ => 1,
+        };
+
+        let len = self.overview_clients.len();
+        if direction > 0 {
+            self.overview_index = (self.overview_index + 1) % len;
+        } else {
+            self.overview_index = (self.overview_index + len - 1) % len;
+        }
+
+        if let Some(&ck) = self.overview_clients.get(self.overview_index) {
+            if let Some(client) = self.state.clients.get(ck) {
+                backend.compositor_set_overview_selection(client.win);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn toggle_magnifier(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.magnifier_enabled = !self.magnifier_enabled;
+        backend.compositor_set_magnifier(self.magnifier_enabled);
+        Ok(())
+    }
+
     fn update_sticky_tags(&mut self, mon_key: MonitorKey) {
         let new_tags = if let Some(monitor) = self.state.monitors.get(mon_key) {
             monitor.tag_set[monitor.sel_tags]
@@ -5309,6 +5555,13 @@ impl Jwm {
 
             self.arrange(backend, Some(sel_mon_key));
             self.restack(backend, Some(sel_mon_key))?;
+        }
+
+        // Notify compositor of PiP state change
+        if backend.has_compositor() {
+            if let Some(client) = self.state.clients.get(sel_client_key) {
+                backend.compositor_set_window_pip(client.win, client.state.is_pip);
+            }
         }
 
         Ok(())
@@ -7358,6 +7611,11 @@ impl Jwm {
         // [修改] 将控制权移交 Backend
         backend.begin_move(win_id)?;
 
+        // Notify compositor of window move start (for wobbly windows effect)
+        if backend.has_compositor() {
+            backend.compositor_notify_window_move_start(win_id);
+        }
+
         // Jwm 不再维护 InteractionState
         Ok(())
     }
@@ -7679,7 +7937,11 @@ impl Jwm {
         if let Some(client) = self.state.clients.get_mut(client_key) {
             if client.state.is_urgent {
                 client.state.is_urgent = false;
+                let win = client.win;
                 let _ = self.seturgent(backend, client_key, false);
+                if backend.has_compositor() {
+                    backend.compositor_set_window_urgent(win, false);
+                }
             }
         }
         self.detachstack(client_key);
@@ -9325,10 +9587,16 @@ impl Jwm {
                     if let Some(c) = self.state.clients.get_mut(client_key) {
                         c.state.is_urgent = true;
                     }
+                    if backend.has_compositor() {
+                        backend.compositor_set_window_urgent(win, true);
+                    }
                 }
             } else {
                 if let Some(c) = self.state.clients.get_mut(client_key) {
                     c.state.is_urgent = false;
+                }
+                if backend.has_compositor() {
+                    backend.compositor_set_window_urgent(win, false);
                 }
             }
             if let Some(input_ok) = hints.input {
