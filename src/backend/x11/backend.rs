@@ -692,6 +692,13 @@ impl Backend for X11Backend {
                 facade.clear_active_window()?;
             }
         }
+
+        if let Some(compositor) = self.compositor.as_mut() {
+            // Focus affects active/inactive visuals and can invalidate more than
+            // the target window's last damage region, so redraw the full scene.
+            compositor.force_full_redraw();
+        }
+
         Ok(())
     }
 

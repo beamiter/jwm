@@ -601,17 +601,24 @@ impl WMController for Jwm {
     }
 
     fn on_client_message(&mut self, backend: &mut dyn Backend, win: WindowId) {
-        // 对应 ActiveWindowMessage
+        // 对应 _NET_ACTIVE_WINDOW: activate (focus + raise) the requested window.
         if let Some(ck) = self.wintoclient(win) {
-            let is_urgent = self
-                .state
-                .clients
-                .get(ck)
-                .map(|c| c.state.is_urgent)
-                .unwrap_or(false);
-            if !self.is_client_selected(ck) && !is_urgent {
-                if let Err(e) = self.seturgent(backend, ck, true) {
-                    error!("Error setting urgent on client message: {:?}", e);
+            if !self.is_client_selected(ck) {
+                // Clear urgent flag if it was set
+                if self
+                    .state
+                    .clients
+                    .get(ck)
+                    .map(|c| c.state.is_urgent)
+                    .unwrap_or(false)
+                {
+                    let _ = self.seturgent(backend, ck, false);
+                }
+                if let Err(e) = self.focus(backend, Some(ck)) {
+                    error!("Error focusing client on _NET_ACTIVE_WINDOW: {:?}", e);
+                }
+                if let Err(e) = self.restack(backend, self.state.sel_mon) {
+                    error!("Error restacking on _NET_ACTIVE_WINDOW: {:?}", e);
                 }
             }
         }
