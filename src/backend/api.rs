@@ -663,6 +663,9 @@ pub trait Backend: Send {
     /// Toggle debug HUD overlay.
     fn compositor_set_debug_hud(&mut self, _enabled: bool) {}
 
+    /// Set tag-switch transition mode ("slide" or "cube").
+    fn compositor_set_transition_mode(&mut self, _mode: &str) {}
+
     /// Get current FPS from compositor debug stats.
     fn compositor_fps(&self) -> f32 { 0.0 }
 

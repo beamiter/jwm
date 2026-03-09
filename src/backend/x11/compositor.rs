@@ -1707,6 +1707,14 @@ impl Compositor {
     // =====================================================================
     // Feature 11: Debug HUD toggle
     // =====================================================================
+    pub(super) fn set_transition_mode(&mut self, mode: &str) {
+        let new_mode = match mode {
+            "cube" => TransitionMode::Cube,
+            _ => TransitionMode::Slide,
+        };
+        self.transition_mode = new_mode;
+    }
+
     pub(super) fn set_debug_hud(&mut self, enabled: bool) {
         self.debug_hud = enabled;
         self.needs_render = true;

@@ -9806,6 +9806,9 @@ impl Jwm {
             }
         }
 
+        // 6. Update compositor transition mode
+        backend.compositor_set_transition_mode(&cfg.behavior().transition_mode);
+
         let client_keys: Vec<ClientKey> = self.state.client_order.clone();
         for ck in client_keys {
             if let Some(client) = self.state.clients.get(ck) {

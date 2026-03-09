@@ -501,6 +501,9 @@ impl Backend for X11Backend {
     fn compositor_set_debug_hud(&mut self, enabled: bool) {
         if let Some(c) = self.compositor.as_mut() { c.set_debug_hud(enabled); }
     }
+    fn compositor_set_transition_mode(&mut self, mode: &str) {
+        if let Some(c) = self.compositor.as_mut() { c.set_transition_mode(mode); }
+    }
     fn compositor_fps(&self) -> f32 {
         self.compositor.as_ref().map_or(0.0, |c| c.frame_stats_fps())
     }
