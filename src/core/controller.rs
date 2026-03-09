@@ -53,6 +53,7 @@ pub trait WMController {
     );
     fn on_button_release(&mut self, backend: &mut dyn Backend, target: HitTarget, time: u32);
     fn on_key_press(&mut self, backend: &mut dyn Backend, keycode: u8, mods: u16, time: u32);
+    fn on_key_release(&mut self, backend: &mut dyn Backend, keycode: u8, mods: u16, time: u32);
     fn on_enter_notify(
         &mut self,
         backend: &mut dyn Backend,

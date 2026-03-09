@@ -1796,6 +1796,11 @@ mod event_source {
                     state: e.state.bits(),
                     time: e.time,
                 }),
+                XEvent::KeyRelease(e) => Some(BackendEvent::KeyRelease {
+                    keycode: e.detail,
+                    state: e.state.bits(),
+                    time: e.time,
+                }),
                 XEvent::MapRequest(e) => Some(BackendEvent::WindowCreated(self.ids.intern(e.window))),
                 XEvent::MapNotify(e) => Some(BackendEvent::WindowMapped(self.ids.intern(e.window))),
                 XEvent::UnmapNotify(e) => Some(BackendEvent::WindowUnmapped(self.ids.intern(e.window))),

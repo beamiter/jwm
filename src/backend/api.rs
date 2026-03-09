@@ -189,6 +189,11 @@ pub enum BackendEvent {
         state: u16,
         time: u32,
     },
+    KeyRelease {
+        keycode: u8,
+        state: u16,
+        time: u32,
+    },
 
     // === 焦点与状态 ===
     EnterNotify {

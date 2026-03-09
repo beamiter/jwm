@@ -46,6 +46,7 @@ use crate::backend::common_define::ColorScheme;
 use crate::backend::common_define::ConfigWindowBits;
 use crate::backend::common_define::EventMaskBits;
 use crate::backend::common_define::SchemeType;
+use crate::backend::common_define::keys;
 use crate::backend::common_define::{KeySym, Mods, MouseButton, StdCursorKind};
 use crate::config::CONFIG;
 use crate::core::layout::LayoutEnum;
@@ -379,6 +380,28 @@ impl WMController for Jwm {
         }
         if let Err(e) = self.on_key_press_internal(backend, keycode, mods) {
             error!("Error handling KeyPress: {:?}", e);
+        }
+    }
+
+    fn on_key_release(&mut self, backend: &mut dyn Backend, keycode: u8, mods: u16, _time: u32) {
+        if !self.overview_active {
+            return;
+        }
+
+        let keysym = match backend.key_ops_mut().keysym_from_keycode(keycode) {
+            Ok(keysym) => keysym,
+            Err(e) => {
+                error!("Error translating KeyRelease keycode {}: {:?}", keycode, e);
+                return;
+            }
+        };
+        let clean_state = self.clean_mask(backend, mods);
+
+        let released_alt = keysym == keys::KEY_Alt_L || keysym == keys::KEY_Alt_R;
+        if released_alt && clean_state.contains(Mods::ALT) {
+            if let Err(e) = self.toggle_overview(backend, &WMArgEnum::Int(0)) {
+                error!("Error handling overview Alt release: {:?}", e);
+            }
         }
     }
 
@@ -897,6 +920,11 @@ impl EventHandler for Jwm {
                 state,
                 time,
             } => self.on_key_press(backend, keycode, state, time),
+            BackendEvent::KeyRelease {
+                keycode,
+                state,
+                time,
+            } => self.on_key_release(backend, keycode, state, time),
             BackendEvent::EnterNotify {
                 window,
                 subwindow: _,
@@ -1484,6 +1512,32 @@ impl Jwm {
 
         let keysym = backend.key_ops_mut().keysym_from_keycode(keycode)?;
         let clean_state = self.clean_mask(backend, state_bits);
+
+        if self.overview_active {
+            let overview_mods = clean_state
+                & (Mods::SHIFT
+                    | Mods::CONTROL
+                    | Mods::ALT
+                    | Mods::SUPER
+                    | Mods::MOD2
+                    | Mods::MOD3
+                    | Mods::MOD5);
+
+            if keysym == keys::KEY_Tab && overview_mods.contains(Mods::ALT) {
+                let direction = if overview_mods.contains(Mods::SHIFT) { -1 } else { 1 };
+                return self.cycle_overview(backend, &WMArgEnum::Int(direction));
+            }
+            if keysym == keys::KEY_Return || keysym == keys::KEY_space {
+                return self.toggle_overview(backend, &WMArgEnum::Int(0));
+            }
+            if keysym == keys::KEY_Escape {
+                self.overview_active = false;
+                self.overview_clients.clear();
+                self.overview_index = 0;
+                backend.compositor_set_overview_mode(false, &[]);
+                return Ok(());
+            }
+        }
 
         let mut matched = false;
         for key_config in self.key_bindings.to_vec().iter() {
