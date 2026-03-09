@@ -45,8 +45,12 @@ void main() {
         texel.rgb *= aa;
     }
 
-    // Dim inactive windows
-    frag_color = vec4(texel.rgb * u_dim, a * u_dim);
+    // Dim inactive windows: darken RGB, keep alpha unchanged for opaque
+    // windows (u_opacity >= 0) so they remain fully opaque and don't
+    // flicker on multi-monitor setups with unsynchronized vblank.
+    // For RGBA windows (u_opacity < 0), dim alpha too for translucency.
+    float out_a = u_opacity >= 0.0 ? a : a * u_dim;
+    frag_color = vec4(texel.rgb * u_dim, out_a);
 }
 "#;
 

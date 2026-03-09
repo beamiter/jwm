@@ -2484,6 +2484,30 @@ impl Compositor {
             );
         }
 
+        // Track render frequency for flicker diagnosis
+        static RENDER_FREQ_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        static RENDER_FREQ_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let epoch = RENDER_FREQ_EPOCH.load(std::sync::atomic::Ordering::Relaxed);
+            if epoch == 0 {
+                RENDER_FREQ_EPOCH.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+            }
+            let fc = RENDER_FREQ_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if now_ms - epoch >= 2000 {
+                let elapsed = (now_ms - epoch) as f64 / 1000.0;
+                log::info!(
+                    "[compositor::render_freq] {:.1} renders/sec (needs_render={}, focused={:?})",
+                    fc as f64 / elapsed, self.needs_render, focused,
+                );
+                RENDER_FREQ_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+                RENDER_FREQ_EPOCH.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
         // Fullscreen unredirect check
         if self.check_fullscreen_unredirect(scene, focused) {
             return false;
@@ -2761,6 +2785,11 @@ impl Compositor {
                     let dim = rule_opacity * fade;
 
                     // detect_client_opacity: if window manages its own alpha, don't force opacity
+                    // For opaque (RGB) windows, set u_opacity = 1.0 so the shader
+                    // uses u_dim alone for both RGB darkening and alpha.  Previously
+                    // u_opacity was set to `dim` which caused alpha to be squared
+                    // (dim * dim), making inactive windows semi-transparent and
+                    // producing visible flickering on multi-monitor setups.
                     let opacity = if wt.has_rgba {
                         if self.detect_client_opacity {
                             -dim
@@ -2768,7 +2797,7 @@ impl Compositor {
                             -1.0f32 * fade
                         }
                     } else {
-                        dim
+                        1.0f32
                     };
 
                     // Feature 4: Apply per-window scale
