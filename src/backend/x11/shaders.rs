@@ -564,6 +564,15 @@ in vec2 v_uv;
 out vec4 frag_color;
 
 void main() {
-    frag_color = vec4(0.0, 0.0, 0.0, 0.6 * u_opacity);
+    vec2 centered = v_uv - vec2(0.5);
+    float dist = length(centered * vec2(1.0, 0.85));
+    float vignette = smoothstep(0.1, 0.85, dist);
+    vec3 top_tint = vec3(0.10, 0.12, 0.16);
+    vec3 bottom_tint = vec3(0.03, 0.04, 0.06);
+    vec3 color = mix(top_tint, bottom_tint, clamp(v_uv.y * 1.15, 0.0, 1.0));
+    // Keep the live scene almost fully hidden in overview so floating windows
+    // underneath don't visually compete with their scaled preview thumbnails.
+    float alpha = (0.93 + vignette * 0.05) * u_opacity;
+    frag_color = vec4(color, alpha);
 }
 "#;

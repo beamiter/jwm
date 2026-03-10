@@ -3854,6 +3854,42 @@ impl Compositor {
             self.gl.bind_vertex_array(Some(self.quad_vao));
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
+            // Draw soft card shadows behind thumbnails.
+            self.gl.use_program(Some(self.shadow_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.shadow_uniforms.projection.as_ref(), false, proj,
+            );
+            self.gl.uniform_1_f32(self.shadow_uniforms.spread.as_ref(), 20.0);
+
+            for entry in &self.overview_windows {
+                let scale = if entry.is_selected { 1.04 } else { 1.0 };
+                let draw_w = entry.target_w * scale;
+                let draw_h = entry.target_h * scale;
+                let draw_x = entry.target_x - (draw_w - entry.target_w) * 0.5;
+                let draw_y = entry.target_y - (draw_h - entry.target_h) * 0.5;
+                let spread = if entry.is_selected { 24.0 } else { 16.0 };
+                let shadow_alpha = if entry.is_selected { 0.30 } else { 0.16 };
+                let shadow_y = if entry.is_selected { 8.0 } else { 5.0 };
+
+                self.gl.uniform_1_f32(self.shadow_uniforms.spread.as_ref(), spread);
+                self.gl.uniform_4_f32(
+                    self.shadow_uniforms.shadow_color.as_ref(),
+                    0.02, 0.03, 0.05, shadow_alpha * self.overview_opacity,
+                );
+                self.gl.uniform_1_f32(self.shadow_uniforms.radius.as_ref(), 18.0);
+                self.gl.uniform_4_f32(
+                    self.shadow_uniforms.rect.as_ref(),
+                    draw_x - spread,
+                    draw_y - spread + shadow_y,
+                    draw_w + 2.0 * spread,
+                    draw_h + 2.0 * spread + shadow_y,
+                );
+                self.gl.uniform_2_f32(
+                    self.shadow_uniforms.size.as_ref(), draw_w, draw_h,
+                );
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
+
             // Draw window thumbnails
             self.gl.use_program(Some(self.program));
             self.gl.uniform_matrix_4_f32_slice(
@@ -3867,49 +3903,59 @@ impl Compositor {
                     None => continue,
                 };
 
-                let radius = 8.0; // fixed rounded corners for thumbnails
+                let scale = if entry.is_selected { 1.04 } else { 1.0 };
+                let draw_w = entry.target_w * scale;
+                let draw_h = entry.target_h * scale;
+                let draw_x = entry.target_x - (draw_w - entry.target_w) * 0.5;
+                let draw_y = entry.target_y - (draw_h - entry.target_h) * 0.5;
+                let radius = 18.0;
                 self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
                 self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
-                self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), if entry.is_selected { 1.0 } else { 0.7 });
+                self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), if entry.is_selected { 1.02 } else { 0.84 });
                 self.gl.uniform_2_f32(
-                    self.win_uniforms.size.as_ref(), entry.target_w, entry.target_h,
+                    self.win_uniforms.size.as_ref(), draw_w, draw_h,
                 );
                 self.gl.uniform_4_f32(
                     self.win_uniforms.rect.as_ref(),
-                    entry.target_x, entry.target_y, entry.target_w, entry.target_h,
+                    draw_x, draw_y, draw_w, draw_h,
                 );
                 self.gl.active_texture(glow::TEXTURE0);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-                // Draw highlight border for selected window
-                if entry.is_selected {
-                    self.gl.use_program(Some(self.border_program));
-                    self.gl.uniform_matrix_4_f32_slice(
-                        self.border_uniforms.projection.as_ref(), false, proj,
-                    );
-                    self.gl.uniform_1_f32(self.border_uniforms.border_width.as_ref(), 3.0);
-                    self.gl.uniform_4_f32(
-                        self.border_uniforms.border_color.as_ref(),
-                        0.4, 0.6, 0.9, 1.0,
-                    );
-                    self.gl.uniform_1_f32(self.border_uniforms.radius.as_ref(), radius);
-                    self.gl.uniform_2_f32(
-                        self.border_uniforms.size.as_ref(), entry.target_w, entry.target_h,
-                    );
-                    self.gl.uniform_4_f32(
-                        self.border_uniforms.rect.as_ref(),
-                        entry.target_x, entry.target_y, entry.target_w, entry.target_h,
-                    );
-                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                self.gl.use_program(Some(self.border_program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.border_uniforms.projection.as_ref(), false, proj,
+                );
+                self.gl.uniform_1_f32(
+                    self.border_uniforms.border_width.as_ref(),
+                    if entry.is_selected { 3.5 } else { 1.25 },
+                );
+                let border_color = if entry.is_selected {
+                    [0.98, 0.72, 0.36, 0.96]
+                } else {
+                    [1.0, 1.0, 1.0, 0.16]
+                };
+                self.gl.uniform_4_f32(
+                    self.border_uniforms.border_color.as_ref(),
+                    border_color[0], border_color[1], border_color[2], border_color[3] * self.overview_opacity,
+                );
+                self.gl.uniform_1_f32(self.border_uniforms.radius.as_ref(), radius);
+                self.gl.uniform_2_f32(
+                    self.border_uniforms.size.as_ref(), draw_w, draw_h,
+                );
+                self.gl.uniform_4_f32(
+                    self.border_uniforms.rect.as_ref(),
+                    draw_x, draw_y, draw_w, draw_h,
+                );
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-                    // Switch back to window program
-                    self.gl.use_program(Some(self.program));
-                    self.gl.uniform_matrix_4_f32_slice(
-                        self.win_uniforms.projection.as_ref(), false, proj,
-                    );
-                    self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
-                }
+                // Switch back to window program for the next thumbnail.
+                self.gl.use_program(Some(self.program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.win_uniforms.projection.as_ref(), false, proj,
+                );
+                self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
             }
 
             self.gl.bind_vertex_array(None);

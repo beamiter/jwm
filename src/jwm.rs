@@ -5404,23 +5404,43 @@ impl Jwm {
             } else {
                 return Ok(());
             };
-            let gap = 20.0f32;
             let n = visible.len();
-            let cols = (n as f32).sqrt().ceil() as usize;
-            let rows = (n + cols - 1) / cols;
-            let cell_w = (screen_w - gap * (cols as f32 + 1.0)) / cols as f32;
-            let cell_h = (screen_h - gap * (rows as f32 + 1.0)) / rows as f32;
+            let outer_margin = (screen_w.min(screen_h) * 0.075).clamp(36.0, 92.0);
+            let gap = (screen_w.min(screen_h) * 0.03).clamp(18.0, 36.0);
+            let cols = ((n as f32 * (screen_w / screen_h.max(1.0))).sqrt().ceil() as usize)
+                .max(1)
+                .min(n);
+            let rows = n.div_ceil(cols);
+
+            let avail_w = (screen_w - outer_margin * 2.0 - gap * (cols.saturating_sub(1) as f32)).max(1.0);
+            let avail_h = (screen_h - outer_margin * 2.0 - gap * (rows.saturating_sub(1) as f32)).max(1.0);
+            let cell_w = avail_w / cols as f32;
+            let cell_h = avail_h / rows as f32;
+            let grid_w = cell_w * cols as f32 + gap * (cols.saturating_sub(1) as f32);
+            let grid_h = cell_h * rows as f32 + gap * (rows.saturating_sub(1) as f32);
+            let grid_x = mon_x + (screen_w - grid_w) * 0.5;
+            let grid_y = mon_y + (screen_h - grid_h) * 0.5;
 
             let mut layout: Vec<(WindowId, f32, f32, f32, f32, bool)> = Vec::new();
             for (i, &ck) in visible.iter().enumerate() {
                 let col = i % cols;
                 let row = i / cols;
-                let x = mon_x + gap + col as f32 * (cell_w + gap);
-                let y = mon_y + gap + row as f32 * (cell_h + gap);
+                let cell_x = grid_x + col as f32 * (cell_w + gap);
+                let cell_y = grid_y + row as f32 * (cell_h + gap);
 
                 if let Some(client) = self.state.clients.get(ck) {
+                    let frame_pad = (cell_w.min(cell_h) * 0.08).clamp(12.0, 24.0);
+                    let inner_w = (cell_w - frame_pad * 2.0).max(1.0);
+                    let inner_h = (cell_h - frame_pad * 2.0).max(1.0);
+                    let client_w = client.geometry.w.max(1) as f32;
+                    let client_h = client.geometry.h.max(1) as f32;
+                    let scale = (inner_w / client_w).min(inner_h / client_h);
+                    let thumb_w = (client_w * scale).max(1.0);
+                    let thumb_h = (client_h * scale).max(1.0);
+                    let x = cell_x + (cell_w - thumb_w) * 0.5;
+                    let y = cell_y + (cell_h - thumb_h) * 0.5;
                     let is_selected = i == 0;
-                    layout.push((client.win, x, y, cell_w, cell_h, is_selected));
+                    layout.push((client.win, x, y, thumb_w, thumb_h, is_selected));
                 }
             }
 
