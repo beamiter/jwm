@@ -330,6 +330,9 @@ pub(super) struct Compositor {
     /// fallback produces garbled textures for mismatched visuals.
     tfp_visual_configs: HashMap<u32, (x11::glx::GLXFBConfig, bool)>,
     overlay_window: u32,
+    /// Window that owns the _NET_WM_CM_Sn selection, advertising this
+    /// compositor to other clients (screenshot tools, etc.).
+    cm_selection_owner: u32,
     glx_drawable: x11::glx::GLXDrawable,
     gl: glow::Context,
     program: glow::Program,
@@ -571,6 +574,8 @@ impl Drop for Compositor {
         for w in wins {
             self.remove_window(w);
         }
+        // Destroy the _NET_WM_CM_Sn selection owner window (releases ownership)
+        let _ = self.conn.destroy_window(self.cm_selection_owner);
         // Undo the MANUAL redirect so the X server renders windows normally again
         let _ = self.conn.composite_unredirect_subwindows(
             self.root,
@@ -1305,6 +1310,41 @@ impl Compositor {
             );
         }
 
+        // Claim the _NET_WM_CM_Sn selection so that other clients (screenshot
+        // tools, Electron apps like Feishu/Lark, etc.) know a compositing
+        // manager is active and don't try to composite the screen themselves.
+        let cm_selection_owner = {
+            let sel_name = format!("_NET_WM_CM_S{}", screen_num);
+            let cm_atom = conn
+                .intern_atom(false, sel_name.as_bytes())
+                .map_err(|e| format!("intern {sel_name}: {e}"))?
+                .reply()
+                .map_err(|e| format!("intern reply {sel_name}: {e}"))?
+                .atom;
+            let sel_win = conn
+                .generate_id()
+                .map_err(|e| format!("generate_id for CM selection owner: {e}"))?;
+            conn.create_window(
+                0, // copy_from_parent depth
+                sel_win,
+                root,
+                0, 0, 1, 1, // off-screen 1x1
+                0,
+                xproto::WindowClass::INPUT_ONLY,
+                0, // copy_from_parent visual
+                &xproto::CreateWindowAux::default(),
+            )
+            .map_err(|e| format!("create CM selection owner window: {e}"))?;
+            conn.set_selection_owner(sel_win, cm_atom, x11rb::CURRENT_TIME)
+                .map_err(|e| format!("set_selection_owner {sel_name}: {e}"))?;
+            let _ = conn.flush();
+            log::info!(
+                "compositor: claimed {} selection (owner=0x{:x})",
+                sel_name, sel_win
+            );
+            sel_win
+        };
+
         // Read compositor visual settings from config
         let cfg = crate::config::CONFIG.load();
         let behavior = cfg.behavior();
@@ -1390,6 +1430,7 @@ impl Compositor {
             fbconfig_rgb,
             tfp_visual_configs,
             overlay_window,
+            cm_selection_owner,
             glx_drawable,
             gl,
             program,
