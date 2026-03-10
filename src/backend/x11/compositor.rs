@@ -4443,7 +4443,7 @@ impl Compositor {
                     draw_x, draw_y, draw_w, draw_h,
                 );
                 self.gl.active_texture(glow::TEXTURE0);
-                self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
                 // Use LINEAR filtering for downscaled thumbnails so the
                 // preview looks like a properly shrunk version of the window
                 // instead of a blocky/solid-color mess (NEAREST skips most
