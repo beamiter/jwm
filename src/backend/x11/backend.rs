@@ -1157,6 +1157,9 @@ mod adapter {
         if (bits & EventMaskBits::SUBSTRUCTURE_NOTIFY.bits()) != 0 {
             m |= EventMask::SUBSTRUCTURE_NOTIFY;
         }
+        if (bits & EventMaskBits::KEY_RELEASE.bits()) != 0 {
+            m |= EventMask::KEY_RELEASE;
+        }
         m
     }
 }

@@ -384,6 +384,10 @@ impl WMController for Jwm {
     }
 
     fn on_key_release(&mut self, backend: &mut dyn Backend, keycode: u8, mods: u16, _time: u32) {
+        let debug_keys = std::env::var("JWM_DEBUG_KEYS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         if !self.overview_active {
             return;
         }
@@ -395,10 +399,21 @@ impl WMController for Jwm {
                 return;
             }
         };
-        let clean_state = self.clean_mask(backend, mods);
+
+        if debug_keys {
+            let mods_clean = backend.key_ops().clean_mods(mods);
+            info!(
+                "[key-release] keycode={} keysym=0x{:x} mods_raw=0x{:x} mods_clean=0x{:x} overview_active={}",
+                keycode,
+                keysym,
+                mods,
+                mods_clean.bits(),
+                self.overview_active
+            );
+        }
 
         let released_alt = keysym == keys::KEY_Alt_L || keysym == keys::KEY_Alt_R;
-        if released_alt && clean_state.contains(Mods::ALT) {
+        if released_alt {
             if let Err(e) = self.toggle_overview(backend, &WMArgEnum::Int(0)) {
                 error!("Error handling overview Alt release: {:?}", e);
             }
@@ -7411,6 +7426,7 @@ impl Jwm {
             | EventMaskBits::SUBSTRUCTURE_NOTIFY
             | EventMaskBits::STRUCTURE_NOTIFY
             | EventMaskBits::BUTTON_PRESS
+            | EventMaskBits::KEY_RELEASE
             | EventMaskBits::POINTER_MOTION
             | EventMaskBits::ENTER_WINDOW
             | EventMaskBits::LEAVE_WINDOW
