@@ -255,6 +255,7 @@ pub struct Jwm {
     pub overview_active: bool,
     pub overview_index: usize,
     pub overview_clients: Vec<ClientKey>,
+    pub overview_confirm_on_alt_release: bool,
 
     /// Magnifier state
     pub magnifier_enabled: bool,
@@ -403,17 +404,19 @@ impl WMController for Jwm {
         if debug_keys {
             let mods_clean = backend.key_ops().clean_mods(mods);
             info!(
-                "[key-release] keycode={} keysym=0x{:x} mods_raw=0x{:x} mods_clean=0x{:x} overview_active={}",
+                "[key-release] keycode={} keysym=0x{:x} mods_raw=0x{:x} mods_clean=0x{:x} overview_active={} confirm_on_alt_release={}",
                 keycode,
                 keysym,
                 mods,
                 mods_clean.bits(),
-                self.overview_active
+                self.overview_active,
+                self.overview_confirm_on_alt_release
             );
         }
 
         let released_alt = keysym == keys::KEY_Alt_L || keysym == keys::KEY_Alt_R;
-        if released_alt {
+        if released_alt && self.overview_confirm_on_alt_release {
+            self.overview_confirm_on_alt_release = false;
             if let Err(e) = self.toggle_overview(backend, &WMArgEnum::Int(0)) {
                 error!("Error handling overview Alt release: {:?}", e);
             }
@@ -1016,6 +1019,7 @@ impl EventHandler for Jwm {
         self.process_commands_from_status_bar(backend);
         self.process_ipc(backend);
         self.check_config_reload(backend);
+        self.maybe_finish_overview_on_alt_release(backend);
         self.flush_pending_bar_updates();
         self.tick_animations(backend);
         backend.window_ops().flush()?;
@@ -1317,6 +1321,7 @@ impl Jwm {
             overview_active: false,
             overview_index: 0,
             overview_clients: Vec::new(),
+            overview_confirm_on_alt_release: false,
             magnifier_enabled: false,
         };
         if let Ok((x, y)) = backend.input_ops().get_pointer_position() {
@@ -1540,15 +1545,27 @@ impl Jwm {
 
             if keysym == keys::KEY_Tab && overview_mods.contains(Mods::ALT) {
                 let direction = if overview_mods.contains(Mods::SHIFT) { -1 } else { 1 };
+                self.overview_confirm_on_alt_release = true;
+                if debug_keys {
+                    info!(
+                        "[overview] cycle via Alt+Tab keysym=0x{:x} mods=0x{:x} direction={} confirm_on_alt_release={}",
+                        keysym,
+                        overview_mods.bits(),
+                        direction,
+                        self.overview_confirm_on_alt_release
+                    );
+                }
                 return self.cycle_overview(backend, &WMArgEnum::Int(direction));
             }
             if keysym == keys::KEY_Return || keysym == keys::KEY_space {
+                self.overview_confirm_on_alt_release = false;
                 return self.toggle_overview(backend, &WMArgEnum::Int(0));
             }
             if keysym == keys::KEY_Escape {
                 self.overview_active = false;
                 self.overview_clients.clear();
                 self.overview_index = 0;
+                self.overview_confirm_on_alt_release = false;
                 backend.compositor_set_overview_mode(false, &[]);
                 return Ok(());
             }
@@ -1580,6 +1597,23 @@ impl Jwm {
                     );
                 }
                 if let Some(func) = key_config.func_opt {
+                    let alt_tab_overview_activation = !self.overview_active
+                        && std::ptr::fn_addr_eq(func, Jwm::toggle_overview as WMFuncType)
+                        && keysym == keys::KEY_Tab
+                        && clean_state.contains(Mods::ALT);
+
+                    if alt_tab_overview_activation {
+                        self.overview_confirm_on_alt_release = true;
+                        if debug_keys {
+                            info!(
+                                "[overview] activate via Alt+Tab keysym=0x{:x} mods=0x{:x} confirm_on_alt_release={}",
+                                keysym,
+                                clean_state.bits(),
+                                self.overview_confirm_on_alt_release
+                            );
+                        }
+                    }
+
                     if let Err(e) = func(self, backend, &key_config.arg) {
                         error!("Error executing keyboard shortcut: {:?}", e);
                     }
@@ -5337,6 +5371,7 @@ impl Jwm {
                 self.focus(backend, Some(client_key))?;
             }
             self.overview_active = false;
+            self.overview_confirm_on_alt_release = false;
             backend.compositor_set_overview_mode(false, &[]);
         } else {
             // Start overview: collect visible windows on current monitor
@@ -5395,6 +5430,50 @@ impl Jwm {
             backend.compositor_set_overview_mode(true, &layout);
         }
         Ok(())
+    }
+
+    fn maybe_finish_overview_on_alt_release(&mut self, backend: &mut dyn Backend) {
+        let debug_keys = std::env::var("JWM_DEBUG_KEYS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        if !self.overview_active || !self.overview_confirm_on_alt_release {
+            return;
+        }
+
+        let Ok((_, _, raw_mods, _)) = backend.input_ops().query_pointer_root() else {
+            if debug_keys {
+                info!("[overview] poll-alt-release query_pointer_root failed while waiting for Alt release");
+            }
+            return;
+        };
+
+        let clean_mods = self.clean_mask(backend, raw_mods);
+        if debug_keys {
+            info!(
+                "[overview] poll-alt-release raw_mods=0x{:x} clean_mods=0x{:x} overview_active={} confirm_on_alt_release={} alt_held={}",
+                raw_mods,
+                clean_mods.bits(),
+                self.overview_active,
+                self.overview_confirm_on_alt_release,
+                clean_mods.contains(Mods::ALT)
+            );
+        }
+        if clean_mods.contains(Mods::ALT) {
+            return;
+        }
+
+        self.overview_confirm_on_alt_release = false;
+        if debug_keys {
+            info!(
+                "[overview] poll-alt-release closing overview at index={} client_count={}",
+                self.overview_index,
+                self.overview_clients.len()
+            );
+        }
+        if let Err(e) = self.toggle_overview(backend, &WMArgEnum::Int(0)) {
+            error!("Error finishing overview after Alt release poll: {:?}", e);
+        }
     }
 
     pub fn cycle_overview(
