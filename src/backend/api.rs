@@ -712,7 +712,7 @@ pub trait Backend: Send {
     fn compositor_set_magnifier(&mut self, _enabled: bool) {}
 
     /// Set overview mode for Alt-Tab window preview.
-    fn compositor_set_overview_mode(&mut self, _active: bool, _windows: &[(WindowId, f32, f32, f32, f32, bool)]) {}
+    fn compositor_set_overview_mode(&mut self, _active: bool, _windows: &[(WindowId, f32, f32, f32, f32, bool, String)]) {}
 
     /// Update overview selection highlight.
     fn compositor_set_overview_selection(&mut self, _window: WindowId) {}

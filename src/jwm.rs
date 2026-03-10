@@ -5421,7 +5421,7 @@ impl Jwm {
             let grid_x = mon_x + (screen_w - grid_w) * 0.5;
             let grid_y = mon_y + (screen_h - grid_h) * 0.5;
 
-            let mut layout: Vec<(WindowId, f32, f32, f32, f32, bool)> = Vec::new();
+            let mut layout: Vec<(WindowId, f32, f32, f32, f32, bool, String)> = Vec::new();
             for (i, &ck) in visible.iter().enumerate() {
                 let col = i % cols;
                 let row = i / cols;
@@ -5429,7 +5429,7 @@ impl Jwm {
                 let cell_y = grid_y + row as f32 * (cell_h + gap);
 
                 if let Some(client) = self.state.clients.get(ck) {
-                    let frame_pad = (cell_w.min(cell_h) * 0.08).clamp(12.0, 24.0);
+                    let frame_pad = (cell_w.min(cell_h) * 0.12).clamp(24.0, 48.0);
                     let inner_w = (cell_w - frame_pad * 2.0).max(1.0);
                     let inner_h = (cell_h - frame_pad * 2.0).max(1.0);
                     let client_w = client.geometry.w.max(1) as f32;
@@ -5440,7 +5440,16 @@ impl Jwm {
                     let x = cell_x + (cell_w - thumb_w) * 0.5;
                     let y = cell_y + (cell_h - thumb_h) * 0.5;
                     let is_selected = i == 0;
-                    layout.push((client.win, x, y, thumb_w, thumb_h, is_selected));
+                    let title = if client.name.is_empty() {
+                        client.class.clone()
+                    } else if !client.class.is_empty()
+                        && !client.name.eq_ignore_ascii_case(&client.class)
+                    {
+                        format!("{} [{}]", client.name, client.class)
+                    } else {
+                        client.name.clone()
+                    };
+                    layout.push((client.win, x, y, thumb_w, thumb_h, is_selected, title));
                 }
             }
 

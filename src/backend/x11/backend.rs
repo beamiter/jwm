@@ -570,11 +570,11 @@ impl Backend for X11Backend {
         if let Some(c) = self.compositor.as_mut() { c.set_magnifier(enabled); }
     }
 
-    fn compositor_set_overview_mode(&mut self, active: bool, windows: &[(WindowId, f32, f32, f32, f32, bool)]) {
+    fn compositor_set_overview_mode(&mut self, active: bool, windows: &[(WindowId, f32, f32, f32, f32, bool, String)]) {
         if let Some(c) = self.compositor.as_mut() {
-            let x11_windows: Vec<(u32, f32, f32, f32, f32, bool)> = windows.iter()
-                .filter_map(|(wid, x, y, w, h, sel)| {
-                    self.ids.x11(*wid).ok().map(|x11w| (x11w, *x, *y, *w, *h, *sel))
+            let x11_windows: Vec<(u32, f32, f32, f32, f32, bool, String)> = windows.iter()
+                .filter_map(|(wid, x, y, w, h, sel, title)| {
+                    self.ids.x11(*wid).ok().map(|x11w| (x11w, *x, *y, *w, *h, *sel, title.clone()))
                 })
                 .collect();
             c.set_overview_mode(active, x11_windows);

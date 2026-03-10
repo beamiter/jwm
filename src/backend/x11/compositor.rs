@@ -235,6 +235,10 @@ struct OverviewEntry {
     target_w: f32,
     target_h: f32,
     is_selected: bool,
+    snapshot_texture: Option<glow::Texture>,
+    title: String,
+    /// (texture, width, height) for the rendered title label.
+    title_texture: Option<(glow::Texture, u32, u32)>,
 }
 
 /// Single particle for close animation.
@@ -522,6 +526,7 @@ unsafe impl Send for Compositor {}
 
 impl Drop for Compositor {
     fn drop(&mut self) {
+        self.clear_overview_snapshots();
         unsafe {
             self.gl.delete_program(self.program);
             self.gl.delete_program(self.shadow_program);
@@ -2250,6 +2255,442 @@ impl Compositor {
         }
     }
 
+    fn clear_overview_snapshots(&mut self) {
+        unsafe {
+            for entry in &mut self.overview_windows {
+                if let Some(texture) = entry.snapshot_texture.take() {
+                    self.gl.delete_texture(texture);
+                }
+            }
+        }
+    }
+
+    fn clear_overview_title_textures(&mut self) {
+        unsafe {
+            for entry in &mut self.overview_windows {
+                if let Some((texture, _, _)) = entry.title_texture.take() {
+                    self.gl.delete_texture(texture);
+                }
+            }
+        }
+    }
+
+    /// Render a title string into an RGBA pixel buffer using a simple embedded bitmap font.
+    /// Returns (pixels, width, height) or None if the title is empty.
+    fn render_title_to_pixels(title: &str, max_width: u32) -> Option<(Vec<u8>, u32, u32)> {
+        if title.is_empty() {
+            return None;
+        }
+
+        // Simple 6x10 bitmap font for printable ASCII (32..=126).
+        // Each character is 6 columns x 10 rows, stored as 10 bytes (1 byte per row,
+        // top 6 bits used). Non-ASCII characters are rendered as '?'.
+        #[rustfmt::skip]
+        const FONT_6X10: [u8; 95 * 10] = [
+            // Space (32)
+            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+            // ! (33)
+            0x20,0x20,0x20,0x20,0x20,0x20,0x00,0x20,0x00,0x00,
+            // " (34)
+            0x50,0x50,0x50,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+            // # (35)
+            0x50,0x50,0xF8,0x50,0xF8,0x50,0x50,0x00,0x00,0x00,
+            // $ (36)
+            0x20,0x78,0xA0,0x70,0x28,0xF0,0x20,0x00,0x00,0x00,
+            // % (37)
+            0xC0,0xC8,0x10,0x20,0x40,0x98,0x18,0x00,0x00,0x00,
+            // & (38)
+            0x60,0x90,0xA0,0x40,0xA8,0x90,0x68,0x00,0x00,0x00,
+            // ' (39)
+            0x60,0x20,0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+            // ( (40)
+            0x10,0x20,0x40,0x40,0x40,0x20,0x10,0x00,0x00,0x00,
+            // ) (41)
+            0x40,0x20,0x10,0x10,0x10,0x20,0x40,0x00,0x00,0x00,
+            // * (42)
+            0x00,0x20,0xA8,0x70,0xA8,0x20,0x00,0x00,0x00,0x00,
+            // + (43)
+            0x00,0x20,0x20,0xF8,0x20,0x20,0x00,0x00,0x00,0x00,
+            // , (44)
+            0x00,0x00,0x00,0x00,0x00,0x60,0x20,0x40,0x00,0x00,
+            // - (45)
+            0x00,0x00,0x00,0xF8,0x00,0x00,0x00,0x00,0x00,0x00,
+            // . (46)
+            0x00,0x00,0x00,0x00,0x00,0x60,0x60,0x00,0x00,0x00,
+            // / (47)
+            0x00,0x08,0x10,0x20,0x40,0x80,0x00,0x00,0x00,0x00,
+            // 0 (48)
+            0x70,0x88,0x98,0xA8,0xC8,0x88,0x70,0x00,0x00,0x00,
+            // 1 (49)
+            0x20,0x60,0x20,0x20,0x20,0x20,0x70,0x00,0x00,0x00,
+            // 2 (50)
+            0x70,0x88,0x08,0x10,0x20,0x40,0xF8,0x00,0x00,0x00,
+            // 3 (51)
+            0xF8,0x10,0x20,0x10,0x08,0x88,0x70,0x00,0x00,0x00,
+            // 4 (52)
+            0x10,0x30,0x50,0x90,0xF8,0x10,0x10,0x00,0x00,0x00,
+            // 5 (53)
+            0xF8,0x80,0xF0,0x08,0x08,0x88,0x70,0x00,0x00,0x00,
+            // 6 (54)
+            0x30,0x40,0x80,0xF0,0x88,0x88,0x70,0x00,0x00,0x00,
+            // 7 (55)
+            0xF8,0x08,0x10,0x20,0x40,0x40,0x40,0x00,0x00,0x00,
+            // 8 (56)
+            0x70,0x88,0x88,0x70,0x88,0x88,0x70,0x00,0x00,0x00,
+            // 9 (57)
+            0x70,0x88,0x88,0x78,0x08,0x10,0x60,0x00,0x00,0x00,
+            // : (58)
+            0x00,0x60,0x60,0x00,0x60,0x60,0x00,0x00,0x00,0x00,
+            // ; (59)
+            0x00,0x60,0x60,0x00,0x60,0x20,0x40,0x00,0x00,0x00,
+            // < (60)
+            0x10,0x20,0x40,0x80,0x40,0x20,0x10,0x00,0x00,0x00,
+            // = (61)
+            0x00,0x00,0xF8,0x00,0xF8,0x00,0x00,0x00,0x00,0x00,
+            // > (62)
+            0x40,0x20,0x10,0x08,0x10,0x20,0x40,0x00,0x00,0x00,
+            // ? (63)
+            0x70,0x88,0x08,0x10,0x20,0x00,0x20,0x00,0x00,0x00,
+            // @ (64)
+            0x70,0x88,0xB8,0xA8,0xB8,0x80,0x70,0x00,0x00,0x00,
+            // A (65)
+            0x70,0x88,0x88,0xF8,0x88,0x88,0x88,0x00,0x00,0x00,
+            // B (66)
+            0xF0,0x88,0x88,0xF0,0x88,0x88,0xF0,0x00,0x00,0x00,
+            // C (67)
+            0x70,0x88,0x80,0x80,0x80,0x88,0x70,0x00,0x00,0x00,
+            // D (68)
+            0xE0,0x90,0x88,0x88,0x88,0x90,0xE0,0x00,0x00,0x00,
+            // E (69)
+            0xF8,0x80,0x80,0xF0,0x80,0x80,0xF8,0x00,0x00,0x00,
+            // F (70)
+            0xF8,0x80,0x80,0xF0,0x80,0x80,0x80,0x00,0x00,0x00,
+            // G (71)
+            0x70,0x88,0x80,0xB8,0x88,0x88,0x78,0x00,0x00,0x00,
+            // H (72)
+            0x88,0x88,0x88,0xF8,0x88,0x88,0x88,0x00,0x00,0x00,
+            // I (73)
+            0x70,0x20,0x20,0x20,0x20,0x20,0x70,0x00,0x00,0x00,
+            // J (74)
+            0x38,0x10,0x10,0x10,0x10,0x90,0x60,0x00,0x00,0x00,
+            // K (75)
+            0x88,0x90,0xA0,0xC0,0xA0,0x90,0x88,0x00,0x00,0x00,
+            // L (76)
+            0x80,0x80,0x80,0x80,0x80,0x80,0xF8,0x00,0x00,0x00,
+            // M (77)
+            0x88,0xD8,0xA8,0xA8,0x88,0x88,0x88,0x00,0x00,0x00,
+            // N (78)
+            0x88,0xC8,0xA8,0x98,0x88,0x88,0x88,0x00,0x00,0x00,
+            // O (79)
+            0x70,0x88,0x88,0x88,0x88,0x88,0x70,0x00,0x00,0x00,
+            // P (80)
+            0xF0,0x88,0x88,0xF0,0x80,0x80,0x80,0x00,0x00,0x00,
+            // Q (81)
+            0x70,0x88,0x88,0x88,0xA8,0x90,0x68,0x00,0x00,0x00,
+            // R (82)
+            0xF0,0x88,0x88,0xF0,0xA0,0x90,0x88,0x00,0x00,0x00,
+            // S (83)
+            0x78,0x80,0x80,0x70,0x08,0x08,0xF0,0x00,0x00,0x00,
+            // T (84)
+            0xF8,0x20,0x20,0x20,0x20,0x20,0x20,0x00,0x00,0x00,
+            // U (85)
+            0x88,0x88,0x88,0x88,0x88,0x88,0x70,0x00,0x00,0x00,
+            // V (86)
+            0x88,0x88,0x88,0x88,0x88,0x50,0x20,0x00,0x00,0x00,
+            // W (87)
+            0x88,0x88,0x88,0xA8,0xA8,0xD8,0x88,0x00,0x00,0x00,
+            // X (88)
+            0x88,0x88,0x50,0x20,0x50,0x88,0x88,0x00,0x00,0x00,
+            // Y (89)
+            0x88,0x88,0x50,0x20,0x20,0x20,0x20,0x00,0x00,0x00,
+            // Z (90)
+            0xF8,0x08,0x10,0x20,0x40,0x80,0xF8,0x00,0x00,0x00,
+            // [ (91)
+            0x70,0x40,0x40,0x40,0x40,0x40,0x70,0x00,0x00,0x00,
+            // \ (92)
+            0x00,0x80,0x40,0x20,0x10,0x08,0x00,0x00,0x00,0x00,
+            // ] (93)
+            0x70,0x10,0x10,0x10,0x10,0x10,0x70,0x00,0x00,0x00,
+            // ^ (94)
+            0x20,0x50,0x88,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+            // _ (95)
+            0x00,0x00,0x00,0x00,0x00,0x00,0xF8,0x00,0x00,0x00,
+            // ` (96)
+            0x40,0x20,0x10,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+            // a (97)
+            0x00,0x00,0x70,0x08,0x78,0x88,0x78,0x00,0x00,0x00,
+            // b (98)
+            0x80,0x80,0xB0,0xC8,0x88,0x88,0xF0,0x00,0x00,0x00,
+            // c (99)
+            0x00,0x00,0x70,0x80,0x80,0x88,0x70,0x00,0x00,0x00,
+            // d (100)
+            0x08,0x08,0x68,0x98,0x88,0x88,0x78,0x00,0x00,0x00,
+            // e (101)
+            0x00,0x00,0x70,0x88,0xF8,0x80,0x70,0x00,0x00,0x00,
+            // f (102)
+            0x30,0x48,0x40,0xE0,0x40,0x40,0x40,0x00,0x00,0x00,
+            // g (103)
+            0x00,0x00,0x78,0x88,0x78,0x08,0x70,0x00,0x00,0x00,
+            // h (104)
+            0x80,0x80,0xB0,0xC8,0x88,0x88,0x88,0x00,0x00,0x00,
+            // i (105)
+            0x20,0x00,0x60,0x20,0x20,0x20,0x70,0x00,0x00,0x00,
+            // j (106)
+            0x10,0x00,0x30,0x10,0x10,0x90,0x60,0x00,0x00,0x00,
+            // k (107)
+            0x80,0x80,0x90,0xA0,0xC0,0xA0,0x90,0x00,0x00,0x00,
+            // l (108)
+            0x60,0x20,0x20,0x20,0x20,0x20,0x70,0x00,0x00,0x00,
+            // m (109)
+            0x00,0x00,0xD0,0xA8,0xA8,0x88,0x88,0x00,0x00,0x00,
+            // n (110)
+            0x00,0x00,0xB0,0xC8,0x88,0x88,0x88,0x00,0x00,0x00,
+            // o (111)
+            0x00,0x00,0x70,0x88,0x88,0x88,0x70,0x00,0x00,0x00,
+            // p (112)
+            0x00,0x00,0xF0,0x88,0xF0,0x80,0x80,0x00,0x00,0x00,
+            // q (113)
+            0x00,0x00,0x68,0x98,0x78,0x08,0x08,0x00,0x00,0x00,
+            // r (114)
+            0x00,0x00,0xB0,0xC8,0x80,0x80,0x80,0x00,0x00,0x00,
+            // s (115)
+            0x00,0x00,0x78,0x80,0x70,0x08,0xF0,0x00,0x00,0x00,
+            // t (116)
+            0x40,0x40,0xE0,0x40,0x40,0x48,0x30,0x00,0x00,0x00,
+            // u (117)
+            0x00,0x00,0x88,0x88,0x88,0x98,0x68,0x00,0x00,0x00,
+            // v (118)
+            0x00,0x00,0x88,0x88,0x88,0x50,0x20,0x00,0x00,0x00,
+            // w (119)
+            0x00,0x00,0x88,0x88,0xA8,0xA8,0x50,0x00,0x00,0x00,
+            // x (120)
+            0x00,0x00,0x88,0x50,0x20,0x50,0x88,0x00,0x00,0x00,
+            // y (121)
+            0x00,0x00,0x88,0x88,0x78,0x08,0x70,0x00,0x00,0x00,
+            // z (122)
+            0x00,0x00,0xF8,0x10,0x20,0x40,0xF8,0x00,0x00,0x00,
+            // { (123)
+            0x10,0x20,0x20,0x40,0x20,0x20,0x10,0x00,0x00,0x00,
+            // | (124)
+            0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x00,0x00,0x00,
+            // } (125)
+            0x40,0x20,0x20,0x10,0x20,0x20,0x40,0x00,0x00,0x00,
+            // ~ (126)
+            0x00,0x40,0xA8,0x10,0x00,0x00,0x00,0x00,0x00,0x00,
+        ];
+
+        const GLYPH_W: u32 = 6;
+        const GLYPH_H: u32 = 10;
+        const SCALE: u32 = 2; // render at 2x for readability
+        const CHAR_W: u32 = GLYPH_W * SCALE;
+        const CHAR_H: u32 = GLYPH_H * SCALE;
+        const PAD_X: u32 = 8;  // horizontal padding
+        const PAD_Y: u32 = 4;  // vertical padding
+
+        // Truncate to fit max_width
+        let max_chars = ((max_width.saturating_sub(PAD_X * 2)) / CHAR_W) as usize;
+        if max_chars == 0 {
+            return None;
+        }
+
+        let display_title: String = title
+            .chars()
+            .take(max_chars)
+            .map(|c| if c.is_ascii_graphic() || c == ' ' { c } else { '?' })
+            .collect();
+
+        let text_w = display_title.len() as u32 * CHAR_W;
+        let img_w = text_w + PAD_X * 2;
+        let img_h = CHAR_H + PAD_Y * 2;
+        let mut pixels = vec![0u8; (img_w * img_h * 4) as usize];
+
+        // Draw semi-transparent dark background (rounded pill shape)
+        for py in 0..img_h {
+            for px in 0..img_w {
+                let idx = ((py * img_w + px) * 4) as usize;
+                // Simple rounded rect: check if inside pill shape
+                let radius = (img_h / 2) as f32;
+                let cx = px as f32;
+                let cy = py as f32;
+                let inside = if cx < radius {
+                    let dx = radius - cx;
+                    let dy = cy - radius;
+                    dx * dx + dy * dy <= radius * radius
+                } else if cx > (img_w as f32 - radius) {
+                    let dx = cx - (img_w as f32 - radius);
+                    let dy = cy - radius;
+                    dx * dx + dy * dy <= radius * radius
+                } else {
+                    true
+                };
+                if inside {
+                    pixels[idx] = 15;     // R
+                    pixels[idx + 1] = 15; // G
+                    pixels[idx + 2] = 20; // B
+                    pixels[idx + 3] = 200; // A (semi-transparent dark)
+                }
+            }
+        }
+
+        // Draw text glyphs
+        for (ci, ch) in display_title.chars().enumerate() {
+            let glyph_idx = if (32..=126).contains(&(ch as u32)) {
+                (ch as u32 - 32) as usize
+            } else {
+                ('?' as u32 - 32) as usize
+            };
+            let glyph = &FONT_6X10[glyph_idx * 10..(glyph_idx + 1) * 10];
+
+            let base_x = PAD_X + ci as u32 * CHAR_W;
+            let base_y = PAD_Y;
+
+            for row in 0..GLYPH_H {
+                let bits = glyph[row as usize];
+                for col in 0..GLYPH_W {
+                    if bits & (0x80 >> col) != 0 {
+                        // Draw scaled pixel
+                        for sy in 0..SCALE {
+                            for sx in 0..SCALE {
+                                let px = base_x + col * SCALE + sx;
+                                let py = base_y + row * SCALE + sy;
+                                if px < img_w && py < img_h {
+                                    let idx = ((py * img_w + px) * 4) as usize;
+                                    pixels[idx] = 240;     // R
+                                    pixels[idx + 1] = 240; // G
+                                    pixels[idx + 2] = 245; // B
+                                    pixels[idx + 3] = 255; // A
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Some((pixels, img_w, img_h))
+    }
+
+    fn create_overview_title_textures(&mut self) {
+        let entries: Vec<(String, f32)> = self
+            .overview_windows
+            .iter()
+            .map(|e| (e.title.clone(), e.target_w))
+            .collect();
+
+        let textures: Vec<Option<(glow::Texture, u32, u32)>> = entries
+            .iter()
+            .map(|(title, target_w)| {
+                let max_w = (*target_w as u32).max(120);
+                let (pixels, w, h) = Self::render_title_to_pixels(title, max_w)?;
+                unsafe {
+                    let tex = self.gl.create_texture().ok()?;
+                    self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                    self.gl.tex_image_2d(
+                        glow::TEXTURE_2D, 0, glow::RGBA8 as i32,
+                        w as i32, h as i32, 0,
+                        glow::RGBA, glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(&pixels)),
+                    );
+                    self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+                    self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                    self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+                    self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+                    self.gl.bind_texture(glow::TEXTURE_2D, None);
+                    Some((tex, w, h))
+                }
+            })
+            .collect();
+
+        for (entry, title_tex) in self.overview_windows.iter_mut().zip(textures.into_iter()) {
+            entry.title_texture = title_tex;
+        }
+    }
+
+    fn upload_overview_snapshot_texture(
+        &self,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Option<glow::Texture> {
+        unsafe {
+            let texture = self.gl.create_texture().ok()?;
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA8 as i32,
+                width as i32,
+                height as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(pixels)),
+            );
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR as i32,
+            );
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
+            );
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
+            Some(texture)
+        }
+    }
+
+    fn create_overview_snapshot_texture(
+        &self,
+        x11_win: u32,
+        max_size: u32,
+    ) -> Option<glow::Texture> {
+        let (pixels, width, height) = self.capture_window_thumbnail(x11_win, max_size)?;
+        let row_bytes = (width * 4) as usize;
+        let mut flipped = vec![0u8; pixels.len()];
+        for y in 0..height as usize {
+            let src_row = (height as usize - 1 - y) * row_bytes;
+            let dst_row = y * row_bytes;
+            flipped[dst_row..dst_row + row_bytes]
+                .copy_from_slice(&pixels[src_row..src_row + row_bytes]);
+        }
+        self.upload_overview_snapshot_texture(&flipped, width, height)
+    }
+
+    fn refresh_overview_snapshots(&mut self) {
+        self.clear_overview_snapshots();
+
+        let requests: Vec<(u32, u32)> = self
+            .overview_windows
+            .iter()
+            .map(|entry| {
+                let desired = (entry.target_w.max(entry.target_h) * 2.0).ceil() as u32;
+                let max_size = desired.clamp(256, 1024);
+                (entry.x11_win, max_size)
+            })
+            .collect();
+
+        let snapshots: Vec<Option<glow::Texture>> = requests
+            .into_iter()
+            .map(|(x11_win, max_size)| self.create_overview_snapshot_texture(x11_win, max_size))
+            .collect();
+
+        for (entry, snapshot_texture) in self.overview_windows.iter_mut().zip(snapshots.into_iter()) {
+            entry.snapshot_texture = snapshot_texture;
+        }
+    }
+
     // =====================================================================
     // Feature 13: Set frame extents for blur mask
     // =====================================================================
@@ -3713,11 +4154,27 @@ impl Compositor {
         self.needs_render = true;
     }
 
-    pub(super) fn set_overview_mode(&mut self, active: bool, windows: Vec<(u32, f32, f32, f32, f32, bool)>) {
+    pub(super) fn set_overview_mode(&mut self, active: bool, windows: Vec<(u32, f32, f32, f32, f32, bool, String)>) {
+        self.clear_overview_snapshots();
+        self.clear_overview_title_textures();
         self.overview_active = active;
-        self.overview_windows = windows.into_iter().map(|(win, x, y, w, h, sel)| {
-            OverviewEntry { x11_win: win, target_x: x, target_y: y, target_w: w, target_h: h, is_selected: sel }
+        self.overview_windows = windows.into_iter().map(|(win, x, y, w, h, sel, title)| {
+            OverviewEntry {
+                x11_win: win,
+                target_x: x,
+                target_y: y,
+                target_w: w,
+                target_h: h,
+                is_selected: sel,
+                snapshot_texture: None,
+                title,
+                title_texture: None,
+            }
         }).collect();
+        if active {
+            self.refresh_overview_snapshots();
+            self.create_overview_title_textures();
+        }
         self.overview_opacity = if active { 1.0 } else { 0.0 };
         self.needs_render = true;
     }
@@ -3887,6 +4344,35 @@ impl Compositor {
             self.gl.bind_vertex_array(Some(self.quad_vao));
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
+            // Draw dark card backgrounds behind thumbnails for visual framing.
+            // This ensures even white-background windows stand out clearly.
+            self.gl.use_program(Some(self.overview_bg_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.overview_bg_uniforms.projection.as_ref(), false, proj,
+            );
+            for entry in &self.overview_windows {
+                let scale = if entry.is_selected { 1.04 } else { 1.0 };
+                let draw_w = entry.target_w * scale;
+                let draw_h = entry.target_h * scale;
+                let draw_x = entry.target_x - (draw_w - entry.target_w) * 0.5;
+                let draw_y = entry.target_y - (draw_h - entry.target_h) * 0.5;
+                let card_pad = 10.0;
+                // Title label height reserve (scale 2x font 10px + padding)
+                let title_reserve = 36.0;
+                self.gl.uniform_4_f32(
+                    self.overview_bg_uniforms.rect.as_ref(),
+                    draw_x - card_pad,
+                    draw_y - card_pad,
+                    draw_w + card_pad * 2.0,
+                    draw_h + card_pad * 2.0 + title_reserve,
+                );
+                self.gl.uniform_1_f32(
+                    self.overview_bg_uniforms.opacity.as_ref(),
+                    if entry.is_selected { 0.85 } else { 0.55 } * self.overview_opacity,
+                );
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
+
             // Draw soft card shadows behind thumbnails.
             self.gl.use_program(Some(self.shadow_program));
             self.gl.uniform_matrix_4_f32_slice(
@@ -3901,7 +4387,7 @@ impl Compositor {
                 let draw_x = entry.target_x - (draw_w - entry.target_w) * 0.5;
                 let draw_y = entry.target_y - (draw_h - entry.target_h) * 0.5;
                 let spread = if entry.is_selected { 24.0 } else { 16.0 };
-                let shadow_alpha = if entry.is_selected { 0.30 } else { 0.16 };
+                let shadow_alpha = if entry.is_selected { 0.35 } else { 0.22 };
                 let shadow_y = if entry.is_selected { 8.0 } else { 5.0 };
 
                 self.gl.uniform_1_f32(self.shadow_uniforms.spread.as_ref(), spread);
@@ -3931,9 +4417,13 @@ impl Compositor {
             self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
 
             for entry in &self.overview_windows {
-                let wt = match self.windows.get(&entry.x11_win) {
-                    Some(wt) => wt,
-                    None => continue,
+                let texture = if let Some(texture) = entry.snapshot_texture {
+                    texture
+                } else {
+                    match self.windows.get(&entry.x11_win) {
+                        Some(wt) => wt.gl_texture,
+                        None => continue,
+                    }
                 };
 
                 let scale = if entry.is_selected { 1.04 } else { 1.0 };
@@ -3979,12 +4469,12 @@ impl Compositor {
                 );
                 self.gl.uniform_1_f32(
                     self.border_uniforms.border_width.as_ref(),
-                    if entry.is_selected { 3.5 } else { 1.25 },
+                    if entry.is_selected { 3.5 } else { 2.0 },
                 );
                 let border_color = if entry.is_selected {
                     [0.98, 0.72, 0.36, 0.96]
                 } else {
-                    [1.0, 1.0, 1.0, 0.16]
+                    [0.75, 0.78, 0.82, 0.50]
                 };
                 self.gl.uniform_4_f32(
                     self.border_uniforms.border_color.as_ref(),
@@ -4007,6 +4497,40 @@ impl Compositor {
                 );
                 self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
             }
+
+            // Draw title labels below each thumbnail
+            self.gl.enable(glow::BLEND);
+            self.gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+            self.gl.use_program(Some(self.program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.win_uniforms.projection.as_ref(), false, proj,
+            );
+            self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+
+            for entry in &self.overview_windows {
+                if let Some((tex, tw, th)) = entry.title_texture {
+                    let tw = tw as f32;
+                    let th = th as f32;
+                    // Center the label horizontally below the thumbnail
+                    let label_x = entry.target_x + (entry.target_w - tw) * 0.5;
+                    let label_y = entry.target_y + entry.target_h + 8.0;
+
+                    self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), th * 0.5);
+                    self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), -1.0); // use texture alpha
+                    self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
+                    self.gl.uniform_2_f32(self.win_uniforms.size.as_ref(), tw, th);
+                    self.gl.uniform_4_f32(
+                        self.win_uniforms.rect.as_ref(),
+                        label_x, label_y, tw, th,
+                    );
+                    self.gl.active_texture(glow::TEXTURE0);
+                    self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                }
+            }
+
+            // Restore premultiplied alpha blending
+            self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
 
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
