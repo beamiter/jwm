@@ -3,10 +3,11 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::Arc;
 use x11rb::connection::{Connection, RequestConnection};
+use x11rb::wrapper::ConnectionExt as WrapperExt;
 use x11rb::protocol::composite::ConnectionExt as CompositeExt;
 use x11rb::protocol::damage::{self, ConnectionExt as DamageExt};
 use x11rb::protocol::xfixes::ConnectionExt as XFixesExt;
-use x11rb::protocol::xproto::ConnectionExt as XProtoExt;
+use x11rb::protocol::xproto::{self, ConnectionExt as XProtoExt};
 use x11rb::rust_connection::RustConnection;
 
 use super::shaders;
@@ -1266,6 +1267,38 @@ impl Compositor {
 
         // Success — defuse the guard so it doesn't undo our redirect
         guard.active = false;
+
+        // Set _NET_WM_WINDOW_TYPE on the overlay window so that screenshot tools
+        // (e.g. Electron-based apps like Feishu/Lark) that enumerate windows via
+        // XComposite will skip the overlay and not double-composite its contents
+        // alongside the individual redirected window pixmaps.
+        {
+            let wm_type_atom = conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE")
+                .map_err(|e| format!("intern _NET_WM_WINDOW_TYPE: {e}"))?
+                .reply()
+                .map_err(|e| format!("intern reply: {e}"))?
+                .atom;
+            let notification_atom = conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_NOTIFICATION")
+                .map_err(|e| format!("intern _NET_WM_WINDOW_TYPE_NOTIFICATION: {e}"))?
+                .reply()
+                .map_err(|e| format!("intern reply: {e}"))?
+                .atom;
+            conn.change_property32(
+                xproto::PropMode::REPLACE,
+                overlay_window,
+                wm_type_atom,
+                xproto::AtomEnum::ATOM,
+                &[notification_atom],
+            )
+            .map_err(|e| format!("set overlay _NET_WM_WINDOW_TYPE: {e}"))?;
+            let _ = conn.flush();
+            log::info!(
+                "compositor: set overlay 0x{:x} _NET_WM_WINDOW_TYPE = NOTIFICATION",
+                overlay_window
+            );
+        }
 
         // Read compositor visual settings from config
         let cfg = crate::config::CONFIG.load();
@@ -3921,7 +3954,24 @@ impl Compositor {
                 );
                 self.gl.active_texture(glow::TEXTURE0);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
+                // Use LINEAR filtering for downscaled thumbnails so the
+                // preview looks like a properly shrunk version of the window
+                // instead of a blocky/solid-color mess (NEAREST skips most
+                // texels when minifying by a large factor).
+                self.gl.tex_parameter_i32(
+                    glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32,
+                );
+                self.gl.tex_parameter_i32(
+                    glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32,
+                );
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                // Restore NEAREST filtering for normal 1:1 rendering.
+                self.gl.tex_parameter_i32(
+                    glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32,
+                );
+                self.gl.tex_parameter_i32(
+                    glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32,
+                );
 
                 self.gl.use_program(Some(self.border_program));
                 self.gl.uniform_matrix_4_f32_slice(
