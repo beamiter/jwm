@@ -453,7 +453,7 @@ impl Default for Config {
                     shadow_color: default_shadow_color(),
                     inactive_opacity: default_inactive_opacity(),
                     active_opacity: default_active_opacity(),
-                    blur_enabled: false,
+                    blur_enabled: true,
                     blur_strength: default_blur_strength(),
                     fading: false,
                     fade_in_step: default_fade_step(),

@@ -1778,6 +1778,14 @@ impl Compositor {
         None
     }
 
+    /// Look up whether a window should have frosted glass effect.
+    fn lookup_frosted_glass_rule(&self, class_name: &str) -> bool {
+        if class_name.is_empty() {
+            return false;
+        }
+        self.frosted_glass_rules.iter().any(|r| r.eq_ignore_ascii_case(class_name))
+    }
+
     /// Look up per-window scale (feature 4).
     fn lookup_scale_rule(&self, class_name: &str) -> Option<f32> {
         if class_name.is_empty() {
@@ -3314,11 +3322,13 @@ impl Compositor {
         let opacity_override = self.lookup_opacity_rule(class_name);
         let corner_radius_override = self.lookup_corner_radius_rule(class_name);
         let scale = self.lookup_scale_rule(class_name);
+        let is_frosted = self.lookup_frosted_glass_rule(class_name);
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             if wt.class_name != class_name {
                 wt.class_name = class_name.to_string();
                 wt.opacity_override = opacity_override;
                 wt.corner_radius_override = corner_radius_override;
+                wt.is_frosted = is_frosted;
                 if let Some(s) = scale {
                     wt.scale = s;
                 }
@@ -3718,8 +3728,9 @@ impl Compositor {
             && self.scene_fbo.is_some()
             && visible_scene.iter().any(|&(win, _, _, _, _)| {
                 self.windows.get(&win).map_or(false, |wt| {
-                    (wt.has_rgba || wt.fade_opacity < 1.0 || wt.opacity_override.is_some())
-                        && !Self::class_matches_exclude(&wt.class_name, &self.blur_exclude)
+                    ((wt.has_rgba || wt.fade_opacity < 1.0 || wt.opacity_override.is_some())
+                        && !Self::class_matches_exclude(&wt.class_name, &self.blur_exclude))
+                        || wt.is_frosted
                 })
             });
 
@@ -3810,7 +3821,8 @@ impl Compositor {
                     if let Some(blur_tex) = blur_texture {
                         let needs_blur = (wt.has_rgba || fade < 1.0 || wt.opacity_override.map_or(false, |o| o < 1.0))
                             && !Self::class_matches_exclude(&wt.class_name, &self.blur_exclude);
-                        if needs_blur {
+                        let needs_frosted = wt.is_frosted;
+                        if needs_blur || needs_frosted {
                             // Feature 13: If blur_use_frame_extents, crop blur to client area
                             let (bx, by, bw, bh) = if self.blur_use_frame_extents {
                                 let [fl, fr, ft, fb] = wt.frame_extents;

@@ -7,8 +7,6 @@ sudo install target/debug/jwm /usr/local/bin/
 sudo install target/debug/jwm-tool /usr/local/bin/
 sudo install jwm-x11.desktop /usr/share/xsessions/
 sudo install jwm-wayland.desktop /usr/share/wayland-sessions/
-# mkdir -p ~/.config/picom/
-# cp picom.conf ~/.config/picom/picom.conf
 
 echo "jwm-tool"
 echo "JWM 管理工具（单二进制多子命令）"
