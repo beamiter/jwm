@@ -1038,12 +1038,20 @@ impl EventHandler for Jwm {
     }
 
     fn render_compositor_immediate(&mut self, backend: &mut dyn Backend) {
-        if !backend.has_compositor() || !backend.compositor_needs_render() {
+        if !backend.has_compositor() {
             return;
         }
         // Skip if animations are active — tick_animations handles rendering
         // during animation frames, so we don't want to double-render.
         if self.animations.has_active() {
+            return;
+        }
+        // When overview is active the prism rotation runs inside the render
+        // pass (tick_overview_prism), but clear_needs_render() after
+        // render_frame() wipes the flag it sets.  So we must keep rendering
+        // every frame unconditionally while overview is up; vsync provides
+        // natural ~60 fps pacing.
+        if !backend.compositor_needs_render() && !self.overview_active {
             return;
         }
         let scene = self.build_compositor_scene(backend, &HashMap::new());
