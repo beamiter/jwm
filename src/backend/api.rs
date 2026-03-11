@@ -717,6 +717,9 @@ pub trait Backend: Send {
     /// Set overview mode for Alt-Tab window preview.
     fn compositor_set_overview_mode(&mut self, _active: bool, _windows: &[(WindowId, f32, f32, f32, f32, bool, String)]) {}
 
+    /// Set monitor bounds for overview rendering (multi-monitor support).
+    fn compositor_set_overview_monitor(&mut self, _x: i32, _y: i32, _w: u32, _h: u32) {}
+
     /// Update overview selection highlight.
     fn compositor_set_overview_selection(&mut self, _window: WindowId) {}
 

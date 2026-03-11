@@ -517,6 +517,11 @@ pub(super) struct Compositor {
     overview_prism_last_tick: Option<std::time::Instant>,
     overview_slide_offset: usize,
     overview_total_clients: usize,
+    // Monitor bounds for overview (multi-monitor)
+    overview_mon_x: i32,
+    overview_mon_y: i32,
+    overview_mon_w: u32,
+    overview_mon_h: u32,
 
     // --- Wobbly windows ---
     wobbly_program: glow::Program,
@@ -1594,6 +1599,10 @@ impl Compositor {
             overview_prism_last_tick: None,
             overview_slide_offset: 0,
             overview_total_clients: 0,
+            overview_mon_x: 0,
+            overview_mon_y: 0,
+            overview_mon_w: screen_w,
+            overview_mon_h: screen_h,
             // Wobbly windows
             wobbly_program,
             wobbly_uniforms,
@@ -4337,6 +4346,13 @@ impl Compositor {
         self.needs_render = true;
     }
 
+    pub(super) fn set_overview_monitor(&mut self, x: i32, y: i32, w: u32, h: u32) {
+        self.overview_mon_x = x;
+        self.overview_mon_y = y;
+        self.overview_mon_w = w;
+        self.overview_mon_h = h;
+    }
+
     pub(super) fn set_overview_mode(&mut self, active: bool, windows: Vec<(u32, f32, f32, f32, f32, bool, String)>) {
         self.clear_overview_snapshots();
         self.clear_overview_title_textures();
@@ -4544,52 +4560,73 @@ impl Compositor {
         if diff.abs() < 0.001 {
             self.overview_prism_current_angle = self.overview_prism_target_angle;
         } else {
-            self.overview_prism_current_angle +=
-                diff * (1.0 - (-12.0 * dt).exp());
+            // Constant angular velocity (~PI rad/s ≈ 180°/s).
+            let speed = std::f32::consts::PI;
+            let step = speed * dt;
+            if diff.abs() <= step {
+                self.overview_prism_current_angle = self.overview_prism_target_angle;
+            } else {
+                self.overview_prism_current_angle += step * diff.signum();
+            }
             self.needs_render = true;
         }
     }
 
     /// Render overview overlay (Alt-Tab preview) as a 3D hexagonal prism carousel.
+    /// Rendering is confined to the monitor that owns the overview.
     fn render_overview(&self, proj: &[f32; 16], _focused: Option<u32>) {
         if self.overview_windows.is_empty() { return; }
 
-        let sw = self.screen_w as f32;
-        let sh = self.screen_h as f32;
+        // Monitor-local dimensions
+        let mon_x = self.overview_mon_x;
+        let mon_y = self.overview_mon_y;
+        let mon_w = self.overview_mon_w;
+        let mon_h = self.overview_mon_h;
+        let mw = mon_w as f32;
+        let mh = mon_h as f32;
 
         unsafe {
-            // === 1. Dark background overlay ===
+            // === 1. Dark background overlay (only on this monitor) ===
             self.gl.use_program(Some(self.overview_bg_program));
             self.gl.uniform_matrix_4_f32_slice(
                 self.overview_bg_uniforms.projection.as_ref(), false, proj,
             );
             self.gl.uniform_4_f32(
                 self.overview_bg_uniforms.rect.as_ref(),
-                0.0, 0.0, sw, sh,
+                mon_x as f32, mon_y as f32, mw, mh,
             );
             self.gl.uniform_1_f32(self.overview_bg_uniforms.opacity.as_ref(), self.overview_opacity);
             self.gl.bind_vertex_array(Some(self.quad_vao));
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-            // === 2. Compute hexagonal prism geometry ===
-            let face_w = sw * 0.35;
-            let face_h = sh * 0.55;
+            // === 2. Scissor + viewport to this monitor for the 3D prism ===
+            let scissor_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
+            self.gl.enable(glow::SCISSOR_TEST);
+            self.gl.scissor(mon_x, scissor_gl_y, mon_w as i32, mon_h as i32);
+            self.gl.viewport(mon_x, scissor_gl_y, mon_w as i32, mon_h as i32);
+
+            // === 3. Compute hexagonal prism geometry ===
+            let face_w = mw * 0.35;
+            let face_h = mh * 0.55;
             let face_aspect = face_w / face_h;
-            // Apothem: center-to-face distance for a regular hexagonal prism
-            // side_length = 2 * face_aspect * tan(PI/6) = 2 * face_aspect / sqrt(3)
-            // apothem = face_aspect (the face half-width projected perpendicular)
             let apothem = face_aspect * 3.0_f32.sqrt();
 
             let fov_y = std::f32::consts::FRAC_PI_4; // 45 degrees
-            let camera_z = apothem + 1.0 / (fov_y * 0.5).tan();
-            let screen_aspect = sw / sh;
+            let camera_z = (apothem + 1.0 / (fov_y * 0.5).tan()) * 1.6;
+            let mon_aspect = mw / mh;
 
-            let persp = perspective_matrix(fov_y, screen_aspect, 0.1, camera_z * 4.0);
-            let view = translate_matrix(0.0, 0.0, -camera_z);
+            let persp = perspective_matrix(fov_y, mon_aspect, 0.1, camera_z * 4.0);
+            // Tilt the prism ~12° so top edges lean away from the viewer,
+            // giving a stronger 3D depth cue.
+            let tilt_angle = -0.21;
+            let view = mat4_mul(
+                &translate_matrix(0.0, 0.0, -camera_z),
+                &rotate_x_matrix(tilt_angle),
+            );
 
             let global_rot = rotate_y_matrix(self.overview_prism_current_angle);
 
-            // === 3. Build per-face draw info ===
+            // === 4. Build per-face draw info ===
             struct FaceDrawInfo {
                 mvp: [f32; 16],
                 z_depth: f32,
@@ -4604,20 +4641,16 @@ impl Compositor {
                 let face_i = entry.face_index;
                 let face_angle = face_i as f32 * pi_over_3;
 
-                // Face model: rotate to position, then translate out to apothem
                 let face_rot = rotate_y_matrix(face_angle);
                 let face_translate = translate_matrix(0.0, 0.0, apothem);
                 let face_model = mat4_mul(&face_rot, &face_translate);
 
-                // Apply global prism rotation
                 let model = mat4_mul(&global_rot, &face_model);
                 let mv = mat4_mul(&view, &model);
                 let mvp = mat4_mul(&persp, &mv);
 
-                // View-space Z for painter's algorithm (column-major: z translation is at index 14)
                 let z_depth = mv[14];
 
-                // Brightness from facing direction: cos of angle between face normal and camera
                 let total_angle = face_angle + self.overview_prism_current_angle;
                 let cos_facing = total_angle.cos();
                 let brightness = if entry.is_selected {
@@ -4634,23 +4667,25 @@ impl Compositor {
                 });
             }
 
-            // === 4. Painter's algorithm: sort by Z-depth ascending (farthest first) ===
+            // === 5. Painter's algorithm: sort by Z-depth ascending (farthest first) ===
             faces.sort_by(|a, b| a.z_depth.partial_cmp(&b.z_depth).unwrap_or(std::cmp::Ordering::Equal));
 
-            // === 5. Draw faces using cube_program ===
+            // === 6. Draw faces using cube_program ===
             self.gl.use_program(Some(self.cube_program));
             self.gl.uniform_1_f32(self.cube_uniforms.aspect.as_ref(), face_aspect);
             self.gl.uniform_1_i32(self.cube_uniforms.texture.as_ref(), 0);
+            // Snapshot textures have top-left origin (X11/image convention)
+            // but GL texture coords have bottom-left origin.  Flip Y by
+            // setting uv_rect to (0, 1, 1, -1): start at v=1, height=-1.
             self.gl.uniform_4_f32(
                 self.cube_uniforms.uv_rect.as_ref(),
-                0.0, 0.0, 1.0, 1.0,
+                0.0, 1.0, 1.0, -1.0,
             );
             self.gl.active_texture(glow::TEXTURE0);
 
             for face in &faces {
                 let entry = &self.overview_windows[face.entry_idx];
 
-                // Skip back-facing faces with very low brightness
                 if face.brightness < 0.05 { continue; }
 
                 let texture = if let Some(tex) = entry.snapshot_texture {
@@ -4676,7 +4711,6 @@ impl Compositor {
                     glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32,
                 );
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                // Restore NEAREST filtering
                 self.gl.tex_parameter_i32(
                     glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32,
                 );
@@ -4685,39 +4719,9 @@ impl Compositor {
                 );
             }
 
-            // === 6. Draw selected window title at screen bottom (orthographic) ===
-            self.gl.enable(glow::BLEND);
-            self.gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
-            self.gl.use_program(Some(self.program));
-            self.gl.uniform_matrix_4_f32_slice(
-                self.win_uniforms.projection.as_ref(), false, proj,
-            );
-            self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
-
-            for entry in &self.overview_windows {
-                if !entry.is_selected { continue; }
-                if let Some((tex, tw, th)) = entry.title_texture {
-                    let tw = tw as f32;
-                    let th = th as f32;
-                    let label_x = (sw - tw) * 0.5;
-                    let label_y = sh * 0.88;
-
-                    self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), th * 0.5);
-                    self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), -1.0);
-                    self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
-                    self.gl.uniform_2_f32(self.win_uniforms.size.as_ref(), tw, th);
-                    self.gl.uniform_4_f32(
-                        self.win_uniforms.rect.as_ref(),
-                        label_x, label_y, tw, th,
-                    );
-                    self.gl.active_texture(glow::TEXTURE0);
-                    self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                }
-            }
-
-            // Restore premultiplied alpha blending
-            self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+            // Restore full-screen viewport and disable scissor
+            self.gl.disable(glow::SCISSOR_TEST);
+            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
 
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
@@ -4942,6 +4946,20 @@ fn rotate_y_matrix(angle: f32) -> [f32; 16] {
          c,  0.0, -s,  0.0,
         0.0, 1.0, 0.0, 0.0,
          s,  0.0,  c,  0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    m
+}
+
+/// Rotation around the X axis.
+fn rotate_x_matrix(angle: f32) -> [f32; 16] {
+    let c = angle.cos();
+    let s = angle.sin();
+    #[rustfmt::skip]
+    let m = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0,  c,   s,  0.0,
+        0.0, -s,   c,  0.0,
         0.0, 0.0, 0.0, 1.0,
     ];
     m

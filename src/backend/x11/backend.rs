@@ -582,6 +582,12 @@ impl Backend for X11Backend {
         }
     }
 
+    fn compositor_set_overview_monitor(&mut self, x: i32, y: i32, w: u32, h: u32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_overview_monitor(x, y, w, h);
+        }
+    }
+
     fn compositor_set_overview_selection(&mut self, window: WindowId) {
         if let Some(c) = self.compositor.as_mut() {
             if let Ok(x11w) = self.ids.x11(window) {

@@ -1034,7 +1034,7 @@ impl EventHandler for Jwm {
     }
 
     fn needs_tick(&self) -> bool {
-        self.animations.has_active()
+        self.animations.has_active() || self.overview_active
     }
 
     fn render_compositor_immediate(&mut self, backend: &mut dyn Backend) {
@@ -5408,6 +5408,16 @@ impl Jwm {
             };
 
             if visible.is_empty() { return Ok(()); }
+
+            // Tell compositor which monitor to render the prism on.
+            if let Some(mon) = self.state.monitors.get(sel_mon_key) {
+                backend.compositor_set_overview_monitor(
+                    mon.geometry.w_x as i32,
+                    mon.geometry.w_y as i32,
+                    mon.geometry.w_w as u32,
+                    mon.geometry.w_h as u32,
+                );
+            }
 
             // Build simple client list; the compositor handles all 3D positioning.
             let layout = self.build_overview_layout(&visible);
