@@ -959,9 +959,22 @@ impl Backend for X11Backend {
             should_exit: false,
         };
         loop {
+            // When animations or overview are active, use a very short timeout so
+            // the event loop doesn't block between frames.  With vsync-enabled
+            // glXSwapBuffers (swap interval=1) the ~16.6ms vblank wait already
+            // provides natural frame pacing; we just need dispatch to return
+            // promptly after the swap completes so we can start the next frame.
+            // Without this, dispatch(None) only wakes on the 20ms calloop timer,
+            // which drifts against the vblank period and produces severe stutter
+            // (the exact symptom: smooth when mouse moves, choppy when still).
+            let timeout = if loop_data.handler.needs_tick() {
+                Some(Duration::from_millis(1))
+            } else {
+                None
+            };
             event_loop
-                .dispatch(None, &mut loop_data)
-                .map_err(|e| BackendError::Other(Box::new(e)))?; // calloop::Error 是 Send+Sync 的，可以用 Box
+                .dispatch(timeout, &mut loop_data)
+                .map_err(|e| BackendError::Other(Box::new(e)))?;
 
             // Immediate compositor render: after processing X events (including
             // DamageNotify), render without waiting for the 20ms timer.

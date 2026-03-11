@@ -1,6 +1,7 @@
 // src/main.rs
 use jwm::{Jwm, jwm::SHARED_PATH};
 use log::{error, info, warn};
+use std::os::unix::process::CommandExt;
 use std::{env, process::Command, sync::atomic::Ordering};
 use xbar_core::initialize_logging;
 
@@ -16,8 +17,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("[main] begin");
 
     setup_locale();
-    jwm::miscellaneous::init_auto_command();
-    jwm::miscellaneous::init_auto_start();
+
+    // exec restart 时跳过 autostart，避免重复启动 picom/fcitx 等
+    let is_restart = env::var("JWM_RESTARTING").is_ok();
+    if is_restart {
+        info!("[main] Detected exec restart, skipping autostart");
+        unsafe { env::remove_var("JWM_RESTARTING") };
+    } else {
+        jwm::miscellaneous::init_auto_command();
+        jwm::miscellaneous::init_auto_start();
+    }
 
     run_jwm()?;
     Ok(())
@@ -65,9 +74,18 @@ fn run_jwm() -> Result<(), Box<dyn std::error::Error>> {
         jwm.cleanup(&mut *backend)?;
 
         if jwm.is_restarting.load(Ordering::SeqCst) {
-            info!("[main] Restarting JWM...");
+            info!("[main] Restarting JWM via exec (picks up new binary from disk)...");
             drop(jwm);
             drop(backend);
+
+            // exec() 替换当前进程 image，这样 restart 后一定使用磁盘上的新 binary
+            let args: Vec<String> = env::args().collect();
+            let err = Command::new(&args[0])
+                .args(&args[1..])
+                .env("JWM_RESTARTING", "1")
+                .exec();
+            // exec() 只在失败时返回，回退到进程内 restart
+            error!("[main] exec failed: {err}, falling back to in-process restart");
             continue;
         }
 
