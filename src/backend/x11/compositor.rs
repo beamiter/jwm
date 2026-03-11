@@ -4053,10 +4053,9 @@ impl Compositor {
         let transition_still_active = if let Some(progress) = self.transition_progress(std::time::Instant::now()) {
             match self.transition_mode {
                 TransitionMode::Slide => {
-                    // --- Slide mode (original) ---
+                    // --- Slide mode: old fades out in place, new slides in ---
                     if let Some((_, snap_tex)) = &self.transition_fbo {
                         let snap_tex = *snap_tex;
-                        let slide_x = -self.transition_direction * (self.screen_w as f32) * progress;
                         let exclude_top = self.transition_exclude_top.min(self.screen_h);
                         let draw_y = exclude_top as f32;
                         let draw_h = (self.screen_h - exclude_top) as f32;
@@ -4065,31 +4064,95 @@ impl Compositor {
                         } else {
                             exclude_top as f32 / self.screen_h as f32
                         };
-                        unsafe {
-                            if draw_h > 0.0 {
-                                self.gl.use_program(Some(self.transition_program));
-                                self.gl.uniform_matrix_4_f32_slice(
-                                    self.transition_uniforms.projection.as_ref(), false, &proj,
+
+                        // Capture the current back-buffer (new scene) into transition_new_fbo
+                        if self.transition_new_fbo.is_none() {
+                            self.transition_new_fbo = unsafe {
+                                Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h).ok()
+                            };
+                        }
+
+                        if let Some((new_fbo, new_tex)) = &self.transition_new_fbo {
+                            let new_fbo = *new_fbo;
+                            let new_tex = *new_tex;
+
+                            unsafe {
+                                // Blit current back-buffer (new scene) into new FBO
+                                self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+                                self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(new_fbo));
+                                self.gl.blit_framebuffer(
+                                    0, 0, self.screen_w as i32, self.screen_h as i32,
+                                    0, 0, self.screen_w as i32, self.screen_h as i32,
+                                    glow::COLOR_BUFFER_BIT,
+                                    glow::NEAREST,
                                 );
-                                self.gl.uniform_4_f32(
-                                    self.transition_uniforms.rect.as_ref(),
-                                    slide_x, draw_y, self.screen_w as f32, draw_h,
-                                );
-                                self.gl.uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
-                                self.gl.uniform_1_f32(self.transition_uniforms.opacity.as_ref(), 1.0);
-                                self.gl.uniform_4_f32(
-                                    self.transition_uniforms.uv_rect.as_ref(),
-                                    0.0,
-                                    0.0,
-                                    1.0,
-                                    1.0 - top_frac,
-                                );
-                                self.gl.active_texture(glow::TEXTURE0);
-                                self.gl.bind_texture(glow::TEXTURE_2D, Some(snap_tex));
-                                self.gl.bind_vertex_array(Some(self.quad_vao));
-                                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                                self.gl.bind_vertex_array(None);
-                                self.gl.use_program(None);
+                                self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+
+                                if draw_h > 0.0 {
+                                    // Clear workspace area below status bar
+                                    self.gl.enable(glow::SCISSOR_TEST);
+                                    self.gl.scissor(
+                                        0, 0,
+                                        self.screen_w as i32,
+                                        (self.screen_h - exclude_top) as i32,
+                                    );
+                                    self.gl.clear_color(0.0, 0.0, 0.0, 1.0);
+                                    self.gl.clear(glow::COLOR_BUFFER_BIT);
+                                    self.gl.disable(glow::SCISSOR_TEST);
+
+                                    // Use SRC_ALPHA blending for correct fade
+                                    self.gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+
+                                    self.gl.use_program(Some(self.transition_program));
+                                    self.gl.uniform_matrix_4_f32_slice(
+                                        self.transition_uniforms.projection.as_ref(), false, &proj,
+                                    );
+                                    self.gl.uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
+                                    self.gl.active_texture(glow::TEXTURE0);
+
+                                    let uv = [0.0f32, 0.0, 1.0, 1.0 - top_frac];
+
+                                    // 1) Draw new scene sliding in
+                                    let slide_x_new = self.transition_direction
+                                        * (self.screen_w as f32)
+                                        * (1.0 - progress);
+                                    self.gl.uniform_4_f32(
+                                        self.transition_uniforms.rect.as_ref(),
+                                        slide_x_new, draw_y, self.screen_w as f32, draw_h,
+                                    );
+                                    self.gl.uniform_1_f32(
+                                        self.transition_uniforms.opacity.as_ref(), 1.0,
+                                    );
+                                    self.gl.uniform_4_f32(
+                                        self.transition_uniforms.uv_rect.as_ref(),
+                                        uv[0], uv[1], uv[2], uv[3],
+                                    );
+                                    self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
+                                    self.gl.bind_vertex_array(Some(self.quad_vao));
+                                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+                                    // 2) Draw old scene fading out in place
+                                    let fade_opacity = 1.0 - progress;
+                                    self.gl.uniform_4_f32(
+                                        self.transition_uniforms.rect.as_ref(),
+                                        0.0, draw_y, self.screen_w as f32, draw_h,
+                                    );
+                                    self.gl.uniform_1_f32(
+                                        self.transition_uniforms.opacity.as_ref(), fade_opacity,
+                                    );
+                                    self.gl.uniform_4_f32(
+                                        self.transition_uniforms.uv_rect.as_ref(),
+                                        uv[0], uv[1], uv[2], uv[3],
+                                    );
+                                    self.gl.bind_texture(glow::TEXTURE_2D, Some(snap_tex));
+                                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+                                    self.gl.bind_vertex_array(None);
+                                    self.gl.use_program(None);
+
+                                    // Restore premultiplied alpha blending
+                                    self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+                                }
                             }
                         }
                     }
