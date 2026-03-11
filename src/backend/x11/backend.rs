@@ -534,9 +534,10 @@ impl Backend for X11Backend {
         duration: std::time::Duration,
         direction: i32,
         exclude_top: u32,
+        mon_rect: (i32, i32, u32, u32),
     ) {
         if let Some(c) = self.compositor.as_mut() {
-            c.notify_tag_switch(duration, direction, exclude_top);
+            c.notify_tag_switch(duration, direction, exclude_top, mon_rect);
         }
     }
 

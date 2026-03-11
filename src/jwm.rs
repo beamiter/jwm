@@ -251,11 +251,13 @@ pub struct Jwm {
     /// Night light: last time we updated color temperature
     pub last_night_light_update: Option<std::time::Instant>,
 
-    /// Overview mode (Alt-Tab grid)
+    /// Overview mode (Alt-Tab 3D prism carousel)
     pub overview_active: bool,
     pub overview_index: usize,
     pub overview_clients: Vec<ClientKey>,
     pub overview_confirm_on_alt_release: bool,
+    /// Sliding window offset for >6 clients in overview prism.
+    pub overview_slide_offset: usize,
 
     /// Magnifier state
     pub magnifier_enabled: bool,
@@ -1322,6 +1324,7 @@ impl Jwm {
             overview_index: 0,
             overview_clients: Vec::new(),
             overview_confirm_on_alt_release: false,
+            overview_slide_offset: 0,
             magnifier_enabled: false,
         };
         if let Ok((x, y)) = backend.input_ops().get_pointer_position() {
@@ -2427,7 +2430,9 @@ impl Jwm {
         has_membership_change && old_has_visible && new_has_visible
     }
 
-    fn tag_transition_exclude_top(&self) -> u32 {
+    /// Return the number of pixels at the top of the monitor to exclude from
+    /// the tag-switch transition (the status bar area), relative to `mon_y`.
+    fn tag_transition_exclude_top(&self, mon_y: i32) -> u32 {
         let Some(bar_key) = self.status_bar_client else {
             return 0;
         };
@@ -2436,7 +2441,18 @@ impl Jwm {
         };
 
         let bottom = (bar.geometry.y + bar.geometry.h).max(0);
-        bottom as u32
+        // Make relative to monitor top
+        (bottom - mon_y).max(0) as u32
+    }
+
+    /// Return the (x, y, w, h) rect of the given monitor for compositor transitions.
+    fn monitor_rect(&self, mon_key: MonitorKey) -> (i32, i32, u32, u32) {
+        if let Some(mon) = self.state.monitors.get(mon_key) {
+            let g = &mon.geometry;
+            (g.m_x, g.m_y, g.m_w.max(1) as u32, g.m_h.max(1) as u32)
+        } else {
+            (0, 0, 1, 1)
+        }
     }
 
     fn nexttiled(&self, mon_key: MonitorKey, start_from: Option<ClientKey>) -> Option<ClientKey> {
@@ -5393,72 +5409,40 @@ impl Jwm {
 
             if visible.is_empty() { return Ok(()); }
 
-            // Calculate grid layout
-            let (screen_w, screen_h, mon_x, mon_y) = if let Some(mon) = self.state.monitors.get(sel_mon_key) {
-                (
-                    mon.geometry.w_w as f32,
-                    mon.geometry.w_h as f32,
-                    mon.geometry.w_x as f32,
-                    mon.geometry.w_y as f32,
-                )
-            } else {
-                return Ok(());
-            };
-            let n = visible.len();
-            let outer_margin = (screen_w.min(screen_h) * 0.075).clamp(36.0, 92.0);
-            let gap = (screen_w.min(screen_h) * 0.03).clamp(18.0, 36.0);
-            let cols = ((n as f32 * (screen_w / screen_h.max(1.0))).sqrt().ceil() as usize)
-                .max(1)
-                .min(n);
-            let rows = n.div_ceil(cols);
-
-            let avail_w = (screen_w - outer_margin * 2.0 - gap * (cols.saturating_sub(1) as f32)).max(1.0);
-            let avail_h = (screen_h - outer_margin * 2.0 - gap * (rows.saturating_sub(1) as f32)).max(1.0);
-            let cell_w = avail_w / cols as f32;
-            let cell_h = avail_h / rows as f32;
-            let grid_w = cell_w * cols as f32 + gap * (cols.saturating_sub(1) as f32);
-            let grid_h = cell_h * rows as f32 + gap * (rows.saturating_sub(1) as f32);
-            let grid_x = mon_x + (screen_w - grid_w) * 0.5;
-            let grid_y = mon_y + (screen_h - grid_h) * 0.5;
-
-            let mut layout: Vec<(WindowId, f32, f32, f32, f32, bool, String)> = Vec::new();
-            for (i, &ck) in visible.iter().enumerate() {
-                let col = i % cols;
-                let row = i / cols;
-                let cell_x = grid_x + col as f32 * (cell_w + gap);
-                let cell_y = grid_y + row as f32 * (cell_h + gap);
-
-                if let Some(client) = self.state.clients.get(ck) {
-                    let frame_pad = (cell_w.min(cell_h) * 0.12).clamp(24.0, 48.0);
-                    let inner_w = (cell_w - frame_pad * 2.0).max(1.0);
-                    let inner_h = (cell_h - frame_pad * 2.0).max(1.0);
-                    let client_w = client.geometry.w.max(1) as f32;
-                    let client_h = client.geometry.h.max(1) as f32;
-                    let scale = (inner_w / client_w).min(inner_h / client_h);
-                    let thumb_w = (client_w * scale).max(1.0);
-                    let thumb_h = (client_h * scale).max(1.0);
-                    let x = cell_x + (cell_w - thumb_w) * 0.5;
-                    let y = cell_y + (cell_h - thumb_h) * 0.5;
-                    let is_selected = i == 0;
-                    let title = if client.name.is_empty() {
-                        client.class.clone()
-                    } else if !client.class.is_empty()
-                        && !client.name.eq_ignore_ascii_case(&client.class)
-                    {
-                        format!("{} [{}]", client.name, client.class)
-                    } else {
-                        client.name.clone()
-                    };
-                    layout.push((client.win, x, y, thumb_w, thumb_h, is_selected, title));
-                }
-            }
+            // Build simple client list; the compositor handles all 3D positioning.
+            let layout = self.build_overview_layout(&visible);
 
             self.overview_active = true;
             self.overview_index = 0;
+            self.overview_slide_offset = 0;
             self.overview_clients = visible;
             backend.compositor_set_overview_mode(true, &layout);
         }
         Ok(())
+    }
+
+    /// Build the overview layout tuple list for the compositor.
+    /// Takes a subset (or all) of visible clients and produces the
+    /// (win, x, y, w, h, is_selected, title) tuples.
+    fn build_overview_layout(&self, clients: &[ClientKey]) -> Vec<(WindowId, f32, f32, f32, f32, bool, String)> {
+        let mut layout = Vec::new();
+        for (i, &ck) in clients.iter().enumerate() {
+            if let Some(client) = self.state.clients.get(ck) {
+                let is_selected = i == 0;
+                let title = if client.name.is_empty() {
+                    client.class.clone()
+                } else if !client.class.is_empty()
+                    && !client.name.eq_ignore_ascii_case(&client.class)
+                {
+                    format!("{} [{}]", client.name, client.class)
+                } else {
+                    client.name.clone()
+                };
+                // x/y/w/h are ignored by the compositor (prism handles positioning)
+                layout.push((client.win, 0.0, 0.0, 0.0, 0.0, is_selected, title));
+            }
+        }
+        layout
     }
 
     fn maybe_finish_overview_on_alt_release(&mut self, backend: &mut dyn Backend) {
@@ -5524,10 +5508,45 @@ impl Jwm {
             self.overview_index = (self.overview_index + len - 1) % len;
         }
 
-        if let Some(&ck) = self.overview_clients.get(self.overview_index) {
-            if let Some(client) = self.state.clients.get(ck) {
-                backend.compositor_set_overview_selection(client.win);
+        if len <= 6 {
+            // All clients fit on the prism; just rotate to selection.
+            if let Some(&ck) = self.overview_clients.get(self.overview_index) {
+                if let Some(client) = self.state.clients.get(ck) {
+                    backend.compositor_set_overview_selection(client.win);
+                }
             }
+        } else {
+            // Sliding window: keep selected index near center of 6-window view.
+            let half = 3usize;
+            let new_start = if self.overview_index < half {
+                0
+            } else if self.overview_index + half >= len {
+                len.saturating_sub(6)
+            } else {
+                self.overview_index - half
+            };
+            let window_end = (new_start + 6).min(len);
+
+            if new_start != self.overview_slide_offset {
+                // Window shifted: refresh prism with new 6-client subset.
+                self.overview_slide_offset = new_start;
+                let subset: Vec<ClientKey> = self.overview_clients[new_start..window_end].to_vec();
+                let mut layout = self.build_overview_layout(&subset);
+                // Mark the correct entry as selected.
+                let sel_in_window = self.overview_index - new_start;
+                for (i, entry) in layout.iter_mut().enumerate() {
+                    entry.5 = i == sel_in_window;
+                }
+                backend.compositor_set_overview_mode(true, &layout);
+            }
+            // Set selection (rotation) to the face within the current window.
+            let sel_in_window = self.overview_index - new_start;
+            if let Some(&ck) = self.overview_clients.get(self.overview_index) {
+                if let Some(client) = self.state.clients.get(ck) {
+                    backend.compositor_set_overview_selection(client.win);
+                }
+            }
+            let _ = sel_in_window; // used implicitly via set_overview_selection face_index
         }
         Ok(())
     }
@@ -7121,10 +7140,12 @@ impl Jwm {
                 && self.should_animate_tag_switch(sel_mon_key, old_tag_mask, next_tag)
             {
                 let dir = Self::tag_switch_direction(old_tag_mask, next_tag, cfg.tags_length());
+                let mon_rect = self.monitor_rect(sel_mon_key);
                 backend.compositor_notify_tag_switch(
                     cfg.animation_duration(),
                     dir,
-                    self.tag_transition_exclude_top(),
+                    self.tag_transition_exclude_top(mon_rect.1),
+                    mon_rect,
                 );
             }
         }
@@ -7272,11 +7293,13 @@ impl Jwm {
                     new_tag_mask,
                     cfg.tags_length(),
                 );
-                let exclude_top = self.tag_transition_exclude_top();
+                let mon_rect = self.monitor_rect(sel_mon_key);
+                let exclude_top = self.tag_transition_exclude_top(mon_rect.1);
                 backend.compositor_notify_tag_switch(
                     cfg.animation_duration(),
                     direction,
                     exclude_top,
+                    mon_rect,
                 );
             }
         }
@@ -7450,11 +7473,13 @@ impl Jwm {
                     new_tag_mask,
                     cfg.tags_length(),
                 );
-                let exclude_top = self.tag_transition_exclude_top();
+                let mon_rect = self.monitor_rect(sel_mon_key);
+                let exclude_top = self.tag_transition_exclude_top(mon_rect.1);
                 backend.compositor_notify_tag_switch(
                     cfg.animation_duration(),
                     direction,
                     exclude_top,
+                    mon_rect,
                 );
             }
         }

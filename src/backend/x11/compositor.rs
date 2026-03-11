@@ -230,7 +230,9 @@ struct WobblyState {
 /// Entry for Alt-Tab overview mode.
 struct OverviewEntry {
     x11_win: u32,
+    #[allow(dead_code)]
     target_x: f32,
+    #[allow(dead_code)]
     target_y: f32,
     target_w: f32,
     target_h: f32,
@@ -239,6 +241,8 @@ struct OverviewEntry {
     title: String,
     /// (texture, width, height) for the rendered title label.
     title_texture: Option<(glow::Texture, u32, u32)>,
+    /// Which face of the hexagonal prism this entry occupies (0..5).
+    face_index: usize,
 }
 
 /// Single particle for close animation.
@@ -444,6 +448,11 @@ pub(super) struct Compositor {
     transition_direction: f32,
     /// Pixels at the top of the screen to exclude from the transition overlay.
     transition_exclude_top: u32,
+    /// Monitor rect (x, y, w, h) for the transition — clips animation to one monitor.
+    transition_mon_x: i32,
+    transition_mon_y: i32,
+    transition_mon_w: u32,
+    transition_mon_h: u32,
     /// Transition animation mode (slide or cube).
     transition_mode: TransitionMode,
 
@@ -502,6 +511,12 @@ pub(super) struct Compositor {
     overview_opacity: f32,
     overview_bg_program: glow::Program,
     overview_bg_uniforms: OverviewBgUniforms,
+    // --- Overview prism state ---
+    overview_prism_target_angle: f32,
+    overview_prism_current_angle: f32,
+    overview_prism_last_tick: Option<std::time::Instant>,
+    overview_slide_offset: usize,
+    overview_total_clients: usize,
 
     // --- Wobbly windows ---
     wobbly_program: glow::Program,
@@ -1521,6 +1536,10 @@ impl Compositor {
             transition_duration: std::time::Duration::from_millis(150),
             transition_direction: 1.0,
             transition_exclude_top: 0,
+            transition_mon_x: 0,
+            transition_mon_y: 0,
+            transition_mon_w: screen_w,
+            transition_mon_h: screen_h,
             transition_mode: match behavior.transition_mode.as_str() {
                 "cube" => TransitionMode::Cube,
                 _ => TransitionMode::Slide,
@@ -1569,6 +1588,12 @@ impl Compositor {
             overview_opacity: 0.0,
             overview_bg_program,
             overview_bg_uniforms,
+            // Overview prism state
+            overview_prism_target_angle: 0.0,
+            overview_prism_current_angle: 0.0,
+            overview_prism_last_tick: None,
+            overview_slide_offset: 0,
+            overview_total_clients: 0,
             // Wobbly windows
             wobbly_program,
             wobbly_uniforms,
@@ -1900,11 +1925,13 @@ impl Compositor {
 
     /// Called just before a tag switch. Captures the current back-buffer into
     /// a snapshot texture so `render_frame` can slide the old scene out.
+    /// `mon_rect` is (x, y, w, h) of the monitor where the switch happens.
     pub(super) fn notify_tag_switch(
         &mut self,
         duration: std::time::Duration,
         direction: i32,
         exclude_top: u32,
+        mon_rect: (i32, i32, u32, u32),
     ) {
         // Ensure GL context is current
         if !self.context_current {
@@ -1919,28 +1946,60 @@ impl Compositor {
             self.context_current = true;
         }
 
-        // Create snapshot FBO if needed
+        let (mon_x, mon_y, mon_w, mon_h) = mon_rect;
+        let mon_w = mon_w.max(1);
+        let mon_h = mon_h.max(1);
+
+        // Recreate FBOs if monitor size changed
+        let size_changed = self.transition_fbo.as_ref().map_or(true, |_| {
+            self.transition_mon_w != mon_w || self.transition_mon_h != mon_h
+        });
+        if size_changed {
+            if let Some((fbo, tex)) = self.transition_fbo.take() {
+                unsafe {
+                    self.gl.delete_framebuffer(fbo);
+                    self.gl.delete_texture(tex);
+                }
+            }
+            if let Some((fbo, tex)) = self.transition_new_fbo.take() {
+                unsafe {
+                    self.gl.delete_framebuffer(fbo);
+                    self.gl.delete_texture(tex);
+                }
+            }
+        }
+
+        // Create snapshot FBO at monitor size
         if self.transition_fbo.is_none() {
             self.transition_fbo = unsafe {
-                Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h).ok()
+                Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok()
             };
         }
 
         // Create new-scene FBO for cube mode if needed
         if self.transition_mode == TransitionMode::Cube && self.transition_new_fbo.is_none() {
             self.transition_new_fbo = unsafe {
-                Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h).ok()
+                Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok()
             };
         }
 
+        // Store monitor rect for rendering
+        self.transition_mon_x = mon_x;
+        self.transition_mon_y = mon_y;
+        self.transition_mon_w = mon_w;
+        self.transition_mon_h = mon_h;
+
         if let Some((snap_fbo, _)) = &self.transition_fbo {
+            // OpenGL Y is flipped: glY = screen_h - (mon_y + mon_h)
+            let gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
             unsafe {
-                // Blit back-buffer into snapshot FBO
+                // Blit only the monitor region from back-buffer into snapshot FBO
                 self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
                 self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(*snap_fbo));
                 self.gl.blit_framebuffer(
-                    0, 0, self.screen_w as i32, self.screen_h as i32,
-                    0, 0, self.screen_w as i32, self.screen_h as i32,
+                    mon_x, gl_y,
+                    mon_x + mon_w as i32, gl_y + mon_h as i32,
+                    0, 0, mon_w as i32, mon_h as i32,
                     glow::COLOR_BUFFER_BIT,
                     glow::NEAREST,
                 );
@@ -1949,7 +2008,7 @@ impl Compositor {
             self.transition_start = Some(std::time::Instant::now());
             self.transition_duration = duration;
             self.transition_direction = if direction >= 0 { 1.0 } else { -1.0 };
-            self.transition_exclude_top = exclude_top.min(self.screen_h.saturating_sub(1));
+            self.transition_exclude_top = exclude_top.min(mon_h.saturating_sub(1));
             // Tag switch can radically change visible scene; force a full redraw
             // to avoid stale pixels from partial-damage scissor regions.
             self.damage_regions.clear();
@@ -1957,9 +2016,10 @@ impl Compositor {
                 .push((0, 0, self.screen_w, self.screen_h));
             self.needs_render = true;
             log::debug!(
-                "compositor: tag-switch slide transition started ({:?}, dir={})",
+                "compositor: tag-switch slide transition started ({:?}, dir={}, mon={}x{}+{}+{})",
                 duration,
-                direction
+                direction,
+                mon_w, mon_h, mon_x, mon_y,
             );
         }
     }
@@ -2002,22 +2062,29 @@ impl Compositor {
             None => return,
         };
 
+        let mon_x = self.transition_mon_x;
+        let mon_y = self.transition_mon_y;
+        let mon_w = self.transition_mon_w;
+        let mon_h = self.transition_mon_h;
+
         // Capture the current back-buffer (new scene) into transition_new_fbo
         if self.transition_new_fbo.is_none() {
             self.transition_new_fbo = unsafe {
-                Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h).ok()
+                Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok()
             };
         }
         let new_tex = match &self.transition_new_fbo {
             Some((fbo, tex)) => {
                 let fbo = *fbo;
                 let tex = *tex;
+                let blit_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
                 unsafe {
                     self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
                     self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
                     self.gl.blit_framebuffer(
-                        0, 0, self.screen_w as i32, self.screen_h as i32,
-                        0, 0, self.screen_w as i32, self.screen_h as i32,
+                        mon_x, blit_gl_y,
+                        mon_x + mon_w as i32, blit_gl_y + mon_h as i32,
+                        0, 0, mon_w as i32, mon_h as i32,
                         glow::COLOR_BUFFER_BIT,
                         glow::NEAREST,
                     );
@@ -2028,17 +2095,17 @@ impl Compositor {
             None => return,
         };
 
-        let exclude_top = self.transition_exclude_top.min(self.screen_h);
-        let workspace_h = self.screen_h.saturating_sub(exclude_top);
+        let exclude_top = self.transition_exclude_top.min(mon_h);
+        let workspace_h = mon_h.saturating_sub(exclude_top);
         if workspace_h == 0 {
             return;
         }
 
-        let aspect = self.screen_w as f32 / workspace_h as f32;
-        let top_frac = if self.screen_h == 0 {
+        let aspect = mon_w as f32 / workspace_h as f32;
+        let top_frac = if mon_h == 0 {
             0.0
         } else {
-            exclude_top as f32 / self.screen_h as f32
+            exclude_top as f32 / mon_h as f32
         };
         // UV rect: workspace portion of the FBO texture (below status bar)
         let uv_rect = [0.0f32, 0.0, 1.0, 1.0 - top_frac];
@@ -2087,11 +2154,13 @@ impl Compositor {
         let old_brightness = (0.35 + 0.65 * (progress * half_pi).cos()).max(0.0);
         let new_brightness = (0.35 + 0.65 * (progress * half_pi).sin()).max(0.0);
 
+        // OpenGL Y for the monitor's workspace region
+        let scissor_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
         unsafe {
-            // Restrict rendering to workspace area (below status bar)
+            // Restrict rendering to the monitor's workspace area (below status bar)
             self.gl.enable(glow::SCISSOR_TEST);
-            self.gl.scissor(0, 0, self.screen_w as i32, workspace_h as i32);
-            self.gl.viewport(0, 0, self.screen_w as i32, workspace_h as i32);
+            self.gl.scissor(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
+            self.gl.viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
 
             // Clear workspace area for cube rendering
             self.gl.clear(glow::COLOR_BUFFER_BIT);
@@ -4082,6 +4151,7 @@ impl Compositor {
 
         // === Pass 5d: Overview overlay ===
         if self.overview_active {
+            self.tick_overview_prism();
             self.render_overview(&proj, focused);
         }
 
@@ -4092,24 +4162,29 @@ impl Compositor {
 
         // === Tag-switch transition overlay ===
         let transition_still_active = if let Some(progress) = self.transition_progress(std::time::Instant::now()) {
+            // Monitor-local geometry for the transition
+            let mon_x = self.transition_mon_x;
+            let mon_y = self.transition_mon_y;
+            let mon_w = self.transition_mon_w;
+            let mon_h = self.transition_mon_h;
+            let exclude_top = self.transition_exclude_top.min(mon_h);
+            let draw_y = (mon_y as u32 + exclude_top) as f32; // Y in screen coords
+            let draw_h = (mon_h - exclude_top) as f32;
+            let draw_x = mon_x as f32;
+            let top_frac = if mon_h == 0 { 0.0 } else { exclude_top as f32 / mon_h as f32 };
+            // OpenGL scissor Y is flipped
+            let scissor_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
+
             match self.transition_mode {
                 TransitionMode::Slide => {
                     // --- Slide mode: old fades out in place, new slides in ---
                     if let Some((_, snap_tex)) = &self.transition_fbo {
                         let snap_tex = *snap_tex;
-                        let exclude_top = self.transition_exclude_top.min(self.screen_h);
-                        let draw_y = exclude_top as f32;
-                        let draw_h = (self.screen_h - exclude_top) as f32;
-                        let top_frac = if self.screen_h == 0 {
-                            0.0
-                        } else {
-                            exclude_top as f32 / self.screen_h as f32
-                        };
 
                         // Capture the current back-buffer (new scene) into transition_new_fbo
                         if self.transition_new_fbo.is_none() {
                             self.transition_new_fbo = unsafe {
-                                Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h).ok()
+                                Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok()
                             };
                         }
 
@@ -4117,29 +4192,32 @@ impl Compositor {
                             let new_fbo = *new_fbo;
                             let new_tex = *new_tex;
 
+                            // OpenGL Y for monitor region
+                            let blit_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
                             unsafe {
-                                // Blit current back-buffer (new scene) into new FBO
+                                // Blit only the monitor region from back-buffer into new FBO
                                 self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
                                 self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(new_fbo));
                                 self.gl.blit_framebuffer(
-                                    0, 0, self.screen_w as i32, self.screen_h as i32,
-                                    0, 0, self.screen_w as i32, self.screen_h as i32,
+                                    mon_x, blit_gl_y,
+                                    mon_x + mon_w as i32, blit_gl_y + mon_h as i32,
+                                    0, 0, mon_w as i32, mon_h as i32,
                                     glow::COLOR_BUFFER_BIT,
                                     glow::NEAREST,
                                 );
                                 self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
 
                                 if draw_h > 0.0 {
-                                    // Clear workspace area below status bar
+                                    // Scissor to the monitor's workspace area (below status bar)
                                     self.gl.enable(glow::SCISSOR_TEST);
                                     self.gl.scissor(
-                                        0, 0,
-                                        self.screen_w as i32,
-                                        (self.screen_h - exclude_top) as i32,
+                                        mon_x,
+                                        scissor_gl_y,
+                                        mon_w as i32,
+                                        (mon_h - exclude_top) as i32,
                                     );
                                     self.gl.clear_color(0.0, 0.0, 0.0, 1.0);
                                     self.gl.clear(glow::COLOR_BUFFER_BIT);
-                                    self.gl.disable(glow::SCISSOR_TEST);
 
                                     // Use SRC_ALPHA blending for correct fade
                                     self.gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
@@ -4153,13 +4231,13 @@ impl Compositor {
 
                                     let uv = [0.0f32, 0.0, 1.0, 1.0 - top_frac];
 
-                                    // 1) Draw new scene sliding in
+                                    // 1) Draw new scene sliding in (within monitor bounds)
                                     let slide_x_new = self.transition_direction
-                                        * (self.screen_w as f32)
+                                        * (mon_w as f32)
                                         * (1.0 - progress);
                                     self.gl.uniform_4_f32(
                                         self.transition_uniforms.rect.as_ref(),
-                                        slide_x_new, draw_y, self.screen_w as f32, draw_h,
+                                        draw_x + slide_x_new, draw_y, mon_w as f32, draw_h,
                                     );
                                     self.gl.uniform_1_f32(
                                         self.transition_uniforms.opacity.as_ref(), 1.0,
@@ -4176,7 +4254,7 @@ impl Compositor {
                                     let fade_opacity = 1.0 - progress;
                                     self.gl.uniform_4_f32(
                                         self.transition_uniforms.rect.as_ref(),
-                                        0.0, draw_y, self.screen_w as f32, draw_h,
+                                        draw_x, draw_y, mon_w as f32, draw_h,
                                     );
                                     self.gl.uniform_1_f32(
                                         self.transition_uniforms.opacity.as_ref(), fade_opacity,
@@ -4191,8 +4269,9 @@ impl Compositor {
                                     self.gl.bind_vertex_array(None);
                                     self.gl.use_program(None);
 
-                                    // Restore premultiplied alpha blending
+                                    // Restore premultiplied alpha blending and disable scissor
                                     self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+                                    self.gl.disable(glow::SCISSOR_TEST);
                                 }
                             }
                         }
@@ -4262,19 +4341,28 @@ impl Compositor {
         self.clear_overview_snapshots();
         self.clear_overview_title_textures();
         self.overview_active = active;
-        self.overview_windows = windows.into_iter().map(|(win, x, y, w, h, sel, title)| {
+        let n = windows.len();
+        let face_w = self.screen_w as f32 * 0.35;
+        let face_h = self.screen_h as f32 * 0.55;
+        self.overview_windows = windows.into_iter().enumerate().map(|(i, (win, _x, _y, _w, _h, sel, title))| {
             OverviewEntry {
                 x11_win: win,
-                target_x: x,
-                target_y: y,
-                target_w: w,
-                target_h: h,
+                target_x: 0.0,
+                target_y: 0.0,
+                target_w: face_w,
+                target_h: face_h,
                 is_selected: sel,
                 snapshot_texture: None,
                 title,
                 title_texture: None,
+                face_index: i.min(5),
             }
         }).collect();
+        self.overview_total_clients = n;
+        self.overview_slide_offset = 0;
+        self.overview_prism_target_angle = 0.0;
+        self.overview_prism_current_angle = 0.0;
+        self.overview_prism_last_tick = None;
         if active {
             self.refresh_overview_snapshots();
             self.create_overview_title_textures();
@@ -4284,9 +4372,21 @@ impl Compositor {
     }
 
     pub(super) fn set_overview_selection(&mut self, x11_win: u32) {
+        let mut selected_face = 0usize;
         for entry in &mut self.overview_windows {
-            entry.is_selected = entry.x11_win == x11_win;
+            let sel = entry.x11_win == x11_win;
+            entry.is_selected = sel;
+            if sel {
+                selected_face = entry.face_index;
+            }
         }
+        // Rotate prism so selected face faces the camera.
+        let new_target = -(selected_face as f32) * std::f32::consts::FRAC_PI_3;
+        // Normalize angular difference to shortest path (within -PI..PI).
+        let mut diff = new_target - self.overview_prism_target_angle;
+        while diff > std::f32::consts::PI { diff -= 2.0 * std::f32::consts::PI; }
+        while diff < -std::f32::consts::PI { diff += 2.0 * std::f32::consts::PI; }
+        self.overview_prism_target_angle += diff;
         self.needs_render = true;
     }
 
@@ -4430,99 +4530,131 @@ impl Compositor {
         }
     }
 
-    /// Render overview overlay (Alt-Tab preview).
+    /// Tick the overview prism rotation animation.
+    fn tick_overview_prism(&mut self) {
+        let now = std::time::Instant::now();
+        let dt = if let Some(last) = self.overview_prism_last_tick {
+            now.duration_since(last).as_secs_f32().min(0.05)
+        } else {
+            1.0 / 60.0
+        };
+        self.overview_prism_last_tick = Some(now);
+
+        let diff = self.overview_prism_target_angle - self.overview_prism_current_angle;
+        if diff.abs() < 0.001 {
+            self.overview_prism_current_angle = self.overview_prism_target_angle;
+        } else {
+            self.overview_prism_current_angle +=
+                diff * (1.0 - (-12.0 * dt).exp());
+            self.needs_render = true;
+        }
+    }
+
+    /// Render overview overlay (Alt-Tab preview) as a 3D hexagonal prism carousel.
     fn render_overview(&self, proj: &[f32; 16], _focused: Option<u32>) {
         if self.overview_windows.is_empty() { return; }
 
+        let sw = self.screen_w as f32;
+        let sh = self.screen_h as f32;
+
         unsafe {
-            // Draw dark background overlay
+            // === 1. Dark background overlay ===
             self.gl.use_program(Some(self.overview_bg_program));
             self.gl.uniform_matrix_4_f32_slice(
                 self.overview_bg_uniforms.projection.as_ref(), false, proj,
             );
             self.gl.uniform_4_f32(
                 self.overview_bg_uniforms.rect.as_ref(),
-                0.0, 0.0, self.screen_w as f32, self.screen_h as f32,
+                0.0, 0.0, sw, sh,
             );
             self.gl.uniform_1_f32(self.overview_bg_uniforms.opacity.as_ref(), self.overview_opacity);
             self.gl.bind_vertex_array(Some(self.quad_vao));
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-            // Draw dark card backgrounds behind thumbnails for visual framing.
-            // This ensures even white-background windows stand out clearly.
-            self.gl.use_program(Some(self.overview_bg_program));
-            self.gl.uniform_matrix_4_f32_slice(
-                self.overview_bg_uniforms.projection.as_ref(), false, proj,
-            );
-            for entry in &self.overview_windows {
-                let scale = if entry.is_selected { 1.04 } else { 1.0 };
-                let draw_w = entry.target_w * scale;
-                let draw_h = entry.target_h * scale;
-                let draw_x = entry.target_x - (draw_w - entry.target_w) * 0.5;
-                let draw_y = entry.target_y - (draw_h - entry.target_h) * 0.5;
-                let card_pad = 10.0;
-                // Title label height reserve (scale 2x font 10px + padding)
-                let title_reserve = 36.0;
-                self.gl.uniform_4_f32(
-                    self.overview_bg_uniforms.rect.as_ref(),
-                    draw_x - card_pad,
-                    draw_y - card_pad,
-                    draw_w + card_pad * 2.0,
-                    draw_h + card_pad * 2.0 + title_reserve,
-                );
-                self.gl.uniform_1_f32(
-                    self.overview_bg_uniforms.opacity.as_ref(),
-                    if entry.is_selected { 0.85 } else { 0.55 } * self.overview_opacity,
-                );
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            // === 2. Compute hexagonal prism geometry ===
+            let face_w = sw * 0.35;
+            let face_h = sh * 0.55;
+            let face_aspect = face_w / face_h;
+            // Apothem: center-to-face distance for a regular hexagonal prism
+            // side_length = 2 * face_aspect * tan(PI/6) = 2 * face_aspect / sqrt(3)
+            // apothem = face_aspect (the face half-width projected perpendicular)
+            let apothem = face_aspect * 3.0_f32.sqrt();
+
+            let fov_y = std::f32::consts::FRAC_PI_4; // 45 degrees
+            let camera_z = apothem + 1.0 / (fov_y * 0.5).tan();
+            let screen_aspect = sw / sh;
+
+            let persp = perspective_matrix(fov_y, screen_aspect, 0.1, camera_z * 4.0);
+            let view = translate_matrix(0.0, 0.0, -camera_z);
+
+            let global_rot = rotate_y_matrix(self.overview_prism_current_angle);
+
+            // === 3. Build per-face draw info ===
+            struct FaceDrawInfo {
+                mvp: [f32; 16],
+                z_depth: f32,
+                brightness: f32,
+                entry_idx: usize,
             }
 
-            // Draw soft card shadows behind thumbnails.
-            self.gl.use_program(Some(self.shadow_program));
-            self.gl.uniform_matrix_4_f32_slice(
-                self.shadow_uniforms.projection.as_ref(), false, proj,
-            );
-            self.gl.uniform_1_f32(self.shadow_uniforms.spread.as_ref(), 20.0);
+            let pi_over_3 = std::f32::consts::FRAC_PI_3;
+            let mut faces: Vec<FaceDrawInfo> = Vec::new();
 
-            for entry in &self.overview_windows {
-                let scale = if entry.is_selected { 1.04 } else { 1.0 };
-                let draw_w = entry.target_w * scale;
-                let draw_h = entry.target_h * scale;
-                let draw_x = entry.target_x - (draw_w - entry.target_w) * 0.5;
-                let draw_y = entry.target_y - (draw_h - entry.target_h) * 0.5;
-                let spread = if entry.is_selected { 24.0 } else { 16.0 };
-                let shadow_alpha = if entry.is_selected { 0.35 } else { 0.22 };
-                let shadow_y = if entry.is_selected { 8.0 } else { 5.0 };
+            for (idx, entry) in self.overview_windows.iter().enumerate() {
+                let face_i = entry.face_index;
+                let face_angle = face_i as f32 * pi_over_3;
 
-                self.gl.uniform_1_f32(self.shadow_uniforms.spread.as_ref(), spread);
-                self.gl.uniform_4_f32(
-                    self.shadow_uniforms.shadow_color.as_ref(),
-                    0.02, 0.03, 0.05, shadow_alpha * self.overview_opacity,
-                );
-                self.gl.uniform_1_f32(self.shadow_uniforms.radius.as_ref(), 18.0);
-                self.gl.uniform_4_f32(
-                    self.shadow_uniforms.rect.as_ref(),
-                    draw_x - spread,
-                    draw_y - spread + shadow_y,
-                    draw_w + 2.0 * spread,
-                    draw_h + 2.0 * spread + shadow_y,
-                );
-                self.gl.uniform_2_f32(
-                    self.shadow_uniforms.size.as_ref(), draw_w, draw_h,
-                );
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                // Face model: rotate to position, then translate out to apothem
+                let face_rot = rotate_y_matrix(face_angle);
+                let face_translate = translate_matrix(0.0, 0.0, apothem);
+                let face_model = mat4_mul(&face_rot, &face_translate);
+
+                // Apply global prism rotation
+                let model = mat4_mul(&global_rot, &face_model);
+                let mv = mat4_mul(&view, &model);
+                let mvp = mat4_mul(&persp, &mv);
+
+                // View-space Z for painter's algorithm (column-major: z translation is at index 14)
+                let z_depth = mv[14];
+
+                // Brightness from facing direction: cos of angle between face normal and camera
+                let total_angle = face_angle + self.overview_prism_current_angle;
+                let cos_facing = total_angle.cos();
+                let brightness = if entry.is_selected {
+                    0.45 + 0.55 * cos_facing.max(0.0)
+                } else {
+                    0.30 + 0.50 * cos_facing.max(0.0)
+                };
+
+                faces.push(FaceDrawInfo {
+                    mvp,
+                    z_depth,
+                    brightness,
+                    entry_idx: idx,
+                });
             }
 
-            // Draw window thumbnails
-            self.gl.use_program(Some(self.program));
-            self.gl.uniform_matrix_4_f32_slice(
-                self.win_uniforms.projection.as_ref(), false, proj,
-            );
-            self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+            // === 4. Painter's algorithm: sort by Z-depth ascending (farthest first) ===
+            faces.sort_by(|a, b| a.z_depth.partial_cmp(&b.z_depth).unwrap_or(std::cmp::Ordering::Equal));
 
-            for entry in &self.overview_windows {
-                let texture = if let Some(texture) = entry.snapshot_texture {
-                    texture
+            // === 5. Draw faces using cube_program ===
+            self.gl.use_program(Some(self.cube_program));
+            self.gl.uniform_1_f32(self.cube_uniforms.aspect.as_ref(), face_aspect);
+            self.gl.uniform_1_i32(self.cube_uniforms.texture.as_ref(), 0);
+            self.gl.uniform_4_f32(
+                self.cube_uniforms.uv_rect.as_ref(),
+                0.0, 0.0, 1.0, 1.0,
+            );
+            self.gl.active_texture(glow::TEXTURE0);
+
+            for face in &faces {
+                let entry = &self.overview_windows[face.entry_idx];
+
+                // Skip back-facing faces with very low brightness
+                if face.brightness < 0.05 { continue; }
+
+                let texture = if let Some(tex) = entry.snapshot_texture {
+                    tex
                 } else {
                     match self.windows.get(&entry.x11_win) {
                         Some(wt) => wt.gl_texture,
@@ -4530,28 +4662,13 @@ impl Compositor {
                     }
                 };
 
-                let scale = if entry.is_selected { 1.04 } else { 1.0 };
-                let draw_w = entry.target_w * scale;
-                let draw_h = entry.target_h * scale;
-                let draw_x = entry.target_x - (draw_w - entry.target_w) * 0.5;
-                let draw_y = entry.target_y - (draw_h - entry.target_h) * 0.5;
-                let radius = 18.0;
-                self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
-                self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
-                self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), if entry.is_selected { 1.02 } else { 0.84 });
-                self.gl.uniform_2_f32(
-                    self.win_uniforms.size.as_ref(), draw_w, draw_h,
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.cube_uniforms.mvp.as_ref(), false, &face.mvp,
                 );
-                self.gl.uniform_4_f32(
-                    self.win_uniforms.rect.as_ref(),
-                    draw_x, draw_y, draw_w, draw_h,
+                self.gl.uniform_1_f32(
+                    self.cube_uniforms.brightness.as_ref(), face.brightness,
                 );
-                self.gl.active_texture(glow::TEXTURE0);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-                // Use LINEAR filtering for downscaled thumbnails so the
-                // preview looks like a properly shrunk version of the window
-                // instead of a blocky/solid-color mess (NEAREST skips most
-                // texels when minifying by a large factor).
                 self.gl.tex_parameter_i32(
                     glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32,
                 );
@@ -4559,50 +4676,16 @@ impl Compositor {
                     glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32,
                 );
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                // Restore NEAREST filtering for normal 1:1 rendering.
+                // Restore NEAREST filtering
                 self.gl.tex_parameter_i32(
                     glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32,
                 );
                 self.gl.tex_parameter_i32(
                     glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32,
                 );
-
-                self.gl.use_program(Some(self.border_program));
-                self.gl.uniform_matrix_4_f32_slice(
-                    self.border_uniforms.projection.as_ref(), false, proj,
-                );
-                self.gl.uniform_1_f32(
-                    self.border_uniforms.border_width.as_ref(),
-                    if entry.is_selected { 3.5 } else { 2.0 },
-                );
-                let border_color = if entry.is_selected {
-                    [0.98, 0.72, 0.36, 0.96]
-                } else {
-                    [0.75, 0.78, 0.82, 0.50]
-                };
-                self.gl.uniform_4_f32(
-                    self.border_uniforms.border_color.as_ref(),
-                    border_color[0], border_color[1], border_color[2], border_color[3] * self.overview_opacity,
-                );
-                self.gl.uniform_1_f32(self.border_uniforms.radius.as_ref(), radius);
-                self.gl.uniform_2_f32(
-                    self.border_uniforms.size.as_ref(), draw_w, draw_h,
-                );
-                self.gl.uniform_4_f32(
-                    self.border_uniforms.rect.as_ref(),
-                    draw_x, draw_y, draw_w, draw_h,
-                );
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-
-                // Switch back to window program for the next thumbnail.
-                self.gl.use_program(Some(self.program));
-                self.gl.uniform_matrix_4_f32_slice(
-                    self.win_uniforms.projection.as_ref(), false, proj,
-                );
-                self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
             }
 
-            // Draw title labels below each thumbnail
+            // === 6. Draw selected window title at screen bottom (orthographic) ===
             self.gl.enable(glow::BLEND);
             self.gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
             self.gl.use_program(Some(self.program));
@@ -4612,15 +4695,15 @@ impl Compositor {
             self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
 
             for entry in &self.overview_windows {
+                if !entry.is_selected { continue; }
                 if let Some((tex, tw, th)) = entry.title_texture {
                     let tw = tw as f32;
                     let th = th as f32;
-                    // Center the label horizontally below the thumbnail
-                    let label_x = entry.target_x + (entry.target_w - tw) * 0.5;
-                    let label_y = entry.target_y + entry.target_h + 8.0;
+                    let label_x = (sw - tw) * 0.5;
+                    let label_y = sh * 0.88;
 
                     self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), th * 0.5);
-                    self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), -1.0); // use texture alpha
+                    self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), -1.0);
                     self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
                     self.gl.uniform_2_f32(self.win_uniforms.size.as_ref(), tw, th);
                     self.gl.uniform_4_f32(

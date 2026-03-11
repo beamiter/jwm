@@ -689,11 +689,14 @@ pub trait Backend: Send {
     /// `direction` uses +1 for forward (higher tag) and -1 for backward
     /// (lower tag). `exclude_top` skips a top strip from the transition so
     /// persistent UI like a status bar is not included in the old snapshot.
+    /// `mon_rect` is (x, y, w, h) of the monitor where the tag switch occurs,
+    /// so the transition animation is clipped to that monitor only.
     fn compositor_notify_tag_switch(
         &mut self,
         _duration: std::time::Duration,
         _direction: i32,
         _exclude_top: u32,
+        _mon_rect: (i32, i32, u32, u32),
     ) {}
 
     /// Force the compositor to redraw the full output on the next frame.
