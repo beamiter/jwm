@@ -2408,8 +2408,6 @@ impl Jwm {
             return false;
         };
 
-        let mut old_has_visible = false;
-        let mut new_has_visible = false;
         let mut has_membership_change = false;
 
         for client_key in client_keys.iter().copied() {
@@ -2428,14 +2426,16 @@ impl Jwm {
             let old_visible = (client.state.tags & old_mask) > 0;
             let new_visible = (client.state.tags & new_mask) > 0;
 
-            old_has_visible |= old_visible;
-            new_has_visible |= new_visible;
-            has_membership_change |= old_visible != new_visible;
+            if old_visible != new_visible {
+                has_membership_change = true;
+                break;
+            }
         }
 
-        // Skip compositor tag-slide when either side is empty. This avoids
-        // first-frame hitching when switching from an empty tag into a busy tag.
-        has_membership_change && old_has_visible && new_has_visible
+        // Animate whenever visible window membership changes between old and
+        // new tags. This includes switching to/from empty tags (wallpaper-only).
+        // When both tags are empty, has_membership_change is false so we skip.
+        has_membership_change
     }
 
     /// Return the number of pixels at the top of the monitor to exclude from
