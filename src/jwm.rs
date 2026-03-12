@@ -3429,6 +3429,16 @@ impl Jwm {
                 cfg.animation_easing(),
                 AnimationKind::Hide,
             );
+            // When compositor is active, move the actual X11 window to the
+            // hidden position immediately.  The compositor handles the visual
+            // slide-out via the scene, but the X server delivers input events
+            // based on the real window geometry — without this the hidden
+            // window still receives hover/click events at its old position.
+            if backend.has_compositor() {
+                if let Err(e) = self.move_window(backend, win, hidden_x, y) {
+                    warn!("[hide_client] Failed to move window off-screen {:?}: {:?}", win, e);
+                }
+            }
         } else {
             if let Err(e) = self.move_window(backend, win, hidden_x, y) {
                 warn!("[hide_client] Failed to hide window {:?}: {:?}", win, e);
