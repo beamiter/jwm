@@ -9596,6 +9596,29 @@ impl Jwm {
                 self.state.sel_mon = self.state.monitor_order.first().copied();
             }
         }
+
+        // Update compositor with current monitor geometries (for per-monitor wallpaper)
+        {
+            let mon_list: Vec<(u32, i32, i32, u32, u32)> = self
+                .state
+                .monitor_order
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, &mk)| {
+                    self.state.monitors.get(mk).map(|m| {
+                        (
+                            idx as u32,
+                            m.geometry.m_x,
+                            m.geometry.m_y,
+                            m.geometry.m_w.max(1) as u32,
+                            m.geometry.m_h.max(1) as u32,
+                        )
+                    })
+                })
+                .collect();
+            backend.compositor_set_monitors(&mon_list);
+        }
+
         dirty
     }
 

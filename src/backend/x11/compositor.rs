@@ -161,6 +161,28 @@ enum TransitionMode {
     Cube,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum WallpaperMode {
+    Fill,
+    Fit,
+    Stretch,
+    Center,
+}
+
+/// Per-monitor wallpaper state.
+struct MonitorWallpaper {
+    /// Monitor geometry in screen coordinates.
+    mon_x: i32,
+    mon_y: i32,
+    mon_w: u32,
+    mon_h: u32,
+    /// GL texture for this monitor's wallpaper (None = use default).
+    texture: Option<glow::Texture>,
+    mode: WallpaperMode,
+    img_w: u32,
+    img_h: u32,
+}
+
 /// Parsed opacity rule: "opacity_percent:class_name"
 #[derive(Clone)]
 struct OpacityRule {
@@ -541,6 +563,15 @@ pub(super) struct Compositor {
     particle_systems: Vec<ParticleSystem>,
     particle_vao: glow::VertexArray,
     particle_vbo: glow::Buffer,
+
+    // --- Wallpaper ---
+    /// Default wallpaper texture (used for monitors without a per-monitor override).
+    wallpaper_texture: Option<glow::Texture>,
+    wallpaper_mode: WallpaperMode,
+    wallpaper_img_w: u32,
+    wallpaper_img_h: u32,
+    /// Per-monitor wallpaper overrides. Populated by set_monitors().
+    monitor_wallpapers: Vec<MonitorWallpaper>,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
@@ -588,6 +619,14 @@ impl Drop for Compositor {
             if let Some((fbo, tex)) = self.transition_new_fbo.take() {
                 self.gl.delete_framebuffer(fbo);
                 self.gl.delete_texture(tex);
+            }
+            if let Some(tex) = self.wallpaper_texture.take() {
+                self.gl.delete_texture(tex);
+            }
+            for mw in self.monitor_wallpapers.drain(..) {
+                if let Some(tex) = mw.texture {
+                    self.gl.delete_texture(tex);
+                }
             }
         }
         let wins: Vec<u32> = self.windows.keys().copied().collect();
@@ -1428,6 +1467,17 @@ impl Compositor {
             None
         };
 
+        // Load wallpaper texture if configured
+        let wallpaper_mode = Self::parse_wallpaper_mode(&behavior.wallpaper_mode);
+        let (wallpaper_texture, wallpaper_img_w, wallpaper_img_h) = if !behavior.wallpaper.is_empty() {
+            match Self::load_wallpaper_texture(&gl, &behavior.wallpaper) {
+                Some((tex, w, h)) => (Some(tex), w, h),
+                None => (None, 0, 0),
+            }
+        } else {
+            (None, 0, 0)
+        };
+
         // Create post-process FBO (features 8/9/10) — needed if any post-processing is active
         let needs_postprocess = behavior.color_temperature != 0.0
             || behavior.saturation != 1.0
@@ -1620,6 +1670,12 @@ impl Compositor {
             particle_systems: Vec::new(),
             particle_vao,
             particle_vbo,
+            // Wallpaper
+            wallpaper_texture,
+            wallpaper_mode,
+            wallpaper_img_w,
+            wallpaper_img_h,
+            monitor_wallpapers: Vec::new(),
         })
     }
 
@@ -1665,6 +1721,158 @@ impl Compositor {
             gl.delete_shader(fs);
             Ok(program)
         }
+    }
+
+    /// Load a wallpaper image from disk and upload it as a GL texture.
+    /// Returns (texture, image_width, image_height) or None on failure.
+    fn load_wallpaper_texture(gl: &glow::Context, path: &str) -> Option<(glow::Texture, u32, u32)> {
+        let img = match image::open(path) {
+            Ok(img) => img,
+            Err(e) => {
+                log::warn!("compositor: failed to load wallpaper '{}': {}", path, e);
+                return None;
+            }
+        };
+        let rgba = img.to_rgba8();
+        let (w, h) = (rgba.width(), rgba.height());
+        log::info!("compositor: loaded wallpaper '{}' ({}x{})", path, w, h);
+
+        unsafe {
+            let tex = match gl.create_texture() {
+                Ok(t) => t,
+                Err(e) => {
+                    log::warn!("compositor: failed to create wallpaper texture: {}", e);
+                    return None;
+                }
+            };
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA8 as i32,
+                w as i32,
+                h as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(rgba.as_raw())),
+            );
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            Some((tex, w, h))
+        }
+    }
+
+    /// Compute the draw rect (x, y, w, h) for a wallpaper within a target area.
+    /// `area`: (x, y, w, h) of the target area in screen coords.
+    /// `img_w`, `img_h`: source image dimensions.
+    fn compute_wallpaper_rect(
+        mode: WallpaperMode,
+        area: (f32, f32, f32, f32),
+        img_w: u32,
+        img_h: u32,
+    ) -> (f32, f32, f32, f32) {
+        let (ax, ay, aw, ah) = area;
+        let iw = img_w as f32;
+        let ih = img_h as f32;
+        if iw <= 0.0 || ih <= 0.0 {
+            return (ax, ay, aw, ah);
+        }
+        match mode {
+            WallpaperMode::Stretch => (ax, ay, aw, ah),
+            WallpaperMode::Fill => {
+                let scale = (aw / iw).max(ah / ih);
+                let dw = iw * scale;
+                let dh = ih * scale;
+                let dx = ax + (aw - dw) * 0.5;
+                let dy = ay + (ah - dh) * 0.5;
+                (dx, dy, dw, dh)
+            }
+            WallpaperMode::Fit => {
+                let scale = (aw / iw).min(ah / ih);
+                let dw = iw * scale;
+                let dh = ih * scale;
+                let dx = ax + (aw - dw) * 0.5;
+                let dy = ay + (ah - dh) * 0.5;
+                (dx, dy, dw, dh)
+            }
+            WallpaperMode::Center => {
+                let dx = ax + (aw - iw) * 0.5;
+                let dy = ay + (ah - ih) * 0.5;
+                (dx, dy, iw, ih)
+            }
+        }
+    }
+
+    fn parse_wallpaper_mode(s: &str) -> WallpaperMode {
+        match s {
+            "fit" => WallpaperMode::Fit,
+            "stretch" => WallpaperMode::Stretch,
+            "center" => WallpaperMode::Center,
+            _ => WallpaperMode::Fill,
+        }
+    }
+
+    /// Update monitor geometries and per-monitor wallpaper textures.
+    /// Called when monitors are added/removed/changed.
+    /// `monitors`: list of (index, x, y, w, h) for each monitor.
+    pub(super) fn set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32)]) {
+        // Clean up old per-monitor textures
+        unsafe {
+            for mw in self.monitor_wallpapers.drain(..) {
+                if let Some(tex) = mw.texture {
+                    self.gl.delete_texture(tex);
+                }
+            }
+        }
+
+        let cfg = crate::config::CONFIG.load();
+        let behavior = cfg.behavior();
+
+        for &(idx, x, y, w, h) in monitors {
+            // Check if there's a per-monitor config for this index
+            let per_mon = behavior.wallpaper_monitors.iter().find(|wm| wm.monitor == idx);
+
+            let (path, mode_str) = if let Some(pm) = per_mon {
+                (
+                    if pm.path.is_empty() { &behavior.wallpaper } else { &pm.path },
+                    if pm.mode.is_empty() { &behavior.wallpaper_mode } else { &pm.mode },
+                )
+            } else {
+                (&behavior.wallpaper, &behavior.wallpaper_mode)
+            };
+
+            let mode = Self::parse_wallpaper_mode(mode_str);
+            let (texture, img_w, img_h) = if !path.is_empty() {
+                match Self::load_wallpaper_texture(&self.gl, path) {
+                    Some((tex, iw, ih)) => (Some(tex), iw, ih),
+                    None => (None, 0, 0),
+                }
+            } else {
+                (None, 0, 0)
+            };
+
+            self.monitor_wallpapers.push(MonitorWallpaper {
+                mon_x: x,
+                mon_y: y,
+                mon_w: w,
+                mon_h: h,
+                texture,
+                mode,
+                img_w,
+                img_h,
+            });
+        }
+
+        self.needs_render = true;
+        log::info!(
+            "compositor: set_monitors: {} monitors, {} with wallpaper overrides",
+            monitors.len(),
+            behavior.wallpaper_monitors.len(),
+        );
     }
 
     /// Create the dual Kawase blur FBO mipmap chain.
@@ -3605,6 +3813,7 @@ impl Compositor {
 
         // Feature 6: Apply scissor test for partial redraw if damage regions available
         let use_scissor = !self.damage_regions.is_empty() && !force_render;
+        let mut damage_scissor = (0i32, 0i32, self.screen_w as i32, self.screen_h as i32);
         if use_scissor {
             unsafe {
                 self.gl.enable(glow::SCISSOR_TEST);
@@ -3621,7 +3830,8 @@ impl Compositor {
                 }
                 // GL scissor uses bottom-left origin
                 let gl_y = self.screen_h as i32 - max_y;
-                self.gl.scissor(min_x, gl_y, max_x - min_x, max_y - min_y);
+                damage_scissor = (min_x, gl_y, max_x - min_x, max_y - min_y);
+                self.gl.scissor(damage_scissor.0, damage_scissor.1, damage_scissor.2, damage_scissor.3);
             }
         }
         self.damage_regions.clear();
@@ -3642,6 +3852,103 @@ impl Compositor {
             -1.0,
             1.0,
         );
+
+        // Draw wallpaper background (per-monitor or global fallback)
+        // Skip if a fully-opaque window already covers the entire screen (occluded).
+        {
+            let wallpaper_occluded = first_visible > 0;
+            let has_wallpaper = !wallpaper_occluded
+                && (!self.monitor_wallpapers.is_empty()
+                    || self.wallpaper_texture.is_some());
+            if has_wallpaper {
+                unsafe {
+                    self.gl.use_program(Some(self.program));
+                    self.gl.uniform_matrix_4_f32_slice(
+                        self.win_uniforms.projection.as_ref(), false, &proj,
+                    );
+                    self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+                    self.gl.bind_vertex_array(Some(self.quad_vao));
+                    self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
+                    self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), 0.0);
+                    self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
+                    self.gl.active_texture(glow::TEXTURE0);
+
+                    if !self.monitor_wallpapers.is_empty() {
+                        // Temporarily disable damage-region scissor for wallpaper
+                        if use_scissor {
+                            self.gl.disable(glow::SCISSOR_TEST);
+                        }
+
+                        // Per-monitor wallpaper rendering with per-monitor scissor
+                        for mw in &self.monitor_wallpapers {
+                            // Resolve texture: per-monitor override or global default
+                            let (tex, mode, iw, ih) = if let Some(t) = mw.texture {
+                                (t, mw.mode, mw.img_w, mw.img_h)
+                            } else if let Some(t) = self.wallpaper_texture {
+                                (t, self.wallpaper_mode, self.wallpaper_img_w, self.wallpaper_img_h)
+                            } else {
+                                continue;
+                            };
+
+                            // Scissor to this monitor's area
+                            let gl_y = self.screen_h as i32 - (mw.mon_y + mw.mon_h as i32);
+                            self.gl.enable(glow::SCISSOR_TEST);
+                            self.gl.scissor(
+                                mw.mon_x,
+                                gl_y,
+                                mw.mon_w as i32,
+                                mw.mon_h as i32,
+                            );
+
+                            let area = (
+                                mw.mon_x as f32,
+                                mw.mon_y as f32,
+                                mw.mon_w as f32,
+                                mw.mon_h as f32,
+                            );
+                            let (rx, ry, rw, rh) =
+                                Self::compute_wallpaper_rect(mode, area, iw, ih);
+                            self.gl.uniform_4_f32(
+                                self.win_uniforms.rect.as_ref(), rx, ry, rw, rh,
+                            );
+                            self.gl.uniform_2_f32(
+                                self.win_uniforms.size.as_ref(), rw, rh,
+                            );
+                            self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                        }
+                        self.gl.disable(glow::SCISSOR_TEST);
+                    } else if let Some(wp_tex) = self.wallpaper_texture {
+                        // Single global wallpaper (no monitors set yet)
+                        let area = (0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
+                        let (rx, ry, rw, rh) = Self::compute_wallpaper_rect(
+                            self.wallpaper_mode,
+                            area,
+                            self.wallpaper_img_w,
+                            self.wallpaper_img_h,
+                        );
+                        self.gl.uniform_4_f32(
+                            self.win_uniforms.rect.as_ref(), rx, ry, rw, rh,
+                        );
+                        self.gl.uniform_2_f32(
+                            self.win_uniforms.size.as_ref(), rw, rh,
+                        );
+                        self.gl.bind_texture(glow::TEXTURE_2D, Some(wp_tex));
+                        self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    }
+
+                    self.gl.bind_texture(glow::TEXTURE_2D, None);
+                    self.gl.bind_vertex_array(None);
+                    self.gl.use_program(None);
+
+                    // Restore damage-region scissor if it was active
+                    if use_scissor {
+                        self.gl.scissor(damage_scissor.0, damage_scissor.1, damage_scissor.2, damage_scissor.3);
+                        self.gl.enable(glow::SCISSOR_TEST);
+                    }
+                }
+            }
+        }
 
         let visible_scene = &scene[first_visible..];
 

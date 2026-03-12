@@ -112,6 +112,17 @@ particle_effects = false
 particle_count = 150
 particle_lifetime = 0.8
 particle_gravity = 800.0
+wallpaper = ""
+wallpaper_mode = "fill"
+# Per-monitor wallpaper overrides (uncomment to use):
+# [[behavior.wallpaper_monitors]]
+# monitor = 0
+# path = "/path/to/wallpaper1.jpg"
+# mode = "fill"
+# [[behavior.wallpaper_monitors]]
+# monitor = 1
+# path = "/path/to/wallpaper2.jpg"
+# mode = "fit"
 
 [status_bar]
 name = "relm_bar"

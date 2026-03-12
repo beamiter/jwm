@@ -294,6 +294,32 @@ pub struct BehaviorConfig {
     pub particle_lifetime: f32,
     #[serde(default = "default_particle_gravity")]
     pub particle_gravity: f32,
+
+    // --- Wallpaper ---
+    /// Path to wallpaper image file (empty = solid black background).
+    /// Used as the default wallpaper for all monitors unless overridden by wallpaper_monitors.
+    #[serde(default)]
+    pub wallpaper: String,
+    /// Wallpaper display mode: "fill" (crop to fill), "fit" (letterbox), "stretch", "center".
+    #[serde(default = "default_wallpaper_mode")]
+    pub wallpaper_mode: String,
+    /// Per-monitor wallpaper overrides. Each entry specifies a monitor index and its wallpaper.
+    /// Monitor index 0 is the primary monitor, 1 is the second, etc.
+    /// Monitors without an entry fall back to the global `wallpaper` setting.
+    #[serde(default)]
+    pub wallpaper_monitors: Vec<WallpaperMonitorConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WallpaperMonitorConfig {
+    /// Monitor index (0-based, matching monitor order).
+    pub monitor: u32,
+    /// Path to wallpaper image file for this monitor.
+    #[serde(default)]
+    pub path: String,
+    /// Wallpaper display mode for this monitor (defaults to global wallpaper_mode).
+    #[serde(default)]
+    pub mode: String,
 }
 
 fn default_corner_radius() -> f32 { 10.0 }
@@ -301,7 +327,7 @@ fn default_true() -> bool { true }
 fn default_shadow_radius() -> f32 { 24.0 }
 fn default_shadow_offset() -> [f32; 2] { [4.0, 4.0] }
 fn default_shadow_color() -> [f32; 4] { [0.0, 0.0, 0.0, 0.5] }
-fn default_inactive_opacity() -> f32 { 0.92 }
+fn default_inactive_opacity() -> f32 { 0.98 }
 fn default_active_opacity() -> f32 { 1.0 }
 fn default_blur_strength() -> u32 { 3 }
 fn default_fade_step() -> f32 { 0.03 }
@@ -332,6 +358,7 @@ fn default_wobbly_grid_size() -> u32 { 8 }
 fn default_particle_count() -> u32 { 150 }
 fn default_particle_lifetime() -> f32 { 0.8 }
 fn default_particle_gravity() -> f32 { 800.0 }
+fn default_wallpaper_mode() -> String { "fill".to_string() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusBarConfig {
@@ -512,6 +539,9 @@ impl Default for Config {
                     particle_count: default_particle_count(),
                     particle_lifetime: default_particle_lifetime(),
                     particle_gravity: default_particle_gravity(),
+                    wallpaper: String::new(),
+                    wallpaper_mode: default_wallpaper_mode(),
+                    wallpaper_monitors: Vec::new(),
                 },
                 status_bar: StatusBarConfig {
                     name: STATUS_BAR_NAME.to_string(),
