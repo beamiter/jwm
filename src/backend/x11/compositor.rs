@@ -2015,6 +2015,17 @@ impl Compositor {
         self.frosted_glass_rules.iter().any(|r| r.eq_ignore_ascii_case(class_name))
     }
 
+    /// Whether a window should receive per-frame backdrop blur compositing.
+    fn needs_backdrop_blur(&self, wt: &WindowTexture) -> bool {
+        if Self::class_matches_exclude(&wt.class_name, &self.blur_exclude) {
+            return false;
+        }
+        wt.is_frosted
+            || wt.has_rgba
+            || wt.fade_opacity < 1.0
+            || wt.opacity_override.map_or(false, |o| o < 1.0)
+    }
+
     /// Look up per-window scale (feature 4).
     fn lookup_scale_rule(&self, class_name: &str) -> Option<f32> {
         if class_name.is_empty() {
@@ -4083,15 +4094,18 @@ impl Compositor {
                     // Compute effective opacity
                     let base_opacity = if is_focused { self.active_opacity } else { self.inactive_opacity };
                     let rule_opacity = wt.opacity_override.unwrap_or(base_opacity);
+                    let has_explicit_transparency = wt.opacity_override.map_or(false, |o| o < 1.0);
                     let inactive_dim_factor = if is_focused { 1.0 } else { self.inactive_dim };
-                    let dim = rule_opacity * fade * inactive_dim_factor;
+                    let dim = if wt.has_rgba {
+                        rule_opacity * fade * inactive_dim_factor
+                    } else {
+                        inactive_dim_factor
+                    };
 
-                    // detect_client_opacity: if window manages its own alpha, don't force opacity
-                    // For opaque (RGB) windows, set u_opacity = 1.0 so the shader
-                    // uses u_dim alone for both RGB darkening and alpha.  Previously
-                    // u_opacity was set to `dim` which caused alpha to be squared
-                    // (dim * dim), making inactive windows semi-transparent and
-                    // producing visible flickering on multi-monitor setups.
+                    // detect_client_opacity: if window manages its own alpha, don't force opacity.
+                    // For RGB windows, keep fully opaque by default, but allow explicit
+                    // per-window opacity overrides (and fade animations) to output real
+                    // alpha so translucent windows can reveal realtime blurred backdrop.
                     let opacity = if wt.has_rgba {
                         if self.detect_client_opacity {
                             -dim
@@ -4099,7 +4113,11 @@ impl Compositor {
                             -1.0f32 * fade
                         }
                     } else {
-                        1.0f32
+                        if has_explicit_transparency || fade < 1.0 {
+                            (rule_opacity * fade).clamp(0.0, 1.0)
+                        } else {
+                            1.0f32
+                        }
                     };
 
                     // Feature 4: Apply per-window scale
@@ -4116,13 +4134,8 @@ impl Compositor {
 
                     // Feature 13: Draw blurred background behind translucent windows (with frame extents mask)
                     // Blur is captured per-window so it includes all windows drawn below.
-                    // Only blur the focused window to reduce CPU/GPU overhead.
                     if blur_available {
-                        let needs_blur = is_focused
-                            && (wt.has_rgba || fade < 1.0 || wt.opacity_override.map_or(false, |o| o < 1.0))
-                            && !Self::class_matches_exclude(&wt.class_name, &self.blur_exclude);
-                        let needs_frosted = is_focused && wt.is_frosted;
-                        if needs_blur || needs_frosted {
+                        if self.needs_backdrop_blur(wt) {
                             // Temporarily break out of the window shader to run blur passes.
                             // Capture the current framebuffer (which includes all windows
                             // drawn so far) and produce a blurred texture from it.
@@ -4766,18 +4779,30 @@ impl Compositor {
     }
 
     pub(super) fn notify_window_move_delta(&mut self, x11_win: u32, dx: f32, dy: f32) {
-        if !self.wobbly_windows { return; }
-        if let Some(wt) = self.windows.get_mut(&x11_win) {
-            if let Some(ref mut w) = wt.wobbly {
-                // Displace non-pinned corners (pin top-left, displace others)
-                // All corners get displaced, but top-left (corner 0) returns faster
-                for i in 1..4 {
-                    w.corner_offsets[i][0] -= dx * 0.5;
-                    w.corner_offsets[i][1] -= dy * 0.5;
+        if self.wobbly_windows {
+            if let Some(wt) = self.windows.get_mut(&x11_win) {
+                if let Some(ref mut w) = wt.wobbly {
+                    // Displace non-pinned corners (pin top-left, displace others)
+                    // All corners get displaced, but top-left (corner 0) returns faster
+                    for i in 1..4 {
+                        w.corner_offsets[i][0] -= dx * 0.5;
+                        w.corner_offsets[i][1] -= dy * 0.5;
+                    }
                 }
             }
-            self.needs_render = true;
         }
+
+        // During interactive move/resize, request full-frame redraw when backdrop
+        // blur is active so translucent windows see real-time updated background.
+        let blur_active = self.blur_enabled
+            && self.scene_fbo.is_some()
+            && !self.blur_fbos.is_empty()
+            && self.windows.values().any(|wt| self.needs_backdrop_blur(wt));
+        if blur_active {
+            self.damage_regions.clear();
+            self.damage_regions.push((0, 0, self.screen_w, self.screen_h));
+        }
+        self.needs_render = true;
     }
 
     pub(super) fn notify_window_move_end(&mut self, x11_win: u32) {
