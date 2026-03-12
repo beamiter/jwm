@@ -3722,41 +3722,10 @@ impl Compositor {
             }
         }
 
-        // === Pass 1.5: Background blur ===
-        let has_blur_windows = self.blur_enabled
+        // === Pass 1.5: Background blur (now computed per-window in Pass 2) ===
+        let blur_available = self.blur_enabled
             && !self.blur_fbos.is_empty()
-            && self.scene_fbo.is_some()
-            && visible_scene.iter().any(|&(win, _, _, _, _)| {
-                self.windows.get(&win).map_or(false, |wt| {
-                    ((wt.has_rgba || wt.fade_opacity < 1.0 || wt.opacity_override.is_some())
-                        && !Self::class_matches_exclude(&wt.class_name, &self.blur_exclude))
-                        || wt.is_frosted
-                })
-            });
-
-        // Disable scissor for blur passes (they need full-screen access)
-        if use_scissor {
-            unsafe { self.gl.disable(glow::SCISSOR_TEST); }
-        }
-
-        let blur_texture = if has_blur_windows {
-            self.run_blur_passes(&proj)
-        } else {
-            None
-        };
-
-        // Re-enable scissor if needed
-        if use_scissor {
-            unsafe { self.gl.enable(glow::SCISSOR_TEST); }
-        }
-
-        // Re-bind postprocess FBO if needed (blur passes may have unbound it)
-        if postprocess_active {
-            let (pp_fbo, _) = self.postprocess_fbo.as_ref().unwrap();
-            unsafe {
-                self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(*pp_fbo));
-            }
-        }
+            && self.scene_fbo.is_some();
 
         // === Pass 2: Draw window textures ===
         unsafe {
@@ -3818,32 +3787,70 @@ impl Compositor {
                     };
 
                     // Feature 13: Draw blurred background behind translucent windows (with frame extents mask)
-                    if let Some(blur_tex) = blur_texture {
+                    // Blur is captured per-window so it includes all windows drawn below.
+                    if blur_available {
                         let needs_blur = (wt.has_rgba || fade < 1.0 || wt.opacity_override.map_or(false, |o| o < 1.0))
                             && !Self::class_matches_exclude(&wt.class_name, &self.blur_exclude);
                         let needs_frosted = wt.is_frosted;
                         if needs_blur || needs_frosted {
-                            // Feature 13: If blur_use_frame_extents, crop blur to client area
-                            let (bx, by, bw, bh) = if self.blur_use_frame_extents {
-                                let [fl, fr, ft, fb] = wt.frame_extents;
-                                let bx = draw_x + fl as f32;
-                                let by = draw_y + ft as f32;
-                                let bw = (draw_w - fl as f32 - fr as f32).max(1.0);
-                                let bh = (draw_h - ft as f32 - fb as f32).max(1.0);
-                                (bx, by, bw, bh)
-                            } else {
-                                (draw_x, draw_y, draw_w, draw_h)
-                            };
-                            self.gl.active_texture(glow::TEXTURE0);
-                            self.gl.bind_texture(glow::TEXTURE_2D, Some(blur_tex));
-                            self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), fade);
-                            self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
-                            self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
-                            self.gl.uniform_2_f32(self.win_uniforms.size.as_ref(), bw, bh);
-                            self.gl.uniform_4_f32(
-                                self.win_uniforms.rect.as_ref(), bx, by, bw, bh,
+                            // Temporarily break out of the window shader to run blur passes.
+                            // Capture the current framebuffer (which includes all windows
+                            // drawn so far) and produce a blurred texture from it.
+                            self.gl.bind_vertex_array(None);
+                            self.gl.use_program(None);
+                            if use_scissor {
+                                self.gl.disable(glow::SCISSOR_TEST);
+                            }
+
+                            let blur_tex = self.run_blur_passes_from_fbo(
+                                if postprocess_active {
+                                    self.postprocess_fbo.as_ref().map(|(fbo, _)| *fbo)
+                                } else {
+                                    None
+                                },
                             );
-                            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+                            // Restore state for window drawing
+                            if use_scissor {
+                                self.gl.enable(glow::SCISSOR_TEST);
+                            }
+                            if postprocess_active {
+                                let (pp_fbo, _) = self.postprocess_fbo.as_ref().unwrap();
+                                self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(*pp_fbo));
+                            } else {
+                                self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                            }
+                            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+                            self.gl.use_program(Some(self.program));
+                            self.gl.uniform_matrix_4_f32_slice(
+                                self.win_uniforms.projection.as_ref(), false, &proj,
+                            );
+                            self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+                            self.gl.bind_vertex_array(Some(self.quad_vao));
+                            self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
+
+                            if let Some(blur_tex) = blur_tex {
+                                // Feature 13: If blur_use_frame_extents, crop blur to client area
+                                let (bx, by, bw, bh) = if self.blur_use_frame_extents {
+                                    let [fl, fr, ft, fb] = wt.frame_extents;
+                                    let bx = draw_x + fl as f32;
+                                    let by = draw_y + ft as f32;
+                                    let bw = (draw_w - fl as f32 - fr as f32).max(1.0);
+                                    let bh = (draw_h - ft as f32 - fb as f32).max(1.0);
+                                    (bx, by, bw, bh)
+                                } else {
+                                    (draw_x, draw_y, draw_w, draw_h)
+                                };
+                                self.gl.active_texture(glow::TEXTURE0);
+                                self.gl.bind_texture(glow::TEXTURE_2D, Some(blur_tex));
+                                self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), fade);
+                                self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
+                                self.gl.uniform_2_f32(self.win_uniforms.size.as_ref(), bw, bh);
+                                self.gl.uniform_4_f32(
+                                    self.win_uniforms.rect.as_ref(), bx, by, bw, bh,
+                                );
+                                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                            }
                         }
                     }
 
@@ -4782,8 +4789,8 @@ impl Compositor {
     }
 
     /// Capture the current framebuffer into scene_fbo, then run dual Kawase blur passes.
-    /// Returns the texture containing the final blurred result.
-    fn run_blur_passes(&self, _proj: &[f32; 16]) -> Option<glow::Texture> {
+    /// `source_fbo` specifies which FBO to read from (None = default back buffer).
+    fn run_blur_passes_from_fbo(&self, source_fbo: Option<glow::Framebuffer>) -> Option<glow::Texture> {
         let (scene_fbo, scene_tex) = self.scene_fbo.as_ref()?;
         if self.blur_fbos.is_empty() {
             return None;
@@ -4791,7 +4798,7 @@ impl Compositor {
 
         unsafe {
             // Copy current framebuffer to scene FBO
-            self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None); // read from default (back buffer)
+            self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, source_fbo);
             self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(*scene_fbo));
             self.gl.blit_framebuffer(
                 0, 0, self.screen_w as i32, self.screen_h as i32,
