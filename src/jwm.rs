@@ -251,11 +251,10 @@ pub struct Jwm {
     /// Night light: last time we updated color temperature
     pub last_night_light_update: Option<std::time::Instant>,
 
-    /// Overview mode (Alt-Tab 3D prism carousel)
+    /// Overview mode (Alt+Ctrl+Tab modal 3D prism carousel)
     pub overview_active: bool,
     pub overview_index: usize,
     pub overview_clients: Vec<ClientKey>,
-    pub overview_confirm_on_alt_release: bool,
     /// Sliding window offset for >6 clients in overview prism.
     pub overview_slide_offset: usize,
 
@@ -386,43 +385,7 @@ impl WMController for Jwm {
         }
     }
 
-    fn on_key_release(&mut self, backend: &mut dyn Backend, keycode: u8, mods: u16, _time: u32) {
-        let debug_keys = std::env::var("JWM_DEBUG_KEYS")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-
-        if !self.overview_active {
-            return;
-        }
-
-        let keysym = match backend.key_ops_mut().keysym_from_keycode(keycode) {
-            Ok(keysym) => keysym,
-            Err(e) => {
-                error!("Error translating KeyRelease keycode {}: {:?}", keycode, e);
-                return;
-            }
-        };
-
-        if debug_keys {
-            let mods_clean = backend.key_ops().clean_mods(mods);
-            info!(
-                "[key-release] keycode={} keysym=0x{:x} mods_raw=0x{:x} mods_clean=0x{:x} overview_active={} confirm_on_alt_release={}",
-                keycode,
-                keysym,
-                mods,
-                mods_clean.bits(),
-                self.overview_active,
-                self.overview_confirm_on_alt_release
-            );
-        }
-
-        let released_alt = keysym == keys::KEY_Alt_L || keysym == keys::KEY_Alt_R;
-        if released_alt && self.overview_confirm_on_alt_release {
-            self.overview_confirm_on_alt_release = false;
-            if let Err(e) = self.toggle_overview(backend, &WMArgEnum::Int(0)) {
-                error!("Error handling overview Alt release: {:?}", e);
-            }
-        }
+    fn on_key_release(&mut self, _backend: &mut dyn Backend, _keycode: u8, _mods: u16, _time: u32) {
     }
 
     fn on_button_press(
@@ -495,6 +458,21 @@ impl WMController for Jwm {
                             backend.compositor_notify_window_move_delta(client.win, dx, dy);
                         }
                     }
+                }
+                // Sync client geometry so build_compositor_scene uses the live
+                // drag position instead of the stale pre-drag geometry.
+                // Also force a compositor redraw since the ConfigureNotify from
+                // set_position is asynchronous and may not arrive this frame.
+                if let Some((win, x, y, w, h)) = backend.interaction_geometry() {
+                    if let Some(&ck) = self.state.win_to_client.get(&win) {
+                        if let Some(client) = self.state.clients.get_mut(ck) {
+                            client.geometry.x = x;
+                            client.geometry.y = y;
+                            client.geometry.w = w as i32;
+                            client.geometry.h = h as i32;
+                        }
+                    }
+                    backend.compositor_force_full_redraw();
                 }
                 self.last_mouse_root = (root_x, root_y);
                 return;
@@ -1021,7 +999,6 @@ impl EventHandler for Jwm {
         self.process_commands_from_status_bar(backend);
         self.process_ipc(backend);
         self.check_config_reload(backend);
-        self.maybe_finish_overview_on_alt_release(backend);
         self.flush_pending_bar_updates();
         self.tick_animations(backend);
         backend.window_ops().flush()?;
@@ -1331,7 +1308,6 @@ impl Jwm {
             overview_active: false,
             overview_index: 0,
             overview_clients: Vec::new(),
-            overview_confirm_on_alt_release: false,
             overview_slide_offset: 0,
             magnifier_enabled: false,
         };
@@ -1554,32 +1530,47 @@ impl Jwm {
                     | Mods::MOD3
                     | Mods::MOD5);
 
-            if keysym == keys::KEY_Tab && overview_mods.contains(Mods::ALT) {
+            // Tab / Shift+Tab → cycle forward / backward
+            if keysym == keys::KEY_Tab && !overview_mods.contains(Mods::ALT) {
                 let direction = if overview_mods.contains(Mods::SHIFT) { -1 } else { 1 };
-                self.overview_confirm_on_alt_release = true;
                 if debug_keys {
                     info!(
-                        "[overview] cycle via Alt+Tab keysym=0x{:x} mods=0x{:x} direction={} confirm_on_alt_release={}",
+                        "[overview] cycle via Tab keysym=0x{:x} mods=0x{:x} direction={}",
                         keysym,
                         overview_mods.bits(),
                         direction,
-                        self.overview_confirm_on_alt_release
                     );
                 }
                 return self.cycle_overview(backend, &WMArgEnum::Int(direction));
             }
-            if keysym == keys::KEY_Return || keysym == keys::KEY_space {
-                self.overview_confirm_on_alt_release = false;
+            // Alt+J → cycle forward, Alt+K → cycle backward
+            if keysym == keys::KEY_j && overview_mods == Mods::ALT {
+                return self.cycle_overview(backend, &WMArgEnum::Int(1));
+            }
+            if keysym == keys::KEY_k && overview_mods == Mods::ALT {
+                return self.cycle_overview(backend, &WMArgEnum::Int(-1));
+            }
+            // Alt+Ctrl+Tab → confirm (close overview, focus selected)
+            if keysym == keys::KEY_Tab
+                && overview_mods.contains(Mods::ALT)
+                && overview_mods.contains(Mods::CONTROL)
+            {
                 return self.toggle_overview(backend, &WMArgEnum::Int(0));
             }
+            // Enter → confirm (close overview, focus selected)
+            if keysym == keys::KEY_Return {
+                return self.toggle_overview(backend, &WMArgEnum::Int(0));
+            }
+            // Escape → cancel (close overview, no focus change)
             if keysym == keys::KEY_Escape {
                 self.overview_active = false;
                 self.overview_clients.clear();
                 self.overview_index = 0;
-                self.overview_confirm_on_alt_release = false;
                 backend.compositor_set_overview_mode(false, &[]);
                 return Ok(());
             }
+            // Consume all other keys while overview is active
+            return Ok(());
         }
 
         let mut matched = false;
@@ -1608,23 +1599,6 @@ impl Jwm {
                     );
                 }
                 if let Some(func) = key_config.func_opt {
-                    let alt_tab_overview_activation = !self.overview_active
-                        && std::ptr::fn_addr_eq(func, Jwm::toggle_overview as WMFuncType)
-                        && keysym == keys::KEY_Tab
-                        && clean_state.contains(Mods::ALT);
-
-                    if alt_tab_overview_activation {
-                        self.overview_confirm_on_alt_release = true;
-                        if debug_keys {
-                            info!(
-                                "[overview] activate via Alt+Tab keysym=0x{:x} mods=0x{:x} confirm_on_alt_release={}",
-                                keysym,
-                                clean_state.bits(),
-                                self.overview_confirm_on_alt_release
-                            );
-                        }
-                    }
-
                     if let Err(e) = func(self, backend, &key_config.arg) {
                         error!("Error executing keyboard shortcut: {:?}", e);
                     }
@@ -5405,7 +5379,6 @@ impl Jwm {
                 self.focus(backend, Some(client_key))?;
             }
             self.overview_active = false;
-            self.overview_confirm_on_alt_release = false;
             backend.compositor_set_overview_mode(false, &[]);
         } else {
             // Start overview: collect visible windows on current monitor
@@ -5471,50 +5444,6 @@ impl Jwm {
             }
         }
         layout
-    }
-
-    fn maybe_finish_overview_on_alt_release(&mut self, backend: &mut dyn Backend) {
-        let debug_keys = std::env::var("JWM_DEBUG_KEYS")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-
-        if !self.overview_active || !self.overview_confirm_on_alt_release {
-            return;
-        }
-
-        let Ok((_, _, raw_mods, _)) = backend.input_ops().query_pointer_root() else {
-            if debug_keys {
-                info!("[overview] poll-alt-release query_pointer_root failed while waiting for Alt release");
-            }
-            return;
-        };
-
-        let clean_mods = self.clean_mask(backend, raw_mods);
-        if debug_keys {
-            info!(
-                "[overview] poll-alt-release raw_mods=0x{:x} clean_mods=0x{:x} overview_active={} confirm_on_alt_release={} alt_held={}",
-                raw_mods,
-                clean_mods.bits(),
-                self.overview_active,
-                self.overview_confirm_on_alt_release,
-                clean_mods.contains(Mods::ALT)
-            );
-        }
-        if clean_mods.contains(Mods::ALT) {
-            return;
-        }
-
-        self.overview_confirm_on_alt_release = false;
-        if debug_keys {
-            info!(
-                "[overview] poll-alt-release closing overview at index={} client_count={}",
-                self.overview_index,
-                self.overview_clients.len()
-            );
-        }
-        if let Err(e) = self.toggle_overview(backend, &WMArgEnum::Int(0)) {
-            error!("Error finishing overview after Alt release poll: {:?}", e);
-        }
     }
 
     pub fn cycle_overview(

@@ -697,16 +697,10 @@ impl Config {
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
-                modifier: vec!["Mod1".to_string()],
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
                 key: "Tab".to_string(),
                 function: "toggle_overview".to_string(),
                 argument: ArgumentConfig::Int(1),
-            },
-            KeyConfig {
-                modifier: vec!["Mod1".to_string(), "Shift".to_string()],
-                key: "Tab".to_string(),
-                function: "toggle_overview".to_string(),
-                argument: ArgumentConfig::Int(-1),
             },
             KeyConfig {
                 modifier: vec!["Mod1".to_string()],

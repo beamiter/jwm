@@ -602,6 +602,12 @@ pub trait Backend: Send {
         Ok(false)
     }
 
+    /// Return the current geometry of the window being dragged/resized, if any.
+    /// Used to keep JWM's client.geometry in sync during interactive move/resize.
+    fn interaction_geometry(&self) -> Option<(WindowId, i32, i32, u32, u32)> {
+        None
+    }
+
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError>;
 
     fn request_render(&mut self) {}

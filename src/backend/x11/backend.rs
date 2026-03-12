@@ -86,6 +86,11 @@ struct X11Interaction {
     start_root_x: f64,
     start_root_y: f64,
     action: InteractionAction,
+    /// Current geometry during drag, updated each handle_motion call.
+    current_x: i32,
+    current_y: i32,
+    current_w: u32,
+    current_h: u32,
 }
 
 impl X11Backend {
@@ -764,6 +769,10 @@ impl Backend for X11Backend {
         if self.input_ops.grab_pointer(mask, Some(cursor_handle))? {
             self.interaction = Some(X11Interaction {
                 win,
+                current_x: geom.x,
+                current_y: geom.y,
+                current_w: geom.w,
+                current_h: geom.h,
                 start_geom: geom,
                 start_root_x: rx,
                 start_root_y: ry,
@@ -802,6 +811,10 @@ impl Backend for X11Backend {
         if self.input_ops.grab_pointer(mask, Some(cursor_handle))? {
             self.interaction = Some(X11Interaction {
                 win,
+                current_x: geom.x,
+                current_y: geom.y,
+                current_w: geom.w,
+                current_h: geom.h,
                 start_geom: geom,
                 start_root_x: rx,
                 start_root_y: ry,
@@ -815,7 +828,7 @@ impl Backend for X11Backend {
 
     // [实现] 处理 Motion
     fn handle_motion(&mut self, x: f64, y: f64, _time: u32) -> Result<bool, BackendError> {
-        if let Some(ref state) = self.interaction {
+        if let Some(ref mut state) = self.interaction {
             let dx = (x - state.start_root_x) as i32;
             let dy = (y - state.start_root_y) as i32;
 
@@ -837,6 +850,8 @@ impl Backend for X11Backend {
                             state.start_geom.h
                         );
                     }
+                    state.current_x = new_x;
+                    state.current_y = new_y;
                     self.window_ops.set_position(state.win, new_x, new_y)?;
                 }
                 InteractionAction::Resize(_) => {
@@ -859,6 +874,8 @@ impl Backend for X11Backend {
                         );
                     }
 
+                    state.current_w = new_w;
+                    state.current_h = new_h;
                     self.window_ops.configure(
                         state.win,
                         state.start_geom.x,
@@ -873,6 +890,11 @@ impl Backend for X11Backend {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    fn interaction_geometry(&self) -> Option<(WindowId, i32, i32, u32, u32)> {
+        let state = self.interaction.as_ref()?;
+        Some((state.win, state.current_x, state.current_y, state.current_w, state.current_h))
     }
 
     // [实现] 处理 ButtonRelease
