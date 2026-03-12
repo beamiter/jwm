@@ -1470,7 +1470,7 @@ impl Compositor {
         // Load wallpaper texture if configured
         let wallpaper_mode = Self::parse_wallpaper_mode(&behavior.wallpaper_mode);
         let (wallpaper_texture, wallpaper_img_w, wallpaper_img_h) = if !behavior.wallpaper.is_empty() {
-            match Self::load_wallpaper_texture(&gl, &behavior.wallpaper) {
+            match Self::load_wallpaper_texture(&gl, &behavior.wallpaper, screen_w, screen_h) {
                 Some((tex, w, h)) => (Some(tex), w, h),
                 None => (None, 0, 0),
             }
@@ -1725,7 +1725,14 @@ impl Compositor {
 
     /// Load a wallpaper image from disk and upload it as a GL texture.
     /// Returns (texture, image_width, image_height) or None on failure.
-    fn load_wallpaper_texture(gl: &glow::Context, path: &str) -> Option<(glow::Texture, u32, u32)> {
+    /// If the image is larger than `max_w`x`max_h`, it is downscaled to fit
+    /// (preserving aspect ratio) to reduce GPU memory and sampling cost.
+    fn load_wallpaper_texture(
+        gl: &glow::Context,
+        path: &str,
+        max_w: u32,
+        max_h: u32,
+    ) -> Option<(glow::Texture, u32, u32)> {
         let img = match image::open(path) {
             Ok(img) => img,
             Err(e) => {
@@ -1733,6 +1740,20 @@ impl Compositor {
                 return None;
             }
         };
+
+        // Downscale to screen dimensions if the image is larger — there is no
+        // benefit in keeping pixels beyond the display resolution, and huge
+        // textures cause noticeable per-frame slowdowns during sampling.
+        let img = if max_w > 0 && max_h > 0 && (img.width() > max_w || img.height() > max_h) {
+            log::info!(
+                "compositor: downscaling wallpaper '{}' from {}x{} to fit {}x{}",
+                path, img.width(), img.height(), max_w, max_h,
+            );
+            img.resize(max_w, max_h, image::imageops::FilterType::Lanczos3)
+        } else {
+            img
+        };
+
         let rgba = img.to_rgba8();
         let (w, h) = (rgba.width(), rgba.height());
         log::info!("compositor: loaded wallpaper '{}' ({}x{})", path, w, h);
@@ -1847,7 +1868,7 @@ impl Compositor {
 
             let mode = Self::parse_wallpaper_mode(mode_str);
             let (texture, img_w, img_h) = if !path.is_empty() {
-                match Self::load_wallpaper_texture(&self.gl, path) {
+                match Self::load_wallpaper_texture(&self.gl, path, self.screen_w, self.screen_h) {
                     Some((tex, iw, ih)) => (Some(tex), iw, ih),
                     None => (None, 0, 0),
                 }
@@ -4095,10 +4116,12 @@ impl Compositor {
 
                     // Feature 13: Draw blurred background behind translucent windows (with frame extents mask)
                     // Blur is captured per-window so it includes all windows drawn below.
+                    // Only blur the focused window to reduce CPU/GPU overhead.
                     if blur_available {
-                        let needs_blur = (wt.has_rgba || fade < 1.0 || wt.opacity_override.map_or(false, |o| o < 1.0))
+                        let needs_blur = is_focused
+                            && (wt.has_rgba || fade < 1.0 || wt.opacity_override.map_or(false, |o| o < 1.0))
                             && !Self::class_matches_exclude(&wt.class_name, &self.blur_exclude);
-                        let needs_frosted = wt.is_frosted;
+                        let needs_frosted = is_focused && wt.is_frosted;
                         if needs_blur || needs_frosted {
                             // Temporarily break out of the window shader to run blur passes.
                             // Capture the current framebuffer (which includes all windows
