@@ -1,0 +1,583 @@
+rules = []
+
+[appearance]
+border_px = 3
+gap_px = 5
+snap = 32
+dmenu_font = "SauceCodePro Nerd Font Regular 11"
+status_bar_padding = 5
+status_bar_height = 42
+
+[behavior]
+focus_follows_new_window = false
+resize_hints = true
+lock_fullscreen = true
+compositor = true
+corner_radius = 10.0
+shadow_enabled = true
+shadow_radius = 24.0
+shadow_offset = [
+    4.0,
+    4.0,
+]
+shadow_color = [
+    0.0,
+    0.0,
+    0.0,
+    0.5,
+]
+inactive_opacity = 0.92
+active_opacity = 1.0
+blur_enabled = false
+blur_strength = 3
+fading = false
+fade_in_step = 0.03
+fade_out_step = 0.03
+shadow_exclude = []
+opacity_rules = []
+blur_exclude = []
+rounded_corners_exclude = []
+detect_client_opacity = false
+fullscreen_unredirect = true
+border_enabled = false
+border_width = 2.0
+border_color_focused = [
+    0.4,
+    0.6,
+    0.9,
+    1.0,
+]
+border_color_unfocused = [
+    0.3,
+    0.3,
+    0.3,
+    0.6,
+]
+corner_radius_rules = []
+scale_rules = []
+color_temperature = 0.0
+saturation = 1.0
+brightness = 1.0
+contrast = 1.0
+invert_colors = false
+grayscale = false
+debug_hud = false
+blur_use_frame_extents = false
+shadow_bottom_extra = 4.0
+transition_mode = "slide"
+window_animation = true
+window_animation_scale = 0.85
+inactive_dim = 1.0
+edge_glow = false
+edge_glow_color = [
+    0.3,
+    0.5,
+    1.0,
+    0.6,
+]
+edge_glow_width = 50.0
+attention_animation = true
+attention_color = [
+    1.0,
+    0.4,
+    0.1,
+    1.0,
+]
+pip_border_color = [
+    0.0,
+    0.8,
+    1.0,
+    0.8,
+]
+pip_border_width = 3.0
+night_light = false
+night_light_temp = 0.4
+night_light_start = "20:00"
+night_light_end = "06:00"
+night_light_transition_mins = 30
+magnifier_enabled = false
+magnifier_radius = 100.0
+magnifier_zoom = 2.0
+window_tilt = false
+tilt_amount = 5.0
+frosted_glass_rules = []
+frosted_glass_strength = 2
+overview_enabled = true
+overview_thumbnail_gap = 20.0
+wobbly_windows = false
+wobbly_stiffness = 10.0
+wobbly_damping = 5.0
+wobbly_grid_size = 8
+particle_effects = false
+particle_count = 150
+particle_lifetime = 0.8
+particle_gravity = 800.0
+
+[status_bar]
+name = "relm_bar"
+show_bar = true
+
+[colors]
+dark_sea_green1 = "#afffd7"
+dark_sea_green2 = "#afffaf"
+pale_turquoise1 = "#afffff"
+light_sky_blue1 = "#afd7ff"
+grey84 = "#d7d7d7"
+cyan = "#00ffd7"
+white = "#ffffff"
+black = "#000000"
+transparent = 0
+opaque = 255
+
+[keybindings]
+modkey = "Mod1"
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "e"
+function = "spawn"
+argument = ["dmenu_run"]
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "r"
+function = "spawn"
+argument = ["dmenu_run"]
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "Return"
+function = "spawn"
+argument = ["jterm4"]
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "b"
+function = "togglebar"
+argument = 0
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "j"
+function = "focusstack"
+argument = 1
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "k"
+function = "focusstack"
+argument = -1
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "i"
+function = "incnmaster"
+argument = 1
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "d"
+function = "incnmaster"
+argument = -1
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "h"
+function = "setmfact"
+argument = -0.025
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "l"
+function = "setmfact"
+argument = 0.025
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "h"
+function = "setcfact"
+argument = 0.2
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "l"
+function = "setcfact"
+argument = -0.2
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "o"
+function = "setcfact"
+argument = 0.0
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "j"
+function = "movestack"
+argument = 1
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "k"
+function = "movestack"
+argument = -1
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "Return"
+function = "zoom"
+argument = 0
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "Tab"
+function = "toggle_overview"
+argument = 1
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "Tab"
+function = "toggle_overview"
+argument = -1
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "Page_Up"
+function = "loopview"
+argument = -1
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "Page_Down"
+function = "loopview"
+argument = 1
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "c"
+function = "killclient"
+argument = 0
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "t"
+function = "setlayout"
+argument = "tile"
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "t"
+function = "setlayout"
+argument = "fibonacci"
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "f"
+function = "setlayout"
+argument = "float"
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "m"
+function = "setlayout"
+argument = "monocle"
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "u"
+function = "setlayout"
+argument = "centeredmaster"
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "u"
+function = "setlayout"
+argument = "bstack"
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "g"
+function = "setlayout"
+argument = "grid"
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "g"
+function = "setlayout"
+argument = "deck"
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "y"
+function = "setlayout"
+argument = "threecol"
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "y"
+function = "setlayout"
+argument = "tatami"
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "slash"
+function = "show_keybindings"
+argument = 0
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "space"
+function = "cyclelayout"
+argument = 1
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "space"
+function = "cyclelayout"
+argument = -1
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "f"
+function = "setlayout"
+argument = "fullscreen"
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "0"
+function = "view"
+argument = 4294967295
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "0"
+function = "tag"
+argument = 4294967295
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "comma"
+function = "focusmon"
+argument = -1
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "period"
+function = "focusmon"
+argument = 1
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "s"
+function = "take_screenshot"
+argument = 0
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "comma"
+function = "tagmon"
+argument = -1
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "period"
+function = "tagmon"
+argument = 1
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "n"
+function = "togglescratchpad"
+argument = ["term"]
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "m"
+function = "togglescratchpad"
+argument = [
+    "music",
+    "spotify",
+]
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "c"
+function = "togglescratchpad"
+argument = [
+    "calc",
+    "qalculate-gtk",
+]
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "s"
+function = "togglesticky"
+argument = 0
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "p"
+function = "togglepip"
+argument = 0
+
+[[keybindings.keys]]
+modifier = ["Mod1"]
+key = "w"
+function = "setlayout"
+argument = "scrolling"
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Control",
+]
+key = "h"
+function = "scrolling_consume"
+argument = -1
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Control",
+]
+key = "l"
+function = "scrolling_consume"
+argument = 1
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Control",
+    "Shift",
+]
+key = "h"
+function = "scrolling_expel"
+argument = -1
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Control",
+    "Shift",
+]
+key = "l"
+function = "scrolling_expel"
+argument = 1
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "q"
+function = "quit"
+argument = 0
+
+[[keybindings.keys]]
+modifier = [
+    "Mod1",
+    "Shift",
+]
+key = "r"
+function = "restart"
+argument = 0
+
+[[mouse_bindings.buttons]]
+click_type = "ClkClientWin"
+modifier = ["Mod1"]
+button = 1
+function = "movemouse"
+argument = 0
+
+[[mouse_bindings.buttons]]
+click_type = "ClkClientWin"
+modifier = ["Mod1"]
+button = 2
+function = "togglefloating"
+argument = 0
+
+[[mouse_bindings.buttons]]
+click_type = "ClkClientWin"
+modifier = ["Mod1"]
+button = 3
+function = "resizemouse"
+argument = 0
+
+[layout]
+m_fact = 0.55
+n_master = 1
+tags_length = 9
+
+[animation]
+enabled = true
+duration_ms = 150
+easing = "ease-out"
