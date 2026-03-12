@@ -371,7 +371,7 @@ impl AnimationConfig {
     pub fn default_value() -> Self {
         Self {
             enabled: true,
-            duration_ms: 150,
+            duration_ms: 250,
             easing: "ease-out".to_string(),
         }
     }
