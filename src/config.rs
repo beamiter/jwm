@@ -882,6 +882,12 @@ impl Config {
                 function: "setlayout".to_string(),
                 argument: ArgumentConfig::String("scrolling".to_string()),
             },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string()],
+                key: "v".to_string(),
+                function: "setlayout".to_string(),
+                argument: ArgumentConfig::String("vstack".to_string()),
+            },
             // Scrolling layout: consume/expel
             KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Control".to_string()],

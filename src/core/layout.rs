@@ -44,6 +44,7 @@ impl LayoutEnum {
     pub const TATAMI: Self = Self("tatami");
     pub const FULLSCREEN: Self = Self("fullscreen");
     pub const SCROLLING: Self = Self("scrolling");
+    pub const VSTACK: Self = Self("vstack");
     pub const ANY: Self = Self("");
 
     pub fn symbol(&self) -> &str {
@@ -60,6 +61,7 @@ impl LayoutEnum {
             "tatami" => "[+]",
             "fullscreen" => "[ ]",
             "scrolling" => "[S]",
+            "vstack" => "V[]",
             _ => "",
         }
     }
@@ -67,7 +69,7 @@ impl LayoutEnum {
     pub fn is_tile(&self) -> bool {
         matches!(
             self.0,
-            "tile" | "fibonacci" | "centeredmaster" | "bstack" | "grid" | "deck" | "threecol" | "tatami" | "fullscreen" | "scrolling"
+            "tile" | "fibonacci" | "centeredmaster" | "bstack" | "grid" | "deck" | "threecol" | "tatami" | "fullscreen" | "scrolling" | "vstack"
         )
     }
     pub fn is_float(&self) -> bool {
@@ -94,6 +96,7 @@ impl LayoutEnum {
         Self::MONOCLE,
         Self::FULLSCREEN,
         Self::SCROLLING,
+        Self::VSTACK,
         Self::FLOAT,
     ];
 
@@ -123,6 +126,7 @@ impl From<u32> for LayoutEnum {
             9 => LayoutEnum::TATAMI,
             10 => LayoutEnum::FULLSCREEN,
             11 => LayoutEnum::SCROLLING,
+            12 => LayoutEnum::VSTACK,
             _ => LayoutEnum::ANY,
         }
     }
@@ -944,4 +948,51 @@ pub fn calculate_scrolling<K: Copy>(
     }
 
     (results, new_viewport_x)
+}
+
+/// V-Stack (扇形堆叠): focused window centered, others fan out left/right.
+/// `clients[0]` must be the focused window (caller reorders before calling).
+pub fn calculate_vstack<K: Copy>(
+    params: &LayoutParams,
+    clients: &[LayoutClient<K>],
+) -> Vec<LayoutResult<K>> {
+    let n = clients.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    let mut results = Vec::with_capacity(n);
+    let gap = params.gap;
+
+    let wx = params.screen_area.x + gap;
+    let wy = params.screen_area.y + gap;
+    let ww = params.screen_area.w - 2 * gap;
+    let wh = params.screen_area.h - 2 * gap;
+
+    let center_w = (ww as f32 * params.m_fact) as i32;
+    let center_x = wx + (ww - center_w) / 2;
+    let step_x = gap.max(1) * 6;
+
+    for (i, c) in clients.iter().enumerate() {
+        let border2 = 2 * c.border_w;
+        let x = if i == 0 {
+            center_x
+        } else {
+            let depth = (i as i32 + 1) / 2;
+            let is_right = (i % 2) == 1;
+            let offset = depth * step_x;
+            if is_right {
+                center_x + offset
+            } else {
+                center_x - offset
+            }
+        };
+
+        results.push(LayoutResult {
+            key: c.key,
+            rect: Rect::new(x, wy, center_w - border2, wh - border2),
+        });
+    }
+
+    results
 }

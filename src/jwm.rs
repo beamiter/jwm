@@ -3958,6 +3958,7 @@ impl Jwm {
             LayoutEnum::TATAMI => self.tatami(backend, mon_key),
             LayoutEnum::FULLSCREEN => self.fullscreen_layout(backend, mon_key),
             LayoutEnum::SCROLLING => self.scrolling(backend, mon_key),
+            LayoutEnum::VSTACK => self.vstack(backend, mon_key),
             LayoutEnum::FLOAT | _ => {}
         }
     }
@@ -4082,6 +4083,59 @@ impl Jwm {
 
     fn tatami(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
         self.tiling_layout_wrapper(backend, mon_key, "tatami", layout::calculate_tatami);
+    }
+
+    fn vstack(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
+        info!("[vstack] via pure layout engine");
+
+        let (wx, wy, ww, wh, mfact, nmaster, _monitor_num, _client_y_offset) =
+            self.get_monitor_info(mon_key);
+
+        let screen_area = self
+            .monitor_work_area(mon_key)
+            .unwrap_or(Rect::new(wx, wy, ww, wh));
+
+        let raw_clients = self.collect_tileable_clients(mon_key);
+        if raw_clients.is_empty() {
+            return;
+        }
+
+        let (_effective_border, effective_gap) = self.apply_smart_borders(&raw_clients);
+        let default_border = CONFIG.load().border_px() as i32;
+
+        // Reorder: move the focused client (monitor.sel) to clients[0]
+        let sel_key = self.state.monitors.get(mon_key).and_then(|m| m.sel);
+        let mut ordered = raw_clients.clone();
+        if let Some(sk) = sel_key {
+            if let Some(pos) = ordered.iter().position(|&(k, _, _)| k == sk) {
+                let item = ordered.remove(pos);
+                ordered.insert(0, item);
+            }
+        }
+
+        let layout_clients: Vec<LayoutClient<ClientKey>> = ordered
+            .iter()
+            .map(|&(key, factor, _)| LayoutClient {
+                key,
+                factor,
+                border_w: self.state.clients.get(key).map(|c| c.geometry.border_w).unwrap_or(default_border),
+            })
+            .collect();
+
+        let params = LayoutParams {
+            screen_area,
+            n_master: nmaster,
+            m_fact: mfact,
+            gap: effective_gap,
+        };
+
+        let results = layout::calculate_vstack(&params, &layout_clients);
+
+        for res in results {
+            self.resize_client(
+                backend, res.key, res.rect.x, res.rect.y, res.rect.w, res.rect.h, false,
+            );
+        }
     }
 
     fn scrolling(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
@@ -6025,6 +6079,15 @@ impl Jwm {
         if let Some(client_key) = target_client {
             self.focus(backend, Some(client_key))?;
             self.restack(backend, self.state.sel_mon)?;
+
+            // V-stack: re-arrange so new focus moves to center
+            if self.is_vstack_layout() {
+                if let Some(mk) = self.state.sel_mon {
+                    self.arrangemon(backend, mk);
+                    let _ = self.restack(backend, Some(mk));
+                }
+            }
+
             self.suppress_mouse_focus_until =
                 Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
         }
@@ -6333,6 +6396,13 @@ impl Jwm {
     fn is_scrolling_layout(&self) -> bool {
         self.state.sel_mon.and_then(|mk| {
             self.state.monitors.get(mk).map(|m| *m.lt[m.sel_lt] == LayoutEnum::SCROLLING)
+        }).unwrap_or(false)
+    }
+
+    /// Check if the current monitor is in vstack layout
+    fn is_vstack_layout(&self) -> bool {
+        self.state.sel_mon.and_then(|mk| {
+            self.state.monitors.get(mk).map(|m| *m.lt[m.sel_lt] == LayoutEnum::VSTACK)
         }).unwrap_or(false)
     }
 

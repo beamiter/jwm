@@ -249,6 +249,7 @@ fn parse_layout_arg(args: &Value) -> Result<WMArgEnum, String> {
         "three_col" | "threecol" => LayoutEnum::THREE_COL,
         "tatami" => LayoutEnum::TATAMI,
         "fullscreen" => LayoutEnum::FULLSCREEN,
+        "vstack" | "v_stack" => LayoutEnum::VSTACK,
         _ => return Err(format!("unknown layout: {name}")),
     };
     Ok(WMArgEnum::Layout(std::rc::Rc::new(layout)))
