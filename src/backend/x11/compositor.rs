@@ -3759,7 +3759,7 @@ impl Compositor {
         let has_dirty = scene.iter().any(|&(win, _, _, _, _)| {
             self.windows.get(&win).map_or(false, |wt| wt.dirty || wt.needs_pixmap_refresh)
         });
-        let force_render = self.pending_screenshot.is_some() || self.debug_hud || self.transition_active();
+        let force_render = self.pending_screenshot.is_some() || self.debug_hud || self.transition_active() || self.overview_active;
         let hash = Self::scene_hash(scene, focused);
         if !has_dirty && !fades_active && !force_render && hash == self.last_scene_hash {
             return false;
