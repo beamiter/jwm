@@ -467,6 +467,12 @@ pub trait KeyOps: Send {
     fn grab_keys(&self, root: WindowId, bindings: &[(Mods, KeySym)]) -> Result<(), BackendError>;
     fn clear_key_grabs(&self, root: WindowId) -> Result<(), BackendError>;
 
+    /// Grab the entire keyboard so all key events are delivered to the WM.
+    /// Used for modal states like overview mode.
+    fn grab_keyboard(&self, _root: WindowId) -> Result<(), BackendError> { Ok(()) }
+    /// Release the keyboard grab.
+    fn ungrab_keyboard(&self) -> Result<(), BackendError> { Ok(()) }
+
     // 辅助转换
     fn clean_mods(&self, raw_state: u16) -> Mods;
     fn keysym_from_keycode(&mut self, keycode: u8) -> Result<KeySym, BackendError>;

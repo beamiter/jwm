@@ -2682,6 +2682,25 @@ mod key_ops {
             self.cache.clear();
             self.full_keymap = None;
         }
+
+        fn grab_keyboard(&self, root: WindowId) -> Result<(), BackendError> {
+            let r = self.ids.x11(root)?;
+            self.conn.grab_keyboard(
+                false,
+                r,
+                x11rb::CURRENT_TIME,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+            )?.reply()?;
+            self.conn.flush()?;
+            Ok(())
+        }
+
+        fn ungrab_keyboard(&self) -> Result<(), BackendError> {
+            self.conn.ungrab_keyboard(x11rb::CURRENT_TIME)?;
+            self.conn.flush()?;
+            Ok(())
+        }
     }
 }
 

@@ -1567,6 +1567,7 @@ impl Jwm {
                 self.overview_clients.clear();
                 self.overview_index = 0;
                 backend.compositor_set_overview_mode(false, &[]);
+                let _ = backend.key_ops().ungrab_keyboard();
                 return Ok(());
             }
             // Consume all other keys while overview is active
@@ -5434,6 +5435,7 @@ impl Jwm {
             }
             self.overview_active = false;
             backend.compositor_set_overview_mode(false, &[]);
+            let _ = backend.key_ops().ungrab_keyboard();
         } else {
             // Start overview: collect visible windows on current monitor
             let sel_mon_key = match self.state.sel_mon {
@@ -5472,6 +5474,9 @@ impl Jwm {
             self.overview_slide_offset = 0;
             self.overview_clients = visible;
             backend.compositor_set_overview_mode(true, &layout);
+            if let Some(root) = backend.root_window() {
+                let _ = backend.key_ops().grab_keyboard(root);
+            }
         }
         Ok(())
     }
