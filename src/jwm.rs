@@ -1530,8 +1530,8 @@ impl Jwm {
                     | Mods::MOD3
                     | Mods::MOD5);
 
-            // Tab / Shift+Tab → cycle forward / backward
-            if keysym == keys::KEY_Tab && !overview_mods.contains(Mods::ALT) {
+            // Tab / Shift+Tab / Alt+Tab / Alt+Shift+Tab → cycle forward / backward
+            if keysym == keys::KEY_Tab && !overview_mods.contains(Mods::CONTROL) {
                 let direction = if overview_mods.contains(Mods::SHIFT) { -1 } else { 1 };
                 if debug_keys {
                     info!(

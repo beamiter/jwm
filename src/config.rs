@@ -704,6 +704,18 @@ impl Config {
             },
             KeyConfig {
                 modifier: vec!["Mod1".to_string()],
+                key: "Tab".to_string(),
+                function: "loopview".to_string(),
+                argument: ArgumentConfig::Int(1),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Shift".to_string()],
+                key: "Tab".to_string(),
+                function: "loopview".to_string(),
+                argument: ArgumentConfig::Int(-1),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string()],
                 key: "Page_Up".to_string(),
                 function: "loopview".to_string(),
                 argument: ArgumentConfig::Int(-1),
