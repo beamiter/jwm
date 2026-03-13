@@ -539,7 +539,12 @@ impl Default for Config {
                     particle_count: default_particle_count(),
                     particle_lifetime: default_particle_lifetime(),
                     particle_gravity: default_particle_gravity(),
-                    wallpaper: String::new(),
+                    wallpaper: dirs::config_dir()
+                        .unwrap_or_default()
+                        .join("jwm")
+                        .join("wallpaper.jpg")
+                        .to_string_lossy()
+                        .into_owned(),
                     wallpaper_mode: default_wallpaper_mode(),
                     wallpaper_monitors: Vec::new(),
                 },
