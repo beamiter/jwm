@@ -6411,6 +6411,22 @@ impl Jwm {
         }).unwrap_or(false)
     }
 
+    /// Move the currently focused client to the front of the monitor's client
+    /// list so it becomes master in tiling layouts.
+    fn promote_focused_to_master(&mut self, mon_key: MonitorKey) {
+        let sel = match self.state.monitors.get(mon_key).and_then(|m| m.sel) {
+            Some(k) => k,
+            None => return,
+        };
+        // Already master?
+        let first_tiled = self.nexttiled(mon_key, None);
+        if first_tiled == Some(sel) {
+            return;
+        }
+        self.detach(sel);
+        self.attach_front(sel);
+    }
+
     /// Get the current monitor's scrolling state (if in scrolling layout)
     fn get_scrolling_state_for_sel_mon(&self) -> Option<(MonitorKey, &ScrollingState)> {
         let mon_key = self.state.sel_mon?;
@@ -6836,6 +6852,12 @@ impl Jwm {
             .map(|m| m.lt[m.sel_lt].clone())
             .ok_or("No monitor")?;
 
+        // Leaving vstack: promote the focused client to master so it stays
+        // master in the new layout.
+        if *old_layout == LayoutEnum::VSTACK {
+            self.promote_focused_to_master(sel_mon_key);
+        }
+
         self.exit_fullscreen_on_monitor(backend, sel_mon_key);
         self.update_layout_selection(sel_mon_key, arg)?;
 
@@ -6877,6 +6899,10 @@ impl Jwm {
             .get(sel_mon_key)
             .map(|m| m.lt[m.sel_lt].clone())
             .ok_or("No monitor")?;
+
+        if *old_layout == LayoutEnum::VSTACK {
+            self.promote_focused_to_master(sel_mon_key);
+        }
 
         self.exit_fullscreen_on_monitor(backend, sel_mon_key);
 
