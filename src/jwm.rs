@@ -5429,9 +5429,16 @@ impl Jwm {
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if self.overview_active {
-            // End overview: focus selected window
+            // End overview: focus selected window and promote it to master
             if let Some(&client_key) = self.overview_clients.get(self.overview_index) {
-                self.focus(backend, Some(client_key))?;
+                if let Some(mon_key) = self.state.sel_mon {
+                    self.detach(client_key);
+                    self.attach_front(client_key);
+                    self.focus(backend, Some(client_key))?;
+                    self.arrange(backend, Some(mon_key));
+                } else {
+                    self.focus(backend, Some(client_key))?;
+                }
             }
             self.overview_active = false;
             backend.compositor_set_overview_mode(false, &[]);
