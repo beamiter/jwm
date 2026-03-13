@@ -4720,8 +4720,8 @@ impl Compositor {
         self.clear_overview_title_textures();
         self.overview_active = active;
         let n = windows.len();
-        let face_w = self.screen_w as f32 * 0.35;
-        let face_h = self.screen_h as f32 * 0.55;
+        let face_w = self.screen_w as f32 * 0.667;
+        let face_h = self.screen_h as f32 * 0.667;
         self.overview_windows = windows.into_iter().enumerate().map(|(i, (win, _x, _y, _w, _h, sel, title))| {
             OverviewEntry {
                 x11_win: win,
@@ -4977,8 +4977,8 @@ impl Compositor {
             self.gl.viewport(mon_x, scissor_gl_y, mon_w as i32, mon_h as i32);
 
             // === 3. Compute hexagonal prism geometry ===
-            let face_w = mw * 0.35;
-            let face_h = mh * 0.55;
+            let face_w = mw * 0.667;
+            let face_h = mh * 0.667;
             let face_aspect = face_w / face_h;
             let apothem = face_aspect * 3.0_f32.sqrt();
 
