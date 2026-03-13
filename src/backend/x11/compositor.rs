@@ -4920,11 +4920,11 @@ impl Compositor {
         }
     }
 
-    /// Tick the overview prism rotation animation.
+    /// Tick the overview prism rotation animation (exponential ease-out).
     fn tick_overview_prism(&mut self) {
         let now = std::time::Instant::now();
         let dt = if let Some(last) = self.overview_prism_last_tick {
-            now.duration_since(last).as_secs_f32().min(0.05)
+            now.duration_since(last).as_secs_f32().min(0.1)
         } else {
             1.0 / 60.0
         };
@@ -4934,14 +4934,11 @@ impl Compositor {
         if diff.abs() < 0.001 {
             self.overview_prism_current_angle = self.overview_prism_target_angle;
         } else {
-            // Constant angular velocity (~PI rad/s ≈ 180°/s).
-            let speed = std::f32::consts::PI;
-            let step = speed * dt;
-            if diff.abs() <= step {
-                self.overview_prism_current_angle = self.overview_prism_target_angle;
-            } else {
-                self.overview_prism_current_angle += step * diff.signum();
-            }
+            // Exponential ease-out: close 88% of the remaining gap per 0.1s.
+            // t = 1 - e^(-speed * dt), speed=20 gives ~86% per 0.1s frame,
+            // feels snappy at any frame rate.
+            let t = 1.0 - (-20.0_f32 * dt).exp();
+            self.overview_prism_current_angle += diff * t;
             self.needs_render = true;
         }
     }
