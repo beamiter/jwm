@@ -1353,6 +1353,7 @@ impl Config {
                 "tatami" => jwm::WMArgEnum::Layout(Rc::new(LayoutEnum::TATAMI)),
                 "fullscreen" => jwm::WMArgEnum::Layout(Rc::new(LayoutEnum::FULLSCREEN)),
                 "scrolling" => jwm::WMArgEnum::Layout(Rc::new(LayoutEnum::SCROLLING)),
+                "vstack" => jwm::WMArgEnum::Layout(Rc::new(LayoutEnum::VSTACK)),
                 _ => jwm::WMArgEnum::StringVec(vec![s.clone()]),
             },
         }
