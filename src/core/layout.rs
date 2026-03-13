@@ -950,8 +950,10 @@ pub fn calculate_scrolling<K: Copy>(
     (results, new_viewport_x)
 }
 
-/// V-Stack (扇形堆叠): focused window centered, others fan out left/right.
-/// `clients[0]` must be the focused window (caller reorders before calling).
+/// V-Stack: all windows are half-monitor size.  The focused window
+/// (clients[0]) is centred at the bottom edge.  The remaining windows fan
+/// out in a V-shape – odd indices go right-up, even indices go left-up –
+/// each step offset at 30° from horizontal (tan 30° ≈ 0.577).
 pub fn calculate_vstack<K: Copy>(
     params: &LayoutParams,
     clients: &[LayoutClient<K>],
@@ -964,33 +966,56 @@ pub fn calculate_vstack<K: Copy>(
     let mut results = Vec::with_capacity(n);
     let gap = params.gap;
 
+    // Usable monitor area (with outer gap)
     let wx = params.screen_area.x + gap;
     let wy = params.screen_area.y + gap;
     let ww = params.screen_area.w - 2 * gap;
     let wh = params.screen_area.h - 2 * gap;
 
-    let center_w = (ww as f32 * params.m_fact) as i32;
-    let center_x = wx + (ww - center_w) / 2;
-    let step_x = gap.max(1) * 6;
+    // Every window is half the monitor size
+    let half_w = ww / 2;
+    let half_h = wh / 2;
+
+    // Focused (main) client: centred horizontally, flush with the bottom
+    let center_x = wx + (ww - half_w) / 2;
+    let bottom_y = wy + wh - half_h;
+
+    // Dynamic step: spread the V arms as wide as possible while keeping
+    // every window inside the monitor.  max_depth is the largest depth
+    // value among all non-focused windows (depth = 1,1,2,2,3,3,...).
+    const TAN30: f32 = 0.57735; // tan(30°)
+    let max_depth = if n <= 1 { 1 } else { n as i32 / 2 };
+
+    // Horizontal limit: the outermost window edge must stay inside.
+    //   center_x ± max_depth*step_x + half_w  <=  wx + ww
+    //   ⇒ step_x <= (ww - half_w) / (2 * max_depth)       [= ww/4 / max_depth]
+    let max_step_x = (ww - half_w) / (2 * max_depth);
+
+    // Vertical limit: the topmost window must not go above the monitor.
+    //   bottom_y - max_depth*step_y >= wy  ⇒  step_y <= (wh-half_h) / max_depth
+    //   step_y = step_x * tan30  ⇒  step_x <= (wh-half_h) / (max_depth * tan30)
+    let max_step_y = ((wh - half_h) as f32 / (max_depth as f32 * TAN30)) as i32;
+
+    let step_x = max_step_x.min(max_step_y).max(gap);
+    let step_y = (step_x as f32 * TAN30) as i32;
 
     for (i, c) in clients.iter().enumerate() {
         let border2 = 2 * c.border_w;
-        let x = if i == 0 {
-            center_x
+        let (x, y) = if i == 0 {
+            (center_x, bottom_y)
         } else {
-            let depth = (i as i32 + 1) / 2;
+            let depth = ((i as i32) + 1) / 2;   // 1,1,2,2,3,3,...
             let is_right = (i % 2) == 1;
-            let offset = depth * step_x;
-            if is_right {
-                center_x + offset
-            } else {
-                center_x - offset
-            }
+            let dx = depth * step_x;
+            let dy = depth * step_y;
+            let x = if is_right { center_x + dx } else { center_x - dx };
+            let y = bottom_y - dy;
+            (x, y)
         };
 
         results.push(LayoutResult {
             key: c.key,
-            rect: Rect::new(x, wy, center_w - border2, wh - border2),
+            rect: Rect::new(x, y, (half_w - border2).max(1), (half_h - border2).max(1)),
         });
     }
 
