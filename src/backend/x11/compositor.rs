@@ -4987,13 +4987,7 @@ impl Compositor {
             let mon_aspect = mw / mh;
 
             let persp = perspective_matrix(fov_y, mon_aspect, 0.1, camera_z * 4.0);
-            // Tilt the prism ~12° so top edges lean away from the viewer,
-            // giving a stronger 3D depth cue.
-            let tilt_angle = -0.21;
-            let view = mat4_mul(
-                &translate_matrix(0.0, -0.5, -camera_z),
-                &rotate_x_matrix(tilt_angle),
-            );
+            let view = translate_matrix(0.0, 0.0, -camera_z);
 
             let global_rot = rotate_y_matrix(self.overview_prism_current_angle);
 
@@ -5025,9 +5019,9 @@ impl Compositor {
                 let total_angle = face_angle + self.overview_prism_current_angle;
                 let cos_facing = total_angle.cos();
                 let brightness = if entry.is_selected {
-                    0.45 + 0.55 * cos_facing.max(0.0)
+                    0.35 + 0.35 * cos_facing.max(0.0)
                 } else {
-                    0.30 + 0.50 * cos_facing.max(0.0)
+                    0.25 + 0.30 * cos_facing.max(0.0)
                 };
 
                 faces.push(FaceDrawInfo {

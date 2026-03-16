@@ -280,7 +280,7 @@ out vec4 frag_color;
 void main() {
     vec2 uv = u_uv_rect.xy + v_uv * u_uv_rect.zw;
     vec4 texel = texture(u_texture, uv);
-    frag_color = vec4(texel.rgb * u_brightness, texel.a);
+    frag_color = vec4(texel.rgb * u_brightness, texel.a * u_brightness);
 }
 "#;
 
