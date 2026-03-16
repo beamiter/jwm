@@ -6095,7 +6095,71 @@ impl Jwm {
             // V-stack: re-arrange so new focus moves to center
             if self.is_vstack_layout() {
                 if let Some(mk) = self.state.sel_mon {
+                    // Save each visible tiled client's current visual rect BEFORE
+                    // arrangemon overwrites client.geometry.  When the compositor
+                    // is active, resizeclient moves the real X11 window to the
+                    // target instantly, so the old geometry values that resizeclient
+                    // stores in old_x/old_y can already equal the target from a
+                    // previous identical layout pass, causing the animation to be
+                    // skipped (current_visual == target).  By snapshotting the
+                    // visual rect here we can inject the correct "from" rect.
+                    let pre_rects: HashMap<ClientKey, Rect> = {
+                        let now = Instant::now();
+                        self.collect_tileable_clients(mk)
+                            .iter()
+                            .map(|&(k, _, _)| {
+                                let visual = self
+                                    .animations
+                                    .current_visual_rect(k, now)
+                                    .or_else(|| {
+                                        self.state.clients.get(k).map(|c| {
+                                            Rect::new(
+                                                c.geometry.x,
+                                                c.geometry.y,
+                                                c.geometry.w,
+                                                c.geometry.h,
+                                            )
+                                        })
+                                    })
+                                    .unwrap_or_default();
+                                (k, visual)
+                            })
+                            .collect()
+                    };
+
                     self.arrangemon(backend, mk);
+
+                    // Patch animations: if arrangemon started an animation whose
+                    // "from" rect equals the target (no-op), replace it with the
+                    // pre-snapshot rect so the window visually slides.
+                    for (ck, pre_rect) in &pre_rects {
+                        if let Some(client) = self.state.clients.get(*ck) {
+                            let target = Rect::new(
+                                client.geometry.x,
+                                client.geometry.y,
+                                client.geometry.w,
+                                client.geometry.h,
+                            );
+                            // If no animation is active (was skipped because old==new)
+                            // but the visual position actually changed, start one.
+                            if !self.animations.active.contains_key(ck) && *pre_rect != target {
+                                let cfg = CONFIG.load();
+                                if cfg.animation_enabled() {
+                                    let duration = cfg.animation_duration();
+                                    let easing = cfg.animation_easing();
+                                    self.animations.start(
+                                        *ck,
+                                        *pre_rect,
+                                        target,
+                                        duration,
+                                        easing,
+                                        AnimationKind::Layout,
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     let _ = self.restack(backend, Some(mk));
                 }
             }
