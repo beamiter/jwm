@@ -570,9 +570,10 @@ void main() {
     vec3 top_tint = vec3(0.10, 0.12, 0.16);
     vec3 bottom_tint = vec3(0.03, 0.04, 0.06);
     vec3 color = mix(top_tint, bottom_tint, clamp(v_uv.y * 1.15, 0.0, 1.0));
-    // Keep the live scene almost fully hidden in overview so floating windows
-    // underneath don't visually compete with their scaled preview thumbnails.
-    float alpha = (0.93 + vignette * 0.05) * u_opacity;
+    // Semi-transparent dark tint so the wallpaper is visible underneath.
+    // Windows on this monitor are already skipped during overview, so we
+    // only need enough opacity to give the 3D prism a clean dark backdrop.
+    float alpha = (0.78 + vignette * 0.12) * u_opacity;
     frag_color = vec4(color, alpha);
 }
 "#;

@@ -3984,6 +3984,20 @@ impl Compositor {
 
         let visible_scene = &scene[first_visible..];
 
+        // When overview is active, skip rendering windows that belong to the
+        // overview monitor — they would be hidden behind the opaque overview
+        // background anyway and their presence can visually compete with the
+        // 3D prism thumbnails.
+        let overview_skip = |x: i32, y: i32, w: u32, h: u32| -> bool {
+            if !self.overview_active { return false; }
+            let cx = x + w as i32 / 2;
+            let cy = y + h as i32 / 2;
+            let mx = self.overview_mon_x;
+            let my = self.overview_mon_y;
+            cx >= mx && cx < mx + self.overview_mon_w as i32
+                && cy >= my && cy < my + self.overview_mon_h as i32
+        };
+
         // === Pass 1: Draw shadows (feature 14: improved shape) ===
         if self.shadow_enabled && self.shadow_radius > 0.0 {
             unsafe {
@@ -4003,6 +4017,7 @@ impl Compositor {
                 );
 
                 for &(win, x, y, w, h) in visible_scene {
+                    if overview_skip(x, y, w, h) { continue; }
                     let wt = match self.windows.get(&win) {
                         Some(wt) => wt,
                         None => continue,
@@ -4076,6 +4091,7 @@ impl Compositor {
             self.gl.bind_vertex_array(Some(self.quad_vao));
 
             for &(win, x, y, w, h) in visible_scene {
+                if overview_skip(x, y, w, h) { continue; }
                 if let Some(wt) = self.windows.get(&win) {
                     let is_focused = focused == Some(win);
                     let fade = wt.fade_opacity;
@@ -4225,6 +4241,7 @@ impl Compositor {
                 self.gl.bind_vertex_array(Some(self.quad_vao));
 
                 for &(win, x, y, w, h) in visible_scene {
+                    if overview_skip(x, y, w, h) { continue; }
                     let wt = match self.windows.get(&win) {
                         Some(wt) => wt,
                         None => continue,
@@ -4316,6 +4333,7 @@ impl Compositor {
                     self.gl.bind_vertex_array(Some(self.quad_vao));
 
                     for &(win, x, y, w, h) in visible_scene {
+                        if overview_skip(x, y, w, h) { continue; }
                         let wt = match self.windows.get(&win) {
                             Some(wt) => wt,
                             None => continue,
