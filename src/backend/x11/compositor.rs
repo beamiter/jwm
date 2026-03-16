@@ -4720,8 +4720,8 @@ impl Compositor {
         self.clear_overview_title_textures();
         self.overview_active = active;
         let n = windows.len();
-        let face_w = self.screen_w as f32 * 0.667;
-        let face_h = self.screen_h as f32 * 0.667;
+        let face_w = self.screen_w as f32 * 0.8;
+        let face_h = self.screen_h as f32 * 0.8;
         self.overview_windows = windows.into_iter().enumerate().map(|(i, (win, _x, _y, _w, _h, sel, title))| {
             OverviewEntry {
                 x11_win: win,
@@ -4977,13 +4977,13 @@ impl Compositor {
             self.gl.viewport(mon_x, scissor_gl_y, mon_w as i32, mon_h as i32);
 
             // === 3. Compute hexagonal prism geometry ===
-            let face_w = mw * 0.667;
-            let face_h = mh * 0.667;
+            let face_w = mw * 0.8;
+            let face_h = mh * 0.8;
             let face_aspect = face_w / face_h;
             let apothem = face_aspect * 3.0_f32.sqrt();
 
             let fov_y = std::f32::consts::FRAC_PI_4; // 45 degrees
-            let camera_z = (apothem + 1.0 / (fov_y * 0.5).tan()) * 1.6;
+            let camera_z = (apothem + 1.0 / (fov_y * 0.5).tan()) * 1.2;
             let mon_aspect = mw / mh;
 
             let persp = perspective_matrix(fov_y, mon_aspect, 0.1, camera_z * 4.0);
@@ -4991,7 +4991,7 @@ impl Compositor {
             // giving a stronger 3D depth cue.
             let tilt_angle = -0.21;
             let view = mat4_mul(
-                &translate_matrix(0.0, 0.0, -camera_z),
+                &translate_matrix(0.0, -0.5, -camera_z),
                 &rotate_x_matrix(tilt_angle),
             );
 
