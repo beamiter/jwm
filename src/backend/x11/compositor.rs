@@ -105,6 +105,7 @@ struct WindowUniforms {
     radius: Option<glow::UniformLocation>,
     size: Option<glow::UniformLocation>,
     dim: Option<glow::UniformLocation>,
+    uv_rect: Option<glow::UniformLocation>,
 }
 
 struct ShadowUniforms {
@@ -1112,6 +1113,7 @@ impl Compositor {
                 radius: gl.get_uniform_location(program, "u_radius"),
                 size: gl.get_uniform_location(program, "u_size"),
                 dim: gl.get_uniform_location(program, "u_dim"),
+                uv_rect: gl.get_uniform_location(program, "u_uv_rect"),
             }
         };
         let shadow_uniforms = unsafe {
@@ -2595,6 +2597,7 @@ impl Compositor {
             self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
             self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), 0.0);
             self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
+            self.gl.uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
             self.gl.uniform_2_f32(self.win_uniforms.size.as_ref(), tw as f32, th as f32);
             self.gl.uniform_4_f32(self.win_uniforms.rect.as_ref(), 0.0, 0.0, tw as f32, th as f32);
             self.gl.bind_vertex_array(Some(self.quad_vao));
@@ -3903,6 +3906,7 @@ impl Compositor {
                     self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
                     self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), 0.0);
                     self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
+                    self.gl.uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
                     self.gl.active_texture(glow::TEXTURE0);
 
                     if !self.monitor_wallpapers.is_empty() {
@@ -4088,6 +4092,7 @@ impl Compositor {
                 self.win_uniforms.projection.as_ref(), false, &proj,
             );
             self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+            self.gl.uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
             self.gl.bind_vertex_array(Some(self.quad_vao));
 
             for &(win, x, y, w, h) in visible_scene {
@@ -4185,6 +4190,7 @@ impl Compositor {
                                 self.win_uniforms.projection.as_ref(), false, &proj,
                             );
                             self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+                            self.gl.uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
                             self.gl.bind_vertex_array(Some(self.quad_vao));
                             self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
 
@@ -4202,6 +4208,17 @@ impl Compositor {
                                 };
                                 self.gl.active_texture(glow::TEXTURE0);
                                 self.gl.bind_texture(glow::TEXTURE_2D, Some(blur_tex));
+                                let uv_x = (bx / self.screen_w as f32).clamp(0.0, 1.0);
+                                let uv_w = (bw / self.screen_w as f32).clamp(0.0, 1.0);
+                                let uv_y_top = (by / self.screen_h as f32).clamp(0.0, 1.0);
+                                let uv_h = (bh / self.screen_h as f32).clamp(0.0, 1.0);
+                                self.gl.uniform_4_f32(
+                                    self.win_uniforms.uv_rect.as_ref(),
+                                    uv_x,
+                                    uv_y_top,
+                                    uv_w,
+                                    uv_h,
+                                );
                                 self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), fade);
                                 self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
                                 self.gl.uniform_2_f32(self.win_uniforms.size.as_ref(), bw, bh);
@@ -4209,6 +4226,11 @@ impl Compositor {
                                     self.win_uniforms.rect.as_ref(), bx, by, bw, bh,
                                 );
                                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                                // Restore default UV for regular window textures.
+                                self.gl.uniform_4_f32(
+                                    self.win_uniforms.uv_rect.as_ref(),
+                                    0.0, 0.0, 1.0, 1.0,
+                                );
                             }
                         }
                     }

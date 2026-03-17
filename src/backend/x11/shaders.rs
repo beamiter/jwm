@@ -21,6 +21,7 @@ uniform float u_opacity; // 1.0 for RGB windows (force opaque), negative to use 
 uniform float u_radius;  // corner radius in pixels (0 = sharp)
 uniform vec2  u_size;    // window size in pixels (w, h)
 uniform float u_dim;     // dim multiplier (1.0 = no dim, <1.0 = darken)
+uniform vec4  u_uv_rect; // x, y, w, h in UV space
 in vec2 v_uv;
 out vec4 frag_color;
 
@@ -30,7 +31,8 @@ float rounded_rect_sdf(vec2 p, vec2 half_size, float r) {
 }
 
 void main() {
-    vec4 texel = texture(u_texture, v_uv);
+    vec2 uv = u_uv_rect.xy + v_uv * u_uv_rect.zw;
+    vec4 texel = texture(u_texture, uv);
     float a = u_opacity >= 0.0 ? u_opacity : texel.a;
 
     // Rounded corners – must mask both alpha AND rgb for premultiplied-alpha
