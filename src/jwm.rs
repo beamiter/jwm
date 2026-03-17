@@ -3321,8 +3321,9 @@ impl Jwm {
 
     fn show_client(&mut self, backend: &mut dyn Backend, client_key: ClientKey) {
         // Cancel any in-flight Hide animation so it doesn't keep moving
-        // the window off-screen.
-        self.animations.remove(client_key);
+        // the window off-screen.  Preserve Layout / Appear animations so
+        // that repeated arrange() calls don't kill in-flight transitions.
+        self.animations.remove_if_hide(client_key);
 
         // Restore on-screen x from old_x if client.geometry.x is still at
         // the hidden position (negative, off-screen).
@@ -4123,6 +4124,25 @@ impl Jwm {
             })
             .collect();
 
+        let pre_rects: HashMap<ClientKey, Rect> = {
+            let now = Instant::now();
+            ordered
+                .iter()
+                .map(|&(key, _, _)| {
+                    let visual = self
+                        .animations
+                        .current_visual_rect(key, now)
+                        .or_else(|| {
+                            self.state.clients.get(key).map(|c| {
+                                Rect::new(c.geometry.x, c.geometry.y, c.geometry.w, c.geometry.h)
+                            })
+                        })
+                        .unwrap_or_default();
+                    (key, visual)
+                })
+                .collect()
+        };
+
         let params = LayoutParams {
             screen_area,
             n_master: nmaster,
@@ -4132,10 +4152,35 @@ impl Jwm {
 
         let results = layout::calculate_vstack(&params, &layout_clients);
 
+        let target_rects: Vec<(ClientKey, Rect)> = results
+            .iter()
+            .map(|res| (res.key, res.rect))
+            .collect();
+
         for res in results {
             self.resize_client(
                 backend, res.key, res.rect.x, res.rect.y, res.rect.w, res.rect.h, false,
             );
+        }
+
+        let cfg = CONFIG.load();
+        if cfg.animation_enabled() {
+            let duration = cfg.animation_duration();
+            let easing = cfg.animation_easing();
+            for (client_key, target) in target_rects {
+                if let Some(pre_rect) = pre_rects.get(&client_key) {
+                    if *pre_rect != target {
+                        self.animations.start(
+                            client_key,
+                            *pre_rect,
+                            target,
+                            duration,
+                            easing,
+                            AnimationKind::Layout,
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -6129,9 +6174,9 @@ impl Jwm {
 
                     self.arrangemon(backend, mk);
 
-                    // Patch animations: if arrangemon started an animation whose
-                    // "from" rect equals the target (no-op), replace it with the
-                    // pre-snapshot rect so the window visually slides.
+                    // Patch animations: always retarget changed clients from the
+                    // pre-snapshot visual rect to the new layout target so vstack
+                    // focus cycling (Alt+j/k) consistently shows move animation.
                     for (ck, pre_rect) in &pre_rects {
                         if let Some(client) = self.state.clients.get(*ck) {
                             let target = Rect::new(
@@ -6140,9 +6185,7 @@ impl Jwm {
                                 client.geometry.w,
                                 client.geometry.h,
                             );
-                            // If no animation is active (was skipped because old==new)
-                            // but the visual position actually changed, start one.
-                            if !self.animations.active.contains_key(ck) && *pre_rect != target {
+                            if *pre_rect != target {
                                 let cfg = CONFIG.load();
                                 if cfg.animation_enabled() {
                                     let duration = cfg.animation_duration();

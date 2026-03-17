@@ -144,6 +144,17 @@ impl AnimationManager {
         self.active.remove(&key);
     }
 
+    /// Remove the animation for `key` only if it is a `Hide` animation.
+    /// Layout / Appear / Float animations are preserved so that repeated
+    /// `arrange()` calls don't kill in-flight layout transitions.
+    pub fn remove_if_hide(&mut self, key: ClientKey) {
+        if let Some(anim) = self.active.get(&key) {
+            if anim.kind == AnimationKind::Hide {
+                self.active.remove(&key);
+            }
+        }
+    }
+
     pub fn has_active(&self) -> bool {
         !self.active.is_empty()
     }
