@@ -527,6 +527,10 @@ pub(super) struct Compositor {
     // --- Frosted glass ---
     frosted_glass_rules: Vec<String>,
     frosted_glass_strength: u32,
+    /// Hash of the below-scene at the time of the last blur computation.
+    /// Used to skip expensive blur passes when only the frosted window itself
+    /// changed (e.g. fcitx popup updating while typing).
+    blur_cache_hash: u64,
 
     // --- Alt-Tab overview ---
     overview_active: bool,
@@ -1639,6 +1643,7 @@ impl Compositor {
             // Frosted glass
             frosted_glass_rules: behavior.frosted_glass_rules.clone(),
             frosted_glass_strength: behavior.frosted_glass_strength,
+            blur_cache_hash: 0,
             // Overview
             overview_active: false,
             overview_windows: Vec::new(),
@@ -3764,10 +3769,18 @@ impl Compositor {
         });
         let force_render = self.pending_screenshot.is_some() || self.debug_hud || self.transition_active() || self.overview_active;
         let hash = Self::scene_hash(scene, focused);
-        if !has_dirty && !fades_active && !force_render && hash == self.last_scene_hash {
+        let scene_changed = hash != self.last_scene_hash;
+        if !has_dirty && !fades_active && !force_render && !scene_changed {
             return false;
         }
         self.last_scene_hash = hash;
+
+        // Invalidate blur cache when scene structure/focus changes or animations
+        // are active — these affect the rendered output of windows below the
+        // frosted window even though no individual texture is "dirty".
+        if scene_changed || fades_active || force_render {
+            self.blur_cache_hash = 0;
+        }
 
         // Ensure context is current
         if !self.context_current {
@@ -3784,6 +3797,15 @@ impl Compositor {
 
         // Recreate pixmaps for windows that were resized (batched, single XSync)
         self.refresh_pixmaps();
+
+        // Collect which windows are dirty this frame (before TFP refresh clears
+        // the flags).  Used by the blur cache to skip expensive blur passes when
+        // only the frosted window itself updated (e.g. fcitx candidate list).
+        let blur_dirty_wins: Vec<u32> = scene.iter()
+            .filter_map(|&(win, _, _, _, _)| {
+                self.windows.get(&win).and_then(|wt| if wt.dirty { Some(win) } else { None })
+            })
+            .collect();
 
         // Refresh TFP textures for dirty windows.
         // NOTE: We intentionally do NOT call glGetError() here.  The old code
@@ -4086,6 +4108,11 @@ impl Compositor {
             && self.scene_fbo.is_some();
 
         // === Pass 2: Draw window textures ===
+        // Track the below-scene for blur caching: a running hash of (win, x, y, w, h)
+        // for all windows drawn so far, plus whether any was dirty this frame.
+        let mut blur_below_hash: u64 = 0u64;
+        let mut blur_below_dirty = false;
+
         unsafe {
             self.gl.use_program(Some(self.program));
             self.gl.uniform_matrix_4_f32_slice(
@@ -4157,42 +4184,56 @@ impl Compositor {
                     // Blur is captured per-window so it includes all windows drawn below.
                     if blur_available {
                         if self.needs_backdrop_blur(wt) {
-                            // Temporarily break out of the window shader to run blur passes.
-                            // Capture the current framebuffer (which includes all windows
-                            // drawn so far) and produce a blurred texture from it.
-                            self.gl.bind_vertex_array(None);
-                            self.gl.use_program(None);
-                            if use_scissor {
-                                self.gl.disable(glow::SCISSOR_TEST);
-                            }
+                            // Blur cache: if no window below this one was dirty and
+                            // the below-scene structure hasn't changed, the previous
+                            // blur result stored in blur_fbos[0] is still valid.
+                            let cache_hit = !blur_below_dirty
+                                && blur_below_hash != 0
+                                && blur_below_hash == self.blur_cache_hash;
 
-                            let blur_tex = self.run_blur_passes_from_fbo(
-                                if postprocess_active {
-                                    self.postprocess_fbo.as_ref().map(|(fbo, _)| *fbo)
-                                } else {
-                                    None
-                                },
-                            );
-
-                            // Restore state for window drawing
-                            if use_scissor {
-                                self.gl.enable(glow::SCISSOR_TEST);
-                            }
-                            if postprocess_active {
-                                let (pp_fbo, _) = self.postprocess_fbo.as_ref().unwrap();
-                                self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(*pp_fbo));
+                            let blur_tex = if cache_hit {
+                                Some(self.blur_fbos[0].texture)
                             } else {
-                                self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-                            }
-                            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
-                            self.gl.use_program(Some(self.program));
-                            self.gl.uniform_matrix_4_f32_slice(
-                                self.win_uniforms.projection.as_ref(), false, &proj,
-                            );
-                            self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
-                            self.gl.uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
-                            self.gl.bind_vertex_array(Some(self.quad_vao));
-                            self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
+                                // Temporarily break out of the window shader to run blur passes.
+                                // Capture the current framebuffer (which includes all windows
+                                // drawn so far) and produce a blurred texture from it.
+                                self.gl.bind_vertex_array(None);
+                                self.gl.use_program(None);
+                                if use_scissor {
+                                    self.gl.disable(glow::SCISSOR_TEST);
+                                }
+
+                                let tex = self.run_blur_passes_from_fbo(
+                                    if postprocess_active {
+                                        self.postprocess_fbo.as_ref().map(|(fbo, _)| *fbo)
+                                    } else {
+                                        None
+                                    },
+                                );
+
+                                // Restore state for window drawing
+                                if use_scissor {
+                                    self.gl.enable(glow::SCISSOR_TEST);
+                                }
+                                if postprocess_active {
+                                    let (pp_fbo, _) = self.postprocess_fbo.as_ref().unwrap();
+                                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(*pp_fbo));
+                                } else {
+                                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                                }
+                                self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+                                self.gl.use_program(Some(self.program));
+                                self.gl.uniform_matrix_4_f32_slice(
+                                    self.win_uniforms.projection.as_ref(), false, &proj,
+                                );
+                                self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+                                self.gl.uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
+                                self.gl.bind_vertex_array(Some(self.quad_vao));
+                                self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
+
+                                self.blur_cache_hash = blur_below_hash;
+                                tex
+                            };
 
                             if let Some(blur_tex) = blur_tex {
                                 // Feature 13: If blur_use_frame_extents, crop blur to client area
@@ -4246,6 +4287,20 @@ impl Compositor {
                     self.gl.active_texture(glow::TEXTURE0);
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
                     self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+                    // Update blur below-scene tracking after drawing this window.
+                    // The hash encodes (win, x, y, w, h) so structural changes
+                    // (reorder, move, resize, add/remove) cause a cache miss.
+                    blur_below_hash = blur_below_hash
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(win as u64)
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(((x as u64) << 32) | (y as u32 as u64))
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(((w as u64) << 32) | (h as u64));
+                    if blur_dirty_wins.contains(&win) {
+                        blur_below_dirty = true;
+                    }
                 }
             }
 
