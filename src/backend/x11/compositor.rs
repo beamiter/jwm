@@ -315,6 +315,7 @@ struct WobblyUniforms {
     radius: Option<glow::UniformLocation>,
     size: Option<glow::UniformLocation>,
     dim: Option<glow::UniformLocation>,
+    uv_rect: Option<glow::UniformLocation>,
     corner_offsets: [Option<glow::UniformLocation>; 4],
     grid_size: Option<glow::UniformLocation>,
 }
@@ -1266,6 +1267,7 @@ impl Compositor {
                 radius: gl.get_uniform_location(wobbly_program, "u_radius"),
                 size: gl.get_uniform_location(wobbly_program, "u_size"),
                 dim: gl.get_uniform_location(wobbly_program, "u_dim"),
+                uv_rect: gl.get_uniform_location(wobbly_program, "u_uv_rect"),
                 corner_offsets: [
                     gl.get_uniform_location(wobbly_program, "u_corner_offsets[0]"),
                     gl.get_uniform_location(wobbly_program, "u_corner_offsets[1]"),
@@ -4276,17 +4278,59 @@ impl Compositor {
                         }
                     }
 
-                    self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), opacity);
-                    self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), dim);
-                    self.gl.uniform_2_f32(
-                        self.win_uniforms.size.as_ref(), draw_w, draw_h,
-                    );
-                    self.gl.uniform_4_f32(
-                        self.win_uniforms.rect.as_ref(), draw_x, draw_y, draw_w, draw_h,
-                    );
                     self.gl.active_texture(glow::TEXTURE0);
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
-                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+                    // Wobbly windows: use grid-deformation shader when active
+                    if self.wobbly_windows && wt.wobbly.is_some() {
+                        let wobbly = wt.wobbly.as_ref().unwrap();
+                        self.gl.use_program(Some(self.wobbly_program));
+                        self.gl.uniform_matrix_4_f32_slice(
+                            self.wobbly_uniforms.projection.as_ref(), false, &proj,
+                        );
+                        self.gl.uniform_4_f32(
+                            self.wobbly_uniforms.rect.as_ref(), draw_x, draw_y, draw_w, draw_h,
+                        );
+                        self.gl.uniform_1_i32(self.wobbly_uniforms.texture.as_ref(), 0);
+                        self.gl.uniform_1_f32(self.wobbly_uniforms.opacity.as_ref(), opacity);
+                        self.gl.uniform_1_f32(self.wobbly_uniforms.radius.as_ref(), radius);
+                        self.gl.uniform_2_f32(self.wobbly_uniforms.size.as_ref(), draw_w, draw_h);
+                        self.gl.uniform_1_f32(self.wobbly_uniforms.dim.as_ref(), dim);
+                        self.gl.uniform_4_f32(
+                            self.wobbly_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0,
+                        );
+                        for (i, offset) in wobbly.corner_offsets.iter().enumerate() {
+                            self.gl.uniform_2_f32(
+                                self.wobbly_uniforms.corner_offsets[i].as_ref(),
+                                offset[0], offset[1],
+                            );
+                        }
+                        let grid = self.wobbly_grid_size as i32;
+                        self.gl.uniform_1_i32(self.wobbly_uniforms.grid_size.as_ref(), grid);
+                        // Grid: grid*grid quads, 6 verts each (two triangles)
+                        self.gl.draw_arrays(glow::TRIANGLES, 0, grid * grid * 6);
+
+                        // Restore standard window program
+                        self.gl.use_program(Some(self.program));
+                        self.gl.uniform_matrix_4_f32_slice(
+                            self.win_uniforms.projection.as_ref(), false, &proj,
+                        );
+                        self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+                        self.gl.uniform_4_f32(
+                            self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0,
+                        );
+                        self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
+                    } else {
+                        self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), opacity);
+                        self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), dim);
+                        self.gl.uniform_2_f32(
+                            self.win_uniforms.size.as_ref(), draw_w, draw_h,
+                        );
+                        self.gl.uniform_4_f32(
+                            self.win_uniforms.rect.as_ref(), draw_x, draw_y, draw_w, draw_h,
+                        );
+                        self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    }
 
                     // Update blur below-scene tracking after drawing this window.
                     // The hash encodes (win, x, y, w, h) so structural changes
