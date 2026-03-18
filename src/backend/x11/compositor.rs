@@ -303,6 +303,7 @@ struct TiltUniforms {
     radius: Option<glow::UniformLocation>,
     size: Option<glow::UniformLocation>,
     dim: Option<glow::UniformLocation>,
+    uv_rect: Option<glow::UniformLocation>,
     tilt: Option<glow::UniformLocation>,
 }
 
@@ -1252,6 +1253,7 @@ impl Compositor {
                 radius: gl.get_uniform_location(tilt_program, "u_radius"),
                 size: gl.get_uniform_location(tilt_program, "u_size"),
                 dim: gl.get_uniform_location(tilt_program, "u_dim"),
+                uv_rect: gl.get_uniform_location(tilt_program, "u_uv_rect"),
                 tilt: gl.get_uniform_location(tilt_program, "u_tilt"),
             }
         };
@@ -4205,12 +4207,18 @@ impl Compositor {
                                     self.gl.disable(glow::SCISSOR_TEST);
                                 }
 
+                                let blur_levels = if wt.is_frosted {
+                                    self.frosted_glass_strength as usize
+                                } else {
+                                    self.blur_fbos.len()
+                                };
                                 let tex = self.run_blur_passes_from_fbo(
                                     if postprocess_active {
                                         self.postprocess_fbo.as_ref().map(|(fbo, _)| *fbo)
                                     } else {
                                         None
                                     },
+                                    blur_levels,
                                 );
 
                                 // Restore state for window drawing
@@ -4309,6 +4317,43 @@ impl Compositor {
                         self.gl.uniform_1_i32(self.wobbly_uniforms.grid_size.as_ref(), grid);
                         // Grid: grid*grid quads, 6 verts each (two triangles)
                         self.gl.draw_arrays(glow::TRIANGLES, 0, grid * grid * 6);
+
+                        // Restore standard window program
+                        self.gl.use_program(Some(self.program));
+                        self.gl.uniform_matrix_4_f32_slice(
+                            self.win_uniforms.projection.as_ref(), false, &proj,
+                        );
+                        self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+                        self.gl.uniform_4_f32(
+                            self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0,
+                        );
+                        self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
+                    } else if self.window_tilt && is_focused {
+                        // 3D tilt: compute tilt from mouse position relative to window center
+                        let cx = draw_x + draw_w * 0.5;
+                        let cy = draw_y + draw_h * 0.5;
+                        let rel_x = (self.mouse_x - cx) / (draw_w * 0.5);
+                        let rel_y = (self.mouse_y - cy) / (draw_h * 0.5);
+                        let tilt_x = -rel_y * self.tilt_amount;
+                        let tilt_y = rel_x * self.tilt_amount;
+
+                        self.gl.use_program(Some(self.tilt_program));
+                        self.gl.uniform_matrix_4_f32_slice(
+                            self.tilt_uniforms.projection.as_ref(), false, &proj,
+                        );
+                        self.gl.uniform_4_f32(
+                            self.tilt_uniforms.rect.as_ref(), draw_x, draw_y, draw_w, draw_h,
+                        );
+                        self.gl.uniform_1_i32(self.tilt_uniforms.texture.as_ref(), 0);
+                        self.gl.uniform_1_f32(self.tilt_uniforms.opacity.as_ref(), opacity);
+                        self.gl.uniform_1_f32(self.tilt_uniforms.radius.as_ref(), radius);
+                        self.gl.uniform_2_f32(self.tilt_uniforms.size.as_ref(), draw_w, draw_h);
+                        self.gl.uniform_1_f32(self.tilt_uniforms.dim.as_ref(), dim);
+                        self.gl.uniform_4_f32(
+                            self.tilt_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0,
+                        );
+                        self.gl.uniform_2_f32(self.tilt_uniforms.tilt.as_ref(), tilt_x, tilt_y);
+                        self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
                         // Restore standard window program
                         self.gl.use_program(Some(self.program));
@@ -5275,11 +5320,12 @@ impl Compositor {
 
     /// Capture the current framebuffer into scene_fbo, then run dual Kawase blur passes.
     /// `source_fbo` specifies which FBO to read from (None = default back buffer).
-    fn run_blur_passes_from_fbo(&self, source_fbo: Option<glow::Framebuffer>) -> Option<glow::Texture> {
+    fn run_blur_passes_from_fbo(&self, source_fbo: Option<glow::Framebuffer>, max_levels: usize) -> Option<glow::Texture> {
         let (scene_fbo, scene_tex) = self.scene_fbo.as_ref()?;
         if self.blur_fbos.is_empty() {
             return None;
         }
+        let levels = max_levels.min(self.blur_fbos.len()).max(1);
 
         unsafe {
             // Copy current framebuffer to scene FBO
@@ -5301,7 +5347,7 @@ impl Compositor {
             let mut src_w = self.screen_w;
             let mut src_h = self.screen_h;
 
-            for level in &self.blur_fbos {
+            for level in &self.blur_fbos[..levels] {
                 self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(level.fbo));
                 self.gl.viewport(0, 0, level.w as i32, level.h as i32);
 
@@ -5332,7 +5378,7 @@ impl Compositor {
             self.gl.uniform_1_i32(self.blur_up_uniforms.texture.as_ref(), 0);
 
             // Upsample from smallest to largest (reverse order, stopping before the last)
-            for i in (0..self.blur_fbos.len() - 1).rev() {
+            for i in (0..levels - 1).rev() {
                 let target = &self.blur_fbos[i];
                 let source_tex = if i + 1 < self.blur_fbos.len() {
                     self.blur_fbos[i + 1].texture
