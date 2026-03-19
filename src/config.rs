@@ -203,7 +203,7 @@ pub struct BehaviorConfig {
     pub shadow_bottom_extra: f32,
 
     // --- Tag-switch transition mode ---
-    /// Workspace switch transition mode: "slide" (default) or "cube".
+    /// Workspace switch transition mode: "slide" (default), "cube", "fade", "flip", "zoom", "stack", "blinds".
     #[serde(default = "default_transition_mode")]
     pub transition_mode: String,
 

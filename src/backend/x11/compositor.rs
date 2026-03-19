@@ -160,6 +160,11 @@ struct CubeUniforms {
 enum TransitionMode {
     Slide,
     Cube,
+    Fade,
+    Flip,
+    Zoom,
+    Stack,
+    Blinds,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1607,6 +1612,11 @@ impl Compositor {
             transition_mon_h: screen_h,
             transition_mode: match behavior.transition_mode.as_str() {
                 "cube" => TransitionMode::Cube,
+                "fade" => TransitionMode::Fade,
+                "flip" => TransitionMode::Flip,
+                "zoom" => TransitionMode::Zoom,
+                "stack" => TransitionMode::Stack,
+                "blinds" => TransitionMode::Blinds,
                 _ => TransitionMode::Slide,
             },
             // Cube transition
@@ -2244,8 +2254,9 @@ impl Compositor {
             };
         }
 
-        // Create new-scene FBO for cube mode if needed
-        if self.transition_mode == TransitionMode::Cube && self.transition_new_fbo.is_none() {
+        // Create new-scene FBO for modes that need both old and new textures
+        let needs_new_fbo = matches!(self.transition_mode, TransitionMode::Cube | TransitionMode::Flip | TransitionMode::Blinds);
+        if needs_new_fbo && self.transition_new_fbo.is_none() {
             self.transition_new_fbo = unsafe {
                 Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok()
             };
@@ -2535,12 +2546,248 @@ impl Compositor {
         }
     }
 
+    /// Flip transition: card-flip around Y axis (180° rotation).
+    /// First half shows old scene flipping away, second half shows new scene
+    /// flipping in. Uses 3D perspective via the cube shader infrastructure.
+    fn render_flip_transition(&mut self, progress: f32, ortho_proj: &[f32; 16]) {
+        let old_tex = match &self.transition_fbo {
+            Some((_, tex)) => *tex,
+            None => return,
+        };
+
+        let mon_x = self.transition_mon_x;
+        let mon_y = self.transition_mon_y;
+        let mon_w = self.transition_mon_w;
+        let mon_h = self.transition_mon_h;
+
+        // Capture new scene
+        if self.transition_new_fbo.is_none() {
+            self.transition_new_fbo = unsafe {
+                Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok()
+            };
+        }
+        let new_tex = match &self.transition_new_fbo {
+            Some((fbo, tex)) => {
+                let fbo = *fbo;
+                let tex = *tex;
+                let blit_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
+                unsafe {
+                    self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+                    self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
+                    self.gl.blit_framebuffer(
+                        mon_x, blit_gl_y,
+                        mon_x + mon_w as i32, blit_gl_y + mon_h as i32,
+                        0, 0, mon_w as i32, mon_h as i32,
+                        glow::COLOR_BUFFER_BIT, glow::NEAREST,
+                    );
+                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                }
+                tex
+            }
+            None => return,
+        };
+
+        let exclude_top = self.transition_exclude_top.min(mon_h);
+        let workspace_h = mon_h.saturating_sub(exclude_top);
+        if workspace_h == 0 { return; }
+
+        let aspect = mon_w as f32 / workspace_h as f32;
+        let top_frac = if mon_h == 0 { 0.0 } else { exclude_top as f32 / mon_h as f32 };
+        let uv_rect = [0.0f32, 0.0, 1.0, 1.0 - top_frac];
+
+        let pi = std::f32::consts::PI;
+        let half_pi = std::f32::consts::FRAC_PI_2;
+
+        // Full 180° flip
+        let angle = self.transition_direction * progress * pi;
+
+        // Camera setup
+        let d = 0.01; // face sits at z=d (nearly flat card)
+        let camera_z = 1.0 + aspect;
+        let persp = perspective_matrix(half_pi, aspect, 0.1, camera_z * 3.0);
+        let view = translate_matrix(0.0, 0.0, -camera_z);
+
+        let scissor_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
+
+        unsafe {
+            self.gl.enable(glow::SCISSOR_TEST);
+            self.gl.scissor(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
+            self.gl.viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
+
+            // Draw wallpaper behind
+            self.gl.clear(glow::COLOR_BUFFER_BIT);
+            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            self.draw_wallpaper_in_region(ortho_proj, mon_x, mon_y, mon_w, mon_h);
+            self.gl.viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
+
+            self.gl.use_program(Some(self.cube_program));
+            self.gl.uniform_1_f32(self.cube_uniforms.aspect.as_ref(), aspect);
+            self.gl.uniform_1_i32(self.cube_uniforms.texture.as_ref(), 0);
+            self.gl.uniform_4_f32(
+                self.cube_uniforms.uv_rect.as_ref(),
+                uv_rect[0], uv_rect[1], uv_rect[2], uv_rect[3],
+            );
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+            self.gl.active_texture(glow::TEXTURE0);
+
+            // First half (0..0.5): show old face rotating away
+            // Second half (0.5..1): show new face rotating in
+            if progress < 0.5 {
+                // Old face rotating away
+                let model = mat4_mul(&rotate_y_matrix(angle), &translate_matrix(0.0, 0.0, d));
+                let mvp = mat4_mul(&persp, &mat4_mul(&view, &model));
+                let brightness = (1.0 - progress * 0.6).max(0.2);
+                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &mvp);
+                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), brightness);
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            } else {
+                // New face rotating in from the back (pre-rotated 180°)
+                let new_angle = angle - self.transition_direction * pi;
+                let model = mat4_mul(&rotate_y_matrix(new_angle), &translate_matrix(0.0, 0.0, d));
+                let mvp = mat4_mul(&persp, &mat4_mul(&view, &model));
+                let brightness = (0.4 + (progress - 0.5) * 1.2).min(1.0);
+                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &mvp);
+                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), brightness);
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
+
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+            self.gl.disable(glow::SCISSOR_TEST);
+            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+        }
+    }
+
+    /// Blinds transition: screen split into vertical strips that flip
+    /// individually with staggered timing to reveal the new scene.
+    fn render_blinds_transition(&mut self, progress: f32, ortho_proj: &[f32; 16]) {
+        let old_tex = match &self.transition_fbo {
+            Some((_, tex)) => *tex,
+            None => return,
+        };
+
+        let mon_x = self.transition_mon_x;
+        let mon_y = self.transition_mon_y;
+        let mon_w = self.transition_mon_w;
+        let mon_h = self.transition_mon_h;
+
+        // Capture new scene
+        if self.transition_new_fbo.is_none() {
+            self.transition_new_fbo = unsafe {
+                Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok()
+            };
+        }
+        let new_tex = match &self.transition_new_fbo {
+            Some((fbo, tex)) => {
+                let fbo = *fbo;
+                let tex = *tex;
+                let blit_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
+                unsafe {
+                    self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+                    self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
+                    self.gl.blit_framebuffer(
+                        mon_x, blit_gl_y,
+                        mon_x + mon_w as i32, blit_gl_y + mon_h as i32,
+                        0, 0, mon_w as i32, mon_h as i32,
+                        glow::COLOR_BUFFER_BIT, glow::NEAREST,
+                    );
+                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                }
+                tex
+            }
+            None => return,
+        };
+
+        let exclude_top = self.transition_exclude_top.min(mon_h);
+        let workspace_h = mon_h.saturating_sub(exclude_top);
+        if workspace_h == 0 { return; }
+
+        let top_frac = if mon_h == 0 { 0.0 } else { exclude_top as f32 / mon_h as f32 };
+        let scissor_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
+
+        let num_blinds: u32 = 8;
+        let strip_w = mon_w as f32 / num_blinds as f32;
+        let stagger = 0.3; // how much strips are staggered (0 = all at once)
+
+        unsafe {
+            self.gl.enable(glow::SCISSOR_TEST);
+
+            self.gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+            self.gl.use_program(Some(self.transition_program));
+            self.gl.uniform_matrix_4_f32_slice(self.transition_uniforms.projection.as_ref(), false, ortho_proj);
+            self.gl.uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
+            self.gl.active_texture(glow::TEXTURE0);
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+
+            let draw_y = (mon_y as u32 + exclude_top) as f32;
+            let draw_h = workspace_h as f32;
+
+            for i in 0..num_blinds {
+                // Staggered progress per strip
+                let strip_delay = (i as f32 / (num_blinds - 1).max(1) as f32) * stagger;
+                let strip_progress = ((progress - strip_delay) / (1.0 - stagger)).clamp(0.0, 1.0);
+
+                let strip_x = mon_x as f32 + i as f32 * strip_w;
+
+                // UV for this strip
+                let uv_x = i as f32 / num_blinds as f32;
+                let uv_w = 1.0 / num_blinds as f32;
+
+                // Scissor to this strip
+                let strip_scissor_x = mon_x + (i as f32 * strip_w) as i32;
+                let strip_scissor_w = strip_w.ceil() as i32;
+                self.gl.scissor(
+                    strip_scissor_x,
+                    scissor_gl_y,
+                    strip_scissor_w,
+                    (mon_h - exclude_top) as i32,
+                );
+
+                if strip_progress < 0.5 {
+                    // Show old scene with horizontal squeeze (simulate flip first half)
+                    let squeeze = 1.0 - strip_progress * 2.0; // 1.0 → 0.0
+                    let squeezed_w = strip_w * squeeze;
+                    let offset_x = strip_x + (strip_w - squeezed_w) * 0.5;
+                    let old_uv = [uv_x, 0.0f32, uv_w, 1.0 - top_frac];
+                    self.gl.uniform_4_f32(self.transition_uniforms.rect.as_ref(), offset_x, draw_y, squeezed_w.max(1.0), draw_h);
+                    self.gl.uniform_1_f32(self.transition_uniforms.opacity.as_ref(), 1.0);
+                    self.gl.uniform_4_f32(self.transition_uniforms.uv_rect.as_ref(), old_uv[0], old_uv[1], old_uv[2], old_uv[3]);
+                    self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
+                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                } else {
+                    // Show new scene expanding (simulate flip second half)
+                    let expand = (strip_progress - 0.5) * 2.0; // 0.0 → 1.0
+                    let expanded_w = strip_w * expand;
+                    let offset_x = strip_x + (strip_w - expanded_w) * 0.5;
+                    let new_uv = [uv_x, 0.0f32, uv_w, 1.0 - top_frac];
+                    self.gl.uniform_4_f32(self.transition_uniforms.rect.as_ref(), offset_x, draw_y, expanded_w.max(1.0), draw_h);
+                    self.gl.uniform_1_f32(self.transition_uniforms.opacity.as_ref(), 1.0);
+                    self.gl.uniform_4_f32(self.transition_uniforms.uv_rect.as_ref(), new_uv[0], new_uv[1], new_uv[2], new_uv[3]);
+                    self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
+                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                }
+            }
+
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+            self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+            self.gl.disable(glow::SCISSOR_TEST);
+        }
+    }
+
     // =====================================================================
     // Feature 11: Debug HUD toggle
     // =====================================================================
     pub(super) fn set_transition_mode(&mut self, mode: &str) {
         let new_mode = match mode {
             "cube" => TransitionMode::Cube,
+            "fade" => TransitionMode::Fade,
+            "flip" => TransitionMode::Flip,
+            "zoom" => TransitionMode::Zoom,
+            "stack" => TransitionMode::Stack,
+            "blinds" => TransitionMode::Blinds,
             _ => TransitionMode::Slide,
         };
         self.transition_mode = new_mode;
@@ -4848,6 +5095,155 @@ impl Compositor {
                 TransitionMode::Cube => {
                     // --- Cube mode: 3D rotating cube transition ---
                     self.render_cube_transition(progress, &proj);
+                }
+                TransitionMode::Fade => {
+                    // --- Fade mode: old scene fades out, new scene fades in ---
+                    if let Some((_, snap_tex)) = &self.transition_fbo {
+                        let snap_tex = *snap_tex;
+                        let fade_opacity = (1.0 - progress).max(0.0);
+                        unsafe {
+                            if draw_h > 0.0 && fade_opacity > 0.0 {
+                                self.gl.enable(glow::SCISSOR_TEST);
+                                self.gl.scissor(mon_x, scissor_gl_y, mon_w as i32, (mon_h - exclude_top) as i32);
+                                self.gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+                                self.gl.use_program(Some(self.transition_program));
+                                self.gl.uniform_matrix_4_f32_slice(self.transition_uniforms.projection.as_ref(), false, &proj);
+                                self.gl.uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
+                                self.gl.active_texture(glow::TEXTURE0);
+                                let uv = [0.0f32, 0.0, 1.0, 1.0 - top_frac];
+                                self.gl.uniform_4_f32(self.transition_uniforms.rect.as_ref(), draw_x, draw_y, mon_w as f32, draw_h);
+                                self.gl.uniform_1_f32(self.transition_uniforms.opacity.as_ref(), fade_opacity);
+                                self.gl.uniform_4_f32(self.transition_uniforms.uv_rect.as_ref(), uv[0], uv[1], uv[2], uv[3]);
+                                self.gl.bind_texture(glow::TEXTURE_2D, Some(snap_tex));
+                                self.gl.bind_vertex_array(Some(self.quad_vao));
+                                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                                self.gl.bind_vertex_array(None);
+                                self.gl.use_program(None);
+                                self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+                                self.gl.disable(glow::SCISSOR_TEST);
+                            }
+                        }
+                    }
+                }
+                TransitionMode::Flip => {
+                    // --- Flip mode: card-flip around Y axis ---
+                    self.render_flip_transition(progress, &proj);
+                }
+                TransitionMode::Zoom => {
+                    // --- Zoom mode: old scene shrinks + fades, new scene grows in ---
+                    if let Some((_, snap_tex)) = &self.transition_fbo {
+                        let snap_tex = *snap_tex;
+                        let fade_opacity = (1.0 - progress).max(0.0);
+                        // Old scene shrinks toward center
+                        let scale = 1.0 - progress * 0.5; // 1.0 → 0.5
+                        let scaled_w = mon_w as f32 * scale;
+                        let scaled_h = draw_h * scale;
+                        let offset_x = draw_x + (mon_w as f32 - scaled_w) * 0.5;
+                        let offset_y = draw_y + (draw_h - scaled_h) * 0.5;
+                        unsafe {
+                            if draw_h > 0.0 && fade_opacity > 0.0 {
+                                self.gl.enable(glow::SCISSOR_TEST);
+                                self.gl.scissor(mon_x, scissor_gl_y, mon_w as i32, (mon_h - exclude_top) as i32);
+                                self.gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+                                self.gl.use_program(Some(self.transition_program));
+                                self.gl.uniform_matrix_4_f32_slice(self.transition_uniforms.projection.as_ref(), false, &proj);
+                                self.gl.uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
+                                self.gl.active_texture(glow::TEXTURE0);
+                                let uv = [0.0f32, 0.0, 1.0, 1.0 - top_frac];
+                                self.gl.uniform_4_f32(self.transition_uniforms.rect.as_ref(), offset_x, offset_y, scaled_w, scaled_h);
+                                self.gl.uniform_1_f32(self.transition_uniforms.opacity.as_ref(), fade_opacity);
+                                self.gl.uniform_4_f32(self.transition_uniforms.uv_rect.as_ref(), uv[0], uv[1], uv[2], uv[3]);
+                                self.gl.bind_texture(glow::TEXTURE_2D, Some(snap_tex));
+                                self.gl.bind_vertex_array(Some(self.quad_vao));
+                                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                                self.gl.bind_vertex_array(None);
+                                self.gl.use_program(None);
+                                self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+                                self.gl.disable(glow::SCISSOR_TEST);
+                            }
+                        }
+                    }
+                }
+                TransitionMode::Stack => {
+                    // --- Stack mode: new scene slides over old with depth effect ---
+                    if let Some((_, snap_tex)) = &self.transition_fbo {
+                        let snap_tex = *snap_tex;
+                        // Old scene stays in place but darkens and scales down slightly
+                        let dim = 1.0 - progress * 0.3; // 1.0 → 0.7
+                        let old_scale = 1.0 - progress * 0.05; // 1.0 → 0.95
+                        let old_w = mon_w as f32 * old_scale;
+                        let old_h = draw_h * old_scale;
+                        let old_x = draw_x + (mon_w as f32 - old_w) * 0.5;
+                        let old_y = draw_y + (draw_h - old_h) * 0.5;
+                        unsafe {
+                            if draw_h > 0.0 {
+                                self.gl.enable(glow::SCISSOR_TEST);
+                                self.gl.scissor(mon_x, scissor_gl_y, mon_w as i32, (mon_h - exclude_top) as i32);
+
+                                // First: clear workspace area and redraw wallpaper behind
+                                self.gl.clear_color(0.0, 0.0, 0.0, 1.0);
+                                self.gl.clear(glow::COLOR_BUFFER_BIT);
+                                self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+                                self.draw_wallpaper_in_region(&proj, mon_x, mon_y, mon_w, mon_h);
+
+                                // Draw dimmed/scaled old scene
+                                self.gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+                                self.gl.use_program(Some(self.transition_program));
+                                self.gl.uniform_matrix_4_f32_slice(self.transition_uniforms.projection.as_ref(), false, &proj);
+                                self.gl.uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
+                                self.gl.active_texture(glow::TEXTURE0);
+                                let uv = [0.0f32, 0.0, 1.0, 1.0 - top_frac];
+                                self.gl.uniform_4_f32(self.transition_uniforms.rect.as_ref(), old_x, old_y, old_w, old_h);
+                                self.gl.uniform_1_f32(self.transition_uniforms.opacity.as_ref(), dim);
+                                self.gl.uniform_4_f32(self.transition_uniforms.uv_rect.as_ref(), uv[0], uv[1], uv[2], uv[3]);
+                                self.gl.bind_texture(glow::TEXTURE_2D, Some(snap_tex));
+                                self.gl.bind_vertex_array(Some(self.quad_vao));
+                                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+                                // Draw new scene sliding in from the transition direction
+                                // New scene is already rendered in the back-buffer; we blit
+                                // from transition_new_fbo if available, otherwise approximate
+                                // by drawing the back-buffer content as a sliding overlay.
+                                // For Stack, capture new scene like cube does.
+                                if self.transition_new_fbo.is_none() {
+                                    self.transition_new_fbo =
+                                        Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok();
+                                }
+                                if let Some((new_fbo, new_tex)) = &self.transition_new_fbo {
+                                    let new_fbo = *new_fbo;
+                                    let new_tex = *new_tex;
+                                    // Blit current back-buffer into new_fbo
+                                    let blit_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
+                                    self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+                                    self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(new_fbo));
+                                    self.gl.blit_framebuffer(
+                                        mon_x, blit_gl_y,
+                                        mon_x + mon_w as i32, blit_gl_y + mon_h as i32,
+                                        0, 0, mon_w as i32, mon_h as i32,
+                                        glow::COLOR_BUFFER_BIT, glow::NEAREST,
+                                    );
+                                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+
+                                    // New scene slides in from the side
+                                    let new_slide = (1.0 - progress) * self.transition_direction * mon_w as f32;
+                                    self.gl.uniform_4_f32(self.transition_uniforms.rect.as_ref(), draw_x + new_slide, draw_y, mon_w as f32, draw_h);
+                                    self.gl.uniform_1_f32(self.transition_uniforms.opacity.as_ref(), 1.0);
+                                    self.gl.uniform_4_f32(self.transition_uniforms.uv_rect.as_ref(), uv[0], uv[1], uv[2], uv[3]);
+                                    self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
+                                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                                }
+
+                                self.gl.bind_vertex_array(None);
+                                self.gl.use_program(None);
+                                self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+                                self.gl.disable(glow::SCISSOR_TEST);
+                            }
+                        }
+                    }
+                }
+                TransitionMode::Blinds => {
+                    // --- Blinds mode: vertical strips flip to reveal new scene ---
+                    self.render_blinds_transition(progress, &proj);
                 }
             }
             true
