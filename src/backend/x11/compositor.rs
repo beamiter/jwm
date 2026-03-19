@@ -4786,21 +4786,26 @@ impl Compositor {
 
             match self.transition_mode {
                 TransitionMode::Slide => {
-                    // --- Slide mode: old scene fades out over the new scene ---
-                    // The back-buffer already contains the new scene (wallpaper +
-                    // new windows) at its final position.  We overlay the old
-                    // snapshot (which also contains wallpaper + old windows) with
-                    // decreasing opacity.  Because the wallpaper is identical in
-                    // both frames, alpha-blending produces:
-                    //   result = old_wp * fade + new_wp * (1-fade) = wp
-                    // so the wallpaper stays perfectly static while old windows
-                    // fade out and new windows are revealed underneath.
+                    // --- Slide mode: old scene fades then vanishes ---
+                    // New scene is already in the back-buffer at final position.
+                    // Old snapshot overlays on top: gently fades to ~30% opacity
+                    // over the first 70% of the duration, then snaps to invisible.
+                    // This gives the effect of current windows dissolving away
+                    // while target windows sit fixed underneath.
                     if let Some((_, snap_tex)) = &self.transition_fbo {
                         let snap_tex = *snap_tex;
 
+                        // Two-phase opacity: gentle fade then sudden vanish
+                        let fade_opacity = if progress < 0.7 {
+                            // Phase 1: 1.0 → 0.3 over 70% of duration
+                            1.0 - progress * 1.0  // 1.0 at 0%, 0.3 at 70%
+                        } else {
+                            // Phase 2: snap to 0 — old scene gone
+                            0.0
+                        };
+
                         unsafe {
-                            if draw_h > 0.0 {
-                                // Scissor to the monitor's workspace area (below status bar)
+                            if draw_h > 0.0 && fade_opacity > 0.0 {
                                 self.gl.enable(glow::SCISSOR_TEST);
                                 self.gl.scissor(
                                     mon_x,
@@ -4809,7 +4814,6 @@ impl Compositor {
                                     (mon_h - exclude_top) as i32,
                                 );
 
-                                // Use SRC_ALPHA blending for correct fade
                                 self.gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
 
                                 self.gl.use_program(Some(self.transition_program));
@@ -4821,8 +4825,6 @@ impl Compositor {
 
                                 let uv = [0.0f32, 0.0, 1.0, 1.0 - top_frac];
 
-                                // Draw old scene fading out over the already-rendered new scene
-                                let fade_opacity = 1.0 - progress;
                                 self.gl.uniform_4_f32(
                                     self.transition_uniforms.rect.as_ref(),
                                     draw_x, draw_y, mon_w as f32, draw_h,
@@ -4841,7 +4843,6 @@ impl Compositor {
                                 self.gl.bind_vertex_array(None);
                                 self.gl.use_program(None);
 
-                                // Restore premultiplied alpha blending and disable scissor
                                 self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
                                 self.gl.disable(glow::SCISSOR_TEST);
                             }

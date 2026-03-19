@@ -215,6 +215,9 @@ pub struct Jwm {
     pub pending_bar_updates: HashSet<MonitorIndex>,
 
     pub suppress_mouse_focus_until: Option<std::time::Instant>,
+    /// When true, resizeclient() skips layout animations (used during tag
+    /// switch transitions so target windows appear instantly).
+    pub suppress_layout_animation: bool,
 
     pub last_stacking: SecondaryMap<MonitorKey, Vec<WindowId>>,
 
@@ -1283,6 +1286,7 @@ impl Jwm {
             pending_bar_updates: HashSet::new(),
 
             suppress_mouse_focus_until: None,
+            suppress_layout_animation: false,
 
             last_stacking: SecondaryMap::new(),
             scratchpads: HashMap::new(),
@@ -3463,7 +3467,7 @@ impl Jwm {
             client.geometry.h = h;
 
             let cfg = CONFIG.load();
-            if cfg.animation_enabled() {
+            if cfg.animation_enabled() && !self.suppress_layout_animation {
                 let old_rect = Rect::new(
                     client.geometry.old_x,
                     client.geometry.old_y,
@@ -7306,6 +7310,7 @@ impl Jwm {
         };
 
         // Trigger compositor transition for loopview shortcuts (Alt+Tab/PageUp/PageDown).
+        let mut transitioning = false;
         if backend.has_compositor() {
             let cfg = CONFIG.load();
             if cfg.animation_enabled()
@@ -7319,6 +7324,7 @@ impl Jwm {
                     self.tag_transition_exclude_top(mon_rect.1),
                     mon_rect,
                 );
+                transitioning = true;
             }
         }
 
@@ -7335,7 +7341,11 @@ impl Jwm {
         let sel_opt = self.apply_pertag_settings(cur_tag)?;
 
         self.focus(backend, sel_opt)?;
+        // Suppress layout animations during tag transition so target windows
+        // appear instantly (the compositor overlay handles the visual effect).
+        self.suppress_layout_animation = transitioning;
         self.arrange(backend, self.state.sel_mon.clone());
+        self.suppress_layout_animation = false;
 
         self.refresh_bar_visibility_on_selected_monitor(backend)?;
 
@@ -7455,6 +7465,7 @@ impl Jwm {
 
         // 3. 副作用 (Backend / Arrange)
         // Notify compositor to capture old scene for slide transition
+        let mut transitioning = false;
         if backend.has_compositor() {
             let cfg = CONFIG.load();
             if cfg.animation_enabled()
@@ -7473,10 +7484,13 @@ impl Jwm {
                     exclude_top,
                     mon_rect,
                 );
+                transitioning = true;
             }
         }
         self.focus(backend, client_to_focus)?;
+        self.suppress_layout_animation = transitioning;
         self.arrange(backend, Some(sel_mon_key));
+        self.suppress_layout_animation = false;
         self.refresh_bar_visibility_on_selected_monitor(backend)?;
         self.update_ewmh_desktop(backend)?;
 
@@ -7635,6 +7649,7 @@ impl Jwm {
 
         // 2. 副作用
         // Notify compositor to capture old scene for slide transition
+        let mut transitioning = false;
         if backend.has_compositor() {
             let cfg = CONFIG.load();
             if cfg.animation_enabled()
@@ -7653,10 +7668,13 @@ impl Jwm {
                     exclude_top,
                     mon_rect,
                 );
+                transitioning = true;
             }
         }
         self.focus(backend, None)?;
+        self.suppress_layout_animation = transitioning;
         self.arrange(backend, Some(sel_mon_key));
+        self.suppress_layout_animation = false;
         self.refresh_bar_visibility_on_selected_monitor(backend)?;
         self.update_ewmh_desktop(backend)?;
 
