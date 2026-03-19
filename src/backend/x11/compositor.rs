@@ -4786,23 +4786,19 @@ impl Compositor {
 
             match self.transition_mode {
                 TransitionMode::Slide => {
-                    // --- Slide mode: old scene fades then vanishes ---
+                    // --- Slide mode: old scene slides out + fades ---
                     // New scene is already in the back-buffer at final position.
-                    // Old snapshot overlays on top: gently fades to ~30% opacity
-                    // over the first 70% of the duration, then snaps to invisible.
-                    // This gives the effect of current windows dissolving away
-                    // while target windows sit fixed underneath.
+                    // Old snapshot slides in transition_direction while fading out,
+                    // giving the effect of current windows sliding away to reveal
+                    // the target windows underneath.
                     if let Some((_, snap_tex)) = &self.transition_fbo {
                         let snap_tex = *snap_tex;
 
-                        // Two-phase opacity: gentle fade then sudden vanish
-                        let fade_opacity = if progress < 0.7 {
-                            // Phase 1: 1.0 → 0.3 over 70% of duration
-                            1.0 - progress * 1.0  // 1.0 at 0%, 0.3 at 70%
-                        } else {
-                            // Phase 2: snap to 0 — old scene gone
-                            0.0
-                        };
+                        // Slide offset: old scene moves in the transition direction
+                        let slide_offset = progress * self.transition_direction * mon_w as f32;
+
+                        // Fade out smoothly over the full duration
+                        let fade_opacity = (1.0 - progress).max(0.0);
 
                         unsafe {
                             if draw_h > 0.0 && fade_opacity > 0.0 {
@@ -4827,7 +4823,7 @@ impl Compositor {
 
                                 self.gl.uniform_4_f32(
                                     self.transition_uniforms.rect.as_ref(),
-                                    draw_x, draw_y, mon_w as f32, draw_h,
+                                    draw_x + slide_offset, draw_y, mon_w as f32, draw_h,
                                 );
                                 self.gl.uniform_1_f32(
                                     self.transition_uniforms.opacity.as_ref(), fade_opacity,
