@@ -1599,11 +1599,51 @@ impl Config {
     pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), ConfigError> {
         let toml_string =
             toml::to_string_pretty(&self.inner).map_err(|e| ConfigError::Serialize(e))?;
+        let toml_string = Self::add_option_comments(&toml_string);
         if let Some(parent) = path.as_ref().parent() {
             fs::create_dir_all(parent)?;
         }
         fs::write(path, toml_string)?;
         Ok(())
+    }
+
+    /// Post-process TOML output to add comments showing available options for enum-like fields.
+    fn add_option_comments(toml: &str) -> String {
+        let mut result = String::with_capacity(toml.len() + 512);
+        let mut section = String::new();
+        for line in toml.lines() {
+            let trimmed = line.trim();
+
+            // Track current TOML section
+            if trimmed.starts_with('[') && !trimmed.starts_with("[[") {
+                section = trimmed.trim_matches(|c| c == '[' || c == ']').to_string();
+            }
+
+            // transition_mode (in [behavior])
+            if section == "behavior" && trimmed.starts_with("transition_mode") {
+                result.push_str("# available: slide, cube, fade, flip, zoom, stack, blinds, coverflow, helix, portal\n");
+            }
+            // wallpaper_mode (in [behavior])
+            else if section == "behavior" && trimmed.starts_with("wallpaper_mode") {
+                result.push_str("# available: fill, fit, stretch, center\n");
+            }
+            // colorblind_mode (in [behavior])
+            else if section == "behavior" && trimmed.starts_with("colorblind_mode") {
+                result.push_str("# available: \"\" (disabled), deuteranopia, protanopia, tritanopia\n");
+            }
+            // easing (in [animation])
+            else if section == "animation" && trimmed.starts_with("easing") {
+                result.push_str("# available: linear, ease-out, ease-in, ease-in-out, bounce, elastic\n");
+            }
+            // speed (in [animation])
+            else if section == "animation" && trimmed.starts_with("speed") {
+                result.push_str("# available: slow, normal, fast, instant\n");
+            }
+
+            result.push_str(line);
+            result.push('\n');
+        }
+        result
     }
 
     pub fn save_default(&self) -> Result<(), ConfigError> {
