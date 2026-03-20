@@ -1422,6 +1422,7 @@ impl Compositor {
         // Read compositor visual settings from config
         let cfg = crate::config::CONFIG.load();
         let behavior = cfg.behavior();
+        let anim_speed = cfg.animation_speed();
 
         // Parse opacity rules ("opacity_percent:class_name")
         let opacity_rules: Vec<OpacityRule> = behavior.opacity_rules.iter().filter_map(|rule| {
@@ -1547,8 +1548,8 @@ impl Compositor {
             blur_fbos,
             scene_fbo,
             fading: behavior.fading,
-            fade_in_step: behavior.fade_in_step,
-            fade_out_step: behavior.fade_out_step,
+            fade_in_step: anim_speed.apply_fade_step(behavior.fade_in_step),
+            fade_out_step: anim_speed.apply_fade_step(behavior.fade_out_step),
             fade_out_pending: Vec::new(),
             shadow_exclude: behavior.shadow_exclude.clone(),
             opacity_rules,
@@ -1603,7 +1604,7 @@ impl Compositor {
             transition_uniforms,
             transition_fbo: None,
             transition_start: None,
-            transition_duration: std::time::Duration::from_millis(150),
+            transition_duration: std::time::Duration::from_millis(anim_speed.apply_duration(150)),
             transition_direction: 1.0,
             transition_exclude_top: 0,
             transition_mon_x: 0,

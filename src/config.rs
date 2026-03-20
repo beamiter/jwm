@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::fmt;
 use std::rc::Rc;
 
-use crate::core::animation::Easing;
+use crate::core::animation::{AnimationSpeed, Easing};
 use crate::core::layout::LayoutEnum;
 use crate::jwm::WMFuncType;
 use crate::jwm::{self, Jwm, WMButton, WMClickType, WMKey, WMRule};
@@ -392,7 +392,13 @@ pub struct AnimationConfig {
     pub enabled: bool,
     pub duration_ms: u64,
     pub easing: String,
+    /// Speed mode: "slow", "normal" (default), "fast", "instant".
+    /// Multiplies all animation timings (duration, fade steps, transitions).
+    #[serde(default = "default_animation_speed")]
+    pub speed: String,
 }
+
+fn default_animation_speed() -> String { "normal".to_string() }
 
 impl AnimationConfig {
     pub fn default_value() -> Self {
@@ -400,6 +406,7 @@ impl AnimationConfig {
             enabled: true,
             duration_ms: 250,
             easing: "ease-out".to_string(),
+            speed: "normal".to_string(),
         }
     }
 }
@@ -1080,8 +1087,14 @@ impl Config {
         self.inner.animation.enabled
     }
 
+    pub fn animation_speed(&self) -> AnimationSpeed {
+        AnimationSpeed::from_str(&self.inner.animation.speed)
+    }
+
     pub fn animation_duration(&self) -> Duration {
-        Duration::from_millis(self.inner.animation.duration_ms)
+        let speed = self.animation_speed();
+        let base_ms = self.inner.animation.duration_ms;
+        Duration::from_millis(speed.apply_duration(base_ms))
     }
 
     pub fn animation_easing(&self) -> Easing {

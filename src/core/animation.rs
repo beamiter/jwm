@@ -14,6 +14,9 @@ pub enum Easing {
     Linear,
     EaseOut,
     EaseInOut,
+    EaseIn,
+    Bounce,
+    Elastic,
 }
 
 impl Easing {
@@ -21,6 +24,9 @@ impl Easing {
         match s {
             "linear" => Easing::Linear,
             "ease-in-out" => Easing::EaseInOut,
+            "ease-in" => Easing::EaseIn,
+            "bounce" => Easing::Bounce,
+            "elastic" => Easing::Elastic,
             // default
             _ => Easing::EaseOut,
         }
@@ -42,7 +48,98 @@ impl Easing {
                     1.0 - p * p * p / 2.0
                 }
             }
+            Easing::EaseIn => {
+                t * t * t
+            }
+            Easing::Bounce => {
+                let t = 1.0 - t;
+                let v = if t < 1.0 / 2.75 {
+                    7.5625 * t * t
+                } else if t < 2.0 / 2.75 {
+                    let t = t - 1.5 / 2.75;
+                    7.5625 * t * t + 0.75
+                } else if t < 2.5 / 2.75 {
+                    let t = t - 2.25 / 2.75;
+                    7.5625 * t * t + 0.9375
+                } else {
+                    let t = t - 2.625 / 2.75;
+                    7.5625 * t * t + 0.984375
+                };
+                1.0 - v
+            }
+            Easing::Elastic => {
+                if t == 0.0 || t == 1.0 {
+                    t
+                } else {
+                    let p = 0.3;
+                    let s = p / 4.0;
+                    let t1 = t - 1.0;
+                    -(2.0_f32.powf(10.0 * t1)
+                        * (std::f32::consts::PI * 2.0 * (t1 - s) / p).sin())
+                        + 1.0
+                }
+            }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AnimationSpeed – preset speed modes
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimationSpeed {
+    /// Very slow animations for accessibility / dramatic effect
+    Slow,
+    /// Default speed
+    Normal,
+    /// Snappy, responsive animations
+    Fast,
+    /// No animation delay, instant transitions
+    Instant,
+}
+
+impl AnimationSpeed {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "slow" => AnimationSpeed::Slow,
+            "fast" => AnimationSpeed::Fast,
+            "instant" => AnimationSpeed::Instant,
+            _ => AnimationSpeed::Normal,
+        }
+    }
+
+    /// Duration multiplier applied to base duration_ms.
+    pub fn duration_multiplier(self) -> f32 {
+        match self {
+            AnimationSpeed::Slow => 2.0,
+            AnimationSpeed::Normal => 1.0,
+            AnimationSpeed::Fast => 0.5,
+            AnimationSpeed::Instant => 0.0,
+        }
+    }
+
+    /// Fade step multiplier (higher = faster fade).
+    pub fn fade_step_multiplier(self) -> f32 {
+        match self {
+            AnimationSpeed::Slow => 0.5,
+            AnimationSpeed::Normal => 1.0,
+            AnimationSpeed::Fast => 2.0,
+            AnimationSpeed::Instant => 100.0,
+        }
+    }
+
+    /// Effective duration in ms given a base duration.
+    pub fn apply_duration(self, base_ms: u64) -> u64 {
+        match self {
+            AnimationSpeed::Instant => 0,
+            _ => (base_ms as f32 * self.duration_multiplier()).round() as u64,
+        }
+    }
+
+    /// Effective fade step given a base step.
+    pub fn apply_fade_step(self, base_step: f32) -> f32 {
+        (base_step * self.fade_step_multiplier()).min(1.0)
     }
 }
 
