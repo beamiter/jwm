@@ -286,6 +286,46 @@ void main() {
 }
 "#;
 
+// ---------------------------------------------------------------------------
+// Portal (iris wipe) transition shader
+// ---------------------------------------------------------------------------
+
+pub const PORTAL_FRAGMENT_SHADER: &str = r#"#version 330 core
+uniform sampler2D u_texture;
+uniform float u_progress;    // 0.0 to 1.0
+uniform float u_glow;        // glow intensity at edge
+uniform vec2 u_center;       // center of portal in UV space (0.5, 0.5)
+uniform vec4 u_uv_rect;
+in vec2 v_uv;
+out vec4 frag_color;
+
+void main() {
+    vec2 uv = u_uv_rect.xy + v_uv * u_uv_rect.zw;
+    // Flip Y for FBO texture
+    uv.y = u_uv_rect.y + (1.0 - v_uv.y) * u_uv_rect.w;
+    vec4 texel = texture(u_texture, uv);
+
+    // Distance from center in normalized coords
+    vec2 diff = v_uv - u_center;
+    float dist = length(diff);
+
+    // Portal radius grows from 0 to sqrt(2) (full diagonal)
+    float radius = u_progress * 1.42; // sqrt(2)
+
+    // Smooth edge
+    float edge_width = 0.02 + 0.03 * (1.0 - u_progress);
+    float mask = smoothstep(radius, radius - edge_width, dist);
+
+    // Glow ring at the edge
+    float ring = smoothstep(radius + edge_width, radius, dist) *
+                 smoothstep(radius - edge_width * 2.0, radius - edge_width, dist);
+    vec3 glow_color = vec3(0.4, 0.6, 1.0) * u_glow * ring * 2.0;
+
+    // Old scene visible where mask > 0
+    frag_color = vec4(texel.rgb + glow_color, texel.a * mask);
+}
+"#;
+
 pub const TRANSITION_FRAGMENT_SHADER: &str = r#"#version 330 core
 
 uniform sampler2D u_texture;

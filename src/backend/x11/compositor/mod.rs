@@ -1,3 +1,12 @@
+pub mod math;
+mod effects;
+mod overview;
+mod pipeline;
+mod postprocess;
+pub mod shaders;
+mod tfp;
+mod transitions;
+
 use glow::HasContext;
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -10,7 +19,7 @@ use x11rb::protocol::xfixes::ConnectionExt as XFixesExt;
 use x11rb::protocol::xproto::{self, ConnectionExt as XProtoExt};
 use x11rb::rust_connection::RustConnection;
 
-use super::shaders;
+use math::ortho;
 
 // ---------------------------------------------------------------------------
 // TFP function pointers (glXBindTexImageEXT / glXReleaseTexImageEXT)
@@ -91,6 +100,8 @@ struct WindowTexture {
     is_frosted: bool,
     // --- Wobbly state ---
     wobbly: Option<WobblyState>,
+    // --- Phase 2.3: Fence sync for async pixmap refresh ---
+    pending_fence: Option<glow::Fence>,
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +167,20 @@ struct CubeUniforms {
     uv_rect: Option<glow::UniformLocation>,
 }
 
+// ---------------------------------------------------------------------------
+// Portal transition uniforms
+// ---------------------------------------------------------------------------
+
+struct PortalUniforms {
+    projection: Option<glow::UniformLocation>,
+    rect: Option<glow::UniformLocation>,
+    texture: Option<glow::UniformLocation>,
+    progress: Option<glow::UniformLocation>,
+    glow: Option<glow::UniformLocation>,
+    center: Option<glow::UniformLocation>,
+    uv_rect: Option<glow::UniformLocation>,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum TransitionMode {
     Slide,
@@ -165,6 +190,9 @@ enum TransitionMode {
     Zoom,
     Stack,
     Blinds,
+    CoverFlow,
+    Helix,
+    Portal,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -348,6 +376,111 @@ struct ParticleUniforms {
 }
 
 // ---------------------------------------------------------------------------
+// Tile-based damage tracker for partial redraw optimization (Phase 2.1)
+// ---------------------------------------------------------------------------
+
+const TILE_COLS: u32 = 8;
+const TILE_ROWS: u32 = 6;
+
+struct DamageTracker {
+    /// Screen divided into TILE_COLS x TILE_ROWS tiles.
+    dirty_tiles: Vec<bool>,
+    tile_w: u32,
+    tile_h: u32,
+    screen_w: u32,
+    screen_h: u32,
+}
+
+impl DamageTracker {
+    fn new(screen_w: u32, screen_h: u32) -> Self {
+        let tile_w = (screen_w + TILE_COLS - 1) / TILE_COLS;
+        let tile_h = (screen_h + TILE_ROWS - 1) / TILE_ROWS;
+        Self {
+            dirty_tiles: vec![true; (TILE_COLS * TILE_ROWS) as usize],
+            tile_w,
+            tile_h,
+            screen_w,
+            screen_h,
+        }
+    }
+
+    fn mark_dirty(&mut self, x: i32, y: i32, w: u32, h: u32) {
+        let x0 = (x.max(0) as u32 / self.tile_w).min(TILE_COLS - 1);
+        let y0 = (y.max(0) as u32 / self.tile_h).min(TILE_ROWS - 1);
+        let x1 = (((x.max(0) as u32 + w).saturating_sub(1)) / self.tile_w).min(TILE_COLS - 1);
+        let y1 = (((y.max(0) as u32 + h).saturating_sub(1)) / self.tile_h).min(TILE_ROWS - 1);
+        for ty in y0..=y1 {
+            for tx in x0..=x1 {
+                self.dirty_tiles[(ty * TILE_COLS + tx) as usize] = true;
+            }
+        }
+    }
+
+    fn mark_all_dirty(&mut self) {
+        self.dirty_tiles.fill(true);
+    }
+
+    fn clear(&mut self) {
+        self.dirty_tiles.fill(false);
+    }
+
+    fn dirty_fraction(&self) -> f32 {
+        let dirty = self.dirty_tiles.iter().filter(|&&d| d).count();
+        dirty as f32 / self.dirty_tiles.len() as f32
+    }
+
+    /// Returns the bounding rectangle of all dirty tiles, or None if nothing is dirty.
+    /// If >50% dirty, returns full screen (cheaper than many scissor switches).
+    fn dirty_bounds(&self) -> Option<(i32, i32, u32, u32)> {
+        if self.dirty_fraction() > 0.5 {
+            return Some((0, 0, self.screen_w, self.screen_h));
+        }
+        let mut min_x = self.screen_w as i32;
+        let mut min_y = self.screen_h as i32;
+        let mut max_x = 0i32;
+        let mut max_y = 0i32;
+        let mut any_dirty = false;
+        for ty in 0..TILE_ROWS {
+            for tx in 0..TILE_COLS {
+                if self.dirty_tiles[(ty * TILE_COLS + tx) as usize] {
+                    any_dirty = true;
+                    let px = (tx * self.tile_w) as i32;
+                    let py = (ty * self.tile_h) as i32;
+                    min_x = min_x.min(px);
+                    min_y = min_y.min(py);
+                    max_x = max_x.max(px + self.tile_w as i32);
+                    max_y = max_y.max(py + self.tile_h as i32);
+                }
+            }
+        }
+        if any_dirty {
+            Some((min_x, min_y, (max_x - min_x) as u32, (max_y - min_y) as u32))
+        } else {
+            None
+        }
+    }
+
+    fn resize(&mut self, screen_w: u32, screen_h: u32) {
+        self.screen_w = screen_w;
+        self.screen_h = screen_h;
+        self.tile_w = (screen_w + TILE_COLS - 1) / TILE_COLS;
+        self.tile_h = (screen_h + TILE_ROWS - 1) / TILE_ROWS;
+        self.dirty_tiles.fill(true);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Blur quality auto-downgrade (Phase 2.2)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq)]
+enum BlurQuality {
+    Full,     // All blur levels
+    Reduced,  // Half blur levels
+    Minimal,  // 1 blur level
+}
+
+// ---------------------------------------------------------------------------
 // Compositor
 // ---------------------------------------------------------------------------
 
@@ -434,7 +567,11 @@ pub(super) struct Compositor {
     scale_rules: Vec<ScaleRule>,
 
     // --- Feature 6: Damage region tracking for partial redraw ---
-    damage_regions: Vec<(i32, i32, u32, u32)>,
+    damage_tracker: DamageTracker,
+
+    // --- Phase 2.2: Blur quality auto-downgrade ---
+    blur_quality: BlurQuality,
+    blur_quality_auto: bool,
 
     // --- Feature 8: Color temperature / color management ---
     postprocess_program: glow::Program,
@@ -491,6 +628,10 @@ pub(super) struct Compositor {
     cube_uniforms: CubeUniforms,
     /// FBO + texture holding a snapshot of the new scene (for cube mode).
     transition_new_fbo: Option<(glow::Framebuffer, glow::Texture)>,
+
+    // --- Portal transition ---
+    portal_program: glow::Program,
+    portal_uniforms: PortalUniforms,
 
     // --- Window scale animation ---
     window_animation: bool,
@@ -603,6 +744,7 @@ impl Drop for Compositor {
             self.gl.delete_program(self.hud_program);
             self.gl.delete_program(self.transition_program);
             self.gl.delete_program(self.cube_program);
+            self.gl.delete_program(self.portal_program);
             self.gl.delete_program(self.edge_glow_program);
             self.gl.delete_program(self.tilt_program);
             self.gl.delete_program(self.wobbly_program);
@@ -1234,6 +1376,22 @@ impl Compositor {
             }
         };
 
+        // Compile portal transition shader
+        let portal_program = unsafe {
+            Self::create_program(&gl, shaders::BLUR_DOWN_VERTEX, shaders::PORTAL_FRAGMENT_SHADER)?
+        };
+        let portal_uniforms = unsafe {
+            PortalUniforms {
+                projection: gl.get_uniform_location(portal_program, "u_projection"),
+                rect: gl.get_uniform_location(portal_program, "u_rect"),
+                texture: gl.get_uniform_location(portal_program, "u_texture"),
+                progress: gl.get_uniform_location(portal_program, "u_progress"),
+                glow: gl.get_uniform_location(portal_program, "u_glow"),
+                center: gl.get_uniform_location(portal_program, "u_center"),
+                uv_rect: gl.get_uniform_location(portal_program, "u_uv_rect"),
+            }
+        };
+
         // Compile edge glow shader
         let edge_glow_program = unsafe { Self::create_program(&gl, shaders::VERTEX_SHADER, shaders::EDGE_GLOW_FRAGMENT_SHADER)? };
         let edge_glow_uniforms = unsafe {
@@ -1569,8 +1727,11 @@ impl Compositor {
             corner_radius_rules,
             // Feature 4: scale
             scale_rules,
-            // Feature 6: damage regions
-            damage_regions: Vec::new(),
+            // Feature 6: damage tracking (tile-based, Phase 2.1)
+            damage_tracker: DamageTracker::new(screen_w, screen_h),
+            // Phase 2.2: Blur quality auto-downgrade
+            blur_quality: BlurQuality::Full,
+            blur_quality_auto: behavior.blur_quality_auto,
             // Feature 8: color management
             postprocess_program,
             postprocess_uniforms,
@@ -1618,12 +1779,18 @@ impl Compositor {
                 "zoom" => TransitionMode::Zoom,
                 "stack" => TransitionMode::Stack,
                 "blinds" => TransitionMode::Blinds,
+                "coverflow" => TransitionMode::CoverFlow,
+                "helix" => TransitionMode::Helix,
+                "portal" => TransitionMode::Portal,
                 _ => TransitionMode::Slide,
             },
             // Cube transition
             cube_program,
             cube_uniforms,
             transition_new_fbo: None,
+            // Portal transition
+            portal_program,
+            portal_uniforms,
             // Window scale animation
             window_animation: behavior.window_animation,
             window_animation_scale: behavior.window_animation_scale,
@@ -1918,77 +2085,6 @@ impl Compositor {
         );
     }
 
-    /// Create the dual Kawase blur FBO mipmap chain.
-    /// Each level is half the size of the previous.
-    unsafe fn create_blur_fbos(gl: &glow::Context, w: u32, h: u32, levels: u32) -> Vec<BlurFboLevel> {
-        let levels = levels.clamp(1, 6);
-        let mut fbos = Vec::new();
-        let mut cur_w = w / 2;
-        let mut cur_h = h / 2;
-        unsafe {
-            for _ in 0..levels {
-                if cur_w == 0 { cur_w = 1; }
-                if cur_h == 0 { cur_h = 1; }
-                let tex = match gl.create_texture() {
-                    Ok(t) => t,
-                    Err(_) => break,
-                };
-                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                gl.tex_image_2d(
-                    glow::TEXTURE_2D, 0, glow::RGBA8 as i32,
-                    cur_w as i32, cur_h as i32, 0,
-                    glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None),
-                );
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
-
-                let fbo = match gl.create_framebuffer() {
-                    Ok(f) => f,
-                    Err(_) => {
-                        gl.delete_texture(tex);
-                        break;
-                    }
-                };
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-                gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(tex), 0);
-
-                fbos.push(BlurFboLevel { fbo, texture: tex, w: cur_w, h: cur_h });
-                cur_w /= 2;
-                cur_h /= 2;
-            }
-            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            gl.bind_texture(glow::TEXTURE_2D, None);
-        }
-        log::info!("compositor: created {} blur FBO levels", fbos.len());
-        fbos
-    }
-
-    /// Create the scene capture FBO used as blur source.
-    unsafe fn create_scene_fbo(gl: &glow::Context, w: u32, h: u32) -> Result<(glow::Framebuffer, glow::Texture), String> {
-        unsafe {
-            let tex = gl.create_texture().map_err(|e| format!("scene_fbo tex: {e}"))?;
-            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            gl.tex_image_2d(
-                glow::TEXTURE_2D, 0, glow::RGBA8 as i32,
-                w as i32, h as i32, 0,
-                glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None),
-            );
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
-
-            let fbo = gl.create_framebuffer().map_err(|e| format!("scene_fbo: {e}"))?;
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-            gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(tex), 0);
-            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            gl.bind_texture(glow::TEXTURE_2D, None);
-            Ok((fbo, tex))
-        }
-    }
-
     /// Check if a window class matches any entry in an exclude list.
     fn class_matches_exclude(class_name: &str, exclude_list: &[String]) -> bool {
         if class_name.is_empty() {
@@ -2124,7 +2220,7 @@ impl Compositor {
     // Feature 6: Mark damage region for partial redraw
     // =====================================================================
     pub(super) fn mark_damage_region(&mut self, x: i32, y: i32, w: u32, h: u32) {
-        self.damage_regions.push((x, y, w, h));
+        self.damage_tracker.mark_dirty(x, y, w, h);
     }
 
     // =====================================================================
@@ -2176,26 +2272,6 @@ impl Compositor {
             self.ensure_postprocess_fbo();
             self.needs_render = true;
         }
-    }
-
-    /// Lazily create postprocess FBO if it doesn't exist yet.
-    fn ensure_postprocess_fbo(&mut self) {
-        if self.postprocess_fbo.is_none() {
-            self.postprocess_fbo = unsafe {
-                Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h).ok()
-            };
-        }
-    }
-
-    /// Whether post-processing is active.
-    fn needs_postprocess(&self) -> bool {
-        self.color_temperature != 0.0
-            || self.saturation != 1.0
-            || self.brightness != 1.0
-            || self.contrast != 1.0
-            || self.invert_colors
-            || self.grayscale
-            || self.magnifier_enabled
     }
 
     // =====================================================================
@@ -2256,7 +2332,7 @@ impl Compositor {
         }
 
         // Create new-scene FBO for modes that need both old and new textures
-        let needs_new_fbo = matches!(self.transition_mode, TransitionMode::Cube | TransitionMode::Flip | TransitionMode::Blinds);
+        let needs_new_fbo = matches!(self.transition_mode, TransitionMode::Cube | TransitionMode::Flip | TransitionMode::Blinds | TransitionMode::CoverFlow | TransitionMode::Helix | TransitionMode::Portal);
         if needs_new_fbo && self.transition_new_fbo.is_none() {
             self.transition_new_fbo = unsafe {
                 Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok()
@@ -2291,9 +2367,7 @@ impl Compositor {
             self.transition_exclude_top = exclude_top.min(mon_h.saturating_sub(1));
             // Tag switch can radically change visible scene; force a full redraw
             // to avoid stale pixels from partial-damage scissor regions.
-            self.damage_regions.clear();
-            self.damage_regions
-                .push((0, 0, self.screen_w, self.screen_h));
+            self.damage_tracker.mark_all_dirty();
             self.needs_render = true;
             log::debug!(
                 "compositor: tag-switch slide transition started ({:?}, dir={}, mon={}x{}+{}+{})",
@@ -2305,477 +2379,8 @@ impl Compositor {
     }
 
     pub(super) fn force_full_redraw(&mut self) {
-        self.damage_regions.clear();
-        self.damage_regions.push((0, 0, self.screen_w, self.screen_h));
+        self.damage_tracker.mark_all_dirty();
         self.needs_render = true;
-    }
-
-    /// Returns true if a tag-switch transition is in progress.
-    fn transition_active(&self) -> bool {
-        self.transition_start.is_some()
-    }
-
-    /// Compute transition progress (0.0 → 1.0). Returns None if no transition.
-    fn transition_progress(&self, now: std::time::Instant) -> Option<f32> {
-        let start = self.transition_start?;
-        let elapsed = now.duration_since(start);
-        if elapsed >= self.transition_duration {
-            None // transition complete
-        } else {
-            let t = elapsed.as_secs_f32() / self.transition_duration.as_secs_f32();
-            // EaseOut cubic for smooth slide deceleration.
-            let inv = 1.0 - t;
-            Some(1.0 - inv * inv * inv)
-        }
-    }
-
-    /// Re-draw the wallpaper in a specific monitor region using the given
-    /// ortho projection.  Used by transitions to keep the wallpaper static
-    /// behind the animated content.
-    fn draw_wallpaper_in_region(&self, proj: &[f32; 16], mon_x: i32, mon_y: i32, mon_w: u32, mon_h: u32) {
-        // Find the matching monitor wallpaper entry
-        let (tex, mode, iw, ih) = if let Some(mw) = self.monitor_wallpapers.iter().find(|mw| {
-            mw.mon_x == mon_x && mw.mon_y == mon_y && mw.mon_w == mon_w && mw.mon_h == mon_h
-        }) {
-            if let Some(t) = mw.texture {
-                (t, mw.mode, mw.img_w, mw.img_h)
-            } else if let Some(t) = self.wallpaper_texture {
-                (t, self.wallpaper_mode, self.wallpaper_img_w, self.wallpaper_img_h)
-            } else {
-                return;
-            }
-        } else if let Some(t) = self.wallpaper_texture {
-            (t, self.wallpaper_mode, self.wallpaper_img_w, self.wallpaper_img_h)
-        } else {
-            return;
-        };
-
-        let area = (mon_x as f32, mon_y as f32, mon_w as f32, mon_h as f32);
-        let (rx, ry, rw, rh) = Self::compute_wallpaper_rect(mode, area, iw, ih);
-
-        unsafe {
-            self.gl.use_program(Some(self.program));
-            self.gl.uniform_matrix_4_f32_slice(
-                self.win_uniforms.projection.as_ref(), false, proj,
-            );
-            self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
-            self.gl.bind_vertex_array(Some(self.quad_vao));
-            self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
-            self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), 0.0);
-            self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
-            self.gl.uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
-            self.gl.active_texture(glow::TEXTURE0);
-
-            self.gl.uniform_4_f32(self.win_uniforms.rect.as_ref(), rx, ry, rw, rh);
-            self.gl.uniform_2_f32(self.win_uniforms.size.as_ref(), rw, rh);
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-
-            self.gl.bind_texture(glow::TEXTURE_2D, None);
-            self.gl.bind_vertex_array(None);
-            self.gl.use_program(None);
-        }
-    }
-
-    /// Render the 3D cube transition overlay.
-    /// `progress` goes from 0.0 (old scene fully visible) to 1.0 (new scene fully visible).
-    ///
-    /// The two tags are adjacent faces of a cube. The cube rotates 90° around
-    /// its vertical (Y) axis so the old front face turns away and the new side
-    /// face turns in.  During the rotation both faces share an edge that is
-    /// visible as a vertical line where the two tag contents meet.
-    fn render_cube_transition(&mut self, progress: f32, ortho_proj: &[f32; 16]) {
-        let old_tex = match &self.transition_fbo {
-            Some((_, tex)) => *tex,
-            None => return,
-        };
-
-        let mon_x = self.transition_mon_x;
-        let mon_y = self.transition_mon_y;
-        let mon_w = self.transition_mon_w;
-        let mon_h = self.transition_mon_h;
-
-        // Capture the current back-buffer (new scene) into transition_new_fbo
-        if self.transition_new_fbo.is_none() {
-            self.transition_new_fbo = unsafe {
-                Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok()
-            };
-        }
-        let new_tex = match &self.transition_new_fbo {
-            Some((fbo, tex)) => {
-                let fbo = *fbo;
-                let tex = *tex;
-                let blit_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
-                unsafe {
-                    self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-                    self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
-                    self.gl.blit_framebuffer(
-                        mon_x, blit_gl_y,
-                        mon_x + mon_w as i32, blit_gl_y + mon_h as i32,
-                        0, 0, mon_w as i32, mon_h as i32,
-                        glow::COLOR_BUFFER_BIT,
-                        glow::NEAREST,
-                    );
-                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-                }
-                tex
-            }
-            None => return,
-        };
-
-        let exclude_top = self.transition_exclude_top.min(mon_h);
-        let workspace_h = mon_h.saturating_sub(exclude_top);
-        if workspace_h == 0 {
-            return;
-        }
-
-        let aspect = mon_w as f32 / workspace_h as f32;
-        let top_frac = if mon_h == 0 {
-            0.0
-        } else {
-            exclude_top as f32 / mon_h as f32
-        };
-        // UV rect: workspace portion of the FBO texture (below status bar)
-        let uv_rect = [0.0f32, 0.0, 1.0, 1.0 - top_frac];
-
-        // --- Cube geometry ---
-        // The face quad spans [-aspect, -1] to [+aspect, +1] in model space
-        // (vertex shader: (pos * 2 - 1) * aspect for X, (pos * 2 - 1) for Y).
-        // For a square cross-section (cube viewed from above), the half-depth
-        // from center to each face equals the face half-width = aspect.
-        let d = aspect;
-
-        // Camera distance: face exactly fills screen when face-on at z=d,
-        // fov_y=90° ⟹ camera_z = 1 + d.  Zoom out slightly at the midpoint
-        // to keep the rotating cube corners within the viewport.
-        let half_pi = std::f32::consts::FRAC_PI_2;
-        let zoom = 1.0 + 0.25 * (progress * std::f32::consts::PI).sin();
-        let camera_z = (1.0 + d) * zoom;
-
-        let persp = perspective_matrix(half_pi, aspect, 0.1, camera_z * 3.0);
-        let view = translate_matrix(0.0, 0.0, -camera_z);
-
-        // Global rotation applied to the whole cube as a rigid body.
-        // direction=+1 (forward): positive Y-rotation moves the front face
-        //   left and brings the right face to the front.
-        // direction=-1 (backward): vice-versa.
-        let angle = self.transition_direction * progress * half_pi;
-        let cube_rot = rotate_y_matrix(angle);
-
-        // Old face: front face of the cube, at z = +d
-        let old_model = mat4_mul(&cube_rot, &translate_matrix(0.0, 0.0, d));
-        let old_mvp = mat4_mul(&persp, &mat4_mul(&view, &old_model));
-
-        // New face: adjacent side face.  Start from the face template at z=+d,
-        // then rotate it ∓90° so it sits on the appropriate side of the cube.
-        // For direction=+1 the new face sits at x=+d (right side);
-        // for direction=-1 it sits at x=-d (left side).
-        let new_base = mat4_mul(
-            &rotate_y_matrix(-self.transition_direction * half_pi),
-            &translate_matrix(0.0, 0.0, d),
-        );
-        let new_model = mat4_mul(&cube_rot, &new_base);
-        let new_mvp = mat4_mul(&persp, &mat4_mul(&view, &new_model));
-
-        // Simulate directional lighting: the face that points more towards the
-        // camera is brighter, the one turning away is dimmer.
-        let old_brightness = (0.35 + 0.65 * (progress * half_pi).cos()).max(0.0);
-        let new_brightness = (0.35 + 0.65 * (progress * half_pi).sin()).max(0.0);
-
-        // OpenGL Y for the monitor's workspace region
-        let scissor_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
-        unsafe {
-            // Restrict rendering to the monitor's workspace area (below status bar)
-            self.gl.enable(glow::SCISSOR_TEST);
-            self.gl.scissor(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
-            self.gl.viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
-
-            // Clear workspace area and draw wallpaper behind the cube so
-            // the background stays static instead of showing black gaps.
-            self.gl.clear(glow::COLOR_BUFFER_BIT);
-            // Temporarily restore full viewport for wallpaper drawing
-            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
-            self.draw_wallpaper_in_region(ortho_proj, mon_x, mon_y, mon_w, mon_h);
-            // Re-set viewport for cube 3D rendering
-            self.gl.viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
-
-            self.gl.use_program(Some(self.cube_program));
-            self.gl.uniform_1_f32(self.cube_uniforms.aspect.as_ref(), aspect);
-            self.gl.uniform_1_i32(self.cube_uniforms.texture.as_ref(), 0);
-            self.gl.uniform_4_f32(
-                self.cube_uniforms.uv_rect.as_ref(),
-                uv_rect[0], uv_rect[1], uv_rect[2], uv_rect[3],
-            );
-            self.gl.bind_vertex_array(Some(self.quad_vao));
-            self.gl.active_texture(glow::TEXTURE0);
-
-            // Painter's algorithm: draw the farther face first so the closer
-            // face correctly occludes it.  At progress < 0.5 the old face is
-            // closer; at progress > 0.5 the new face is closer.
-            if progress < 0.5 {
-                // New face farther → draw first
-                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &new_mvp);
-                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), new_brightness);
-                self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-
-                // Old face closer → draw second
-                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &old_mvp);
-                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), old_brightness);
-                self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-            } else {
-                // Old face farther → draw first
-                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &old_mvp);
-                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), old_brightness);
-                self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-
-                // New face closer → draw second
-                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &new_mvp);
-                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), new_brightness);
-                self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-            }
-
-            self.gl.bind_vertex_array(None);
-            self.gl.use_program(None);
-
-            // Restore viewport and disable scissor
-            self.gl.disable(glow::SCISSOR_TEST);
-            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
-        }
-    }
-
-    /// Flip transition: card-flip around Y axis (180° rotation).
-    /// First half shows old scene flipping away, second half shows new scene
-    /// flipping in. Uses 3D perspective via the cube shader infrastructure.
-    fn render_flip_transition(&mut self, progress: f32, ortho_proj: &[f32; 16]) {
-        let old_tex = match &self.transition_fbo {
-            Some((_, tex)) => *tex,
-            None => return,
-        };
-
-        let mon_x = self.transition_mon_x;
-        let mon_y = self.transition_mon_y;
-        let mon_w = self.transition_mon_w;
-        let mon_h = self.transition_mon_h;
-
-        // Capture new scene
-        if self.transition_new_fbo.is_none() {
-            self.transition_new_fbo = unsafe {
-                Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok()
-            };
-        }
-        let new_tex = match &self.transition_new_fbo {
-            Some((fbo, tex)) => {
-                let fbo = *fbo;
-                let tex = *tex;
-                let blit_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
-                unsafe {
-                    self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-                    self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
-                    self.gl.blit_framebuffer(
-                        mon_x, blit_gl_y,
-                        mon_x + mon_w as i32, blit_gl_y + mon_h as i32,
-                        0, 0, mon_w as i32, mon_h as i32,
-                        glow::COLOR_BUFFER_BIT, glow::NEAREST,
-                    );
-                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-                }
-                tex
-            }
-            None => return,
-        };
-
-        let exclude_top = self.transition_exclude_top.min(mon_h);
-        let workspace_h = mon_h.saturating_sub(exclude_top);
-        if workspace_h == 0 { return; }
-
-        let aspect = mon_w as f32 / workspace_h as f32;
-        let top_frac = if mon_h == 0 { 0.0 } else { exclude_top as f32 / mon_h as f32 };
-        let uv_rect = [0.0f32, 0.0, 1.0, 1.0 - top_frac];
-
-        let pi = std::f32::consts::PI;
-        let half_pi = std::f32::consts::FRAC_PI_2;
-
-        // Full 180° flip
-        let angle = self.transition_direction * progress * pi;
-
-        // Camera setup
-        let d = 0.01; // face sits at z=d (nearly flat card)
-        let camera_z = 1.0 + aspect;
-        let persp = perspective_matrix(half_pi, aspect, 0.1, camera_z * 3.0);
-        let view = translate_matrix(0.0, 0.0, -camera_z);
-
-        let scissor_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
-
-        unsafe {
-            self.gl.enable(glow::SCISSOR_TEST);
-            self.gl.scissor(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
-            self.gl.viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
-
-            // Draw wallpaper behind
-            self.gl.clear(glow::COLOR_BUFFER_BIT);
-            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
-            self.draw_wallpaper_in_region(ortho_proj, mon_x, mon_y, mon_w, mon_h);
-            self.gl.viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
-
-            self.gl.use_program(Some(self.cube_program));
-            self.gl.uniform_1_f32(self.cube_uniforms.aspect.as_ref(), aspect);
-            self.gl.uniform_1_i32(self.cube_uniforms.texture.as_ref(), 0);
-            self.gl.uniform_4_f32(
-                self.cube_uniforms.uv_rect.as_ref(),
-                uv_rect[0], uv_rect[1], uv_rect[2], uv_rect[3],
-            );
-            self.gl.bind_vertex_array(Some(self.quad_vao));
-            self.gl.active_texture(glow::TEXTURE0);
-
-            // First half (0..0.5): show old face rotating away
-            // Second half (0.5..1): show new face rotating in
-            if progress < 0.5 {
-                // Old face rotating away
-                let model = mat4_mul(&rotate_y_matrix(angle), &translate_matrix(0.0, 0.0, d));
-                let mvp = mat4_mul(&persp, &mat4_mul(&view, &model));
-                let brightness = (1.0 - progress * 0.6).max(0.2);
-                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &mvp);
-                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), brightness);
-                self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-            } else {
-                // New face rotating in from the back (pre-rotated 180°)
-                let new_angle = angle - self.transition_direction * pi;
-                let model = mat4_mul(&rotate_y_matrix(new_angle), &translate_matrix(0.0, 0.0, d));
-                let mvp = mat4_mul(&persp, &mat4_mul(&view, &model));
-                let brightness = (0.4 + (progress - 0.5) * 1.2).min(1.0);
-                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &mvp);
-                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), brightness);
-                self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-            }
-
-            self.gl.bind_vertex_array(None);
-            self.gl.use_program(None);
-            self.gl.disable(glow::SCISSOR_TEST);
-            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
-        }
-    }
-
-    /// Blinds transition: screen split into vertical strips that flip
-    /// individually with staggered timing to reveal the new scene.
-    fn render_blinds_transition(&mut self, progress: f32, ortho_proj: &[f32; 16]) {
-        let old_tex = match &self.transition_fbo {
-            Some((_, tex)) => *tex,
-            None => return,
-        };
-
-        let mon_x = self.transition_mon_x;
-        let mon_y = self.transition_mon_y;
-        let mon_w = self.transition_mon_w;
-        let mon_h = self.transition_mon_h;
-
-        // Capture new scene
-        if self.transition_new_fbo.is_none() {
-            self.transition_new_fbo = unsafe {
-                Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok()
-            };
-        }
-        let new_tex = match &self.transition_new_fbo {
-            Some((fbo, tex)) => {
-                let fbo = *fbo;
-                let tex = *tex;
-                let blit_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
-                unsafe {
-                    self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-                    self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
-                    self.gl.blit_framebuffer(
-                        mon_x, blit_gl_y,
-                        mon_x + mon_w as i32, blit_gl_y + mon_h as i32,
-                        0, 0, mon_w as i32, mon_h as i32,
-                        glow::COLOR_BUFFER_BIT, glow::NEAREST,
-                    );
-                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-                }
-                tex
-            }
-            None => return,
-        };
-
-        let exclude_top = self.transition_exclude_top.min(mon_h);
-        let workspace_h = mon_h.saturating_sub(exclude_top);
-        if workspace_h == 0 { return; }
-
-        let top_frac = if mon_h == 0 { 0.0 } else { exclude_top as f32 / mon_h as f32 };
-        let scissor_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
-
-        let num_blinds: u32 = 8;
-        let strip_w = mon_w as f32 / num_blinds as f32;
-        let stagger = 0.3; // how much strips are staggered (0 = all at once)
-
-        unsafe {
-            self.gl.enable(glow::SCISSOR_TEST);
-
-            self.gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
-            self.gl.use_program(Some(self.transition_program));
-            self.gl.uniform_matrix_4_f32_slice(self.transition_uniforms.projection.as_ref(), false, ortho_proj);
-            self.gl.uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
-            self.gl.active_texture(glow::TEXTURE0);
-            self.gl.bind_vertex_array(Some(self.quad_vao));
-
-            let draw_y = (mon_y as u32 + exclude_top) as f32;
-            let draw_h = workspace_h as f32;
-
-            for i in 0..num_blinds {
-                // Staggered progress per strip
-                let strip_delay = (i as f32 / (num_blinds - 1).max(1) as f32) * stagger;
-                let strip_progress = ((progress - strip_delay) / (1.0 - stagger)).clamp(0.0, 1.0);
-
-                let strip_x = mon_x as f32 + i as f32 * strip_w;
-
-                // UV for this strip
-                let uv_x = i as f32 / num_blinds as f32;
-                let uv_w = 1.0 / num_blinds as f32;
-
-                // Scissor to this strip
-                let strip_scissor_x = mon_x + (i as f32 * strip_w) as i32;
-                let strip_scissor_w = strip_w.ceil() as i32;
-                self.gl.scissor(
-                    strip_scissor_x,
-                    scissor_gl_y,
-                    strip_scissor_w,
-                    (mon_h - exclude_top) as i32,
-                );
-
-                if strip_progress < 0.5 {
-                    // Show old scene with horizontal squeeze (simulate flip first half)
-                    let squeeze = 1.0 - strip_progress * 2.0; // 1.0 → 0.0
-                    let squeezed_w = strip_w * squeeze;
-                    let offset_x = strip_x + (strip_w - squeezed_w) * 0.5;
-                    let old_uv = [uv_x, 0.0f32, uv_w, 1.0 - top_frac];
-                    self.gl.uniform_4_f32(self.transition_uniforms.rect.as_ref(), offset_x, draw_y, squeezed_w.max(1.0), draw_h);
-                    self.gl.uniform_1_f32(self.transition_uniforms.opacity.as_ref(), 1.0);
-                    self.gl.uniform_4_f32(self.transition_uniforms.uv_rect.as_ref(), old_uv[0], old_uv[1], old_uv[2], old_uv[3]);
-                    self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
-                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                } else {
-                    // Show new scene expanding (simulate flip second half)
-                    let expand = (strip_progress - 0.5) * 2.0; // 0.0 → 1.0
-                    let expanded_w = strip_w * expand;
-                    let offset_x = strip_x + (strip_w - expanded_w) * 0.5;
-                    let new_uv = [uv_x, 0.0f32, uv_w, 1.0 - top_frac];
-                    self.gl.uniform_4_f32(self.transition_uniforms.rect.as_ref(), offset_x, draw_y, expanded_w.max(1.0), draw_h);
-                    self.gl.uniform_1_f32(self.transition_uniforms.opacity.as_ref(), 1.0);
-                    self.gl.uniform_4_f32(self.transition_uniforms.uv_rect.as_ref(), new_uv[0], new_uv[1], new_uv[2], new_uv[3]);
-                    self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
-                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                }
-            }
-
-            self.gl.bind_vertex_array(None);
-            self.gl.use_program(None);
-            self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
-            self.gl.disable(glow::SCISSOR_TEST);
-        }
     }
 
     // =====================================================================
@@ -2789,6 +2394,9 @@ impl Compositor {
             "zoom" => TransitionMode::Zoom,
             "stack" => TransitionMode::Stack,
             "blinds" => TransitionMode::Blinds,
+            "coverflow" => TransitionMode::CoverFlow,
+            "helix" => TransitionMode::Helix,
+            "portal" => TransitionMode::Portal,
             _ => TransitionMode::Slide,
         };
         self.transition_mode = new_mode;
@@ -2813,1143 +2421,6 @@ impl Compositor {
     pub(super) fn request_screenshot(&mut self, path: std::path::PathBuf) {
         self.pending_screenshot = Some(path);
         self.needs_render = true;
-    }
-
-    /// Capture the current framebuffer to a PNG file.
-    fn capture_screenshot(&mut self, path: &std::path::Path) -> bool {
-        let w = self.screen_w;
-        let h = self.screen_h;
-        let mut pixels = vec![0u8; (w * h * 4) as usize];
-        unsafe {
-            self.gl.read_pixels(
-                0, 0, w as i32, h as i32,
-                glow::RGBA, glow::UNSIGNED_BYTE,
-                glow::PixelPackData::Slice(Some(&mut pixels)),
-            );
-        }
-        // OpenGL reads bottom-to-top, flip vertically
-        let row_bytes = (w * 4) as usize;
-        let mut flipped = vec![0u8; pixels.len()];
-        for y in 0..h as usize {
-            let src_row = (h as usize - 1 - y) * row_bytes;
-            let dst_row = y * row_bytes;
-            flipped[dst_row..dst_row + row_bytes].copy_from_slice(&pixels[src_row..src_row + row_bytes]);
-        }
-        // Write PNG
-        let file = match std::fs::File::create(path) {
-            Ok(f) => f,
-            Err(e) => {
-                log::warn!("compositor: screenshot create failed: {e}");
-                return false;
-            }
-        };
-        let writer = std::io::BufWriter::new(file);
-        let mut encoder = png::Encoder::new(writer, w, h);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        match encoder.write_header().and_then(|mut w| w.write_image_data(&flipped)) {
-            Ok(_) => {
-                log::info!("compositor: screenshot saved to {}", path.display());
-                true
-            }
-            Err(e) => {
-                log::warn!("compositor: screenshot encode failed: {e}");
-                false
-            }
-        }
-    }
-
-    // =====================================================================
-    // Feature 7: Window thumbnail rendering
-    // =====================================================================
-    /// Render a specific window to an off-screen FBO and return RGBA pixel data.
-    /// Returns None if the window isn't tracked. Dimensions are (width, height).
-    pub(super) fn capture_window_thumbnail(&self, x11_win: u32, max_size: u32) -> Option<(Vec<u8>, u32, u32)> {
-        let wt = self.windows.get(&x11_win)?;
-        if wt.w == 0 || wt.h == 0 {
-            return None;
-        }
-
-        // Calculate thumbnail size preserving aspect ratio
-        let aspect = wt.w as f32 / wt.h as f32;
-        let (tw, th) = if wt.w >= wt.h {
-            let tw = max_size.min(wt.w);
-            (tw, (tw as f32 / aspect) as u32)
-        } else {
-            let th = max_size.min(wt.h);
-            ((th as f32 * aspect) as u32, th)
-        };
-        let tw = tw.max(1);
-        let th = th.max(1);
-
-        unsafe {
-            // Create temp FBO
-            let tex = self.gl.create_texture().ok()?;
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            self.gl.tex_image_2d(
-                glow::TEXTURE_2D, 0, glow::RGBA8 as i32,
-                tw as i32, th as i32, 0,
-                glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None),
-            );
-            self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-            self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-            let fbo = self.gl.create_framebuffer().ok()?;
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-            self.gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(tex), 0);
-
-            self.gl.viewport(0, 0, tw as i32, th as i32);
-            self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
-            self.gl.clear(glow::COLOR_BUFFER_BIT);
-
-            let proj = ortho(0.0, tw as f32, th as f32, 0.0, -1.0, 1.0);
-            self.gl.use_program(Some(self.program));
-            self.gl.uniform_matrix_4_f32_slice(self.win_uniforms.projection.as_ref(), false, &proj);
-            self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
-            self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
-            self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), 0.0);
-            self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
-            self.gl.uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
-            self.gl.uniform_2_f32(self.win_uniforms.size.as_ref(), tw as f32, th as f32);
-            self.gl.uniform_4_f32(self.win_uniforms.rect.as_ref(), 0.0, 0.0, tw as f32, th as f32);
-            self.gl.bind_vertex_array(Some(self.quad_vao));
-            self.gl.active_texture(glow::TEXTURE0);
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-
-            // Read pixels
-            let mut pixels = vec![0u8; (tw * th * 4) as usize];
-            self.gl.read_pixels(
-                0, 0, tw as i32, th as i32,
-                glow::RGBA, glow::UNSIGNED_BYTE,
-                glow::PixelPackData::Slice(Some(&mut pixels)),
-            );
-
-            // Cleanup temp FBO
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            self.gl.delete_framebuffer(fbo);
-            self.gl.delete_texture(tex);
-            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
-            self.gl.bind_vertex_array(None);
-            self.gl.use_program(None);
-
-            Some((pixels, tw, th))
-        }
-    }
-
-    fn clear_overview_snapshots(&mut self) {
-        unsafe {
-            for entry in &mut self.overview_windows {
-                if let Some(texture) = entry.snapshot_texture.take() {
-                    self.gl.delete_texture(texture);
-                }
-            }
-        }
-    }
-
-    fn clear_overview_title_textures(&mut self) {
-        unsafe {
-            for entry in &mut self.overview_windows {
-                if let Some((texture, _, _)) = entry.title_texture.take() {
-                    self.gl.delete_texture(texture);
-                }
-            }
-        }
-    }
-
-    /// Render a title string into an RGBA pixel buffer using a simple embedded bitmap font.
-    /// Returns (pixels, width, height) or None if the title is empty.
-    fn render_title_to_pixels(title: &str, max_width: u32) -> Option<(Vec<u8>, u32, u32)> {
-        if title.is_empty() {
-            return None;
-        }
-
-        // Simple 6x10 bitmap font for printable ASCII (32..=126).
-        // Each character is 6 columns x 10 rows, stored as 10 bytes (1 byte per row,
-        // top 6 bits used). Non-ASCII characters are rendered as '?'.
-        #[rustfmt::skip]
-        const FONT_6X10: [u8; 95 * 10] = [
-            // Space (32)
-            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-            // ! (33)
-            0x20,0x20,0x20,0x20,0x20,0x20,0x00,0x20,0x00,0x00,
-            // " (34)
-            0x50,0x50,0x50,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-            // # (35)
-            0x50,0x50,0xF8,0x50,0xF8,0x50,0x50,0x00,0x00,0x00,
-            // $ (36)
-            0x20,0x78,0xA0,0x70,0x28,0xF0,0x20,0x00,0x00,0x00,
-            // % (37)
-            0xC0,0xC8,0x10,0x20,0x40,0x98,0x18,0x00,0x00,0x00,
-            // & (38)
-            0x60,0x90,0xA0,0x40,0xA8,0x90,0x68,0x00,0x00,0x00,
-            // ' (39)
-            0x60,0x20,0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-            // ( (40)
-            0x10,0x20,0x40,0x40,0x40,0x20,0x10,0x00,0x00,0x00,
-            // ) (41)
-            0x40,0x20,0x10,0x10,0x10,0x20,0x40,0x00,0x00,0x00,
-            // * (42)
-            0x00,0x20,0xA8,0x70,0xA8,0x20,0x00,0x00,0x00,0x00,
-            // + (43)
-            0x00,0x20,0x20,0xF8,0x20,0x20,0x00,0x00,0x00,0x00,
-            // , (44)
-            0x00,0x00,0x00,0x00,0x00,0x60,0x20,0x40,0x00,0x00,
-            // - (45)
-            0x00,0x00,0x00,0xF8,0x00,0x00,0x00,0x00,0x00,0x00,
-            // . (46)
-            0x00,0x00,0x00,0x00,0x00,0x60,0x60,0x00,0x00,0x00,
-            // / (47)
-            0x00,0x08,0x10,0x20,0x40,0x80,0x00,0x00,0x00,0x00,
-            // 0 (48)
-            0x70,0x88,0x98,0xA8,0xC8,0x88,0x70,0x00,0x00,0x00,
-            // 1 (49)
-            0x20,0x60,0x20,0x20,0x20,0x20,0x70,0x00,0x00,0x00,
-            // 2 (50)
-            0x70,0x88,0x08,0x10,0x20,0x40,0xF8,0x00,0x00,0x00,
-            // 3 (51)
-            0xF8,0x10,0x20,0x10,0x08,0x88,0x70,0x00,0x00,0x00,
-            // 4 (52)
-            0x10,0x30,0x50,0x90,0xF8,0x10,0x10,0x00,0x00,0x00,
-            // 5 (53)
-            0xF8,0x80,0xF0,0x08,0x08,0x88,0x70,0x00,0x00,0x00,
-            // 6 (54)
-            0x30,0x40,0x80,0xF0,0x88,0x88,0x70,0x00,0x00,0x00,
-            // 7 (55)
-            0xF8,0x08,0x10,0x20,0x40,0x40,0x40,0x00,0x00,0x00,
-            // 8 (56)
-            0x70,0x88,0x88,0x70,0x88,0x88,0x70,0x00,0x00,0x00,
-            // 9 (57)
-            0x70,0x88,0x88,0x78,0x08,0x10,0x60,0x00,0x00,0x00,
-            // : (58)
-            0x00,0x60,0x60,0x00,0x60,0x60,0x00,0x00,0x00,0x00,
-            // ; (59)
-            0x00,0x60,0x60,0x00,0x60,0x20,0x40,0x00,0x00,0x00,
-            // < (60)
-            0x10,0x20,0x40,0x80,0x40,0x20,0x10,0x00,0x00,0x00,
-            // = (61)
-            0x00,0x00,0xF8,0x00,0xF8,0x00,0x00,0x00,0x00,0x00,
-            // > (62)
-            0x40,0x20,0x10,0x08,0x10,0x20,0x40,0x00,0x00,0x00,
-            // ? (63)
-            0x70,0x88,0x08,0x10,0x20,0x00,0x20,0x00,0x00,0x00,
-            // @ (64)
-            0x70,0x88,0xB8,0xA8,0xB8,0x80,0x70,0x00,0x00,0x00,
-            // A (65)
-            0x70,0x88,0x88,0xF8,0x88,0x88,0x88,0x00,0x00,0x00,
-            // B (66)
-            0xF0,0x88,0x88,0xF0,0x88,0x88,0xF0,0x00,0x00,0x00,
-            // C (67)
-            0x70,0x88,0x80,0x80,0x80,0x88,0x70,0x00,0x00,0x00,
-            // D (68)
-            0xE0,0x90,0x88,0x88,0x88,0x90,0xE0,0x00,0x00,0x00,
-            // E (69)
-            0xF8,0x80,0x80,0xF0,0x80,0x80,0xF8,0x00,0x00,0x00,
-            // F (70)
-            0xF8,0x80,0x80,0xF0,0x80,0x80,0x80,0x00,0x00,0x00,
-            // G (71)
-            0x70,0x88,0x80,0xB8,0x88,0x88,0x78,0x00,0x00,0x00,
-            // H (72)
-            0x88,0x88,0x88,0xF8,0x88,0x88,0x88,0x00,0x00,0x00,
-            // I (73)
-            0x70,0x20,0x20,0x20,0x20,0x20,0x70,0x00,0x00,0x00,
-            // J (74)
-            0x38,0x10,0x10,0x10,0x10,0x90,0x60,0x00,0x00,0x00,
-            // K (75)
-            0x88,0x90,0xA0,0xC0,0xA0,0x90,0x88,0x00,0x00,0x00,
-            // L (76)
-            0x80,0x80,0x80,0x80,0x80,0x80,0xF8,0x00,0x00,0x00,
-            // M (77)
-            0x88,0xD8,0xA8,0xA8,0x88,0x88,0x88,0x00,0x00,0x00,
-            // N (78)
-            0x88,0xC8,0xA8,0x98,0x88,0x88,0x88,0x00,0x00,0x00,
-            // O (79)
-            0x70,0x88,0x88,0x88,0x88,0x88,0x70,0x00,0x00,0x00,
-            // P (80)
-            0xF0,0x88,0x88,0xF0,0x80,0x80,0x80,0x00,0x00,0x00,
-            // Q (81)
-            0x70,0x88,0x88,0x88,0xA8,0x90,0x68,0x00,0x00,0x00,
-            // R (82)
-            0xF0,0x88,0x88,0xF0,0xA0,0x90,0x88,0x00,0x00,0x00,
-            // S (83)
-            0x78,0x80,0x80,0x70,0x08,0x08,0xF0,0x00,0x00,0x00,
-            // T (84)
-            0xF8,0x20,0x20,0x20,0x20,0x20,0x20,0x00,0x00,0x00,
-            // U (85)
-            0x88,0x88,0x88,0x88,0x88,0x88,0x70,0x00,0x00,0x00,
-            // V (86)
-            0x88,0x88,0x88,0x88,0x88,0x50,0x20,0x00,0x00,0x00,
-            // W (87)
-            0x88,0x88,0x88,0xA8,0xA8,0xD8,0x88,0x00,0x00,0x00,
-            // X (88)
-            0x88,0x88,0x50,0x20,0x50,0x88,0x88,0x00,0x00,0x00,
-            // Y (89)
-            0x88,0x88,0x50,0x20,0x20,0x20,0x20,0x00,0x00,0x00,
-            // Z (90)
-            0xF8,0x08,0x10,0x20,0x40,0x80,0xF8,0x00,0x00,0x00,
-            // [ (91)
-            0x70,0x40,0x40,0x40,0x40,0x40,0x70,0x00,0x00,0x00,
-            // \ (92)
-            0x00,0x80,0x40,0x20,0x10,0x08,0x00,0x00,0x00,0x00,
-            // ] (93)
-            0x70,0x10,0x10,0x10,0x10,0x10,0x70,0x00,0x00,0x00,
-            // ^ (94)
-            0x20,0x50,0x88,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-            // _ (95)
-            0x00,0x00,0x00,0x00,0x00,0x00,0xF8,0x00,0x00,0x00,
-            // ` (96)
-            0x40,0x20,0x10,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-            // a (97)
-            0x00,0x00,0x70,0x08,0x78,0x88,0x78,0x00,0x00,0x00,
-            // b (98)
-            0x80,0x80,0xB0,0xC8,0x88,0x88,0xF0,0x00,0x00,0x00,
-            // c (99)
-            0x00,0x00,0x70,0x80,0x80,0x88,0x70,0x00,0x00,0x00,
-            // d (100)
-            0x08,0x08,0x68,0x98,0x88,0x88,0x78,0x00,0x00,0x00,
-            // e (101)
-            0x00,0x00,0x70,0x88,0xF8,0x80,0x70,0x00,0x00,0x00,
-            // f (102)
-            0x30,0x48,0x40,0xE0,0x40,0x40,0x40,0x00,0x00,0x00,
-            // g (103)
-            0x00,0x00,0x78,0x88,0x78,0x08,0x70,0x00,0x00,0x00,
-            // h (104)
-            0x80,0x80,0xB0,0xC8,0x88,0x88,0x88,0x00,0x00,0x00,
-            // i (105)
-            0x20,0x00,0x60,0x20,0x20,0x20,0x70,0x00,0x00,0x00,
-            // j (106)
-            0x10,0x00,0x30,0x10,0x10,0x90,0x60,0x00,0x00,0x00,
-            // k (107)
-            0x80,0x80,0x90,0xA0,0xC0,0xA0,0x90,0x00,0x00,0x00,
-            // l (108)
-            0x60,0x20,0x20,0x20,0x20,0x20,0x70,0x00,0x00,0x00,
-            // m (109)
-            0x00,0x00,0xD0,0xA8,0xA8,0x88,0x88,0x00,0x00,0x00,
-            // n (110)
-            0x00,0x00,0xB0,0xC8,0x88,0x88,0x88,0x00,0x00,0x00,
-            // o (111)
-            0x00,0x00,0x70,0x88,0x88,0x88,0x70,0x00,0x00,0x00,
-            // p (112)
-            0x00,0x00,0xF0,0x88,0xF0,0x80,0x80,0x00,0x00,0x00,
-            // q (113)
-            0x00,0x00,0x68,0x98,0x78,0x08,0x08,0x00,0x00,0x00,
-            // r (114)
-            0x00,0x00,0xB0,0xC8,0x80,0x80,0x80,0x00,0x00,0x00,
-            // s (115)
-            0x00,0x00,0x78,0x80,0x70,0x08,0xF0,0x00,0x00,0x00,
-            // t (116)
-            0x40,0x40,0xE0,0x40,0x40,0x48,0x30,0x00,0x00,0x00,
-            // u (117)
-            0x00,0x00,0x88,0x88,0x88,0x98,0x68,0x00,0x00,0x00,
-            // v (118)
-            0x00,0x00,0x88,0x88,0x88,0x50,0x20,0x00,0x00,0x00,
-            // w (119)
-            0x00,0x00,0x88,0x88,0xA8,0xA8,0x50,0x00,0x00,0x00,
-            // x (120)
-            0x00,0x00,0x88,0x50,0x20,0x50,0x88,0x00,0x00,0x00,
-            // y (121)
-            0x00,0x00,0x88,0x88,0x78,0x08,0x70,0x00,0x00,0x00,
-            // z (122)
-            0x00,0x00,0xF8,0x10,0x20,0x40,0xF8,0x00,0x00,0x00,
-            // { (123)
-            0x10,0x20,0x20,0x40,0x20,0x20,0x10,0x00,0x00,0x00,
-            // | (124)
-            0x20,0x20,0x20,0x20,0x20,0x20,0x20,0x00,0x00,0x00,
-            // } (125)
-            0x40,0x20,0x20,0x10,0x20,0x20,0x40,0x00,0x00,0x00,
-            // ~ (126)
-            0x00,0x40,0xA8,0x10,0x00,0x00,0x00,0x00,0x00,0x00,
-        ];
-
-        const GLYPH_W: u32 = 6;
-        const GLYPH_H: u32 = 10;
-        const SCALE: u32 = 2; // render at 2x for readability
-        const CHAR_W: u32 = GLYPH_W * SCALE;
-        const CHAR_H: u32 = GLYPH_H * SCALE;
-        const PAD_X: u32 = 8;  // horizontal padding
-        const PAD_Y: u32 = 4;  // vertical padding
-
-        // Truncate to fit max_width
-        let max_chars = ((max_width.saturating_sub(PAD_X * 2)) / CHAR_W) as usize;
-        if max_chars == 0 {
-            return None;
-        }
-
-        let display_title: String = title
-            .chars()
-            .take(max_chars)
-            .map(|c| if c.is_ascii_graphic() || c == ' ' { c } else { '?' })
-            .collect();
-
-        let text_w = display_title.len() as u32 * CHAR_W;
-        let img_w = text_w + PAD_X * 2;
-        let img_h = CHAR_H + PAD_Y * 2;
-        let mut pixels = vec![0u8; (img_w * img_h * 4) as usize];
-
-        // Draw semi-transparent dark background (rounded pill shape)
-        for py in 0..img_h {
-            for px in 0..img_w {
-                let idx = ((py * img_w + px) * 4) as usize;
-                // Simple rounded rect: check if inside pill shape
-                let radius = (img_h / 2) as f32;
-                let cx = px as f32;
-                let cy = py as f32;
-                let inside = if cx < radius {
-                    let dx = radius - cx;
-                    let dy = cy - radius;
-                    dx * dx + dy * dy <= radius * radius
-                } else if cx > (img_w as f32 - radius) {
-                    let dx = cx - (img_w as f32 - radius);
-                    let dy = cy - radius;
-                    dx * dx + dy * dy <= radius * radius
-                } else {
-                    true
-                };
-                if inside {
-                    pixels[idx] = 15;     // R
-                    pixels[idx + 1] = 15; // G
-                    pixels[idx + 2] = 20; // B
-                    pixels[idx + 3] = 200; // A (semi-transparent dark)
-                }
-            }
-        }
-
-        // Draw text glyphs
-        for (ci, ch) in display_title.chars().enumerate() {
-            let glyph_idx = if (32..=126).contains(&(ch as u32)) {
-                (ch as u32 - 32) as usize
-            } else {
-                ('?' as u32 - 32) as usize
-            };
-            let glyph = &FONT_6X10[glyph_idx * 10..(glyph_idx + 1) * 10];
-
-            let base_x = PAD_X + ci as u32 * CHAR_W;
-            let base_y = PAD_Y;
-
-            for row in 0..GLYPH_H {
-                let bits = glyph[row as usize];
-                for col in 0..GLYPH_W {
-                    if bits & (0x80 >> col) != 0 {
-                        // Draw scaled pixel
-                        for sy in 0..SCALE {
-                            for sx in 0..SCALE {
-                                let px = base_x + col * SCALE + sx;
-                                let py = base_y + row * SCALE + sy;
-                                if px < img_w && py < img_h {
-                                    let idx = ((py * img_w + px) * 4) as usize;
-                                    pixels[idx] = 240;     // R
-                                    pixels[idx + 1] = 240; // G
-                                    pixels[idx + 2] = 245; // B
-                                    pixels[idx + 3] = 255; // A
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Some((pixels, img_w, img_h))
-    }
-
-    fn create_overview_title_textures(&mut self) {
-        let entries: Vec<(String, f32)> = self
-            .overview_windows
-            .iter()
-            .map(|e| (e.title.clone(), e.target_w))
-            .collect();
-
-        let textures: Vec<Option<(glow::Texture, u32, u32)>> = entries
-            .iter()
-            .map(|(title, target_w)| {
-                let max_w = (*target_w as u32).max(120);
-                let (pixels, w, h) = Self::render_title_to_pixels(title, max_w)?;
-                unsafe {
-                    let tex = self.gl.create_texture().ok()?;
-                    self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                    self.gl.tex_image_2d(
-                        glow::TEXTURE_2D, 0, glow::RGBA8 as i32,
-                        w as i32, h as i32, 0,
-                        glow::RGBA, glow::UNSIGNED_BYTE,
-                        glow::PixelUnpackData::Slice(Some(&pixels)),
-                    );
-                    self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-                    self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-                    self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-                    self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
-                    self.gl.bind_texture(glow::TEXTURE_2D, None);
-                    Some((tex, w, h))
-                }
-            })
-            .collect();
-
-        for (entry, title_tex) in self.overview_windows.iter_mut().zip(textures.into_iter()) {
-            entry.title_texture = title_tex;
-        }
-    }
-
-    fn upload_overview_snapshot_texture(
-        &self,
-        pixels: &[u8],
-        width: u32,
-        height: u32,
-    ) -> Option<glow::Texture> {
-        unsafe {
-            let texture = self.gl.create_texture().ok()?;
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-            self.gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::RGBA8 as i32,
-                width as i32,
-                height as i32,
-                0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(Some(pixels)),
-            );
-            self.gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MIN_FILTER,
-                glow::LINEAR as i32,
-            );
-            self.gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MAG_FILTER,
-                glow::LINEAR as i32,
-            );
-            self.gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_S,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-            self.gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_T,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-            self.gl.bind_texture(glow::TEXTURE_2D, None);
-            Some(texture)
-        }
-    }
-
-    fn create_overview_snapshot_texture(
-        &self,
-        x11_win: u32,
-        max_size: u32,
-    ) -> Option<glow::Texture> {
-        let (pixels, width, height) = self.capture_window_thumbnail(x11_win, max_size)?;
-        let row_bytes = (width * 4) as usize;
-        let mut flipped = vec![0u8; pixels.len()];
-        for y in 0..height as usize {
-            let src_row = (height as usize - 1 - y) * row_bytes;
-            let dst_row = y * row_bytes;
-            flipped[dst_row..dst_row + row_bytes]
-                .copy_from_slice(&pixels[src_row..src_row + row_bytes]);
-        }
-        self.upload_overview_snapshot_texture(&flipped, width, height)
-    }
-
-    fn refresh_overview_snapshots(&mut self) {
-        self.clear_overview_snapshots();
-
-        let requests: Vec<(u32, u32)> = self
-            .overview_windows
-            .iter()
-            .map(|entry| {
-                let desired = (entry.target_w.max(entry.target_h) * 2.0).ceil() as u32;
-                let max_size = desired.clamp(256, 1024);
-                (entry.x11_win, max_size)
-            })
-            .collect();
-
-        let snapshots: Vec<Option<glow::Texture>> = requests
-            .into_iter()
-            .map(|(x11_win, max_size)| self.create_overview_snapshot_texture(x11_win, max_size))
-            .collect();
-
-        for (entry, snapshot_texture) in self.overview_windows.iter_mut().zip(snapshots.into_iter()) {
-            entry.snapshot_texture = snapshot_texture;
-        }
-    }
-
-    // =====================================================================
-    // Feature 13: Set frame extents for blur mask
-    // =====================================================================
-    pub(super) fn set_frame_extents(&mut self, x11_win: u32, left: u32, right: u32, top: u32, bottom: u32) {
-        if let Some(wt) = self.windows.get_mut(&x11_win) {
-            wt.frame_extents = [left, right, top, bottom];
-        }
-    }
-
-    // =====================================================================
-    // Feature 14: Set shaped window
-    // =====================================================================
-    pub(super) fn set_window_shaped(&mut self, x11_win: u32, shaped: bool) {
-        if let Some(wt) = self.windows.get_mut(&x11_win) {
-            wt.is_shaped = shaped;
-        }
-    }
-
-    // ----- Window management -----
-
-    pub(super) fn add_window(&mut self, x11_win: u32, x: i32, y: i32, w: u32, h: u32) {
-        if self.windows.contains_key(&x11_win) {
-            return;
-        }
-        if w == 0 || h == 0 {
-            return;
-        }
-        log::info!(
-            "compositor: add_window START 0x{:x} {}x{} at ({},{})",
-            x11_win, w, h, x, y
-        );
-
-        // Create damage
-        let damage_id = match self.conn.generate_id() {
-            Ok(id) => id,
-            Err(e) => {
-                log::warn!("compositor: generate_id for damage failed: {e}");
-                return;
-            }
-        };
-        if let Err(e) = self
-            .conn
-            .damage_create(damage_id, x11_win, damage::ReportLevel::NON_EMPTY)
-        {
-            log::warn!("compositor: damage_create failed for 0x{x11_win:x}: {e}");
-            return;
-        }
-
-        // NameWindowPixmap
-        let pixmap = match self.conn.generate_id() {
-            Ok(id) => id,
-            Err(e) => {
-                log::warn!("compositor: generate_id for pixmap failed: {e}");
-                let _ = self.conn.damage_destroy(damage_id);
-                return;
-            }
-        };
-        if let Err(e) = self.conn.composite_name_window_pixmap(x11_win, pixmap) {
-            log::warn!("compositor: name_window_pixmap failed for 0x{x11_win:x}: {e}");
-            let _ = self.conn.damage_destroy(damage_id);
-            return;
-        }
-        // Flush x11rb AND sync Xlib so the pixmap XID is visible to GLX.
-        let _ = self.conn.flush();
-
-        // Select the TFP FBConfig for this window.  First try an exact match
-        // by visual ID (required on older Mesa, e.g. Ubuntu 20); fall back to
-        // the generic depth-based selection.
-        let win_visual = self
-            .conn
-            .get_window_attributes(x11_win)
-            .ok()
-            .and_then(|c| c.reply().ok())
-            .map(|a| a.visual)
-            .unwrap_or(0);
-        let win_depth = self
-            .conn
-            .get_geometry(x11_win)
-            .ok()
-            .and_then(|c| c.reply().ok())
-            .map(|g| g.depth)
-            .unwrap_or(24);
-
-        let (fbconfig, use_rgba) = if let Some(&(cfg, is_rgba)) =
-            self.tfp_visual_configs.get(&win_visual)
-        {
-            log::debug!(
-                "compositor: win 0x{:x} visual 0x{:x} -> per-visual FBConfig (rgba={})",
-                x11_win, win_visual, is_rgba
-            );
-            (cfg, is_rgba)
-        } else {
-            // Fallback: depth-based selection
-            let rgba = win_depth == 32 && !self.fbconfig_rgba.is_null();
-            let cfg = if rgba {
-                self.fbconfig_rgba
-            } else {
-                self.fbconfig_rgb
-            };
-            log::debug!(
-                "compositor: win 0x{:x} visual 0x{:x} depth={} -> depth-based FBConfig (rgba={})",
-                x11_win, win_visual, win_depth, rgba
-            );
-            (cfg, rgba)
-        };
-        if fbconfig.is_null() {
-            log::warn!(
-                "compositor: no fbconfig for visual=0x{:x} depth={} win=0x{:x}",
-                win_visual, win_depth, x11_win
-            );
-            let _ = self.conn.free_pixmap(pixmap);
-            let _ = self.conn.damage_destroy(damage_id);
-            return;
-        }
-        let tex_fmt = if use_rgba {
-            GLX_TEXTURE_FORMAT_RGBA_EXT
-        } else {
-            GLX_TEXTURE_FORMAT_RGB_EXT
-        };
-
-        // Create GLX pixmap for TFP
-        let pixmap_attrs: Vec<i32> = vec![
-            GLX_TEXTURE_TARGET_EXT,
-            GLX_TEXTURE_2D_EXT,
-            GLX_TEXTURE_FORMAT_EXT,
-            tex_fmt,
-            0,
-        ];
-
-        log::info!(
-            "compositor: add_window 0x{:x} depth={} rgba={} pixmap=0x{:x}, calling glXCreatePixmap...",
-            x11_win, win_depth, use_rgba, pixmap
-        );
-        let glx_pixmap = unsafe {
-            // Sync both connections so the Xlib display can see the pixmap
-            // created by x11rb.
-            x11::xlib::XSync(self.xlib_display, 0);
-
-            x11::glx::glXCreatePixmap(
-                self.xlib_display,
-                fbconfig,
-                pixmap as _,
-                pixmap_attrs.as_ptr(),
-            )
-        };
-        log::info!("compositor: glXCreatePixmap returned 0x{:x}", glx_pixmap);
-        if glx_pixmap == 0 {
-            log::warn!("compositor: glXCreatePixmap failed for 0x{x11_win:x}");
-            let _ = self.conn.free_pixmap(pixmap);
-            let _ = self.conn.damage_destroy(damage_id);
-            return;
-        }
-
-        // Create GL texture
-        let gl_texture = unsafe {
-            match self.gl.create_texture() {
-                Ok(t) => t,
-                Err(e) => {
-                    log::warn!("compositor: create_texture failed: {e}");
-                    x11::glx::glXDestroyPixmap(self.xlib_display, glx_pixmap);
-                    let _ = self.conn.free_pixmap(pixmap);
-                    let _ = self.conn.damage_destroy(damage_id);
-                    return;
-                }
-            }
-        };
-
-        // Bind texture
-        log::info!("compositor: add_window 0x{:x} binding TFP texture...", x11_win);
-        unsafe {
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(gl_texture));
-            self.gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MIN_FILTER,
-                glow::NEAREST as i32,
-            );
-            self.gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MAG_FILTER,
-                glow::NEAREST as i32,
-            );
-            self.gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_S,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-            self.gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_T,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-            (self.tfp.bind)(
-                self.xlib_display,
-                glx_pixmap,
-                GLX_FRONT_LEFT_EXT,
-                std::ptr::null(),
-            );
-            self.gl.bind_texture(glow::TEXTURE_2D, None);
-        }
-        log::info!("compositor: add_window 0x{:x} COMPLETE", x11_win);
-
-        // Start with fade opacity = 0 if fading is enabled (will fade in)
-        let initial_fade = if self.fading { 0.0 } else { 1.0 };
-
-        self.windows.insert(
-            x11_win,
-            WindowTexture {
-                x,
-                y,
-                w,
-                h,
-                damage: damage_id,
-                pixmap,
-                glx_pixmap,
-                gl_texture,
-                dirty: true,
-                has_rgba: use_rgba,
-                fbconfig,
-                needs_pixmap_refresh: false,
-                x11_win,
-                fade_opacity: initial_fade,
-                fading_out: false,
-                class_name: String::new(),
-                opacity_override: None,
-                is_fullscreen: false,
-                corner_radius_override: None,
-                scale: 1.0,
-                frame_extents: [0; 4],
-                is_shaped: false,
-                anim_scale: if self.window_animation { self.window_animation_scale } else { 1.0 },
-                anim_scale_target: 1.0,
-                is_urgent: false,
-                is_pip: false,
-                is_frosted: false,
-                wobbly: None,
-            },
-        );
-        self.needs_render = true;
-
-        log::debug!(
-            "compositor: add_window 0x{:x} {}x{} at ({},{})",
-            x11_win,
-            w,
-            h,
-            x,
-            y
-        );
-    }
-
-    /// Update the compositor's screen dimensions (e.g. after a RandR hotplug).
-    /// The overlay window is resized automatically by the X server, but we need
-    /// to update our GL viewport and projection matrix dimensions.
-    pub(super) fn resize(&mut self, new_w: u32, new_h: u32) {
-        if new_w == self.screen_w && new_h == self.screen_h {
-            return;
-        }
-        log::info!(
-            "compositor: resize {}x{} -> {}x{}",
-            self.screen_w, self.screen_h, new_w, new_h
-        );
-        self.screen_w = new_w;
-        self.screen_h = new_h;
-        self.needs_render = true;
-
-        // Recreate blur FBOs for new screen size
-        if self.blur_enabled {
-            unsafe {
-                for level in self.blur_fbos.drain(..) {
-                    self.gl.delete_framebuffer(level.fbo);
-                    self.gl.delete_texture(level.texture);
-                }
-                self.blur_fbos = Self::create_blur_fbos(&self.gl, new_w, new_h, self.blur_strength);
-                if let Some((fbo, tex)) = self.scene_fbo.take() {
-                    self.gl.delete_framebuffer(fbo);
-                    self.gl.delete_texture(tex);
-                }
-                self.scene_fbo = Self::create_scene_fbo(&self.gl, new_w, new_h).ok();
-            }
-        }
-        // Recreate postprocess FBO
-        if self.postprocess_fbo.is_some() {
-            unsafe {
-                if let Some((fbo, tex)) = self.postprocess_fbo.take() {
-                    self.gl.delete_framebuffer(fbo);
-                    self.gl.delete_texture(tex);
-                }
-                self.postprocess_fbo = Self::create_scene_fbo(&self.gl, new_w, new_h).ok();
-            }
-        }
-        // Cancel in-progress transition on resize (screen geometry changed)
-        if let Some((fbo, tex)) = self.transition_fbo.take() {
-            unsafe {
-                self.gl.delete_framebuffer(fbo);
-                self.gl.delete_texture(tex);
-            }
-            self.transition_start = None;
-        }
-    }
-
-    pub(super) fn remove_window(&mut self, x11_win: u32) {
-        // Spawn particles for closing window
-        if self.particle_effects {
-            if let Some(wt) = self.windows.get(&x11_win) {
-                self.spawn_particles_for_window(wt.x, wt.y, wt.w, wt.h);
-            }
-        }
-
-        // If fading is enabled and the window exists, start fade-out instead of immediate remove
-        if self.fading {
-            if let Some(wt) = self.windows.get_mut(&x11_win) {
-                if !wt.fading_out && wt.fade_opacity > 0.0 {
-                    wt.fading_out = true;
-                    wt.anim_scale_target = self.window_animation_scale;
-                    self.needs_render = true;
-                    return;
-                }
-            }
-        }
-
-        self.remove_window_immediate(x11_win);
-    }
-
-    /// Actually remove a window (no fade). Used internally.
-    fn remove_window_immediate(&mut self, x11_win: u32) {
-        let Some(wt) = self.windows.remove(&x11_win) else {
-            return;
-        };
-        self.needs_render = true;
-        // Undo fullscreen unredirect if this was the unredirected window
-        if self.unredirected_window == Some(x11_win) {
-            self.unredirected_window = None;
-        }
-
-        unsafe {
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
-            (self.tfp.release)(self.xlib_display, wt.glx_pixmap, GLX_FRONT_LEFT_EXT);
-            self.gl.bind_texture(glow::TEXTURE_2D, None);
-            self.gl.delete_texture(wt.gl_texture);
-            x11::glx::glXDestroyPixmap(self.xlib_display, wt.glx_pixmap);
-        }
-        let _ = self.conn.free_pixmap(wt.pixmap);
-        let _ = self.conn.damage_destroy(wt.damage);
-
-        log::debug!("compositor: remove_window 0x{:x}", x11_win);
-    }
-
-    pub(super) fn update_geometry(&mut self, x11_win: u32, x: i32, y: i32, w: u32, h: u32) {
-        if let Some(wt) = self.windows.get_mut(&x11_win) {
-            let size_changed = wt.w != w || wt.h != h;
-            let moved = wt.x != x || wt.y != y;
-            wt.x = x;
-            wt.y = y;
-            self.needs_render = true;
-
-            if moved {
-                // Window move exposes old screen area and occupies new area.
-                // Damage events are not always sufficient for both regions,
-                // so request a full-frame redraw to prevent trails/ghosting.
-                self.damage_regions.clear();
-                self.damage_regions
-                    .push((0, 0, self.screen_w, self.screen_h));
-            }
-
-            if size_changed && w > 0 && h > 0 {
-                wt.w = w;
-                wt.h = h;
-                // Defer the heavy pixmap recreation to the next render_frame()
-                // call, so multiple resize events within a single frame are batched.
-                wt.needs_pixmap_refresh = true;
-            }
-        }
-    }
-
-    /// Recreate GLX pixmaps for windows that had their size changed.
-    /// Called once per frame in render_frame() to batch all pending recreations.
-    fn refresh_pixmaps(&mut self) {
-        // Collect window IDs that need refresh to avoid borrowing issues
-        let refresh_wins: Vec<u32> = self
-            .windows
-            .iter()
-            .filter(|(_, wt)| wt.needs_pixmap_refresh)
-            .map(|(&id, _)| id)
-            .collect();
-
-        if refresh_wins.is_empty() {
-            return;
-        }
-
-        // Release old pixmaps for all windows that need refresh
-        for &win in &refresh_wins {
-            let wt = self.windows.get(&win).unwrap();
-            unsafe {
-                self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
-                (self.tfp.release)(self.xlib_display, wt.glx_pixmap, GLX_FRONT_LEFT_EXT);
-                self.gl.bind_texture(glow::TEXTURE_2D, None);
-                x11::glx::glXDestroyPixmap(self.xlib_display, wt.glx_pixmap);
-            }
-            let _ = self.conn.free_pixmap(wt.pixmap);
-        }
-
-        // Create new named pixmaps for all windows via x11rb
-        let mut new_pixmaps: Vec<(u32, u32)> = Vec::new(); // (win, pixmap)
-        for &win in &refresh_wins {
-            let wt = self.windows.get_mut(&win).unwrap();
-            let pixmap = match self.conn.generate_id() {
-                Ok(id) => id,
-                Err(_) => {
-                    wt.glx_pixmap = 0;
-                    wt.pixmap = 0;
-                    wt.needs_pixmap_refresh = false;
-                    continue;
-                }
-            };
-            if self
-                .conn
-                .composite_name_window_pixmap(wt.x11_win, pixmap)
-                .is_err()
-            {
-                wt.glx_pixmap = 0;
-                wt.pixmap = 0;
-                wt.needs_pixmap_refresh = false;
-                continue;
-            }
-            wt.pixmap = pixmap;
-            new_pixmaps.push((win, pixmap));
-        }
-
-        // Single flush + sync for the entire batch
-        let _ = self.conn.flush();
-        unsafe {
-            x11::xlib::XSync(self.xlib_display, 0);
-        }
-
-        // Create GLX pixmaps and rebind textures
-        for (win, pixmap) in new_pixmaps {
-            let wt = self.windows.get_mut(&win).unwrap();
-            let fbconfig = wt.fbconfig;
-            let tex_fmt = if wt.has_rgba {
-                GLX_TEXTURE_FORMAT_RGBA_EXT
-            } else {
-                GLX_TEXTURE_FORMAT_RGB_EXT
-            };
-            let pixmap_attrs: Vec<i32> = vec![
-                GLX_TEXTURE_TARGET_EXT,
-                GLX_TEXTURE_2D_EXT,
-                GLX_TEXTURE_FORMAT_EXT,
-                tex_fmt,
-                0,
-            ];
-            let glx_pixmap = unsafe {
-                x11::glx::glXCreatePixmap(
-                    self.xlib_display,
-                    fbconfig,
-                    pixmap as _,
-                    pixmap_attrs.as_ptr(),
-                )
-            };
-            if glx_pixmap == 0 {
-                let _ = self.conn.free_pixmap(pixmap);
-                wt.pixmap = 0;
-                wt.glx_pixmap = 0;
-                wt.needs_pixmap_refresh = false;
-                continue;
-            }
-
-            unsafe {
-                self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
-                (self.tfp.bind)(
-                    self.xlib_display,
-                    glx_pixmap,
-                    GLX_FRONT_LEFT_EXT,
-                    std::ptr::null(),
-                );
-                self.gl.bind_texture(glow::TEXTURE_2D, None);
-            }
-
-            wt.glx_pixmap = glx_pixmap;
-            wt.dirty = true;
-            wt.needs_pixmap_refresh = false;
-        }
-
-        // Clear flag for any remaining windows (error paths above)
-        for &win in &refresh_wins {
-            if let Some(wt) = self.windows.get_mut(&win) {
-                wt.needs_pixmap_refresh = false;
-            }
-        }
-    }
-
-    pub(super) fn mark_damaged(&mut self, x11_win: u32) {
-        if let Some(wt) = self.windows.get_mut(&x11_win) {
-            wt.dirty = true;
-            self.needs_render = true;
-            // Subtract damage so we get future notifications
-            let _ = self.conn.damage_subtract(wt.damage, 0u32, 0u32);
-        }
-    }
-
-    /// Set the window class name (for per-window rules).
-    pub(super) fn set_window_class(&mut self, x11_win: u32, class_name: &str) {
-        // Look up per-window rules before borrowing windows mutably
-        let opacity_override = self.lookup_opacity_rule(class_name);
-        let corner_radius_override = self.lookup_corner_radius_rule(class_name);
-        let scale = self.lookup_scale_rule(class_name);
-        let is_frosted = self.lookup_frosted_glass_rule(class_name);
-        if let Some(wt) = self.windows.get_mut(&x11_win) {
-            if wt.class_name != class_name {
-                wt.class_name = class_name.to_string();
-                wt.opacity_override = opacity_override;
-                wt.corner_radius_override = corner_radius_override;
-                wt.is_frosted = is_frosted;
-                if let Some(s) = scale {
-                    wt.scale = s;
-                }
-                self.needs_render = true;
-            }
-        }
-    }
-
-    /// Set/unset fullscreen state for a window (for fullscreen unredirect).
-    pub(super) fn set_window_fullscreen(&mut self, x11_win: u32, fullscreen: bool) {
-        if let Some(wt) = self.windows.get_mut(&x11_win) {
-            if wt.is_fullscreen != fullscreen {
-                wt.is_fullscreen = fullscreen;
-                self.needs_render = true;
-            }
-        }
-    }
-
-    /// Advance fade animations. Returns true if any fades are still in progress.
-    fn tick_fades(&mut self) -> bool {
-        let mut any_active = false;
-        let mut to_remove = Vec::new();
-
-        for (&win, wt) in self.windows.iter_mut() {
-            // Fade animation
-            if self.fading {
-                if wt.fading_out {
-                    wt.fade_opacity -= self.fade_out_step;
-                    if wt.fade_opacity <= 0.0 {
-                        wt.fade_opacity = 0.0;
-                        to_remove.push(win);
-                    } else {
-                        any_active = true;
-                    }
-                } else if wt.fade_opacity < 1.0 {
-                    wt.fade_opacity += self.fade_in_step;
-                    if wt.fade_opacity >= 1.0 {
-                        wt.fade_opacity = 1.0;
-                    } else {
-                        any_active = true;
-                    }
-                }
-            }
-
-            // Scale animation (window open/close zoom)
-            if self.window_animation {
-                let diff = wt.anim_scale_target - wt.anim_scale;
-                if diff.abs() > 0.001 {
-                    let step = if diff > 0.0 { self.fade_in_step } else { -self.fade_out_step };
-                    wt.anim_scale += step;
-                    if (wt.anim_scale_target - wt.anim_scale).abs() < 0.001
-                        || (step > 0.0 && wt.anim_scale >= wt.anim_scale_target)
-                        || (step < 0.0 && wt.anim_scale <= wt.anim_scale_target)
-                    {
-                        wt.anim_scale = wt.anim_scale_target;
-                    } else {
-                        any_active = true;
-                    }
-                }
-            }
-        }
-
-        for win in to_remove {
-            self.remove_window_immediate(win);
-        }
-
-        any_active
     }
 
     /// Check if there's a single fullscreen opaque window covering the screen.
@@ -4127,6 +2598,19 @@ impl Compositor {
         for &(win, _, _, _, _) in scene {
             if let Some(wt) = self.windows.get_mut(&win) {
                 if wt.dirty && wt.glx_pixmap != 0 {
+                    // Phase 2.3: Check fence before rebind — skip if GPU not done yet
+                    if let Some(fence) = wt.pending_fence.take() {
+                        let status = unsafe {
+                            self.gl.client_wait_sync(fence, 0, 0)
+                        };
+                        if status == glow::TIMEOUT_EXPIRED {
+                            // GPU not done yet, skip this window's update; use old texture
+                            wt.pending_fence = Some(fence);
+                            continue;
+                        }
+                        unsafe { self.gl.delete_sync(fence); }
+                    }
+
                     unsafe {
                         self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
                         (self.tfp.release)(
@@ -4141,6 +2625,9 @@ impl Compositor {
                             std::ptr::null(),
                         );
                         self.gl.bind_texture(glow::TEXTURE_2D, None);
+
+                        // Insert fence after rebind
+                        wt.pending_fence = self.gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0).ok();
                     }
                     wt.dirty = false;
                 }
@@ -4174,30 +2661,20 @@ impl Compositor {
             }
         }
 
-        // Feature 6: Apply scissor test for partial redraw if damage regions available
-        let use_scissor = !self.damage_regions.is_empty() && !force_render;
+        // Feature 6 / Phase 2.1: Apply scissor test using tile-based damage tracker
+        let damage_bounds = self.damage_tracker.dirty_bounds();
+        let use_scissor = damage_bounds.is_some() && !force_render;
         let mut damage_scissor = (0i32, 0i32, self.screen_w as i32, self.screen_h as i32);
-        if use_scissor {
+        if let (true, Some((dx, dy, dw, dh))) = (use_scissor, damage_bounds) {
             unsafe {
                 self.gl.enable(glow::SCISSOR_TEST);
-                // Compute bounding box of all damage regions
-                let mut min_x = self.screen_w as i32;
-                let mut min_y = self.screen_h as i32;
-                let mut max_x = 0i32;
-                let mut max_y = 0i32;
-                for &(x, y, w, h) in &self.damage_regions {
-                    min_x = min_x.min(x);
-                    min_y = min_y.min(y);
-                    max_x = max_x.max(x + w as i32);
-                    max_y = max_y.max(y + h as i32);
-                }
                 // GL scissor uses bottom-left origin
-                let gl_y = self.screen_h as i32 - max_y;
-                damage_scissor = (min_x, gl_y, max_x - min_x, max_y - min_y);
+                let gl_y = self.screen_h as i32 - dy - dh as i32;
+                damage_scissor = (dx, gl_y, dw as i32, dh as i32);
                 self.gl.scissor(damage_scissor.0, damage_scissor.1, damage_scissor.2, damage_scissor.3);
             }
         }
-        self.damage_regions.clear();
+        self.damage_tracker.clear();
 
         // Clear
         unsafe {
@@ -4408,6 +2885,17 @@ impl Compositor {
             }
         }
 
+        // Phase 2.2: Auto blur quality downgrade during animations/transitions
+        if self.blur_quality_auto {
+            self.blur_quality = if self.transition_active() || self.overview_active {
+                BlurQuality::Minimal
+            } else if fades_active || wobbly_active {
+                BlurQuality::Reduced
+            } else {
+                BlurQuality::Full
+            };
+        }
+
         // === Pass 1.5: Background blur (now computed per-window in Pass 2) ===
         let blur_available = self.blur_enabled
             && !self.blur_fbos.is_empty()
@@ -4509,10 +2997,16 @@ impl Compositor {
                                     self.gl.disable(glow::SCISSOR_TEST);
                                 }
 
-                                let blur_levels = if wt.is_frosted {
+                                let base_levels = if wt.is_frosted {
                                     self.frosted_glass_strength as usize
                                 } else {
                                     self.blur_fbos.len()
+                                };
+                                // Phase 2.2: Apply blur quality cap
+                                let blur_levels = match self.blur_quality {
+                                    BlurQuality::Full => base_levels,
+                                    BlurQuality::Reduced => (base_levels / 2).max(1),
+                                    BlurQuality::Minimal => 1,
                                 };
                                 let tex = self.run_blur_passes_from_fbo(
                                     if postprocess_active {
@@ -5246,6 +3740,15 @@ impl Compositor {
                     // --- Blinds mode: vertical strips flip to reveal new scene ---
                     self.render_blinds_transition(progress, &proj);
                 }
+                TransitionMode::CoverFlow => {
+                    self.render_coverflow_transition(progress, &proj);
+                }
+                TransitionMode::Helix => {
+                    self.render_helix_transition(progress, &proj);
+                }
+                TransitionMode::Portal => {
+                    self.render_portal_transition(progress, &proj);
+                }
             }
             true
         } else {
@@ -5393,8 +3896,7 @@ impl Compositor {
             && !self.blur_fbos.is_empty()
             && self.windows.values().any(|wt| self.needs_backdrop_blur(wt));
         if blur_active {
-            self.damage_regions.clear();
-            self.damage_regions.push((0, 0, self.screen_w, self.screen_h));
+            self.damage_tracker.mark_all_dirty();
         }
         self.needs_render = true;
     }
@@ -5410,424 +3912,6 @@ impl Compositor {
                 }
             }
         }
-    }
-
-    /// Tick wobbly spring physics. Returns true if any wobbly is active.
-    fn tick_wobbly(&mut self) -> bool {
-        if !self.wobbly_windows { return false; }
-        let dt = 1.0 / 60.0; // approximate frame time
-        let stiffness = self.wobbly_stiffness;
-        let damping = self.wobbly_damping;
-        let mut any_active = false;
-        let mut to_clear = Vec::new();
-
-        for (&win, wt) in self.windows.iter_mut() {
-            if let Some(ref mut w) = wt.wobbly {
-                let mut all_settled = true;
-                for i in 0..4 {
-                    for axis in 0..2 {
-                        let offset = w.corner_offsets[i][axis];
-                        let vel = w.corner_velocities[i][axis];
-                        let accel = -stiffness * offset - damping * vel;
-                        let new_vel = vel + accel * dt;
-                        let new_offset = offset + new_vel * dt;
-                        w.corner_offsets[i][axis] = new_offset;
-                        w.corner_velocities[i][axis] = new_vel;
-                        if new_offset.abs() > 0.1 || new_vel.abs() > 0.1 {
-                            all_settled = false;
-                        }
-                    }
-                }
-                if all_settled {
-                    to_clear.push(win);
-                } else {
-                    any_active = true;
-                }
-            }
-        }
-
-        for win in to_clear {
-            if let Some(wt) = self.windows.get_mut(&win) {
-                wt.wobbly = None;
-            }
-        }
-
-        any_active
-    }
-
-    /// Tick particle systems. Removes dead particles and empty systems.
-    fn tick_particles(&mut self) {
-        let dt = 1.0 / 60.0;
-        let gravity = self.particle_gravity;
-
-        self.particle_systems.retain_mut(|sys| {
-            sys.particles.retain_mut(|p| {
-                p.vy += gravity * dt;
-                p.x += p.vx * dt;
-                p.y += p.vy * dt;
-                p.lifetime -= dt;
-                p.lifetime > 0.0
-            });
-            !sys.particles.is_empty()
-        });
-    }
-
-    /// Render active particle systems.
-    fn render_particles(&self, proj: &[f32; 16]) {
-        if self.particle_systems.is_empty() { return; }
-
-        // Collect all particles into a flat buffer
-        let mut data: Vec<f32> = Vec::new();
-        let mut count = 0u32;
-        for sys in &self.particle_systems {
-            for p in &sys.particles {
-                let life_frac = (p.lifetime / p.max_lifetime).clamp(0.0, 1.0);
-                data.extend_from_slice(&[p.x, p.y, p.color[0], p.color[1], p.color[2], p.color[3], life_frac]);
-                count += 1;
-            }
-        }
-
-        if count == 0 { return; }
-
-        unsafe {
-            self.gl.use_program(Some(self.particle_program));
-            self.gl.uniform_matrix_4_f32_slice(
-                self.particle_uniforms.projection.as_ref(), false, proj,
-            );
-            self.gl.uniform_1_f32(self.particle_uniforms.point_size.as_ref(), 4.0);
-
-            self.gl.enable(glow::PROGRAM_POINT_SIZE);
-            self.gl.bind_vertex_array(Some(self.particle_vao));
-            self.gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.particle_vbo));
-
-            let byte_data: &[u8] = std::slice::from_raw_parts(
-                data.as_ptr() as *const u8,
-                data.len() * 4,
-            );
-            self.gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, byte_data, glow::DYNAMIC_DRAW);
-            self.gl.draw_arrays(glow::POINTS, 0, count as i32);
-
-            self.gl.disable(glow::PROGRAM_POINT_SIZE);
-            self.gl.bind_buffer(glow::ARRAY_BUFFER, None);
-            self.gl.bind_vertex_array(None);
-            self.gl.use_program(None);
-        }
-    }
-
-    /// Tick the overview prism rotation animation (exponential ease-out).
-    fn tick_overview_prism(&mut self) {
-        let now = std::time::Instant::now();
-        let dt = if let Some(last) = self.overview_prism_last_tick {
-            now.duration_since(last).as_secs_f32().min(0.1)
-        } else {
-            1.0 / 60.0
-        };
-        self.overview_prism_last_tick = Some(now);
-
-        let diff = self.overview_prism_target_angle - self.overview_prism_current_angle;
-        if diff.abs() < 0.001 {
-            self.overview_prism_current_angle = self.overview_prism_target_angle;
-        } else {
-            // Exponential ease-out: close 88% of the remaining gap per 0.1s.
-            // t = 1 - e^(-speed * dt), speed=20 gives ~86% per 0.1s frame,
-            // feels snappy at any frame rate.
-            let t = 1.0 - (-20.0_f32 * dt).exp();
-            self.overview_prism_current_angle += diff * t;
-            self.needs_render = true;
-        }
-    }
-
-    /// Render overview overlay (Alt-Tab preview) as a 3D hexagonal prism carousel.
-    /// Rendering is confined to the monitor that owns the overview.
-    fn render_overview(&self, proj: &[f32; 16], _focused: Option<u32>) {
-        if self.overview_windows.is_empty() { return; }
-
-        // Monitor-local dimensions
-        let mon_x = self.overview_mon_x;
-        let mon_y = self.overview_mon_y;
-        let mon_w = self.overview_mon_w;
-        let mon_h = self.overview_mon_h;
-        let mw = mon_w as f32;
-        let mh = mon_h as f32;
-
-        unsafe {
-            // === 1. Dark background overlay (only on this monitor) ===
-            self.gl.use_program(Some(self.overview_bg_program));
-            self.gl.uniform_matrix_4_f32_slice(
-                self.overview_bg_uniforms.projection.as_ref(), false, proj,
-            );
-            self.gl.uniform_4_f32(
-                self.overview_bg_uniforms.rect.as_ref(),
-                mon_x as f32, mon_y as f32, mw, mh,
-            );
-            self.gl.uniform_1_f32(self.overview_bg_uniforms.opacity.as_ref(), self.overview_opacity);
-            self.gl.bind_vertex_array(Some(self.quad_vao));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-
-            // === 2. Scissor + viewport to this monitor for the 3D prism ===
-            let scissor_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
-            self.gl.enable(glow::SCISSOR_TEST);
-            self.gl.scissor(mon_x, scissor_gl_y, mon_w as i32, mon_h as i32);
-            self.gl.viewport(mon_x, scissor_gl_y, mon_w as i32, mon_h as i32);
-
-            // === 3. Compute hexagonal prism geometry ===
-            let face_w = mw * 0.8;
-            let face_h = mh * 0.8;
-            let face_aspect = face_w / face_h;
-            let apothem = face_aspect * 3.0_f32.sqrt();
-
-            let fov_y = std::f32::consts::FRAC_PI_4; // 45 degrees
-            let camera_z = (apothem + 1.0 / (fov_y * 0.5).tan()) * 1.2;
-            let mon_aspect = mw / mh;
-
-            let persp = perspective_matrix(fov_y, mon_aspect, 0.1, camera_z * 4.0);
-            let view = translate_matrix(0.0, 0.0, -camera_z);
-
-            let global_rot = rotate_y_matrix(self.overview_prism_current_angle);
-
-            // === 4. Build per-face draw info ===
-            struct FaceDrawInfo {
-                mvp: [f32; 16],
-                z_depth: f32,
-                brightness: f32,
-                entry_idx: usize,
-            }
-
-            let pi_over_3 = std::f32::consts::FRAC_PI_3;
-            let mut faces: Vec<FaceDrawInfo> = Vec::new();
-
-            for (idx, entry) in self.overview_windows.iter().enumerate() {
-                let face_i = entry.face_index;
-                let face_angle = face_i as f32 * pi_over_3;
-
-                let face_rot = rotate_y_matrix(face_angle);
-                let face_translate = translate_matrix(0.0, 0.0, apothem);
-                let face_model = mat4_mul(&face_rot, &face_translate);
-
-                let model = mat4_mul(&global_rot, &face_model);
-                let mv = mat4_mul(&view, &model);
-                let mvp = mat4_mul(&persp, &mv);
-
-                let z_depth = mv[14];
-
-                let total_angle = face_angle + self.overview_prism_current_angle;
-                let cos_facing = total_angle.cos();
-                let brightness = if entry.is_selected {
-                    0.35 + 0.35 * cos_facing.max(0.0)
-                } else {
-                    0.25 + 0.30 * cos_facing.max(0.0)
-                };
-
-                faces.push(FaceDrawInfo {
-                    mvp,
-                    z_depth,
-                    brightness,
-                    entry_idx: idx,
-                });
-            }
-
-            // === 5. Painter's algorithm: sort by Z-depth ascending (farthest first) ===
-            faces.sort_by(|a, b| a.z_depth.partial_cmp(&b.z_depth).unwrap_or(std::cmp::Ordering::Equal));
-
-            // === 6. Draw faces using cube_program ===
-            self.gl.use_program(Some(self.cube_program));
-            self.gl.uniform_1_f32(self.cube_uniforms.aspect.as_ref(), face_aspect);
-            self.gl.uniform_1_i32(self.cube_uniforms.texture.as_ref(), 0);
-            // Snapshot textures have top-left origin (X11/image convention)
-            // but GL texture coords have bottom-left origin.  Flip Y by
-            // setting uv_rect to (0, 1, 1, -1): start at v=1, height=-1.
-            self.gl.uniform_4_f32(
-                self.cube_uniforms.uv_rect.as_ref(),
-                0.0, 1.0, 1.0, -1.0,
-            );
-            self.gl.active_texture(glow::TEXTURE0);
-
-            for face in &faces {
-                let entry = &self.overview_windows[face.entry_idx];
-
-                if face.brightness < 0.05 { continue; }
-
-                let texture = if let Some(tex) = entry.snapshot_texture {
-                    tex
-                } else {
-                    match self.windows.get(&entry.x11_win) {
-                        Some(wt) => wt.gl_texture,
-                        None => continue,
-                    }
-                };
-
-                self.gl.uniform_matrix_4_f32_slice(
-                    self.cube_uniforms.mvp.as_ref(), false, &face.mvp,
-                );
-                self.gl.uniform_1_f32(
-                    self.cube_uniforms.brightness.as_ref(), face.brightness,
-                );
-                self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-                self.gl.tex_parameter_i32(
-                    glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32,
-                );
-                self.gl.tex_parameter_i32(
-                    glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32,
-                );
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                self.gl.tex_parameter_i32(
-                    glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32,
-                );
-                self.gl.tex_parameter_i32(
-                    glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32,
-                );
-            }
-
-            // Restore full-screen viewport and disable scissor
-            self.gl.disable(glow::SCISSOR_TEST);
-            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
-
-            self.gl.bind_vertex_array(None);
-            self.gl.use_program(None);
-        }
-    }
-
-    /// Spawn particles when a window is removed (particle effect).
-    fn spawn_particles_for_window(&mut self, x: i32, y: i32, w: u32, h: u32) {
-        if !self.particle_effects { return; }
-
-        let count = self.particle_count as usize;
-        let lifetime = self.particle_lifetime;
-        let mut particles = Vec::with_capacity(count);
-
-        let cols = (count as f32).sqrt().ceil() as u32;
-        let rows = (count as u32 + cols - 1) / cols;
-
-        for i in 0..count {
-            let col = i as u32 % cols;
-            let row = i as u32 / cols;
-
-            let px = x as f32 + (col as f32 + 0.5) / cols as f32 * w as f32;
-            let py = y as f32 + (row as f32 + 0.5) / rows as f32 * h as f32;
-
-            // Random velocity (using simple deterministic hash)
-            let hash = ((i * 2654435761) ^ (col as usize * 1597334677)) as f32;
-            let vx = (hash % 200.0) - 100.0;
-            let vy = -((hash / 200.0) % 300.0) - 50.0; // upward bias
-
-            // Color from window position (gradient)
-            let r = (col as f32 / cols as f32 * 0.5 + 0.5).clamp(0.3, 1.0);
-            let g = (row as f32 / rows as f32 * 0.5 + 0.5).clamp(0.3, 1.0);
-            let b = 0.8;
-
-            particles.push(Particle {
-                x: px, y: py,
-                vx, vy,
-                color: [r, g, b, 1.0],
-                lifetime,
-                max_lifetime: lifetime,
-            });
-        }
-
-        self.particle_systems.push(ParticleSystem { particles });
-        self.needs_render = true;
-    }
-
-    /// Capture the current framebuffer into scene_fbo, then run dual Kawase blur passes.
-    /// `source_fbo` specifies which FBO to read from (None = default back buffer).
-    fn run_blur_passes_from_fbo(&self, source_fbo: Option<glow::Framebuffer>, max_levels: usize) -> Option<glow::Texture> {
-        let (scene_fbo, scene_tex) = self.scene_fbo.as_ref()?;
-        if self.blur_fbos.is_empty() {
-            return None;
-        }
-        let levels = max_levels.min(self.blur_fbos.len()).max(1);
-
-        unsafe {
-            // Copy current framebuffer to scene FBO
-            self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, source_fbo);
-            self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(*scene_fbo));
-            self.gl.blit_framebuffer(
-                0, 0, self.screen_w as i32, self.screen_h as i32,
-                0, 0, self.screen_w as i32, self.screen_h as i32,
-                glow::COLOR_BUFFER_BIT,
-                glow::LINEAR,
-            );
-
-            // === Downsample passes ===
-            self.gl.use_program(Some(self.blur_down_program));
-            self.gl.uniform_1_i32(self.blur_down_uniforms.texture.as_ref(), 0);
-            self.gl.bind_vertex_array(Some(self.quad_vao));
-
-            let mut src_tex = *scene_tex;
-            let mut src_w = self.screen_w;
-            let mut src_h = self.screen_h;
-
-            for level in &self.blur_fbos[..levels] {
-                self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(level.fbo));
-                self.gl.viewport(0, 0, level.w as i32, level.h as i32);
-
-                let hp_proj = ortho(0.0, level.w as f32, level.h as f32, 0.0, -1.0, 1.0);
-                self.gl.uniform_matrix_4_f32_slice(
-                    self.blur_down_uniforms.projection.as_ref(), false, &hp_proj,
-                );
-                self.gl.uniform_4_f32(
-                    self.blur_down_uniforms.rect.as_ref(),
-                    0.0, 0.0, level.w as f32, level.h as f32,
-                );
-                self.gl.uniform_2_f32(
-                    self.blur_down_uniforms.halfpixel.as_ref(),
-                    0.5 / src_w as f32, 0.5 / src_h as f32,
-                );
-
-                self.gl.active_texture(glow::TEXTURE0);
-                self.gl.bind_texture(glow::TEXTURE_2D, Some(src_tex));
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-
-                src_tex = level.texture;
-                src_w = level.w;
-                src_h = level.h;
-            }
-
-            // === Upsample passes ===
-            self.gl.use_program(Some(self.blur_up_program));
-            self.gl.uniform_1_i32(self.blur_up_uniforms.texture.as_ref(), 0);
-
-            // Upsample from smallest to largest (reverse order, stopping before the last)
-            for i in (0..levels - 1).rev() {
-                let target = &self.blur_fbos[i];
-                let source_tex = if i + 1 < self.blur_fbos.len() {
-                    self.blur_fbos[i + 1].texture
-                } else {
-                    src_tex
-                };
-
-                self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.fbo));
-                self.gl.viewport(0, 0, target.w as i32, target.h as i32);
-
-                let hp_proj = ortho(0.0, target.w as f32, target.h as f32, 0.0, -1.0, 1.0);
-                self.gl.uniform_matrix_4_f32_slice(
-                    self.blur_up_uniforms.projection.as_ref(), false, &hp_proj,
-                );
-                self.gl.uniform_4_f32(
-                    self.blur_up_uniforms.rect.as_ref(),
-                    0.0, 0.0, target.w as f32, target.h as f32,
-                );
-
-                let src_level = &self.blur_fbos[i + 1];
-                self.gl.uniform_2_f32(
-                    self.blur_up_uniforms.halfpixel.as_ref(),
-                    0.5 / src_level.w as f32, 0.5 / src_level.h as f32,
-                );
-
-                self.gl.active_texture(glow::TEXTURE0);
-                self.gl.bind_texture(glow::TEXTURE_2D, Some(source_tex));
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-            }
-
-            // Bind back to default framebuffer
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
-            self.gl.bind_vertex_array(None);
-            self.gl.use_program(None);
-        }
-
-        // Return the first (largest) blur level texture as the blurred result
-        Some(self.blur_fbos[0].texture)
     }
 
     pub(super) fn tracked_window_count(&self) -> usize {
@@ -5853,87 +3937,3 @@ unsafe extern "C" fn ignore_x_error(
     0
 }
 
-// Orthographic projection matrix (column-major for OpenGL)
-fn ortho(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> [f32; 16] {
-    let tx = -(right + left) / (right - left);
-    let ty = -(top + bottom) / (top - bottom);
-    let tz = -(far + near) / (far - near);
-    #[rustfmt::skip]
-    let m = [
-        2.0 / (right - left), 0.0,                  0.0,                 0.0,
-        0.0,                  2.0 / (top - bottom),  0.0,                 0.0,
-        0.0,                  0.0,                  -2.0 / (far - near),  0.0,
-        tx,                   ty,                    tz,                  1.0,
-    ];
-    m
-}
-
-// ---------------------------------------------------------------------------
-// 3D matrix helpers for cube transition (column-major for OpenGL)
-// ---------------------------------------------------------------------------
-
-/// Perspective projection matrix.
-fn perspective_matrix(fov_y: f32, aspect: f32, near: f32, far: f32) -> [f32; 16] {
-    let f = 1.0 / (fov_y * 0.5).tan();
-    #[rustfmt::skip]
-    let m = [
-        f / aspect, 0.0, 0.0,                              0.0,
-        0.0,        f,   0.0,                              0.0,
-        0.0,        0.0, (far + near) / (near - far),     -1.0,
-        0.0,        0.0, (2.0 * far * near) / (near - far), 0.0,
-    ];
-    m
-}
-
-/// Translation matrix.
-fn translate_matrix(x: f32, y: f32, z: f32) -> [f32; 16] {
-    #[rustfmt::skip]
-    let m = [
-        1.0, 0.0, 0.0, 0.0,
-        0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 1.0, 0.0,
-        x,   y,   z,   1.0,
-    ];
-    m
-}
-
-/// Rotation around the Y axis.
-fn rotate_y_matrix(angle: f32) -> [f32; 16] {
-    let c = angle.cos();
-    let s = angle.sin();
-    #[rustfmt::skip]
-    let m = [
-         c,  0.0, -s,  0.0,
-        0.0, 1.0, 0.0, 0.0,
-         s,  0.0,  c,  0.0,
-        0.0, 0.0, 0.0, 1.0,
-    ];
-    m
-}
-
-/// Rotation around the X axis.
-fn rotate_x_matrix(angle: f32) -> [f32; 16] {
-    let c = angle.cos();
-    let s = angle.sin();
-    #[rustfmt::skip]
-    let m = [
-        1.0, 0.0, 0.0, 0.0,
-        0.0,  c,   s,  0.0,
-        0.0, -s,   c,  0.0,
-        0.0, 0.0, 0.0, 1.0,
-    ];
-    m
-}
-
-/// 4×4 matrix multiply (column-major).
-fn mat4_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
-    let mut m = [0.0f32; 16];
-    for col in 0..4 {
-        for row in 0..4 {
-            m[col * 4 + row] = (0..4)
-                .map(|k| a[k * 4 + row] * b[col * 4 + k])
-                .sum();
-        }
-    }
-    m
-}

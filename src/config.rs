@@ -111,6 +111,9 @@ pub struct BehaviorConfig {
     /// Blur strength / number of passes (1..5). Higher = more blur.
     #[serde(default = "default_blur_strength")]
     pub blur_strength: u32,
+    /// Automatically reduce blur quality during animations/transitions for better performance.
+    #[serde(default = "default_true")]
+    pub blur_quality_auto: bool,
     /// Enable fade-in/fade-out when windows map/unmap.
     #[serde(default)]
     pub fading: bool,
@@ -489,6 +492,7 @@ impl Default for Config {
                     active_opacity: default_active_opacity(),
                     blur_enabled: true,
                     blur_strength: default_blur_strength(),
+                    blur_quality_auto: true,
                     fading: false,
                     fade_in_step: default_fade_step(),
                     fade_out_step: default_fade_step(),
