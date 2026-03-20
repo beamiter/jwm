@@ -13,6 +13,7 @@ use glow::HasContext;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::sync::Arc;
+use std::sync::mpsc;
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::wrapper::ConnectionExt as WrapperExt;
 use x11rb::protocol::composite::ConnectionExt as CompositeExt;
@@ -205,6 +206,14 @@ enum WallpaperMode {
     Fit,
     Stretch,
     Center,
+}
+
+/// Decoded wallpaper image data ready for GPU upload (produced by background thread).
+struct WallpaperImageData {
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+    mode: WallpaperMode,
 }
 
 /// Per-monitor wallpaper state.
@@ -899,6 +908,13 @@ pub(super) struct Compositor {
     wallpaper_crossfade_duration_ms: u64,
     old_wallpaper_texture: Option<glow::Texture>,
     wallpaper_transition_start: Option<std::time::Instant>,
+
+    // --- Async wallpaper loading ---
+    /// Receiver for the default wallpaper decoded on a background thread.
+    pending_wallpaper: Option<mpsc::Receiver<WallpaperImageData>>,
+    /// Receivers for per-monitor wallpapers decoded on background threads.
+    /// Each entry: (mon_index_in_vec, receiver).
+    pending_monitor_wallpapers: Vec<(usize, mpsc::Receiver<WallpaperImageData>)>,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
@@ -1870,15 +1886,13 @@ impl Compositor {
             None
         };
 
-        // Load wallpaper texture if configured
+        // Load wallpaper asynchronously — decode on background thread so the
+        // desktop appears immediately and the wallpaper fades in once ready.
         let wallpaper_mode = Self::parse_wallpaper_mode(&behavior.wallpaper_mode);
-        let (wallpaper_texture, wallpaper_img_w, wallpaper_img_h) = if !behavior.wallpaper.is_empty() {
-            match Self::load_wallpaper_texture(&gl, &behavior.wallpaper, screen_w, screen_h) {
-                Some((tex, w, h)) => (Some(tex), w, h),
-                None => (None, 0, 0),
-            }
+        let pending_wallpaper = if !behavior.wallpaper.is_empty() {
+            Some(Self::load_wallpaper_async(&behavior.wallpaper, screen_w, screen_h, wallpaper_mode))
         } else {
-            (None, 0, 0)
+            None
         };
 
         // Create post-process FBO (features 8/9/10) — needed if any post-processing is active
@@ -2116,11 +2130,11 @@ impl Compositor {
             particle_systems: Vec::new(),
             particle_vao,
             particle_vbo,
-            // Wallpaper
-            wallpaper_texture,
+            // Wallpaper (texture loaded asynchronously)
+            wallpaper_texture: None,
             wallpaper_mode,
-            wallpaper_img_w,
-            wallpaper_img_h,
+            wallpaper_img_w: 0,
+            wallpaper_img_h: 0,
             monitor_wallpapers: Vec::new(),
             // Phase 6.1: Colorblind correction
             colorblind_mode: match behavior.colorblind_mode.as_str() {
@@ -2179,6 +2193,9 @@ impl Compositor {
             wallpaper_crossfade_duration_ms: behavior.wallpaper_crossfade_duration_ms,
             old_wallpaper_texture: None,
             wallpaper_transition_start: None,
+            // Async wallpaper loading
+            pending_wallpaper,
+            pending_monitor_wallpapers: Vec::new(),
         })
     }
 
@@ -2226,41 +2243,54 @@ impl Compositor {
         }
     }
 
-    /// Load a wallpaper image from disk and upload it as a GL texture.
-    /// Returns (texture, image_width, image_height) or None on failure.
-    /// If the image is larger than `max_w`x`max_h`, it is downscaled to fit
-    /// (preserving aspect ratio) to reduce GPU memory and sampling cost.
-    fn load_wallpaper_texture(
-        gl: &glow::Context,
+    /// Decode a wallpaper image on a background thread.
+    /// Returns a receiver that will deliver the decoded RGBA data.
+    fn load_wallpaper_async(
         path: &str,
         max_w: u32,
         max_h: u32,
+        mode: WallpaperMode,
+    ) -> mpsc::Receiver<WallpaperImageData> {
+        let (tx, rx) = mpsc::channel();
+        let path = path.to_string();
+        std::thread::spawn(move || {
+            let img = match image::open(&path) {
+                Ok(img) => img,
+                Err(e) => {
+                    log::warn!("compositor: failed to load wallpaper '{}': {}", path, e);
+                    return;
+                }
+            };
+
+            let img = if max_w > 0 && max_h > 0 && (img.width() > max_w || img.height() > max_h) {
+                log::info!(
+                    "compositor: downscaling wallpaper '{}' from {}x{} to fit {}x{}",
+                    path, img.width(), img.height(), max_w, max_h,
+                );
+                img.resize(max_w, max_h, image::imageops::FilterType::Lanczos3)
+            } else {
+                img
+            };
+
+            let rgba = img.to_rgba8();
+            let (w, h) = (rgba.width(), rgba.height());
+            log::info!("compositor: decoded wallpaper '{}' ({}x{})", path, w, h);
+
+            let _ = tx.send(WallpaperImageData {
+                rgba: rgba.into_raw(),
+                width: w,
+                height: h,
+                mode,
+            });
+        });
+        rx
+    }
+
+    /// Upload decoded wallpaper RGBA data to a GL texture.
+    fn upload_wallpaper_texture(
+        gl: &glow::Context,
+        data: &WallpaperImageData,
     ) -> Option<(glow::Texture, u32, u32)> {
-        let img = match image::open(path) {
-            Ok(img) => img,
-            Err(e) => {
-                log::warn!("compositor: failed to load wallpaper '{}': {}", path, e);
-                return None;
-            }
-        };
-
-        // Downscale to screen dimensions if the image is larger — there is no
-        // benefit in keeping pixels beyond the display resolution, and huge
-        // textures cause noticeable per-frame slowdowns during sampling.
-        let img = if max_w > 0 && max_h > 0 && (img.width() > max_w || img.height() > max_h) {
-            log::info!(
-                "compositor: downscaling wallpaper '{}' from {}x{} to fit {}x{}",
-                path, img.width(), img.height(), max_w, max_h,
-            );
-            img.resize(max_w, max_h, image::imageops::FilterType::Lanczos3)
-        } else {
-            img
-        };
-
-        let rgba = img.to_rgba8();
-        let (w, h) = (rgba.width(), rgba.height());
-        log::info!("compositor: loaded wallpaper '{}' ({}x{})", path, w, h);
-
         unsafe {
             let tex = match gl.create_texture() {
                 Ok(t) => t,
@@ -2274,21 +2304,23 @@ impl Compositor {
                 glow::TEXTURE_2D,
                 0,
                 glow::RGBA8 as i32,
-                w as i32,
-                h as i32,
+                data.width as i32,
+                data.height as i32,
                 0,
                 glow::RGBA,
                 glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(Some(rgba.as_raw())),
+                glow::PixelUnpackData::Slice(Some(&data.rgba)),
             );
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
             gl.bind_texture(glow::TEXTURE_2D, None);
-            Some((tex, w, h))
+            log::info!("compositor: uploaded wallpaper texture ({}x{})", data.width, data.height);
+            Some((tex, data.width, data.height))
         }
     }
+
 
     /// Compute the draw rect (x, y, w, h) for a wallpaper within a target area.
     /// `area`: (x, y, w, h) of the target area in screen coords.
@@ -2365,6 +2397,9 @@ impl Compositor {
         let cfg = crate::config::CONFIG.load();
         let behavior = cfg.behavior();
 
+        // Clear any previous pending monitor wallpaper loads
+        self.pending_monitor_wallpapers.clear();
+
         for &(idx, x, y, w, h) in monitors {
             // Check if there's a per-monitor config for this index
             let per_mon = behavior.wallpaper_monitors.iter().find(|wm| wm.monitor == idx);
@@ -2379,24 +2414,23 @@ impl Compositor {
             };
 
             let mode = Self::parse_wallpaper_mode(mode_str);
-            let (texture, img_w, img_h) = if !path.is_empty() {
-                match Self::load_wallpaper_texture(&self.gl, path, self.screen_w, self.screen_h) {
-                    Some((tex, iw, ih)) => (Some(tex), iw, ih),
-                    None => (None, 0, 0),
-                }
-            } else {
-                (None, 0, 0)
-            };
+            let mon_idx = self.monitor_wallpapers.len();
+
+            // Spawn async decode for per-monitor wallpaper
+            if !path.is_empty() {
+                let rx = Self::load_wallpaper_async(path, self.screen_w, self.screen_h, mode);
+                self.pending_monitor_wallpapers.push((mon_idx, rx));
+            }
 
             self.monitor_wallpapers.push(MonitorWallpaper {
                 mon_x: x,
                 mon_y: y,
                 mon_w: w,
                 mon_h: h,
-                texture,
+                texture: None, // will be filled when async load completes
                 mode,
-                img_w,
-                img_h,
+                img_w: 0,
+                img_h: 0,
             });
         }
 
@@ -2527,6 +2561,10 @@ impl Compositor {
             for wt in self.windows.values() {
                 if (wt.anim_scale - wt.anim_scale_target).abs() > 0.001 { return true; }
             }
+        }
+        // Need render to poll async wallpaper loading
+        if self.pending_wallpaper.is_some() || !self.pending_monitor_wallpapers.is_empty() {
+            return true;
         }
         false
     }
@@ -2883,6 +2921,43 @@ impl Compositor {
             self.last_focused_window = focused;
         }
 
+        // Poll for async wallpaper decode results and upload to GPU if ready.
+        let mut wallpaper_just_loaded = false;
+        if let Some(rx) = &self.pending_wallpaper {
+            if let Ok(data) = rx.try_recv() {
+                if let Some((tex, w, h)) = Self::upload_wallpaper_texture(&self.gl, &data) {
+                    self.wallpaper_texture = Some(tex);
+                    self.wallpaper_img_w = w;
+                    self.wallpaper_img_h = h;
+                    self.wallpaper_mode = data.mode;
+                    wallpaper_just_loaded = true;
+                    log::info!("compositor: async wallpaper ready ({}x{})", w, h);
+                }
+                self.pending_wallpaper = None;
+            }
+        }
+        // Poll per-monitor wallpaper results
+        self.pending_monitor_wallpapers.retain_mut(|(idx, rx)| {
+            if let Ok(data) = rx.try_recv() {
+                if let Some(mw) = self.monitor_wallpapers.get_mut(*idx) {
+                    if let Some((tex, w, h)) = Self::upload_wallpaper_texture(&self.gl, &data) {
+                        mw.texture = Some(tex);
+                        mw.img_w = w;
+                        mw.img_h = h;
+                        mw.mode = data.mode;
+                        wallpaper_just_loaded = true;
+                        log::info!("compositor: async monitor wallpaper [{}] ready ({}x{})", idx, w, h);
+                    }
+                }
+                false // remove from pending list
+            } else {
+                true // keep waiting
+            }
+        });
+        if wallpaper_just_loaded {
+            self.needs_render = true;
+        }
+
         // Skip-unchanged-frame: if scene hasn't changed and no textures are
         // dirty, we can skip the entire GL render (unless screenshot pending or HUD active).
         let has_dirty = scene.iter().any(|&(win, _, _, _, _)| {
@@ -2891,7 +2966,7 @@ impl Compositor {
         let force_render = self.pending_screenshot.is_some() || self.debug_hud || self.transition_active() || self.overview_active
             || self.expose_active || expose_animating || snap_animating || peek_animating
             || genie_active || ripples_active || focus_highlight_active || wallpaper_crossfade_active
-            || self.recording_active || self.annotation_active;
+            || self.recording_active || self.annotation_active || wallpaper_just_loaded;
         let hash = Self::scene_hash(scene, focused);
         let scene_changed = hash != self.last_scene_hash;
         if !has_dirty && !fades_active && !force_render && !scene_changed {
