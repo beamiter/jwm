@@ -710,39 +710,3 @@ void main() {
 
 // Genie uses the same fragment shader as windows (FRAGMENT_SHADER)
 
-// ---------------------------------------------------------------------------
-// Phase 3.3: Window open ripple fragment shader
-// ---------------------------------------------------------------------------
-
-pub const RIPPLE_FRAGMENT_SHADER: &str = r#"#version 330 core
-uniform sampler2D u_texture;
-uniform float u_time;       // seconds since ripple started
-uniform float u_duration;   // total duration
-uniform vec2 u_center;      // ripple center in UV space
-uniform float u_amplitude;  // UV distortion amplitude
-in vec2 v_uv;
-out vec4 frag_color;
-
-void main() {
-    float progress = u_time / u_duration;
-    if (progress >= 1.0) {
-        frag_color = texture(u_texture, v_uv);
-        return;
-    }
-
-    vec2 diff = v_uv - u_center;
-    float dist = length(diff);
-
-    // Ripple wave
-    float wave_speed = 3.0;
-    float wave_freq = 15.0;
-    float wave = sin(dist * wave_freq - u_time * wave_speed * 6.28);
-
-    // Fade out over distance and time
-    float fade = (1.0 - progress) * exp(-dist * 4.0);
-    float displacement = wave * u_amplitude * fade;
-
-    vec2 uv = v_uv + normalize(diff + 0.001) * displacement;
-    frag_color = texture(u_texture, uv);
-}
-"#;

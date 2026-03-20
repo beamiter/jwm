@@ -26,23 +26,16 @@ impl Compositor {
 
     pub(in crate::backend::x11) fn annotation_add_point(&mut self, x: f32, y: f32) {
         if !self.annotation_active { return; }
+        if self.annotation_strokes.is_empty() {
+            self.annotation_strokes.push(AnnotationStroke {
+                points: Vec::new(),
+                color: self.annotation_color,
+                width: self.annotation_line_width,
+            });
+        }
         if let Some(stroke) = self.annotation_strokes.last_mut() {
             stroke.points.push(AnnotationPoint { x, y });
-            self.needs_render = true;
         }
-    }
-
-    pub(super) fn annotation_new_stroke(&mut self) {
-        if !self.annotation_active { return; }
-        self.annotation_strokes.push(AnnotationStroke {
-            points: Vec::new(),
-            color: self.annotation_color,
-            width: self.annotation_line_width,
-        });
-    }
-
-    pub(super) fn annotation_clear(&mut self) {
-        self.annotation_strokes.clear();
         self.needs_render = true;
     }
 

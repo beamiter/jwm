@@ -249,10 +249,7 @@ impl Compositor {
 
         // Phase 3.3: Trigger ripple effect on window open
         if self.ripple_on_open {
-            let cx = (x as f32 + w as f32 * 0.5) / self.screen_w as f32;
-            let cy = (y as f32 + h as f32 * 0.5) / self.screen_h as f32;
             self.ripple_active.push(RippleState {
-                center: (cx, cy),
                 start: std::time::Instant::now(),
             });
         }

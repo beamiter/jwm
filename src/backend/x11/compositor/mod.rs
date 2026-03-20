@@ -447,18 +447,6 @@ impl DamageTracker {
         }
     }
 
-    fn mark_dirty(&mut self, x: i32, y: i32, w: u32, h: u32) {
-        let x0 = (x.max(0) as u32 / self.tile_w).min(TILE_COLS - 1);
-        let y0 = (y.max(0) as u32 / self.tile_h).min(TILE_ROWS - 1);
-        let x1 = (((x.max(0) as u32 + w).saturating_sub(1)) / self.tile_w).min(TILE_COLS - 1);
-        let y1 = (((y.max(0) as u32 + h).saturating_sub(1)) / self.tile_h).min(TILE_ROWS - 1);
-        for ty in y0..=y1 {
-            for tx in x0..=x1 {
-                self.dirty_tiles[(ty * TILE_COLS + tx) as usize] = true;
-            }
-        }
-    }
-
     fn mark_all_dirty(&mut self) {
         self.dirty_tiles.fill(true);
     }
@@ -558,17 +546,7 @@ struct GenieAnimation {
 // Phase 3.3: Window open ripple
 // ---------------------------------------------------------------------------
 
-struct RippleUniforms {
-    texture: Option<glow::UniformLocation>,
-    time: Option<glow::UniformLocation>,
-    duration: Option<glow::UniformLocation>,
-    center: Option<glow::UniformLocation>,
-    amplitude: Option<glow::UniformLocation>,
-}
-
-/// Active ripple effect.
 struct RippleState {
-    center: (f32, f32),  // UV-space center
     start: std::time::Instant,
 }
 
@@ -608,7 +586,6 @@ pub(super) struct Compositor {
     screen_h: u32,
     #[allow(dead_code)]
     root: u32,
-    damage_event_base: u8,
     needs_render: bool,
     context_current: bool,
     /// Hash of the last rendered scene for skip-unchanged-frame optimization.
@@ -631,8 +608,6 @@ pub(super) struct Compositor {
     fading: bool,
     fade_in_step: f32,
     fade_out_step: f32,
-    /// Windows pending removal after fade-out completes
-    fade_out_pending: Vec<u32>,
     // Per-window rule settings
     shadow_exclude: Vec<String>,
     opacity_rules: Vec<OpacityRule>,
@@ -861,9 +836,6 @@ pub(super) struct Compositor {
     zoom_to_fit_target: f32,
 
     // --- Phase 7.1: Shader hot reload ---
-    shader_hot_reload: bool,
-    shader_dir: String,
-
     // --- Phase 7.2: Extended debug HUD ---
     debug_hud_extended: bool,
 
@@ -889,11 +861,8 @@ pub(super) struct Compositor {
     dock_position: (f32, f32),
 
     // --- Phase 3.3: Window open ripple ---
-    ripple_program: glow::Program,
-    ripple_uniforms: RippleUniforms,
     ripple_on_open: bool,
     ripple_duration: f32,
-    ripple_amplitude: f32,
     ripple_active: Vec<RippleState>,
 
     // --- Phase 3.4: Focus switch highlight ---
@@ -941,7 +910,6 @@ impl Drop for Compositor {
             self.gl.delete_program(self.overview_bg_program);
             self.gl.delete_program(self.particle_program);
             self.gl.delete_program(self.genie_program);
-            self.gl.delete_program(self.ripple_program);
             self.gl.delete_buffer(self.particle_vbo);
             self.gl.delete_vertex_array(self.particle_vao);
             self.gl.delete_vertex_array(self.quad_vao);
@@ -1724,18 +1692,6 @@ impl Compositor {
             }
         };
 
-        // Phase 3.3: Compile ripple post-process shader
-        let ripple_program = unsafe { Self::create_program(&gl, shaders::BLUR_DOWN_VERTEX, shaders::RIPPLE_FRAGMENT_SHADER)? };
-        let ripple_uniforms = unsafe {
-            RippleUniforms {
-                texture: gl.get_uniform_location(ripple_program, "u_texture"),
-                time: gl.get_uniform_location(ripple_program, "u_time"),
-                duration: gl.get_uniform_location(ripple_program, "u_duration"),
-                center: gl.get_uniform_location(ripple_program, "u_center"),
-                amplitude: gl.get_uniform_location(ripple_program, "u_amplitude"),
-            }
-        };
-
         // 16. Setup GL state
         unsafe {
             gl.viewport(0, 0, screen_w as i32, screen_h as i32);
@@ -1933,7 +1889,6 @@ impl Compositor {
             screen_w,
             screen_h,
             root,
-            damage_event_base,
             needs_render: true,
             context_current: true,
             last_scene_hash: 0,
@@ -1951,7 +1906,6 @@ impl Compositor {
             fading: behavior.fading,
             fade_in_step: anim_speed.apply_fade_step(behavior.fade_in_step),
             fade_out_step: anim_speed.apply_fade_step(behavior.fade_out_step),
-            fade_out_pending: Vec::new(),
             shadow_exclude: behavior.shadow_exclude.clone(),
             opacity_rules,
             blur_exclude: behavior.blur_exclude.clone(),
@@ -2152,9 +2106,6 @@ impl Compositor {
             zoom_to_fit_window: None,
             zoom_to_fit_scale: 1.0,
             zoom_to_fit_target: 1.0,
-            // Phase 7.1: Shader hot reload
-            shader_hot_reload: behavior.shader_hot_reload,
-            shader_dir: behavior.shader_dir.clone(),
             // Phase 7.2: Extended debug HUD
             debug_hud_extended: behavior.debug_hud_extended,
             // Phase 7.3: Screen recording
@@ -2176,11 +2127,8 @@ impl Compositor {
             genie_active: Vec::new(),
             dock_position: (0.5 * screen_w as f32, screen_h as f32),
             // Phase 3.3: Ripple on open
-            ripple_program,
-            ripple_uniforms,
             ripple_on_open: behavior.ripple_on_open,
             ripple_duration: behavior.ripple_duration,
-            ripple_amplitude: behavior.ripple_amplitude,
             ripple_active: Vec::new(),
             // Phase 3.4: Focus highlight
             focus_highlight: behavior.focus_highlight,
@@ -2514,10 +2462,6 @@ impl Compositor {
         None
     }
 
-    pub(super) fn damage_event_base(&self) -> u8 {
-        self.damage_event_base
-    }
-
     pub(super) fn needs_render(&self) -> bool {
         if self.needs_render {
             return true;
@@ -2575,13 +2519,6 @@ impl Compositor {
 
     pub(super) fn clear_needs_render(&mut self) {
         self.needs_render = false;
-    }
-
-    // =====================================================================
-    // Feature 6: Mark damage region for partial redraw
-    // =====================================================================
-    pub(super) fn mark_damage_region(&mut self, x: i32, y: i32, w: u32, h: u32) {
-        self.damage_tracker.mark_dirty(x, y, w, h);
     }
 
     // =====================================================================
@@ -2768,6 +2705,7 @@ impl Compositor {
         self.needs_render = true;
     }
 
+    #[allow(dead_code)]
     pub(super) fn debug_hud_enabled(&self) -> bool {
         self.debug_hud
     }
@@ -4528,6 +4466,7 @@ impl Compositor {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn tracked_window_count(&self) -> usize {
         self.windows.len()
     }
@@ -4587,6 +4526,7 @@ impl Compositor {
     // Phase 7: Diagnostics
     // =====================================================================
 
+    #[allow(dead_code)]
     pub(super) fn reload_shader_from_file(&mut self, name: &str, path: &std::path::Path) -> Result<(), String> {
         let fs_src = std::fs::read_to_string(path)
             .map_err(|e| format!("read shader file: {e}"))?;
