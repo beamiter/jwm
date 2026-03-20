@@ -21,6 +21,7 @@ impl Compositor {
             || self.invert_colors
             || self.grayscale
             || self.magnifier_enabled
+            || self.colorblind_mode != 0
     }
 
     /// Capture the current framebuffer to a PNG file.

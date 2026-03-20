@@ -747,6 +747,45 @@ pub trait Backend: Send {
 
     /// Notify compositor of window move end (for wobbly windows).
     fn compositor_notify_window_move_end(&mut self, _window: WindowId) {}
+
+    /// Set the dock/taskbar position for genie minimize target.
+    fn compositor_set_dock_position(&mut self, _x: f32, _y: f32) {}
+
+    /// Set expose/mission control mode. windows: Vec<(window_id, x, y, w, h)>.
+    fn compositor_set_expose_mode(&mut self, _active: bool, _windows: Vec<(u32, i32, i32, u32, u32)>) {}
+
+    /// Set snap preview rectangle. None = hide preview.
+    fn compositor_set_snap_preview(&mut self, _preview: Option<(f32, f32, f32, f32)>) {}
+
+    /// Toggle window peek (boss key) mode.
+    fn compositor_set_peek_mode(&mut self, _active: bool) {}
+
+    /// Set window tab groups. Each entry: (group_id, Vec<(window_id, title, is_active)>).
+    fn compositor_set_window_groups(&mut self, _groups: Vec<(u32, Vec<(u32, String, bool)>)>) {}
+
+    /// Request a live thumbnail for a window. Returns (pixels, width, height).
+    fn compositor_request_live_thumbnail(&mut self, _window: u32, _max_size: u32) -> Option<(Vec<u8>, u32, u32)> { None }
+
+    /// Zoom-to-fit a window (or reset if None).
+    fn compositor_zoom_to_fit(&mut self, _window: Option<u32>) {}
+
+    /// Expose mode click at screen coordinates. Returns the selected window or None.
+    fn compositor_expose_click(&mut self, _x: f32, _y: f32) -> Option<u32> { None }
+
+    /// Set colorblind correction mode (Phase 6.1).
+    fn compositor_set_colorblind_mode(&mut self, _mode: &str) {}
+
+    /// Set annotation mode (Phase 6.2).
+    fn compositor_set_annotation_mode(&mut self, _active: bool) {}
+
+    /// Add annotation point (Phase 6.2).
+    fn compositor_annotation_add_point(&mut self, _x: f32, _y: f32) {}
+
+    /// Start screen recording (Phase 7.3).
+    fn compositor_start_recording(&mut self, _path: &str) {}
+
+    /// Stop screen recording (Phase 7.3).
+    fn compositor_stop_recording(&mut self) {}
 }
 
 // 兼容性定义

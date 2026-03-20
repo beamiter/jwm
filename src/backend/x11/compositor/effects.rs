@@ -195,4 +195,112 @@ impl Compositor {
 
         any_active
     }
+
+    // =================================================================
+    // Phase 3.1: Motion trail
+    // =================================================================
+
+    /// Record the current window position into the motion trail ring buffer.
+    pub(super) fn update_motion_trail(&mut self, x11_win: u32, x: i32, y: i32) {
+        if !self.motion_trail_enabled { return; }
+        if let Some(wt) = self.windows.get_mut(&x11_win) {
+            wt.motion_trail.push_back((x, y));
+            while wt.motion_trail.len() > self.motion_trail_frames as usize {
+                wt.motion_trail.pop_front();
+            }
+        }
+    }
+
+    /// Clear the motion trail for a window (called on move end).
+    pub(super) fn clear_motion_trail(&mut self, x11_win: u32) {
+        if let Some(wt) = self.windows.get_mut(&x11_win) {
+            wt.motion_trail.clear();
+        }
+    }
+
+    // =================================================================
+    // Phase 3.2: Genie minimize tick
+    // =================================================================
+
+    /// Tick genie animations. Returns true if any are active.
+    pub(super) fn tick_genie(&mut self) -> bool {
+        if self.genie_active.is_empty() { return false; }
+        let duration = std::time::Duration::from_millis(self.genie_duration_ms);
+        let now = std::time::Instant::now();
+        // Remove completed animations and clean up their textures
+        self.genie_active.retain(|ga| {
+            now.duration_since(ga.start) < duration
+        });
+        !self.genie_active.is_empty()
+    }
+
+    /// Start a genie animation for a window being removed.
+    pub(super) fn start_genie_animation(&mut self, x11_win: u32, x: f32, y: f32, w: f32, h: f32) {
+        if !self.genie_minimize { return; }
+        // We need the window's GL texture — if it still exists, grab it
+        // The texture won't be deleted because we prevent remove_window_immediate
+        if let Some(wt) = self.windows.get(&x11_win) {
+            self.genie_active.push(super::GenieAnimation {
+                x11_win,
+                start: std::time::Instant::now(),
+                x, y, w, h,
+                gl_texture: wt.gl_texture,
+                has_rgba: wt.has_rgba,
+            });
+        }
+    }
+
+    // =================================================================
+    // Phase 3.3: Ripple tick
+    // =================================================================
+
+    /// Tick ripple effects. Returns true if any are active.
+    pub(super) fn tick_ripples(&mut self) -> bool {
+        if self.ripple_active.is_empty() { return false; }
+        let duration = std::time::Duration::from_secs_f32(self.ripple_duration);
+        let now = std::time::Instant::now();
+        self.ripple_active.retain(|r| {
+            now.duration_since(r.start) < duration
+        });
+        !self.ripple_active.is_empty()
+    }
+
+    // =================================================================
+    // Phase 3.4: Focus highlight tick
+    // =================================================================
+
+    /// Returns true if focus highlight is currently animating.
+    pub(super) fn tick_focus_highlight(&self) -> bool {
+        if !self.focus_highlight { return false; }
+        if let Some((_, start)) = self.focus_highlight_start {
+            let elapsed = start.elapsed().as_millis() as u64;
+            elapsed < self.focus_highlight_duration_ms
+        } else {
+            false
+        }
+    }
+
+    // =================================================================
+    // Phase 3.5: Wallpaper crossfade tick
+    // =================================================================
+
+    /// Returns true if wallpaper crossfade is currently animating.
+    pub(super) fn tick_wallpaper_crossfade(&mut self) -> bool {
+        if !self.wallpaper_crossfade { return false; }
+        if let Some(start) = self.wallpaper_transition_start {
+            let elapsed = start.elapsed().as_millis() as u64;
+            if elapsed >= self.wallpaper_crossfade_duration_ms {
+                // Transition finished — clean up old texture
+                if let Some(tex) = self.old_wallpaper_texture.take() {
+                    unsafe { self.gl.delete_texture(tex); }
+                }
+                self.wallpaper_transition_start = None;
+                false
+            } else {
+                true
+            }
+        } else {
+            false
+        }
+    }
 }

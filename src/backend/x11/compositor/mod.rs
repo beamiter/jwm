@@ -1,5 +1,7 @@
 pub mod math;
+mod annotations;
 mod effects;
+mod expose;
 mod overview;
 mod pipeline;
 mod postprocess;
@@ -102,6 +104,8 @@ struct WindowTexture {
     wobbly: Option<WobblyState>,
     // --- Phase 2.3: Fence sync for async pixmap refresh ---
     pending_fence: Option<glow::Fence>,
+    // --- Phase 3.1: Motion trail ---
+    motion_trail: std::collections::VecDeque<(i32, i32)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +279,11 @@ struct FrameStats {
     fps: f32,
     frame_times: Vec<f32>,
     last_frame_time: std::time::Instant,
+    // Phase 7.2: Extended debug stats
+    draw_calls: u32,
+    texture_memory_bytes: u64,
+    blur_cache_hits: u64,
+    blur_cache_misses: u64,
 }
 
 /// Per-window wobbly animation state.
@@ -310,6 +319,30 @@ struct Particle {
     color: [f32; 4],
     lifetime: f32,
     max_lifetime: f32,
+}
+
+/// Entry for Expose/Mission Control mode.
+struct ExposeEntry {
+    x11_win: u32,
+    orig_x: f32, orig_y: f32, orig_w: f32, orig_h: f32,
+    target_x: f32, target_y: f32, target_w: f32, target_h: f32,
+    current_x: f32, current_y: f32, current_w: f32, current_h: f32,
+    is_hovered: bool,
+}
+
+/// Snap preview state.
+struct SnapPreview {
+    x: f32, y: f32, w: f32, h: f32,
+    opacity: f32,
+    start: std::time::Instant,
+    fading_out: bool,
+}
+
+/// Single tab in a window group.
+struct WindowTab {
+    x11_win: u32,
+    title: String,
+    is_active: bool,
 }
 
 /// Active particle system (one per closing window).
@@ -367,6 +400,7 @@ struct MagnifierUniforms {
     magnifier_center: Option<glow::UniformLocation>,
     magnifier_radius: Option<glow::UniformLocation>,
     magnifier_zoom: Option<glow::UniformLocation>,
+    colorblind_mode: Option<glow::UniformLocation>,
 }
 
 /// Particle shader uniform locations.
@@ -478,6 +512,55 @@ enum BlurQuality {
     Full,     // All blur levels
     Reduced,  // Half blur levels
     Minimal,  // 1 blur level
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3.2: Genie minimize animation
+// ---------------------------------------------------------------------------
+
+struct GenieUniforms {
+    projection: Option<glow::UniformLocation>,
+    rect: Option<glow::UniformLocation>,
+    texture: Option<glow::UniformLocation>,
+    opacity: Option<glow::UniformLocation>,
+    radius: Option<glow::UniformLocation>,
+    size: Option<glow::UniformLocation>,
+    dim: Option<glow::UniformLocation>,
+    uv_rect: Option<glow::UniformLocation>,
+    progress: Option<glow::UniformLocation>,
+    dock_pos: Option<glow::UniformLocation>,
+    grid_size: Option<glow::UniformLocation>,
+}
+
+/// Active genie minimize animation for one window.
+struct GenieAnimation {
+    #[allow(dead_code)]
+    x11_win: u32,
+    start: std::time::Instant,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    gl_texture: glow::Texture,
+    has_rgba: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3.3: Window open ripple
+// ---------------------------------------------------------------------------
+
+struct RippleUniforms {
+    texture: Option<glow::UniformLocation>,
+    time: Option<glow::UniformLocation>,
+    duration: Option<glow::UniformLocation>,
+    center: Option<glow::UniformLocation>,
+    amplitude: Option<glow::UniformLocation>,
+}
+
+/// Active ripple effect.
+struct RippleState {
+    center: (f32, f32),  // UV-space center
+    start: std::time::Instant,
 }
 
 // ---------------------------------------------------------------------------
@@ -706,6 +789,34 @@ pub(super) struct Compositor {
     wobbly_damping: f32,
     wobbly_grid_size: u32,
 
+    // --- Phase 5: Expose/Mission Control ---
+    expose_active: bool,
+    expose_enabled: bool,
+    expose_gap: f32,
+    expose_entries: Vec<ExposeEntry>,
+    expose_opacity: f32,
+    expose_start: Option<std::time::Instant>,
+
+    // --- Phase 5: Smart Snap Preview ---
+    snap_preview_enabled: bool,
+    snap_preview_color: [f32; 4],
+    snap_animation_duration_ms: u64,
+    snap_target: Option<SnapPreview>,
+
+    // --- Phase 5: Window Peek (Boss Key) ---
+    peek_active: bool,
+    peek_enabled: bool,
+    peek_exclude: Vec<String>,
+    peek_opacity: f32,
+    peek_start: Option<std::time::Instant>,
+
+    // --- Phase 5: Window Tabs ---
+    window_tabs_enabled: bool,
+    tab_bar_height: f32,
+    tab_bar_color: [f32; 4],
+    tab_active_color: [f32; 4],
+    window_groups: HashMap<u32, Vec<WindowTab>>,
+
     // --- Particle effects ---
     particle_program: glow::Program,
     particle_uniforms: ParticleUniforms,
@@ -725,6 +836,69 @@ pub(super) struct Compositor {
     wallpaper_img_h: u32,
     /// Per-monitor wallpaper overrides. Populated by set_monitors().
     monitor_wallpapers: Vec<MonitorWallpaper>,
+
+    // --- Phase 6.1: Colorblind correction ---
+    colorblind_mode: i32, // 0=none, 1=deuteranopia, 2=protanopia, 3=tritanopia
+
+    // --- Phase 6.2: Screen annotations ---
+    annotation_active: bool,
+    annotation_strokes: Vec<annotations::AnnotationStroke>,
+    annotation_color: [f32; 4],
+    annotation_line_width: f32,
+
+    // --- Phase 6.3: Zoom to fit ---
+    zoom_to_fit_window: Option<u32>,
+    zoom_to_fit_scale: f32,
+    zoom_to_fit_target: f32,
+
+    // --- Phase 7.1: Shader hot reload ---
+    shader_hot_reload: bool,
+    shader_dir: String,
+
+    // --- Phase 7.2: Extended debug HUD ---
+    debug_hud_extended: bool,
+
+    // --- Phase 7.3: Screen recording ---
+    recording_active: bool,
+    recording_fps: u32,
+    recording_process: Option<std::process::Child>,
+    recording_last_frame: Option<std::time::Instant>,
+    recording_pbo: [Option<glow::Buffer>; 2],
+    recording_pbo_index: usize,
+
+    // --- Phase 3.1: Motion trail (drag ghosting) ---
+    motion_trail_enabled: bool,
+    motion_trail_frames: u32,
+    motion_trail_opacity: f32,
+
+    // --- Phase 3.2: Genie minimize animation ---
+    genie_program: glow::Program,
+    genie_uniforms: GenieUniforms,
+    genie_minimize: bool,
+    genie_duration_ms: u64,
+    genie_active: Vec<GenieAnimation>,
+    dock_position: (f32, f32),
+
+    // --- Phase 3.3: Window open ripple ---
+    ripple_program: glow::Program,
+    ripple_uniforms: RippleUniforms,
+    ripple_on_open: bool,
+    ripple_duration: f32,
+    ripple_amplitude: f32,
+    ripple_active: Vec<RippleState>,
+
+    // --- Phase 3.4: Focus switch highlight ---
+    focus_highlight: bool,
+    focus_highlight_color: [f32; 4],
+    focus_highlight_duration_ms: u64,
+    focus_highlight_start: Option<(u32, std::time::Instant)>,
+    last_focused_window: Option<u32>,
+
+    // --- Phase 3.5: Wallpaper crossfade ---
+    wallpaper_crossfade: bool,
+    wallpaper_crossfade_duration_ms: u64,
+    old_wallpaper_texture: Option<glow::Texture>,
+    wallpaper_transition_start: Option<std::time::Instant>,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
@@ -750,6 +924,8 @@ impl Drop for Compositor {
             self.gl.delete_program(self.wobbly_program);
             self.gl.delete_program(self.overview_bg_program);
             self.gl.delete_program(self.particle_program);
+            self.gl.delete_program(self.genie_program);
+            self.gl.delete_program(self.ripple_program);
             self.gl.delete_buffer(self.particle_vbo);
             self.gl.delete_vertex_array(self.particle_vao);
             self.gl.delete_vertex_array(self.quad_vao);
@@ -781,6 +957,28 @@ impl Drop for Compositor {
                 if let Some(tex) = mw.texture {
                     self.gl.delete_texture(tex);
                 }
+            }
+            // Phase 3.2: Clean up genie animation textures
+            for ga in self.genie_active.drain(..) {
+                self.gl.delete_texture(ga.gl_texture);
+            }
+            // Phase 3.5: Clean up old wallpaper crossfade texture
+            if let Some(tex) = self.old_wallpaper_texture.take() {
+                self.gl.delete_texture(tex);
+            }
+            // Clean up recording PBOs
+            for pbo in &mut self.recording_pbo {
+                if let Some(buf) = pbo.take() {
+                    self.gl.delete_buffer(buf);
+                }
+            }
+        }
+        // Stop recording if active
+        if self.recording_active {
+            self.recording_active = false;
+            if let Some(mut child) = self.recording_process.take() {
+                drop(child.stdin.take());
+                let _ = child.wait();
             }
         }
         let wins: Vec<u32> = self.windows.keys().copied().collect();
@@ -1333,6 +1531,7 @@ impl Compositor {
                 magnifier_center: gl.get_uniform_location(postprocess_program, "u_magnifier_center"),
                 magnifier_radius: gl.get_uniform_location(postprocess_program, "u_magnifier_radius"),
                 magnifier_zoom: gl.get_uniform_location(postprocess_program, "u_magnifier_zoom"),
+                colorblind_mode: gl.get_uniform_location(postprocess_program, "u_colorblind_mode"),
             }
         };
 
@@ -1489,6 +1688,36 @@ impl Compositor {
             gl.bind_vertex_array(Some(vao));
             gl.bind_vertex_array(None);
             vao
+        };
+
+        // Phase 3.2: Compile genie minimize shader
+        let genie_program = unsafe { Self::create_program(&gl, shaders::GENIE_VERTEX_SHADER, shaders::FRAGMENT_SHADER)? };
+        let genie_uniforms = unsafe {
+            GenieUniforms {
+                projection: gl.get_uniform_location(genie_program, "u_projection"),
+                rect: gl.get_uniform_location(genie_program, "u_rect"),
+                texture: gl.get_uniform_location(genie_program, "u_texture"),
+                opacity: gl.get_uniform_location(genie_program, "u_opacity"),
+                radius: gl.get_uniform_location(genie_program, "u_radius"),
+                size: gl.get_uniform_location(genie_program, "u_size"),
+                dim: gl.get_uniform_location(genie_program, "u_dim"),
+                uv_rect: gl.get_uniform_location(genie_program, "u_uv_rect"),
+                progress: gl.get_uniform_location(genie_program, "u_progress"),
+                dock_pos: gl.get_uniform_location(genie_program, "u_dock_pos"),
+                grid_size: gl.get_uniform_location(genie_program, "u_grid_size"),
+            }
+        };
+
+        // Phase 3.3: Compile ripple post-process shader
+        let ripple_program = unsafe { Self::create_program(&gl, shaders::BLUR_DOWN_VERTEX, shaders::RIPPLE_FRAGMENT_SHADER)? };
+        let ripple_uniforms = unsafe {
+            RippleUniforms {
+                texture: gl.get_uniform_location(ripple_program, "u_texture"),
+                time: gl.get_uniform_location(ripple_program, "u_time"),
+                duration: gl.get_uniform_location(ripple_program, "u_duration"),
+                center: gl.get_uniform_location(ripple_program, "u_center"),
+                amplitude: gl.get_uniform_location(ripple_program, "u_amplitude"),
+            }
         };
 
         // 16. Setup GL state
@@ -1753,6 +1982,10 @@ impl Compositor {
                 fps: 0.0,
                 frame_times: Vec::with_capacity(120),
                 last_frame_time: std::time::Instant::now(),
+                draw_calls: 0,
+                texture_memory_bytes: 0,
+                blur_cache_hits: 0,
+                blur_cache_misses: 0,
             },
             // Feature 12: screenshot
             pending_screenshot: None,
@@ -1849,6 +2082,30 @@ impl Compositor {
             wobbly_stiffness: behavior.wobbly_stiffness,
             wobbly_damping: behavior.wobbly_damping,
             wobbly_grid_size: behavior.wobbly_grid_size,
+            // Phase 5: Expose/Mission Control
+            expose_active: false,
+            expose_enabled: behavior.expose_enabled,
+            expose_gap: behavior.expose_gap,
+            expose_entries: Vec::new(),
+            expose_opacity: 0.0,
+            expose_start: None,
+            // Phase 5: Smart Snap Preview
+            snap_preview_enabled: behavior.snap_preview,
+            snap_preview_color: behavior.snap_preview_color,
+            snap_animation_duration_ms: behavior.snap_animation_duration_ms,
+            snap_target: None,
+            // Phase 5: Window Peek
+            peek_active: false,
+            peek_enabled: behavior.peek_enabled,
+            peek_exclude: behavior.peek_exclude.clone(),
+            peek_opacity: 1.0,
+            peek_start: None,
+            // Phase 5: Window Tabs
+            window_tabs_enabled: behavior.window_tabs,
+            tab_bar_height: behavior.tab_bar_height,
+            tab_bar_color: behavior.tab_bar_color,
+            tab_active_color: behavior.tab_active_color,
+            window_groups: HashMap::new(),
             // Particle effects
             particle_program,
             particle_uniforms,
@@ -1865,6 +2122,63 @@ impl Compositor {
             wallpaper_img_w,
             wallpaper_img_h,
             monitor_wallpapers: Vec::new(),
+            // Phase 6.1: Colorblind correction
+            colorblind_mode: match behavior.colorblind_mode.as_str() {
+                "deuteranopia" => 1,
+                "protanopia" => 2,
+                "tritanopia" => 3,
+                _ => 0,
+            },
+            // Phase 6.2: Annotations
+            annotation_active: false,
+            annotation_strokes: Vec::new(),
+            annotation_color: behavior.annotation_color,
+            annotation_line_width: behavior.annotation_line_width,
+            // Phase 6.3: Zoom to fit
+            zoom_to_fit_window: None,
+            zoom_to_fit_scale: 1.0,
+            zoom_to_fit_target: 1.0,
+            // Phase 7.1: Shader hot reload
+            shader_hot_reload: behavior.shader_hot_reload,
+            shader_dir: behavior.shader_dir.clone(),
+            // Phase 7.2: Extended debug HUD
+            debug_hud_extended: behavior.debug_hud_extended,
+            // Phase 7.3: Screen recording
+            recording_active: false,
+            recording_fps: behavior.recording_fps,
+            recording_process: None,
+            recording_last_frame: None,
+            recording_pbo: [None, None],
+            recording_pbo_index: 0,
+            // Phase 3.1: Motion trail
+            motion_trail_enabled: behavior.motion_trail,
+            motion_trail_frames: behavior.motion_trail_frames,
+            motion_trail_opacity: behavior.motion_trail_opacity,
+            // Phase 3.2: Genie minimize
+            genie_program,
+            genie_uniforms,
+            genie_minimize: behavior.genie_minimize,
+            genie_duration_ms: behavior.genie_duration_ms,
+            genie_active: Vec::new(),
+            dock_position: (0.5 * screen_w as f32, screen_h as f32),
+            // Phase 3.3: Ripple on open
+            ripple_program,
+            ripple_uniforms,
+            ripple_on_open: behavior.ripple_on_open,
+            ripple_duration: behavior.ripple_duration,
+            ripple_amplitude: behavior.ripple_amplitude,
+            ripple_active: Vec::new(),
+            // Phase 3.4: Focus highlight
+            focus_highlight: behavior.focus_highlight,
+            focus_highlight_color: behavior.focus_highlight_color,
+            focus_highlight_duration_ms: behavior.focus_highlight_duration_ms,
+            focus_highlight_start: None,
+            last_focused_window: None,
+            // Phase 3.5: Wallpaper crossfade
+            wallpaper_crossfade: behavior.wallpaper_crossfade,
+            wallpaper_crossfade_duration_ms: behavior.wallpaper_crossfade_duration_ms,
+            old_wallpaper_texture: None,
+            wallpaper_transition_start: None,
         })
     }
 
@@ -2030,6 +2344,15 @@ impl Compositor {
     /// Called when monitors are added/removed/changed.
     /// `monitors`: list of (index, x, y, w, h) for each monitor.
     pub(super) fn set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32)]) {
+        // Phase 3.5: Save old wallpaper texture for crossfade
+        if self.wallpaper_crossfade && self.wallpaper_texture.is_some() {
+            if let Some(old) = self.old_wallpaper_texture.take() {
+                unsafe { self.gl.delete_texture(old); }
+            }
+            self.old_wallpaper_texture = self.wallpaper_texture;
+            self.wallpaper_transition_start = Some(std::time::Instant::now());
+        }
+
         // Clean up old per-monitor textures
         unsafe {
             for mw in self.monitor_wallpapers.drain(..) {
@@ -2539,12 +2862,36 @@ impl Compositor {
         // Tick wobbly spring physics
         let wobbly_active = self.tick_wobbly();
 
+        // Tick Phase 5 animations
+        let expose_animating = self.tick_expose();
+        let snap_animating = self.tick_snap_preview();
+        let peek_animating = self.tick_peek();
+
+        // Tick Phase 3 animations
+        let genie_active = self.tick_genie();
+        let ripples_active = self.tick_ripples();
+        let focus_highlight_active = self.tick_focus_highlight();
+        let wallpaper_crossfade_active = self.tick_wallpaper_crossfade();
+
+        // Phase 3.4: Detect focus change
+        if self.focus_highlight {
+            if let Some(fw) = focused {
+                if self.last_focused_window != Some(fw) {
+                    self.focus_highlight_start = Some((fw, std::time::Instant::now()));
+                }
+            }
+            self.last_focused_window = focused;
+        }
+
         // Skip-unchanged-frame: if scene hasn't changed and no textures are
         // dirty, we can skip the entire GL render (unless screenshot pending or HUD active).
         let has_dirty = scene.iter().any(|&(win, _, _, _, _)| {
             self.windows.get(&win).map_or(false, |wt| wt.dirty || wt.needs_pixmap_refresh)
         });
-        let force_render = self.pending_screenshot.is_some() || self.debug_hud || self.transition_active() || self.overview_active;
+        let force_render = self.pending_screenshot.is_some() || self.debug_hud || self.transition_active() || self.overview_active
+            || self.expose_active || expose_animating || snap_animating || peek_animating
+            || genie_active || ripples_active || focus_highlight_active || wallpaper_crossfade_active
+            || self.recording_active || self.annotation_active;
         let hash = Self::scene_hash(scene, focused);
         let scene_changed = hash != self.last_scene_hash;
         if !has_dirty && !fades_active && !force_render && !scene_changed {
@@ -2778,6 +3125,27 @@ impl Compositor {
                         self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                     }
 
+                    // Phase 3.5: Draw old wallpaper for crossfade
+                    if let (Some(old_tex), Some(start)) = (self.old_wallpaper_texture, self.wallpaper_transition_start) {
+                        let elapsed = start.elapsed().as_millis() as f32;
+                        let duration = self.wallpaper_crossfade_duration_ms as f32;
+                        let old_opacity = (1.0 - elapsed / duration).max(0.0);
+                        if old_opacity > 0.0 {
+                            let area = (0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
+                            let (rx, ry, rw, rh) = Self::compute_wallpaper_rect(
+                                self.wallpaper_mode, area,
+                                self.wallpaper_img_w, self.wallpaper_img_h,
+                            );
+                            self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), old_opacity);
+                            self.gl.uniform_4_f32(self.win_uniforms.rect.as_ref(), rx, ry, rw, rh);
+                            self.gl.uniform_2_f32(self.win_uniforms.size.as_ref(), rw, rh);
+                            self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
+                            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                            // Restore opacity for subsequent draws
+                            self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
+                        }
+                    }
+
                     self.gl.bind_texture(glow::TEXTURE_2D, None);
                     self.gl.bind_vertex_array(None);
                     self.gl.use_program(None);
@@ -2923,6 +3291,9 @@ impl Compositor {
                     let fade = wt.fade_opacity;
                     if fade <= 0.0 { continue; }
 
+                    // Phase 5.3: Peek opacity multiplier
+                    let peek_mul = self.peek_opacity_for(&wt.class_name);
+
                     // Feature 3: Per-window corner radius
                     let radius = wt.corner_radius_override.unwrap_or(
                         if Self::class_matches_exclude(&wt.class_name, &self.rounded_corners_exclude) {
@@ -2962,8 +3333,22 @@ impl Compositor {
                         }
                     };
 
-                    // Feature 4: Apply per-window scale
-                    let scale = wt.scale * wt.anim_scale;
+                    // Phase 5.3: Apply peek opacity
+                    let opacity = if peek_mul < 1.0 && opacity > 0.0 {
+                        if opacity < 0.0 { opacity * peek_mul } else { (opacity * peek_mul).clamp(0.0, 1.0) }
+                    } else {
+                        opacity
+                    };
+                    // Feature 4: Apply per-window scale + Phase 3.4 focus bounce
+                    let focus_bounce = if self.focus_highlight && focused == Some(win) {
+                        if let Some((hw, start)) = self.focus_highlight_start {
+                            if hw == win && start.elapsed().as_millis() < self.focus_highlight_duration_ms as u128 {
+                                let t = start.elapsed().as_millis() as f32 / self.focus_highlight_duration_ms as f32;
+                                1.0 + 0.02 * (1.0 - t) * ((t * std::f32::consts::PI).sin())
+                            } else { 1.0 }
+                        } else { 1.0 }
+                    } else { 1.0 };
+                    let scale = wt.scale * wt.anim_scale * focus_bounce;
                     let (draw_x, draw_y, draw_w, draw_h) = if (scale - 1.0).abs() > f32::EPSILON {
                         let cw = w as f32 * scale;
                         let ch = h as f32 * scale;
@@ -3082,6 +3467,21 @@ impl Compositor {
                         }
                     }
 
+                    // Phase 3.1: Motion trail ghost copies at historical positions
+                    if self.motion_trail_enabled && !wt.motion_trail.is_empty() {
+                        let trail_len = wt.motion_trail.len();
+                        for (i, &(tx, ty)) in wt.motion_trail.iter().enumerate() {
+                            let trail_opacity = self.motion_trail_opacity * (i as f32 + 1.0) / trail_len as f32;
+                            self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), trail_opacity);
+                            self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 0.7);
+                            self.gl.uniform_4_f32(self.win_uniforms.rect.as_ref(), tx as f32, ty as f32, draw_w, draw_h);
+                            self.gl.uniform_2_f32(self.win_uniforms.size.as_ref(), draw_w, draw_h);
+                            self.gl.active_texture(glow::TEXTURE0);
+                            self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
+                            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                        }
+                    }
+
                     self.gl.active_texture(glow::TEXTURE0);
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
 
@@ -3193,6 +3593,46 @@ impl Compositor {
             self.gl.use_program(None);
         }
 
+        // === Pass 2b: Genie minimize animations ===
+        if !self.genie_active.is_empty() {
+            let genie_duration_ms = self.genie_duration_ms;
+            unsafe {
+                self.gl.use_program(Some(self.genie_program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.genie_uniforms.projection.as_ref(), false, &proj,
+                );
+                self.gl.uniform_1_i32(self.genie_uniforms.texture.as_ref(), 0);
+                self.gl.uniform_4_f32(self.genie_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
+                self.gl.uniform_1_f32(self.genie_uniforms.radius.as_ref(), 0.0);
+                let grid = 12i32;
+                self.gl.uniform_1_i32(self.genie_uniforms.grid_size.as_ref(), grid);
+                self.gl.bind_vertex_array(Some(self.quad_vao));
+
+                let dock = self.dock_position;
+                for ga in &self.genie_active {
+                    let elapsed = ga.start.elapsed().as_millis() as f32;
+                    let progress = (elapsed / genie_duration_ms as f32).min(1.0);
+                    let opacity = 1.0 - progress;
+                    self.gl.uniform_4_f32(
+                        self.genie_uniforms.rect.as_ref(), ga.x, ga.y, ga.w, ga.h,
+                    );
+                    self.gl.uniform_2_f32(
+                        self.genie_uniforms.size.as_ref(), ga.w, ga.h,
+                    );
+                    self.gl.uniform_1_f32(self.genie_uniforms.progress.as_ref(), progress);
+                    self.gl.uniform_2_f32(self.genie_uniforms.dock_pos.as_ref(), dock.0, dock.1);
+                    self.gl.uniform_1_f32(self.genie_uniforms.opacity.as_ref(), if ga.has_rgba { -opacity } else { opacity });
+                    self.gl.uniform_1_f32(self.genie_uniforms.dim.as_ref(), 1.0);
+                    self.gl.active_texture(glow::TEXTURE0);
+                    self.gl.bind_texture(glow::TEXTURE_2D, Some(ga.gl_texture));
+                    self.gl.draw_arrays(glow::TRIANGLES, 0, grid * grid * 6);
+                }
+
+                self.gl.bind_vertex_array(None);
+                self.gl.use_program(None);
+            }
+        }
+
         // === Pass 3: Window borders (feature 1) ===
         if self.border_enabled && self.border_width > 0.0 {
             unsafe {
@@ -3212,7 +3652,19 @@ impl Compositor {
                     if fade <= 0.0 { continue; }
 
                     let is_focused = focused == Some(win);
-                    let color = if wt.is_urgent && self.attention_animation {
+
+                    // Phase 3.4: Focus highlight animation
+                    let focus_highlight_active_for_win = if let Some((hw, start)) = self.focus_highlight_start {
+                        hw == win && start.elapsed().as_millis() < self.focus_highlight_duration_ms as u128
+                    } else { false };
+
+                    let color = if focus_highlight_active_for_win {
+                        let elapsed_ms = self.focus_highlight_start.unwrap().1.elapsed().as_millis() as f32;
+                        let dur = self.focus_highlight_duration_ms as f32;
+                        let pulse = ((elapsed_ms / dur * std::f32::consts::PI).sin()).abs();
+                        let [r, g, b, a] = self.focus_highlight_color;
+                        [r, g, b, a * pulse]
+                    } else if wt.is_urgent && self.attention_animation {
                         let elapsed = self.compositor_start_time.elapsed().as_secs_f32();
                         let pulse = (elapsed * 4.0).sin() * 0.5 + 0.5;
                         let [r, g, b, a] = self.attention_color;
@@ -3225,7 +3677,9 @@ impl Compositor {
                         self.border_color_unfocused
                     };
 
-                    let bw = if wt.is_urgent && self.attention_animation {
+                    let bw = if focus_highlight_active_for_win {
+                        (self.border_width + 2.0).max(3.0)
+                    } else if wt.is_urgent && self.attention_animation {
                         self.border_width.max(2.0)
                     } else if wt.is_pip {
                         self.pip_border_width
@@ -3241,6 +3695,15 @@ impl Compositor {
                             self.corner_radius
                         }
                     );
+
+                    // Phase 3.4: Focus highlight scale bounce (1.02x)
+                    let highlight_scale = if focus_highlight_active_for_win {
+                        let elapsed_ms = self.focus_highlight_start.unwrap().1.elapsed().as_millis() as f32;
+                        let dur = self.focus_highlight_duration_ms as f32;
+                        let t = (elapsed_ms / dur).min(1.0);
+                        1.0 + 0.02 * (1.0 - t) * ((t * std::f32::consts::PI).sin())
+                    } else { 1.0 };
+                    let _ = highlight_scale; // used below in scale computation
 
                     // Feature 4: Apply scale
                     let scale = wt.scale * wt.anim_scale;
@@ -3355,6 +3818,20 @@ impl Compositor {
             }
         }
 
+        // === Pass 3c: Window tab bars ===
+        if self.window_tabs_enabled && !self.window_groups.is_empty() {
+            for &(win, x, y, w, _h) in visible_scene {
+                if let Some((_gid, tabs)) = self.find_window_group(win) {
+                    let tabs_owned: Vec<WindowTab> = tabs.iter().map(|t| WindowTab {
+                        x11_win: t.x11_win,
+                        title: t.title.clone(),
+                        is_active: t.is_active,
+                    }).collect();
+                    self.render_tab_bar(&proj, x as f32, y as f32, w as f32, &tabs_owned);
+                }
+            }
+        }
+
         // Disable scissor (feature 6)
         if use_scissor {
             unsafe { self.gl.disable(glow::SCISSOR_TEST); }
@@ -3397,6 +3874,9 @@ impl Compositor {
                     self.gl.uniform_1_f32(self.magnifier_uniforms.magnifier_radius.as_ref(), self.magnifier_radius / self.screen_w as f32);
                     self.gl.uniform_1_f32(self.magnifier_uniforms.magnifier_zoom.as_ref(), self.magnifier_zoom);
                 }
+
+                // Colorblind correction uniform
+                self.gl.uniform_1_i32(self.magnifier_uniforms.colorblind_mode.as_ref(), self.colorblind_mode);
 
                 self.gl.active_texture(glow::TEXTURE0);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(pp_tex));
@@ -3458,10 +3938,22 @@ impl Compositor {
             if self.frame_stats.frame_count % 60 == 0 {
                 let avg_dt = if self.frame_stats.frame_times.is_empty() { 0.0 }
                     else { self.frame_stats.frame_times.iter().sum::<f32>() / self.frame_stats.frame_times.len() as f32 };
-                log::info!(
-                    "[HUD] FPS: {:.1}, frame_time: {:.2}ms, windows: {}",
-                    self.frame_stats.fps, avg_dt * 1000.0, self.windows.len()
-                );
+                if self.debug_hud_extended {
+                    // Phase 7.2: Extended debug HUD stats
+                    let tex_mem_kb = self.frame_stats.texture_memory_bytes / 1024;
+                    log::info!(
+                        "[HUD] FPS: {:.1}, frame_time: {:.2}ms, windows: {}, draw_calls: {}, tex_mem: {}KB, blur_hits: {}, blur_misses: {}",
+                        self.frame_stats.fps, avg_dt * 1000.0, self.windows.len(),
+                        self.frame_stats.draw_calls, tex_mem_kb,
+                        self.frame_stats.blur_cache_hits, self.frame_stats.blur_cache_misses,
+                    );
+                    self.frame_stats.draw_calls = 0;
+                } else {
+                    log::info!(
+                        "[HUD] FPS: {:.1}, frame_time: {:.2}ms, windows: {}",
+                        self.frame_stats.fps, avg_dt * 1000.0, self.windows.len()
+                    );
+                }
             }
         }
 
@@ -3504,6 +3996,19 @@ impl Compositor {
         if self.overview_active {
             self.tick_overview_prism();
             self.render_overview(&proj, focused);
+        }
+
+        // === Pass 5f: Expose/Mission Control overlay ===
+        if !self.expose_entries.is_empty() {
+            self.render_expose(&proj);
+        }
+
+        // === Pass 5g: Snap preview ===
+        self.render_snap_preview(&proj);
+
+        // === Pass 5e: Annotations overlay ===
+        if self.annotation_active && !self.annotation_strokes.is_empty() {
+            self.render_annotations(&proj);
         }
 
         // === Feature 12: Screenshot capture (after all rendering, before swap) ===
@@ -3765,8 +4270,30 @@ impl Compositor {
             x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable);
         }
 
+        // === Phase 7.3: Recording frame capture ===
+        if self.recording_active {
+            self.capture_recording_frame();
+        }
+
         // Schedule re-render if fades or transition are still in progress
-        if fades_active || transition_still_active || wobbly_active || !self.particle_systems.is_empty() || self.overview_active {
+        if fades_active || transition_still_active || wobbly_active || !self.particle_systems.is_empty() || self.overview_active
+            || genie_active || ripples_active || focus_highlight_active || wallpaper_crossfade_active
+            || expose_animating || snap_animating || peek_animating || self.expose_active
+        {
+            self.needs_render = true;
+        }
+
+        // Schedule re-render if recording is active (need continuous frames)
+        if self.recording_active {
+            self.needs_render = true;
+        }
+
+        // Animate zoom-to-fit scale
+        if (self.zoom_to_fit_scale - self.zoom_to_fit_target).abs() > 0.001 {
+            self.zoom_to_fit_scale += (self.zoom_to_fit_target - self.zoom_to_fit_scale) * 0.15;
+            if (self.zoom_to_fit_scale - self.zoom_to_fit_target).abs() < 0.001 {
+                self.zoom_to_fit_scale = self.zoom_to_fit_target;
+            }
             self.needs_render = true;
         }
 
@@ -3876,6 +4403,15 @@ impl Compositor {
     }
 
     pub(super) fn notify_window_move_delta(&mut self, x11_win: u32, dx: f32, dy: f32) {
+        // Phase 3.1: Record position for motion trail
+        if self.motion_trail_enabled {
+            if let Some(wt) = self.windows.get(&x11_win) {
+                let cur_x = wt.x;
+                let cur_y = wt.y;
+                self.update_motion_trail(x11_win, cur_x, cur_y);
+            }
+        }
+
         if self.wobbly_windows {
             if let Some(wt) = self.windows.get_mut(&x11_win) {
                 if let Some(ref mut w) = wt.wobbly {
@@ -3902,6 +4438,9 @@ impl Compositor {
     }
 
     pub(super) fn notify_window_move_end(&mut self, x11_win: u32) {
+        // Phase 3.1: Clear motion trail
+        self.clear_motion_trail(x11_win);
+
         // Don't clear wobbly state - let it settle naturally
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             if let Some(ref mut w) = wt.wobbly {
@@ -3918,10 +4457,207 @@ impl Compositor {
         self.windows.len()
     }
 
+    /// Set dock/taskbar position for genie minimize target.
+    pub(super) fn set_dock_position(&mut self, x: f32, y: f32) {
+        self.dock_position = (x, y);
+    }
+
     #[allow(dead_code)]
     pub(super) fn has_window(&self, x11_win: u32) -> bool {
         self.windows.contains_key(&x11_win)
     }
+
+    // =====================================================================
+    // Phase 6: Accessibility & Utility
+    // =====================================================================
+
+    pub(super) fn set_colorblind_mode(&mut self, mode: &str) {
+        let m = match mode {
+            "deuteranopia" => 1,
+            "protanopia" => 2,
+            "tritanopia" => 3,
+            _ => 0,
+        };
+        if self.colorblind_mode != m {
+            self.colorblind_mode = m;
+            self.ensure_postprocess_fbo();
+            self.needs_render = true;
+        }
+    }
+
+    pub(super) fn zoom_to_fit(&mut self, window: Option<u32>) {
+        if let Some(win) = window {
+            if self.zoom_to_fit_window == Some(win) {
+                self.zoom_to_fit_window = None;
+                self.zoom_to_fit_target = 1.0;
+            } else {
+                self.zoom_to_fit_window = Some(win);
+                if let Some(wt) = self.windows.get(&win) {
+                    if wt.w > 0 && wt.h > 0 {
+                        let sx = self.screen_w as f32 / wt.w as f32;
+                        let sy = self.screen_h as f32 / wt.h as f32;
+                        self.zoom_to_fit_target = sx.min(sy);
+                    }
+                }
+            }
+            self.needs_render = true;
+        } else {
+            self.zoom_to_fit_window = None;
+            self.zoom_to_fit_target = 1.0;
+            self.needs_render = true;
+        }
+    }
+
+    // =====================================================================
+    // Phase 7: Diagnostics
+    // =====================================================================
+
+    pub(super) fn reload_shader_from_file(&mut self, name: &str, path: &std::path::Path) -> Result<(), String> {
+        let fs_src = std::fs::read_to_string(path)
+            .map_err(|e| format!("read shader file: {e}"))?;
+        let vs_src = shaders::VERTEX_SHADER;
+        match unsafe { Self::create_program(&self.gl, vs_src, &fs_src) } {
+            Ok(new_program) => {
+                match name {
+                    "window" => { unsafe { self.gl.delete_program(self.program); } self.program = new_program; }
+                    "shadow" => { unsafe { self.gl.delete_program(self.shadow_program); } self.shadow_program = new_program; }
+                    _ => { unsafe { self.gl.delete_program(new_program); } return Err(format!("unknown shader: {name}")); }
+                }
+                self.needs_render = true;
+                Ok(())
+            }
+            Err(e) => {
+                log::warn!("compositor: shader reload failed for {name}: {e}");
+                Err(e)
+            }
+        }
+    }
+
+    pub(super) fn start_recording(&mut self, output_path: &str) {
+        if self.recording_active { return; }
+        let w = self.screen_w;
+        let h = self.screen_h;
+        let fps = self.recording_fps;
+
+        let child = match std::process::Command::new("ffmpeg")
+            .args([
+                "-f", "rawvideo",
+                "-pix_fmt", "rgba",
+                "-s", &format!("{w}x{h}"),
+                "-r", &fps.to_string(),
+                "-i", "pipe:0",
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-y", output_path,
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(e) => {
+                log::warn!("compositor: failed to start ffmpeg: {e}");
+                return;
+            }
+        };
+
+        unsafe {
+            for pbo in &mut self.recording_pbo {
+                if let Ok(buf) = self.gl.create_buffer() {
+                    self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(buf));
+                    self.gl.buffer_data_size(
+                        glow::PIXEL_PACK_BUFFER,
+                        (w * h * 4) as i32,
+                        glow::STREAM_READ,
+                    );
+                    self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                    *pbo = Some(buf);
+                }
+            }
+        }
+
+        self.recording_process = Some(child);
+        self.recording_active = true;
+        self.recording_last_frame = None;
+        log::info!("compositor: recording started to {output_path}");
+    }
+
+    pub(super) fn stop_recording(&mut self) {
+        if !self.recording_active { return; }
+        self.recording_active = false;
+
+        unsafe {
+            for pbo in &mut self.recording_pbo {
+                if let Some(buf) = pbo.take() {
+                    self.gl.delete_buffer(buf);
+                }
+            }
+        }
+
+        if let Some(mut child) = self.recording_process.take() {
+            drop(child.stdin.take());
+            let _ = child.wait();
+        }
+        log::info!("compositor: recording stopped");
+    }
+
+    fn capture_recording_frame(&mut self) {
+        if !self.recording_active { return; }
+
+        let now = std::time::Instant::now();
+        let min_interval = std::time::Duration::from_secs_f32(1.0 / self.recording_fps as f32);
+        if let Some(last) = self.recording_last_frame {
+            if now.duration_since(last) < min_interval {
+                return;
+            }
+        }
+        self.recording_last_frame = Some(now);
+
+        let w = self.screen_w;
+        let h = self.screen_h;
+        let buf_size = (w * h * 4) as usize;
+
+        let pbo_idx = self.recording_pbo_index;
+        self.recording_pbo_index = (self.recording_pbo_index + 1) % 2;
+
+        if let Some(pbo) = self.recording_pbo[pbo_idx] {
+            unsafe {
+                self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
+                self.gl.read_pixels(
+                    0, 0, w as i32, h as i32,
+                    glow::RGBA, glow::UNSIGNED_BYTE,
+                    glow::PixelPackData::BufferOffset(0),
+                );
+                self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+            }
+
+            let read_idx = self.recording_pbo_index;
+            if let Some(read_pbo) = self.recording_pbo[read_idx] {
+                unsafe {
+                    self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(read_pbo));
+                    let ptr = self.gl.map_buffer_range(
+                        glow::PIXEL_PACK_BUFFER,
+                        0,
+                        buf_size as i32,
+                        glow::MAP_READ_BIT,
+                    );
+                    if !ptr.is_null() {
+                        let pixels = std::slice::from_raw_parts(ptr as *const u8, buf_size);
+                        if let Some(ref mut child) = self.recording_process {
+                            if let Some(ref mut stdin) = child.stdin {
+                                use std::io::Write;
+                                let _ = stdin.write_all(pixels);
+                            }
+                        }
+                        self.gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
+                    }
+                    self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                }
+            }
+        }
+    }
+
 }
 
 /// X error handler that logs errors instead of calling exit().

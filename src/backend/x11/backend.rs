@@ -631,6 +631,60 @@ impl Backend for X11Backend {
         }
     }
 
+    fn compositor_set_dock_position(&mut self, x: f32, y: f32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_dock_position(x, y);
+        }
+    }
+
+    fn compositor_set_colorblind_mode(&mut self, mode: &str) {
+        if let Some(c) = self.compositor.as_mut() { c.set_colorblind_mode(mode); }
+    }
+
+    fn compositor_set_annotation_mode(&mut self, active: bool) {
+        if let Some(c) = self.compositor.as_mut() { c.set_annotation_mode(active); }
+    }
+
+    fn compositor_annotation_add_point(&mut self, x: f32, y: f32) {
+        if let Some(c) = self.compositor.as_mut() { c.annotation_add_point(x, y); }
+    }
+
+    fn compositor_zoom_to_fit(&mut self, window: Option<u32>) {
+        if let Some(c) = self.compositor.as_mut() { c.zoom_to_fit(window); }
+    }
+
+    fn compositor_start_recording(&mut self, path: &str) {
+        if let Some(c) = self.compositor.as_mut() { c.start_recording(path); }
+    }
+
+    fn compositor_stop_recording(&mut self) {
+        if let Some(c) = self.compositor.as_mut() { c.stop_recording(); }
+    }
+
+    fn compositor_set_expose_mode(&mut self, active: bool, windows: Vec<(u32, i32, i32, u32, u32)>) {
+        if let Some(c) = self.compositor.as_mut() { c.set_expose_mode(active, windows); }
+    }
+
+    fn compositor_set_snap_preview(&mut self, preview: Option<(f32, f32, f32, f32)>) {
+        if let Some(c) = self.compositor.as_mut() { c.set_snap_preview(preview); }
+    }
+
+    fn compositor_set_peek_mode(&mut self, active: bool) {
+        if let Some(c) = self.compositor.as_mut() { c.set_peek_mode(active); }
+    }
+
+    fn compositor_set_window_groups(&mut self, groups: Vec<(u32, Vec<(u32, String, bool)>)>) {
+        if let Some(c) = self.compositor.as_mut() { c.set_window_groups(groups); }
+    }
+
+    fn compositor_request_live_thumbnail(&mut self, window: u32, max_size: u32) -> Option<(Vec<u8>, u32, u32)> {
+        self.compositor.as_ref()?.request_live_thumbnail(window, max_size)
+    }
+
+    fn compositor_expose_click(&mut self, x: f32, y: f32) -> Option<u32> {
+        self.compositor.as_mut()?.expose_click(x, y)
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

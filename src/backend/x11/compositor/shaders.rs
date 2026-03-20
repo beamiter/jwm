@@ -412,6 +412,8 @@ uniform int   u_magnifier_enabled;
 uniform vec2  u_magnifier_center;  // normalized [0,1] screen coords
 uniform float u_magnifier_radius;  // in normalized coords
 uniform float u_magnifier_zoom;    // zoom factor (e.g. 2.0)
+// Colorblind correction uniform
+uniform int   u_colorblind_mode;   // 0=none, 1=deuteranopia, 2=protanopia, 3=tritanopia
 in vec2 v_uv;
 out vec4 frag_color;
 
@@ -429,6 +431,41 @@ void main() {
     }
 
     vec4 c = texture(u_texture, sample_uv);
+
+    // Colorblind correction (Daltonization) — applied before other color adjustments
+    if (u_colorblind_mode > 0) {
+        // Convert to LMS (Hunt-Pointer-Estevez matrix)
+        mat3 rgb_to_lms = mat3(
+            0.31399022, 0.15537241, 0.01775239,
+            0.63951294, 0.75789446, 0.10944209,
+            0.04649755, 0.08670142, 0.87256922
+        );
+        mat3 lms_to_rgb = mat3(
+            5.47221206, -1.1252419, 0.02980165,
+            -4.6419601, 2.29317094, -0.19318073,
+            0.16963708, -0.1678952, 1.16364789
+        );
+
+        vec3 lms = rgb_to_lms * c.rgb;
+        vec3 sim_lms = lms;
+
+        if (u_colorblind_mode == 1) { // Deuteranopia
+            sim_lms.y = 0.494207 * lms.x + 1.24827 * lms.z;
+        } else if (u_colorblind_mode == 2) { // Protanopia
+            sim_lms.x = 2.02344 * lms.y - 2.52581 * lms.z;
+        } else if (u_colorblind_mode == 3) { // Tritanopia
+            sim_lms.z = -0.395913 * lms.x + 0.801109 * lms.y;
+        }
+
+        vec3 sim_rgb = lms_to_rgb * sim_lms;
+        vec3 error = c.rgb - sim_rgb;
+
+        // Redistribute error to remaining channels
+        c.r += error.r * 0.0;
+        c.g += error.r * 0.7 + error.g * 1.0;
+        c.b += error.r * 0.7 + error.b * 1.0;
+        c.rgb = clamp(c.rgb, 0.0, 1.0);
+    }
 
     // Invert
     if (u_invert == 1) {
@@ -617,5 +654,95 @@ void main() {
     // only need enough opacity to give the 3D prism a clean dark backdrop.
     float alpha = (0.78 + vignette * 0.12) * u_opacity;
     frag_color = vec4(color, alpha);
+}
+"#;
+
+// ---------------------------------------------------------------------------
+// Phase 3.2: Genie/Magic Lamp minimize vertex shader
+// ---------------------------------------------------------------------------
+
+pub const GENIE_VERTEX_SHADER: &str = r#"#version 330 core
+uniform vec4 u_rect;       // x, y, w, h in pixels
+uniform mat4 u_projection;
+uniform float u_progress;  // 0.0 = normal, 1.0 = fully minimized
+uniform vec2 u_dock_pos;   // dock target position in pixels
+uniform int u_grid_size;   // grid subdivisions
+
+out vec2 v_uv;
+
+void main() {
+    int grid = u_grid_size;
+    int quad_id = gl_VertexID / 6;
+    int vert_in_quad = gl_VertexID % 6;
+    int col = quad_id % grid;
+    int row = quad_id / grid;
+
+    int dx, dy;
+    if (vert_in_quad == 0)      { dx = 0; dy = 0; }
+    else if (vert_in_quad == 1) { dx = 1; dy = 0; }
+    else if (vert_in_quad == 2) { dx = 0; dy = 1; }
+    else if (vert_in_quad == 3) { dx = 0; dy = 1; }
+    else if (vert_in_quad == 4) { dx = 1; dy = 0; }
+    else                        { dx = 1; dy = 1; }
+
+    float fx = float(col + dx) / float(grid);
+    float fy = float(row + dy) / float(grid);
+    v_uv = vec2(fx, fy);
+
+    // Bezier-like genie deformation
+    float t = u_progress;
+
+    // Bottom rows converge to dock position, top rows follow more slowly
+    float row_t = fy; // 0 = top, 1 = bottom
+
+    // Horizontal squeeze: width narrows toward dock
+    float center_x = u_rect.x + u_rect.z * 0.5;
+    float target_x = mix(center_x, u_dock_pos.x, t * row_t);
+    float half_w = u_rect.z * 0.5 * mix(1.0, 0.02, t * row_t);
+    float px = target_x + (fx - 0.5) * half_w * 2.0;
+
+    // Vertical: bottom converges to dock_y, top stays then follows
+    float py = mix(u_rect.y + fy * u_rect.w, u_dock_pos.y, t * row_t * row_t);
+
+    gl_Position = u_projection * vec4(px, py, 0.0, 1.0);
+}
+"#;
+
+// Genie uses the same fragment shader as windows (FRAGMENT_SHADER)
+
+// ---------------------------------------------------------------------------
+// Phase 3.3: Window open ripple fragment shader
+// ---------------------------------------------------------------------------
+
+pub const RIPPLE_FRAGMENT_SHADER: &str = r#"#version 330 core
+uniform sampler2D u_texture;
+uniform float u_time;       // seconds since ripple started
+uniform float u_duration;   // total duration
+uniform vec2 u_center;      // ripple center in UV space
+uniform float u_amplitude;  // UV distortion amplitude
+in vec2 v_uv;
+out vec4 frag_color;
+
+void main() {
+    float progress = u_time / u_duration;
+    if (progress >= 1.0) {
+        frag_color = texture(u_texture, v_uv);
+        return;
+    }
+
+    vec2 diff = v_uv - u_center;
+    float dist = length(diff);
+
+    // Ripple wave
+    float wave_speed = 3.0;
+    float wave_freq = 15.0;
+    float wave = sin(dist * wave_freq - u_time * wave_speed * 6.28);
+
+    // Fade out over distance and time
+    float fade = (1.0 - progress) * exp(-dist * 4.0);
+    float displacement = wave * u_amplitude * fade;
+
+    vec2 uv = v_uv + normalize(diff + 0.001) * displacement;
+    frag_color = texture(u_texture, uv);
 }
 "#;

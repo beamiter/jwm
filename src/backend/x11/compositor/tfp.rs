@@ -4,7 +4,7 @@ use x11rb::protocol::composite::ConnectionExt as CompositeExt;
 use x11rb::protocol::damage::{self, ConnectionExt as DamageExt};
 use x11rb::protocol::xproto::ConnectionExt as XProtoExt;
 use super::Compositor;
-use super::{WindowTexture, GLX_TEXTURE_TARGET_EXT, GLX_TEXTURE_2D_EXT, GLX_TEXTURE_FORMAT_EXT, GLX_TEXTURE_FORMAT_RGBA_EXT, GLX_TEXTURE_FORMAT_RGB_EXT, GLX_FRONT_LEFT_EXT};
+use super::{WindowTexture, RippleState, GLX_TEXTURE_TARGET_EXT, GLX_TEXTURE_2D_EXT, GLX_TEXTURE_FORMAT_EXT, GLX_TEXTURE_FORMAT_RGBA_EXT, GLX_TEXTURE_FORMAT_RGB_EXT, GLX_FRONT_LEFT_EXT};
 
 impl Compositor {
     // =====================================================================
@@ -243,8 +243,20 @@ impl Compositor {
                 is_frosted: false,
                 wobbly: None,
                 pending_fence: None,
+                motion_trail: std::collections::VecDeque::new(),
             },
         );
+
+        // Phase 3.3: Trigger ripple effect on window open
+        if self.ripple_on_open {
+            let cx = (x as f32 + w as f32 * 0.5) / self.screen_w as f32;
+            let cy = (y as f32 + h as f32 * 0.5) / self.screen_h as f32;
+            self.ripple_active.push(RippleState {
+                center: (cx, cy),
+                start: std::time::Instant::now(),
+            });
+        }
+
         self.needs_render = true;
 
         log::debug!(
@@ -315,6 +327,17 @@ impl Compositor {
         if self.particle_effects {
             if let Some(wt) = self.windows.get(&x11_win) {
                 self.spawn_particles_for_window(wt.x, wt.y, wt.w, wt.h);
+            }
+        }
+
+        // Phase 3.2: Start genie minimize animation
+        if self.genie_minimize {
+            if let Some(wt) = self.windows.get(&x11_win) {
+                self.start_genie_animation(
+                    x11_win,
+                    wt.x as f32, wt.y as f32,
+                    wt.w as f32, wt.h as f32,
+                );
             }
         }
 

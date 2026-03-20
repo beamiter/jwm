@@ -298,6 +298,110 @@ pub struct BehaviorConfig {
     #[serde(default = "default_particle_gravity")]
     pub particle_gravity: f32,
 
+    // --- Expose/Mission Control ---
+    #[serde(default = "default_true")]
+    pub expose_enabled: bool,
+    #[serde(default = "default_expose_gap")]
+    pub expose_gap: f32,
+
+    // --- Smart Snap Preview ---
+    #[serde(default = "default_true")]
+    pub snap_preview: bool,
+    #[serde(default = "default_snap_preview_color")]
+    pub snap_preview_color: [f32; 4],
+    #[serde(default = "default_snap_animation_duration_ms")]
+    pub snap_animation_duration_ms: u64,
+
+    // --- Window Peek (Boss Key) ---
+    #[serde(default = "default_true")]
+    pub peek_enabled: bool,
+    #[serde(default)]
+    pub peek_exclude: Vec<String>,
+
+    // --- Window Tabs ---
+    #[serde(default)]
+    pub window_tabs: bool,
+    #[serde(default = "default_tab_bar_height")]
+    pub tab_bar_height: f32,
+    #[serde(default = "default_tab_bar_color")]
+    pub tab_bar_color: [f32; 4],
+    #[serde(default = "default_tab_active_color")]
+    pub tab_active_color: [f32; 4],
+
+    // --- Motion trail (drag ghosting) ---
+    /// Enable motion trail ghost copies when dragging windows.
+    #[serde(default)]
+    pub motion_trail: bool,
+    /// Number of ghost frames in the motion trail.
+    #[serde(default = "default_motion_trail_frames")]
+    pub motion_trail_frames: u32,
+    /// Base opacity for motion trail ghosts (0.0..1.0).
+    #[serde(default = "default_motion_trail_opacity")]
+    pub motion_trail_opacity: f32,
+
+    // --- Genie minimize animation ---
+    /// Enable genie/magic lamp minimize animation.
+    #[serde(default)]
+    pub genie_minimize: bool,
+    /// Duration of the genie animation in milliseconds.
+    #[serde(default = "default_genie_duration")]
+    pub genie_duration_ms: u64,
+
+    // --- Window open ripple ---
+    /// Enable ripple distortion effect when a window opens.
+    #[serde(default)]
+    pub ripple_on_open: bool,
+    /// Duration of the ripple effect in seconds.
+    #[serde(default = "default_ripple_duration")]
+    pub ripple_duration: f32,
+    /// Amplitude of the ripple distortion in UV space.
+    #[serde(default = "default_ripple_amplitude")]
+    pub ripple_amplitude: f32,
+
+    // --- Focus switch highlight ---
+    /// Enable border flash + scale bounce on focus change.
+    #[serde(default)]
+    pub focus_highlight: bool,
+    /// Focus highlight border color [r, g, b, a].
+    #[serde(default = "default_focus_highlight_color")]
+    pub focus_highlight_color: [f32; 4],
+    /// Duration of focus highlight in milliseconds.
+    #[serde(default = "default_focus_highlight_duration")]
+    pub focus_highlight_duration_ms: u64,
+
+    // --- Wallpaper crossfade ---
+    /// Enable smooth crossfade when wallpaper changes.
+    #[serde(default = "default_true")]
+    pub wallpaper_crossfade: bool,
+    /// Duration of wallpaper crossfade in milliseconds.
+    #[serde(default = "default_wallpaper_crossfade_duration")]
+    pub wallpaper_crossfade_duration_ms: u64,
+
+    // --- Phase 6: Accessibility & Utility ---
+    /// Colorblind correction mode: "", "deuteranopia", "protanopia", "tritanopia".
+    #[serde(default)]
+    pub colorblind_mode: String,
+    /// Annotation pen color [r, g, b, a].
+    #[serde(default = "default_annotation_color")]
+    pub annotation_color: [f32; 4],
+    /// Annotation pen width in pixels.
+    #[serde(default = "default_annotation_line_width")]
+    pub annotation_line_width: f32,
+
+    // --- Phase 7: Diagnostics ---
+    /// Enable shader hot reload from files.
+    #[serde(default)]
+    pub shader_hot_reload: bool,
+    /// Directory path to watch for shader files.
+    #[serde(default)]
+    pub shader_dir: String,
+    /// Enable extended debug HUD (draw calls, texture memory, etc.).
+    #[serde(default)]
+    pub debug_hud_extended: bool,
+    /// Recording FPS (frames per second) for screen recording.
+    #[serde(default = "default_recording_fps")]
+    pub recording_fps: u32,
+
     // --- Wallpaper ---
     /// Path to wallpaper image file (empty = solid black background).
     /// Used as the default wallpaper for all monitors unless overridden by wallpaper_monitors.
@@ -362,6 +466,23 @@ fn default_particle_count() -> u32 { 150 }
 fn default_particle_lifetime() -> f32 { 0.8 }
 fn default_particle_gravity() -> f32 { 800.0 }
 fn default_wallpaper_mode() -> String { "fill".to_string() }
+fn default_annotation_color() -> [f32; 4] { [1.0, 0.0, 0.0, 1.0] }
+fn default_annotation_line_width() -> f32 { 3.0 }
+fn default_recording_fps() -> u32 { 30 }
+fn default_motion_trail_frames() -> u32 { 5 }
+fn default_motion_trail_opacity() -> f32 { 0.3 }
+fn default_genie_duration() -> u64 { 300 }
+fn default_ripple_duration() -> f32 { 0.6 }
+fn default_ripple_amplitude() -> f32 { 0.015 }
+fn default_focus_highlight_color() -> [f32; 4] { [0.4, 0.7, 1.0, 0.9] }
+fn default_focus_highlight_duration() -> u64 { 300 }
+fn default_wallpaper_crossfade_duration() -> u64 { 500 }
+fn default_expose_gap() -> f32 { 20.0 }
+fn default_snap_preview_color() -> [f32; 4] { [0.3, 0.5, 1.0, 0.3] }
+fn default_snap_animation_duration_ms() -> u64 { 200 }
+fn default_tab_bar_height() -> f32 { 28.0 }
+fn default_tab_bar_color() -> [f32; 4] { [0.15, 0.15, 0.18, 0.9] }
+fn default_tab_active_color() -> [f32; 4] { [0.3, 0.5, 0.9, 0.9] }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusBarConfig {
@@ -550,6 +671,31 @@ impl Default for Config {
                     particle_count: default_particle_count(),
                     particle_lifetime: default_particle_lifetime(),
                     particle_gravity: default_particle_gravity(),
+                    expose_enabled: default_true(),
+                    expose_gap: default_expose_gap(),
+                    snap_preview: default_true(),
+                    snap_preview_color: default_snap_preview_color(),
+                    snap_animation_duration_ms: default_snap_animation_duration_ms(),
+                    peek_enabled: default_true(),
+                    peek_exclude: Vec::new(),
+                    window_tabs: false,
+                    tab_bar_height: default_tab_bar_height(),
+                    tab_bar_color: default_tab_bar_color(),
+                    tab_active_color: default_tab_active_color(),
+                    // Phase 3: Visual effects
+                    motion_trail: false,
+                    motion_trail_frames: default_motion_trail_frames(),
+                    motion_trail_opacity: default_motion_trail_opacity(),
+                    genie_minimize: false,
+                    genie_duration_ms: default_genie_duration(),
+                    ripple_on_open: false,
+                    ripple_duration: default_ripple_duration(),
+                    ripple_amplitude: default_ripple_amplitude(),
+                    focus_highlight: false,
+                    focus_highlight_color: default_focus_highlight_color(),
+                    focus_highlight_duration_ms: default_focus_highlight_duration(),
+                    wallpaper_crossfade: default_true(),
+                    wallpaper_crossfade_duration_ms: default_wallpaper_crossfade_duration(),
                     wallpaper: dirs::config_dir()
                         .unwrap_or_default()
                         .join("jwm")
@@ -558,6 +704,15 @@ impl Default for Config {
                         .into_owned(),
                     wallpaper_mode: default_wallpaper_mode(),
                     wallpaper_monitors: Vec::new(),
+                    // Phase 6: Accessibility
+                    colorblind_mode: String::new(),
+                    annotation_color: default_annotation_color(),
+                    annotation_line_width: default_annotation_line_width(),
+                    // Phase 7: Diagnostics
+                    shader_hot_reload: false,
+                    shader_dir: String::new(),
+                    debug_hud_extended: false,
+                    recording_fps: default_recording_fps(),
                 },
                 status_bar: StatusBarConfig {
                     name: STATUS_BAR_NAME.to_string(),
