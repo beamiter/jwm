@@ -3409,9 +3409,16 @@ impl Jwm {
         // client.geometry to the hidden position. This prevents
         // tick_animations from snapping the window back on-screen when the
         // Hide animation completes.
+        //
+        // Guard: only save old_x/old_y when the window is still on-screen.
+        // If it is already hidden (x is far negative), a repeated hide_client
+        // call must NOT overwrite old_x with the hidden position — otherwise
+        // show_client will restore the window to an off-screen coordinate.
         if let Some(client) = self.state.clients.get_mut(client_key) {
-            client.geometry.old_x = client.geometry.x;
-            client.geometry.old_y = client.geometry.y;
+            if client.geometry.x >= -(client.geometry.w) {
+                client.geometry.old_x = client.geometry.x;
+                client.geometry.old_y = client.geometry.y;
+            }
             client.geometry.x = hidden_x;
             // y, w, h stay unchanged
         }
