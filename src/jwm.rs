@@ -349,6 +349,14 @@ impl WMController for Jwm {
         // Keep the OR geometry cache up to date so build_compositor_scene
         // doesn't need a synchronous GetGeometry round-trip per frame.
         if self.override_redirect_windows.contains(&win) {
+            if let Some(&old) = self.or_window_geometries.get(&win) {
+                if old != (x, y, width, height) {
+                    info!(
+                        "[or_geom_update] win={:?} ({},{} {}x{}) -> ({},{} {}x{})",
+                        win, old.0, old.1, old.2, old.3, x, y, width, height
+                    );
+                }
+            }
             self.or_window_geometries.insert(win, (x, y, width, height));
         }
         if let Err(e) = self.configurenotify(backend, win, x, y, width, height) {
@@ -1176,6 +1184,15 @@ impl Jwm {
             Err(_) => return,
         };
 
+        // Skip windows that cover most of the screen (e.g. screenshot overlays
+        // like Feishu/Lark that set _NET_WM_WINDOW_TYPE_NOTIFICATION).
+        // Real notifications are small; full-screen overlays must not be clamped.
+        if geom.w >= (self.s_w as u32).saturating_sub(4)
+            && geom.h >= (self.s_h as u32).saturating_sub(4)
+        {
+            return;
+        }
+
         // Find the monitor by window center (fallback to selected monitor).
         let cx = geom.x.saturating_add((geom.w as i32) / 2);
         let cy = geom.y.saturating_add((geom.h as i32) / 2);
@@ -1936,7 +1953,13 @@ impl Jwm {
                 }
 
                 // Defer workarea clamping until after we release the mutable borrow.
-                if client.state.is_floating && !client.state.is_fullscreen {
+                // Skip clamping for windows that cover the full monitor (e.g.
+                // screenshot overlays that intentionally span strut areas).
+                let covers_monitor = client.geometry.x <= mx
+                    && client.geometry.y <= my
+                    && client.total_width() >= mw
+                    && client.total_height() >= mh;
+                if client.state.is_floating && !client.state.is_fullscreen && !covers_monitor {
                     clamp_request = Some((
                         client.geometry.x,
                         client.geometry.y,
@@ -3719,19 +3742,62 @@ impl Jwm {
             }
         }
 
-        // Also include the status bar if present
-        if let Some(bar_key) = self.status_bar_client {
+        // Also include the status bar if present — but skip it when a large
+        // override-redirect window (e.g. screenshot overlay) covers the bar area.
+        // RGBA OR overlays don't participate in occlusion culling, so without
+        // this check the real status bar would render beneath the overlay's
+        // semi-transparent region, producing a "double bar" artifact.
+        let overlay_win = backend.compositor_overlay_window();
+        let bar_covered = if let Some(bar_key) = self.status_bar_client {
             if let Some(bar) = self.state.clients.get(bar_key) {
-                let w = bar.geometry.w as u32;
-                let h = bar.geometry.h as u32;
-                if w > 0 && h > 0 {
-                    scene.push((
-                        bar.win.raw(),
-                        bar.geometry.x,
-                        bar.geometry.y,
-                        w,
-                        h,
-                    ));
+                let bx = bar.geometry.x;
+                let by = bar.geometry.y;
+                let bw = bar.geometry.w;
+                let bh = bar.geometry.h;
+                self.override_redirect_windows.iter().any(|&or_win| {
+                    if Some(or_win) == overlay_win {
+                        return false;
+                    }
+                    if let Some(&(ox, oy, ow, oh)) = self.or_window_geometries.get(&or_win) {
+                        // Allow a small tolerance (2px) because some apps
+                        // (e.g. Feishu/Electron) create windows 1px smaller
+                        // than the screen to avoid fullscreen detection.
+                        let tol = 2;
+                        let covered = ox <= bx + tol
+                            && oy <= by + tol
+                            && (ox + ow as i32) >= (bx + bw - tol)
+                            && (oy + oh as i32) >= (by + bh - tol);
+                        if covered {
+                            info!(
+                                "[bar_covered] OR {:?} ({},{} {}x{}) covers bar ({},{} {}x{})",
+                                or_win, ox, oy, ow, oh, bx, by, bw, bh
+                            );
+                        }
+                        covered
+                    } else {
+                        false
+                    }
+                })
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if !bar_covered {
+            if let Some(bar_key) = self.status_bar_client {
+                if let Some(bar) = self.state.clients.get(bar_key) {
+                    let w = bar.geometry.w as u32;
+                    let h = bar.geometry.h as u32;
+                    if w > 0 && h > 0 {
+                        scene.push((
+                            bar.win.raw(),
+                            bar.geometry.x,
+                            bar.geometry.y,
+                            w,
+                            h,
+                        ));
+                    }
                 }
             }
         }
@@ -3741,7 +3807,6 @@ impl Jwm {
         // Filter out the compositor's overlay window to avoid feedback loops.
         // Use cached geometries to avoid synchronous GetGeometry round-trips
         // on every frame (which add per-window X11 latency).
-        let overlay_win = backend.compositor_overlay_window();
         for &or_win in &self.override_redirect_windows {
             if Some(or_win) == overlay_win {
                 continue;
@@ -9489,15 +9554,40 @@ impl Jwm {
             } else {
                 return;
             };
-        if client_x + client_total_width > mon_wx + mon_ww {
-            client_x = mon_wx + mon_ww - client_total_width;
-            info!("Adjusted X to prevent overflow: {}", client_x);
-        }
         let client_total_height = if let Some(client) = self.state.clients.get(client_key) {
             client.total_height()
         } else {
             return;
         };
+
+        // Windows whose requested geometry covers the full monitor (e.g. screenshot
+        // overlays) intentionally want to include areas reserved by struts/status
+        // bars.  Skip all workarea clamping so they are not shifted into the
+        // workarea.
+        if let Some(monitor) = self.state.monitors.get(client_mon_key) {
+            let (m_x, m_y, m_w, m_h) = (
+                monitor.geometry.m_x,
+                monitor.geometry.m_y,
+                monitor.geometry.m_w,
+                monitor.geometry.m_h,
+            );
+            if client_x <= m_x
+                && client_y <= m_y
+                && client_total_width >= m_w
+                && client_total_height >= m_h
+            {
+                info!(
+                    "Window covers full monitor ({}x{} at ({},{})), skipping workarea clamping",
+                    client_total_width, client_total_height, client_x, client_y
+                );
+                return;
+            }
+        }
+
+        if client_x + client_total_width > mon_wx + mon_ww {
+            client_x = mon_wx + mon_ww - client_total_width;
+            info!("Adjusted X to prevent overflow: {}", client_x);
+        }
         if client_y + client_total_height > mon_wy + mon_wh {
             client_y = mon_wy + mon_wh - client_total_height;
             info!("Adjusted Y to prevent overflow: {}", client_y);
