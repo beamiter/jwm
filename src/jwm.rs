@@ -3200,6 +3200,9 @@ impl Jwm {
             return Err("Client not found".into());
         };
 
+        // Compositor renders borders via GPU — tell X11 border is 0.
+        let x11_bw = if backend.has_compositor() { 0 } else { border_w as u32 };
+
         let scheme = if is_focused {
             SchemeType::Sel
         } else {
@@ -3208,7 +3211,7 @@ impl Jwm {
         if let Ok(pixel) = backend.color_allocator().get_border_pixel_of(scheme) {
             backend
                 .window_ops()
-                .set_decoration_style(win, border_w as u32, pixel)?;
+                .set_decoration_style(win, x11_bw, pixel)?;
         }
         Ok(())
     }
@@ -3496,6 +3499,14 @@ impl Jwm {
             client.geometry.w = w;
             client.geometry.h = h;
 
+            // When compositor is active, borders are rendered by the compositor
+            // (Pass 3) — tell X11 the border is 0 so it doesn't draw its own.
+            let x11_bw = if backend.has_compositor() {
+                0
+            } else {
+                client.geometry.border_w as u32
+            };
+
             let cfg = CONFIG.load();
             if cfg.animation_enabled() && !self.suppress_layout_animation {
                 let old_rect = Rect::new(
@@ -3538,7 +3549,7 @@ impl Jwm {
                         y,
                         w as u32,
                         h as u32,
-                        client.geometry.border_w as u32,
+                        x11_bw,
                     )?;
                 } else {
                     backend.window_ops().configure(
@@ -3547,7 +3558,7 @@ impl Jwm {
                         visual.y,
                         visual.w as u32,
                         visual.h as u32,
-                        client.geometry.border_w as u32,
+                        x11_bw,
                     )?;
                 }
             } else {
@@ -3557,7 +3568,7 @@ impl Jwm {
                     y,
                     w as u32,
                     h as u32,
-                    client.geometry.border_w as u32,
+                    x11_bw,
                 )?;
             }
         }
@@ -3859,13 +3870,16 @@ impl Jwm {
         client_key: ClientKey,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(client) = self.state.clients.get(client_key) {
+            // Compositor renders borders via GPU — tell X11 border is 0.
+            let x11_bw = if backend.has_compositor() { 0 } else { client.geometry.border_w as u32 };
+
             backend.window_ops().configure(
                 client.win,
                 client.geometry.x,
                 client.geometry.y,
                 client.geometry.w as u32,
                 client.geometry.h as u32,
-                client.geometry.border_w as u32,
+                x11_bw,
             )?;
 
             // 分离装饰设置
@@ -3874,7 +3888,7 @@ impl Jwm {
                 .get_border_pixel_of(SchemeType::Norm)?;
             backend.window_ops().set_decoration_style(
                 client.win,
-                client.geometry.border_w as u32,
+                x11_bw,
                 border_color,
             )?;
         }

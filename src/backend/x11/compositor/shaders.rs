@@ -169,7 +169,8 @@ void main() {
     float outer = 1.0 - smoothstep(-1.0, 1.0, dist);
     float inner = 1.0 - smoothstep(-1.0, 1.0, dist + u_border_width);
     float border_mask = outer - inner;
-    frag_color = vec4(u_border_color.rgb, u_border_color.a * border_mask);
+    float a = u_border_color.a * border_mask;
+    frag_color = vec4(u_border_color.rgb * a, a);  // premultiplied alpha
 }
 "#;
 

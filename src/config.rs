@@ -145,7 +145,7 @@ pub struct BehaviorConfig {
 
     // --- Feature 1: Window borders ---
     /// Enable window border/outline rendering.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub border_enabled: bool,
     /// Border width in pixels.
     #[serde(default = "default_border_width")]
@@ -623,7 +623,7 @@ impl Default for Config {
                     rounded_corners_exclude: Vec::new(),
                     detect_client_opacity: false,
                     fullscreen_unredirect: true,
-                    border_enabled: false,
+                    border_enabled: true,
                     border_width: default_border_width(),
                     border_color_focused: default_border_color_focused(),
                     border_color_unfocused: default_border_color_unfocused(),

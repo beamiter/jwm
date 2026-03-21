@@ -3647,7 +3647,12 @@ impl Compositor {
         }
 
         // === Pass 3: Window borders (feature 1) ===
-        if self.border_enabled && self.border_width > 0.0 {
+        // When compositor is active, it owns border rendering.  Read the WM's
+        // border_px so the visual border always matches the layout gap.
+        let wm_border_px = crate::config::CONFIG.load().border_px() as f32;
+        let effective_border_enabled = self.border_enabled || wm_border_px > 0.0;
+        let base_border_width = if self.border_enabled { self.border_width } else { wm_border_px };
+        if effective_border_enabled && base_border_width > 0.0 {
             unsafe {
                 self.gl.use_program(Some(self.border_program));
                 self.gl.uniform_matrix_4_f32_slice(
@@ -3691,13 +3696,13 @@ impl Compositor {
                     };
 
                     let bw = if focus_highlight_active_for_win {
-                        (self.border_width + 2.0).max(3.0)
+                        (base_border_width + 2.0).max(3.0)
                     } else if wt.is_urgent && self.attention_animation {
-                        self.border_width.max(2.0)
+                        base_border_width.max(2.0)
                     } else if wt.is_pip {
                         self.pip_border_width
                     } else {
-                        self.border_width
+                        base_border_width
                     };
 
                     // Per-window corner radius (feature 3)
@@ -3730,6 +3735,16 @@ impl Compositor {
                         (x as f32, y as f32, w as f32, h as f32)
                     };
 
+                    // Expand the draw rect outward by border_width so the
+                    // border is rendered *outside* the window content area.
+                    // The SDF in the shader treats dist=0 at the expanded rect
+                    // edge and dist=-bw at the original window edge, so the
+                    // border naturally fills the gap between the two.
+                    let bdr_x = draw_x - bw;
+                    let bdr_y = draw_y - bw;
+                    let bdr_w = draw_w + 2.0 * bw;
+                    let bdr_h = draw_h + 2.0 * bw;
+
                     self.gl.uniform_1_f32(
                         self.border_uniforms.border_width.as_ref(), bw,
                     );
@@ -3738,13 +3753,13 @@ impl Compositor {
                         color[0], color[1], color[2], color[3] * fade,
                     );
                     self.gl.uniform_1_f32(
-                        self.border_uniforms.radius.as_ref(), radius,
+                        self.border_uniforms.radius.as_ref(), radius + bw,
                     );
                     self.gl.uniform_2_f32(
-                        self.border_uniforms.size.as_ref(), draw_w, draw_h,
+                        self.border_uniforms.size.as_ref(), bdr_w, bdr_h,
                     );
                     self.gl.uniform_4_f32(
-                        self.border_uniforms.rect.as_ref(), draw_x, draw_y, draw_w, draw_h,
+                        self.border_uniforms.rect.as_ref(), bdr_x, bdr_y, bdr_w, bdr_h,
                     );
                     self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 }
@@ -3812,15 +3827,21 @@ impl Compositor {
                             (x as f32, y as f32, w as f32, h as f32)
                         };
 
+                        // Expand rect outward for outside-window border rendering.
+                        let bdr_x = draw_x - bw;
+                        let bdr_y = draw_y - bw;
+                        let bdr_w = draw_w + 2.0 * bw;
+                        let bdr_h = draw_h + 2.0 * bw;
+
                         self.gl.uniform_1_f32(self.border_uniforms.border_width.as_ref(), bw);
                         self.gl.uniform_4_f32(
                             self.border_uniforms.border_color.as_ref(),
                             color[0], color[1], color[2], color[3] * fade,
                         );
-                        self.gl.uniform_1_f32(self.border_uniforms.radius.as_ref(), radius);
-                        self.gl.uniform_2_f32(self.border_uniforms.size.as_ref(), draw_w, draw_h);
+                        self.gl.uniform_1_f32(self.border_uniforms.radius.as_ref(), radius + bw);
+                        self.gl.uniform_2_f32(self.border_uniforms.size.as_ref(), bdr_w, bdr_h);
                         self.gl.uniform_4_f32(
-                            self.border_uniforms.rect.as_ref(), draw_x, draw_y, draw_w, draw_h,
+                            self.border_uniforms.rect.as_ref(), bdr_x, bdr_y, bdr_w, bdr_h,
                         );
                         self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                     }
