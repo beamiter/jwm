@@ -87,6 +87,9 @@ pub struct Colors {
     pub purple: Color,
     pub teal: Color,
     pub time: Color,
+    pub accent: Color,
+    pub accent_light: Color,
+    pub dim: Color,
 }
 
 pub fn default_colors() -> Colors {
@@ -115,6 +118,9 @@ pub fn default_colors() -> Colors {
         purple: Color::rgb(150, 110, 210),
         teal: Color::rgb(0, 180, 180),
         time: Color::rgb(80, 150, 220),
+        accent: Color::rgb(8, 145, 178),
+        accent_light: Color::rgb(34, 211, 238),
+        dim: Color::rgb(81, 90, 104),
     }
 }
 
@@ -134,6 +140,9 @@ pub fn light_colors() -> Colors {
         purple: Color::rgb(140, 90, 210),
         teal: Color::rgb(0, 160, 160),
         time: Color::rgb(50, 120, 210),
+        accent: Color::rgb(59, 130, 246),
+        accent_light: Color::rgb(96, 165, 250),
+        dim: Color::rgb(100, 116, 139),
     }
 }
 
@@ -199,6 +208,14 @@ pub struct BarConfig {
     pub time_icon: &'static str,
     pub screenshot_label: &'static str,
 
+    // Emoji labels
+    pub tag_labels: [&'static str; 9],
+    pub theme_dark_label: &'static str,
+    pub theme_light_label: &'static str,
+    pub monitor_labels: [&'static str; 4], // M0, M1, M2, fallback
+    pub volume_label: &'static str,
+    pub mute_label: &'static str,
+
     // 可选组件
     pub show_audio: bool,
     pub show_theme_toggle: bool,
@@ -216,6 +233,13 @@ impl Default for BarConfig {
             shape_style: ShapeStyle::Pill,
             time_icon: "TIME",
             screenshot_label: "SHOT",
+
+            tag_labels: ["1", "2", "3", "4", "5", "6", "7", "8", "9"],
+            theme_dark_label: "DARK",
+            theme_light_label: "LIGHT",
+            monitor_labels: ["M0", "M1", "M2", "M?"],
+            volume_label: "VOL",
+            mute_label: "MUTE",
 
             show_audio: false,
             show_theme_toggle: false,
@@ -321,6 +345,14 @@ impl AppState {
     }
     pub fn monitor_num_to_label(num: i32) -> String {
         format!("M{}", num)
+    }
+    pub fn monitor_label<'a>(&self, cfg: &'a BarConfig) -> &'a str {
+        let idx = self.monitor_num as usize;
+        if idx < cfg.monitor_labels.len() - 1 {
+            cfg.monitor_labels[idx]
+        } else {
+            cfg.monitor_labels[cfg.monitor_labels.len() - 1] // fallback
+        }
     }
     pub fn update_from_shared(&mut self, msg: SharedMessage) {
         debug!("SharedMemoryUpdated: {:?}", msg.timestamp);
@@ -591,11 +623,10 @@ fn overlay_top_highlight(
     k: f64,
     base: Color,
 ) -> Result<()> {
-    // 顶部高光：模拟“玻璃/轻拟物”质感。
-    // 注意：这里不使用 alpha，而用更亮的颜色覆盖来实现高光。
-    let top = base.lighten(0.20);
-    let mid = base.lighten(0.08);
-    let bottom = base.darken(0.04);
+    // 顶部高光：更柔和的拟物质感 (relm_bar inspired)
+    let top = base.lighten(0.12);
+    let mid = base.lighten(0.04);
+    let bottom = base.darken(0.02);
 
     cr.save()?;
     clip_shape(cr, style, x, y, w, h, k);
@@ -609,10 +640,10 @@ fn overlay_top_highlight(
     cr.rectangle(x, y, w, h);
     cr.fill()?;
 
-    // 额外的“高光带”（上半部分更亮一些）
-    let band_h = (h * 0.35).max(6.0);
-    let b_top = base.lighten(0.26);
-    let b_mid = base.lighten(0.10);
+    // 额外的高光带（更柔和）
+    let band_h = (h * 0.30).max(5.0);
+    let b_top = base.lighten(0.15);
+    let b_mid = base.lighten(0.06);
     let grad2 = LinearGradient::new(0.0, y, 0.0, y + band_h);
     grad2.add_color_stop_rgb(0.0, b_top.r, b_top.g, b_top.b);
     grad2.add_color_stop_rgb(1.0, b_mid.r, b_mid.g, b_mid.b);
@@ -626,9 +657,9 @@ fn overlay_top_highlight(
 
 fn pill_border_color(fill: Color, is_light_theme: bool) -> Color {
     if is_light_theme {
-        fill.darken(0.18)
+        fill.darken(0.14)
     } else {
-        fill.darken(0.35)
+        fill.darken(0.20)
     }
 }
 
@@ -643,15 +674,14 @@ fn draw_soft_shadow(
     bg: Color,
     is_light_theme: bool,
 ) -> Result<()> {
-    // 软阴影：用背景色加深后的纯色 + 轻微位移模拟。
-    // 这里不使用 alpha，确保在所有后端一致。
+    // 软阴影：more subtle, relm_bar inspired
     let shadow = if is_light_theme {
-        bg.darken(0.08)
+        bg.darken(0.06)
     } else {
-        bg.darken(0.55)
+        bg.darken(0.30)
     };
-    let dx = 0.8;
-    let dy = 1.2;
+    let dx = 0.5;
+    let dy = 0.8;
 
     match style {
         ShapeStyle::Chamfer => fill_chamfer(cr, x + dx, y + dy, w, h, k, shadow)?,
@@ -759,8 +789,9 @@ fn paint_bar_background(
 ) -> Result<()> {
     let w = width as f64;
     let h = height as f64;
-    let top = if is_light { bg.darken(0.03) } else { bg.lighten(0.06) };
-    let bottom = if is_light { bg.lighten(0.02) } else { bg.darken(0.05) };
+    // relm_bar inspired: subtler gradient
+    let top = if is_light { bg.darken(0.02) } else { bg.lighten(0.03) };
+    let bottom = if is_light { bg.lighten(0.01) } else { bg.darken(0.03) };
 
     let grad = LinearGradient::new(0.0, 0.0, 0.0, h);
     grad.add_color_stop_rgb(0.0, top.r, top.g, top.b);
@@ -769,9 +800,9 @@ fn paint_bar_background(
     cr.rectangle(0.0, 0.0, w, h);
     cr.fill()?;
 
-    // 顶部高光线 + 底部阴影线（waybar/macOS 观感）
-    let top_line = if is_light { bg.lighten(0.20) } else { bg.lighten(0.10) };
-    let bottom_line = if is_light { bg.darken(0.10) } else { bg.darken(0.25) };
+    // 顶部高光线 + 底部阴影线（更柔和）
+    let top_line = if is_light { bg.lighten(0.12) } else { bg.lighten(0.06) };
+    let bottom_line = if is_light { bg.darken(0.06) } else { bg.darken(0.15) };
     cr.set_source_rgb(top_line.r, top_line.g, top_line.b);
     cr.rectangle(0.0, 0.0, w, 1.0);
     cr.fill()?;
@@ -779,8 +810,8 @@ fn paint_bar_background(
     cr.rectangle(0.0, h - 1.0, w, 1.0);
     cr.fill()?;
 
-    // 外框（极轻微，增强面板边界）
-    let frame = if is_light { bg.darken(0.08) } else { bg.darken(0.18) };
+    // 外框（极轻微）
+    let frame = if is_light { bg.darken(0.05) } else { bg.darken(0.10) };
     cr.set_source_rgb(frame.r, frame.g, frame.b);
     cr.set_line_width(1.0);
     cr.rectangle(0.5, 0.5, (w - 1.0).max(0.0), (h - 1.0).max(0.0));
@@ -812,24 +843,54 @@ fn stroke_shape_with_fill(
     }
 }
 
-// 使用率配色
-fn usage_bg_color(colors: &Colors, usage: f32) -> Color {
+// 使用率配色 — relm_bar inspired muted metric colors
+fn usage_bg_color(_colors: &Colors, usage: f32, is_light_theme: bool) -> Color {
     let u = usage.clamp(0.0, 100.0);
-    if u <= 30.0 {
-        colors.green
-    } else if u <= 60.0 {
-        colors.yellow
-    } else if u <= 80.0 {
-        colors.orange
+    if is_light_theme {
+        if u <= 30.0 {
+            Color::rgb(230, 247, 234)
+        } else if u <= 60.0 {
+            Color::rgb(255, 248, 230)
+        } else if u <= 80.0 {
+            Color::rgb(255, 242, 232)
+        } else {
+            Color::rgb(255, 234, 234)
+        }
     } else {
-        colors.red
+        // dark theme: pre-composited on (13,16,23)
+        if u <= 30.0 {
+            Color::rgb(17, 49, 36)
+        } else if u <= 60.0 {
+            Color::rgb(55, 42, 21)
+        } else if u <= 80.0 {
+            Color::rgb(55, 34, 23)
+        } else {
+            Color::rgb(58, 26, 32)
+        }
     }
 }
-fn usage_text_color(colors: &Colors, usage: f32) -> Color {
-    if usage <= 60.0 {
-        colors.black
+fn usage_text_color(_colors: &Colors, usage: f32, is_light_theme: bool) -> Color {
+    let u = usage.clamp(0.0, 100.0);
+    if is_light_theme {
+        if u <= 30.0 {
+            Color::rgb(24, 121, 78)
+        } else if u <= 60.0 {
+            Color::rgb(138, 93, 0)
+        } else if u <= 80.0 {
+            Color::rgb(159, 58, 13)
+        } else {
+            Color::rgb(168, 7, 26)
+        }
     } else {
-        colors.white
+        if u <= 30.0 {
+            Color::rgb(209, 243, 218)
+        } else if u <= 60.0 {
+            Color::rgb(242, 235, 226)
+        } else if u <= 80.0 {
+            Color::rgb(242, 226, 204)
+        } else {
+            Color::rgb(241, 216, 216)
+        }
     }
 }
 
@@ -837,22 +898,89 @@ fn tag_visuals(
     colors: &Colors,
     mi: Option<&MonitorInfo>,
     idx: usize,
+    is_light_theme: bool,
 ) -> (Color, f64, Color, Color, bool) {
-    let tag_color = colors.tag_colors[idx.min(colors.tag_colors.len() - 1)];
     if let Some(monitor) = mi {
         if let Some(status) = monitor.tag_status_vec.get(idx) {
             if status.is_urg {
                 return (colors.red, 2.0, colors.red, colors.white, true);
             } else if status.is_selected {
-                return (tag_color, 2.0, tag_color, colors.black, true);
+                if is_light_theme {
+                    // relm_bar light: blue accent selected
+                    return (
+                        Color::rgb(59, 130, 246),
+                        2.0,
+                        Color::rgb(59, 130, 246),
+                        colors.white,
+                        true,
+                    );
+                } else {
+                    // relm_bar dark: teal selected (pre-composited)
+                    return (
+                        Color::rgb(10, 106, 132),
+                        2.0,
+                        Color::rgb(25, 123, 141),
+                        colors.white,
+                        true,
+                    );
+                }
             } else if status.is_filled {
-                return (tag_color, 1.0, tag_color, colors.black, true);
+                if is_light_theme {
+                    return (
+                        Color::rgb(37, 99, 235),
+                        1.0,
+                        Color::rgb(37, 99, 235),
+                        colors.white,
+                        true,
+                    );
+                } else {
+                    return (
+                        Color::rgb(9, 126, 155),
+                        1.0,
+                        Color::rgb(20, 140, 160),
+                        colors.white,
+                        true,
+                    );
+                }
             } else if status.is_occ {
-                return (colors.gray, 1.0, colors.gray, colors.white, true);
+                if is_light_theme {
+                    return (
+                        Color::rgb(224, 242, 254),
+                        1.0,
+                        Color::rgb(147, 197, 253),
+                        Color::rgb(30, 64, 175),
+                        true,
+                    );
+                } else {
+                    return (
+                        Color::rgb(17, 44, 57),
+                        1.0,
+                        Color::rgb(18, 59, 70),
+                        Color::rgb(207, 224, 236),
+                        true,
+                    );
+                }
             }
         }
     }
-    (colors.bg, 1.0, colors.gray, colors.gray, true)
+    // Empty state
+    if is_light_theme {
+        (
+            Color::rgb(241, 245, 249),
+            1.0,
+            Color::rgb(203, 213, 225),
+            colors.dim,
+            true,
+        )
+    } else {
+        (
+            Color::rgb(14, 19, 31),
+            1.0,
+            Color::rgb(27, 31, 39),
+            colors.dim,
+            true,
+        )
+    }
 }
 
 // ================= 对外：绘制入口 =================
@@ -872,14 +1000,14 @@ pub fn draw_bar(
     let pill_h = (height as f64) - 2.0 * cfg.padding_y;
 
     // 左侧 tags
-    let tags = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+    let tags = &cfg.tag_labels;
     let mut x = cfg.padding_x;
     for (i, label) in tags.iter().enumerate() {
         let (tw, _th) = pango_text_size(cr, font, label);
         let w = ((tw as f64) + 2.0 * cfg.pill_hpadding).max(40.0);
 
         let (mut bg, mut bw, mut bc, txt_color, draw_bg) =
-            tag_visuals(colors, state.monitor_info.as_ref(), i);
+            tag_visuals(colors, state.monitor_info.as_ref(), i, is_light_theme);
 
         // 统一边框风格：轻拟物边框略深
         bc = pill_border_color(bc, is_light_theme);
@@ -931,7 +1059,12 @@ pub fn draw_bar(
     let (lw, lh) = pango_text_size(cr, font, layout_label);
     let lw_total = lw as f64 + 2.0 * cfg.pill_hpadding;
 
-    let mut layout_fill = colors.green;
+    // Layout button: teal when open, amber when closed (relm_bar style)
+    let mut layout_fill = if state.layout_selector_open {
+        if is_light_theme { Color::rgb(20, 184, 166) } else { Color::rgb(13, 120, 110) }
+    } else {
+        if is_light_theme { Color::rgb(249, 115, 22) } else { Color::rgb(160, 75, 15) }
+    };
     let mut layout_border = pill_border_color(layout_fill, is_light_theme);
     let mut layout_bw = 1.0;
     if state.hover_target == HoverTarget::LayoutButton {
@@ -981,10 +1114,25 @@ pub fn draw_bar(
 
     // 布局选项
     if state.layout_selector_open {
+        // relm_bar style: current layout gets teal-green, others are subtle dark
+        let current_sym = state.layout_symbol.as_str();
+        let layout_defs: [(&str, u32); 3] = [("[]=", 0), ("><>", 1), ("[M]", 2)];
         let layouts: [(&str, u32, Color); 3] = [
-            ("[]=", 0, colors.green),
-            ("><>", 1, colors.blue),
-            ("[M]", 2, colors.purple),
+            (layout_defs[0].0, layout_defs[0].1, if layout_defs[0].0 == current_sym {
+                if is_light_theme { Color::rgb(34, 197, 94) } else { Color::rgb(16, 120, 80) }
+            } else {
+                if is_light_theme { Color::rgb(220, 225, 230) } else { Color::rgb(30, 41, 59) }
+            }),
+            (layout_defs[1].0, layout_defs[1].1, if layout_defs[1].0 == current_sym {
+                if is_light_theme { Color::rgb(34, 197, 94) } else { Color::rgb(16, 120, 80) }
+            } else {
+                if is_light_theme { Color::rgb(220, 225, 230) } else { Color::rgb(30, 41, 59) }
+            }),
+            (layout_defs[2].0, layout_defs[2].1, if layout_defs[2].0 == current_sym {
+                if is_light_theme { Color::rgb(34, 197, 94) } else { Color::rgb(16, 120, 80) }
+            } else {
+                if is_light_theme { Color::rgb(220, 225, 230) } else { Color::rgb(30, 41, 59) }
+            }),
         ];
         let mut opt_x = x;
         for (i, (sym, _idx, base_color)) in layouts.iter().enumerate() {
@@ -1022,7 +1170,14 @@ pub fn draw_bar(
                 border,
                 Some(fill),
             )?;
-            pango_draw_text_centered(cr, font, colors.white, opt_x, cfg.padding_y, w, pill_h, sym);
+            let opt_text = if *sym == current_sym {
+                colors.white
+            } else if is_light_theme {
+                colors.text
+            } else {
+                Color::rgb(226, 232, 240)
+            };
+            pango_draw_text_centered(cr, font, opt_text, opt_x, cfg.padding_y, w, pill_h, sym);
             state.layout_option_rects[i] = Rect {
                 x: opt_x as i16,
                 y: cfg.padding_y as i16,
@@ -1041,18 +1196,27 @@ pub fn draw_bar(
     // 主题切换 pill（可选）
     if cfg.show_theme_toggle {
         let label = match state.theme_mode {
-            ThemeMode::Dark => "DARK",
-            ThemeMode::Light => "LIGHT",
+            ThemeMode::Dark => cfg.theme_dark_label,
+            ThemeMode::Light => cfg.theme_light_label,
         };
         let (tw, th) = pango_text_size(cr, font, label);
         let w = (tw as f64 + 2.0 * (cfg.pill_hpadding - 2.0)).max(54.0);
         right_x -= w + cfg.tag_spacing;
-        let mut fill = colors.gray;
-        let mut border = pill_border_color(fill, is_light_theme);
+        // relm_bar style: subtle neutral pill
+        let mut fill = if is_light_theme {
+            Color::rgb(255, 255, 255)
+        } else {
+            Color::rgb(30, 41, 59)
+        };
+        let mut border = if is_light_theme {
+            Color::rgb(220, 225, 230)
+        } else {
+            Color::rgb(45, 55, 72)
+        };
         let mut bw = 1.0;
         if HoverTarget::Theme == state.hover_target {
             fill = fill.lighten(0.08);
-            border = pill_border_color(fill, is_light_theme).lighten(0.06);
+            border = border.lighten(0.10);
             bw = 2.0;
         }
         let _ = draw_soft_shadow(
@@ -1078,11 +1242,12 @@ pub fn draw_bar(
             border,
             Some(fill),
         )?;
+        let theme_text = if is_light_theme { colors.text } else { Color::rgb(229, 231, 235) };
         let ty = cfg.padding_y + (pill_h - th as f64) / 2.0 - 1.0;
         pango_draw_text_left(
             cr,
             font,
-            colors.text,
+            theme_text,
             right_x + (w - tw as f64) / 2.0,
             ty,
             label,
@@ -1098,16 +1263,25 @@ pub fn draw_bar(
     }
 
     // 监视器 pill
-    let mon_label = AppState::monitor_num_to_label(state.monitor_num);
+    let mon_label = state.monitor_label(cfg).to_string();
     let (mon_w, mon_h) = pango_text_size(cr, font, &mon_label);
     let mon_total = mon_w as f64 + 2.0 * cfg.pill_hpadding;
     right_x -= mon_total + cfg.tag_spacing;
-    let mut mon_fill = colors.purple;
-    let mut mon_border = pill_border_color(mon_fill, is_light_theme);
+    // relm_bar style: subtle dark monitor badge
+    let mut mon_fill = if is_light_theme {
+        Color::rgb(255, 255, 255)
+    } else {
+        Color::rgb(15, 23, 42)
+    };
+    let mut mon_border = if is_light_theme {
+        Color::rgb(220, 225, 230)
+    } else {
+        Color::rgb(30, 38, 52)
+    };
     let mut mon_bw = 1.0;
     if HoverTarget::Monitor == state.hover_target {
         mon_fill = mon_fill.lighten(0.08);
-        mon_border = pill_border_color(mon_fill, is_light_theme).lighten(0.06);
+        mon_border = mon_border.lighten(0.10);
         mon_bw = 2.0;
     }
     let _ = draw_soft_shadow(
@@ -1133,11 +1307,12 @@ pub fn draw_bar(
         mon_border,
         Some(mon_fill),
     )?;
+    let mon_text = if is_light_theme { colors.text } else { Color::rgb(226, 232, 240) };
     let ty_mon = cfg.padding_y + (pill_h - mon_h as f64) / 2.0 - 1.0;
     pango_draw_text_left(
         cr,
         font,
-        colors.white,
+        mon_text,
         right_x + cfg.pill_hpadding,
         ty_mon,
         &mon_label,
@@ -1155,12 +1330,21 @@ pub fn draw_bar(
     let (time_w, time_h) = pango_text_size(cr, font, &time_label);
     let time_total = time_w as f64 + 2.0 * cfg.pill_hpadding;
     right_x -= time_total + cfg.tag_spacing;
-    let mut time_fill = colors.time;
-    let mut time_border = pill_border_color(time_fill, is_light_theme);
+    // relm_bar style: dark teal time pill
+    let mut time_fill = if is_light_theme {
+        Color::rgb(224, 242, 254)
+    } else {
+        Color::rgb(9, 41, 64)
+    };
+    let mut time_border = if is_light_theme {
+        Color::rgb(147, 197, 253)
+    } else {
+        Color::rgb(35, 68, 77)
+    };
     let mut time_bw = 1.0;
     if HoverTarget::Time == state.hover_target {
         time_fill = time_fill.lighten(0.08);
-        time_border = pill_border_color(time_fill, is_light_theme).lighten(0.06);
+        time_border = time_border.lighten(0.10);
         time_bw = 2.0;
     }
     let _ = draw_soft_shadow(
@@ -1186,11 +1370,12 @@ pub fn draw_bar(
         time_border,
         Some(time_fill),
     )?;
+    let time_text = if is_light_theme { Color::rgb(15, 23, 42) } else { Color::rgb(236, 254, 255) };
     let ty_time = cfg.padding_y + (pill_h - time_h as f64) / 2.0 - 1.0;
     pango_draw_text_left(
         cr,
         font,
-        colors.white,
+        time_text,
         right_x + cfg.pill_hpadding,
         ty_time,
         &time_label,
@@ -1207,12 +1392,21 @@ pub fn draw_bar(
     let (ss_w, ss_h) = pango_text_size(cr, font, ss_label);
     let ss_total = ss_w as f64 + 2.0 * cfg.pill_hpadding;
     right_x -= ss_total + cfg.tag_spacing;
-    let mut ss_fill = colors.teal;
-    let mut ss_border = pill_border_color(ss_fill, is_light_theme);
+    // relm_bar style: subtle screenshot pill
+    let mut ss_fill = if is_light_theme {
+        Color::rgb(238, 247, 251)
+    } else {
+        Color::rgb(30, 41, 59)
+    };
+    let mut ss_border = if is_light_theme {
+        Color::rgb(204, 230, 242)
+    } else {
+        Color::rgb(45, 55, 72)
+    };
     let mut ss_bw = 1.0;
     if HoverTarget::Screenshot == state.hover_target {
         ss_fill = ss_fill.lighten(0.08);
-        ss_border = pill_border_color(ss_fill, is_light_theme).lighten(0.06);
+        ss_border = ss_border.lighten(0.10);
         ss_bw = 2.0;
     }
     let _ = draw_soft_shadow(
@@ -1238,11 +1432,12 @@ pub fn draw_bar(
         ss_border,
         Some(ss_fill),
     )?;
+    let ss_text = if is_light_theme { Color::rgb(21, 94, 117) } else { Color::rgb(226, 232, 240) };
     let ty_ss = cfg.padding_y + (pill_h - ss_h as f64) / 2.0 - 1.0;
     pango_draw_text_left(
         cr,
         font,
-        colors.white,
+        ss_text,
         right_x + cfg.pill_hpadding,
         ty_ss,
         ss_label,
@@ -1257,26 +1452,34 @@ pub fn draw_bar(
     // 音量 pill（可选）
     if cfg.show_audio {
         let (label, muted) = if let Some(dev) = state.audio_manager.get_master_device() {
-            let tag = if dev.is_muted { "MUTE" } else { "VOL" };
+            let tag = if dev.is_muted { cfg.mute_label } else { cfg.volume_label };
             (
                 format!("{} {}%", tag, dev.volume.clamp(0, 100)),
                 dev.is_muted,
             )
         } else {
-            ("VOL --".to_string(), true)
+            (format!("{} --", cfg.volume_label), true)
         };
 
         let (aw, ah) = pango_text_size(cr, font, &label);
         let a_total = aw as f64 + 2.0 * cfg.pill_hpadding;
         right_x -= a_total + cfg.tag_spacing;
 
-        let base = if muted { colors.gray } else { colors.blue };
-        let mut fill = base;
-        let mut border = pill_border_color(fill, is_light_theme);
+        // relm_bar style: teal accent for volume, subtle for muted
+        let mut fill = if muted {
+            if is_light_theme { Color::rgb(243, 244, 246) } else { Color::rgb(30, 41, 59) }
+        } else {
+            if is_light_theme { Color::rgb(255, 255, 255) } else { Color::rgb(12, 50, 70) }
+        };
+        let mut border = if muted {
+            if is_light_theme { Color::rgb(209, 213, 219) } else { Color::rgb(45, 55, 72) }
+        } else {
+            if is_light_theme { Color::rgb(147, 197, 253) } else { Color::rgb(20, 70, 90) }
+        };
         let mut bw = 1.0;
         if HoverTarget::Audio == state.hover_target {
             fill = fill.lighten(0.08);
-            border = pill_border_color(fill, is_light_theme).lighten(0.06);
+            border = border.lighten(0.10);
             bw = 2.0;
         }
         let _ = draw_soft_shadow(
@@ -1303,10 +1506,10 @@ pub fn draw_bar(
             Some(fill),
         )?;
         let ty = cfg.padding_y + (pill_h - ah as f64) / 2.0 - 1.0;
-        let audio_text = if is_light_theme && muted {
-            colors.text
+        let audio_text = if is_light_theme {
+            if muted { colors.text } else { Color::rgb(15, 23, 42) }
         } else {
-            colors.white
+            Color::rgb(236, 254, 255)
         };
         pango_draw_text_left(cr, font, audio_text, right_x + cfg.pill_hpadding, ty, &label);
         state.audio_rect = Rect {
@@ -1339,8 +1542,8 @@ pub fn draw_bar(
     let (mem_w, mem_h) = pango_text_size(cr, font, &mem_label);
     let mem_total = mem_w as f64 + 2.0 * cfg.pill_hpadding;
     right_x -= mem_total + cfg.tag_spacing;
-    let base_mem_bg = usage_bg_color(colors, mem_usage);
-    let base_mem_fg = usage_text_color(colors, mem_usage);
+    let base_mem_bg = usage_bg_color(colors, mem_usage, is_light_theme);
+    let base_mem_fg = usage_text_color(colors, mem_usage, is_light_theme);
     let mut mem_bg = base_mem_bg;
     let mut mem_border = pill_border_color(base_mem_bg, is_light_theme);
     let mut mem_bw = 1.0;
@@ -1392,8 +1595,8 @@ pub fn draw_bar(
     let (cpu_w, cpu_h) = pango_text_size(cr, font, &cpu_label);
     let cpu_total = cpu_w as f64 + 2.0 * cfg.pill_hpadding;
     right_x -= cpu_total + cfg.tag_spacing;
-    let base_cpu_bg = usage_bg_color(colors, cpu_avg);
-    let base_cpu_fg = usage_text_color(colors, cpu_avg);
+    let base_cpu_bg = usage_bg_color(colors, cpu_avg, is_light_theme);
+    let base_cpu_fg = usage_text_color(colors, cpu_avg, is_light_theme);
     let mut cpu_bg = base_cpu_bg;
     let mut cpu_border = pill_border_color(base_cpu_bg, is_light_theme);
     let mut cpu_bw = 1.0;
