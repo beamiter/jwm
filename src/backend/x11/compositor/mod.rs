@@ -101,6 +101,8 @@ struct WindowTexture {
     is_pip: bool,
     // --- Frosted glass ---
     is_frosted: bool,
+    // --- Override-redirect (unmanaged overlay) ---
+    is_override_redirect: bool,
     // --- Wobbly state ---
     wobbly: Option<WobblyState>,
     // --- Phase 2.3: Fence sync for async pixmap refresh ---
@@ -2442,6 +2444,21 @@ impl Compositor {
     fn needs_backdrop_blur(&self, wt: &WindowTexture) -> bool {
         if Self::class_matches_exclude(&wt.class_name, &self.blur_exclude) {
             return false;
+        }
+        // Skip backdrop blur for large override-redirect RGBA windows.  These
+        // are typically screen-sharing overlays (e.g. Feishu/Lark) or screenshot
+        // selection tools that are intentionally transparent.  Applying blur
+        // behind them produces an unwanted frosted-glass effect that covers the
+        // actual screen content.
+        //
+        // "Large" = covers at least 80 % of any single monitor in both dimensions.
+        if wt.is_override_redirect && wt.has_rgba {
+            let dominated = self.monitor_wallpapers.iter().any(|mw| {
+                wt.w >= mw.mon_w * 4 / 5 && wt.h >= mw.mon_h * 4 / 5
+            });
+            if dominated {
+                return false;
+            }
         }
         wt.is_frosted
             || wt.has_rgba

@@ -1184,15 +1184,6 @@ impl Jwm {
             Err(_) => return,
         };
 
-        // Skip windows that cover most of the screen (e.g. screenshot overlays
-        // like Feishu/Lark that set _NET_WM_WINDOW_TYPE_NOTIFICATION).
-        // Real notifications are small; full-screen overlays must not be clamped.
-        if geom.w >= (self.s_w as u32).saturating_sub(4)
-            && geom.h >= (self.s_h as u32).saturating_sub(4)
-        {
-            return;
-        }
-
         // Find the monitor by window center (fallback to selected monitor).
         let cx = geom.x.saturating_add((geom.w as i32) / 2);
         let cy = geom.y.saturating_add((geom.h as i32) / 2);
@@ -1200,6 +1191,21 @@ impl Jwm {
         let Some(mon_key) = mon_key else {
             return;
         };
+
+        // Skip windows that cover most of the monitor (e.g. screenshot overlays
+        // like Feishu/Lark that set _NET_WM_WINDOW_TYPE_NOTIFICATION).
+        // Real notifications are small; full-screen overlays must not be clamped.
+        // Compare against the monitor size, not the virtual screen, so that
+        // per-monitor overlays in multi-monitor setups are correctly skipped.
+        let (mon_w, mon_h) = self
+            .state
+            .monitors
+            .get(mon_key)
+            .map(|m| (m.geometry.m_w as u32, m.geometry.m_h as u32))
+            .unwrap_or((self.s_w as u32, self.s_h as u32));
+        if geom.w >= mon_w.saturating_sub(4) && geom.h >= mon_h.saturating_sub(4) {
+            return;
+        }
 
         let work = match self.monitor_work_area(mon_key) {
             Some(r) => r,
@@ -5144,6 +5150,11 @@ impl Jwm {
             let fallback = CONFIG.load().status_bar_height() + CONFIG.load().status_bar_padding() * 2;
             let pad = CONFIG.load().status_bar_padding().max(0);
 
+            // Use the real bar geometry only on the monitor that currently hosts
+            // the bar.  All other monitors get the static fallback so they always
+            // reserve the same amount of space — this prevents windows from
+            // resizing every time the bar follows the cursor to a different
+            // monitor.
             if self.current_bar_monitor_id == Some(monitor.num) {
                 if let Some(bar_key) = self.status_bar_client {
                     if let Some(bar) = self.state.clients.get(bar_key) {

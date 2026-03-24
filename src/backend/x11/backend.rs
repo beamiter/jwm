@@ -280,6 +280,13 @@ impl X11Backend {
                         if !cls.is_empty() {
                             compositor.set_window_class(x11w, &cls);
                         }
+                        // Mark override-redirect windows so the compositor can
+                        // skip backdrop blur for large overlays (screen sharing, etc.)
+                        if let Ok(attr) = self.window_ops.get_window_attributes(*win) {
+                            if attr.override_redirect {
+                                compositor.set_window_override_redirect(x11w, true);
+                            }
+                        }
                     }
                 }
             }

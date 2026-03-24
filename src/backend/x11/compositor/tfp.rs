@@ -25,6 +25,15 @@ impl Compositor {
         }
     }
 
+    // =====================================================================
+    // Mark window as override-redirect (unmanaged overlay)
+    // =====================================================================
+    pub(in crate::backend::x11) fn set_window_override_redirect(&mut self, x11_win: u32, is_or: bool) {
+        if let Some(wt) = self.windows.get_mut(&x11_win) {
+            wt.is_override_redirect = is_or;
+        }
+    }
+
     // ----- Window management -----
 
     pub(in crate::backend::x11) fn add_window(&mut self, x11_win: u32, x: i32, y: i32, w: u32, h: u32) {
@@ -241,6 +250,7 @@ impl Compositor {
                 is_urgent: false,
                 is_pip: false,
                 is_frosted: false,
+                is_override_redirect: false,
                 wobbly: None,
                 pending_fence: None,
                 motion_trail: std::collections::VecDeque::new(),
