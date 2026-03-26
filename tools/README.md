@@ -1,72 +1,66 @@
+# jwm-tool
 
-# Table of Contents
-
-1.  [使用方法](#org07c4647)
-    1.  [构建与安装](#orgbfe6bca)
-    2.  [启动守护进程](#org41e4bcd)
-    3.  [控制命令](#org9c3f4b6)
-    4.  [守护进程管理](#orgdc61194)
-    5.  [构建并重启 JWM（与脚本行为一致）](#orgc24c616)
-    6.  [调试信息](#orga39b135)
-
-
-<a id="org07c4647"></a>
-
-# 使用方法
-
-
-<a id="orgbfe6bca"></a>
+JWM 管理工具（单二进制多子命令）。
 
 ## 构建与安装
 
--   cargo build &#x2013;release
--   可将 target/release/jwm-tool 放入 PATH，例如：
-    -   sudo cp target/release/jwm-tool *usr/local/bin*
+```bash
+# 通过安装脚本（推荐）
+./scripts/install_jwm_scripts.sh
 
+# 手动构建
+cargo build --release
+sudo install target/release/jwm-tool /usr/local/bin/
+```
 
-<a id="org41e4bcd"></a>
+## 使用方法
 
-## 启动守护进程
+### 启动守护进程
 
--   jwm-tool daemon
-    -   指定 JWM 可执行文件路径：
-    -   jwm-tool daemon &#x2013;jwm-binary /path/to/jwm
-    -   或环境变量：JWM<sub>BINARY</sub>=/path/to/jwm jwm-tool daemon
-    -   指定运行后端：
-    -   jwm-tool daemon –-backend wayland-udev
-    -   或环境变量：JWM_BACKEND=wayland-udev jwm-tool daemon
+```bash
+jwm-tool daemon
 
+# 指定 JWM 可执行文件路径
+jwm-tool daemon --jwm-binary /path/to/jwm
 
-<a id="org9c3f4b6"></a>
+# 通过环境变量指定
+JWM_BINARY=/path/to/jwm jwm-tool daemon
 
-## 控制命令
+# 指定运行后端
+jwm-tool daemon --backend wayland-udev
 
--   jwm-tool start
--   jwm-tool stop
--   jwm-tool restart
--   jwm-tool status
--   jwm-tool quit
+# 通过环境变量指定后端
+JWM_BACKEND=wayland-udev jwm-tool daemon
+```
 
+### 控制命令
 
-<a id="orgdc61194"></a>
+```bash
+jwm-tool start      # 启动 JWM
+jwm-tool stop       # 停止 JWM
+jwm-tool restart    # 重启 JWM
+jwm-tool status     # 查看状态
+jwm-tool quit       # 退出
+```
 
-## 守护进程管理
+### 守护进程管理
 
--   jwm-tool daemon-check
--   jwm-tool daemon-restart
+```bash
+jwm-tool daemon-check     # 守护进程健康检查/自动重启
+jwm-tool daemon-restart   # 重启守护进程
+```
 
+### 构建并重启 JWM
 
-<a id="orgc24c616"></a>
+```bash
+jwm-tool rebuild --jwm-dir /path/to/jwm
 
-## 构建并重启 JWM（与脚本行为一致）
+# 或通过环境变量
+JWM_DIR=/path/to/jwm jwm-tool rebuild
+```
 
--   jwm-tool rebuild &#x2013;jwm-dir /path/to/jwm
--   或设置环境变量 JWM<sub>DIR</sub>
+### 调试信息
 
-
-<a id="orga39b135"></a>
-
-## 调试信息
-
--   jwm-tool debug
-
+```bash
+jwm-tool debug
+```
