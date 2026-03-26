@@ -3,6 +3,23 @@
 set -euo pipefail
 
 # ============================================================
+# 确保 cargo 可用（sudo 环境下 PATH 可能不包含 cargo）
+# ============================================================
+if ! command -v cargo &>/dev/null; then
+    for candidate in "$HOME/.cargo/env" "/home/${SUDO_USER:-}/.cargo/env"; do
+        if [[ -f "$candidate" ]]; then
+            # shellcheck source=/dev/null
+            source "$candidate"
+            break
+        fi
+    done
+fi
+if ! command -v cargo &>/dev/null; then
+    echo "[ERROR] cargo 未找到（sudo 环境下 PATH 可能不包含 cargo），请先安装 Rust 工具链或不使用 sudo 运行此脚本" >&2
+    exit 1
+fi
+
+# ============================================================
 # 颜色输出
 # ============================================================
 RED='\033[0;31m'
