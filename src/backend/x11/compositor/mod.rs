@@ -2923,7 +2923,8 @@ impl Compositor {
         let force_render = self.pending_screenshot.is_some() || self.debug_hud || self.transition_active() || self.overview_active
             || self.expose_active || expose_animating || snap_animating || peek_animating
             || genie_active || ripples_active || focus_highlight_active || wallpaper_crossfade_active
-            || self.recording_active || self.annotation_active || wallpaper_just_loaded;
+            || self.recording_active || self.annotation_active || wallpaper_just_loaded
+            || wobbly_active;
         let hash = Self::scene_hash(scene, focused);
         let scene_changed = hash != self.last_scene_hash;
         if !has_dirty && !fades_active && !force_render && !scene_changed {
