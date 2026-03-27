@@ -374,6 +374,7 @@ struct EdgeGlowUniforms {
     glow_width: Option<glow::UniformLocation>,
     mouse: Option<glow::UniformLocation>,
     screen_size: Option<glow::UniformLocation>,
+    time: Option<glow::UniformLocation>,
 }
 
 /// Cached uniform locations for tilt shader.
@@ -722,6 +723,7 @@ pub(super) struct Compositor {
     edge_glow_program: glow::Program,
     edge_glow_uniforms: EdgeGlowUniforms,
     edge_glow: bool,
+    edge_glow_active: bool,          // true only when mouse is near a screen edge
     edge_glow_color: [f32; 4],
     edge_glow_width: f32,
 
@@ -1593,6 +1595,7 @@ impl Compositor {
                 glow_width: gl.get_uniform_location(edge_glow_program, "u_glow_width"),
                 mouse: gl.get_uniform_location(edge_glow_program, "u_mouse"),
                 screen_size: gl.get_uniform_location(edge_glow_program, "u_screen_size"),
+                time: gl.get_uniform_location(edge_glow_program, "u_time"),
             }
         };
 
@@ -2007,6 +2010,7 @@ impl Compositor {
             edge_glow_program,
             edge_glow_uniforms,
             edge_glow: behavior.edge_glow,
+            edge_glow_active: false,
             edge_glow_color: behavior.edge_glow_color,
             edge_glow_width: behavior.edge_glow_width,
             // Attention animation
@@ -2515,8 +2519,8 @@ impl Compositor {
         }
         // Need render if magnifier is active (tracking mouse)
         if self.magnifier_enabled { return true; }
-        // Need render if edge glow is active
-        if self.edge_glow { return true; }
+        // Need render if edge glow is active (mouse near screen edge)
+        if self.edge_glow_active { return true; }
         // Need render if window tilt is active
         if self.window_tilt { return true; }
         // Need render if scale animation active
@@ -4015,7 +4019,7 @@ impl Compositor {
         }
 
         // === Pass 5b: Screen edge glow ===
-        if self.edge_glow && self.edge_glow_width > 0.0 {
+        if self.edge_glow_active && self.edge_glow_width > 0.0 {
             unsafe {
                 self.gl.use_program(Some(self.edge_glow_program));
                 self.gl.uniform_matrix_4_f32_slice(
@@ -4035,6 +4039,10 @@ impl Compositor {
                 self.gl.uniform_2_f32(
                     self.edge_glow_uniforms.screen_size.as_ref(),
                     self.screen_w as f32, self.screen_h as f32,
+                );
+                self.gl.uniform_1_f32(
+                    self.edge_glow_uniforms.time.as_ref(),
+                    self.compositor_start_time.elapsed().as_secs_f32(),
                 );
                 self.gl.bind_vertex_array(Some(self.quad_vao));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -4364,7 +4372,20 @@ impl Compositor {
     pub(super) fn set_mouse_position(&mut self, x: f32, y: f32) {
         self.mouse_x = x;
         self.mouse_y = y;
-        if self.edge_glow || self.magnifier_enabled || self.window_tilt {
+        if self.edge_glow {
+            let dist_left   = x;
+            let dist_right  = self.screen_w as f32 - x;
+            let dist_top    = y;
+            let dist_bottom = self.screen_h as f32 - y;
+            let min_dist = dist_left.min(dist_right).min(dist_top).min(dist_bottom);
+            let was_active = self.edge_glow_active;
+            self.edge_glow_active = min_dist < self.edge_glow_width;
+            if self.edge_glow_active || was_active {
+                // Render when active, and one extra frame when deactivating to clear
+                self.needs_render = true;
+            }
+        }
+        if self.magnifier_enabled || self.window_tilt {
             self.needs_render = true;
         }
         if self.expose_active {
