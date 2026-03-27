@@ -2481,10 +2481,14 @@ mod input_ops {
             Ok((reply.root_x as f64, reply.root_y as f64))
         }
 
-        fn grab_pointer(&self, _mask: u32, cursor: Option<u64>) -> Result<bool, BackendError> {
+        fn grab_pointer(&self, mask_bits: u32, cursor: Option<u64>) -> Result<bool, BackendError> {
             let cursor_id = cursor.map(|c| c as u32).unwrap_or(0);
             //  Grab Pointer  ButtonRelease  Motion
-            let mask = EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION;
+            let mask = if mask_bits != 0 {
+                EventMask::from(mask_bits)
+            } else {
+                EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION
+            };
 
             let reply = self
                 .conn

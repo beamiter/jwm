@@ -1560,6 +1560,7 @@ impl Jwm {
                 self.expose_active = false;
                 backend.compositor_set_expose_mode(false, vec![]);
                 let _ = backend.key_ops().ungrab_keyboard();
+                let _ = backend.input_ops().ungrab_pointer();
                 return Ok(());
             }
             // Fall through to normal keybinding dispatch so Alt+E can toggle off
@@ -1678,6 +1679,7 @@ impl Jwm {
                 // Compositor handled the click and already deactivated expose animation
                 self.expose_active = false;
                 let _ = backend.key_ops().ungrab_keyboard();
+                let _ = backend.input_ops().ungrab_pointer();
                 if let Some(ck) = self.wintoclient(wid) {
                     self.focus(backend, Some(ck))?;
                     if let Some(mon_key) = self.state.sel_mon {
@@ -1689,6 +1691,7 @@ impl Jwm {
                 self.expose_active = false;
                 backend.compositor_set_expose_mode(false, vec![]);
                 let _ = backend.key_ops().ungrab_keyboard();
+                let _ = backend.input_ops().ungrab_pointer();
             }
             return Ok(());
         }
@@ -5779,6 +5782,7 @@ impl Jwm {
             self.expose_active = false;
             backend.compositor_set_expose_mode(false, vec![]);
             let _ = backend.key_ops().ungrab_keyboard();
+            let _ = backend.input_ops().ungrab_pointer();
         } else {
             // Collect visible windows across all monitors
             let mut windows: Vec<(WindowId, i32, i32, u32, u32)> = Vec::new();
@@ -5814,6 +5818,11 @@ impl Jwm {
             if let Some(root) = backend.root_window() {
                 let _ = backend.key_ops().grab_keyboard(root);
             }
+            let pointer_mask = (EventMaskBits::BUTTON_PRESS
+                | EventMaskBits::BUTTON_RELEASE
+                | EventMaskBits::POINTER_MOTION)
+                .bits();
+            let _ = backend.input_ops().grab_pointer(pointer_mask, None);
         }
         Ok(())
     }
