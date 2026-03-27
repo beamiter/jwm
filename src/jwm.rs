@@ -1029,7 +1029,7 @@ impl EventHandler for Jwm {
     }
 
     fn needs_tick(&self) -> bool {
-        self.animations.has_active() || self.overview_active
+        self.animations.has_active() || self.overview_active || self.expose_active
     }
 
     fn render_compositor_immediate(&mut self, backend: &mut dyn Backend) {

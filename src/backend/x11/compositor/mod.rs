@@ -2493,8 +2493,8 @@ impl Compositor {
                 }
             }
         }
-        // Need render if overview is active
-        if self.overview_active { return true; }
+        // Need render if overview or expose is active (or expose exit animation in progress)
+        if self.overview_active || self.expose_active || !self.expose_entries.is_empty() { return true; }
         // Need render if particles are active
         if !self.particle_systems.is_empty() { return true; }
         // Need render if any window has active wobbly

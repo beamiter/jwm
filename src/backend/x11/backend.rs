@@ -1064,7 +1064,9 @@ impl Backend for X11Backend {
             // Without this, dispatch(None) only wakes on the 20ms calloop timer,
             // which drifts against the vblank period and produces severe stutter
             // (the exact symptom: smooth when mouse moves, choppy when still).
-            let timeout = if loop_data.handler.needs_tick() {
+            let timeout = if loop_data.handler.needs_tick()
+                || loop_data.backend.compositor_needs_render()
+            {
                 Some(Duration::from_millis(1))
             } else {
                 None
