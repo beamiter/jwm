@@ -1674,11 +1674,10 @@ impl Jwm {
         // Expose mode intercept: route clicks to compositor
         if self.expose_active {
             let (rx, ry) = self.last_mouse_root;
-            if let Some(raw_win) = backend.compositor_expose_click(rx as f32, ry as f32) {
+            if let Some(wid) = backend.compositor_expose_click(rx as f32, ry as f32) {
                 // Compositor handled the click and already deactivated expose animation
                 self.expose_active = false;
                 let _ = backend.key_ops().ungrab_keyboard();
-                let wid = WindowId::from_raw(raw_win as u64);
                 if let Some(ck) = self.wintoclient(wid) {
                     self.focus(backend, Some(ck))?;
                     if let Some(mon_key) = self.state.sel_mon {
@@ -5782,7 +5781,7 @@ impl Jwm {
             let _ = backend.key_ops().ungrab_keyboard();
         } else {
             // Collect visible windows across all monitors
-            let mut windows: Vec<(u32, i32, i32, u32, u32)> = Vec::new();
+            let mut windows: Vec<(WindowId, i32, i32, u32, u32)> = Vec::new();
             for &mon_key in &self.state.monitor_order.clone() {
                 if let Some(clients) = self.state.monitor_clients.get(mon_key) {
                     for &ck in clients {
@@ -5796,7 +5795,7 @@ impl Jwm {
                             let g = &client.geometry;
                             if g.w > 0 && g.h > 0 {
                                 windows.push((
-                                    client.win.raw() as u32,
+                                    client.win,
                                     g.x,
                                     g.y,
                                     g.w as u32,

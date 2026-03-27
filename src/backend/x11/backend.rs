@@ -668,8 +668,15 @@ impl Backend for X11Backend {
         if let Some(c) = self.compositor.as_mut() { c.stop_recording(); }
     }
 
-    fn compositor_set_expose_mode(&mut self, active: bool, windows: Vec<(u32, i32, i32, u32, u32)>) {
-        if let Some(c) = self.compositor.as_mut() { c.set_expose_mode(active, windows); }
+    fn compositor_set_expose_mode(&mut self, active: bool, windows: Vec<(WindowId, i32, i32, u32, u32)>) {
+        if let Some(c) = self.compositor.as_mut() {
+            let x11_windows: Vec<(u32, i32, i32, u32, u32)> = windows.iter()
+                .filter_map(|(wid, x, y, w, h)| {
+                    self.ids.x11(*wid).ok().map(|x11w| (x11w, *x, *y, *w, *h))
+                })
+                .collect();
+            c.set_expose_mode(active, x11_windows);
+        }
     }
 
     fn compositor_set_snap_preview(&mut self, preview: Option<(f32, f32, f32, f32)>) {
@@ -688,8 +695,9 @@ impl Backend for X11Backend {
         self.compositor.as_ref()?.request_live_thumbnail(window, max_size)
     }
 
-    fn compositor_expose_click(&mut self, x: f32, y: f32) -> Option<u32> {
-        self.compositor.as_mut()?.expose_click(x, y)
+    fn compositor_expose_click(&mut self, x: f32, y: f32) -> Option<WindowId> {
+        let x11_win = self.compositor.as_mut()?.expose_click(x, y)?;
+        Some(self.ids.intern(x11_win))
     }
 
     fn as_any(&self) -> &dyn Any {

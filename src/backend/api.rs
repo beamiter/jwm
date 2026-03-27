@@ -752,7 +752,7 @@ pub trait Backend: Send {
     fn compositor_set_dock_position(&mut self, _x: f32, _y: f32) {}
 
     /// Set expose/mission control mode. windows: Vec<(window_id, x, y, w, h)>.
-    fn compositor_set_expose_mode(&mut self, _active: bool, _windows: Vec<(u32, i32, i32, u32, u32)>) {}
+    fn compositor_set_expose_mode(&mut self, _active: bool, _windows: Vec<(WindowId, i32, i32, u32, u32)>) {}
 
     /// Set snap preview rectangle. None = hide preview.
     fn compositor_set_snap_preview(&mut self, _preview: Option<(f32, f32, f32, f32)>) {}
@@ -770,7 +770,7 @@ pub trait Backend: Send {
     fn compositor_zoom_to_fit(&mut self, _window: Option<u32>) {}
 
     /// Expose mode click at screen coordinates. Returns the selected window or None.
-    fn compositor_expose_click(&mut self, _x: f32, _y: f32) -> Option<u32> { None }
+    fn compositor_expose_click(&mut self, _x: f32, _y: f32) -> Option<WindowId> { None }
 
     /// Set colorblind correction mode (Phase 6.1).
     fn compositor_set_colorblind_mode(&mut self, _mode: &str) {}
