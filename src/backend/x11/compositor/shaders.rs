@@ -357,38 +357,26 @@ uniform vec4  u_glow_color;     // glow RGBA
 uniform float u_glow_width;     // glow width in pixels
 uniform vec2  u_mouse;          // mouse position in pixels
 uniform vec2  u_screen_size;    // screen dimensions
-uniform float u_time;           // elapsed seconds (for ripple animation)
+uniform float u_time;           // reserved
 in vec2 v_uv;
 out vec4 frag_color;
 
 void main() {
     vec2 pixel = v_uv * u_screen_size;
 
-    // Distance from mouse in pixels
-    float mouse_r = length(pixel - u_mouse);
-
-    // Concentric ripples expanding outward from mouse position
-    float ripple_freq  = 0.08;   // spatial frequency (rings per pixel)
-    float ripple_speed = 3.0;    // outward expansion speed
-    float ripple_wave  = sin((mouse_r * ripple_freq - u_time * ripple_speed) * 6.2832);
-    // Remap [-1,1] to [0.3, 1.0] so the glow modulates but never fully vanishes
-    float ripple = 0.65 + 0.35 * ripple_wave;
-
-    // Distance to each screen edge
     float dist_left   = pixel.x;
     float dist_right  = u_screen_size.x - pixel.x;
     float dist_top    = pixel.y;
     float dist_bottom = u_screen_size.y - pixel.y;
 
-    // Mouse distance to each edge
     float mouse_dist_left   = u_mouse.x;
     float mouse_dist_right  = u_screen_size.x - u_mouse.x;
     float mouse_dist_top    = u_mouse.y;
     float mouse_dist_bottom = u_screen_size.y - u_mouse.y;
     float mouse_min = min(min(mouse_dist_left, mouse_dist_right), min(mouse_dist_top, mouse_dist_bottom));
 
-    // Determine which edge the mouse is closest to, only glow on that edge
-    float edge_dist = u_glow_width; // default: no glow
+    // Only glow on the edge closest to the mouse
+    float edge_dist = u_glow_width;
     if (mouse_min < u_glow_width) {
         if (mouse_min == mouse_dist_left)        edge_dist = dist_left;
         else if (mouse_min == mouse_dist_right)   edge_dist = dist_right;
@@ -397,18 +385,10 @@ void main() {
     }
 
     float alpha = 1.0 - smoothstep(0.0, u_glow_width, edge_dist);
-    alpha *= alpha; // softer falloff
+    alpha *= alpha;
 
-    // Fade based on mouse proximity to edge
     float mouse_factor = 1.0 - smoothstep(0.0, u_glow_width, mouse_min);
     alpha *= mouse_factor;
-
-    // Apply ripple modulation
-    alpha *= ripple;
-
-    // Fade ripple intensity with distance from mouse so far-away edge regions are calmer
-    float dist_fade = 1.0 - smoothstep(0.0, u_screen_size.x * 0.6, mouse_r);
-    alpha *= mix(0.5, 1.0, dist_fade);
 
     float final_a = u_glow_color.a * alpha;
     frag_color = vec4(u_glow_color.rgb * final_a, final_a);
