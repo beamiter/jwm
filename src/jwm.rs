@@ -1559,9 +1559,10 @@ impl Jwm {
             if keysym == keys::KEY_Escape {
                 self.expose_active = false;
                 backend.compositor_set_expose_mode(false, vec![]);
+                let _ = backend.key_ops().ungrab_keyboard();
+                return Ok(());
             }
-            // Consume all keys while expose is active
-            return Ok(());
+            // Fall through to normal keybinding dispatch so Alt+E can toggle off
         }
 
         if self.overview_active {
@@ -1676,6 +1677,7 @@ impl Jwm {
             if let Some(raw_win) = backend.compositor_expose_click(rx as f32, ry as f32) {
                 // Compositor handled the click and already deactivated expose animation
                 self.expose_active = false;
+                let _ = backend.key_ops().ungrab_keyboard();
                 let wid = WindowId::from_raw(raw_win as u64);
                 if let Some(ck) = self.wintoclient(wid) {
                     self.focus(backend, Some(ck))?;
@@ -1687,6 +1689,7 @@ impl Jwm {
                 // Clicked outside any exposed window — exit expose
                 self.expose_active = false;
                 backend.compositor_set_expose_mode(false, vec![]);
+                let _ = backend.key_ops().ungrab_keyboard();
             }
             return Ok(());
         }
@@ -5776,6 +5779,7 @@ impl Jwm {
         if self.expose_active {
             self.expose_active = false;
             backend.compositor_set_expose_mode(false, vec![]);
+            let _ = backend.key_ops().ungrab_keyboard();
         } else {
             // Collect visible windows across all monitors
             let mut windows: Vec<(u32, i32, i32, u32, u32)> = Vec::new();
@@ -5808,6 +5812,9 @@ impl Jwm {
             }
             self.expose_active = true;
             backend.compositor_set_expose_mode(true, windows);
+            if let Some(root) = backend.root_window() {
+                let _ = backend.key_ops().grab_keyboard(root);
+            }
         }
         Ok(())
     }

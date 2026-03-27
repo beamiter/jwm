@@ -778,8 +778,8 @@ impl Config {
             KeyConfig {
                 modifier: vec!["Mod1".to_string()],
                 key: "e".to_string(),
-                function: "spawn".to_string(),
-                argument: ArgumentConfig::StringVec(dmenu_cmd.clone()),
+                function: "toggle_expose".to_string(),
+                argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
                 modifier: vec!["Mod1".to_string()],
@@ -876,12 +876,6 @@ impl Config {
                 key: "Tab".to_string(),
                 function: "toggle_overview".to_string(),
                 argument: ArgumentConfig::Int(1),
-            },
-            KeyConfig {
-                modifier: vec!["Mod4".to_string()],
-                key: "e".to_string(),
-                function: "toggle_expose".to_string(),
-                argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
                 modifier: vec!["Mod1".to_string()],
