@@ -69,7 +69,7 @@ ALL_BARS=(
 # ============================================================
 BUILD_MODE="release"
 BAR_NAME="xcb_bar"
-SKIP_BAR=false
+SKIP_BAR=true
 SKIP_JWM=false
 JOBS=""
 

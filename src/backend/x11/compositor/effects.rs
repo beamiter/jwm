@@ -28,7 +28,7 @@ impl Compositor {
                         }
                     }
                 }
-                if all_settled {
+                if all_settled && !w.dragging {
                     to_clear.push(win);
                 } else {
                     any_active = true;

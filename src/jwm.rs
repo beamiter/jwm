@@ -728,6 +728,10 @@ impl Jwm {
             if let Err(e) = backend.begin_move(win) {
                 error!("Error begin_move for _NET_WM_MOVERESIZE: {:?}", e);
             }
+            // Notify compositor of window move start (for wobbly windows effect)
+            if backend.has_compositor() {
+                backend.compositor_notify_window_move_start(win);
+            }
             return;
         }
 

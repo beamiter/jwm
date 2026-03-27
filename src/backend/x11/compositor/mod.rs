@@ -301,6 +301,7 @@ struct FrameStats {
 struct WobblyState {
     corner_offsets: [[f32; 2]; 4],    // TL, TR, BL, BR displacement
     corner_velocities: [[f32; 2]; 4], // velocity per corner
+    dragging: bool,                   // true while interactive move is active
 }
 
 /// Entry for Alt-Tab overview mode.
@@ -4449,7 +4450,10 @@ impl Compositor {
             wt.wobbly = Some(WobblyState {
                 corner_offsets: [[0.0; 2]; 4],
                 corner_velocities: [[0.0; 2]; 4],
+                dragging: true,
             });
+        } else {
+            log::warn!("[wobbly] move_start: window 0x{:x} not tracked by compositor", x11_win);
         }
     }
 
@@ -4495,6 +4499,7 @@ impl Compositor {
         // Don't clear wobbly state - let it settle naturally
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             if let Some(ref mut w) = wt.wobbly {
+                w.dragging = false;
                 // All corners spring back to zero
                 for i in 0..4 {
                     // Keep the offsets, they'll spring back in tick_wobbly
