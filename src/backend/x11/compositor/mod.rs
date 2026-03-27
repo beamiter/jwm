@@ -2520,7 +2520,7 @@ impl Compositor {
         // Need render if magnifier is active (tracking mouse)
         if self.magnifier_enabled { return true; }
         // Need render if edge glow is active (mouse near screen edge)
-        if self.edge_glow_active { return true; }
+        if self.edge_glow && self.edge_glow_active { return true; }
         // Need render if window tilt is active
         if self.window_tilt { return true; }
         // Need render if scale animation active
@@ -4019,6 +4019,15 @@ impl Compositor {
         }
 
         // === Pass 5b: Screen edge glow ===
+        // Recompute edge proximity every frame from current mouse position
+        // so glow deactivation is robust regardless of event delivery.
+        if self.edge_glow {
+            let sw = self.screen_w as f32;
+            let sh = self.screen_h as f32;
+            let min_dist = self.mouse_x.min(sw - self.mouse_x)
+                .min(self.mouse_y).min(sh - self.mouse_y);
+            self.edge_glow_active = min_dist < self.edge_glow_width;
+        }
         if self.edge_glow_active && self.edge_glow_width > 0.0 {
             unsafe {
                 self.gl.use_program(Some(self.edge_glow_program));
@@ -4372,20 +4381,7 @@ impl Compositor {
     pub(super) fn set_mouse_position(&mut self, x: f32, y: f32) {
         self.mouse_x = x;
         self.mouse_y = y;
-        if self.edge_glow {
-            let dist_left   = x;
-            let dist_right  = self.screen_w as f32 - x;
-            let dist_top    = y;
-            let dist_bottom = self.screen_h as f32 - y;
-            let min_dist = dist_left.min(dist_right).min(dist_top).min(dist_bottom);
-            let was_active = self.edge_glow_active;
-            self.edge_glow_active = min_dist < self.edge_glow_width;
-            if self.edge_glow_active || was_active {
-                // Render when active, and one extra frame when deactivating to clear
-                self.needs_render = true;
-            }
-        }
-        if self.magnifier_enabled || self.window_tilt {
+        if self.edge_glow || self.magnifier_enabled || self.window_tilt {
             self.needs_render = true;
         }
         if self.expose_active {
