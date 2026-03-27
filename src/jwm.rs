@@ -263,6 +263,9 @@ pub struct Jwm {
 
     /// Magnifier state
     pub magnifier_enabled: bool,
+
+    /// Expose / Mission Control mode
+    pub expose_active: bool,
 }
 
 // =================================================================================
@@ -1341,6 +1344,7 @@ impl Jwm {
             overview_clients: Vec::new(),
             overview_slide_offset: 0,
             magnifier_enabled: false,
+            expose_active: false,
         };
         if let Ok((x, y)) = backend.input_ops().get_pointer_position() {
             jwm.last_mouse_root = (x, y);
@@ -1551,6 +1555,15 @@ impl Jwm {
         let keysym = backend.key_ops_mut().keysym_from_keycode(keycode)?;
         let clean_state = self.clean_mask(backend, state_bits);
 
+        if self.expose_active {
+            if keysym == keys::KEY_Escape {
+                self.expose_active = false;
+                backend.compositor_set_expose_mode(false, vec![]);
+            }
+            // Consume all keys while expose is active
+            return Ok(());
+        }
+
         if self.overview_active {
             let overview_mods = clean_state
                 & (Mods::SHIFT
@@ -1657,6 +1670,27 @@ impl Jwm {
         detail_btn: u8,
         time: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // Expose mode intercept: route clicks to compositor
+        if self.expose_active {
+            let (rx, ry) = self.last_mouse_root;
+            if let Some(raw_win) = backend.compositor_expose_click(rx as f32, ry as f32) {
+                // Compositor handled the click and already deactivated expose animation
+                self.expose_active = false;
+                let wid = WindowId::from_raw(raw_win as u64);
+                if let Some(ck) = self.wintoclient(wid) {
+                    self.focus(backend, Some(ck))?;
+                    if let Some(mon_key) = self.state.sel_mon {
+                        let _ = self.restack(backend, Some(mon_key));
+                    }
+                }
+            } else {
+                // Clicked outside any exposed window — exit expose
+                self.expose_active = false;
+                backend.compositor_set_expose_mode(false, vec![]);
+            }
+            return Ok(());
+        }
+
         let mut click_type = WMClickType::ClickRootWin;
         let clicked_win: Option<crate::backend::common_define::WindowId> = match target {
             HitTarget::Surface(wid) => Some(wid),
@@ -5731,6 +5765,50 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.magnifier_enabled = !self.magnifier_enabled;
         backend.compositor_set_magnifier(self.magnifier_enabled);
+        Ok(())
+    }
+
+    pub fn toggle_expose(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.expose_active {
+            self.expose_active = false;
+            backend.compositor_set_expose_mode(false, vec![]);
+        } else {
+            // Collect visible windows across all monitors
+            let mut windows: Vec<(u32, i32, i32, u32, u32)> = Vec::new();
+            for &mon_key in &self.state.monitor_order.clone() {
+                if let Some(clients) = self.state.monitor_clients.get(mon_key) {
+                    for &ck in clients {
+                        if !self.is_client_visible_on_monitor(ck, mon_key) {
+                            continue;
+                        }
+                        if Some(ck) == self.status_bar_client {
+                            continue;
+                        }
+                        if let Some(client) = self.state.clients.get(ck) {
+                            let g = &client.geometry;
+                            if g.w > 0 && g.h > 0 {
+                                windows.push((
+                                    client.win.raw() as u32,
+                                    g.x,
+                                    g.y,
+                                    g.w as u32,
+                                    g.h as u32,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            if windows.is_empty() {
+                return Ok(());
+            }
+            self.expose_active = true;
+            backend.compositor_set_expose_mode(true, windows);
+        }
         Ok(())
     }
 

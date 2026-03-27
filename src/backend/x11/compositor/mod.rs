@@ -4365,6 +4365,9 @@ impl Compositor {
         if self.edge_glow || self.magnifier_enabled || self.window_tilt {
             self.needs_render = true;
         }
+        if self.expose_active {
+            self.expose_set_hover(x, y);
+        }
     }
 
     pub(super) fn set_window_urgent(&mut self, x11_win: u32, urgent: bool) {

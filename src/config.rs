@@ -878,6 +878,12 @@ impl Config {
                 argument: ArgumentConfig::Int(1),
             },
             KeyConfig {
+                modifier: vec!["Mod4".to_string()],
+                key: "e".to_string(),
+                function: "toggle_expose".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
                 modifier: vec!["Mod1".to_string()],
                 key: "Tab".to_string(),
                 function: "loopview".to_string(),
@@ -1398,6 +1404,7 @@ impl Config {
             "toggle_overview" => Some(Jwm::toggle_overview),
             "cycle_overview" => Some(Jwm::cycle_overview),
             "toggle_magnifier" => Some(Jwm::toggle_magnifier),
+            "toggle_expose" => Some(Jwm::toggle_expose),
 
             "scrolling_focus_column" => Some(Jwm::scrolling_focus_column),
             "scrolling_move_column" => Some(Jwm::scrolling_move_column),
