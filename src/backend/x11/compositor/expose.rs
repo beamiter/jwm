@@ -130,12 +130,6 @@ impl Compositor {
                 }
             }
         } else {
-            // Fade out
-            self.expose_opacity = (self.expose_opacity - dt * 4.0).max(0.0);
-            if self.expose_opacity > 0.0 {
-                any_moving = true;
-            }
-
             // Animate current -> orig
             for entry in &mut self.expose_entries {
                 let dx = entry.orig_x - entry.current_x;
@@ -155,6 +149,15 @@ impl Compositor {
                     entry.current_w = entry.orig_w;
                     entry.current_h = entry.orig_h;
                 }
+            }
+
+            // Fade out the dark overlay faster than the position animation,
+            // so it disappears before windows reach their original positions.
+            // This avoids a visible flash of dark overlay at the end.
+            let fade_speed = if any_moving { 8.0 } else { 20.0 };
+            self.expose_opacity = (self.expose_opacity - dt * fade_speed).max(0.0);
+            if self.expose_opacity > 0.0 {
+                any_moving = true;
             }
 
             // Clean up when animation finishes
@@ -219,7 +222,13 @@ impl Compositor {
                     None => continue,
                 };
 
-                let opacity = self.expose_opacity;
+                // When exiting (expose_active=false), keep windows fully opaque
+                // so only the dark overlay fades — avoids a dim flash at the end.
+                let opacity = if self.expose_active {
+                    self.expose_opacity
+                } else {
+                    1.0
+                };
                 self.gl
                     .uniform_1_f32(self.win_uniforms.opacity.as_ref(), opacity);
                 self.gl
