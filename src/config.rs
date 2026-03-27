@@ -285,6 +285,8 @@ pub struct BehaviorConfig {
     pub wobbly_stiffness: f32,
     #[serde(default = "default_wobbly_damping")]
     pub wobbly_damping: f32,
+    #[serde(default = "default_wobbly_restore_stiffness")]
+    pub wobbly_restore_stiffness: f32,
     #[serde(default = "default_wobbly_grid_size")]
     pub wobbly_grid_size: u32,
 
@@ -459,8 +461,9 @@ fn default_magnifier_zoom() -> f32 { 2.0 }
 fn default_tilt_amount() -> f32 { 5.0 }
 fn default_frosted_glass_strength() -> u32 { 2 }
 fn default_overview_gap() -> f32 { 20.0 }
-fn default_wobbly_stiffness() -> f32 { 10.0 }
-fn default_wobbly_damping() -> f32 { 5.0 }
+fn default_wobbly_stiffness() -> f32 { 400.0 }
+fn default_wobbly_damping() -> f32 { 25.0 }
+fn default_wobbly_restore_stiffness() -> f32 { 200.0 }
 fn default_wobbly_grid_size() -> u32 { 8 }
 fn default_particle_count() -> u32 { 150 }
 fn default_particle_lifetime() -> f32 { 0.8 }
@@ -666,6 +669,7 @@ impl Default for Config {
                     wobbly_windows: false,
                     wobbly_stiffness: default_wobbly_stiffness(),
                     wobbly_damping: default_wobbly_damping(),
+                    wobbly_restore_stiffness: default_wobbly_restore_stiffness(),
                     wobbly_grid_size: default_wobbly_grid_size(),
                     particle_effects: false,
                     particle_count: default_particle_count(),

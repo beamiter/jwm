@@ -550,22 +550,22 @@ void main() {
 
 pub const WOBBLY_VERTEX_SHADER: &str = r#"#version 330 core
 
-uniform vec4 u_rect;       // x, y, w, h in pixels
+uniform vec4 u_rect;               // x, y, w, h in pixels
 uniform mat4 u_projection;
-uniform vec2 u_corner_offsets[4]; // TL, TR, BL, BR corner displacements
-uniform int  u_grid_size;  // grid subdivisions (e.g. 8)
+uniform vec2 u_grid_offsets[289];  // up to 17x17 grid node offsets
+uniform int  u_grid_n;             // nodes per axis (grid_size + 1)
 
 out vec2 v_uv;
 
 void main() {
-    int grid = u_grid_size;
+    int grid = u_grid_n - 1;      // quads per axis
     int quad_id = gl_VertexID / 6;
     int vert_in_quad = gl_VertexID % 6;
 
     int col = quad_id % grid;
     int row = quad_id / grid;
 
-    // Triangle strip indices for a quad: 0,1,2, 2,1,3
+    // Two triangles per quad: (0,1,2) and (2,1,3)
     int dx, dy;
     if (vert_in_quad == 0)      { dx = 0; dy = 0; }
     else if (vert_in_quad == 1) { dx = 1; dy = 0; }
@@ -574,18 +574,15 @@ void main() {
     else if (vert_in_quad == 4) { dx = 1; dy = 0; }
     else                        { dx = 1; dy = 1; }
 
-    float fx = float(col + dx) / float(grid);
-    float fy = float(row + dy) / float(grid);
+    int node_col = col + dx;
+    int node_row = row + dy;
 
+    float fx = float(node_col) / float(grid);
+    float fy = float(node_row) / float(grid);
     v_uv = vec2(fx, fy);
 
-    // Bilinear interpolation of corner offsets
-    vec2 tl = u_corner_offsets[0];
-    vec2 tr = u_corner_offsets[1];
-    vec2 bl = u_corner_offsets[2];
-    vec2 br = u_corner_offsets[3];
-
-    vec2 offset = mix(mix(tl, tr, fx), mix(bl, br, fx), fy);
+    // Direct grid node lookup — no bilinear interpolation needed
+    vec2 offset = u_grid_offsets[node_row * u_grid_n + node_col];
 
     vec2 pixel = u_rect.xy + vec2(fx, fy) * u_rect.zw + offset;
     gl_Position = u_projection * vec4(pixel, 0.0, 1.0);

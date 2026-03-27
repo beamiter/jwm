@@ -2,32 +2,100 @@ use glow::HasContext;
 use super::{Compositor, Particle};
 
 impl Compositor {
-    /// Tick wobbly spring physics. Returns true if any wobbly is active.
+    /// Tick wobbly grid spring-mass physics. Returns true if any wobbly is active.
     pub(super) fn tick_wobbly(&mut self) -> bool {
         if !self.wobbly_windows { return false; }
-        let dt = 1.0 / 60.0; // approximate frame time
-        let stiffness = self.wobbly_stiffness;
+        let neighbor_k = self.wobbly_stiffness;
+        let restore_k = self.wobbly_restore_stiffness;
         let damping = self.wobbly_damping;
         let mut any_active = false;
         let mut to_clear = Vec::new();
 
+        let now = std::time::Instant::now();
+
         for (&win, wt) in self.windows.iter_mut() {
             if let Some(ref mut w) = wt.wobbly {
-                let mut all_settled = true;
-                for i in 0..4 {
-                    for axis in 0..2 {
-                        let offset = w.corner_offsets[i][axis];
-                        let vel = w.corner_velocities[i][axis];
-                        let accel = -stiffness * offset - damping * vel;
-                        let new_vel = vel + accel * dt;
-                        let new_offset = offset + new_vel * dt;
-                        w.corner_offsets[i][axis] = new_offset;
-                        w.corner_velocities[i][axis] = new_vel;
-                        if new_offset.abs() > 0.1 || new_vel.abs() > 0.1 {
-                            all_settled = false;
+                let raw_dt = now.duration_since(w.last_tick).as_secs_f32();
+                let dt = raw_dt.clamp(0.001, 0.033);
+                w.last_tick = now;
+
+                let n = w.grid_n;
+                let sub_steps = 3;
+                let sub_dt = dt / sub_steps as f32;
+
+                for _ in 0..sub_steps {
+                    // Compute forces for all nodes into a temporary buffer
+                    let count = n * n;
+                    let mut forces = vec![[0.0f32; 2]; count];
+
+                    for row in 0..n {
+                        for col in 0..n {
+                            // Skip anchor node during drag
+                            if w.dragging && row == w.anchor_row && col == w.anchor_col {
+                                continue;
+                            }
+                            let idx = row * n + col;
+                            let off = w.offsets[idx];
+                            let vel = w.velocities[idx];
+
+                            let mut fx = 0.0f32;
+                            let mut fy = 0.0f32;
+
+                            // Neighbor spring forces (up, down, left, right)
+                            if row > 0 {
+                                let ni = (row - 1) * n + col;
+                                fx += neighbor_k * (w.offsets[ni][0] - off[0]);
+                                fy += neighbor_k * (w.offsets[ni][1] - off[1]);
+                            }
+                            if row + 1 < n {
+                                let ni = (row + 1) * n + col;
+                                fx += neighbor_k * (w.offsets[ni][0] - off[0]);
+                                fy += neighbor_k * (w.offsets[ni][1] - off[1]);
+                            }
+                            if col > 0 {
+                                let ni = row * n + (col - 1);
+                                fx += neighbor_k * (w.offsets[ni][0] - off[0]);
+                                fy += neighbor_k * (w.offsets[ni][1] - off[1]);
+                            }
+                            if col + 1 < n {
+                                let ni = row * n + (col + 1);
+                                fx += neighbor_k * (w.offsets[ni][0] - off[0]);
+                                fy += neighbor_k * (w.offsets[ni][1] - off[1]);
+                            }
+
+                            // Restore spring (pull back to rest position [0,0])
+                            fx += -restore_k * off[0];
+                            fy += -restore_k * off[1];
+
+                            // Velocity damping
+                            fx += -damping * vel[0];
+                            fy += -damping * vel[1];
+
+                            forces[idx] = [fx, fy];
+                        }
+                    }
+
+                    // Symplectic Euler: update velocity then position
+                    for row in 0..n {
+                        for col in 0..n {
+                            if w.dragging && row == w.anchor_row && col == w.anchor_col {
+                                continue;
+                            }
+                            let idx = row * n + col;
+                            w.velocities[idx][0] += forces[idx][0] * sub_dt;
+                            w.velocities[idx][1] += forces[idx][1] * sub_dt;
+                            w.offsets[idx][0] += w.velocities[idx][0] * sub_dt;
+                            w.offsets[idx][1] += w.velocities[idx][1] * sub_dt;
                         }
                     }
                 }
+
+                // Check if settled
+                let all_settled = w.offsets.iter().zip(w.velocities.iter()).all(|(o, v)| {
+                    o[0].abs() < 0.1 && o[1].abs() < 0.1
+                        && v[0].abs() < 0.1 && v[1].abs() < 0.1
+                });
+
                 if all_settled && !w.dragging {
                     to_clear.push(win);
                 } else {

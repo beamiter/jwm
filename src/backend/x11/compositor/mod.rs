@@ -297,11 +297,15 @@ struct FrameStats {
     blur_cache_misses: u64,
 }
 
-/// Per-window wobbly animation state.
+/// Per-window wobbly animation state (grid spring-mass system).
 struct WobblyState {
-    corner_offsets: [[f32; 2]; 4],    // TL, TR, BL, BR displacement
-    corner_velocities: [[f32; 2]; 4], // velocity per corner
-    dragging: bool,                   // true while interactive move is active
+    grid_n: usize,                   // nodes per axis = grid_size + 1
+    offsets: Vec<[f32; 2]>,          // grid_n * grid_n node offsets (pixels)
+    velocities: Vec<[f32; 2]>,       // grid_n * grid_n node velocities
+    dragging: bool,                  // true while interactive move is active
+    anchor_row: usize,               // drag anchor node row
+    anchor_col: usize,               // drag anchor node column
+    last_tick: std::time::Instant,   // for accurate dt calculation
 }
 
 /// Entry for Alt-Tab overview mode.
@@ -395,8 +399,8 @@ struct WobblyUniforms {
     size: Option<glow::UniformLocation>,
     dim: Option<glow::UniformLocation>,
     uv_rect: Option<glow::UniformLocation>,
-    corner_offsets: [Option<glow::UniformLocation>; 4],
-    grid_size: Option<glow::UniformLocation>,
+    grid_offsets: Option<glow::UniformLocation>, // vec2 u_grid_offsets[289]
+    grid_n: Option<glow::UniformLocation>,       // int u_grid_n
 }
 
 /// Cached uniform locations for overview background shader.
@@ -774,6 +778,7 @@ pub(super) struct Compositor {
     wobbly_windows: bool,
     wobbly_stiffness: f32,
     wobbly_damping: f32,
+    wobbly_restore_stiffness: f32,
     wobbly_grid_size: u32,
 
     // --- Phase 5: Expose/Mission Control ---
@@ -1619,13 +1624,8 @@ impl Compositor {
                 size: gl.get_uniform_location(wobbly_program, "u_size"),
                 dim: gl.get_uniform_location(wobbly_program, "u_dim"),
                 uv_rect: gl.get_uniform_location(wobbly_program, "u_uv_rect"),
-                corner_offsets: [
-                    gl.get_uniform_location(wobbly_program, "u_corner_offsets[0]"),
-                    gl.get_uniform_location(wobbly_program, "u_corner_offsets[1]"),
-                    gl.get_uniform_location(wobbly_program, "u_corner_offsets[2]"),
-                    gl.get_uniform_location(wobbly_program, "u_corner_offsets[3]"),
-                ],
-                grid_size: gl.get_uniform_location(wobbly_program, "u_grid_size"),
+                grid_offsets: gl.get_uniform_location(wobbly_program, "u_grid_offsets"),
+                grid_n: gl.get_uniform_location(wobbly_program, "u_grid_n"),
             }
         };
 
@@ -2052,6 +2052,7 @@ impl Compositor {
             wobbly_windows: behavior.wobbly_windows,
             wobbly_stiffness: behavior.wobbly_stiffness,
             wobbly_damping: behavior.wobbly_damping,
+            wobbly_restore_stiffness: behavior.wobbly_restore_stiffness,
             wobbly_grid_size: behavior.wobbly_grid_size,
             // Phase 5: Expose/Mission Control
             expose_active: false,
@@ -2500,7 +2501,7 @@ impl Compositor {
         if self.wobbly_windows {
             for wt in self.windows.values() {
                 if let Some(ref w) = wt.wobbly {
-                    if w.corner_offsets.iter().any(|o| o[0].abs() > 0.1 || o[1].abs() > 0.1) {
+                    if w.dragging || w.offsets.iter().any(|o| o[0].abs() > 0.1 || o[1].abs() > 0.1) {
                         return true;
                     }
                 }
@@ -3516,7 +3517,7 @@ impl Compositor {
                     self.gl.active_texture(glow::TEXTURE0);
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
 
-                    // Wobbly windows: use grid-deformation shader when active
+                    // Wobbly windows: use grid spring-mass deformation shader
                     if self.wobbly_windows && wt.wobbly.is_some() {
                         let wobbly = wt.wobbly.as_ref().unwrap();
                         self.gl.use_program(Some(self.wobbly_program));
@@ -3534,16 +3535,18 @@ impl Compositor {
                         self.gl.uniform_4_f32(
                             self.wobbly_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0,
                         );
-                        for (i, offset) in wobbly.corner_offsets.iter().enumerate() {
-                            self.gl.uniform_2_f32(
-                                self.wobbly_uniforms.corner_offsets[i].as_ref(),
-                                offset[0], offset[1],
-                            );
-                        }
-                        let grid = self.wobbly_grid_size as i32;
-                        self.gl.uniform_1_i32(self.wobbly_uniforms.grid_size.as_ref(), grid);
-                        // Grid: grid*grid quads, 6 verts each (two triangles)
-                        self.gl.draw_arrays(glow::TRIANGLES, 0, grid * grid * 6);
+                        // Upload grid offsets as flat vec2 array
+                        let flat: Vec<f32> = wobbly.offsets.iter()
+                            .flat_map(|o| [o[0], o[1]])
+                            .collect();
+                        self.gl.uniform_2_f32_slice(
+                            self.wobbly_uniforms.grid_offsets.as_ref(), &flat,
+                        );
+                        let grid_n = wobbly.grid_n as i32;
+                        self.gl.uniform_1_i32(self.wobbly_uniforms.grid_n.as_ref(), grid_n);
+                        // Grid: (grid_n-1)^2 quads, 6 verts each
+                        let quads = grid_n - 1;
+                        self.gl.draw_arrays(glow::TRIANGLES, 0, quads * quads * 6);
 
                         // Restore standard window program
                         self.gl.use_program(Some(self.program));
@@ -4446,11 +4449,23 @@ impl Compositor {
 
     pub(super) fn notify_window_move_start(&mut self, x11_win: u32) {
         if !self.wobbly_windows { return; }
+        let grid_n = (self.wobbly_grid_size as usize + 1).min(17);
         if let Some(wt) = self.windows.get_mut(&x11_win) {
+            // Determine anchor node: closest grid node to mouse position
+            let rel_x = ((self.mouse_x - wt.x as f32).max(0.0)).min(wt.w as f32);
+            let rel_y = ((self.mouse_y - wt.y as f32).max(0.0)).min(wt.h as f32);
+            let anchor_col = ((rel_x / wt.w as f32) * (grid_n - 1) as f32).round() as usize;
+            let anchor_row = ((rel_y / wt.h as f32) * (grid_n - 1) as f32).round() as usize;
+
+            let count = grid_n * grid_n;
             wt.wobbly = Some(WobblyState {
-                corner_offsets: [[0.0; 2]; 4],
-                corner_velocities: [[0.0; 2]; 4],
+                grid_n,
+                offsets: vec![[0.0; 2]; count],
+                velocities: vec![[0.0; 2]; count],
                 dragging: true,
+                anchor_row: anchor_row.min(grid_n - 1),
+                anchor_col: anchor_col.min(grid_n - 1),
+                last_tick: std::time::Instant::now(),
             });
         } else {
             log::warn!("[wobbly] move_start: window 0x{:x} not tracked by compositor", x11_win);
@@ -4470,12 +4485,24 @@ impl Compositor {
         if self.wobbly_windows {
             if let Some(wt) = self.windows.get_mut(&x11_win) {
                 if let Some(ref mut w) = wt.wobbly {
-                    // Displace non-pinned corners (pin top-left, displace others)
-                    // All corners get displaced, but top-left (corner 0) returns faster
-                    for i in 1..4 {
-                        w.corner_offsets[i][0] -= dx * 0.5;
-                        w.corner_offsets[i][1] -= dy * 0.5;
+                    // The window has already moved to the new position.
+                    // Anchor node stays at [0,0] (moves with the window).
+                    // All OTHER nodes get a reverse impulse to simulate inertia.
+                    let n = w.grid_n;
+                    let ar = w.anchor_row;
+                    let ac = w.anchor_col;
+                    for row in 0..n {
+                        for col in 0..n {
+                            if row == ar && col == ac { continue; }
+                            let idx = row * n + col;
+                            w.offsets[idx][0] -= dx;
+                            w.offsets[idx][1] -= dy;
+                        }
                     }
+                    // Ensure anchor stays pinned at zero
+                    let ai = ar * n + ac;
+                    w.offsets[ai] = [0.0, 0.0];
+                    w.velocities[ai] = [0.0, 0.0];
                 }
             }
         }
@@ -4496,15 +4523,10 @@ impl Compositor {
         // Phase 3.1: Clear motion trail
         self.clear_motion_trail(x11_win);
 
-        // Don't clear wobbly state - let it settle naturally
+        // Release anchor — let all nodes spring back via tick_wobbly
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             if let Some(ref mut w) = wt.wobbly {
                 w.dragging = false;
-                // All corners spring back to zero
-                for i in 0..4 {
-                    // Keep the offsets, they'll spring back in tick_wobbly
-                    let _ = w.corner_velocities[i];
-                }
             }
         }
     }
