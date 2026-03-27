@@ -2487,7 +2487,9 @@ mod input_ops {
             let cursor_id = cursor.map(|c| c as u32).unwrap_or(0);
             //  Grab Pointer  ButtonRelease  Motion
             let mask = if mask_bits != 0 {
-                EventMask::from(mask_bits)
+                // mask_bits uses EventMaskBits (custom bit layout), must convert
+                // to X11 EventMask via the adapter — the bit positions differ.
+                super::adapter::event_mask_from_generic(mask_bits)
             } else {
                 EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION
             };
