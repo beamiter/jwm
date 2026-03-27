@@ -124,6 +124,8 @@ struct WindowUniforms {
     size: Option<glow::UniformLocation>,
     dim: Option<glow::UniformLocation>,
     uv_rect: Option<glow::UniformLocation>,
+    ripple_progress: Option<glow::UniformLocation>,
+    ripple_amplitude: Option<glow::UniformLocation>,
 }
 
 struct ShadowUniforms {
@@ -555,6 +557,7 @@ struct GenieAnimation {
 // ---------------------------------------------------------------------------
 
 struct RippleState {
+    x11_win: u32,
     start: std::time::Instant,
 }
 
@@ -873,6 +876,7 @@ pub(super) struct Compositor {
     // --- Phase 3.3: Window open ripple ---
     ripple_on_open: bool,
     ripple_duration: f32,
+    ripple_amplitude: f32,
     ripple_active: Vec<RippleState>,
 
     // --- Phase 3.4: Focus switch highlight ---
@@ -1459,6 +1463,8 @@ impl Compositor {
                 size: gl.get_uniform_location(program, "u_size"),
                 dim: gl.get_uniform_location(program, "u_dim"),
                 uv_rect: gl.get_uniform_location(program, "u_uv_rect"),
+                ripple_progress: gl.get_uniform_location(program, "u_ripple_progress"),
+                ripple_amplitude: gl.get_uniform_location(program, "u_ripple_amplitude"),
             }
         };
         let shadow_uniforms = unsafe {
@@ -2137,6 +2143,7 @@ impl Compositor {
             // Phase 3.3: Ripple on open
             ripple_on_open: behavior.ripple_on_open,
             ripple_duration: behavior.ripple_duration,
+            ripple_amplitude: behavior.ripple_amplitude,
             ripple_active: Vec::new(),
             // Phase 3.4: Focus highlight
             focus_highlight: behavior.focus_highlight,
@@ -3320,6 +3327,7 @@ impl Compositor {
             );
             self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
             self.gl.uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
+            self.gl.uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
             self.gl.bind_vertex_array(Some(self.quad_vao));
 
             for &(win, x, y, w, h) in visible_scene {
@@ -3610,7 +3618,27 @@ impl Compositor {
                         self.gl.uniform_4_f32(
                             self.win_uniforms.rect.as_ref(), draw_x, draw_y, draw_w, draw_h,
                         );
+
+                        // Window-open ripple: set per-window distortion uniforms
+                        let ripple_prog = self.ripple_active.iter()
+                            .find(|r| r.x11_win == win)
+                            .map(|r| {
+                                let elapsed = r.start.elapsed().as_secs_f32();
+                                (elapsed / self.ripple_duration).min(1.0)
+                            });
+                        if let Some(progress) = ripple_prog {
+                            self.gl.uniform_1_f32(self.win_uniforms.ripple_progress.as_ref(), progress);
+                            self.gl.uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), self.ripple_amplitude);
+                        } else {
+                            self.gl.uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
+                        }
+
                         self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+                        // Reset ripple for next window
+                        if ripple_prog.is_some() {
+                            self.gl.uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
+                        }
                     }
 
                     // Update blur below-scene tracking after drawing this window.

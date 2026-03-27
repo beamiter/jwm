@@ -260,6 +260,7 @@ impl Compositor {
         // Phase 3.3: Trigger ripple effect on window open
         if self.ripple_on_open {
             self.ripple_active.push(RippleState {
+                x11_win,
                 start: std::time::Instant::now(),
             });
         }
