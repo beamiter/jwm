@@ -2920,11 +2920,12 @@ impl Compositor {
         let has_dirty = scene.iter().any(|&(win, _, _, _, _)| {
             self.windows.get(&win).map_or(false, |wt| wt.dirty || wt.needs_pixmap_refresh)
         });
+        let explicit_render = std::mem::replace(&mut self.needs_render, false);
         let force_render = self.pending_screenshot.is_some() || self.debug_hud || self.transition_active() || self.overview_active
             || self.expose_active || expose_animating || snap_animating || peek_animating
             || genie_active || ripples_active || focus_highlight_active || wallpaper_crossfade_active
             || self.recording_active || self.annotation_active || wallpaper_just_loaded
-            || wobbly_active;
+            || wobbly_active || explicit_render;
         let hash = Self::scene_hash(scene, focused);
         let scene_changed = hash != self.last_scene_hash;
         if !has_dirty && !fades_active && !force_render && !scene_changed {

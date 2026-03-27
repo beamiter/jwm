@@ -391,7 +391,8 @@ void main() {
     float mouse_factor = 1.0 - smoothstep(0.0, u_glow_width, mouse_min);
     alpha *= mouse_factor;
 
-    frag_color = vec4(u_glow_color.rgb, u_glow_color.a * alpha);
+    float final_a = u_glow_color.a * alpha;
+    frag_color = vec4(u_glow_color.rgb * final_a, final_a);
 }
 "#;
 
