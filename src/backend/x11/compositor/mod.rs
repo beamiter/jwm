@@ -726,7 +726,9 @@ pub(super) struct Compositor {
     edge_glow_program: glow::Program,
     edge_glow_uniforms: EdgeGlowUniforms,
     edge_glow: bool,
-    edge_glow_active: bool,          // true only when mouse is near a screen edge
+    edge_glow_active: bool,
+    /// When the glow should auto-deactivate (refreshed while mouse stays at edge).
+    edge_glow_expire: Option<std::time::Instant>,
     edge_glow_color: [f32; 4],
     edge_glow_width: f32,
 
@@ -2017,6 +2019,7 @@ impl Compositor {
             edge_glow_uniforms,
             edge_glow: behavior.edge_glow,
             edge_glow_active: false,
+            edge_glow_expire: None,
             edge_glow_color: behavior.edge_glow_color,
             edge_glow_width: behavior.edge_glow_width,
             // Attention animation
@@ -4047,14 +4050,9 @@ impl Compositor {
         }
 
         // === Pass 5b: Screen edge glow ===
-        // Recompute edge proximity every frame from current mouse position
-        // so glow deactivation is robust regardless of event delivery.
+        // Tick the countdown so the glow expires even without new mouse events.
         if self.edge_glow {
-            let sw = self.screen_w as f32;
-            let sh = self.screen_h as f32;
-            let min_dist = self.mouse_x.min(sw - self.mouse_x)
-                .min(self.mouse_y).min(sh - self.mouse_y);
-            self.edge_glow_active = min_dist < self.edge_glow_width;
+            self.edge_glow_tick(self.mouse_x, self.mouse_y);
         }
         if self.edge_glow_active && self.edge_glow_width > 0.0 {
             unsafe {
@@ -4409,11 +4407,42 @@ impl Compositor {
     pub(super) fn set_mouse_position(&mut self, x: f32, y: f32) {
         self.mouse_x = x;
         self.mouse_y = y;
-        if self.edge_glow || self.magnifier_enabled || self.window_tilt {
+        if self.edge_glow {
+            self.edge_glow_tick(x, y);
+        }
+        if self.magnifier_enabled || self.window_tilt {
             self.needs_render = true;
         }
         if self.expose_active {
             self.expose_set_hover(x, y);
+        }
+    }
+
+    /// Core edge-glow state machine (called from mouse events and render tick).
+    ///
+    /// - Mouse at edge  → activate, deadline = now + 2 s (keeps refreshing).
+    /// - Mouse away     → deadline counts down; deactivate when it expires.
+    fn edge_glow_tick(&mut self, mx: f32, my: f32) {
+        let sw = self.screen_w as f32;
+        let sh = self.screen_h as f32;
+        let min_dist = mx.min(sw - mx).min(my).min(sh - my);
+        let at_edge = min_dist < self.edge_glow_width;
+        let now = std::time::Instant::now();
+
+        if at_edge {
+            self.edge_glow_active = true;
+            self.edge_glow_expire = Some(now + std::time::Duration::from_secs(2));
+            self.needs_render = true;
+        } else if self.edge_glow_active {
+            if self.edge_glow_expire.map_or(true, |t| now >= t) {
+                self.edge_glow_active = false;
+                self.edge_glow_expire = None;
+                // one more render to clear the glow from screen
+                self.needs_render = true;
+            } else {
+                // still counting down — keep rendering
+                self.needs_render = true;
+            }
         }
     }
 
