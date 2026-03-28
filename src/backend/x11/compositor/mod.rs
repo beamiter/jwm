@@ -729,8 +729,6 @@ pub(super) struct Compositor {
     edge_glow_active: bool,
     /// Suppressed while pointer is over a client window (prevents re-activation).
     edge_glow_suppressed: bool,
-    /// When the glow should auto-deactivate (refreshed while mouse stays at edge).
-    edge_glow_expire: Option<std::time::Instant>,
     edge_glow_color: [f32; 4],
     edge_glow_width: f32,
 
@@ -2022,7 +2020,6 @@ impl Compositor {
             edge_glow: behavior.edge_glow,
             edge_glow_active: false,
             edge_glow_suppressed: false,
-            edge_glow_expire: None,
             edge_glow_color: behavior.edge_glow_color,
             edge_glow_width: behavior.edge_glow_width,
             // Attention animation
@@ -4423,29 +4420,22 @@ impl Compositor {
 
     /// Core edge-glow state machine (called from mouse events and render tick).
     ///
-    /// - Mouse at edge  → activate, deadline = now + 2 s (keeps refreshing).
-    /// - Mouse away     → deadline counts down; deactivate when it expires.
+    /// - Mouse at edge (unsuppressed) → activate.
+    /// - Mouse away or suppressed     → deactivate immediately.
     fn edge_glow_tick(&mut self, mx: f32, my: f32) {
         let sw = self.screen_w as f32;
         let sh = self.screen_h as f32;
         let min_dist = mx.min(sw - mx).min(my).min(sh - my);
         let at_edge = min_dist < self.edge_glow_width;
-        let now = std::time::Instant::now();
 
         if at_edge && !self.edge_glow_suppressed {
-            self.edge_glow_active = true;
-            self.edge_glow_expire = Some(now + std::time::Duration::from_secs(2));
-            self.needs_render = true;
-        } else if self.edge_glow_active {
-            if self.edge_glow_expire.map_or(true, |t| now >= t) {
-                self.edge_glow_active = false;
-                self.edge_glow_expire = None;
-                // one more render to clear the glow from screen
-                self.needs_render = true;
-            } else {
-                // still counting down — keep rendering
+            if !self.edge_glow_active {
+                self.edge_glow_active = true;
                 self.needs_render = true;
             }
+        } else if self.edge_glow_active {
+            self.edge_glow_active = false;
+            self.needs_render = true;
         }
     }
 
@@ -4456,7 +4446,6 @@ impl Compositor {
             self.edge_glow_suppressed = true;
             if self.edge_glow_active {
                 self.edge_glow_active = false;
-                self.edge_glow_expire = None;
                 self.needs_render = true;
             }
         }
