@@ -453,6 +453,11 @@ impl WMController for Jwm {
     ) {
         // Forward mouse position to compositor for effects (magnifier, etc.)
         if backend.has_compositor() {
+            // When pointer is on the desktop (no window), clear edge-glow suppression
+            // so the glow can activate at screen edges again.
+            if matches!(target, HitTarget::Background { .. }) {
+                backend.compositor_unsuppress_edge_glow();
+            }
             backend.compositor_set_mouse_position(root_x as f32, root_y as f32);
         }
 
@@ -520,6 +525,7 @@ impl WMController for Jwm {
         self.last_mouse_root = (root_x, root_y);
 
         if backend.has_compositor() {
+            backend.compositor_set_mouse_position(root_x as f32, root_y as f32);
             backend.compositor_deactivate_edge_glow();
         }
 

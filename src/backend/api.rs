@@ -720,6 +720,9 @@ pub trait Backend: Send {
     /// Immediately deactivate edge glow (e.g. pointer entered a window).
     fn compositor_deactivate_edge_glow(&mut self) {}
 
+    /// Clear edge-glow suppression (pointer returned to desktop).
+    fn compositor_unsuppress_edge_glow(&mut self) {}
+
     /// Set window urgent state for attention animation.
     fn compositor_set_window_urgent(&mut self, _window: WindowId, _urgent: bool) {}
 

@@ -727,6 +727,8 @@ pub(super) struct Compositor {
     edge_glow_uniforms: EdgeGlowUniforms,
     edge_glow: bool,
     edge_glow_active: bool,
+    /// Suppressed while pointer is over a client window (prevents re-activation).
+    edge_glow_suppressed: bool,
     /// When the glow should auto-deactivate (refreshed while mouse stays at edge).
     edge_glow_expire: Option<std::time::Instant>,
     edge_glow_color: [f32; 4],
@@ -2019,6 +2021,7 @@ impl Compositor {
             edge_glow_uniforms,
             edge_glow: behavior.edge_glow,
             edge_glow_active: false,
+            edge_glow_suppressed: false,
             edge_glow_expire: None,
             edge_glow_color: behavior.edge_glow_color,
             edge_glow_width: behavior.edge_glow_width,
@@ -4429,7 +4432,7 @@ impl Compositor {
         let at_edge = min_dist < self.edge_glow_width;
         let now = std::time::Instant::now();
 
-        if at_edge {
+        if at_edge && !self.edge_glow_suppressed {
             self.edge_glow_active = true;
             self.edge_glow_expire = Some(now + std::time::Duration::from_secs(2));
             self.needs_render = true;
@@ -4446,13 +4449,22 @@ impl Compositor {
         }
     }
 
-    /// Immediately deactivate the edge glow (e.g. when pointer enters a window).
+    /// Immediately deactivate the edge glow and suppress re-activation
+    /// until the pointer leaves the window (returns to root/desktop).
     pub(super) fn deactivate_edge_glow(&mut self) {
-        if self.edge_glow && self.edge_glow_active {
-            self.edge_glow_active = false;
-            self.edge_glow_expire = None;
-            self.needs_render = true;
+        if self.edge_glow {
+            self.edge_glow_suppressed = true;
+            if self.edge_glow_active {
+                self.edge_glow_active = false;
+                self.edge_glow_expire = None;
+                self.needs_render = true;
+            }
         }
+    }
+
+    /// Clear the edge-glow suppression (pointer returned to desktop).
+    pub(super) fn unsuppress_edge_glow(&mut self) {
+        self.edge_glow_suppressed = false;
     }
 
     pub(super) fn set_window_urgent(&mut self, x11_win: u32, urgent: bool) {
