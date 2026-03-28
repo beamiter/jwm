@@ -3383,7 +3383,7 @@ impl Compositor {
                     };
 
                     // Phase 5.3: Apply peek opacity
-                    let opacity = if peek_mul < 1.0 && opacity > 0.0 {
+                    let opacity = if peek_mul < 1.0 {
                         if opacity < 0.0 { opacity * peek_mul } else { (opacity * peek_mul).clamp(0.0, 1.0) }
                     } else {
                         opacity
