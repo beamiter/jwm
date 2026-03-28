@@ -563,6 +563,10 @@ impl Backend for X11Backend {
         if let Some(c) = self.compositor.as_mut() { c.set_mouse_position(x, y); }
     }
 
+    fn compositor_deactivate_edge_glow(&mut self) {
+        if let Some(c) = self.compositor.as_mut() { c.deactivate_edge_glow(); }
+    }
+
     fn compositor_set_window_urgent(&mut self, window: WindowId, urgent: bool) {
         if let Some(c) = self.compositor.as_mut() {
             if let Ok(x11w) = self.ids.x11(window) {

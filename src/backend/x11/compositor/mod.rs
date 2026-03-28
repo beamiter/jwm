@@ -4446,6 +4446,15 @@ impl Compositor {
         }
     }
 
+    /// Immediately deactivate the edge glow (e.g. when pointer enters a window).
+    pub(super) fn deactivate_edge_glow(&mut self) {
+        if self.edge_glow && self.edge_glow_active {
+            self.edge_glow_active = false;
+            self.edge_glow_expire = None;
+            self.needs_render = true;
+        }
+    }
+
     pub(super) fn set_window_urgent(&mut self, x11_win: u32, urgent: bool) {
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             wt.is_urgent = urgent;

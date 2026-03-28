@@ -520,7 +520,7 @@ impl WMController for Jwm {
         self.last_mouse_root = (root_x, root_y);
 
         if backend.has_compositor() {
-            backend.compositor_set_mouse_position(root_x as f32, root_y as f32);
+            backend.compositor_deactivate_edge_glow();
         }
 
         if let Err(e) = self.enter_notify(backend, win) {

@@ -717,6 +717,9 @@ pub trait Backend: Send {
     /// Set mouse position for compositor effects (magnifier, tilt, edge glow).
     fn compositor_set_mouse_position(&mut self, _x: f32, _y: f32) {}
 
+    /// Immediately deactivate edge glow (e.g. pointer entered a window).
+    fn compositor_deactivate_edge_glow(&mut self) {}
+
     /// Set window urgent state for attention animation.
     fn compositor_set_window_urgent(&mut self, _window: WindowId, _urgent: bool) {}
 
