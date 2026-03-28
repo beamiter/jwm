@@ -783,6 +783,12 @@ impl Config {
             },
             KeyConfig {
                 modifier: vec!["Mod1".to_string()],
+                key: "p".to_string(),
+                function: "toggle_peek".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string()],
                 key: "r".to_string(),
                 function: "spawn".to_string(),
                 argument: ArgumentConfig::StringVec(dmenu_cmd),
