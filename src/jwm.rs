@@ -264,6 +264,9 @@ pub struct Jwm {
     /// Magnifier state
     pub magnifier_enabled: bool,
 
+    /// Peek (boss key) mode — all windows fade to transparent.
+    pub peek_active: bool,
+
     /// Expose / Mission Control mode
     pub expose_active: bool,
 }
@@ -1354,6 +1357,7 @@ impl Jwm {
             overview_clients: Vec::new(),
             overview_slide_offset: 0,
             magnifier_enabled: false,
+            peek_active: false,
             expose_active: false,
         };
         if let Ok((x, y)) = backend.input_ops().get_pointer_position() {
@@ -5780,6 +5784,16 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.magnifier_enabled = !self.magnifier_enabled;
         backend.compositor_set_magnifier(self.magnifier_enabled);
+        Ok(())
+    }
+
+    pub fn toggle_peek(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.peek_active = !self.peek_active;
+        backend.compositor_set_peek_mode(self.peek_active);
         Ok(())
     }
 

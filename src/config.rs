@@ -1398,6 +1398,7 @@ impl Config {
             "toggle_overview" => Some(Jwm::toggle_overview),
             "cycle_overview" => Some(Jwm::cycle_overview),
             "toggle_magnifier" => Some(Jwm::toggle_magnifier),
+            "toggle_peek" => Some(Jwm::toggle_peek),
             "toggle_expose" => Some(Jwm::toggle_expose),
 
             "scrolling_focus_column" => Some(Jwm::scrolling_focus_column),
