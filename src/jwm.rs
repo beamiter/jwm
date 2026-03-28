@@ -1166,6 +1166,10 @@ impl Jwm {
             "cycle_overview"
         } else if eq!(Jwm::toggle_magnifier) {
             "toggle_magnifier"
+        } else if eq!(Jwm::toggle_peek) {
+            "toggle_peek"
+        } else if eq!(Jwm::toggle_expose) {
+            "toggle_expose"
         } else {
             "<unknown>"
         }
