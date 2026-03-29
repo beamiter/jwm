@@ -4709,25 +4709,37 @@ impl Compositor {
         let stderr_file = std::fs::File::create("/tmp/jwm-ffmpeg.log")
             .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
 
-        // Probe VAAPI by running: ffmpeg -vaapi_device /dev/dri/renderD128 -f lavfi -i nullsrc -frames:v 1 -f null -
-        let vaapi_available = std::path::Path::new("/dev/dri/renderD128").exists()
-            && std::process::Command::new("ffmpeg")
-                .args(["-vaapi_device", "/dev/dri/renderD128", "-f", "lavfi", "-i", "nullsrc", "-frames:v", "1", "-f", "null", "-"])
+        // Probe HW encoders: NVENC (NVIDIA) > VAAPI (Intel/AMD) > libopenh264 (SW fallback).
+        let probe = |args: &[&str]| -> bool {
+            std::process::Command::new("ffmpeg")
+                .args(args)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
                 .map(|s| s.success())
-                .unwrap_or(false);
+                .unwrap_or(false)
+        };
 
-        let codec = if vaapi_available { "h264_vaapi" } else { "libopenh264" };
-        log::info!("compositor: recording encoder={codec}, size={w}x{h}, fps={fps}, output={output_path}");
+        enum Encoder { Nvenc, Vaapi, Sw }
+        let encoder = if probe(&["-f", "lavfi", "-i", "nullsrc=s=64x64", "-frames:v", "1", "-c:v", "h264_nvenc", "-f", "null", "-"]) {
+            Encoder::Nvenc
+        } else if std::path::Path::new("/dev/dri/renderD128").exists()
+            && probe(&["-vaapi_device", "/dev/dri/renderD128", "-f", "lavfi", "-i", "nullsrc=s=64x64", "-frames:v", "1", "-f", "null", "-"])
+        {
+            Encoder::Vaapi
+        } else {
+            Encoder::Sw
+        };
+
+        let codec_name = match encoder { Encoder::Nvenc => "h264_nvenc", Encoder::Vaapi => "h264_vaapi", Encoder::Sw => "libopenh264" };
+        log::info!("compositor: recording encoder={codec_name}, size={w}x{h}, fps={fps}, output={output_path}");
 
         let size_str = format!("{w}x{h}");
         let fps_str = fps.to_string();
         let mut args: Vec<&str> = Vec::new();
 
-        if vaapi_available {
+        if matches!(encoder, Encoder::Vaapi) {
             args.extend_from_slice(&["-vaapi_device", "/dev/dri/renderD128"]);
         }
         args.extend_from_slice(&[
@@ -4737,12 +4749,12 @@ impl Compositor {
             "-r", &fps_str,
             "-i", "pipe:0",
         ]);
-        if vaapi_available {
-            args.extend_from_slice(&["-vf", "vflip,format=nv12,hwupload"]);
-        } else {
-            args.extend_from_slice(&["-vf", "vflip"]);
+        match encoder {
+            Encoder::Nvenc => args.extend_from_slice(&["-vf", "vflip"]),
+            Encoder::Vaapi => args.extend_from_slice(&["-vf", "vflip,format=nv12,hwupload"]),
+            Encoder::Sw => args.extend_from_slice(&["-vf", "vflip"]),
         }
-        args.extend_from_slice(&["-c:v", codec, "-b:v", "20M", "-y", output_path]);
+        args.extend_from_slice(&["-c:v", codec_name, "-b:v", "20M", "-y", output_path]);
 
         let child = match std::process::Command::new("ffmpeg")
             .args(&args)
