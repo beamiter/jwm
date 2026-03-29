@@ -431,6 +431,11 @@ impl WMController for Jwm {
                         }
                     }
 
+                    // Clear snap preview
+                    if backend.has_compositor() {
+                        backend.compositor_set_snap_preview(None);
+                    }
+
                     // Sync floating window geometry after drag ends
                     self.sync_focused_floating_geometry(backend);
 
@@ -495,6 +500,32 @@ impl WMController for Jwm {
                         }
                     }
                     backend.compositor_force_full_redraw();
+
+                    // Snap preview: detect mouse near monitor edges
+                    let snap_dist = CONFIG.load().snap() as i32;
+                    let rx = root_x as i32;
+                    let ry = root_y as i32;
+                    let mon_key = self.recttomon(backend, rx, ry);
+                    let preview = if let Some(mk) = mon_key {
+                        let (mx, my, mw, mh) = self.monitor_rect(mk);
+                        let mw = mw as i32;
+                        let mh = mh as i32;
+                        if rx - mx < snap_dist {
+                            // Left edge → left half
+                            Some((mx as f32, my as f32, (mw / 2) as f32, mh as f32))
+                        } else if (mx + mw) - rx < snap_dist {
+                            // Right edge → right half
+                            Some(((mx + mw / 2) as f32, my as f32, (mw / 2) as f32, mh as f32))
+                        } else if ry - my < snap_dist {
+                            // Top edge → fullscreen
+                            Some((mx as f32, my as f32, mw as f32, mh as f32))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    backend.compositor_set_snap_preview(preview);
                 }
                 self.last_mouse_root = (root_x, root_y);
                 return;
