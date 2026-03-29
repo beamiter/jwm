@@ -860,7 +860,6 @@ pub(super) struct Compositor {
     recording_process: Option<std::process::Child>,
     recording_last_frame: Option<std::time::Instant>,
     recording_pbo: [Option<glow::Buffer>; 2],
-    recording_pbo_index: usize,
 
     // --- Phase 3.1: Motion trail (drag ghosting) ---
     motion_trail_enabled: bool,
@@ -2131,7 +2130,6 @@ impl Compositor {
             recording_process: None,
             recording_last_frame: None,
             recording_pbo: [None, None],
-            recording_pbo_index: 0,
             // Phase 3.1: Motion trail
             motion_trail_enabled: behavior.motion_trail,
             motion_trail_frames: behavior.motion_trail_frames,
@@ -4788,10 +4786,8 @@ impl Compositor {
         let h = self.screen_h;
         let buf_size = (w * h * 4) as usize;
 
-        let pbo_idx = self.recording_pbo_index;
-        self.recording_pbo_index = (self.recording_pbo_index + 1) % 2;
-
-        if let Some(pbo) = self.recording_pbo[pbo_idx] {
+        // Simple single-buffer approach: read_pixels into PBO, map, write to ffmpeg.
+        if let Some(pbo) = self.recording_pbo[0] {
             unsafe {
                 self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
                 self.gl.read_pixels(
@@ -4799,31 +4795,32 @@ impl Compositor {
                     glow::RGBA, glow::UNSIGNED_BYTE,
                     glow::PixelPackData::BufferOffset(0),
                 );
-                self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-            }
 
-            let read_idx = self.recording_pbo_index;
-            if let Some(read_pbo) = self.recording_pbo[read_idx] {
-                unsafe {
-                    self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(read_pbo));
-                    let ptr = self.gl.map_buffer_range(
-                        glow::PIXEL_PACK_BUFFER,
-                        0,
-                        buf_size as i32,
-                        glow::MAP_READ_BIT,
-                    );
-                    if !ptr.is_null() {
-                        let pixels = std::slice::from_raw_parts(ptr as *const u8, buf_size);
-                        if let Some(ref mut child) = self.recording_process {
-                            if let Some(ref mut stdin) = child.stdin {
-                                use std::io::Write;
-                                let _ = stdin.write_all(pixels);
+                let ptr = self.gl.map_buffer_range(
+                    glow::PIXEL_PACK_BUFFER,
+                    0,
+                    buf_size as i32,
+                    glow::MAP_READ_BIT,
+                );
+                if !ptr.is_null() {
+                    let pixels = std::slice::from_raw_parts(ptr as *const u8, buf_size);
+                    if let Some(ref mut child) = self.recording_process {
+                        if let Some(ref mut stdin) = child.stdin {
+                            use std::io::Write;
+                            if let Err(e) = stdin.write_all(pixels) {
+                                log::warn!("compositor: recording write failed: {e}, stopping");
+                                self.gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
+                                self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                                self.recording_active = false;
+                                return;
                             }
                         }
-                        self.gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
                     }
-                    self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                    self.gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
+                } else {
+                    log::warn!("compositor: recording PBO map returned null");
                 }
+                self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
             }
         }
     }
