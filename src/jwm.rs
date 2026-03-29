@@ -431,6 +431,38 @@ impl WMController for Jwm {
                         }
                     }
 
+                    // Snap: if mouse is near a monitor edge, snap the window
+                    let (rx, ry) = self.last_mouse_root;
+                    let rx = rx as i32;
+                    let ry = ry as i32;
+                    let snap_dist = CONFIG.load().snap() as i32;
+                    if let Some(mk) = self.recttomon(backend, rx, ry) {
+                        let (mx, my, mw, mh) = self.monitor_rect(mk);
+                        let mw = mw as i32;
+                        let mh = mh as i32;
+                        let snap_rect = if rx - mx < snap_dist {
+                            Some((mx, my, mw / 2, mh))
+                        } else if (mx + mw) - rx < snap_dist {
+                            Some((mx + mw / 2, my, mw / 2, mh))
+                        } else if ry - my < snap_dist {
+                            Some((mx, my, mw, mh))
+                        } else {
+                            None
+                        };
+                        if let Some((sx, sy, sw, sh)) = snap_rect {
+                            if let Some(ck) = self.get_selected_client_key() {
+                                let bw = self.state.clients.get(ck)
+                                    .map(|c| c.geometry.border_w).unwrap_or(0);
+                                self.resize_client(
+                                    backend, ck,
+                                    sx + bw, sy + bw,
+                                    sw - 2 * bw, sh - 2 * bw,
+                                    false,
+                                );
+                            }
+                        }
+                    }
+
                     // Clear snap preview
                     if backend.has_compositor() {
                         backend.compositor_set_snap_preview(None);
