@@ -4711,31 +4711,30 @@ impl Compositor {
 
         // Try h264_vaapi (HW) first, fallback to libopenh264 (SW).
         let vaapi_available = std::path::Path::new("/dev/dri/renderD128").exists();
-        let (codec, extra_args): (&str, Vec<&str>) = if vaapi_available {
-            ("h264_vaapi", vec![
-                "-vaapi_device", "/dev/dri/renderD128",
-                "-vf", "vflip,format=nv12,hwupload",
-                "-b:v", "20M",
-            ])
-        } else {
-            ("libopenh264", vec![
-                "-vf", "vflip",
-                "-b:v", "20M",
-            ])
-        };
+        let codec = if vaapi_available { "h264_vaapi" } else { "libopenh264" };
         log::info!("compositor: recording encoder={codec}, size={w}x{h}, fps={fps}, output={output_path}");
 
         let size_str = format!("{w}x{h}");
         let fps_str = fps.to_string();
-        let mut args = vec![
+        let mut args: Vec<&str> = Vec::new();
+
+        // -vaapi_device must come before -i as a global init option
+        if vaapi_available {
+            args.extend_from_slice(&["-vaapi_device", "/dev/dri/renderD128"]);
+        }
+        args.extend_from_slice(&[
             "-f", "rawvideo",
             "-pix_fmt", "rgba",
             "-s", &size_str,
             "-r", &fps_str,
             "-i", "pipe:0",
-        ];
-        args.extend_from_slice(&extra_args);
-        args.extend_from_slice(&["-c:v", codec, "-y", output_path]);
+        ]);
+        if vaapi_available {
+            args.extend_from_slice(&["-vf", "vflip,format=nv12,hwupload"]);
+        } else {
+            args.extend_from_slice(&["-vf", "vflip"]);
+        }
+        args.extend_from_slice(&["-c:v", codec, "-b:v", "20M", "-y", output_path]);
 
         let child = match std::process::Command::new("ffmpeg")
             .args(&args)
