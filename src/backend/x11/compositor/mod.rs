@@ -2982,13 +2982,6 @@ impl Compositor {
         let focus_highlight_active = self.tick_focus_highlight();
         let wallpaper_crossfade_active = self.tick_wallpaper_crossfade();
 
-        // Tick tilt smooth animation (target is set per-frame in the render loop;
-        // reset to 0 so it smoothly returns when no focused window sets it)
-        self.tilt_target_x = 0.0;
-        self.tilt_target_y = 0.0;
-        let dt = self.frame_stats.last_frame_time.elapsed().as_secs_f32();
-        let tilt_active = self.tick_tilt(dt);
-
         // Phase 3.4: Detect focus change
         if self.focus_highlight {
             if let Some(fw) = focused {
@@ -3046,13 +3039,20 @@ impl Compositor {
             || self.expose_active || expose_animating || snap_animating || peek_animating
             || genie_active || ripples_active || focus_highlight_active || wallpaper_crossfade_active
             || self.recording_active || self.annotation_active || wallpaper_just_loaded
-            || wobbly_active || tilt_active || explicit_render;
+            || wobbly_active || explicit_render;
         let hash = Self::scene_hash(scene, focused);
         let scene_changed = hash != self.last_scene_hash;
         if !has_dirty && !fades_active && !force_render && !scene_changed {
             return false;
         }
         self.last_scene_hash = hash;
+
+        // Reset tilt targets — the render loop will set them if a focused window
+        // uses tilt; otherwise they stay at 0 so the tilt smoothly returns to rest.
+        if self.window_tilt {
+            self.tilt_target_x = 0.0;
+            self.tilt_target_y = 0.0;
+        }
 
         // Invalidate blur cache when scene structure/focus changes or animations
         // are active — these affect the rendered output of windows below the
@@ -4099,6 +4099,17 @@ impl Compositor {
 
                 self.gl.bind_vertex_array(None);
                 self.gl.use_program(None);
+            }
+        }
+
+        // Tick tilt after the render loop has set tilt_target from the focused window.
+        // If no focused window set tilt_target this frame, it keeps 0 from the reset
+        // at the start of the loop (see the tilt branch which sets tilt_target_x/y).
+        {
+            let dt = self.frame_stats.last_frame_time.elapsed().as_secs_f32();
+            let tilt_animating = self.tick_tilt(dt);
+            if tilt_animating {
+                self.needs_render = true;
             }
         }
 
