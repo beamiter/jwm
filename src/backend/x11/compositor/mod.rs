@@ -4709,8 +4709,17 @@ impl Compositor {
         let stderr_file = std::fs::File::create("/tmp/jwm-ffmpeg.log")
             .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
 
-        // Try h264_vaapi (HW) first, fallback to libopenh264 (SW).
-        let vaapi_available = std::path::Path::new("/dev/dri/renderD128").exists();
+        // Probe VAAPI by running: ffmpeg -vaapi_device /dev/dri/renderD128 -f lavfi -i nullsrc -frames:v 1 -f null -
+        let vaapi_available = std::path::Path::new("/dev/dri/renderD128").exists()
+            && std::process::Command::new("ffmpeg")
+                .args(["-vaapi_device", "/dev/dri/renderD128", "-f", "lavfi", "-i", "nullsrc", "-frames:v", "1", "-f", "null", "-"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+
         let codec = if vaapi_available { "h264_vaapi" } else { "libopenh264" };
         log::info!("compositor: recording encoder={codec}, size={w}x{h}, fps={fps}, output={output_path}");
 
@@ -4718,7 +4727,6 @@ impl Compositor {
         let fps_str = fps.to_string();
         let mut args: Vec<&str> = Vec::new();
 
-        // -vaapi_device must come before -i as a global init option
         if vaapi_available {
             args.extend_from_slice(&["-vaapi_device", "/dev/dri/renderD128"]);
         }
