@@ -789,7 +789,7 @@ impl Config {
             },
             KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
-                key: "r".to_string(),
+                key: "v".to_string(),
                 function: "toggle_recording".to_string(),
                 argument: ArgumentConfig::Int(0),
             },
