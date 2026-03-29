@@ -352,6 +352,24 @@ impl Compositor {
     // Phase 3.5: Wallpaper crossfade tick
     // =================================================================
 
+    /// Tick tilt smooth interpolation. Returns true if tilt is visually active.
+    pub(super) fn tick_tilt(&mut self, dt: f32) -> bool {
+        if !self.window_tilt { return false; }
+        let dt = dt.clamp(0.001, 0.05);
+        let alpha = 1.0 - (-dt * self.tilt_speed).exp();
+        self.tilt_current_x += (self.tilt_target_x - self.tilt_current_x) * alpha;
+        self.tilt_current_y += (self.tilt_target_y - self.tilt_current_y) * alpha;
+        let epsilon = 0.0001;
+        let dx = (self.tilt_current_x - self.tilt_target_x).abs();
+        let dy = (self.tilt_current_y - self.tilt_target_y).abs();
+        if dx < epsilon && dy < epsilon {
+            self.tilt_current_x = self.tilt_target_x;
+            self.tilt_current_y = self.tilt_target_y;
+        }
+        self.tilt_current_x.abs() > epsilon || self.tilt_current_y.abs() > epsilon
+            || dx > epsilon || dy > epsilon
+    }
+
     /// Returns true if wallpaper crossfade is currently animating.
     pub(super) fn tick_wallpaper_crossfade(&mut self) -> bool {
         if !self.wallpaper_crossfade { return false; }

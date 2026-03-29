@@ -397,6 +397,9 @@ struct TiltUniforms {
     dim: Option<glow::UniformLocation>,
     uv_rect: Option<glow::UniformLocation>,
     tilt: Option<glow::UniformLocation>,
+    perspective: Option<glow::UniformLocation>,
+    grid_size: Option<glow::UniformLocation>,
+    light_dir: Option<glow::UniformLocation>,
 }
 
 /// Cached uniform locations for wobbly shader.
@@ -765,6 +768,13 @@ pub(super) struct Compositor {
     tilt_uniforms: TiltUniforms,
     window_tilt: bool,
     tilt_amount: f32,
+    tilt_perspective: f32,
+    tilt_speed: f32,
+    tilt_grid: u32,
+    tilt_current_x: f32,
+    tilt_current_y: f32,
+    tilt_target_x: f32,
+    tilt_target_y: f32,
 
     // --- Frosted glass ---
     frosted_glass_rules: Vec<String>,
@@ -1633,8 +1643,8 @@ impl Compositor {
             }
         };
 
-        // Compile tilt shader (uses tilt vertex + standard fragment)
-        let tilt_program = unsafe { Self::create_program(&gl, shaders::TILT_VERTEX_SHADER, shaders::FRAGMENT_SHADER)? };
+        // Compile tilt shader (uses tilt vertex + tilt fragment)
+        let tilt_program = unsafe { Self::create_program(&gl, shaders::TILT_VERTEX_SHADER, shaders::TILT_FRAGMENT_SHADER)? };
         let tilt_uniforms = unsafe {
             TiltUniforms {
                 projection: gl.get_uniform_location(tilt_program, "u_projection"),
@@ -1646,6 +1656,9 @@ impl Compositor {
                 dim: gl.get_uniform_location(tilt_program, "u_dim"),
                 uv_rect: gl.get_uniform_location(tilt_program, "u_uv_rect"),
                 tilt: gl.get_uniform_location(tilt_program, "u_tilt"),
+                perspective: gl.get_uniform_location(tilt_program, "u_perspective"),
+                grid_size: gl.get_uniform_location(tilt_program, "u_grid_size"),
+                light_dir: gl.get_uniform_location(tilt_program, "u_light_dir"),
             }
         };
 
@@ -2071,6 +2084,13 @@ impl Compositor {
             tilt_uniforms,
             window_tilt: behavior.window_tilt,
             tilt_amount: behavior.tilt_amount,
+            tilt_perspective: behavior.tilt_perspective,
+            tilt_speed: behavior.tilt_speed,
+            tilt_grid: behavior.tilt_grid.max(1),
+            tilt_current_x: 0.0,
+            tilt_current_y: 0.0,
+            tilt_target_x: 0.0,
+            tilt_target_y: 0.0,
             // Frosted glass
             frosted_glass_rules: behavior.frosted_glass_rules.clone(),
             frosted_glass_strength: behavior.frosted_glass_strength,
@@ -2562,8 +2582,17 @@ impl Compositor {
         if self.magnifier_enabled { return true; }
         // Need render if edge glow is active (mouse near screen edge)
         if self.edge_glow && self.edge_glow_active { return true; }
-        // Need render if window tilt is active
-        if self.window_tilt { return true; }
+        // Need render if window tilt is animating
+        if self.window_tilt {
+            let epsilon = 0.0001;
+            if (self.tilt_current_x - self.tilt_target_x).abs() > epsilon
+                || (self.tilt_current_y - self.tilt_target_y).abs() > epsilon
+                || self.tilt_current_x.abs() > epsilon
+                || self.tilt_current_y.abs() > epsilon
+            {
+                return true;
+            }
+        }
         // Need render if scale animation active
         if self.window_animation {
             for wt in self.windows.values() {
@@ -2953,6 +2982,13 @@ impl Compositor {
         let focus_highlight_active = self.tick_focus_highlight();
         let wallpaper_crossfade_active = self.tick_wallpaper_crossfade();
 
+        // Tick tilt smooth animation (target is set per-frame in the render loop;
+        // reset to 0 so it smoothly returns when no focused window sets it)
+        self.tilt_target_x = 0.0;
+        self.tilt_target_y = 0.0;
+        let dt = self.frame_stats.last_frame_time.elapsed().as_secs_f32();
+        let tilt_active = self.tick_tilt(dt);
+
         // Phase 3.4: Detect focus change
         if self.focus_highlight {
             if let Some(fw) = focused {
@@ -3010,7 +3046,7 @@ impl Compositor {
             || self.expose_active || expose_animating || snap_animating || peek_animating
             || genie_active || ripples_active || focus_highlight_active || wallpaper_crossfade_active
             || self.recording_active || self.annotation_active || wallpaper_just_loaded
-            || wobbly_active || explicit_render;
+            || wobbly_active || tilt_active || explicit_render;
         let hash = Self::scene_hash(scene, focused);
         let scene_changed = hash != self.last_scene_hash;
         if !has_dirty && !fades_active && !force_render && !scene_changed {
@@ -3354,10 +3390,20 @@ impl Compositor {
                     let win_h = h as f32 * anim_s;
                     let cx = x as f32 + (w as f32 - win_w) * 0.5;
                     let cy = y as f32 + (h as f32 - win_h) * 0.5;
-                    let sx = cx + ox - spread;
-                    let sy = cy + sy_offset - spread;
-                    let sw = win_w + 2.0 * spread;
-                    let sh = win_h + 2.0 * spread + bottom_extra;
+                    let mut sx = cx + ox - spread;
+                    let mut sy = cy + sy_offset - spread;
+                    let mut sw = win_w + 2.0 * spread;
+                    let mut sh = win_h + 2.0 * spread + bottom_extra;
+
+                    // Dynamic shadow offset for tilted focused window
+                    if self.window_tilt && focused == Some(win) {
+                        let tilt_mag = (self.tilt_current_x.powi(2) + self.tilt_current_y.powi(2)).sqrt();
+                        let extra = tilt_mag * 15.0;
+                        sx += self.tilt_current_y * 30.0 - extra;
+                        sy += self.tilt_current_x * 30.0 - extra;
+                        sw += extra * 2.0;
+                        sh += extra * 2.0;
+                    }
                     self.gl.uniform_4_f32(
                         self.shadow_uniforms.rect.as_ref(), sx, sy, sw, sh,
                     );
@@ -3647,13 +3693,13 @@ impl Compositor {
                         );
                         self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
                     } else if self.window_tilt && is_focused {
-                        // 3D tilt: compute tilt from mouse position relative to window center
+                        // Update tilt target from mouse position (clamped)
                         let cx = draw_x + draw_w * 0.5;
                         let cy = draw_y + draw_h * 0.5;
-                        let rel_x = (self.mouse_x - cx) / (draw_w * 0.5);
-                        let rel_y = (self.mouse_y - cy) / (draw_h * 0.5);
-                        let tilt_x = -rel_y * self.tilt_amount;
-                        let tilt_y = rel_x * self.tilt_amount;
+                        let rel_x = ((self.mouse_x - cx) / (draw_w * 0.5)).clamp(-1.0, 1.0);
+                        let rel_y = ((self.mouse_y - cy) / (draw_h * 0.5)).clamp(-1.0, 1.0);
+                        self.tilt_target_x = (-rel_y * self.tilt_amount).clamp(-0.35, 0.35);
+                        self.tilt_target_y = (rel_x * self.tilt_amount).clamp(-0.35, 0.35);
 
                         self.gl.use_program(Some(self.tilt_program));
                         self.gl.uniform_matrix_4_f32_slice(
@@ -3670,8 +3716,13 @@ impl Compositor {
                         self.gl.uniform_4_f32(
                             self.tilt_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0,
                         );
-                        self.gl.uniform_2_f32(self.tilt_uniforms.tilt.as_ref(), tilt_x, tilt_y);
-                        self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                        self.gl.uniform_2_f32(self.tilt_uniforms.tilt.as_ref(), self.tilt_current_x, self.tilt_current_y);
+                        self.gl.uniform_1_f32(self.tilt_uniforms.perspective.as_ref(), self.tilt_perspective);
+                        let grid = self.tilt_grid as i32;
+                        self.gl.uniform_1_i32(self.tilt_uniforms.grid_size.as_ref(), grid);
+                        self.gl.uniform_2_f32(self.tilt_uniforms.light_dir.as_ref(), 0.0, -1.0);
+                        // Grid: grid^2 quads, 6 verts each
+                        self.gl.draw_arrays(glow::TRIANGLES, 0, grid * grid * 6);
 
                         // Restore standard window program
                         self.gl.use_program(Some(self.program));

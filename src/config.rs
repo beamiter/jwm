@@ -265,6 +265,12 @@ pub struct BehaviorConfig {
     pub window_tilt: bool,
     #[serde(default = "default_tilt_amount")]
     pub tilt_amount: f32,
+    #[serde(default = "default_tilt_perspective")]
+    pub tilt_perspective: f32,
+    #[serde(default = "default_tilt_speed")]
+    pub tilt_speed: f32,
+    #[serde(default = "default_tilt_grid")]
+    pub tilt_grid: u32,
 
     // --- Frosted glass ---
     #[serde(default)]
@@ -458,7 +464,10 @@ fn default_night_light_end() -> String { "06:00".to_string() }
 fn default_night_light_transition() -> u32 { 30 }
 fn default_magnifier_radius() -> f32 { 100.0 }
 fn default_magnifier_zoom() -> f32 { 2.0 }
-fn default_tilt_amount() -> f32 { 5.0 }
+fn default_tilt_amount() -> f32 { 0.26 }
+fn default_tilt_perspective() -> f32 { 800.0 }
+fn default_tilt_speed() -> f32 { 12.0 }
+fn default_tilt_grid() -> u32 { 8 }
 fn default_frosted_glass_strength() -> u32 { 2 }
 fn default_overview_gap() -> f32 { 20.0 }
 fn default_wobbly_stiffness() -> f32 { 400.0 }
@@ -662,6 +671,9 @@ impl Default for Config {
                     magnifier_zoom: default_magnifier_zoom(),
                     window_tilt: false,
                     tilt_amount: default_tilt_amount(),
+                    tilt_perspective: default_tilt_perspective(),
+                    tilt_speed: default_tilt_speed(),
+                    tilt_grid: default_tilt_grid(),
                     frosted_glass_rules: Vec::new(),
                     frosted_glass_strength: default_frosted_glass_strength(),
                     overview_enabled: default_true(),
