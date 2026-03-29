@@ -4716,9 +4716,7 @@ impl Compositor {
                 "-s", &format!("{w}x{h}"),
                 "-r", &fps.to_string(),
                 "-i", "pipe:0",
-                "-c:v", "libx264",
-                "-pix_fmt", "yuv420p",
-                "-preset", "ultrafast",
+                "-c:v", "libopenh264",
                 "-y", output_path,
             ])
             .stdin(std::process::Stdio::piped())
