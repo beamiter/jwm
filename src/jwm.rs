@@ -1126,6 +1126,8 @@ impl EventHandler for Jwm {
             return;
         }
         let scene = self.build_compositor_scene(backend, &HashMap::new());
+        let groups = self.build_window_groups();
+        backend.compositor_set_window_groups(groups);
         let focused = self.get_selected_client_key()
             .and_then(|ck| self.state.clients.get(ck))
             .map(|c| c.win.raw());
@@ -3808,6 +3810,34 @@ impl Jwm {
         for key in completed {
             self.animations.active.remove(&key);
         }
+    }
+
+    /// Build window tab groups: one group per monitor, containing visible tiled windows.
+    /// The focused window is marked as active tab.
+    fn build_window_groups(&self) -> Vec<(u32, Vec<(u32, String, bool)>)> {
+        let mut groups = Vec::new();
+        let focused_ck = self.get_selected_client_key();
+        for (i, &mon_key) in self.state.monitor_order.iter().enumerate() {
+            let mut tabs = Vec::new();
+            for &ck in self.get_monitor_clients(mon_key) {
+                if !self.is_client_visible_on_monitor(ck, mon_key) {
+                    continue;
+                }
+                let client = match self.state.clients.get(ck) {
+                    Some(c) => c,
+                    None => continue,
+                };
+                if client.state.is_floating || client.state.is_fullscreen {
+                    continue;
+                }
+                let is_active = focused_ck == Some(ck);
+                tabs.push((client.win.raw() as u32, client.name.clone(), is_active));
+            }
+            if tabs.len() > 1 {
+                groups.push((i as u32, tabs));
+            }
+        }
+        groups
     }
 
     /// Build an ordered scene for the compositor: Vec<(window_id_raw, x, y, w, h)>
