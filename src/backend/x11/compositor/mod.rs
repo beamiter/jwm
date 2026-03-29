@@ -4708,19 +4708,37 @@ impl Compositor {
 
         let stderr_file = std::fs::File::create("/tmp/jwm-ffmpeg.log")
             .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
-        log::info!("compositor: ffmpeg args: -f rawvideo -pix_fmt rgba -s {w}x{h} -r {fps} -i pipe:0 -c:v libx264 -pix_fmt yuv420p -preset ultrafast -y {output_path}");
-        let child = match std::process::Command::new("ffmpeg")
-            .args([
-                "-f", "rawvideo",
-                "-pix_fmt", "rgba",
-                "-s", &format!("{w}x{h}"),
-                "-r", &fps.to_string(),
-                "-i", "pipe:0",
-                "-vf", "vflip",
-                "-c:v", "libopenh264",
-                "-b:v", "10M",
-                "-y", output_path,
+
+        // Try h264_vaapi (HW) first, fallback to libopenh264 (SW).
+        let vaapi_available = std::path::Path::new("/dev/dri/renderD128").exists();
+        let (codec, extra_args): (&str, Vec<&str>) = if vaapi_available {
+            ("h264_vaapi", vec![
+                "-vaapi_device", "/dev/dri/renderD128",
+                "-vf", "vflip,format=nv12,hwupload",
+                "-b:v", "20M",
             ])
+        } else {
+            ("libopenh264", vec![
+                "-vf", "vflip",
+                "-b:v", "20M",
+            ])
+        };
+        log::info!("compositor: recording encoder={codec}, size={w}x{h}, fps={fps}, output={output_path}");
+
+        let size_str = format!("{w}x{h}");
+        let fps_str = fps.to_string();
+        let mut args = vec![
+            "-f", "rawvideo",
+            "-pix_fmt", "rgba",
+            "-s", &size_str,
+            "-r", &fps_str,
+            "-i", "pipe:0",
+        ];
+        args.extend_from_slice(&extra_args);
+        args.extend_from_slice(&["-c:v", codec, "-y", output_path]);
+
+        let child = match std::process::Command::new("ffmpeg")
+            .args(&args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(stderr_file)
