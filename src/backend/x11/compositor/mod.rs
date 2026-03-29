@@ -4716,12 +4716,13 @@ impl Compositor {
                 "-r", &fps.to_string(),
                 "-i", "pipe:0",
                 "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
                 "-preset", "ultrafast",
                 "-y", output_path,
             ])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
             .spawn()
         {
             Ok(child) => child,
