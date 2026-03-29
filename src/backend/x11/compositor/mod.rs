@@ -4706,6 +4706,9 @@ impl Compositor {
         let h = self.screen_h;
         let fps = self.recording_fps;
 
+        let stderr_file = std::fs::File::create("/tmp/jwm-ffmpeg.log")
+            .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
+        log::info!("compositor: ffmpeg args: -f rawvideo -pix_fmt rgba -s {w}x{h} -r {fps} -i pipe:0 -c:v libx264 -pix_fmt yuv420p -preset ultrafast -y {output_path}");
         let child = match std::process::Command::new("ffmpeg")
             .args([
                 "-f", "rawvideo",
@@ -4720,7 +4723,7 @@ impl Compositor {
             ])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit())
+            .stderr(stderr_file)
             .spawn()
         {
             Ok(child) => child,
