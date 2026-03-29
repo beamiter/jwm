@@ -71,6 +71,18 @@ pub fn rotate_x_matrix(angle: f32) -> [f32; 16] {
     m
 }
 
+/// Uniform scale matrix.
+pub fn scale_matrix(sx: f32, sy: f32, sz: f32) -> [f32; 16] {
+    #[rustfmt::skip]
+    let m = [
+        sx,  0.0, 0.0, 0.0,
+        0.0, sy,  0.0, 0.0,
+        0.0, 0.0, sz,  0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    m
+}
+
 /// 4×4 matrix multiply (column-major).
 pub fn mat4_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     let mut m = [0.0f32; 16];

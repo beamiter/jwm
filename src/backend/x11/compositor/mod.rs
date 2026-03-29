@@ -801,6 +801,9 @@ pub(super) struct Compositor {
     overview_mon_y: i32,
     overview_mon_w: u32,
     overview_mon_h: u32,
+    overview_entry_progress: f32,
+    overview_closing: bool,
+    overview_exit_progress: f32,
 
     // --- Wobbly windows ---
     wobbly_program: glow::Program,
@@ -2111,6 +2114,9 @@ impl Compositor {
             overview_mon_y: 0,
             overview_mon_w: screen_w,
             overview_mon_h: screen_h,
+            overview_entry_progress: 1.0,
+            overview_closing: false,
+            overview_exit_progress: 1.0,
             // Wobbly windows
             wobbly_program,
             wobbly_uniforms,
@@ -4659,9 +4665,17 @@ impl Compositor {
     }
 
     pub(super) fn set_overview_mode(&mut self, active: bool, windows: Vec<(u32, f32, f32, f32, f32, bool, String)>) {
+        if !active && self.overview_active && !self.overview_closing {
+            // Begin exit animation — don't clear state yet
+            self.overview_closing = true;
+            self.overview_exit_progress = 1.0;
+            self.needs_render = true;
+            return;
+        }
         self.clear_overview_snapshots();
         self.clear_overview_title_textures();
         self.overview_active = active;
+        self.overview_closing = false;
         let n = windows.len();
         let face_w = self.screen_w as f32 * 0.8;
         let face_h = self.screen_h as f32 * 0.8;
@@ -4687,8 +4701,14 @@ impl Compositor {
         if active {
             self.refresh_overview_snapshots();
             self.create_overview_title_textures();
+            self.overview_entry_progress = 0.0;
+            self.overview_exit_progress = 1.0;
+            self.overview_opacity = 0.0;
+        } else {
+            self.overview_entry_progress = 1.0;
+            self.overview_exit_progress = 1.0;
+            self.overview_opacity = 0.0;
         }
-        self.overview_opacity = if active { 1.0 } else { 0.0 };
         self.needs_render = true;
     }
 

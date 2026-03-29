@@ -1,6 +1,6 @@
 use glow::HasContext;
 use super::Compositor;
-use super::math::{perspective_matrix, translate_matrix, rotate_y_matrix, mat4_mul};
+use super::math::{perspective_matrix, translate_matrix, rotate_y_matrix, scale_matrix, mat4_mul};
 
 impl Compositor {
     pub(super) fn clear_overview_snapshots(&mut self) {
@@ -251,17 +251,57 @@ impl Compositor {
         };
         self.overview_prism_last_tick = Some(now);
 
+        // Prism rotation animation
         let diff = self.overview_prism_target_angle - self.overview_prism_current_angle;
         if diff.abs() < 0.001 {
             self.overview_prism_current_angle = self.overview_prism_target_angle;
         } else {
-            // Exponential ease-out: close 88% of the remaining gap per 0.1s.
-            // t = 1 - e^(-speed * dt), speed=20 gives ~86% per 0.1s frame,
-            // feels snappy at any frame rate.
             let t = 1.0 - (-20.0_f32 * dt).exp();
             self.overview_prism_current_angle += diff * t;
             self.needs_render = true;
         }
+
+        // Entry animation (scale + fade in)
+        if self.overview_entry_progress < 1.0 {
+            let t = 1.0 - (-10.0_f32 * dt).exp();
+            self.overview_entry_progress += (1.0 - self.overview_entry_progress) * t;
+            if (1.0 - self.overview_entry_progress).abs() < 0.002 {
+                self.overview_entry_progress = 1.0;
+            }
+            self.overview_opacity = self.overview_entry_progress;
+            self.needs_render = true;
+        }
+
+        // Exit animation (scale + fade out)
+        if self.overview_closing {
+            let t = 1.0 - (-12.0_f32 * dt).exp();
+            self.overview_exit_progress -= self.overview_exit_progress * t;
+            self.overview_opacity = self.overview_exit_progress;
+            if self.overview_exit_progress < 0.01 {
+                // Animation complete: actually deactivate
+                self.overview_active = false;
+                self.overview_closing = false;
+                self.overview_exit_progress = 1.0;
+                self.overview_opacity = 0.0;
+                self.clear_overview_snapshots();
+                self.clear_overview_title_textures();
+                self.overview_windows.clear();
+            }
+            self.needs_render = true;
+        }
+    }
+
+    /// Project a point in model space through the MVP matrix to screen coordinates.
+    fn project_to_screen(mvp: &[f32; 16], model_pt: [f32; 3], vp_w: f32, vp_h: f32, vp_x: f32, vp_y: f32) -> (f32, f32) {
+        let [mx, my, mz] = model_pt;
+        let clip_x = mvp[0]*mx + mvp[4]*my + mvp[8]*mz  + mvp[12];
+        let clip_y = mvp[1]*mx + mvp[5]*my + mvp[9]*mz  + mvp[13];
+        let clip_w = mvp[3]*mx + mvp[7]*my + mvp[11]*mz + mvp[15];
+        let ndc_x = clip_x / clip_w;
+        let ndc_y = clip_y / clip_w;
+        let sx = (ndc_x * 0.5 + 0.5) * vp_w + vp_x;
+        let sy = (1.0 - (ndc_y * 0.5 + 0.5)) * vp_h + vp_y;
+        (sx, sy)
     }
 
     /// Render overview overlay (Alt-Tab preview) as a 3D hexagonal prism carousel.
@@ -269,7 +309,6 @@ impl Compositor {
     pub(super) fn render_overview(&self, proj: &[f32; 16], _focused: Option<u32>) {
         if self.overview_windows.is_empty() { return; }
 
-        // Monitor-local dimensions
         let mon_x = self.overview_mon_x;
         let mon_y = self.overview_mon_y;
         let mon_w = self.overview_mon_w;
@@ -277,8 +316,11 @@ impl Compositor {
         let mw = mon_w as f32;
         let mh = mon_h as f32;
 
+        // Combined scale for entry/exit animation
+        let anim_scale = self.overview_entry_progress * self.overview_exit_progress;
+
         unsafe {
-            // === 1. Dark background overlay (only on this monitor) ===
+            // === 1. Dark background overlay ===
             self.gl.use_program(Some(self.overview_bg_program));
             self.gl.uniform_matrix_4_f32_slice(
                 self.overview_bg_uniforms.projection.as_ref(), false, proj,
@@ -291,26 +333,28 @@ impl Compositor {
             self.gl.bind_vertex_array(Some(self.quad_vao));
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-            // === 2. Scissor + viewport to this monitor for the 3D prism ===
+            // === 2. Scissor + viewport ===
             let scissor_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
             self.gl.enable(glow::SCISSOR_TEST);
             self.gl.scissor(mon_x, scissor_gl_y, mon_w as i32, mon_h as i32);
             self.gl.viewport(mon_x, scissor_gl_y, mon_w as i32, mon_h as i32);
 
-            // === 3. Compute hexagonal prism geometry ===
+            // === 3. Hexagonal prism geometry ===
             let face_w = mw * 0.8;
             let face_h = mh * 0.8;
             let face_aspect = face_w / face_h;
             let apothem = face_aspect * 3.0_f32.sqrt();
 
-            let fov_y = std::f32::consts::FRAC_PI_4; // 45 degrees
+            let fov_y = std::f32::consts::FRAC_PI_4;
             let camera_z = (apothem + 1.0 / (fov_y * 0.5).tan()) * 1.2;
             let mon_aspect = mw / mh;
 
             let persp = perspective_matrix(fov_y, mon_aspect, 0.1, camera_z * 4.0);
             let view = translate_matrix(0.0, 0.0, -camera_z);
-
             let global_rot = rotate_y_matrix(self.overview_prism_current_angle);
+
+            // Scale matrix for entry/exit animation
+            let scale_mat = scale_matrix(anim_scale, anim_scale, anim_scale);
 
             // === 4. Build per-face draw info ===
             struct FaceDrawInfo {
@@ -331,7 +375,9 @@ impl Compositor {
                 let face_translate = translate_matrix(0.0, 0.0, apothem);
                 let face_model = mat4_mul(&face_rot, &face_translate);
 
-                let model = mat4_mul(&global_rot, &face_model);
+                // Apply animation scale before global rotation
+                let model = mat4_mul(&scale_mat, &face_model);
+                let model = mat4_mul(&global_rot, &model);
                 let mv = mat4_mul(&view, &model);
                 let mvp = mat4_mul(&persp, &mv);
 
@@ -340,9 +386,9 @@ impl Compositor {
                 let total_angle = face_angle + self.overview_prism_current_angle;
                 let cos_facing = total_angle.cos();
                 let brightness = if entry.is_selected {
-                    0.35 + 0.35 * cos_facing.max(0.0)
+                    (0.50 + 0.50 * cos_facing.max(0.0)) * anim_scale
                 } else {
-                    0.25 + 0.30 * cos_facing.max(0.0)
+                    (0.25 + 0.30 * cos_facing.max(0.0)) * anim_scale
                 };
 
                 faces.push(FaceDrawInfo {
@@ -353,16 +399,13 @@ impl Compositor {
                 });
             }
 
-            // === 5. Painter's algorithm: sort by Z-depth ascending (farthest first) ===
+            // === 5. Painter's algorithm ===
             faces.sort_by(|a, b| a.z_depth.partial_cmp(&b.z_depth).unwrap_or(std::cmp::Ordering::Equal));
 
-            // === 6. Draw faces using cube_program ===
+            // === 6. Draw faces ===
             self.gl.use_program(Some(self.cube_program));
             self.gl.uniform_1_f32(self.cube_uniforms.aspect.as_ref(), face_aspect);
             self.gl.uniform_1_i32(self.cube_uniforms.texture.as_ref(), 0);
-            // Snapshot textures have top-left origin (X11/image convention)
-            // but GL texture coords have bottom-left origin.  Flip Y by
-            // setting uv_rect to (0, 1, 1, -1): start at v=1, height=-1.
             self.gl.uniform_4_f32(
                 self.cube_uniforms.uv_rect.as_ref(),
                 0.0, 1.0, 1.0, -1.0,
@@ -371,7 +414,6 @@ impl Compositor {
 
             for face in &faces {
                 let entry = &self.overview_windows[face.entry_idx];
-
                 if face.brightness < 0.05 { continue; }
 
                 let texture = if let Some(tex) = entry.snapshot_texture {
@@ -405,9 +447,98 @@ impl Compositor {
                 );
             }
 
-            // Restore full-screen viewport and disable scissor
+            // === 7. Restore viewport for 2D overlays (titles, border) ===
             self.gl.disable(glow::SCISSOR_TEST);
             self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+
+            // === 8. Draw title labels and selection border ===
+            let vp_x = mon_x as f32;
+            let vp_y = mon_y as f32;
+
+            // Draw selection border on the selected face
+            for face in faces.iter().rev() {
+                let entry = &self.overview_windows[face.entry_idx];
+                if !entry.is_selected || face.brightness < 0.05 { continue; }
+
+                // Project four corners to screen space
+                let corners = [
+                    [-face_aspect, -1.0, 0.0],
+                    [ face_aspect, -1.0, 0.0],
+                    [-face_aspect,  1.0, 0.0],
+                    [ face_aspect,  1.0, 0.0],
+                ];
+                let mut min_x = f32::MAX;
+                let mut min_y = f32::MAX;
+                let mut max_x = f32::MIN;
+                let mut max_y = f32::MIN;
+                for c in &corners {
+                    let (sx, sy) = Self::project_to_screen(&face.mvp, *c, mw, mh, vp_x, vp_y);
+                    min_x = min_x.min(sx);
+                    min_y = min_y.min(sy);
+                    max_x = max_x.max(sx);
+                    max_y = max_y.max(sy);
+                }
+                let bw = 3.0;
+                let pad = bw + 2.0;
+                let rx = min_x - pad;
+                let ry = min_y - pad;
+                let rw = max_x - min_x + pad * 2.0;
+                let rh = max_y - min_y + pad * 2.0;
+
+                self.gl.use_program(Some(self.border_program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.border_uniforms.projection.as_ref(), false, proj,
+                );
+                self.gl.uniform_4_f32(
+                    self.border_uniforms.rect.as_ref(), rx, ry, rw, rh,
+                );
+                self.gl.uniform_2_f32(
+                    self.border_uniforms.size.as_ref(), rw, rh,
+                );
+                self.gl.uniform_1_f32(
+                    self.border_uniforms.border_width.as_ref(), bw,
+                );
+                self.gl.uniform_4_f32(
+                    self.border_uniforms.border_color.as_ref(),
+                    0.3, 0.6, 1.0, 0.8 * anim_scale,
+                );
+                self.gl.uniform_1_f32(
+                    self.border_uniforms.radius.as_ref(), 8.0,
+                );
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
+
+            // Draw title labels below each face (front-to-back)
+            for face in faces.iter().rev() {
+                let entry = &self.overview_windows[face.entry_idx];
+                if face.brightness < 0.05 { continue; }
+
+                let (tex, tw, th) = match entry.title_texture {
+                    Some((t, w, h)) => (t, w, h),
+                    None => continue,
+                };
+
+                // Project bottom-center of face to screen
+                let (bcx, bcy) = Self::project_to_screen(&face.mvp, [0.0, -1.0, 0.0], mw, mh, vp_x, vp_y);
+                let title_x = bcx - tw as f32 * 0.5;
+                let title_y = bcy + 10.0;
+                let title_alpha = (face.brightness / 0.55).min(1.0) * anim_scale;
+
+                self.gl.use_program(Some(self.hud_text_program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.hud_text_uniforms.projection.as_ref(), false, proj,
+                );
+                self.gl.uniform_4_f32(
+                    self.hud_text_uniforms.rect.as_ref(),
+                    title_x, title_y, tw as f32, th as f32,
+                );
+                self.gl.uniform_1_i32(
+                    self.hud_text_uniforms.texture.as_ref(), 0,
+                );
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                let _ = title_alpha; // opacity is baked into the title texture already
+            }
 
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
