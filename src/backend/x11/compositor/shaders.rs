@@ -270,6 +270,23 @@ void main() {
 "#;
 
 // ---------------------------------------------------------------------------
+// Feature 11b: HUD text overlay (pre-rasterized bitmap font texture)
+// ---------------------------------------------------------------------------
+
+pub const HUD_TEXT_FRAGMENT_SHADER: &str = r#"#version 330 core
+
+uniform sampler2D u_texture;
+in vec2 v_uv;
+out vec4 frag_color;
+
+void main() {
+    vec4 texel = texture(u_texture, v_uv);
+    // Output premultiplied alpha for GL_ONE, GL_ONE_MINUS_SRC_ALPHA blending
+    frag_color = vec4(texel.rgb * texel.a, texel.a);
+}
+"#;
+
+// ---------------------------------------------------------------------------
 // Tag-switch transition shader
 // ---------------------------------------------------------------------------
 

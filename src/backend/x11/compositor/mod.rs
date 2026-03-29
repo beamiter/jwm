@@ -2,6 +2,7 @@ pub mod math;
 mod annotations;
 mod effects;
 mod expose;
+mod font;
 mod overview;
 mod pipeline;
 mod postprocess;
@@ -283,6 +284,12 @@ struct HudUniforms {
     bg_color: Option<glow::UniformLocation>,
     fg_color: Option<glow::UniformLocation>,
     size: Option<glow::UniformLocation>,
+}
+
+struct HudTextUniforms {
+    projection: Option<glow::UniformLocation>,
+    rect: Option<glow::UniformLocation>,
+    texture: Option<glow::UniformLocation>,
 }
 
 /// Frame timing statistics for the debug HUD (feature 11).
@@ -668,6 +675,12 @@ pub(super) struct Compositor {
     // --- Feature 11: Debug HUD ---
     hud_program: glow::Program,
     hud_uniforms: HudUniforms,
+    hud_text_program: glow::Program,
+    hud_text_uniforms: HudTextUniforms,
+    hud_text_texture: Option<glow::Texture>,
+    hud_text_width: u32,
+    hud_text_height: u32,
+    hud_text_cache: String,
     debug_hud: bool,
     frame_stats: FrameStats,
 
@@ -916,6 +929,10 @@ impl Drop for Compositor {
             self.gl.delete_program(self.border_program);
             self.gl.delete_program(self.postprocess_program);
             self.gl.delete_program(self.hud_program);
+            self.gl.delete_program(self.hud_text_program);
+            if let Some(tex) = self.hud_text_texture.take() {
+                self.gl.delete_texture(tex);
+            }
             self.gl.delete_program(self.transition_program);
             self.gl.delete_program(self.cube_program);
             self.gl.delete_program(self.portal_program);
@@ -1548,6 +1565,16 @@ impl Compositor {
             }
         };
 
+        // Compile HUD text shader (feature 11b)
+        let hud_text_program = unsafe { Self::create_program(&gl, shaders::VERTEX_SHADER, shaders::HUD_TEXT_FRAGMENT_SHADER)? };
+        let hud_text_uniforms = unsafe {
+            HudTextUniforms {
+                projection: gl.get_uniform_location(hud_text_program, "u_projection"),
+                rect: gl.get_uniform_location(hud_text_program, "u_rect"),
+                texture: gl.get_uniform_location(hud_text_program, "u_texture"),
+            }
+        };
+
         // Compile tag-switch transition shader
         let transition_program = unsafe {
             Self::create_program(&gl, shaders::BLUR_DOWN_VERTEX, shaders::TRANSITION_FRAGMENT_SHADER)?
@@ -1956,6 +1983,12 @@ impl Compositor {
             // Feature 11: debug HUD
             hud_program,
             hud_uniforms,
+            hud_text_program,
+            hud_text_uniforms,
+            hud_text_texture: None,
+            hud_text_width: 0,
+            hud_text_height: 0,
+            hud_text_cache: String::new(),
             debug_hud: behavior.debug_hud,
             frame_stats: FrameStats {
                 frame_count: 0,
@@ -2743,6 +2776,46 @@ impl Compositor {
 
     pub(super) fn frame_stats_fps(&self) -> f32 {
         self.frame_stats.fps
+    }
+
+    /// Rasterize HUD text and upload as a GL texture. Skips upload when the
+    /// formatted string is identical to the previous frame.
+    fn update_hud_text_texture(&mut self, text: &str) {
+        if text == self.hud_text_cache && self.hud_text_texture.is_some() {
+            return;
+        }
+
+        let scale = 2u32;
+        let fg = [0, 230, 64, 255]; // green
+        let (pixels, w, h) = font::render_text_to_rgba(text, scale, fg);
+        if w == 0 || h == 0 {
+            return;
+        }
+
+        unsafe {
+            if let Some(old) = self.hud_text_texture.take() {
+                self.gl.delete_texture(old);
+            }
+            if let Ok(tex) = self.gl.create_texture() {
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                self.gl.tex_image_2d(
+                    glow::TEXTURE_2D, 0, glow::RGBA8 as i32,
+                    w as i32, h as i32, 0,
+                    glow::RGBA, glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&pixels)),
+                );
+                self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+                self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+                self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+                self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+                self.gl.bind_texture(glow::TEXTURE_2D, None);
+                self.hud_text_texture = Some(tex);
+                self.hud_text_width = w;
+                self.hud_text_height = h;
+            }
+        }
+
+        self.hud_text_cache = text.to_string();
     }
 
     // =====================================================================
@@ -3996,13 +4069,38 @@ impl Compositor {
                 self.frame_stats.last_fps_update = now;
             }
 
-            // Draw HUD panel
-            let hud_w = 160.0f32;
-            let hud_h = 40.0f32;
+            // Format HUD text
+            let avg_dt = if self.frame_stats.frame_times.is_empty() { 0.0 }
+                else { self.frame_stats.frame_times.iter().sum::<f32>() / self.frame_stats.frame_times.len() as f32 };
+            let mut hud_text = format!(
+                "FPS: {:.1}  {:.1}ms\nWindows: {}",
+                self.frame_stats.fps, avg_dt * 1000.0, self.windows.len(),
+            );
+            if self.debug_hud_extended {
+                let tex_mem_kb = self.frame_stats.texture_memory_bytes / 1024;
+                use std::fmt::Write;
+                let _ = write!(
+                    hud_text,
+                    "\nDraw calls: {}\nTex mem: {}KB\nBlur: {}h/{}m",
+                    self.frame_stats.draw_calls, tex_mem_kb,
+                    self.frame_stats.blur_cache_hits, self.frame_stats.blur_cache_misses,
+                );
+            }
+
+            // Update text texture (skips upload if content unchanged)
+            self.update_hud_text_texture(&hud_text);
+
+            // Compute panel dimensions from text texture
+            let pad = 8.0f32;
+            let text_w = self.hud_text_width as f32;
+            let text_h = self.hud_text_height as f32;
+            let hud_w = text_w + pad * 2.0;
+            let hud_h = text_h + pad * 2.0;
             let hud_x = self.screen_w as f32 - hud_w - 10.0;
             let hud_y = 10.0f32;
 
             unsafe {
+                // Draw background panel
                 self.gl.use_program(Some(self.hud_program));
                 self.gl.uniform_matrix_4_f32_slice(
                     self.hud_uniforms.projection.as_ref(), false, &proj,
@@ -4021,15 +4119,32 @@ impl Compositor {
                 );
                 self.gl.bind_vertex_array(Some(self.quad_vao));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+                // Draw text overlay
+                if let Some(tex) = self.hud_text_texture {
+                    self.gl.use_program(Some(self.hud_text_program));
+                    self.gl.uniform_matrix_4_f32_slice(
+                        self.hud_text_uniforms.projection.as_ref(), false, &proj,
+                    );
+                    self.gl.uniform_4_f32(
+                        self.hud_text_uniforms.rect.as_ref(),
+                        hud_x + pad, hud_y + pad, text_w, text_h,
+                    );
+                    self.gl.uniform_1_i32(
+                        self.hud_text_uniforms.texture.as_ref(), 0,
+                    );
+                    self.gl.active_texture(glow::TEXTURE0);
+                    self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                }
+
                 self.gl.bind_vertex_array(None);
                 self.gl.use_program(None);
             }
-            // FPS logged instead of rendered as text (GL text rendering is complex)
+
+            // Log stats periodically
             if self.frame_stats.frame_count % 60 == 0 {
-                let avg_dt = if self.frame_stats.frame_times.is_empty() { 0.0 }
-                    else { self.frame_stats.frame_times.iter().sum::<f32>() / self.frame_stats.frame_times.len() as f32 };
                 if self.debug_hud_extended {
-                    // Phase 7.2: Extended debug HUD stats
                     let tex_mem_kb = self.frame_stats.texture_memory_bytes / 1024;
                     log::info!(
                         "[HUD] FPS: {:.1}, frame_time: {:.2}ms, windows: {}, draw_calls: {}, tex_mem: {}KB, blur_hits: {}, blur_misses: {}",
