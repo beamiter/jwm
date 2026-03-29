@@ -788,6 +788,12 @@ impl Config {
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Shift".to_string()],
+                key: "r".to_string(),
+                function: "toggle_recording".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
                 modifier: vec!["Mod1".to_string()],
                 key: "r".to_string(),
                 function: "spawn".to_string(),
@@ -1406,6 +1412,7 @@ impl Config {
             "toggle_magnifier" => Some(Jwm::toggle_magnifier),
             "toggle_peek" => Some(Jwm::toggle_peek),
             "toggle_expose" => Some(Jwm::toggle_expose),
+            "toggle_recording" => Some(Jwm::toggle_recording),
 
             "scrolling_focus_column" => Some(Jwm::scrolling_focus_column),
             "scrolling_move_column" => Some(Jwm::scrolling_move_column),

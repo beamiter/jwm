@@ -269,6 +269,9 @@ pub struct Jwm {
 
     /// Expose / Mission Control mode
     pub expose_active: bool,
+
+    /// Screen recording active
+    pub recording_active: bool,
 }
 
 // =================================================================================
@@ -1235,6 +1238,8 @@ impl Jwm {
             "toggle_peek"
         } else if eq!(Jwm::toggle_expose) {
             "toggle_expose"
+        } else if eq!(Jwm::toggle_recording) {
+            "toggle_recording"
         } else {
             "<unknown>"
         }
@@ -1428,6 +1433,7 @@ impl Jwm {
             magnifier_enabled: false,
             peek_active: false,
             expose_active: false,
+            recording_active: false,
         };
         if let Ok((x, y)) = backend.input_ops().get_pointer_position() {
             jwm.last_mouse_root = (x, y);
@@ -5891,6 +5897,39 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.peek_active = !self.peek_active;
         backend.compositor_set_peek_mode(self.peek_active);
+        Ok(())
+    }
+
+    pub fn toggle_recording(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.recording_active = !self.recording_active;
+        if self.recording_active {
+            let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+            let videos_dir = std::env::var("XDG_VIDEOS_DIR")
+                .or_else(|_| std::env::var("HOME").map(|h| format!("{}/Videos", h)))
+                .unwrap_or_else(|_| "/tmp".to_string());
+            let mut output_dir = std::path::PathBuf::from(&videos_dir);
+            if let Err(e) = std::fs::create_dir_all(&output_dir) {
+                warn!(
+                    "[toggle_recording] cannot create output dir '{}': {}, fallback to /tmp",
+                    output_dir.display(),
+                    e
+                );
+                output_dir = std::path::PathBuf::from("/tmp");
+            }
+            let path = output_dir
+                .join(format!("recording-{}.mp4", timestamp))
+                .to_string_lossy()
+                .to_string();
+            info!("[toggle_recording] start → {}", path);
+            backend.compositor_start_recording(&path);
+        } else {
+            info!("[toggle_recording] stop");
+            backend.compositor_stop_recording();
+        }
         Ok(())
     }
 
