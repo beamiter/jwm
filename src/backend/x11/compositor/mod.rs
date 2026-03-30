@@ -4335,7 +4335,9 @@ impl Compositor {
                 if self.magnifier_enabled {
                     let cx = self.mouse_x / self.screen_w as f32;
                     let cy = self.mouse_y / self.screen_h as f32;
-                    self.gl.uniform_2_f32(self.magnifier_uniforms.magnifier_center.as_ref(), cx, cy);
+                    // The fragment shader flips Y (uv.y = 1.0 - v_uv.y) so that
+                    // uv.y=1 corresponds to the top of the screen.  Flip cy to match.
+                    self.gl.uniform_2_f32(self.magnifier_uniforms.magnifier_center.as_ref(), cx, 1.0 - cy);
                     self.gl.uniform_1_f32(self.magnifier_uniforms.magnifier_radius.as_ref(), self.magnifier_radius / self.screen_w as f32);
                     self.gl.uniform_1_f32(self.magnifier_uniforms.magnifier_zoom.as_ref(), self.magnifier_zoom);
                 }

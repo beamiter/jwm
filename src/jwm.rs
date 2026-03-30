@@ -1103,6 +1103,18 @@ impl EventHandler for Jwm {
         self.check_config_reload(backend);
         self.flush_pending_bar_updates();
         self.tick_animations(backend);
+
+        // Poll pointer position when magnifier is active.  X11 MotionNotify
+        // events are only delivered to the deepest window that selects
+        // PointerMotion, so when the pointer is over a client's internal
+        // subwindow the WM misses the events and the magnifier gets stuck.
+        // Polling via QueryPointer on the root window always succeeds.
+        if self.magnifier_enabled && backend.has_compositor() {
+            if let Ok((x, y)) = backend.input_ops().get_pointer_position() {
+                backend.compositor_set_mouse_position(x as f32, y as f32);
+            }
+        }
+
         backend.window_ops().flush()?;
         Ok(())
     }
