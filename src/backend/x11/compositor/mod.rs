@@ -884,6 +884,7 @@ pub(super) struct Compositor {
     recording_active: bool,
     recording_fps: u32,
     recording_bitrate: String,
+    recording_quality: u32,
     recording_encoder: String,
     recording_output_dir: String,
     recording_process: Option<std::process::Child>,
@@ -2190,6 +2191,7 @@ impl Compositor {
             recording_active: false,
             recording_fps: behavior.recording_fps,
             recording_bitrate: behavior.recording_bitrate.clone(),
+            recording_quality: behavior.recording_quality,
             recording_encoder: behavior.recording_encoder.clone(),
             recording_output_dir: behavior.recording_output_dir.clone(),
             recording_process: None,
@@ -4945,7 +4947,8 @@ impl Compositor {
 
         let codec_name = match encoder { Encoder::Nvenc => "h264_nvenc", Encoder::Vaapi => "h264_vaapi", Encoder::Sw => "libopenh264" };
         let bitrate = &self.recording_bitrate;
-        log::info!("compositor: recording encoder={codec_name}, size={w}x{h}, fps={fps}, bitrate={bitrate}, output={output_path}");
+        let quality_str = self.recording_quality.to_string();
+        log::info!("compositor: recording encoder={codec_name}, size={w}x{h}, fps={fps}, bitrate={bitrate}, qp={quality_str}, output={output_path}");
 
         let size_str = format!("{w}x{h}");
         let fps_str = fps.to_string();
@@ -4966,7 +4969,12 @@ impl Compositor {
             Encoder::Vaapi => args.extend_from_slice(&["-vf", "vflip,format=nv12,hwupload"]),
             Encoder::Sw => args.extend_from_slice(&["-vf", "vflip"]),
         }
-        args.extend_from_slice(&["-c:v", codec_name, "-b:v", bitrate, "-y", output_path]);
+        args.push("-c:v"); args.push(codec_name);
+        match encoder {
+            Encoder::Vaapi => args.extend_from_slice(&["-rc_mode", "CQP", "-qp", &quality_str]),
+            _ => args.extend_from_slice(&["-b:v", bitrate]),
+        }
+        args.extend_from_slice(&["-y", output_path]);
 
         let child = match std::process::Command::new("ffmpeg")
             .args(&args)

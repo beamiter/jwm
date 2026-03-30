@@ -409,9 +409,12 @@ pub struct BehaviorConfig {
     /// Recording FPS (frames per second) for screen recording.
     #[serde(default = "default_recording_fps")]
     pub recording_fps: u32,
-    /// Recording bitrate (e.g. "20M", "10M", "5000k").
+    /// Recording bitrate (e.g. "20M", "10M", "5000k"). Used by NVENC and software encoders.
     #[serde(default = "default_recording_bitrate")]
     pub recording_bitrate: String,
+    /// Recording quality (QP value 0-51, lower=better). Used by VAAPI (CQP mode).
+    #[serde(default = "default_recording_quality")]
+    pub recording_quality: u32,
     /// Recording encoder: "auto" (probe NVENC>VAAPI>SW), "nvenc", "vaapi", "software".
     #[serde(default = "default_recording_encoder")]
     pub recording_encoder: String,
@@ -492,6 +495,7 @@ fn default_annotation_line_width() -> f32 { 3.0 }
 fn default_recording_fps() -> u32 { 30 }
 fn default_recording_bitrate() -> String { "20M".to_string() }
 fn default_recording_encoder() -> String { "auto".to_string() }
+fn default_recording_quality() -> u32 { 23 }
 fn default_motion_trail_frames() -> u32 { 5 }
 fn default_motion_trail_opacity() -> f32 { 0.3 }
 fn default_genie_duration() -> u64 { 300 }
@@ -741,6 +745,7 @@ impl Default for Config {
                     debug_hud_extended: false,
                     recording_fps: default_recording_fps(),
                     recording_bitrate: default_recording_bitrate(),
+                    recording_quality: default_recording_quality(),
                     recording_encoder: default_recording_encoder(),
                     recording_output_dir: String::new(),
                 },
