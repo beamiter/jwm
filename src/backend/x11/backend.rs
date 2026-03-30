@@ -2707,7 +2707,7 @@ mod key_ops {
             for (mods, keysym) in bindings {
                 for (offset, keysyms_for_keycode) in mapping.keysyms.chunks(per).enumerate() {
                     let keycode = min + offset as u8;
-                    let matched = keysyms_for_keycode.iter().any(|&ks| ks == *keysym);
+                    let matched = keysyms_for_keycode.first() == Some(keysym);
                     if matched {
                         let base = mods_to_x11(*mods, numlock_mask_obj);
                         let combos = [
