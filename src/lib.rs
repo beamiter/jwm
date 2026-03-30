@@ -1668,8 +1668,8 @@ pub fn arm_second_timer(tfd: libc::c_int) -> std::io::Result<()> {
             tv_nsec: (diff_ns % 1_000_000_000) as libc::c_long,
         },
         it_interval: libc::timespec {
-            tv_sec: 1,
-            tv_nsec: 0,
+            tv_sec: 0,
+            tv_nsec: 500_000_000,
         },
     };
     let rc = unsafe { libc::timerfd_settime(tfd, 0, &its as *const _, std::ptr::null_mut()) };
