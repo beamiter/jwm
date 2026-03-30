@@ -4957,11 +4957,14 @@ impl Compositor {
         if matches!(encoder, Encoder::Vaapi) {
             args.extend_from_slice(&["-vaapi_device", "/dev/dri/renderD128"]);
         }
+        // Input: use wall clock timestamps so video duration matches real time.
+        // The nominal `-r` is moved to the output side; ffmpeg duplicates/drops
+        // frames automatically to produce a constant-frame-rate file.
         args.extend_from_slice(&[
+            "-use_wallclock_as_timestamps", "1",
             "-f", "rawvideo",
             "-pix_fmt", "rgba",
             "-s", &size_str,
-            "-r", &fps_str,
             "-i", "pipe:0",
         ]);
         match encoder {
@@ -4974,7 +4977,7 @@ impl Compositor {
             Encoder::Vaapi => args.extend_from_slice(&["-rc_mode", "CQP", "-qp", &quality_str]),
             _ => args.extend_from_slice(&["-b:v", bitrate]),
         }
-        args.extend_from_slice(&["-y", output_path]);
+        args.extend_from_slice(&["-r", &fps_str, "-y", output_path]);
 
         let child = match std::process::Command::new("ffmpeg")
             .args(&args)
