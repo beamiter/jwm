@@ -857,6 +857,8 @@ pub(super) struct Compositor {
     /// Default wallpaper texture (used for monitors without a per-monitor override).
     wallpaper_texture: Option<glow::Texture>,
     wallpaper_mode: WallpaperMode,
+    /// Stored wallpaper path for change detection during hot-reload.
+    wallpaper_path: String,
     wallpaper_img_w: u32,
     wallpaper_img_h: u32,
     /// Per-monitor wallpaper overrides. Populated by set_monitors().
@@ -2166,6 +2168,7 @@ impl Compositor {
             // Wallpaper (texture loaded asynchronously)
             wallpaper_texture: None,
             wallpaper_mode,
+            wallpaper_path: behavior.wallpaper.clone(),
             wallpaper_img_w: 0,
             wallpaper_img_h: 0,
             monitor_wallpapers: Vec::new(),
@@ -2677,6 +2680,240 @@ impl Compositor {
             self.ensure_postprocess_fbo();
             self.needs_render = true;
         }
+    }
+
+    // =====================================================================
+    // Hot-reload: apply all config changes at once
+    // =====================================================================
+
+    /// Re-sync all cached compositor fields from the current config.
+    /// Called on config file hot-reload so users don't need to restart.
+    pub(super) fn apply_config(&mut self) {
+        let cfg = crate::config::CONFIG.load();
+        let behavior = cfg.behavior();
+        let anim_speed = cfg.animation_speed();
+
+        // --- Core visual settings ---
+        self.corner_radius = behavior.corner_radius;
+        self.shadow_enabled = behavior.shadow_enabled;
+        self.shadow_radius = behavior.shadow_radius;
+        self.shadow_offset = behavior.shadow_offset;
+        self.shadow_color = behavior.shadow_color;
+        self.shadow_bottom_extra = behavior.shadow_bottom_extra;
+        self.inactive_opacity = behavior.inactive_opacity;
+        self.active_opacity = behavior.active_opacity;
+        self.fading = behavior.fading;
+        self.fade_in_step = anim_speed.apply_fade_step(behavior.fade_in_step);
+        self.fade_out_step = anim_speed.apply_fade_step(behavior.fade_out_step);
+        self.detect_client_opacity = behavior.detect_client_opacity;
+        self.fullscreen_unredirect = behavior.fullscreen_unredirect;
+        self.blur_use_frame_extents = behavior.blur_use_frame_extents;
+        self.blur_quality_auto = behavior.blur_quality_auto;
+
+        // --- Blur (may need FBO rebuild) ---
+        if self.blur_enabled != behavior.blur_enabled || self.blur_strength != behavior.blur_strength {
+            // Tear down old blur FBOs
+            unsafe {
+                for level in self.blur_fbos.drain(..) {
+                    self.gl.delete_framebuffer(level.fbo);
+                    self.gl.delete_texture(level.texture);
+                }
+            }
+            self.blur_enabled = behavior.blur_enabled;
+            self.blur_strength = behavior.blur_strength;
+            // Recreate if enabled
+            if self.blur_enabled {
+                self.blur_fbos = unsafe {
+                    Self::create_blur_fbos(&self.gl, self.screen_w, self.screen_h, self.blur_strength)
+                };
+            }
+        }
+
+        // --- Per-window rules (re-parse from strings) ---
+        self.shadow_exclude = behavior.shadow_exclude.clone();
+        self.blur_exclude = behavior.blur_exclude.clone();
+        self.rounded_corners_exclude = behavior.rounded_corners_exclude.clone();
+
+        self.opacity_rules = behavior.opacity_rules.iter().filter_map(|rule| {
+            let parts: Vec<&str> = rule.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                if let Ok(pct) = parts[0].trim().parse::<f32>() {
+                    return Some(OpacityRule {
+                        opacity: (pct / 100.0).clamp(0.0, 1.0),
+                        class_name: parts[1].trim().to_string(),
+                    });
+                }
+            }
+            None
+        }).collect();
+
+        self.corner_radius_rules = behavior.corner_radius_rules.iter().filter_map(|rule| {
+            let parts: Vec<&str> = rule.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                if let Ok(r) = parts[0].trim().parse::<f32>() {
+                    return Some(CornerRadiusRule {
+                        radius: r.max(0.0),
+                        class_name: parts[1].trim().to_string(),
+                    });
+                }
+            }
+            None
+        }).collect();
+
+        self.scale_rules = behavior.scale_rules.iter().filter_map(|rule| {
+            let parts: Vec<&str> = rule.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                if let Ok(pct) = parts[0].trim().parse::<f32>() {
+                    return Some(ScaleRule {
+                        scale: (pct / 100.0).clamp(0.1, 2.0),
+                        class_name: parts[1].trim().to_string(),
+                    });
+                }
+            }
+            None
+        }).collect();
+
+        // --- Borders ---
+        self.border_enabled = behavior.border_enabled;
+        self.border_width = behavior.border_width;
+        self.border_color_focused = behavior.border_color_focused;
+        self.border_color_unfocused = behavior.border_color_unfocused;
+
+        // --- Color post-processing (use existing setters for postprocess FBO management) ---
+        self.set_color_temperature(behavior.color_temperature);
+        self.set_saturation(behavior.saturation);
+        self.set_brightness(behavior.brightness);
+        self.set_contrast(behavior.contrast);
+        self.set_invert_colors(behavior.invert_colors);
+        self.set_grayscale(behavior.grayscale);
+        self.set_colorblind_mode(&behavior.colorblind_mode);
+
+        // --- Debug HUD ---
+        self.debug_hud = behavior.debug_hud;
+        self.debug_hud_extended = behavior.debug_hud_extended;
+
+        // --- Transition mode ---
+        self.set_transition_mode(&behavior.transition_mode);
+        self.transition_duration = std::time::Duration::from_millis(anim_speed.apply_duration(150));
+
+        // --- Window animation ---
+        self.window_animation = behavior.window_animation;
+        self.window_animation_scale = behavior.window_animation_scale;
+
+        // --- Dim inactive ---
+        self.inactive_dim = behavior.inactive_dim;
+
+        // --- Edge glow ---
+        self.edge_glow = behavior.edge_glow;
+        self.edge_glow_color = behavior.edge_glow_color;
+        self.edge_glow_width = behavior.edge_glow_width;
+
+        // --- Attention animation ---
+        self.attention_animation = behavior.attention_animation;
+        self.attention_color = behavior.attention_color;
+
+        // --- PiP ---
+        self.pip_border_color = behavior.pip_border_color;
+        self.pip_border_width = behavior.pip_border_width;
+
+        // --- Magnifier ---
+        self.magnifier_enabled = behavior.magnifier_enabled;
+        self.magnifier_radius = behavior.magnifier_radius;
+        self.magnifier_zoom = behavior.magnifier_zoom;
+
+        // --- Window tilt ---
+        self.window_tilt = behavior.window_tilt;
+        self.tilt_amount = behavior.tilt_amount;
+        self.tilt_perspective = behavior.tilt_perspective;
+        self.tilt_speed = behavior.tilt_speed;
+        self.tilt_grid = behavior.tilt_grid.max(1);
+
+        // --- Frosted glass ---
+        self.frosted_glass_rules = behavior.frosted_glass_rules.clone();
+        self.frosted_glass_strength = behavior.frosted_glass_strength;
+
+        // --- Wobbly windows ---
+        self.wobbly_windows = behavior.wobbly_windows;
+        self.wobbly_stiffness = behavior.wobbly_stiffness;
+        self.wobbly_damping = behavior.wobbly_damping;
+        self.wobbly_restore_stiffness = behavior.wobbly_restore_stiffness;
+        self.wobbly_grid_size = behavior.wobbly_grid_size;
+
+        // --- Expose ---
+        self.expose_enabled = behavior.expose_enabled;
+        self.expose_gap = behavior.expose_gap;
+
+        // --- Snap preview ---
+        self.snap_preview_enabled = behavior.snap_preview;
+        self.snap_preview_color = behavior.snap_preview_color;
+        self.snap_animation_duration_ms = behavior.snap_animation_duration_ms;
+
+        // --- Peek ---
+        self.peek_enabled = behavior.peek_enabled;
+        self.peek_exclude = behavior.peek_exclude.clone();
+
+        // --- Window tabs ---
+        self.window_tabs_enabled = behavior.window_tabs;
+        self.tab_bar_height = behavior.tab_bar_height;
+        self.tab_bar_color = behavior.tab_bar_color;
+        self.tab_active_color = behavior.tab_active_color;
+
+        // --- Particle effects ---
+        self.particle_effects = behavior.particle_effects;
+        self.particle_count = behavior.particle_count;
+        self.particle_lifetime = behavior.particle_lifetime;
+        self.particle_gravity = behavior.particle_gravity;
+
+        // --- Motion trail ---
+        self.motion_trail_enabled = behavior.motion_trail;
+        self.motion_trail_frames = behavior.motion_trail_frames;
+        self.motion_trail_opacity = behavior.motion_trail_opacity;
+
+        // --- Genie minimize ---
+        self.genie_minimize = behavior.genie_minimize;
+        self.genie_duration_ms = behavior.genie_duration_ms;
+
+        // --- Ripple on open ---
+        self.ripple_on_open = behavior.ripple_on_open;
+        self.ripple_duration = behavior.ripple_duration;
+        self.ripple_amplitude = behavior.ripple_amplitude;
+
+        // --- Focus highlight ---
+        self.focus_highlight = behavior.focus_highlight;
+        self.focus_highlight_color = behavior.focus_highlight_color;
+        self.focus_highlight_duration_ms = behavior.focus_highlight_duration_ms;
+
+        // --- Wallpaper crossfade ---
+        self.wallpaper_crossfade = behavior.wallpaper_crossfade;
+        self.wallpaper_crossfade_duration_ms = behavior.wallpaper_crossfade_duration_ms;
+
+        // --- Annotations ---
+        self.annotation_color = behavior.annotation_color;
+        self.annotation_line_width = behavior.annotation_line_width;
+
+        // --- Recording ---
+        self.recording_fps = behavior.recording_fps;
+        self.recording_bitrate = behavior.recording_bitrate.clone();
+        self.recording_quality = behavior.recording_quality;
+        self.recording_encoder = behavior.recording_encoder.clone();
+        self.recording_output_dir = behavior.recording_output_dir.clone();
+
+        // --- Wallpaper (trigger async reload if path or mode changed) ---
+        let new_mode = Self::parse_wallpaper_mode(&behavior.wallpaper_mode);
+        if behavior.wallpaper != self.wallpaper_path || new_mode != self.wallpaper_mode {
+            self.wallpaper_mode = new_mode;
+            self.wallpaper_path = behavior.wallpaper.clone();
+            if !self.wallpaper_path.is_empty() {
+                self.pending_wallpaper = Some(Self::load_wallpaper_async(
+                    &self.wallpaper_path,
+                    self.screen_w,
+                    self.screen_h,
+                    self.wallpaper_mode,
+                ));
+            }
+        }
+
+        self.needs_render = true;
     }
 
     // =====================================================================

@@ -519,6 +519,9 @@ impl Backend for X11Backend {
     fn compositor_set_transition_mode(&mut self, mode: &str) {
         if let Some(c) = self.compositor.as_mut() { c.set_transition_mode(mode); }
     }
+    fn compositor_apply_config(&mut self) {
+        if let Some(c) = self.compositor.as_mut() { c.apply_config(); }
+    }
     fn compositor_fps(&self) -> f32 {
         self.compositor.as_ref().map_or(0.0, |c| c.frame_stats_fps())
     }

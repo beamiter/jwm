@@ -683,6 +683,9 @@ pub trait Backend: Send {
     /// Set tag-switch transition mode ("slide" or "cube").
     fn compositor_set_transition_mode(&mut self, _mode: &str) {}
 
+    /// Hot-reload all compositor settings from the current config.
+    fn compositor_apply_config(&mut self) {}
+
     /// Get current FPS from compositor debug stats.
     fn compositor_fps(&self) -> f32 { 0.0 }
 

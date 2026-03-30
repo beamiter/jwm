@@ -11008,8 +11008,8 @@ impl Jwm {
             }
         }
 
-        // 6. Update compositor transition mode
-        backend.compositor_set_transition_mode(&cfg.behavior().transition_mode);
+        // 6. Hot-reload all compositor settings
+        backend.compositor_apply_config();
 
         let client_keys: Vec<ClientKey> = self.state.client_order.clone();
         for ck in client_keys {
