@@ -209,7 +209,9 @@ in vec2 v_uv;
 out vec4 frag_color;
 
 void main() {
-    vec4 c = texture(u_texture, v_uv);
+    // FBO textures have Y=0 at bottom, flip to match top-left-origin scene
+    vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
+    vec4 c = texture(u_texture, uv);
 
     // Invert
     if (u_invert == 1) {
@@ -454,11 +456,14 @@ in vec2 v_uv;
 out vec4 frag_color;
 
 void main() {
-    vec2 sample_uv = v_uv;
+    // FBO textures have Y=0 at bottom, but scene was rendered with top-left-origin
+    // projection, so flip V to correct the vertical orientation.
+    vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
+    vec2 sample_uv = uv;
 
     // Magnifier effect
     if (u_magnifier_enabled == 1) {
-        vec2 diff = v_uv - u_magnifier_center;
+        vec2 diff = uv - u_magnifier_center;
         float dist = length(diff);
         if (dist < u_magnifier_radius) {
             // Zoom into the area around the center
@@ -534,7 +539,7 @@ void main() {
 
     // Magnifier border ring
     if (u_magnifier_enabled == 1) {
-        vec2 diff = v_uv - u_magnifier_center;
+        vec2 diff = uv - u_magnifier_center;
         float dist = length(diff);
         float ring = abs(dist - u_magnifier_radius);
         float ring_width = 0.002;
