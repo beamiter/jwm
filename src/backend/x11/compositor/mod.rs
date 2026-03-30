@@ -2561,7 +2561,7 @@ impl Compositor {
     }
 
     pub(super) fn needs_render(&self) -> bool {
-        if self.needs_render {
+        if self.needs_render || self.recording_active {
             return true;
         }
         // Also need render if any fade animations are in progress
