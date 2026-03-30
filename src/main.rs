@@ -70,6 +70,10 @@ fn run_jwm() -> Result<(), Box<dyn std::error::Error>> {
         let mut jwm = Jwm::new(&mut *backend)?;
         jwm.setup(&mut *backend)?;
         jwm.setup_initial_windows(&mut *backend)?;
+
+        // Auto-resume recording if state file exists (from a restart)
+        jwm.resume_recording_if_needed(&mut *backend);
+
         jwm.run(&mut *backend)?;
         jwm.cleanup(&mut *backend)?;
 
