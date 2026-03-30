@@ -5908,9 +5908,14 @@ impl Jwm {
         self.recording_active = !self.recording_active;
         if self.recording_active {
             let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-            let videos_dir = std::env::var("XDG_VIDEOS_DIR")
-                .or_else(|_| std::env::var("HOME").map(|h| format!("{}/Videos", h)))
-                .unwrap_or_else(|_| "/tmp".to_string());
+            let cfg_dir = CONFIG.load().behavior().recording_output_dir.clone();
+            let videos_dir = if !cfg_dir.is_empty() {
+                cfg_dir
+            } else {
+                std::env::var("XDG_VIDEOS_DIR")
+                    .or_else(|_| std::env::var("HOME").map(|h| format!("{}/Videos", h)))
+                    .unwrap_or_else(|_| "/tmp".to_string())
+            };
             let mut output_dir = std::path::PathBuf::from(&videos_dir);
             if let Err(e) = std::fs::create_dir_all(&output_dir) {
                 warn!(

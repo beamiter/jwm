@@ -883,6 +883,9 @@ pub(super) struct Compositor {
     // --- Phase 7.3: Screen recording ---
     recording_active: bool,
     recording_fps: u32,
+    recording_bitrate: String,
+    recording_encoder: String,
+    recording_output_dir: String,
     recording_process: Option<std::process::Child>,
     recording_last_frame: Option<std::time::Instant>,
     recording_pbo: [Option<glow::Buffer>; 2],
@@ -2186,6 +2189,9 @@ impl Compositor {
             // Phase 7.3: Screen recording
             recording_active: false,
             recording_fps: behavior.recording_fps,
+            recording_bitrate: behavior.recording_bitrate.clone(),
+            recording_encoder: behavior.recording_encoder.clone(),
+            recording_output_dir: behavior.recording_output_dir.clone(),
             recording_process: None,
             recording_last_frame: None,
             recording_pbo: [None, None],
@@ -4906,7 +4912,7 @@ impl Compositor {
         let stderr_file = std::fs::File::create("/tmp/jwm-ffmpeg.log")
             .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
 
-        // Probe HW encoders: NVENC (NVIDIA) > VAAPI (Intel/AMD) > libopenh264 (SW fallback).
+        // Select encoder: respect config or auto-probe (NVENC > VAAPI > SW).
         let probe = |args: &[&str]| -> bool {
             std::process::Command::new("ffmpeg")
                 .args(args)
@@ -4919,18 +4925,27 @@ impl Compositor {
         };
 
         enum Encoder { Nvenc, Vaapi, Sw }
-        let encoder = if probe(&["-f", "lavfi", "-i", "nullsrc=s=64x64", "-frames:v", "1", "-c:v", "h264_nvenc", "-f", "null", "-"]) {
-            Encoder::Nvenc
-        } else if std::path::Path::new("/dev/dri/renderD128").exists()
-            && probe(&["-vaapi_device", "/dev/dri/renderD128", "-f", "lavfi", "-i", "nullsrc=s=64x64", "-frames:v", "1", "-f", "null", "-"])
-        {
-            Encoder::Vaapi
-        } else {
-            Encoder::Sw
+        let encoder = match self.recording_encoder.as_str() {
+            "nvenc" => Encoder::Nvenc,
+            "vaapi" => Encoder::Vaapi,
+            "software" => Encoder::Sw,
+            _ => {
+                // auto: probe NVENC > VAAPI > SW
+                if probe(&["-f", "lavfi", "-i", "nullsrc=s=64x64", "-frames:v", "1", "-c:v", "h264_nvenc", "-f", "null", "-"]) {
+                    Encoder::Nvenc
+                } else if std::path::Path::new("/dev/dri/renderD128").exists()
+                    && probe(&["-vaapi_device", "/dev/dri/renderD128", "-f", "lavfi", "-i", "nullsrc=s=64x64", "-frames:v", "1", "-f", "null", "-"])
+                {
+                    Encoder::Vaapi
+                } else {
+                    Encoder::Sw
+                }
+            }
         };
 
         let codec_name = match encoder { Encoder::Nvenc => "h264_nvenc", Encoder::Vaapi => "h264_vaapi", Encoder::Sw => "libopenh264" };
-        log::info!("compositor: recording encoder={codec_name}, size={w}x{h}, fps={fps}, output={output_path}");
+        let bitrate = &self.recording_bitrate;
+        log::info!("compositor: recording encoder={codec_name}, size={w}x{h}, fps={fps}, bitrate={bitrate}, output={output_path}");
 
         let size_str = format!("{w}x{h}");
         let fps_str = fps.to_string();
@@ -4951,7 +4966,7 @@ impl Compositor {
             Encoder::Vaapi => args.extend_from_slice(&["-vf", "vflip,format=nv12,hwupload"]),
             Encoder::Sw => args.extend_from_slice(&["-vf", "vflip"]),
         }
-        args.extend_from_slice(&["-c:v", codec_name, "-b:v", "20M", "-y", output_path]);
+        args.extend_from_slice(&["-c:v", codec_name, "-b:v", bitrate, "-y", output_path]);
 
         let child = match std::process::Command::new("ffmpeg")
             .args(&args)

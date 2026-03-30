@@ -409,6 +409,15 @@ pub struct BehaviorConfig {
     /// Recording FPS (frames per second) for screen recording.
     #[serde(default = "default_recording_fps")]
     pub recording_fps: u32,
+    /// Recording bitrate (e.g. "20M", "10M", "5000k").
+    #[serde(default = "default_recording_bitrate")]
+    pub recording_bitrate: String,
+    /// Recording encoder: "auto" (probe NVENC>VAAPI>SW), "nvenc", "vaapi", "software".
+    #[serde(default = "default_recording_encoder")]
+    pub recording_encoder: String,
+    /// Recording output directory (empty = $XDG_VIDEOS_DIR or ~/Videos).
+    #[serde(default)]
+    pub recording_output_dir: String,
 
     // --- Wallpaper ---
     /// Path to wallpaper image file (empty = solid black background).
@@ -481,6 +490,8 @@ fn default_wallpaper_mode() -> String { "fill".to_string() }
 fn default_annotation_color() -> [f32; 4] { [1.0, 0.0, 0.0, 1.0] }
 fn default_annotation_line_width() -> f32 { 3.0 }
 fn default_recording_fps() -> u32 { 30 }
+fn default_recording_bitrate() -> String { "20M".to_string() }
+fn default_recording_encoder() -> String { "auto".to_string() }
 fn default_motion_trail_frames() -> u32 { 5 }
 fn default_motion_trail_opacity() -> f32 { 0.3 }
 fn default_genie_duration() -> u64 { 300 }
@@ -729,6 +740,9 @@ impl Default for Config {
                     shader_dir: String::new(),
                     debug_hud_extended: false,
                     recording_fps: default_recording_fps(),
+                    recording_bitrate: default_recording_bitrate(),
+                    recording_encoder: default_recording_encoder(),
+                    recording_output_dir: String::new(),
                 },
                 status_bar: StatusBarConfig {
                     name: STATUS_BAR_NAME.to_string(),
