@@ -283,7 +283,7 @@ pub struct AppState {
     pub audio_manager: AudioManager,
     pub system_monitor: SystemMonitor,
 
-    pub last_clock_update: Instant,
+    pub last_time_string: String,
     pub last_monitor_update: Instant,
 
     pub shape_style: ShapeStyle,
@@ -337,7 +337,7 @@ impl AppState {
             audio_manager: AudioManager::new(),
             system_monitor: SystemMonitor::new(5),
 
-            last_clock_update: Instant::now(),
+            last_time_string: String::new(),
             last_monitor_update: Instant::now(),
 
             shape_style: ShapeStyle::Pill,
@@ -539,15 +539,13 @@ impl AppState {
 
 // ================= 绘制相关：Pango 文字与形状 =================
 
-fn pango_text_size(cr: &Context, font: &FontDescription, text: &str) -> (i32, i32) {
-    let layout = create_layout(cr);
-    layout.set_font_description(Some(font));
+fn pango_text_size(layout: &pango::Layout, text: &str) -> (i32, i32) {
     layout.set_text(text);
     layout.pixel_size()
 }
 fn pango_draw_text_centered(
     cr: &Context,
-    font: &FontDescription,
+    layout: &pango::Layout,
     color: Color,
     x: f64,
     y: f64,
@@ -555,30 +553,26 @@ fn pango_draw_text_centered(
     h: f64,
     text: &str,
 ) {
-    let layout = create_layout(cr);
-    layout.set_font_description(Some(font));
     layout.set_text(text);
     let (tw, th) = layout.pixel_size();
     let tx = x + (w - tw as f64) / 2.0;
     let ty = y + (h - th as f64) / 2.0 - 1.0;
     cr.set_source_rgb(color.r, color.g, color.b);
     cr.move_to(tx, ty);
-    show_layout(cr, &layout);
+    show_layout(cr, layout);
 }
 fn pango_draw_text_left(
     cr: &Context,
-    font: &FontDescription,
+    layout: &pango::Layout,
     color: Color,
     x: f64,
     y: f64,
     text: &str,
 ) {
-    let layout = create_layout(cr);
-    layout.set_font_description(Some(font));
     layout.set_text(text);
     cr.set_source_rgb(color.r, color.g, color.b);
     cr.move_to(x, y);
-    show_layout(cr, &layout);
+    show_layout(cr, layout);
 }
 
 fn cairo_path_round_rect(cr: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
@@ -997,13 +991,17 @@ pub fn draw_bar(
     let is_light_theme = colors.bg.r > 0.7 && colors.bg.g > 0.7 && colors.bg.b > 0.7;
     paint_bar_background(cr, width, height, colors.bg, is_light_theme)?;
 
+    // Reuse a single Pango Layout for all text measurement and rendering
+    let layout = create_layout(cr);
+    layout.set_font_description(Some(font));
+
     let pill_h = (height as f64) - 2.0 * cfg.padding_y;
 
     // 左侧 tags
     let tags = &cfg.tag_labels;
     let mut x = cfg.padding_x;
     for (i, label) in tags.iter().enumerate() {
-        let (tw, _th) = pango_text_size(cr, font, label);
+        let (tw, _th) = pango_text_size(&layout,label);
         let w = ((tw as f64) + 2.0 * cfg.pill_hpadding).max(40.0);
 
         let (mut bg, mut bw, mut bc, txt_color, draw_bg) =
@@ -1043,7 +1041,7 @@ pub fn draw_bar(
                 bc,
                 Some(bg),
             )?;
-            pango_draw_text_centered(cr, font, txt_color, x, cfg.padding_y, w, pill_h, label);
+            pango_draw_text_centered(cr, &layout,txt_color, x, cfg.padding_y, w, pill_h, label);
         }
         state.tag_rects[i] = Rect {
             x: x as i16,
@@ -1056,7 +1054,7 @@ pub fn draw_bar(
 
     // 布局按钮
     let layout_label = state.layout_symbol.as_str();
-    let (lw, lh) = pango_text_size(cr, font, layout_label);
+    let (lw, lh) = pango_text_size(&layout,layout_label);
     let lw_total = lw as f64 + 2.0 * cfg.pill_hpadding;
 
     // Layout button: teal when open, amber when closed (relm_bar style)
@@ -1098,7 +1096,7 @@ pub fn draw_bar(
     let ty = cfg.padding_y + (pill_h - lh as f64) / 2.0 - 1.0;
     pango_draw_text_left(
         cr,
-        font,
+        &layout,
         colors.white,
         x + cfg.pill_hpadding,
         ty,
@@ -1136,7 +1134,7 @@ pub fn draw_bar(
         ];
         let mut opt_x = x;
         for (i, (sym, _idx, base_color)) in layouts.iter().enumerate() {
-            let (tw, _th) = pango_text_size(cr, font, sym);
+            let (tw, _th) = pango_text_size(&layout,sym);
             let w = ((tw as f64) + 2.0 * (cfg.pill_hpadding - 2.0)).max(32.0);
 
             let mut fill = *base_color;
@@ -1177,7 +1175,7 @@ pub fn draw_bar(
             } else {
                 Color::rgb(226, 232, 240)
             };
-            pango_draw_text_centered(cr, font, opt_text, opt_x, cfg.padding_y, w, pill_h, sym);
+            pango_draw_text_centered(cr, &layout,opt_text, opt_x, cfg.padding_y, w, pill_h, sym);
             state.layout_option_rects[i] = Rect {
                 x: opt_x as i16,
                 y: cfg.padding_y as i16,
@@ -1199,7 +1197,7 @@ pub fn draw_bar(
             ThemeMode::Dark => cfg.theme_dark_label,
             ThemeMode::Light => cfg.theme_light_label,
         };
-        let (tw, th) = pango_text_size(cr, font, label);
+        let (tw, th) = pango_text_size(&layout,label);
         let w = (tw as f64 + 2.0 * (cfg.pill_hpadding - 2.0)).max(54.0);
         right_x -= w + cfg.tag_spacing;
         // relm_bar style: subtle neutral pill
@@ -1246,7 +1244,7 @@ pub fn draw_bar(
         let ty = cfg.padding_y + (pill_h - th as f64) / 2.0 - 1.0;
         pango_draw_text_left(
             cr,
-            font,
+            &layout,
             theme_text,
             right_x + (w - tw as f64) / 2.0,
             ty,
@@ -1264,7 +1262,7 @@ pub fn draw_bar(
 
     // 监视器 pill
     let mon_label = state.monitor_label(cfg).to_string();
-    let (mon_w, mon_h) = pango_text_size(cr, font, &mon_label);
+    let (mon_w, mon_h) = pango_text_size(&layout,&mon_label);
     let mon_total = mon_w as f64 + 2.0 * cfg.pill_hpadding;
     right_x -= mon_total + cfg.tag_spacing;
     // relm_bar style: subtle dark monitor badge
@@ -1311,7 +1309,7 @@ pub fn draw_bar(
     let ty_mon = cfg.padding_y + (pill_h - mon_h as f64) / 2.0 - 1.0;
     pango_draw_text_left(
         cr,
-        font,
+        &layout,
         mon_text,
         right_x + cfg.pill_hpadding,
         ty_mon,
@@ -1327,7 +1325,7 @@ pub fn draw_bar(
     // 时间 pill
     let time_str = state.format_time();
     let time_label = format!("{} {}", cfg.time_icon, time_str);
-    let (time_w, time_h) = pango_text_size(cr, font, &time_label);
+    let (time_w, time_h) = pango_text_size(&layout,&time_label);
     let time_total = time_w as f64 + 2.0 * cfg.pill_hpadding;
     right_x -= time_total + cfg.tag_spacing;
     // relm_bar style: dark teal time pill
@@ -1374,7 +1372,7 @@ pub fn draw_bar(
     let ty_time = cfg.padding_y + (pill_h - time_h as f64) / 2.0 - 1.0;
     pango_draw_text_left(
         cr,
-        font,
+        &layout,
         time_text,
         right_x + cfg.pill_hpadding,
         ty_time,
@@ -1389,7 +1387,7 @@ pub fn draw_bar(
 
     // 截图 pill（hover：提亮 + 边框加粗）
     let ss_label = cfg.screenshot_label;
-    let (ss_w, ss_h) = pango_text_size(cr, font, ss_label);
+    let (ss_w, ss_h) = pango_text_size(&layout,ss_label);
     let ss_total = ss_w as f64 + 2.0 * cfg.pill_hpadding;
     right_x -= ss_total + cfg.tag_spacing;
     // relm_bar style: subtle screenshot pill
@@ -1436,7 +1434,7 @@ pub fn draw_bar(
     let ty_ss = cfg.padding_y + (pill_h - ss_h as f64) / 2.0 - 1.0;
     pango_draw_text_left(
         cr,
-        font,
+        &layout,
         ss_text,
         right_x + cfg.pill_hpadding,
         ty_ss,
@@ -1461,7 +1459,7 @@ pub fn draw_bar(
             (format!("{} --", cfg.volume_label), true)
         };
 
-        let (aw, ah) = pango_text_size(cr, font, &label);
+        let (aw, ah) = pango_text_size(&layout,&label);
         let a_total = aw as f64 + 2.0 * cfg.pill_hpadding;
         right_x -= a_total + cfg.tag_spacing;
 
@@ -1511,7 +1509,7 @@ pub fn draw_bar(
         } else {
             Color::rgb(236, 254, 255)
         };
-        pango_draw_text_left(cr, font, audio_text, right_x + cfg.pill_hpadding, ty, &label);
+        pango_draw_text_left(cr, &layout,audio_text, right_x + cfg.pill_hpadding, ty, &label);
         state.audio_rect = Rect {
             x: right_x as i16,
             y: cfg.padding_y as i16,
@@ -1539,7 +1537,7 @@ pub fn draw_bar(
         0.0
     };
     let mem_label = format!("MEM {:.0}%", mem_usage.clamp(0.0, 100.0));
-    let (mem_w, mem_h) = pango_text_size(cr, font, &mem_label);
+    let (mem_w, mem_h) = pango_text_size(&layout,&mem_label);
     let mem_total = mem_w as f64 + 2.0 * cfg.pill_hpadding;
     right_x -= mem_total + cfg.tag_spacing;
     let base_mem_bg = usage_bg_color(colors, mem_usage, is_light_theme);
@@ -1578,7 +1576,7 @@ pub fn draw_bar(
     let ty_mem = cfg.padding_y + (pill_h - mem_h as f64) / 2.0 - 1.0;
     pango_draw_text_left(
         cr,
-        font,
+        &layout,
         base_mem_fg,
         right_x + cfg.pill_hpadding,
         ty_mem,
@@ -1592,7 +1590,7 @@ pub fn draw_bar(
     };
 
     let cpu_label = format!("CPU {:.0}%", cpu_avg.clamp(0.0, 100.0));
-    let (cpu_w, cpu_h) = pango_text_size(cr, font, &cpu_label);
+    let (cpu_w, cpu_h) = pango_text_size(&layout,&cpu_label);
     let cpu_total = cpu_w as f64 + 2.0 * cfg.pill_hpadding;
     right_x -= cpu_total + cfg.tag_spacing;
     let base_cpu_bg = usage_bg_color(colors, cpu_avg, is_light_theme);
@@ -1631,7 +1629,7 @@ pub fn draw_bar(
     let ty_cpu = cfg.padding_y + (pill_h - cpu_h as f64) / 2.0 - 1.0;
     pango_draw_text_left(
         cr,
-        font,
+        &layout,
         base_cpu_fg,
         right_x + cfg.pill_hpadding,
         ty_cpu,
@@ -1668,8 +1666,8 @@ pub fn arm_second_timer(tfd: libc::c_int) -> std::io::Result<()> {
             tv_nsec: (diff_ns % 1_000_000_000) as libc::c_long,
         },
         it_interval: libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 500_000_000,
+            tv_sec: 1,
+            tv_nsec: 0,
         },
     };
     let rc = unsafe { libc::timerfd_settime(tfd, 0, &its as *const _, std::ptr::null_mut()) };
