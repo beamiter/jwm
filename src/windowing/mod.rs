@@ -1,8 +1,5 @@
 pub mod eframe_backend;
 
-#[cfg(feature = "wayland")]
-pub mod layer_shell_backend;
-
 use anyhow::Result;
 
 /// Trait abstracting over different windowing backends
@@ -17,19 +14,6 @@ pub fn select_backend(
     height: f32,
     rt_handle: tokio::runtime::Handle,
 ) -> Box<dyn WindowingBackend> {
-    #[cfg(feature = "wayland")]
-    {
-        if std::env::var("WAYLAND_DISPLAY").is_ok() {
-            log::info!("Wayland detected, using layer-shell backend");
-            return Box::new(layer_shell_backend::LayerShellBackend::new(
-                shared_path,
-                transparent,
-                height,
-                rt_handle,
-            ));
-        }
-    }
-
     log::info!("Using eframe/X11 backend");
     Box::new(eframe_backend::EframeBackend::new(
         shared_path,
