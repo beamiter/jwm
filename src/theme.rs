@@ -122,7 +122,7 @@ pub fn apply_theme(ctx: &egui::Context) {
         }
     });
 
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     let mut visuals = if theme.eq_ignore_ascii_case("light") {
         egui::Visuals::light()
     } else {
@@ -173,7 +173,7 @@ pub fn apply_theme(ctx: &egui::Context) {
     style.spacing.window_margin = Margin::symmetric(12, 10);
     style.interaction.tooltip_delay = 0.25;
 
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 }
 
 /// Setup custom fonts from system

@@ -77,7 +77,7 @@ impl BarModule for AudioModule {
                     .volume_window
                     .position
                     .unwrap_or_else(|| {
-                        let screen_rect = ctx.screen_rect();
+                        let screen_rect = ctx.viewport_rect();
                         egui::pos2(
                             screen_rect.center().x - 160.0,
                             screen_rect.center().y - 150.0,

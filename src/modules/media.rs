@@ -166,7 +166,7 @@ impl BarModule for MediaModule {
 
         // Scroll for prev/next
         if hovered {
-            let scroll = ui.input(|i| i.raw_scroll_delta.y);
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll > 1.0 {
                 Self::next_track();
             } else if scroll < -1.0 {

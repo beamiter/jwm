@@ -305,8 +305,11 @@ impl BarModule for TrayModule {
 
             let resp = if let Some(texture) = state.textures.get(addr) {
                 let size = egui::vec2(18.0, 18.0);
-                let img = egui::Image::new(texture).fit_to_exact_size(size);
-                ui.add(egui::ImageButton::new(img))
+                ui.add(
+                    egui::Image::new(texture)
+                        .fit_to_exact_size(size)
+                        .sense(egui::Sense::click())
+                )
             } else {
                 // Fallback: text button with first char or icon name
                 let label = display.chars().next().unwrap_or('?').to_string();

@@ -117,7 +117,7 @@ impl BarModule for BrightnessModule {
 
         // Handle scroll to adjust brightness
         if hovered {
-            let scroll = ui.input(|i| i.raw_scroll_delta.y);
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll.abs() > 0.5 {
                 let step = (self.max_brightness as f64 * 0.05).max(1.0) as i64;
                 let delta = if scroll > 0.0 { step } else { -step };

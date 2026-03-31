@@ -334,7 +334,8 @@ impl EguiBarApp {
 }
 
 impl eframe::App for EguiBarApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         ctx.set_pixels_per_point(self.state.ui_state.scale_factor);
 
         // Process events from the event bus
@@ -358,14 +359,14 @@ impl eframe::App for EguiBarApp {
             egui::Window::new("🔧 Settings")
                 .open(&mut setting)
                 .vscroll(true)
-                .show(ctx, |ui| {
+                .show(&ctx, |ui| {
                     ctx.settings_ui(ui);
                 });
 
             egui::Window::new("🔍 Inspection")
                 .open(&mut setting)
                 .vscroll(true)
-                .show(ctx, |ui| {
+                .show(&ctx, |ui| {
                     ctx.inspection_ui(ui);
                 });
         }
@@ -377,10 +378,10 @@ impl eframe::App for EguiBarApp {
                     .stroke(Stroke::new(1.0, colors::STROKE_SUBTLE))
                     .inner_margin(egui::Margin::symmetric(10, 2)),
             )
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 self.draw_main_ui(ui);
-                self.render_popups(ctx);
-                self.adjust_window(ctx, ui);
+                self.render_popups(&ctx);
+                self.adjust_window(&ctx, ui);
             });
 
         // Request repaint if animations are running
