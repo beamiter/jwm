@@ -68,7 +68,7 @@ ALL_BARS=(
 # 默认值
 # ============================================================
 BUILD_MODE="release"
-BAR_NAME="xcb_bar"
+BAR_NAME="x11rb_bar"
 SKIP_BAR=true
 SKIP_JWM=false
 JOBS=""

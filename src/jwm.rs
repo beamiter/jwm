@@ -1527,7 +1527,7 @@ impl Jwm {
             .state
             .monitors
             .get(mon_key)
-            .map(|m| m.tag_set[m.sel_tags])
+            .map(|m| m.get_active_tags())
             .unwrap_or(1);
 
         let unassigned: Vec<ClientKey> = self
@@ -2540,7 +2540,7 @@ impl Jwm {
             self.state.clients.get(client_key),
             self.state.monitors.get(mon_key),
         ) {
-            client.state.is_sticky || (client.state.tags & monitor.tag_set[monitor.sel_tags]) > 0
+            client.state.is_sticky || (client.state.tags & monitor.get_active_tags()) > 0
         } else {
             false
         }
@@ -2550,7 +2550,7 @@ impl Jwm {
         if let Some(client) = self.state.clients.get(client_key) {
             if let Some(mon_key) = client.mon {
                 if let Some(monitor) = self.state.monitors.get(mon_key) {
-                    return client.state.is_sticky || (client.state.tags & monitor.tag_set[monitor.sel_tags]) > 0;
+                    return client.state.is_sticky || (client.state.tags & monitor.get_active_tags()) > 0;
                 }
             }
         }
@@ -5665,7 +5665,7 @@ impl Jwm {
             if client.state.is_sticky {
                 // Ensure sticky client has current monitor tags
                 if let Some(monitor) = self.state.monitors.get(sel_mon_key) {
-                    let current_tags = monitor.tag_set[monitor.sel_tags];
+                    let current_tags = monitor.get_active_tags();
                     if let Some(client) = self.state.clients.get_mut(sel_client_key) {
                         client.state.tags = current_tags;
                     }
@@ -6133,7 +6133,7 @@ impl Jwm {
 
     fn update_sticky_tags(&mut self, mon_key: MonitorKey) {
         let new_tags = if let Some(monitor) = self.state.monitors.get(mon_key) {
-            monitor.tag_set[monitor.sel_tags]
+            monitor.get_active_tags()
         } else {
             return;
         };
@@ -6206,7 +6206,7 @@ impl Jwm {
                         .state
                         .monitors
                         .get(mon_key)
-                        .map(|m| m.tag_set[m.sel_tags])
+                        .map(|m| m.get_active_tags())
                         .unwrap_or(1);
 
                     if let Some(client) = self.state.clients.get_mut(sp_key) {
@@ -6590,7 +6590,7 @@ impl Jwm {
         }
 
         if let Some(target_monitor) = self.state.monitors.get(target_mon_key) {
-            let target_tags = target_monitor.tag_set[target_monitor.sel_tags];
+            let target_tags = target_monitor.get_active_tags();
 
             if let Some(client) = self.state.clients.get_mut(client_key) {
                 client.state.tags = target_tags;
@@ -7800,7 +7800,7 @@ impl Jwm {
                     .state
                     .monitors
                     .get(k)
-                    .map(|m| m.tag_set[m.sel_tags])
+                    .map(|m| m.get_active_tags())
                     .unwrap_or(next_tag);
                 (k, old)
             }
@@ -7853,7 +7853,7 @@ impl Jwm {
     fn calculate_next_tag(&self, direction: i32) -> u32 {
         let current_tag = if let Some(sel_mon_key) = self.state.sel_mon {
             if let Some(monitor) = self.state.monitors.get(sel_mon_key) {
-                monitor.tag_set[monitor.sel_tags]
+                monitor.get_active_tags()
             } else {
                 warn!("[calculate_next_tag] Selected monitor not found");
                 return 1; // 返回默认的第一个标签
@@ -7953,9 +7953,9 @@ impl Jwm {
         let mut old_tag_mask = 0u32;
         let mut new_tag_mask = target_mask;
         if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
-            old_tag_mask = monitor.tag_set[monitor.sel_tags];
+            old_tag_mask = monitor.get_active_tags();
             monitor.view_tag(target_mask, false); // false = not toggle, direct set
-            new_tag_mask = monitor.tag_set[monitor.sel_tags];
+            new_tag_mask = monitor.get_active_tags();
             // 获取该 Tag 上次选中的 Client
             client_to_focus = monitor.get_selected_client_for_current_tag();
         }
@@ -8002,7 +8002,7 @@ impl Jwm {
     fn is_same_tag(&self, target_tag: u32) -> bool {
         if let Some(sel_mon_key) = self.state.sel_mon {
             if let Some(monitor) = self.state.monitors.get(sel_mon_key) {
-                return target_tag == monitor.tag_set[monitor.sel_tags];
+                return target_tag == monitor.get_active_tags();
             }
         }
         false
@@ -8139,9 +8139,9 @@ impl Jwm {
         let mut old_tag_mask = 0u32;
         let mut new_tag_mask = mask;
         if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
-            old_tag_mask = monitor.tag_set[monitor.sel_tags];
+            old_tag_mask = monitor.get_active_tags();
             monitor.view_tag(mask, true); // true = toggle
-            new_tag_mask = monitor.tag_set[monitor.sel_tags];
+            new_tag_mask = monitor.get_active_tags();
         }
         self.update_sticky_tags(sel_mon_key);
 
@@ -8901,7 +8901,7 @@ impl Jwm {
         let total = CONFIG.load().tags_length() as u32;
         let current = if let Some(sel_mon_key) = self.state.sel_mon {
             if let Some(monitor) = self.state.monitors.get(sel_mon_key) {
-                let tagset = monitor.tag_set[monitor.sel_tags];
+                let tagset = monitor.get_active_tags();
                 if tagset > 0 { tagset.trailing_zeros() } else { 0 }
             } else {
                 0
@@ -9454,7 +9454,7 @@ impl Jwm {
             } else {
                 if let Some(mon_key) = client.mon {
                     if let Some(monitor) = self.state.monitors.get(mon_key) {
-                        client.state.tags = monitor.tag_set[monitor.sel_tags];
+                        client.state.tags = monitor.get_active_tags();
                     }
                 } else {
                     client.state.tags = 1;
@@ -10433,7 +10433,7 @@ impl Jwm {
 
         let target_tags = if let Some(target_monitor) = self.state.monitors.get(target_monitor_key)
         {
-            target_monitor.tag_set[target_monitor.sel_tags]
+            target_monitor.get_active_tags()
         } else {
             1
         };
@@ -10596,7 +10596,7 @@ impl Jwm {
                 Some(m) => m,
                 None => break,
             };
-            let active_tagset = monitor.tag_set[monitor.sel_tags];
+            let active_tagset = monitor.get_active_tags();
             let is_selected_tag = (active_tagset & tag_bit) != 0;
             let is_urgent_tag = (urgent_tags_mask & tag_bit) != 0;
             let is_occupied_tag = (occupied_tags_mask & tag_bit) != 0;
@@ -10672,7 +10672,7 @@ impl Jwm {
                         return false;
 
                         // 策略 B (备选): 只高亮当前 Monitor 正在查看的 Tag
-                        // return (monitor.tag_set[monitor.sel_tags] & tag_bit) != 0;
+                        // return (monitor.get_active_tags() & tag_bit) != 0;
                     }
 
                     return (client.state.tags & tag_bit) != 0;
@@ -10831,7 +10831,7 @@ impl Jwm {
                 Some(m) => m,
                 None => continue,
             };
-            let active_tags = mon.tag_set[mon.sel_tags];
+            let active_tags = mon.get_active_tags();
             let client_count = self.state.monitor_clients.get(mk)
                 .map(|v| v.len())
                 .unwrap_or(0);
@@ -10862,7 +10862,7 @@ impl Jwm {
                 y: m.geometry.m_y,
                 w: m.geometry.m_w,
                 h: m.geometry.m_h,
-                active_tags: m.tag_set[m.sel_tags],
+                active_tags: m.get_active_tags(),
                 layout: format!("{:?}", *m.lt[m.sel_lt]),
                 focused: self.state.sel_mon == Some(mk),
             })
@@ -10907,7 +10907,7 @@ impl Jwm {
                     y: m.geometry.m_y,
                     w: m.geometry.m_w,
                     h: m.geometry.m_h,
-                    active_tags: m.tag_set[m.sel_tags],
+                    active_tags: m.get_active_tags(),
                     layout: format!("{:?}", *m.lt[m.sel_lt]),
                     focused: self.state.sel_mon == Some(mk),
                 },

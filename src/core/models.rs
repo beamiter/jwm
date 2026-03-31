@@ -345,6 +345,13 @@ impl WMMonitor {
         }
         self.sel = client;
     }
+
+    /// 安全地获取当前活跃的 tag_set 值
+    /// 确保 sel_tags 在有效范围内 [0, 1]，防止数组越界
+    pub fn get_active_tags(&self) -> u32 {
+        let safe_idx = self.sel_tags & 1; // 位与 1 确保索引只能是 0 或 1
+        self.tag_set[safe_idx]
+    }
 }
 
 impl fmt::Display for WMMonitor {
