@@ -6189,17 +6189,53 @@ impl Jwm {
             // Scratchpad exists — toggle visibility
             let is_visible = self.is_client_visible_by_key(sp_key);
             if is_visible {
-                // Hide: set tags to 0
-                if let Some(client) = self.state.clients.get_mut(sp_key) {
-                    client.state.tags = 0;
+                // Hide: animate upward then hide
+                if let Some(client) = self.state.clients.get(sp_key) {
+                    let current_rect = Rect::new(
+                        client.geometry.x,
+                        client.geometry.y,
+                        client.geometry.w,
+                        client.geometry.h,
+                    );
+                    // Target: move up by window height
+                    let hidden_y = current_rect.y - current_rect.h - 100;
+                    let hidden_rect = Rect::new(
+                        current_rect.x,
+                        hidden_y,
+                        current_rect.w,
+                        current_rect.h,
+                    );
+
+                    let cfg = CONFIG.load();
+                    if cfg.animation_enabled() {
+                        self.animations.start(
+                            sp_key,
+                            current_rect,
+                            hidden_rect,
+                            cfg.animation_duration(),
+                            cfg.animation_easing(),
+                            AnimationKind::Hide,
+                        );
+                    } else {
+                        // If animations disabled, immediately hide
+                        if let Some(c) = self.state.clients.get_mut(sp_key) {
+                            c.state.tags = 0;
+                        }
+                    }
                 }
+
+                // Mark for deferred hiding after animation completes
+                if let Some(c) = self.state.clients.get_mut(sp_key) {
+                    c.state.tags = 0;
+                }
+
                 let mon_key = self.state.clients.get(sp_key).and_then(|c| c.mon);
                 self.focus(backend, None)?;
                 if let Some(mk) = mon_key {
                     self.arrange(backend, Some(mk));
                 }
             } else {
-                // Show: move to current monitor and tags
+                // Show: animate downward from top
                 let sel_mon_key = self.state.sel_mon;
                 if let Some(mon_key) = sel_mon_key {
                     let current_tags = self
@@ -6223,11 +6259,44 @@ impl Jwm {
                         let h = (area.h as f32 * 0.8) as i32;
                         let x = area.x + (area.w - w) / 2;
                         let y = area.y + (area.h - h) / 2;
+
+                        // Suppress animation during resize to set target position
+                        let suppress_flag = self.suppress_layout_animation;
+                        self.suppress_layout_animation = true;
                         self.resize_client(backend, sp_key, x, y, w, h, false);
+                        self.suppress_layout_animation = suppress_flag;
                     }
 
                     self.focus(backend, Some(sp_key))?;
                     self.arrange(backend, Some(mon_key));
+
+                    // After arrange, get actual position and start downward animation
+                    if let Some(area) = self.monitor_work_area(mon_key) {
+                        let w = (area.w as f32 * 0.8) as i32;
+                        let h = (area.h as f32 * 0.8) as i32;
+                        let x = area.x + (area.w - w) / 2;
+                        let y = area.y + (area.h - h) / 2;
+
+                        let cfg = CONFIG.load();
+                        if cfg.animation_enabled() {
+                            // Animate from above screen to target position
+                            // from_y: window top is at (area.y - h), so window is completely above visible area
+                            let from_y = area.y - h;
+                            let from_rect = Rect::new(x, from_y, w, h);
+                            let to_rect = Rect::new(x, y, w, h);
+
+                            info!("[togglescratchpad] scratchpad show animation from y={} to y={}", from_y, y);
+
+                            self.animations.start(
+                                sp_key,
+                                from_rect,
+                                to_rect,
+                                cfg.animation_duration(),
+                                cfg.animation_easing(),
+                                AnimationKind::Appear,
+                            );
+                        }
+                    }
                 }
             }
         } else {
@@ -9005,8 +9074,11 @@ impl Jwm {
 
         // Appear animation for new windows
         {
+            // Check if this is a scratchpad before starting default animation
+            let is_scratchpad = self.scratchpad_pending_name.is_some();
+
             let cfg = CONFIG.load();
-            if cfg.animation_enabled() {
+            if cfg.animation_enabled() && !is_scratchpad {
                 if let Some(client) = self.state.clients.get(client_key) {
                     let target = Rect::new(
                         client.geometry.x,
@@ -9046,10 +9118,39 @@ impl Jwm {
                     let h = (area.h as f32 * 0.8) as i32;
                     let x = area.x + (area.w - w) / 2;
                     let y = area.y + (area.h - h) / 2;
+
+                    // Suppress animation during resize to set target position
+                    let suppress_flag = self.suppress_layout_animation;
+                    self.suppress_layout_animation = true;
                     self.resize_client(backend, client_key, x, y, w, h, false);
+                    self.suppress_layout_animation = suppress_flag;
                 }
                 let _ = self.focus(backend, Some(client_key));
                 self.arrange(backend, Some(mk));
+
+                // Start downward animation on initial appearance
+                if let Some(area) = self.monitor_work_area(mk) {
+                    let w = (area.w as f32 * 0.8) as i32;
+                    let h = (area.h as f32 * 0.8) as i32;
+                    let x = area.x + (area.w - w) / 2;
+                    let y = area.y + (area.h - h) / 2;
+
+                    let cfg = CONFIG.load();
+                    if cfg.animation_enabled() {
+                        let from_y = area.y - h;
+                        let from_rect = Rect::new(x, from_y, w, h);
+                        let to_rect = Rect::new(x, y, w, h);
+                        info!("[manage] scratchpad '{}' initial animation from y={} to y={}", sp_name, from_y, y);
+                        self.animations.start(
+                            client_key,
+                            from_rect,
+                            to_rect,
+                            cfg.animation_duration(),
+                            cfg.animation_easing(),
+                            AnimationKind::Appear,
+                        );
+                    }
+                }
             }
         }
 
