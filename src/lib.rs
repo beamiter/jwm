@@ -20,6 +20,47 @@ pub mod system_monitor;
 pub use audio_manager::AudioManager;
 pub use system_monitor::SystemMonitor;
 
+// ================= Dirty Region Tracking =================
+
+/// Bitmask to track which UI regions have changed since last redraw
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirtyBits(u32);
+
+impl DirtyBits {
+    pub const NONE: u32 = 0;
+    pub const TIME_CHANGED: u32 = 1 << 0;        // Clock/time display changed
+    pub const HOVER_CHANGED: u32 = 1 << 1;       // Hover state changed
+    pub const MONITOR_CHANGED: u32 = 1 << 2;     // Tag/window manager state changed
+    pub const AUDIO_CHANGED: u32 = 1 << 3;       // Volume/audio changed
+    pub const SYSTEM_CHANGED: u32 = 1 << 4;      // CPU/memory stats changed
+    pub const LAYOUT_CHANGED: u32 = 1 << 5;      // Layout symbol changed
+    pub const THEME_CHANGED: u32 = 1 << 6;       // Dark/Light mode changed
+
+    pub fn new(bits: u32) -> Self {
+        DirtyBits(bits)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn set(&mut self, flag: u32) {
+        self.0 |= flag;
+    }
+
+    pub fn contains(&self, flag: u32) -> bool {
+        (self.0 & flag) != 0
+    }
+
+    pub fn clear(&mut self) {
+        self.0 = 0;
+    }
+
+    pub fn all() -> Self {
+        DirtyBits(!0u32)
+    }
+}
+
 // ================= 公共类型 =================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,6 +328,9 @@ pub struct AppState {
     pub last_monitor_update: Instant,
 
     pub shape_style: ShapeStyle,
+
+    // Dirty region tracking for selective redraw
+    pub dirty_fields: DirtyBits,
 }
 
 // 排他式 hover 的命中目标
@@ -341,6 +385,9 @@ impl AppState {
             last_monitor_update: Instant::now(),
 
             shape_style: ShapeStyle::Pill,
+
+            // Initialize with all dirty to force full redraw on first draw
+            dirty_fields: DirtyBits::all(),
         }
     }
     pub fn monitor_num_to_label(num: i32) -> String {
@@ -356,9 +403,20 @@ impl AppState {
     }
     pub fn update_from_shared(&mut self, msg: SharedMessage) {
         debug!("SharedMemoryUpdated: {:?}", msg.timestamp);
+        let old_info = self.monitor_info.clone();
         self.monitor_info = Some(msg.monitor_info);
         if let Some(mi) = self.monitor_info.as_ref() {
-            self.layout_symbol = mi.get_ltsymbol();
+            // Mark monitor state changed if info differs
+            if old_info.as_ref() != Some(mi) {
+                self.dirty_fields.set(DirtyBits::MONITOR_CHANGED);
+            }
+            let new_symbol = mi.get_ltsymbol();
+            if new_symbol != self.layout_symbol {
+                self.dirty_fields.set(DirtyBits::LAYOUT_CHANGED);
+                self.layout_symbol = new_symbol;
+            } else {
+                self.layout_symbol = new_symbol;
+            }
             self.monitor_num = mi.monitor_num;
             for (i, tag) in mi.tag_status_vec.iter().enumerate() {
                 if tag.is_selected {
@@ -411,6 +469,7 @@ impl AppState {
                 } else if button == 3 {
                     self.send_tag_command_index(i, false);
                 }
+                self.dirty_fields.set(DirtyBits::MONITOR_CHANGED);
                 need_redraw = true;
                 break;
             }
@@ -418,6 +477,7 @@ impl AppState {
         // 布局按钮
         if self.layout_button_rect.contains(px, py) && button == 1 {
             self.layout_selector_open = !self.layout_selector_open;
+            self.dirty_fields.set(DirtyBits::LAYOUT_CHANGED);
             need_redraw = true;
         }
         // 布局选项
@@ -425,6 +485,7 @@ impl AppState {
             if r.w > 0 && r.contains(px, py) && button == 1 {
                 self.send_layout_command(idx as u32);
                 self.layout_selector_open = false;
+                self.dirty_fields.set(DirtyBits::LAYOUT_CHANGED);
                 need_redraw = true;
                 break;
             }
@@ -438,10 +499,14 @@ impl AppState {
 
         // 主题切换
         if self.theme_rect.w > 0 && self.theme_rect.contains(px, py) && button == 1 {
+            let old_theme = self.theme_mode;
             self.theme_mode = match self.theme_mode {
                 ThemeMode::Dark => ThemeMode::Light,
                 ThemeMode::Light => ThemeMode::Dark,
             };
+            if old_theme != self.theme_mode {
+                self.dirty_fields.set(DirtyBits::THEME_CHANGED);
+            }
             need_redraw = true;
         }
 
@@ -451,14 +516,17 @@ impl AppState {
                 match button {
                     1 => {
                         let _ = self.audio_manager.toggle_mute(&dev.name);
+                        self.dirty_fields.set(DirtyBits::AUDIO_CHANGED);
                         need_redraw = true;
                     }
                     4 => {
                         let _ = self.audio_manager.adjust_volume(&dev.name, 5);
+                        self.dirty_fields.set(DirtyBits::AUDIO_CHANGED);
                         need_redraw = true;
                     }
                     5 => {
                         let _ = self.audio_manager.adjust_volume(&dev.name, -5);
+                        self.dirty_fields.set(DirtyBits::AUDIO_CHANGED);
                         need_redraw = true;
                     }
                     3 => {
@@ -472,6 +540,7 @@ impl AppState {
         // 时间 pill 切换秒显示
         if self.time_rect.contains(px, py) && button == 1 {
             self.show_seconds = !self.show_seconds;
+            self.dirty_fields.set(DirtyBits::TIME_CHANGED);
             need_redraw = true;
         }
         need_redraw
@@ -526,12 +595,20 @@ impl AppState {
     pub fn update_hover(&mut self, px: i16, py: i16) -> bool {
         let prev = self.hover_target;
         self.hover_target = self.hit_test(px, py);
-        prev != self.hover_target
+        if prev != self.hover_target {
+            self.dirty_fields.set(DirtyBits::HOVER_CHANGED);
+            true
+        } else {
+            false
+        }
     }
 
     // 鼠标离开：清空 hover 状态。返回是否需要重绘
     pub fn clear_hover(&mut self) -> bool {
         let changed = self.hover_target != HoverTarget::None;
+        if changed {
+            self.dirty_fields.set(DirtyBits::HOVER_CHANGED);
+        }
         self.hover_target = HoverTarget::None;
         changed
     }
@@ -977,40 +1054,29 @@ fn tag_visuals(
     }
 }
 
-// ================= 对外：绘制入口 =================
+// ================= Region draw functions =================
 
-pub fn draw_bar(
+/// Draw left-side tag pills. Returns the x position after the last tag.
+pub fn draw_left_tags(
     cr: &Context,
-    width: u16,
-    height: u16,
-    colors: &Colors,
-    state: &mut AppState,
-    font: &FontDescription,
     cfg: &BarConfig,
-) -> Result<()> {
-    let is_light_theme = colors.bg.r > 0.7 && colors.bg.g > 0.7 && colors.bg.b > 0.7;
-    paint_bar_background(cr, width, height, colors.bg, is_light_theme)?;
-
-    // Reuse a single Pango Layout for all text measurement and rendering
-    let layout = create_layout(cr);
-    layout.set_font_description(Some(font));
-
-    let pill_h = (height as f64) - 2.0 * cfg.padding_y;
-
-    // 左侧 tags
+    state: &mut AppState,
+    layout: &pango::Layout,
+    pill_h: f64,
+    is_light_theme: bool,
+    colors: &Colors,
+) -> Result<f64> {
     let tags = &cfg.tag_labels;
     let mut x = cfg.padding_x;
     for (i, label) in tags.iter().enumerate() {
-        let (tw, _th) = pango_text_size(&layout,label);
+        let (tw, _th) = pango_text_size(&layout, label);
         let w = ((tw as f64) + 2.0 * cfg.pill_hpadding).max(40.0);
 
         let (mut bg, mut bw, mut bc, txt_color, draw_bg) =
             tag_visuals(colors, state.monitor_info.as_ref(), i, is_light_theme);
 
-        // 统一边框风格：轻拟物边框略深
         bc = pill_border_color(bc, is_light_theme);
 
-        // Hover 样式：提亮 + 边框加粗
         if HoverTarget::Tag(i) == state.hover_target {
             bg = bg.lighten(0.10);
             bc = bc.lighten(0.10);
@@ -1041,7 +1107,7 @@ pub fn draw_bar(
                 bc,
                 Some(bg),
             )?;
-            pango_draw_text_centered(cr, &layout,txt_color, x, cfg.padding_y, w, pill_h, label);
+            pango_draw_text_centered(cr, &layout, txt_color, x, cfg.padding_y, w, pill_h, label);
         }
         state.tag_rects[i] = Rect {
             x: x as i16,
@@ -1051,13 +1117,24 @@ pub fn draw_bar(
         };
         x += w + cfg.tag_spacing;
     }
+    Ok(x)
+}
 
-    // 布局按钮
+/// Draw the layout button pill (left-side). Returns the x position after the button.
+pub fn draw_layout_button(
+    cr: &Context,
+    cfg: &BarConfig,
+    state: &mut AppState,
+    layout: &pango::Layout,
+    pill_h: f64,
+    is_light_theme: bool,
+    colors: &Colors,
+    x: f64,
+) -> Result<f64> {
     let layout_label = state.layout_symbol.as_str();
-    let (lw, lh) = pango_text_size(&layout,layout_label);
+    let (lw, lh) = pango_text_size(&layout, layout_label);
     let lw_total = lw as f64 + 2.0 * cfg.pill_hpadding;
 
-    // Layout button: teal when open, amber when closed (relm_bar style)
     let mut layout_fill = if state.layout_selector_open {
         if is_light_theme { Color::rgb(20, 184, 166) } else { Color::rgb(13, 120, 110) }
     } else {
@@ -1108,9 +1185,21 @@ pub fn draw_bar(
         w: lw_total as u16,
         h: pill_h as u16,
     };
-    x += lw_total + cfg.tag_spacing;
+    Ok(x + lw_total + cfg.tag_spacing)
+}
 
-    // 布局选项
+/// Draw layout option pills (expanded selector), left-side.
+/// `x` is the starting X position (after the layout button).
+pub fn draw_layout_options(
+    cr: &Context,
+    cfg: &BarConfig,
+    state: &mut AppState,
+    layout: &pango::Layout,
+    pill_h: f64,
+    is_light_theme: bool,
+    colors: &Colors,
+    x: f64,
+) -> Result<()> {
     if state.layout_selector_open {
         // relm_bar style: current layout gets teal-green, others are subtle dark
         let current_sym = state.layout_symbol.as_str();
@@ -1134,7 +1223,7 @@ pub fn draw_bar(
         ];
         let mut opt_x = x;
         for (i, (sym, _idx, base_color)) in layouts.iter().enumerate() {
-            let (tw, _th) = pango_text_size(&layout,sym);
+            let (tw, _th) = pango_text_size(&layout, sym);
             let w = ((tw as f64) + 2.0 * (cfg.pill_hpadding - 2.0)).max(32.0);
 
             let mut fill = *base_color;
@@ -1175,7 +1264,7 @@ pub fn draw_bar(
             } else {
                 Color::rgb(226, 232, 240)
             };
-            pango_draw_text_centered(cr, &layout,opt_text, opt_x, cfg.padding_y, w, pill_h, sym);
+            pango_draw_text_centered(cr, &layout, opt_text, opt_x, cfg.padding_y, w, pill_h, sym);
             state.layout_option_rects[i] = Rect {
                 x: opt_x as i16,
                 y: cfg.padding_y as i16,
@@ -1187,19 +1276,28 @@ pub fn draw_bar(
     } else {
         state.layout_option_rects = [Rect::default(), Rect::default(), Rect::default()];
     }
+    Ok(())
+}
 
-    // 右侧从右往左
-    let mut right_x = width as f64 - cfg.padding_x;
-
-    // 主题切换 pill（可选）
+/// Draw theme toggle pill (right-side, optional).
+pub fn draw_theme_toggle(
+    cr: &Context,
+    cfg: &BarConfig,
+    state: &mut AppState,
+    layout: &pango::Layout,
+    pill_h: f64,
+    is_light_theme: bool,
+    colors: &Colors,
+    right_x: &mut f64,
+) -> Result<()> {
     if cfg.show_theme_toggle {
         let label = match state.theme_mode {
             ThemeMode::Dark => cfg.theme_dark_label,
             ThemeMode::Light => cfg.theme_light_label,
         };
-        let (tw, th) = pango_text_size(&layout,label);
+        let (tw, th) = pango_text_size(&layout, label);
         let w = (tw as f64 + 2.0 * (cfg.pill_hpadding - 2.0)).max(54.0);
-        right_x -= w + cfg.tag_spacing;
+        *right_x -= w + cfg.tag_spacing;
         // relm_bar style: subtle neutral pill
         let mut fill = if is_light_theme {
             Color::rgb(255, 255, 255)
@@ -1220,7 +1318,7 @@ pub fn draw_bar(
         let _ = draw_soft_shadow(
             cr,
             state.shape_style,
-            right_x,
+            *right_x,
             cfg.padding_y,
             w,
             pill_h,
@@ -1231,7 +1329,7 @@ pub fn draw_bar(
         stroke_shape_with_fill(
             cr,
             state.shape_style,
-            right_x,
+            *right_x,
             cfg.padding_y,
             w,
             pill_h,
@@ -1246,12 +1344,12 @@ pub fn draw_bar(
             cr,
             &layout,
             theme_text,
-            right_x + (w - tw as f64) / 2.0,
+            *right_x + (w - tw as f64) / 2.0,
             ty,
             label,
         );
         state.theme_rect = Rect {
-            x: right_x as i16,
+            x: *right_x as i16,
             y: cfg.padding_y as i16,
             w: w as u16,
             h: pill_h as u16,
@@ -1259,12 +1357,24 @@ pub fn draw_bar(
     } else {
         state.theme_rect = Rect::default();
     }
+    Ok(())
+}
 
-    // 监视器 pill
+/// Draw monitor badge pill (right-side).
+pub fn draw_monitor_badge(
+    cr: &Context,
+    cfg: &BarConfig,
+    state: &mut AppState,
+    layout: &pango::Layout,
+    pill_h: f64,
+    is_light_theme: bool,
+    colors: &Colors,
+    right_x: &mut f64,
+) -> Result<()> {
     let mon_label = state.monitor_label(cfg).to_string();
-    let (mon_w, mon_h) = pango_text_size(&layout,&mon_label);
+    let (mon_w, mon_h) = pango_text_size(&layout, &mon_label);
     let mon_total = mon_w as f64 + 2.0 * cfg.pill_hpadding;
-    right_x -= mon_total + cfg.tag_spacing;
+    *right_x -= mon_total + cfg.tag_spacing;
     // relm_bar style: subtle dark monitor badge
     let mut mon_fill = if is_light_theme {
         Color::rgb(255, 255, 255)
@@ -1285,7 +1395,7 @@ pub fn draw_bar(
     let _ = draw_soft_shadow(
         cr,
         state.shape_style,
-        right_x,
+        *right_x,
         cfg.padding_y,
         mon_total,
         pill_h,
@@ -1296,7 +1406,7 @@ pub fn draw_bar(
     stroke_shape_with_fill(
         cr,
         state.shape_style,
-        right_x,
+        *right_x,
         cfg.padding_y,
         mon_total,
         pill_h,
@@ -1311,23 +1421,35 @@ pub fn draw_bar(
         cr,
         &layout,
         mon_text,
-        right_x + cfg.pill_hpadding,
+        *right_x + cfg.pill_hpadding,
         ty_mon,
         &mon_label,
     );
     state.mon_rect = Rect {
-        x: right_x as i16,
+        x: *right_x as i16,
         y: cfg.padding_y as i16,
         w: mon_total as u16,
         h: pill_h as u16,
     };
+    Ok(())
+}
 
-    // 时间 pill
+/// Draw time display pill (right-side).
+pub fn draw_time_display(
+    cr: &Context,
+    cfg: &BarConfig,
+    state: &mut AppState,
+    layout: &pango::Layout,
+    pill_h: f64,
+    is_light_theme: bool,
+    colors: &Colors,
+    right_x: &mut f64,
+) -> Result<()> {
     let time_str = state.format_time();
     let time_label = format!("{} {}", cfg.time_icon, time_str);
-    let (time_w, time_h) = pango_text_size(&layout,&time_label);
+    let (time_w, time_h) = pango_text_size(&layout, &time_label);
     let time_total = time_w as f64 + 2.0 * cfg.pill_hpadding;
-    right_x -= time_total + cfg.tag_spacing;
+    *right_x -= time_total + cfg.tag_spacing;
     // relm_bar style: dark teal time pill
     let mut time_fill = if is_light_theme {
         Color::rgb(224, 242, 254)
@@ -1348,7 +1470,7 @@ pub fn draw_bar(
     let _ = draw_soft_shadow(
         cr,
         state.shape_style,
-        right_x,
+        *right_x,
         cfg.padding_y,
         time_total,
         pill_h,
@@ -1359,7 +1481,7 @@ pub fn draw_bar(
     stroke_shape_with_fill(
         cr,
         state.shape_style,
-        right_x,
+        *right_x,
         cfg.padding_y,
         time_total,
         pill_h,
@@ -1374,22 +1496,34 @@ pub fn draw_bar(
         cr,
         &layout,
         time_text,
-        right_x + cfg.pill_hpadding,
+        *right_x + cfg.pill_hpadding,
         ty_time,
         &time_label,
     );
     state.time_rect = Rect {
-        x: right_x as i16,
+        x: *right_x as i16,
         y: cfg.padding_y as i16,
         w: time_total as u16,
         h: pill_h as u16,
     };
+    Ok(())
+}
 
-    // 截图 pill（hover：提亮 + 边框加粗）
+/// Draw screenshot button pill (right-side).
+pub fn draw_screenshot_button(
+    cr: &Context,
+    cfg: &BarConfig,
+    state: &mut AppState,
+    layout: &pango::Layout,
+    pill_h: f64,
+    is_light_theme: bool,
+    colors: &Colors,
+    right_x: &mut f64,
+) -> Result<()> {
     let ss_label = cfg.screenshot_label;
-    let (ss_w, ss_h) = pango_text_size(&layout,ss_label);
+    let (ss_w, ss_h) = pango_text_size(&layout, ss_label);
     let ss_total = ss_w as f64 + 2.0 * cfg.pill_hpadding;
-    right_x -= ss_total + cfg.tag_spacing;
+    *right_x -= ss_total + cfg.tag_spacing;
     // relm_bar style: subtle screenshot pill
     let mut ss_fill = if is_light_theme {
         Color::rgb(238, 247, 251)
@@ -1410,7 +1544,7 @@ pub fn draw_bar(
     let _ = draw_soft_shadow(
         cr,
         state.shape_style,
-        right_x,
+        *right_x,
         cfg.padding_y,
         ss_total,
         pill_h,
@@ -1421,7 +1555,7 @@ pub fn draw_bar(
     stroke_shape_with_fill(
         cr,
         state.shape_style,
-        right_x,
+        *right_x,
         cfg.padding_y,
         ss_total,
         pill_h,
@@ -1436,18 +1570,30 @@ pub fn draw_bar(
         cr,
         &layout,
         ss_text,
-        right_x + cfg.pill_hpadding,
+        *right_x + cfg.pill_hpadding,
         ty_ss,
         ss_label,
     );
     state.ss_rect = Rect {
-        x: right_x as i16,
+        x: *right_x as i16,
         y: cfg.padding_y as i16,
         w: ss_total as u16,
         h: pill_h as u16,
     };
+    Ok(())
+}
 
-    // 音量 pill（可选）
+/// Draw audio volume pill (right-side, optional).
+pub fn draw_audio_volume(
+    cr: &Context,
+    cfg: &BarConfig,
+    state: &mut AppState,
+    layout: &pango::Layout,
+    pill_h: f64,
+    is_light_theme: bool,
+    colors: &Colors,
+    right_x: &mut f64,
+) -> Result<()> {
     if cfg.show_audio {
         let (label, muted) = if let Some(dev) = state.audio_manager.get_master_device() {
             let tag = if dev.is_muted { cfg.mute_label } else { cfg.volume_label };
@@ -1459,9 +1605,9 @@ pub fn draw_bar(
             (format!("{} --", cfg.volume_label), true)
         };
 
-        let (aw, ah) = pango_text_size(&layout,&label);
+        let (aw, ah) = pango_text_size(&layout, &label);
         let a_total = aw as f64 + 2.0 * cfg.pill_hpadding;
-        right_x -= a_total + cfg.tag_spacing;
+        *right_x -= a_total + cfg.tag_spacing;
 
         // relm_bar style: teal accent for volume, subtle for muted
         let mut fill = if muted {
@@ -1483,7 +1629,7 @@ pub fn draw_bar(
         let _ = draw_soft_shadow(
             cr,
             state.shape_style,
-            right_x,
+            *right_x,
             cfg.padding_y,
             a_total,
             pill_h,
@@ -1494,7 +1640,7 @@ pub fn draw_bar(
         stroke_shape_with_fill(
             cr,
             state.shape_style,
-            right_x,
+            *right_x,
             cfg.padding_y,
             a_total,
             pill_h,
@@ -1509,9 +1655,9 @@ pub fn draw_bar(
         } else {
             Color::rgb(236, 254, 255)
         };
-        pango_draw_text_left(cr, &layout,audio_text, right_x + cfg.pill_hpadding, ty, &label);
+        pango_draw_text_left(cr, &layout, audio_text, *right_x + cfg.pill_hpadding, ty, &label);
         state.audio_rect = Rect {
-            x: right_x as i16,
+            x: *right_x as i16,
             y: cfg.padding_y as i16,
             w: a_total as u16,
             h: pill_h as u16,
@@ -1519,8 +1665,21 @@ pub fn draw_bar(
     } else {
         state.audio_rect = Rect::default();
     }
+    Ok(())
+}
 
-    // MEM/CPU
+/// Draw memory stats pill (right-side).
+/// Returns (mem_total_gb, mem_used_gb, cpu_avg) for use by draw_cpu_stats.
+pub fn draw_memory_stats(
+    cr: &Context,
+    cfg: &BarConfig,
+    state: &mut AppState,
+    layout: &pango::Layout,
+    pill_h: f64,
+    is_light_theme: bool,
+    colors: &Colors,
+    right_x: &mut f64,
+) -> Result<f32> {
     let (mem_total_gb, mem_used_gb, cpu_avg) =
         if let Some(snap) = state.system_monitor.get_snapshot() {
             (
@@ -1537,9 +1696,9 @@ pub fn draw_bar(
         0.0
     };
     let mem_label = format!("MEM {:.0}%", mem_usage.clamp(0.0, 100.0));
-    let (mem_w, mem_h) = pango_text_size(&layout,&mem_label);
+    let (mem_w, mem_h) = pango_text_size(&layout, &mem_label);
     let mem_total = mem_w as f64 + 2.0 * cfg.pill_hpadding;
-    right_x -= mem_total + cfg.tag_spacing;
+    *right_x -= mem_total + cfg.tag_spacing;
     let base_mem_bg = usage_bg_color(colors, mem_usage, is_light_theme);
     let base_mem_fg = usage_text_color(colors, mem_usage, is_light_theme);
     let mut mem_bg = base_mem_bg;
@@ -1553,7 +1712,7 @@ pub fn draw_bar(
     let _ = draw_soft_shadow(
         cr,
         state.shape_style,
-        right_x,
+        *right_x,
         cfg.padding_y,
         mem_total,
         pill_h,
@@ -1564,7 +1723,7 @@ pub fn draw_bar(
     stroke_shape_with_fill(
         cr,
         state.shape_style,
-        right_x,
+        *right_x,
         cfg.padding_y,
         mem_total,
         pill_h,
@@ -1578,21 +1737,35 @@ pub fn draw_bar(
         cr,
         &layout,
         base_mem_fg,
-        right_x + cfg.pill_hpadding,
+        *right_x + cfg.pill_hpadding,
         ty_mem,
         &mem_label,
     );
     state.mem_rect = Rect {
-        x: right_x as i16,
+        x: *right_x as i16,
         y: cfg.padding_y as i16,
         w: mem_total as u16,
         h: pill_h as u16,
     };
+    Ok(cpu_avg)
+}
 
+/// Draw CPU stats pill (right-side).
+pub fn draw_cpu_stats(
+    cr: &Context,
+    cfg: &BarConfig,
+    state: &mut AppState,
+    layout: &pango::Layout,
+    pill_h: f64,
+    is_light_theme: bool,
+    colors: &Colors,
+    right_x: &mut f64,
+    cpu_avg: f32,
+) -> Result<()> {
     let cpu_label = format!("CPU {:.0}%", cpu_avg.clamp(0.0, 100.0));
-    let (cpu_w, cpu_h) = pango_text_size(&layout,&cpu_label);
+    let (cpu_w, cpu_h) = pango_text_size(&layout, &cpu_label);
     let cpu_total = cpu_w as f64 + 2.0 * cfg.pill_hpadding;
-    right_x -= cpu_total + cfg.tag_spacing;
+    *right_x -= cpu_total + cfg.tag_spacing;
     let base_cpu_bg = usage_bg_color(colors, cpu_avg, is_light_theme);
     let base_cpu_fg = usage_text_color(colors, cpu_avg, is_light_theme);
     let mut cpu_bg = base_cpu_bg;
@@ -1606,7 +1779,7 @@ pub fn draw_bar(
     let _ = draw_soft_shadow(
         cr,
         state.shape_style,
-        right_x,
+        *right_x,
         cfg.padding_y,
         cpu_total,
         pill_h,
@@ -1617,7 +1790,7 @@ pub fn draw_bar(
     stroke_shape_with_fill(
         cr,
         state.shape_style,
-        right_x,
+        *right_x,
         cfg.padding_y,
         cpu_total,
         pill_h,
@@ -1631,16 +1804,277 @@ pub fn draw_bar(
         cr,
         &layout,
         base_cpu_fg,
-        right_x + cfg.pill_hpadding,
+        *right_x + cfg.pill_hpadding,
         ty_cpu,
         &cpu_label,
     );
     state.cpu_rect = Rect {
-        x: right_x as i16,
+        x: *right_x as i16,
         y: cfg.padding_y as i16,
         w: cpu_total as u16,
         h: pill_h as u16,
     };
+    Ok(())
+}
+
+// ================= 对外：绘制入口 =================
+
+pub fn draw_bar(
+    cr: &Context,
+    width: u16,
+    height: u16,
+    colors: &Colors,
+    state: &mut AppState,
+    font: &FontDescription,
+    cfg: &BarConfig,
+) -> Result<()> {
+    let is_light_theme = colors.bg.r > 0.7 && colors.bg.g > 0.7 && colors.bg.b > 0.7;
+    paint_bar_background(cr, width, height, colors.bg, is_light_theme)?;
+
+    let layout = create_layout(cr);
+    layout.set_font_description(Some(font));
+
+    let pill_h = (height as f64) - 2.0 * cfg.padding_y;
+
+    // Left side: tags -> layout button -> layout options
+    let x = draw_left_tags(cr, cfg, state, &layout, pill_h, is_light_theme, colors)?;
+    let x = draw_layout_button(cr, cfg, state, &layout, pill_h, is_light_theme, colors, x)?;
+    draw_layout_options(cr, cfg, state, &layout, pill_h, is_light_theme, colors, x)?;
+
+    // Right side: right-to-left
+    let mut right_x = width as f64 - cfg.padding_x;
+    draw_theme_toggle(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+    draw_monitor_badge(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+    draw_time_display(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+    draw_screenshot_button(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+    draw_audio_volume(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+    let cpu_avg = draw_memory_stats(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+    draw_cpu_stats(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x, cpu_avg)?;
+
+    Ok(())
+}
+
+/// Draw bar with selective region redrawing based on dirty bits.
+///
+/// - `dirty_bits = None`       -> Full redraw (all regions)
+/// - `dirty_bits = Some(0)`    -> Skip redraw entirely
+/// - `dirty_bits = Some(bits)` -> Redraw only the affected regions
+///
+/// HOVER_CHANGED and THEME_CHANGED trigger a full redraw because they
+/// affect the visual appearance of every region.
+pub fn draw_bar_with_dirty(
+    cr: &Context,
+    width: u16,
+    height: u16,
+    colors: &Colors,
+    state: &mut AppState,
+    font: &FontDescription,
+    cfg: &BarConfig,
+    dirty_bits: Option<DirtyBits>,
+) -> Result<()> {
+    // If dirty_bits is Some(0), nothing changed -- skip entirely.
+    if let Some(ref dirty) = dirty_bits {
+        if dirty.is_empty() {
+            return Ok(());
+        }
+    }
+
+    // Determine whether we need a full redraw.
+    // None means "no tracking, redraw everything".
+    // HOVER_CHANGED / THEME_CHANGED affect all regions, so treat as full.
+    let full_redraw = match dirty_bits {
+        None => true,
+        Some(ref d) => {
+            d.contains(DirtyBits::HOVER_CHANGED) || d.contains(DirtyBits::THEME_CHANGED)
+        }
+    };
+
+    // ── Always: background, layout object, theme detection, pill_h ──
+    let is_light_theme = colors.bg.r > 0.7 && colors.bg.g > 0.7 && colors.bg.b > 0.7;
+    paint_bar_background(cr, width, height, colors.bg, is_light_theme)?;
+
+    let layout = create_layout(cr);
+    layout.set_font_description(Some(font));
+
+    let pill_h = (height as f64) - 2.0 * cfg.padding_y;
+
+    // Helper: should we draw a given region?
+    // Under selective mode, only the regions whose dirty flag is set are drawn.
+    let dirty_ref = &dirty_bits;
+    let should_draw = |flag: u32| -> bool {
+        if full_redraw {
+            return true;
+        }
+        match dirty_ref {
+            None => true,
+            Some(d) => d.contains(flag),
+        }
+    };
+
+    // ── Left side (left-to-right, position-chained) ──
+    //
+    // Tags and layout button positions depend on each other, so we always
+    // compute positions for all left-side items.  We only *draw* the ones
+    // that are dirty, but we still need the returned x for the next item.
+    //
+    // MONITOR_CHANGED affects tags (tag visuals depend on monitor_info).
+    // LAYOUT_CHANGED affects layout button + layout options.
+
+    let draw_tags = should_draw(DirtyBits::MONITOR_CHANGED);
+    let draw_layout = should_draw(DirtyBits::LAYOUT_CHANGED);
+
+    // Tags -- always compute positions for chaining; conditionally render.
+    let x = if draw_tags {
+        draw_left_tags(cr, cfg, state, &layout, pill_h, is_light_theme, colors)?
+    } else {
+        // Recompute x position without drawing (measure-only pass).
+        let tags = &cfg.tag_labels;
+        let mut x = cfg.padding_x;
+        for (i, label) in tags.iter().enumerate() {
+            let (tw, _th) = pango_text_size(&layout, label);
+            let w = ((tw as f64) + 2.0 * cfg.pill_hpadding).max(40.0);
+            state.tag_rects[i] = Rect {
+                x: x as i16,
+                y: cfg.padding_y as i16,
+                w: w as u16,
+                h: pill_h as u16,
+            };
+            x += w + cfg.tag_spacing;
+        }
+        x
+    };
+
+    // Layout button
+    let x = if draw_layout {
+        draw_layout_button(cr, cfg, state, &layout, pill_h, is_light_theme, colors, x)?
+    } else {
+        // Measure-only: advance x past the layout button.
+        let layout_label = state.layout_symbol.as_str();
+        let (lw, _lh) = pango_text_size(&layout, layout_label);
+        let lw_total = lw as f64 + 2.0 * cfg.pill_hpadding;
+        state.layout_button_rect = Rect {
+            x: x as i16,
+            y: cfg.padding_y as i16,
+            w: lw_total as u16,
+            h: pill_h as u16,
+        };
+        x + lw_total + cfg.tag_spacing
+    };
+
+    // Layout options
+    if draw_layout {
+        draw_layout_options(cr, cfg, state, &layout, pill_h, is_light_theme, colors, x)?;
+    }
+
+    // ── Right side (right-to-left, position-chained) ──
+    //
+    // Each right-side region decrements `right_x`.  Like the left side, we
+    // always advance the position but only draw when the region is dirty.
+    //
+    // The call order matches draw_bar():
+    //   theme_toggle -> monitor_badge -> time_display -> screenshot_button
+    //   -> audio_volume -> memory_stats -> cpu_stats
+
+    let mut right_x = width as f64 - cfg.padding_x;
+
+    // Theme toggle (always if show_theme_toggle; dirty on THEME_CHANGED -- but
+    // THEME_CHANGED already triggers full_redraw, so under selective mode this
+    // is always skipped unless full_redraw. We draw it under full_redraw.)
+    if full_redraw {
+        draw_theme_toggle(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+    } else if cfg.show_theme_toggle {
+        // Advance right_x without drawing so subsequent positions are correct.
+        let label = match state.theme_mode {
+            ThemeMode::Dark => cfg.theme_dark_label,
+            ThemeMode::Light => cfg.theme_light_label,
+        };
+        let (tw, _) = pango_text_size(&layout, label);
+        let w = (tw as f64 + 2.0 * (cfg.pill_hpadding - 2.0)).max(54.0);
+        right_x -= w + cfg.tag_spacing;
+    }
+
+    // Monitor badge
+    if should_draw(DirtyBits::MONITOR_CHANGED) {
+        draw_monitor_badge(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+    } else {
+        let mon_label = state.monitor_label(cfg).to_string();
+        let (mon_w, _) = pango_text_size(&layout, &mon_label);
+        let mon_total = mon_w as f64 + 2.0 * cfg.pill_hpadding;
+        right_x -= mon_total + cfg.tag_spacing;
+    }
+
+    // Time display
+    if should_draw(DirtyBits::TIME_CHANGED) {
+        draw_time_display(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+    } else {
+        // Advance past time pill. Use the cached rect width if available,
+        // otherwise measure the current time string.
+        if state.time_rect.w > 0 {
+            right_x -= state.time_rect.w as f64 + cfg.tag_spacing;
+        } else {
+            let time_str = state.format_time();
+            let time_label = format!("{} {}", cfg.time_icon, time_str);
+            let (tw, _) = pango_text_size(&layout, &time_label);
+            let w = tw as f64 + 2.0 * cfg.pill_hpadding;
+            right_x -= w + cfg.tag_spacing;
+        }
+    }
+
+    // Screenshot button (static, always drawn on full redraw; skip on selective)
+    if full_redraw {
+        draw_screenshot_button(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+    } else {
+        let ss_label = cfg.screenshot_label;
+        let (ss_w, _) = pango_text_size(&layout, ss_label);
+        let ss_total = ss_w as f64 + 2.0 * cfg.pill_hpadding;
+        right_x -= ss_total + cfg.tag_spacing;
+    }
+
+    // Audio volume
+    if should_draw(DirtyBits::AUDIO_CHANGED) {
+        draw_audio_volume(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+    } else if cfg.show_audio {
+        // Advance past audio pill without drawing.
+        let (label, _muted) = if let Some(dev) = state.audio_manager.get_master_device() {
+            let tag = if dev.is_muted { cfg.mute_label } else { cfg.volume_label };
+            (format!("{} {}%", tag, dev.volume.clamp(0, 100)), dev.is_muted)
+        } else {
+            (format!("{} --", cfg.volume_label), true)
+        };
+        let (aw, _) = pango_text_size(&layout, &label);
+        let a_total = aw as f64 + 2.0 * cfg.pill_hpadding;
+        right_x -= a_total + cfg.tag_spacing;
+    }
+
+    // Memory stats + CPU stats (coupled: memory returns cpu_avg for cpu pill)
+    let draw_system = should_draw(DirtyBits::SYSTEM_CHANGED);
+    if draw_system {
+        let cpu_avg = draw_memory_stats(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+        draw_cpu_stats(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x, cpu_avg)?;
+    } else {
+        // Advance past memory pill.
+        let (mem_total_gb, mem_used_gb, cpu_avg) =
+            if let Some(snap) = state.system_monitor.get_snapshot() {
+                ((snap.memory_total as f32) / 1e9, (snap.memory_used as f32) / 1e9, snap.cpu_average)
+            } else {
+                (0.0, 0.0, 0.0)
+            };
+        let mem_usage = if mem_total_gb > 0.0 { (mem_used_gb / mem_total_gb) * 100.0 } else { 0.0 };
+        let mem_label = format!("MEM {:.0}%", mem_usage.clamp(0.0, 100.0));
+        let (mem_w, _) = pango_text_size(&layout, &mem_label);
+        let mem_total = mem_w as f64 + 2.0 * cfg.pill_hpadding;
+        right_x -= mem_total + cfg.tag_spacing;
+
+        // Advance past CPU pill.
+        let cpu_label = format!("CPU {:.0}%", cpu_avg.clamp(0.0, 100.0));
+        let (cpu_w, _) = pango_text_size(&layout, &cpu_label);
+        let cpu_total = cpu_w as f64 + 2.0 * cfg.pill_hpadding;
+        right_x -= cpu_total + cfg.tag_spacing;
+        let _ = right_x; // suppress unused warning
+    }
+
+    // ── Clear dirty bits ──
+    state.dirty_fields = DirtyBits::new(0);
 
     Ok(())
 }
