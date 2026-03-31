@@ -15,11 +15,6 @@ xbar_core = { git = "https://github.com/beamiter/xbar_core.git" }
 tokio = { version = "1.47.1", features = ["full"] }
 
 font-kit = "0.14"
-eframe = { version = "0.32.3", features = ["persistence"] }
-egui_plot = "0.33.0"
-egui = "0.32.3"
-
-toml = "0.9.7"
 notify = "8"
 dirs = "6.0"
 arc-swap = "1"
@@ -32,6 +27,10 @@ smithay-client-toolkit = { version = "0.19", optional = true }
 wayland-client = { version = "0.31", optional = true }
 wayland-protocols-wlr = { version = "0.3", optional = true, features = ["client"] }
 raw-window-handle = { version = "0.6", optional = true }
+eframe = "0.34.1"
+egui = "0.34.1"
+egui_plot = "0.35.0"
+toml = "1.1.0"
 
 [features]
 default = ["x11"]
