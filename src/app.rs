@@ -61,38 +61,6 @@ impl EguiBarApp {
             .and_then(|state| state.current_message.clone())
     }
 
-    /// Calculate target window height
-    fn calculate_target_height(&self, _ui: &egui::Ui) -> f32 {
-        if let Some(message) = self.get_current_message() {
-            let monitor_info = &message.monitor_info;
-            if self.state.ui_state.volume_window.open || self.state.ui_state.show_debug_window {
-                return monitor_info.monitor_height as f32 * 0.618;
-            }
-        }
-        40.0
-    }
-
-    /// Adjust window size and position
-    fn adjust_window(&mut self, ctx: &egui::Context, ui: &egui::Ui) {
-        if self.state.ui_state.need_resize {
-            let target_height = self.calculate_target_height(ui);
-            let viewport_info = ctx.input(|i| i.viewport().clone());
-            info!("viewport_info: {:?}", viewport_info);
-
-            if let Some(outer_rect) = viewport_info.outer_rect {
-                let target_width = outer_rect.width();
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::Vec2::new(
-                    target_width,
-                    target_height,
-                )));
-                info!("Window adjusted size: {}x{}", target_width, target_height);
-            }
-
-            self.state.ui_state.need_resize = false;
-        }
-    }
-
-    // ================================
     // Main UI via Module System
     // ================================
 
@@ -323,7 +291,6 @@ impl eframe::App for EguiBarApp {
             .show_inside(ui, |ui| {
                 self.draw_main_ui(ui);
                 self.render_popups(&ctx);
-                self.adjust_window(&ctx, ui);
             });
 
         if self.state.ui_state.need_resize {

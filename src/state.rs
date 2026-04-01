@@ -1,53 +1,13 @@
 use shared_structures::SharedMessage;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use xbar_core::audio_manager::{AudioDevice, AudioManager};
 use xbar_core::system_monitor::SystemMonitor;
 
 use crate::theme::ui;
 
-/// Volume control window state
-#[derive(Debug)]
-pub struct VolumeWindowState {
-    /// Whether the window is open
-    pub open: bool,
-    /// Selected device index
-    pub selected_device: usize,
-    /// Window position
-    pub position: Option<egui::Pos2>,
-    /// Last volume change time (for debouncing)
-    pub last_volume_change: Instant,
-    /// Volume change debounce duration
-    pub volume_change_debounce: Duration,
-}
-
-impl VolumeWindowState {
-    pub fn new() -> Self {
-        Self {
-            open: false,
-            selected_device: 0,
-            position: None,
-            last_volume_change: Instant::now(),
-            volume_change_debounce: Duration::from_millis(50),
-        }
-    }
-
-    /// Check if volume change should be applied (debouncing)
-    pub fn should_apply_volume_change(&mut self) -> bool {
-        let now = Instant::now();
-        if now.duration_since(self.last_volume_change) > self.volume_change_debounce {
-            self.last_volume_change = now;
-            true
-        } else {
-            false
-        }
-    }
-}
-
 /// UI-specific state
 #[derive(Debug)]
 pub struct UiState {
-    /// Volume control window state
-    pub volume_window: VolumeWindowState,
     /// Current scale factor
     pub scale_factor: f32,
     /// Whether window needs resizing
@@ -60,25 +20,21 @@ pub struct UiState {
     pub last_ui_update: Instant,
     /// Button height for calculations
     pub button_height: f32,
+    /// Selected audio device for popup
+    pub selected_device: usize,
 }
 
 impl UiState {
     pub fn new() -> Self {
         Self {
-            volume_window: VolumeWindowState::new(),
             scale_factor: ui::DEFAULT_SCALE_FACTOR,
             need_resize: false,
             show_seconds: false,
             show_debug_window: false,
             last_ui_update: Instant::now(),
             button_height: 0.0,
+            selected_device: 0,
         }
-    }
-
-    /// Toggle volume window
-    pub fn toggle_volume_window(&mut self) {
-        self.volume_window.open = !self.volume_window.open;
-        self.need_resize = true;
     }
 
     /// Toggle debug window

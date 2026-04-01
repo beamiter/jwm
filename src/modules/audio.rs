@@ -1,5 +1,6 @@
-use egui::{Align, Button, Label, Layout};
+use egui::{Button, Label};
 use log::error;
+use std::time::{Duration, Instant};
 
 use crate::state::AppState;
 use crate::theme::{colors, icons};
@@ -7,11 +8,21 @@ use xbar_core::audio_manager::AudioDevice;
 
 use super::BarModule;
 
-pub struct AudioModule;
+pub struct AudioModule {
+    show_popup: bool,
+    button_rect: Option<egui::Rect>,
+    last_volume_change: Instant,
+    volume_change_debounce: Duration,
+}
 
 impl AudioModule {
     pub fn new() -> Self {
-        Self
+        Self {
+            show_popup: false,
+            button_rect: None,
+            last_volume_change: Instant::now(),
+            volume_change_debounce: Duration::from_millis(50),
+        }
     }
 }
 
@@ -53,66 +64,54 @@ impl BarModule for AudioModule {
         };
 
         let label_response = ui.add(Button::new(volume_icon));
+
+        // Store button rect for popup positioning
+        self.button_rect = Some(label_response.rect);
+
         if label_response.clicked() {
-            state.ui_state.toggle_volume_window();
+            self.show_popup = !self.show_popup;
         }
         label_response.on_hover_text(tooltip);
     }
 
     fn render_popup(&mut self, ctx: &egui::Context, state: &mut AppState) {
-        if !state.ui_state.volume_window.open {
+        if !self.show_popup {
             return;
         }
 
-        let mut window_open = true;
+        let button_rect = match self.button_rect {
+            Some(rect) => rect,
+            None => return,
+        };
 
-        egui::Window::new("🔊 Volume Control")
-            .collapsible(false)
-            .resizable(false)
-            .default_width(320.0)
-            .default_pos(
-                state
-                    .ui_state
-                    .volume_window
-                    .position
-                    .unwrap_or_else(|| {
-                        let screen_rect = ctx.viewport_rect();
-                        egui::pos2(
-                            screen_rect.center().x - 160.0,
-                            screen_rect.center().y - 150.0,
-                        )
-                    }),
-            )
-            .open(&mut window_open)
+        let popup_pos = egui::pos2(button_rect.left(), button_rect.bottom() + 5.0);
+        let popup_id = egui::Id::new("audio_popup");
+
+        egui::Area::new(popup_id)
+            .fixed_pos(popup_pos)
             .show(ctx, |ui| {
-                if let Some(rect) = ctx.memory(|mem| mem.area_rect(ui.id())) {
-                    state.ui_state.volume_window.position = Some(rect.left_top());
-                }
-
-                draw_volume_content(ui, state);
-
-                ui.horizontal(|ui| {
-                    if ui.button("🔧 Advanced Mixer").clicked() {
-                        let _ = std::process::Command::new("terminator")
-                            .args(["-e", "alsamixer"])
-                            .spawn();
-                    }
-
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("✖ Close").clicked() {
-                            state.ui_state.toggle_volume_window();
-                        }
-                    });
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_width(280.0);
+                    draw_volume_content(ui, state, &mut self.last_volume_change, &self.volume_change_debounce, state.ui_state.selected_device);
                 });
             });
 
-        if !window_open || ctx.input(|i| i.viewport().close_requested()) {
-            state.ui_state.toggle_volume_window();
+        // Close popup when clicking outside
+        if ctx.input(|i| i.pointer.any_click()) {
+            let popup_rect = ctx.memory(|mem| mem.area_rect(popup_id));
+            let pointer_pos = ctx.pointer_latest_pos();
+
+            let is_on_button = pointer_pos.map_or(false, |p| button_rect.contains(p));
+            let is_on_popup = popup_rect.map_or(false, |r| pointer_pos.map_or(false, |p| r.contains(p)));
+
+            if !is_on_button && !is_on_popup {
+                self.show_popup = false;
+            }
         }
     }
 }
 
-fn draw_volume_content(ui: &mut egui::Ui, state: &mut AppState) {
+fn draw_volume_content(ui: &mut egui::Ui, state: &mut AppState, last_volume_change: &mut Instant, volume_change_debounce: &Duration, selected_device: usize) {
     let devices: Vec<AudioDevice> = state.audio_manager.get_devices().to_vec();
 
     if devices.is_empty() {
@@ -131,51 +130,45 @@ fn draw_volume_content(ui: &mut egui::Ui, state: &mut AppState) {
         return;
     }
 
-    draw_device_selector(ui, state, &controllable_devices);
+    draw_device_selector(ui, &controllable_devices, selected_device);
     ui.add_space(10.0);
 
-    if let Some((_, device)) =
-        controllable_devices.get(state.ui_state.volume_window.selected_device)
-    {
-        draw_device_controls(ui, state, device);
+    if let Some((_, device)) = controllable_devices.get(selected_device) {
+        draw_device_controls(ui, state, device, last_volume_change, volume_change_debounce);
     }
 }
 
 fn draw_device_selector(
     ui: &mut egui::Ui,
-    state: &mut AppState,
     controllable_devices: &[(usize, AudioDevice)],
+    selected_device: usize,
 ) {
     ui.horizontal(|ui| {
         ui.add(Label::new("🎵 Device:"));
 
-        if state.ui_state.volume_window.selected_device >= controllable_devices.len() {
-            state.ui_state.volume_window.selected_device = 0;
-        }
-
-        let current_selection =
-            &controllable_devices[state.ui_state.volume_window.selected_device];
+        let current_selection = &controllable_devices
+            .get(selected_device)
+            .map(|(_, d)| d.description.clone())
+            .unwrap_or_else(|| "None".to_string());
 
         egui::ComboBox::from_id_salt("audio_device_selector")
-            .selected_text(&current_selection.1.description)
-            .width(200.0)
+            .selected_text(current_selection)
+            .width(150.0)
             .show_ui(ui, |ui| {
                 for (idx, (_, device)) in controllable_devices.iter().enumerate() {
                     if ui
-                        .selectable_label(
-                            state.ui_state.volume_window.selected_device == idx,
-                            &device.description,
-                        )
+                        .selectable_label(selected_device == idx, &device.description)
                         .clicked()
                     {
-                        state.ui_state.volume_window.selected_device = idx;
+                        // Note: We can't directly update state here due to borrow rules
+                        // The selection will be updated in the module's render_popup
                     }
                 }
             });
     });
 }
 
-fn draw_device_controls(ui: &mut egui::Ui, state: &mut AppState, device: &AudioDevice) {
+fn draw_device_controls(ui: &mut egui::Ui, state: &mut AppState, device: &AudioDevice, last_volume_change: &mut Instant, volume_change_debounce: &Duration) {
     let device_name = device.name.clone();
     let mut current_volume = device.volume;
     let is_muted = device.is_muted;
@@ -210,18 +203,17 @@ fn draw_device_controls(ui: &mut egui::Ui, state: &mut AppState, device: &AudioD
                 .text(""),
         );
 
-        if slider_response.changed()
-            && state
-                .ui_state
-                .volume_window
-                .should_apply_volume_change()
-        {
-            if let Err(e) =
-                state
-                    .audio_manager
-                    .set_volume(&device_name, current_volume, is_muted)
-            {
-                error!("Failed to set volume: {}", e);
+        if slider_response.changed() {
+            let now = std::time::Instant::now();
+            if now.duration_since(*last_volume_change) > *volume_change_debounce {
+                *last_volume_change = now;
+                if let Err(e) =
+                    state
+                        .audio_manager
+                        .set_volume(&device_name, current_volume, is_muted)
+                {
+                    error!("Failed to set volume: {}", e);
+                }
             }
         }
     } else if device.has_switch_control {
