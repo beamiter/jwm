@@ -8,7 +8,6 @@ pub mod network;
 pub mod bluetooth;
 pub mod brightness;
 pub mod media;
-pub mod tray;
 
 use crate::state::AppState;
 use shared_structures::SharedRingBuffer;
@@ -57,27 +56,27 @@ impl ModuleRegistry {
     /// Create module registry with default modules
     pub fn new(
         shared_buffer: &Option<Arc<SharedRingBuffer>>,
-        egui_ctx: &egui::Context,
-        rt_handle: &tokio::runtime::Handle,
+        _egui_ctx: &egui::Context,
+        _rt_handle: &tokio::runtime::Handle,
     ) -> Self {
         // Default module layout
         let left_names = vec!["workspaces"];
         let center_names: Vec<&str> = vec![];
-        let right_names = vec!["tray", "cpu", "memory", "battery", "audio", "clock"];
+        let right_names = vec!["cpu", "memory", "battery", "audio", "clock"];
 
         let left: Vec<Box<dyn BarModule>> = left_names
             .iter()
-            .filter_map(|name| create_module(name, shared_buffer, egui_ctx, rt_handle))
+            .filter_map(|name| create_module(name, shared_buffer))
             .collect();
 
         let center: Vec<Box<dyn BarModule>> = center_names
             .iter()
-            .filter_map(|name| create_module(name, shared_buffer, egui_ctx, rt_handle))
+            .filter_map(|name| create_module(name, shared_buffer))
             .collect();
 
         let right: Vec<Box<dyn BarModule>> = right_names
             .iter()
-            .filter_map(|name| create_module(name, shared_buffer, egui_ctx, rt_handle))
+            .filter_map(|name| create_module(name, shared_buffer))
             .collect();
 
         Self { left, center, right }
@@ -88,8 +87,6 @@ impl ModuleRegistry {
 fn create_module(
     name: &str,
     shared_buffer: &Option<Arc<SharedRingBuffer>>,
-    egui_ctx: &egui::Context,
-    rt_handle: &tokio::runtime::Handle,
 ) -> Option<Box<dyn BarModule>> {
     match name {
         "workspaces" => Some(Box::new(workspaces::WorkspacesModule::new(shared_buffer.clone()))),
@@ -102,7 +99,6 @@ fn create_module(
         "bluetooth" => Some(Box::new(bluetooth::BluetoothModule::new())),
         "brightness" => Some(Box::new(brightness::BrightnessModule::new())),
         "media" => Some(Box::new(media::MediaModule::new())),
-        "tray" => Some(Box::new(tray::TrayModule::new(egui_ctx.clone(), rt_handle.clone()))),
         other => {
             log::warn!("Unknown module: {}", other);
             None
