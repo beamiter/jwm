@@ -8,7 +8,6 @@ use system_tray::client::{Client, Event, UpdateEvent};
 use system_tray::item::{IconPixmap, StatusNotifierItem};
 use system_tray::menu::TrayMenu;
 
-use crate::animation::AnimationState;
 use crate::state::AppState;
 use crate::theme::colors;
 
@@ -264,7 +263,7 @@ impl BarModule for TrayModule {
         true
     }
 
-    fn render_bar(&mut self, ui: &mut egui::Ui, _state: &mut AppState, _anim: &mut AnimationState) {
+    fn render_bar(&mut self, ui: &mut egui::Ui, _state: &mut AppState) {
         let mut state = self.tray_state.lock().unwrap();
 
         if state.items.is_empty() {

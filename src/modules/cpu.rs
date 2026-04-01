@@ -1,7 +1,6 @@
 use egui::{Button, Color32};
 use egui_plot::{Line, Plot, PlotPoints};
 
-use crate::animation::AnimationState;
 use crate::state::AppState;
 use crate::theme::colors;
 
@@ -47,7 +46,7 @@ impl BarModule for CpuModule {
         "CPU"
     }
 
-    fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState, _anim: &mut AnimationState) {
+    fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         // Ensure color cache
         if state.color_cache.is_empty() {
             state.color_cache = (0..=100)

@@ -2,7 +2,6 @@ use log::info;
 use shared_structures::SharedRingBuffer;
 use std::sync::Arc;
 
-use crate::animation::AnimationState;
 use crate::ipc;
 use crate::state::AppState;
 use crate::theme::colors;
@@ -28,7 +27,7 @@ impl BarModule for LayoutSelectorModule {
         "Layout Selector"
     }
 
-    fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState, _anim: &mut AnimationState) {
+    fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         let layout_symbol = state
             .current_message
             .as_ref()

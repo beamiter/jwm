@@ -1,4 +1,3 @@
-use crate::animation::AnimationState;
 use crate::state::AppState;
 use crate::theme::colors;
 
@@ -21,7 +20,7 @@ impl BarModule for BatteryModule {
         "Battery"
     }
 
-    fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState, _anim: &mut AnimationState) {
+    fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         if let Some(snapshot) = state.system_monitor.get_snapshot() {
             let battery_percent = snapshot.battery_percent;
             let is_charging = snapshot.is_charging;

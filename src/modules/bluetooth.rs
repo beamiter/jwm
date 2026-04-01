@@ -1,6 +1,5 @@
 use std::time::{Duration, Instant};
 
-use crate::animation::AnimationState;
 use crate::state::AppState;
 use crate::theme::colors;
 
@@ -129,7 +128,7 @@ impl BarModule for BluetoothModule {
         true
     }
 
-    fn render_bar(&mut self, ui: &mut egui::Ui, _state: &mut AppState, _anim: &mut AnimationState) {
+    fn render_bar(&mut self, ui: &mut egui::Ui, _state: &mut AppState) {
         let (icon, color, tooltip) = if !self.bt_state.powered {
             ("", colors::TEXT_SUBTLE, "Bluetooth off".to_string())
         } else {

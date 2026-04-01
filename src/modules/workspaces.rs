@@ -3,7 +3,6 @@ use log::info;
 use shared_structures::SharedRingBuffer;
 use std::sync::Arc;
 
-use crate::animation::{AnimationState, EasingName};
 use crate::ipc;
 use crate::state::AppState;
 use crate::theme::{colors, icons, with_alpha};
@@ -29,7 +28,7 @@ impl BarModule for WorkspacesModule {
         "Workspaces"
     }
 
-    fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState, anim: &mut AnimationState) {
+    fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         let bold_thickness = 2.5;
         let light_thickness = 1.5;
         let monitor_info = state
@@ -37,9 +36,6 @@ impl BarModule for WorkspacesModule {
             .as_ref()
             .map(|m| m.monitor_info)
             .unwrap_or_default();
-
-        let hover_ms = 150; // Default hover duration
-        let easing = EasingName::EaseOutQuad;
 
         for (index, &tag_icon) in icons::TAG_ICONS.iter().enumerate() {
             let tag_color = colors::TAG_COLORS[index];
@@ -71,13 +67,9 @@ impl BarModule for WorkspacesModule {
                 }
             }
 
-            // Animate background color
-            let anim_id = format!("ws_bg_{}", index);
-            let bg = anim.animate_color(&anim_id, button_bg_color, hover_ms, easing);
-
             let button = Button::new(rich_text)
                 .min_size(Vec2::new(34.0, 26.0))
-                .fill(bg);
+                .fill(button_bg_color);
 
             let label_response = ui.add(button);
             let rect = label_response.rect;
@@ -125,26 +117,6 @@ impl BarModule for WorkspacesModule {
                     &state.current_message,
                     tag_bit,
                     false,
-                );
-            }
-
-            // Hover effects
-            let hover_alpha = if label_response.hovered() { 1.0_f32 } else { 0.0_f32 };
-            let hover_anim = anim.animate(
-                &format!("ws_hover_{}", index),
-                hover_alpha,
-                hover_ms,
-                EasingName::EaseOutQuad,
-            );
-
-            if hover_anim > 0.01 {
-                let expand = hover_anim * 1.0;
-                let alpha = (hover_anim * 255.0) as u8;
-                ui.painter().rect_stroke(
-                    rect.expand(expand),
-                    1.0,
-                    Stroke::new(bold_thickness, with_alpha(tag_color, alpha)),
-                    StrokeKind::Inside,
                 );
             }
 

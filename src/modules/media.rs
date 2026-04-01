@@ -1,6 +1,5 @@
 use std::time::{Duration, Instant};
 
-use crate::animation::AnimationState;
 use crate::state::AppState;
 use crate::theme::colors;
 
@@ -113,7 +112,7 @@ impl BarModule for MediaModule {
         }
     }
 
-    fn render_bar(&mut self, ui: &mut egui::Ui, _state: &mut AppState, _anim: &mut AnimationState) {
+    fn render_bar(&mut self, ui: &mut egui::Ui, _state: &mut AppState) {
         if !self.info.available {
             return; // No player, hide module
         }

@@ -1,8 +1,6 @@
 //! egui_bar - A modern system status bar application
 
-mod animation;
 mod app;
-mod events;
 mod ipc;
 mod modules;
 mod state;

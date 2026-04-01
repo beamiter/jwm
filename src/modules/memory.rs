@@ -1,4 +1,3 @@
-use crate::animation::AnimationState;
 use crate::state::AppState;
 use crate::theme::colors;
 
@@ -21,7 +20,7 @@ impl BarModule for MemoryModule {
         "Memory"
     }
 
-    fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState, _anim: &mut AnimationState) {
+    fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         let (available_gb, used_gb) = state.get_memory_display_info();
 
         ui.label(

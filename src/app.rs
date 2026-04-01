@@ -5,8 +5,6 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 
-use crate::animation::AnimationState;
-use crate::events::{self, BarEvent, EventBus};
 use crate::ipc;
 use crate::modules::ModuleRegistry;
 use crate::state::{AppState, SharedAppState};
@@ -23,10 +21,6 @@ pub struct EguiBarApp {
     shared_buffer_rc: Option<Arc<SharedRingBuffer>>,
     /// Module registry
     modules: ModuleRegistry,
-    /// Animation state
-    anim: AnimationState,
-    /// Event bus
-    event_bus: EventBus,
 }
 
 impl EguiBarApp {
@@ -50,19 +44,12 @@ impl EguiBarApp {
         ipc::start_background_tasks(&shared_state, &cc.egui_ctx, shared_buffer_rc.clone());
 
         let modules = ModuleRegistry::new(&shared_buffer_rc, &cc.egui_ctx, &rt_handle);
-        let anim = AnimationState::new();
-
-        // Start event-driven listeners
-        let event_bus = EventBus::new();
-        events::start_event_listeners(event_bus.sender(), cc.egui_ctx.clone());
 
         Ok(Self {
             state,
             shared_state,
             shared_buffer_rc,
             modules,
-            anim,
-            event_bus,
         })
     }
 
@@ -105,43 +92,6 @@ impl EguiBarApp {
         }
     }
 
-    /// Dispatch an event to the appropriate handler
-    fn dispatch_event(&mut self, event: BarEvent) {
-        match event {
-            BarEvent::BatteryChanged { .. } => {
-                // Battery module polls SystemMonitor, which will pick this up
-                log::debug!("Battery event received");
-            }
-            BarEvent::NetworkChanged { interface, connected } => {
-                log::debug!("Network event: {} {}", interface, if connected { "up" } else { "down" });
-            }
-            BarEvent::BrightnessChanged { value, max } => {
-                log::debug!("Brightness event: {}/{}", value, max);
-            }
-            BarEvent::BluetoothDeviceChanged { address, connected } => {
-                log::debug!("Bluetooth event: {} {}", address, if connected { "connected" } else { "disconnected" });
-            }
-            BarEvent::MediaPlayerChanged { player, title, .. } => {
-                log::debug!("Media event: {} - {}", player, title);
-            }
-            BarEvent::MediaPlaybackChanged { status } => {
-                log::debug!("Media playback: {}", status);
-            }
-            BarEvent::WorkspaceChanged { message } => {
-                self.state.current_message = Some(message);
-            }
-            BarEvent::ConfigReloaded => {
-                log::info!("Config reloaded event received");
-            }
-            BarEvent::TrayItemAdded { id } => {
-                log::debug!("Tray item added: {}", id);
-            }
-            BarEvent::TrayItemRemoved { id } => {
-                log::debug!("Tray item removed: {}", id);
-            }
-        }
-    }
-
     // ================================
     // Main UI via Module System
     // ================================
@@ -156,7 +106,7 @@ impl EguiBarApp {
             // Left modules
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                 for module in &mut self.modules.left {
-                    module.render_bar(ui, &mut self.state, &mut self.anim);
+                    module.render_bar(ui, &mut self.state);
                 }
             });
 
@@ -164,7 +114,7 @@ impl EguiBarApp {
                 // Center modules
                 ui[0].with_layout(Layout::left_to_right(Align::Center), |ui| {
                     for module in &mut self.modules.center {
-                        module.render_bar(ui, &mut self.state, &mut self.anim);
+                        module.render_bar(ui, &mut self.state);
                     }
                 });
 
@@ -175,7 +125,7 @@ impl EguiBarApp {
 
                     // Right modules in reverse order (RTL layout)
                     for module in self.modules.right.iter_mut().rev() {
-                        module.render_bar(ui, &mut self.state, &mut self.anim);
+                        module.render_bar(ui, &mut self.state);
                     }
                 });
             });
@@ -335,11 +285,6 @@ impl eframe::App for EguiBarApp {
         let ctx = ui.ctx().clone();
         ctx.set_pixels_per_point(self.state.ui_state.scale_factor);
 
-        // Process events from the event bus
-        for event in self.event_bus.drain() {
-            self.dispatch_event(event);
-        }
-
         self.state.update();
 
         // Update all modules
@@ -380,14 +325,6 @@ impl eframe::App for EguiBarApp {
                 self.render_popups(&ctx);
                 self.adjust_window(&ctx, ui);
             });
-
-        // Request repaint if animations are running
-        if self.anim.is_animating() {
-            ctx.request_repaint();
-        }
-
-        // Periodic GC for animation entries
-        self.anim.gc();
 
         if self.state.ui_state.need_resize {
             info!("request for resize");

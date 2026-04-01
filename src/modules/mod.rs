@@ -11,7 +11,6 @@ pub mod brightness;
 pub mod media;
 pub mod tray;
 
-use crate::animation::AnimationState;
 use crate::state::AppState;
 use shared_structures::SharedRingBuffer;
 use std::sync::Arc;
@@ -29,7 +28,7 @@ pub trait BarModule: Send {
     }
 
     /// Render the module's bar content
-    fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState, anim: &mut AnimationState);
+    fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState);
 
     /// Render popup/window if this module has one
     fn render_popup(&mut self, _ctx: &egui::Context, _state: &mut AppState) {}

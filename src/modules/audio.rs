@@ -1,7 +1,6 @@
 use egui::{Align, Button, Label, Layout};
 use log::error;
 
-use crate::animation::AnimationState;
 use crate::state::AppState;
 use crate::theme::{colors, icons};
 use xbar_core::audio_manager::AudioDevice;
@@ -29,7 +28,7 @@ impl BarModule for AudioModule {
         true
     }
 
-    fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState, _anim: &mut AnimationState) {
+    fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         let (volume_icon, tooltip) = if let Some(device) = state.get_master_audio_device() {
             let icon = if device.is_muted || device.volume == 0 {
                 icons::VOLUME_MUTED

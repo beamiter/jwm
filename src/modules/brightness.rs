@@ -1,7 +1,6 @@
 use std::fs;
 use std::time::{Duration, Instant};
 
-use crate::animation::AnimationState;
 use crate::state::AppState;
 use crate::theme::colors;
 
@@ -100,7 +99,7 @@ impl BarModule for BrightnessModule {
         }
     }
 
-    fn render_bar(&mut self, ui: &mut egui::Ui, _state: &mut AppState, _anim: &mut AnimationState) {
+    fn render_bar(&mut self, ui: &mut egui::Ui, _state: &mut AppState) {
         if self.backlight_path.is_none() {
             return; // No backlight device, hide module
         }

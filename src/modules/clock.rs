@@ -1,4 +1,3 @@
-use crate::animation::AnimationState;
 use crate::state::AppState;
 use crate::theme::colors;
 
@@ -21,7 +20,7 @@ impl BarModule for ClockModule {
         "Clock"
     }
 
-    fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState, _anim: &mut AnimationState) {
+    fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         let format_str = if state.ui_state.show_seconds {
             "%Y-%m-%d %H:%M:%S"
         } else {

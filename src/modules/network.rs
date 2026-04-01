@@ -1,7 +1,6 @@
 use std::fs;
 use std::time::{Duration, Instant};
 
-use crate::animation::AnimationState;
 use crate::state::AppState;
 use crate::theme::colors;
 
@@ -148,7 +147,7 @@ impl BarModule for NetworkModule {
         true
     }
 
-    fn render_bar(&mut self, ui: &mut egui::Ui, _state: &mut AppState, _anim: &mut AnimationState) {
+    fn render_bar(&mut self, ui: &mut egui::Ui, _state: &mut AppState) {
         let (icon, color, tooltip) = if let Some(primary) = self.primary_interface() {
             if primary.connected {
                 let icon = if primary.is_wifi {
