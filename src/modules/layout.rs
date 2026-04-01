@@ -106,9 +106,6 @@ impl BarModule for LayoutModule {
             None => return,
         };
 
-        let layout_symbol = Self::get_layout_symbol(state);
-        let layout_type = Self::detect_layout_type(&layout_symbol);
-
         let popup_pos = egui::pos2(button_rect.left(), button_rect.bottom() + 5.0);
         let popup_id = egui::Id::new("layout_popup");
 
@@ -116,30 +113,28 @@ impl BarModule for LayoutModule {
             .fixed_pos(popup_pos)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_width(150.0);
-                    ui.label(format!("Layout: {}", layout_type));
-                    ui.separator();
+                    ui.horizontal(|ui| {
+                        // Tiled layout button
+                        if ui.button("Tiled []=").clicked() {
+                            info!("Setting layout to tiled");
+                            ipc::send_layout_command(&self.shared_buffer, monitor_num, 0);
+                            self.show_popup = false;
+                        }
 
-                    // Tiled layout button
-                    if ui.button("Tiled []=").clicked() {
-                        info!("Setting layout to tiled");
-                        ipc::send_layout_command(&self.shared_buffer, monitor_num, 0);
-                        self.show_popup = false;
-                    }
+                        // Floating layout button
+                        if ui.button("Floating ><>").clicked() {
+                            info!("Setting layout to floating");
+                            ipc::send_layout_command(&self.shared_buffer, monitor_num, 1);
+                            self.show_popup = false;
+                        }
 
-                    // Floating layout button
-                    if ui.button("Floating ><>").clicked() {
-                        info!("Setting layout to floating");
-                        ipc::send_layout_command(&self.shared_buffer, monitor_num, 1);
-                        self.show_popup = false;
-                    }
-
-                    // Monocle layout button
-                    if ui.button("Monocle [M]").clicked() {
-                        info!("Setting layout to monocle");
-                        ipc::send_layout_command(&self.shared_buffer, monitor_num, 2);
-                        self.show_popup = false;
-                    }
+                        // Monocle layout button
+                        if ui.button("Monocle [M]").clicked() {
+                            info!("Setting layout to monocle");
+                            ipc::send_layout_command(&self.shared_buffer, monitor_num, 2);
+                            self.show_popup = false;
+                        }
+                    });
                 });
             });
 

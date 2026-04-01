@@ -1,4 +1,4 @@
-use egui::{Button, Label};
+use egui::{Button, Label, ScrollArea};
 use log::error;
 use std::time::{Duration, Instant};
 
@@ -92,7 +92,11 @@ impl BarModule for AudioModule {
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_width(280.0);
-                    draw_volume_content(ui, state, &mut self.last_volume_change, &self.volume_change_debounce, state.ui_state.selected_device);
+                    ScrollArea::vertical()
+                        .max_height(200.0)
+                        .show(ui, |ui| {
+                            draw_volume_content(ui, state, &mut self.last_volume_change, &self.volume_change_debounce, state.ui_state.selected_device);
+                        });
                 });
             });
 
