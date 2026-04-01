@@ -1,10 +1,9 @@
-use egui::{Button, Label, ScrollArea};
+use egui::Button;
 use log::error;
 use std::time::{Duration, Instant};
 
 use crate::state::AppState;
-use crate::theme::{colors, icons};
-use xbar_core::audio_manager::AudioDevice;
+use crate::theme::icons;
 
 use super::BarModule;
 
@@ -84,19 +83,22 @@ impl BarModule for AudioModule {
             None => return,
         };
 
-        let popup_pos = egui::pos2(button_rect.left(), button_rect.bottom() + 5.0);
+        // Get device info first
+        let device_info = state.get_master_audio_device().map(|d| (d.name.clone(), d.volume, d.is_muted, d.has_switch_control));
+
+        // Position popup to the right of button
+        let popup_pos = egui::pos2(button_rect.right() + 10.0, button_rect.top());
         let popup_id = egui::Id::new("audio_popup");
 
         egui::Area::new(popup_id)
             .fixed_pos(popup_pos)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_width(280.0);
-                    ScrollArea::vertical()
-                        .max_height(200.0)
-                        .show(ui, |ui| {
-                            draw_volume_content(ui, state, &mut self.last_volume_change, &self.volume_change_debounce, state.ui_state.selected_device);
-                        });
+                    if let Some((device_name, volume, is_muted, has_switch)) = device_info {
+                        draw_simple_volume_control(ui, state, &device_name, volume, is_muted, has_switch, &mut self.last_volume_change, &self.volume_change_debounce);
+                    } else {
+                        ui.label("No audio device");
+                    }
                 });
             });
 
@@ -115,151 +117,44 @@ impl BarModule for AudioModule {
     }
 }
 
-fn draw_volume_content(ui: &mut egui::Ui, state: &mut AppState, last_volume_change: &mut Instant, volume_change_debounce: &Duration, selected_device: usize) {
-    let devices: Vec<AudioDevice> = state.audio_manager.get_devices().to_vec();
-
-    if devices.is_empty() {
-        ui.add(Label::new("❌ No controllable audio device found"));
-        return;
-    }
-
-    let controllable_devices: Vec<(usize, AudioDevice)> = devices
-        .into_iter()
-        .enumerate()
-        .filter(|(_, d)| d.has_volume_control || d.has_switch_control)
-        .collect();
-
-    if controllable_devices.is_empty() {
-        ui.add(Label::new("❌ No controllable audio device found"));
-        return;
-    }
-
-    draw_device_selector(ui, &controllable_devices, selected_device);
-    ui.add_space(10.0);
-
-    if let Some((_, device)) = controllable_devices.get(selected_device) {
-        draw_device_controls(ui, state, device, last_volume_change, volume_change_debounce);
-    }
-}
-
-fn draw_device_selector(
-    ui: &mut egui::Ui,
-    controllable_devices: &[(usize, AudioDevice)],
-    selected_device: usize,
-) {
+fn draw_simple_volume_control(ui: &mut egui::Ui, state: &mut AppState, device_name: &str, mut current_volume: i32, is_muted: bool, has_switch_control: bool, last_volume_change: &mut Instant, volume_change_debounce: &Duration) {
     ui.horizontal(|ui| {
-        ui.add(Label::new("🎵 Device:"));
-
-        let current_selection = &controllable_devices
-            .get(selected_device)
-            .map(|(_, d)| d.description.clone())
-            .unwrap_or_else(|| "None".to_string());
-
-        egui::ComboBox::from_id_salt("audio_device_selector")
-            .selected_text(current_selection)
-            .width(150.0)
-            .show_ui(ui, |ui| {
-                for (idx, (_, device)) in controllable_devices.iter().enumerate() {
-                    if ui
-                        .selectable_label(selected_device == idx, &device.description)
-                        .clicked()
-                    {
-                        // Note: We can't directly update state here due to borrow rules
-                        // The selection will be updated in the module's render_popup
-                    }
-                }
-            });
-    });
-}
-
-fn draw_device_controls(ui: &mut egui::Ui, state: &mut AppState, device: &AudioDevice, last_volume_change: &mut Instant, volume_change_debounce: &Duration) {
-    let device_name = device.name.clone();
-    let mut current_volume = device.volume;
-    let is_muted = device.is_muted;
-
-    if device.has_volume_control {
-        ui.horizontal(|ui| {
-            ui.add(Label::new("🔊 Volume:"));
-
-            if device.has_switch_control {
-                let mute_icon = if is_muted {
-                    icons::VOLUME_MUTED
-                } else {
-                    icons::VOLUME_HIGH
-                };
-                let mute_btn = ui.button(mute_icon);
-
-                if mute_btn.clicked() {
-                    if let Err(e) = state.audio_manager.toggle_mute(&device_name) {
-                        error!("Failed to toggle mute: {}", e);
-                    }
-                }
-
-                mute_btn.on_hover_text(if is_muted { "Unmute" } else { "Mute" });
-            }
-
-            ui.label(format!("{}%", current_volume));
-        });
-
+        // Volume slider
         let slider_response = ui.add(
             egui::Slider::new(&mut current_volume, 0..=100)
                 .show_value(false)
-                .text(""),
+                .text("")
+                .fixed_decimals(0),
         );
 
         if slider_response.changed() {
             let now = std::time::Instant::now();
             if now.duration_since(*last_volume_change) > *volume_change_debounce {
                 *last_volume_change = now;
-                if let Err(e) =
-                    state
-                        .audio_manager
-                        .set_volume(&device_name, current_volume, is_muted)
-                {
+                if let Err(e) = state.audio_manager.set_volume(device_name, current_volume, is_muted) {
                     error!("Failed to set volume: {}", e);
                 }
             }
         }
-    } else if device.has_switch_control {
-        ui.horizontal(|ui| {
-            let btn_text = if is_muted {
-                "🔴 Disabled"
-            } else {
-                "🟢 Enabled"
-            };
-            let btn_color = if is_muted {
-                colors::ERROR
-            } else {
-                colors::SUCCESS
-            };
 
-            if ui
-                .add(egui::Button::new(btn_text).fill(btn_color))
-                .clicked()
-            {
-                if let Err(e) = state.audio_manager.toggle_mute(&device_name) {
+        // Mute button
+        if has_switch_control {
+            let mute_icon = if is_muted {
+                icons::VOLUME_MUTED
+            } else {
+                icons::VOLUME_HIGH
+            };
+            let mute_btn = ui.button(mute_icon);
+
+            if mute_btn.clicked() {
+                if let Err(e) = state.audio_manager.toggle_mute(device_name) {
                     error!("Failed to toggle mute: {}", e);
                 }
             }
-        });
-    } else {
-        ui.add(Label::new("❌ No available controls for this device"));
-    }
+            mute_btn.on_hover_text(if is_muted { "Unmute" } else { "Mute" });
+        }
 
-    ui.separator();
-    ui.horizontal(|ui| {
-        ui.add(Label::new(format!("📋 Type: {:?}", device.device_type)));
-        ui.add(Label::new(format!(
-            "📹 Controls: {}",
-            if device.has_volume_control && device.has_switch_control {
-                "Volume + Switch"
-            } else if device.has_volume_control {
-                "Volume only"
-            } else if device.has_switch_control {
-                "Switch only"
-            } else {
-                "None"
-            }
-        )));
+        // Volume percentage
+        ui.label(format!("{}%", current_volume));
     });
 }

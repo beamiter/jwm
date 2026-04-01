@@ -20,8 +20,6 @@ pub struct UiState {
     pub last_ui_update: Instant,
     /// Button height for calculations
     pub button_height: f32,
-    /// Selected audio device for popup
-    pub selected_device: usize,
 }
 
 impl UiState {
@@ -33,7 +31,6 @@ impl UiState {
             show_debug_window: false,
             last_ui_update: Instant::now(),
             button_height: 0.0,
-            selected_device: 0,
         }
     }
 
