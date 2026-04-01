@@ -1,0 +1,141 @@
+use egui::{Button, Color32, Vec2};
+use log::info;
+use shared_structures::SharedRingBuffer;
+use std::sync::Arc;
+
+use crate::ipc;
+use crate::state::AppState;
+use crate::theme::{colors, with_alpha};
+
+use super::BarModule;
+
+pub struct LayoutModule {
+    shared_buffer: Option<Arc<SharedRingBuffer>>,
+    show_popup: bool,
+}
+
+impl LayoutModule {
+    pub fn new(shared_buffer: Option<Arc<SharedRingBuffer>>) -> Self {
+        Self {
+            shared_buffer,
+            show_popup: false,
+        }
+    }
+
+    fn get_layout_symbol(state: &AppState) -> String {
+        state
+            .current_message
+            .as_ref()
+            .map(|m| m.monitor_info.get_ltsymbol())
+            .unwrap_or_else(|| "?".to_string())
+    }
+
+    fn detect_layout_type(symbol: &str) -> &'static str {
+        if symbol.contains("[]=") {
+            "tiled"
+        } else if symbol.contains("><>") {
+            "floating"
+        } else if symbol.contains("[M]") {
+            "monocle"
+        } else {
+            "unknown"
+        }
+    }
+}
+
+impl BarModule for LayoutModule {
+    fn id(&self) -> &str {
+        "layout"
+    }
+
+    fn name(&self) -> &str {
+        "Layout"
+    }
+
+    fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
+        let layout_symbol = Self::get_layout_symbol(state);
+        let layout_type = Self::detect_layout_type(&layout_symbol);
+
+        // Display layout symbol button
+        let button_text = egui::RichText::new(&layout_symbol)
+            .monospace()
+            .size(12.0);
+
+        let button_bg_color = match layout_type {
+            "tiled" => with_alpha(colors::BLUE, 70),
+            "floating" => with_alpha(colors::CYAN, 70),
+            "monocle" => with_alpha(colors::VIOLET, 70),
+            _ => Color32::TRANSPARENT,
+        };
+
+        let button = Button::new(button_text)
+            .min_size(Vec2::new(50.0, 26.0))
+            .fill(button_bg_color);
+
+        let response = ui.add(button);
+        let rect = response.rect;
+        state.ui_state.button_height = rect.height();
+
+        // Toggle popup on click
+        if response.clicked() {
+            self.show_popup = !self.show_popup;
+        }
+
+        // Tooltip showing current layout
+        response.on_hover_text(format!("Layout: {} (click to change)", layout_type));
+    }
+
+    fn render_popup(&mut self, ctx: &egui::Context, state: &mut AppState) {
+        if !self.show_popup {
+            return;
+        }
+
+        let monitor_num = state
+            .current_message
+            .as_ref()
+            .map(|m| m.monitor_info.monitor_num as i32)
+            .unwrap_or(0);
+
+        egui::Window::new("Layout Selector")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                let layout_symbol = Self::get_layout_symbol(state);
+                let layout_type = Self::detect_layout_type(&layout_symbol);
+
+                ui.label(format!("Current Layout: {}", layout_type));
+                ui.separator();
+
+                // Tiled layout button
+                let tiled_button = Button::new("Tiled []=");
+                let tiled_response = ui.add(tiled_button);
+                if tiled_response.clicked() {
+                    info!("Setting layout to tiled");
+                    ipc::send_layout_command(&self.shared_buffer, monitor_num, 0);
+                    self.show_popup = false;
+                }
+
+                // Floating layout button
+                let floating_button = Button::new("Floating ><>");
+                let floating_response = ui.add(floating_button);
+                if floating_response.clicked() {
+                    info!("Setting layout to floating");
+                    ipc::send_layout_command(&self.shared_buffer, monitor_num, 1);
+                    self.show_popup = false;
+                }
+
+                // Monocle layout button
+                let monocle_button = Button::new("Monocle [M]");
+                let monocle_response = ui.add(monocle_button);
+                if monocle_response.clicked() {
+                    info!("Setting layout to monocle");
+                    ipc::send_layout_command(&self.shared_buffer, monitor_num, 2);
+                    self.show_popup = false;
+                }
+            });
+    }
+
+    fn has_popup(&self) -> bool {
+        self.show_popup
+    }
+}

@@ -128,3 +128,13 @@ pub fn send_tag_command(
         send_command(shared_buffer, command);
     }
 }
+
+/// Send layout-related commands
+pub fn send_layout_command(
+    shared_buffer: &Option<Arc<SharedRingBuffer>>,
+    monitor_id: i32,
+    layout_idx: u32,
+) {
+    let command = SharedCommand::set_layout(layout_idx, monitor_id);
+    send_command(shared_buffer, command);
+}
