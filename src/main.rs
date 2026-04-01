@@ -8,8 +8,8 @@ mod ipc;
 mod modules;
 mod state;
 mod theme;
-mod windowing;
 
+use app::EguiBarApp;
 use config::CONFIG;
 use log::info;
 use std::env;
@@ -45,7 +45,33 @@ async fn main() -> anyhow::Result<()> {
     // spawn async tasks even from eframe's non-tokio threads.
     let rt_handle = tokio::runtime::Handle::current();
 
-    // Select and run the appropriate windowing backend
-    let backend = windowing::select_backend(shared_path, transparent, height, rt_handle);
-    backend.run()
+    // Run eframe
+    log::info!("Using eframe/X11 backend");
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_position(egui::Pos2::new(0.0, 0.0))
+            .with_inner_size([1080.0, height])
+            .with_min_inner_size([480.0, height])
+            .with_decorations(false)
+            .with_resizable(true)
+            .with_transparent(transparent),
+        vsync: true,
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "egui_bar",
+        native_options,
+        Box::new(move |cc| match EguiBarApp::new(cc, shared_path, rt_handle) {
+            Ok(app) => {
+                info!("Application created successfully");
+                Ok(Box::new(app))
+            }
+            Err(e) => {
+                log::error!("Failed to create application: {}", e);
+                std::process::exit(1);
+            }
+        }),
+    )
+    .map_err(|e| anyhow::anyhow!("eframe error: {}", e))
 }
