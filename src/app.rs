@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 
 use crate::animation::AnimationState;
-use crate::config;
 use crate::events::{self, BarEvent, EventBus};
 use crate::ipc;
 use crate::modules::ModuleRegistry;
@@ -49,9 +48,8 @@ impl EguiBarApp {
             SharedRingBuffer::create_shared_ring_buffer_aux(&shared_path).map(Arc::new);
 
         ipc::start_background_tasks(&shared_state, &cc.egui_ctx, shared_buffer_rc.clone());
-        config::start_config_watcher(cc.egui_ctx.clone());
 
-        let modules = ModuleRegistry::from_config(&shared_buffer_rc, &cc.egui_ctx, &rt_handle);
+        let modules = ModuleRegistry::new(&shared_buffer_rc, &cc.egui_ctx, &rt_handle);
         let anim = AnimationState::new();
 
         // Start event-driven listeners
@@ -84,8 +82,7 @@ impl EguiBarApp {
                 return monitor_info.monitor_height as f32 * 0.618;
             }
         }
-        let cfg = config::CONFIG.load();
-        cfg.general.height
+        40.0
     }
 
     /// Adjust window size and position

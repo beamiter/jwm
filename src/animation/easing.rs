@@ -1,4 +1,4 @@
-use crate::config::EasingName;
+use super::EasingName;
 
 pub fn linear(t: f32) -> f32 {
     t

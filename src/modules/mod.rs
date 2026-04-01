@@ -56,31 +56,28 @@ pub struct ModuleRegistry {
 }
 
 impl ModuleRegistry {
-    /// Create module registry from config
-    pub fn from_config(
+    /// Create module registry with default modules
+    pub fn new(
         shared_buffer: &Option<Arc<SharedRingBuffer>>,
         egui_ctx: &egui::Context,
         rt_handle: &tokio::runtime::Handle,
     ) -> Self {
-        let cfg = crate::config::CONFIG.load();
+        // Default module layout
+        let left_names = vec!["workspaces", "layout"];
+        let center_names: Vec<&str> = vec![];
+        let right_names = vec!["tray", "cpu", "memory", "battery", "audio", "clock"];
 
-        let left: Vec<Box<dyn BarModule>> = cfg
-            .modules
-            .left
+        let left: Vec<Box<dyn BarModule>> = left_names
             .iter()
             .filter_map(|name| create_module(name, shared_buffer, egui_ctx, rt_handle))
             .collect();
 
-        let center: Vec<Box<dyn BarModule>> = cfg
-            .modules
-            .center
+        let center: Vec<Box<dyn BarModule>> = center_names
             .iter()
             .filter_map(|name| create_module(name, shared_buffer, egui_ctx, rt_handle))
             .collect();
 
-        let right: Vec<Box<dyn BarModule>> = cfg
-            .modules
-            .right
+        let right: Vec<Box<dyn BarModule>> = right_names
             .iter()
             .filter_map(|name| create_module(name, shared_buffer, egui_ctx, rt_handle))
             .collect();

@@ -3,9 +3,17 @@ use log::info;
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use crate::config::CONFIG;
+
+/// Theme mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum ThemeMode {
+    Dark,
+    Light,
+}
 
 /// UI constants
+#[allow(dead_code)]
 pub mod ui {
     pub const DEFAULT_FONT_SIZE: f32 = 18.0;
     pub const DEFAULT_SCALE_FACTOR: f32 = 1.0;
@@ -111,16 +119,8 @@ pub const FONT_FAMILIES: &[&str] = &[
 
 /// Apply theme to egui context
 pub fn apply_theme(ctx: &egui::Context) {
-    use crate::config::ThemeMode;
-
-    let cfg = CONFIG.load();
-    // Env var overrides config
-    let theme = std::env::var("EGUI_BAR_THEME").unwrap_or_else(|_| {
-        match cfg.theme.mode {
-            ThemeMode::Light => "light".to_string(),
-            ThemeMode::Dark => "dark".to_string(),
-        }
-    });
+    // Env var overrides default (dark theme)
+    let theme = std::env::var("EGUI_BAR_THEME").unwrap_or_else(|_| "dark".to_string());
 
     let mut style = (*ctx.global_style()).clone();
     let mut visuals = if theme.eq_ignore_ascii_case("light") {
@@ -201,13 +201,8 @@ pub fn setup_custom_fonts(ctx: &egui::Context) -> Result<()> {
     let mut loaded_fonts = Vec::new();
     let mut seen_fonts = HashSet::new();
 
-    // Use config font families, falling back to hardcoded defaults
-    let cfg = CONFIG.load();
-    let font_families: Vec<String> = if cfg.fonts.families.is_empty() {
-        FONT_FAMILIES.iter().map(|s| s.to_string()).collect()
-    } else {
-        cfg.fonts.families.clone()
-    };
+    // Use default font families
+    let font_families: Vec<String> = FONT_FAMILIES.iter().map(|s| s.to_string()).collect();
 
     for font_name in &font_families {
         if fonts.font_data.contains_key(font_name.as_str()) || seen_fonts.contains(font_name.as_str()) {
@@ -297,12 +292,7 @@ fn update_font_families(
 /// Configure text styles for egui context
 pub fn configure_text_styles(ctx: &egui::Context) {
     ctx.all_styles_mut(|style| {
-        let cfg = CONFIG.load();
-        let base_font_size = if cfg.fonts.size > 0.0 {
-            cfg.fonts.size
-        } else {
-            ui::DEFAULT_FONT_SIZE
-        };
+        let base_font_size = 18.0; // Default font size
         let text_styles: BTreeMap<TextStyle, FontId> = [
             (
                 TextStyle::Small,

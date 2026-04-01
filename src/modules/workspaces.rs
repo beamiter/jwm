@@ -3,8 +3,7 @@ use log::info;
 use shared_structures::SharedRingBuffer;
 use std::sync::Arc;
 
-use crate::animation::AnimationState;
-use crate::config::EasingName;
+use crate::animation::{AnimationState, EasingName};
 use crate::ipc;
 use crate::state::AppState;
 use crate::theme::{colors, icons, with_alpha};
@@ -39,9 +38,8 @@ impl BarModule for WorkspacesModule {
             .map(|m| m.monitor_info)
             .unwrap_or_default();
 
-        let cfg = crate::config::CONFIG.load();
-        let hover_ms = cfg.animation.hover_duration_ms;
-        let easing = cfg.animation.easing;
+        let hover_ms = 150; // Default hover duration
+        let easing = EasingName::EaseOutQuad;
 
         for (index, &tag_icon) in icons::TAG_ICONS.iter().enumerate() {
             let tag_color = colors::TAG_COLORS[index];

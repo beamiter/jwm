@@ -2,7 +2,6 @@
 
 mod animation;
 mod app;
-mod config;
 mod events;
 mod ipc;
 mod modules;
@@ -10,7 +9,6 @@ mod state;
 mod theme;
 
 use app::EguiBarApp;
-use config::CONFIG;
 use log::info;
 use std::env;
 use xbar_core::initialize_logging;
@@ -30,16 +28,12 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Starting egui_bar V1.0");
 
-    // Load config
-    let cfg = CONFIG.load();
-
-    // Transparent: env var overrides config
+    // Transparent: env var overrides default
     let transparent = env::var("EGUI_BAR_TRANSPARENT")
         .ok()
-        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        || cfg.general.transparent;
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
 
-    let height = cfg.general.height;
+    let height = 40.0;
 
     // Capture the tokio runtime handle so modules (e.g. system tray) can
     // spawn async tasks even from eframe's non-tokio threads.

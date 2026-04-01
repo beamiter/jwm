@@ -4,8 +4,19 @@ use egui::Color32;
 use std::collections::HashMap;
 use std::time::Instant;
 
-use crate::config::{CONFIG, EasingName};
 use easing::from_name;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum EasingName {
+    Linear,
+    EaseInQuad,
+    EaseOutQuad,
+    EaseInOutQuad,
+    EaseInCubic,
+    EaseOutCubic,
+    EaseInOutCubic,
+}
 
 #[derive(Debug, Clone)]
 struct AnimEntry {
@@ -31,11 +42,6 @@ impl AnimationState {
 
     /// Animate a value toward a target. Returns the current interpolated value.
     pub fn animate(&mut self, id: &str, target: f32, duration_ms: u64, easing: EasingName) -> f32 {
-        let cfg = CONFIG.load();
-        if !cfg.animation.enabled {
-            return target;
-        }
-
         let now = Instant::now();
 
         let entry = self.entries.get(id);
