@@ -1,5 +1,5 @@
 use log::{debug, error, info, warn};
-use shared_structures::{CommandType, SharedCommand, SharedMessage, SharedRingBuffer};
+use shared_structures::{SharedCommand, SharedMessage, SharedRingBuffer};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -125,19 +125,6 @@ pub fn send_tag_command(
             SharedCommand::toggle_tag(tag_bit, monitor_id)
         };
 
-        send_command(shared_buffer, command);
-    }
-}
-
-/// Send layout change command
-pub fn send_layout_command(
-    shared_buffer: &Option<Arc<SharedRingBuffer>>,
-    current_message: &Option<SharedMessage>,
-    layout_index: u32,
-) {
-    if let Some(message) = current_message {
-        let monitor_id = message.monitor_info.monitor_num;
-        let command = SharedCommand::new(CommandType::SetLayout, layout_index, monitor_id);
         send_command(shared_buffer, command);
     }
 }

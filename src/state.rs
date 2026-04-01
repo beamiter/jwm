@@ -1,18 +1,9 @@
-use egui::Color32;
 use shared_structures::SharedMessage;
 use std::time::{Duration, Instant};
 use xbar_core::audio_manager::{AudioDevice, AudioManager};
 use xbar_core::system_monitor::SystemMonitor;
 
 use crate::theme::ui;
-
-/// Layout information
-#[derive(Debug, Clone)]
-pub struct LayoutInfo {
-    pub symbol: String,
-    pub name: String,
-    pub index: u32,
-}
 
 /// Volume control window state
 #[derive(Debug)]
@@ -113,43 +104,16 @@ pub struct AppState {
     pub ui_state: UiState,
     /// Current message from shared memory
     pub current_message: Option<SharedMessage>,
-    /// Layout selector state
-    pub layout_selector_open: bool,
-    /// Available layouts
-    pub available_layouts: Vec<LayoutInfo>,
-    /// Color cache for performance
-    pub color_cache: Vec<Color32>,
 }
 
 impl AppState {
     /// Create new application state
     pub fn new() -> Self {
-        let available_layouts = vec![
-            LayoutInfo {
-                symbol: "[]=".to_string(),
-                name: "Tiled".to_string(),
-                index: 0,
-            },
-            LayoutInfo {
-                symbol: "><>".to_string(),
-                name: "Floating".to_string(),
-                index: 1,
-            },
-            LayoutInfo {
-                symbol: "[M]".to_string(),
-                name: "Monocle".to_string(),
-                index: 2,
-            },
-        ];
-
         Self {
             audio_manager: AudioManager::new(),
             system_monitor: SystemMonitor::new(10),
             ui_state: UiState::new(),
             current_message: None,
-            layout_selector_open: false,
-            available_layouts,
-            color_cache: Vec::new(),
         }
     }
 
@@ -164,11 +128,6 @@ impl AppState {
     /// Get master audio device
     pub fn get_master_audio_device(&self) -> Option<&AudioDevice> {
         self.audio_manager.get_master_device()
-    }
-
-    /// Get CPU data for chart
-    pub fn get_cpu_chart_data(&self) -> Vec<f64> {
-        self.system_monitor.get_cpu_data_for_chart()
     }
 
     /// Get memory info for display

@@ -1,5 +1,4 @@
 pub mod workspaces;
-pub mod layout_selector;
 pub mod clock;
 pub mod cpu;
 pub mod memory;
@@ -62,7 +61,7 @@ impl ModuleRegistry {
         rt_handle: &tokio::runtime::Handle,
     ) -> Self {
         // Default module layout
-        let left_names = vec!["workspaces", "layout"];
+        let left_names = vec!["workspaces"];
         let center_names: Vec<&str> = vec![];
         let right_names = vec!["tray", "cpu", "memory", "battery", "audio", "clock"];
 
@@ -94,7 +93,6 @@ fn create_module(
 ) -> Option<Box<dyn BarModule>> {
     match name {
         "workspaces" => Some(Box::new(workspaces::WorkspacesModule::new(shared_buffer.clone()))),
-        "layout" => Some(Box::new(layout_selector::LayoutSelectorModule::new(shared_buffer.clone()))),
         "clock" => Some(Box::new(clock::ClockModule::new())),
         "cpu" => Some(Box::new(cpu::CpuModule::new())),
         "memory" => Some(Box::new(memory::MemoryModule::new())),
