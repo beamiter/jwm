@@ -4091,7 +4091,7 @@ impl Compositor {
                 );
                 self.gl.bind_vertex_array(Some(self.quad_vao));
 
-                for &(win, x, y, w, h) in visible_scene {
+                for (idx, &(win, x, y, w, h)) in visible_scene.iter().enumerate() {
                     if overview_skip(x, y, w, h) { continue; }
                     let wt = match self.windows.get(&win) {
                         Some(wt) => wt,
@@ -4099,6 +4099,22 @@ impl Compositor {
                     };
                     let fade = wt.fade_opacity;
                     if fade <= 0.0 { continue; }
+
+                    // Check if this window is completely occluded by opaque windows in front of it
+                    let is_occluded = visible_scene[..idx].iter().any(|&(w2, x2, y2, w2_sz, h2)| {
+                        let wt2 = match self.windows.get(&w2) {
+                            Some(wt2) => wt2,
+                            None => return false,
+                        };
+                        // Window must be opaque (no RGBA, fully visible)
+                        let is_opaque = !wt2.has_rgba && wt2.fade_opacity >= 0.99;
+                        if !is_opaque { return false; }
+                        // Check if w2 completely covers (x, y, w, h)
+                        x2 <= x && y2 <= y
+                            && (x2 + w2_sz as i32) >= (x + w as i32)
+                            && (y2 + h2 as i32) >= (y + h as i32)
+                    });
+                    if is_occluded { continue; }
 
                     let is_focused = focused == Some(win);
 
@@ -4216,7 +4232,7 @@ impl Compositor {
                     );
                     self.gl.bind_vertex_array(Some(self.quad_vao));
 
-                    for &(win, x, y, w, h) in visible_scene {
+                    for (idx, &(win, x, y, w, h)) in visible_scene.iter().enumerate() {
                         if overview_skip(x, y, w, h) { continue; }
                         let wt = match self.windows.get(&win) {
                             Some(wt) => wt,
@@ -4227,6 +4243,22 @@ impl Compositor {
                         }
                         let fade = wt.fade_opacity;
                         if fade <= 0.0 { continue; }
+
+                        // Check if this window is completely occluded by opaque windows in front of it
+                        let is_occluded = visible_scene[..idx].iter().any(|&(w2, x2, y2, w2_sz, h2)| {
+                            let wt2 = match self.windows.get(&w2) {
+                                Some(wt2) => wt2,
+                                None => return false,
+                            };
+                            // Window must be opaque (no RGBA, fully visible)
+                            let is_opaque = !wt2.has_rgba && wt2.fade_opacity >= 0.99;
+                            if !is_opaque { return false; }
+                            // Check if w2 completely covers (x, y, w, h)
+                            x2 <= x && y2 <= y
+                                && (x2 + w2_sz as i32) >= (x + w as i32)
+                                && (y2 + h2 as i32) >= (y + h as i32)
+                        });
+                        if is_occluded { continue; }
 
                         let color = if wt.is_urgent && self.attention_animation {
                             let elapsed = self.compositor_start_time.elapsed().as_secs_f32();

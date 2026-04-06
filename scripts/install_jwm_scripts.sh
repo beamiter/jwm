@@ -68,7 +68,7 @@ ALL_BARS=(
 # 默认值
 # ============================================================
 BUILD_MODE="release"
-BAR_NAME="x11rb_bar"
+BAR_NAME="egui_bar"
 SKIP_BAR=true
 SKIP_JWM=false
 JOBS=""
