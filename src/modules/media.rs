@@ -152,16 +152,6 @@ impl BarModule for MediaModule {
         }
 
         let hovered = resp.hovered();
-        resp.on_hover_text(format!(
-            "{}\n{}{}\nClick: play/pause | Scroll: prev/next",
-            self.info.player_name,
-            if self.info.artist.is_empty() {
-                String::new()
-            } else {
-                format!("{} - ", self.info.artist)
-            },
-            self.info.title,
-        ));
 
         // Scroll for prev/next
         if hovered {

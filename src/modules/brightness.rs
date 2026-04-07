@@ -112,7 +112,6 @@ impl BarModule for BrightnessModule {
         ));
 
         let hovered = resp.hovered();
-        resp.on_hover_text(format!("Brightness: {}%\nScroll to adjust", pct));
 
         // Handle scroll to adjust brightness
         if hovered {

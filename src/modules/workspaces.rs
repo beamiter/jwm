@@ -119,8 +119,6 @@ impl BarModule for WorkspacesModule {
                     false,
                 );
             }
-
-            label_response.on_hover_text(tooltip);
         }
     }
 }

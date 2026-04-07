@@ -129,7 +129,7 @@ impl BarModule for BluetoothModule {
     }
 
     fn render_bar(&mut self, ui: &mut egui::Ui, _state: &mut AppState) {
-        let (icon, color, tooltip) = if !self.bt_state.powered {
+        let (icon, color, _tooltip) = if !self.bt_state.powered {
             ("", colors::TEXT_SUBTLE, "Bluetooth off".to_string())
         } else {
             let count = self.connected_count();
@@ -148,7 +148,6 @@ impl BarModule for BluetoothModule {
         if resp.clicked() {
             self.show_popup = !self.show_popup;
         }
-        resp.on_hover_text(tooltip);
     }
 
     fn render_popup(&mut self, ctx: &egui::Context, _state: &mut AppState) {

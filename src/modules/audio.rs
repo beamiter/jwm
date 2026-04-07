@@ -39,7 +39,7 @@ impl BarModule for AudioModule {
     }
 
     fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
-        let (volume_icon, tooltip) = if let Some(device) = state.get_master_audio_device() {
+        let (volume_icon, _tooltip) = if let Some(device) = state.get_master_audio_device() {
             let icon = if device.is_muted || device.volume == 0 {
                 icons::VOLUME_MUTED
             } else if device.volume < 30 {
@@ -70,7 +70,6 @@ impl BarModule for AudioModule {
         if label_response.clicked() {
             self.show_popup = !self.show_popup;
         }
-        label_response.on_hover_text(tooltip);
     }
 
     fn render_popup(&mut self, ctx: &egui::Context, state: &mut AppState) {
@@ -151,7 +150,6 @@ fn draw_simple_volume_control(ui: &mut egui::Ui, state: &mut AppState, device_na
                     error!("Failed to toggle mute: {}", e);
                 }
             }
-            mute_btn.on_hover_text(if is_muted { "Unmute" } else { "Mute" });
         }
 
         // Volume percentage

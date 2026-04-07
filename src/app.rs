@@ -1,5 +1,5 @@
-use egui::{Align, Button, Label, Layout, Sense, Stroke};
-use log::{error, info};
+use egui::{Align, Button, Label, Layout, Stroke};
+use log::info;
 use shared_structures::SharedRingBuffer;
 use std::sync::{Arc, Mutex};
 
@@ -100,33 +100,14 @@ impl EguiBarApp {
         });
     }
 
-    /// Extra buttons that remain in app.rs (screenshot, debug, monitor)
+    /// Extra buttons that remain in app.rs (screenshot, monitor)
     fn draw_extra_buttons(&mut self, ui: &mut egui::Ui) {
-        // Debug button
-        {
-            let (debug_icon, tooltip) = if self.state.ui_state.show_debug_window {
-                ("󰱭", "Close debug window")
-            } else {
-                ("🔍", "Open debug window")
-            };
-
-            let label_response = ui.add(Button::new(debug_icon).sense(Sense::click()));
-            if label_response.clicked() {
-                self.state.ui_state.toggle_debug_window();
-            }
-            label_response.on_hover_text(tooltip);
-        }
-
         // Screenshot button
         {
             let label_response = ui.add(Button::new(icons::SCREENSHOT_ICON));
             if label_response.clicked() {
                 let _ = std::process::Command::new("flameshot").arg("gui").spawn();
             }
-            label_response.on_hover_text(format!(
-                "Screenshot (flameshot)\nScale: {:.2}",
-                self.state.ui_state.scale_factor
-            ));
         }
 
         // Monitor number
@@ -149,103 +130,9 @@ impl EguiBarApp {
                 module.render_popup(ctx, &mut self.state);
             }
         }
-
-        // Debug window (not a module)
-        self.draw_debug_display_window(ctx);
     }
 
-    // ================================
-    // Debug Window
-    // ================================
 
-    fn draw_debug_display_window(&mut self, ctx: &egui::Context) {
-        if !self.state.ui_state.show_debug_window {
-            return;
-        }
-
-        let mut window_open = true;
-
-        egui::Window::new("🐛 Debug Info")
-            .collapsible(false)
-            .resizable(true)
-            .default_width(400.0)
-            .default_height(300.0)
-            .open(&mut window_open)
-            .show(ctx, |ui| {
-                ui.label("💻 System");
-                if let Some(snapshot) = self.state.system_monitor.get_snapshot() {
-                    ui.horizontal(|ui| {
-                        ui.label("CPU:");
-                        let cpu_color = if snapshot.cpu_average > 80.0 {
-                            colors::ERROR
-                        } else if snapshot.cpu_average > 60.0 {
-                            colors::WARNING
-                        } else {
-                            colors::SUCCESS
-                        };
-                        ui.label(
-                            egui::RichText::new(format!("{:.1}%", snapshot.cpu_average))
-                                .color(cpu_color),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Memory:");
-                        let mem_color = if snapshot.memory_usage_percent > 80.0 {
-                            colors::ERROR
-                        } else if snapshot.memory_usage_percent > 60.0 {
-                            colors::WARNING
-                        } else {
-                            colors::SUCCESS
-                        };
-                        ui.label(
-                            egui::RichText::new(format!("{:.1}%", snapshot.memory_usage_percent))
-                                .color(mem_color),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Uptime:");
-                        ui.label(self.state.system_monitor.get_uptime_string());
-                    });
-                }
-
-                ui.separator();
-
-                ui.label("🔊 Audio System");
-                let stats = self.state.audio_manager.get_stats();
-                ui.horizontal(|ui| {
-                    ui.label("Device Count:");
-                    ui.label(format!("{}", stats.total_devices));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Devices w/ volume:");
-                    ui.label(format!("{}", stats.devices_with_volume));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Muted Devices:");
-                    ui.label(format!("{}", stats.muted_devices));
-                });
-
-                ui.separator();
-
-                ui.horizontal(|ui| {
-                    if ui.small_button("🔄 Refresh Audio").clicked() {
-                        if let Err(e) = self.state.audio_manager.refresh_devices() {
-                            error!("Failed to refresh audio devices: {}", e);
-                        }
-                    }
-
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.small_button("❌ Close").clicked() {
-                            self.state.ui_state.toggle_debug_window();
-                        }
-                    });
-                });
-            });
-
-        if !window_open || ctx.input(|i| i.viewport().close_requested()) {
-            self.state.ui_state.toggle_debug_window();
-        }
-    }
 }
 
 impl eframe::App for EguiBarApp {

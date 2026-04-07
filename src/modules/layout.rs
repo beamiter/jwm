@@ -85,9 +85,6 @@ impl BarModule for LayoutModule {
         if response.clicked() {
             self.show_popup = !self.show_popup;
         }
-
-        // Tooltip showing current layout
-        response.on_hover_text(format!("Layout: {} (click to change)", layout_type));
     }
 
     fn render_popup(&mut self, ctx: &egui::Context, state: &mut AppState) {

@@ -148,7 +148,7 @@ impl BarModule for NetworkModule {
     }
 
     fn render_bar(&mut self, ui: &mut egui::Ui, _state: &mut AppState) {
-        let (icon, color, tooltip) = if let Some(primary) = self.primary_interface() {
+        let (icon, color, _tooltip) = if let Some(primary) = self.primary_interface() {
             if primary.connected {
                 let icon = if primary.is_wifi {
                     Self::wifi_icon(primary.signal_strength)
@@ -173,7 +173,6 @@ impl BarModule for NetworkModule {
         if resp.clicked() {
             self.show_popup = !self.show_popup;
         }
-        resp.on_hover_text(tooltip);
     }
 
     fn render_popup(&mut self, ctx: &egui::Context, _state: &mut AppState) {
