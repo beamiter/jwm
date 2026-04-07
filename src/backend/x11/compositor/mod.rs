@@ -10,6 +10,27 @@ pub mod shaders;
 mod tfp;
 mod transitions;
 
+// Optimization modules
+pub mod perf_metrics;
+pub mod texture_pool;
+pub mod shader_cache;
+pub mod pixel_buffer_pool;
+pub mod frame_rate;
+pub mod blur_optimize;
+pub mod per_monitor;
+pub mod dirty_region;
+pub mod optimization_manager;
+
+pub use perf_metrics::PerfMetrics;
+pub use texture_pool::TexturePool;
+pub use shader_cache::ShaderCache;
+pub use pixel_buffer_pool::PixelBufferPool;
+pub use frame_rate::{FrameRateLimiter, AdaptiveFrameRate};
+pub use blur_optimize::{AdaptiveBlur, GaussianBlurParams, BlurCache, BlurCacheStats};
+pub use per_monitor::{PerMonitorRenderer, MonitorRenderRegion};
+pub use dirty_region::{DirtyRegionTracker, DirtyRect};
+pub use optimization_manager::{OptimizationManager, OptimizationStatus};
+
 use glow::HasContext;
 use std::collections::HashMap;
 use std::ffi::CString;
