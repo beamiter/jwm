@@ -3686,6 +3686,10 @@ impl Compositor {
             && self.scene_fbo.is_some();
 
         // === Pass 2: Draw window textures ===
+        let wm_border_px = crate::config::CONFIG.load().border_px() as f32;
+        let effective_border_enabled = self.border_enabled || wm_border_px > 0.0;
+        let base_border_width = if self.border_enabled { self.border_width } else { wm_border_px };
+
         // Track the below-scene for blur caching: a running hash of (win, x, y, w, h)
         // for all windows drawn so far, plus whether any was dirty this frame.
         let mut blur_below_hash: u64 = 0u64;
@@ -3707,6 +3711,11 @@ impl Compositor {
                     let is_focused = focused == Some(win);
                     let fade = wt.fade_opacity;
                     if fade <= 0.0 { continue; }
+                    let focus_highlight_active_for_win = if let Some((hw, start)) = self.focus_highlight_start {
+                        hw == win && start.elapsed().as_millis() < self.focus_highlight_duration_ms as u128
+                    } else { false };
+                    let attention_active_for_win = wt.is_urgent && self.attention_animation;
+                    let has_special_border = attention_active_for_win || wt.is_pip;
 
                     // Phase 5.3: Peek opacity multiplier
                     let peek_mul = self.peek_opacity_for(&wt.class_name);
@@ -4017,6 +4026,80 @@ impl Compositor {
                         }
                     }
 
+                    if (effective_border_enabled && base_border_width > 0.0) || has_special_border {
+                        let color = if focus_highlight_active_for_win {
+                            let elapsed_ms = self.focus_highlight_start.unwrap().1.elapsed().as_millis() as f32;
+                            let dur = self.focus_highlight_duration_ms as f32;
+                            let pulse = ((elapsed_ms / dur * std::f32::consts::PI).sin()).abs();
+                            let [r, g, b, a] = self.focus_highlight_color;
+                            [r, g, b, a * pulse]
+                        } else if attention_active_for_win {
+                            let elapsed = self.compositor_start_time.elapsed().as_secs_f32();
+                            let pulse = (elapsed * 4.0).sin() * 0.5 + 0.5;
+                            let [r, g, b, a] = self.attention_color;
+                            [r, g, b, a * pulse]
+                        } else if wt.is_pip {
+                            self.pip_border_color
+                        } else if is_focused {
+                            self.border_color_focused
+                        } else {
+                            self.border_color_unfocused
+                        };
+
+                        let bw = if focus_highlight_active_for_win {
+                            (base_border_width + 2.0).max(3.0)
+                        } else if attention_active_for_win {
+                            if effective_border_enabled {
+                                base_border_width.max(2.0)
+                            } else {
+                                2.0
+                            }
+                        } else if wt.is_pip {
+                            self.pip_border_width
+                        } else {
+                            base_border_width
+                        };
+
+                        if bw > 0.0 {
+                            let bdr_x = draw_x - bw;
+                            let bdr_y = draw_y - bw;
+                            let bdr_w = draw_w + 2.0 * bw;
+                            let bdr_h = draw_h + 2.0 * bw;
+
+                            self.gl.use_program(Some(self.border_program));
+                            self.gl.uniform_matrix_4_f32_slice(
+                                self.border_uniforms.projection.as_ref(), false, &proj,
+                            );
+                            self.gl.uniform_1_f32(
+                                self.border_uniforms.border_width.as_ref(), bw,
+                            );
+                            self.gl.uniform_4_f32(
+                                self.border_uniforms.border_color.as_ref(),
+                                color[0], color[1], color[2], color[3] * fade,
+                            );
+                            self.gl.uniform_1_f32(
+                                self.border_uniforms.radius.as_ref(), radius + bw,
+                            );
+                            self.gl.uniform_2_f32(
+                                self.border_uniforms.size.as_ref(), bdr_w, bdr_h,
+                            );
+                            self.gl.uniform_4_f32(
+                                self.border_uniforms.rect.as_ref(), bdr_x, bdr_y, bdr_w, bdr_h,
+                            );
+                            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+                            self.gl.use_program(Some(self.program));
+                            self.gl.uniform_matrix_4_f32_slice(
+                                self.win_uniforms.projection.as_ref(), false, &proj,
+                            );
+                            self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+                            self.gl.uniform_4_f32(
+                                self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0,
+                            );
+                            self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
+                        }
+                    }
+
                     // Update blur below-scene tracking after drawing this window.
                     // The hash encodes (win, x, y, w, h) so structural changes
                     // (reorder, move, resize, add/remove) cause a cache miss.
@@ -4074,244 +4157,6 @@ impl Compositor {
 
                 self.gl.bind_vertex_array(None);
                 self.gl.use_program(None);
-            }
-        }
-
-        // === Pass 3: Window borders (feature 1) ===
-        // When compositor is active, it owns border rendering.  Read the WM's
-        // border_px so the visual border always matches the layout gap.
-        let wm_border_px = crate::config::CONFIG.load().border_px() as f32;
-        let effective_border_enabled = self.border_enabled || wm_border_px > 0.0;
-        let base_border_width = if self.border_enabled { self.border_width } else { wm_border_px };
-        if effective_border_enabled && base_border_width > 0.0 {
-            unsafe {
-                self.gl.use_program(Some(self.border_program));
-                self.gl.uniform_matrix_4_f32_slice(
-                    self.border_uniforms.projection.as_ref(), false, &proj,
-                );
-                self.gl.bind_vertex_array(Some(self.quad_vao));
-
-                for (idx, &(win, x, y, w, h)) in visible_scene.iter().enumerate() {
-                    if overview_skip(x, y, w, h) { continue; }
-                    let wt = match self.windows.get(&win) {
-                        Some(wt) => wt,
-                        None => continue,
-                    };
-                    let fade = wt.fade_opacity;
-                    if fade <= 0.0 { continue; }
-
-                    // Check if this window is completely occluded by opaque windows in front of it
-                    let is_occluded = visible_scene[..idx].iter().any(|&(w2, x2, y2, w2_sz, h2)| {
-                        let wt2 = match self.windows.get(&w2) {
-                            Some(wt2) => wt2,
-                            None => return false,
-                        };
-                        // Window must be opaque (no RGBA, fully visible)
-                        let is_opaque = !wt2.has_rgba && wt2.fade_opacity >= 0.99;
-                        if !is_opaque { return false; }
-                        // Check if w2 completely covers (x, y, w, h)
-                        x2 <= x && y2 <= y
-                            && (x2 + w2_sz as i32) >= (x + w as i32)
-                            && (y2 + h2 as i32) >= (y + h as i32)
-                    });
-                    if is_occluded { continue; }
-
-                    let is_focused = focused == Some(win);
-
-                    // Phase 3.4: Focus highlight animation
-                    let focus_highlight_active_for_win = if let Some((hw, start)) = self.focus_highlight_start {
-                        hw == win && start.elapsed().as_millis() < self.focus_highlight_duration_ms as u128
-                    } else { false };
-
-                    let color = if focus_highlight_active_for_win {
-                        let elapsed_ms = self.focus_highlight_start.unwrap().1.elapsed().as_millis() as f32;
-                        let dur = self.focus_highlight_duration_ms as f32;
-                        let pulse = ((elapsed_ms / dur * std::f32::consts::PI).sin()).abs();
-                        let [r, g, b, a] = self.focus_highlight_color;
-                        [r, g, b, a * pulse]
-                    } else if wt.is_urgent && self.attention_animation {
-                        let elapsed = self.compositor_start_time.elapsed().as_secs_f32();
-                        let pulse = (elapsed * 4.0).sin() * 0.5 + 0.5;
-                        let [r, g, b, a] = self.attention_color;
-                        [r, g, b, a * pulse]
-                    } else if wt.is_pip {
-                        self.pip_border_color
-                    } else if is_focused {
-                        self.border_color_focused
-                    } else {
-                        self.border_color_unfocused
-                    };
-
-                    let bw = if focus_highlight_active_for_win {
-                        (base_border_width + 2.0).max(3.0)
-                    } else if wt.is_urgent && self.attention_animation {
-                        base_border_width.max(2.0)
-                    } else if wt.is_pip {
-                        self.pip_border_width
-                    } else {
-                        base_border_width
-                    };
-
-                    // Per-window corner radius (feature 3)
-                    let radius = wt.corner_radius_override.unwrap_or(
-                        if Self::class_matches_exclude(&wt.class_name, &self.rounded_corners_exclude) {
-                            0.0
-                        } else {
-                            self.corner_radius
-                        }
-                    );
-
-                    // Phase 3.4: Focus highlight scale bounce (1.02x)
-                    let highlight_scale = if focus_highlight_active_for_win {
-                        let elapsed_ms = self.focus_highlight_start.unwrap().1.elapsed().as_millis() as f32;
-                        let dur = self.focus_highlight_duration_ms as f32;
-                        let t = (elapsed_ms / dur).min(1.0);
-                        1.0 + 0.02 * (1.0 - t) * ((t * std::f32::consts::PI).sin())
-                    } else { 1.0 };
-                    let _ = highlight_scale; // used below in scale computation
-
-                    // Feature 4: Apply scale
-                    let scale = wt.scale * wt.anim_scale;
-                    let (draw_x, draw_y, draw_w, draw_h) = if (scale - 1.0).abs() > f32::EPSILON {
-                        let cw = w as f32 * scale;
-                        let ch = h as f32 * scale;
-                        let cx = x as f32 + (w as f32 - cw) * 0.5;
-                        let cy = y as f32 + (h as f32 - ch) * 0.5;
-                        (cx, cy, cw, ch)
-                    } else {
-                        (x as f32, y as f32, w as f32, h as f32)
-                    };
-
-                    // Expand the draw rect outward by border_width so the
-                    // border is rendered *outside* the window content area.
-                    // The SDF in the shader treats dist=0 at the expanded rect
-                    // edge and dist=-bw at the original window edge, so the
-                    // border naturally fills the gap between the two.
-                    let bdr_x = draw_x - bw;
-                    let bdr_y = draw_y - bw;
-                    let bdr_w = draw_w + 2.0 * bw;
-                    let bdr_h = draw_h + 2.0 * bw;
-
-                    self.gl.uniform_1_f32(
-                        self.border_uniforms.border_width.as_ref(), bw,
-                    );
-                    self.gl.uniform_4_f32(
-                        self.border_uniforms.border_color.as_ref(),
-                        color[0], color[1], color[2], color[3] * fade,
-                    );
-                    self.gl.uniform_1_f32(
-                        self.border_uniforms.radius.as_ref(), radius + bw,
-                    );
-                    self.gl.uniform_2_f32(
-                        self.border_uniforms.size.as_ref(), bdr_w, bdr_h,
-                    );
-                    self.gl.uniform_4_f32(
-                        self.border_uniforms.rect.as_ref(), bdr_x, bdr_y, bdr_w, bdr_h,
-                    );
-                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                }
-
-                self.gl.bind_vertex_array(None);
-                self.gl.use_program(None);
-            }
-        }
-
-        // === Pass 3b: Urgent/PiP borders (even if borders disabled) ===
-        if !self.border_enabled {
-            let has_special = visible_scene.iter().any(|&(win, _, _, _, _)| {
-                self.windows.get(&win).map_or(false, |wt| {
-                    (wt.is_urgent && self.attention_animation) || wt.is_pip
-                })
-            });
-            if has_special {
-                // Draw borders only for urgent/pip windows
-                unsafe {
-                    self.gl.use_program(Some(self.border_program));
-                    self.gl.uniform_matrix_4_f32_slice(
-                        self.border_uniforms.projection.as_ref(), false, &proj,
-                    );
-                    self.gl.bind_vertex_array(Some(self.quad_vao));
-
-                    for (idx, &(win, x, y, w, h)) in visible_scene.iter().enumerate() {
-                        if overview_skip(x, y, w, h) { continue; }
-                        let wt = match self.windows.get(&win) {
-                            Some(wt) => wt,
-                            None => continue,
-                        };
-                        if !((wt.is_urgent && self.attention_animation) || wt.is_pip) {
-                            continue;
-                        }
-                        let fade = wt.fade_opacity;
-                        if fade <= 0.0 { continue; }
-
-                        // Check if this window is completely occluded by opaque windows in front of it
-                        let is_occluded = visible_scene[..idx].iter().any(|&(w2, x2, y2, w2_sz, h2)| {
-                            let wt2 = match self.windows.get(&w2) {
-                                Some(wt2) => wt2,
-                                None => return false,
-                            };
-                            // Window must be opaque (no RGBA, fully visible)
-                            let is_opaque = !wt2.has_rgba && wt2.fade_opacity >= 0.99;
-                            if !is_opaque { return false; }
-                            // Check if w2 completely covers (x, y, w, h)
-                            x2 <= x && y2 <= y
-                                && (x2 + w2_sz as i32) >= (x + w as i32)
-                                && (y2 + h2 as i32) >= (y + h as i32)
-                        });
-                        if is_occluded { continue; }
-
-                        let color = if wt.is_urgent && self.attention_animation {
-                            let elapsed = self.compositor_start_time.elapsed().as_secs_f32();
-                            let pulse = (elapsed * 4.0).sin() * 0.5 + 0.5;
-                            let [r, g, b, a] = self.attention_color;
-                            [r, g, b, a * pulse]
-                        } else {
-                            self.pip_border_color
-                        };
-
-                        let bw = if wt.is_pip { self.pip_border_width } else { 2.0 };
-
-                        let radius = wt.corner_radius_override.unwrap_or(
-                            if Self::class_matches_exclude(&wt.class_name, &self.rounded_corners_exclude) {
-                                0.0
-                            } else {
-                                self.corner_radius
-                            }
-                        );
-
-                        let scale = wt.scale * wt.anim_scale;
-                        let (draw_x, draw_y, draw_w, draw_h) = if (scale - 1.0).abs() > f32::EPSILON {
-                            let cw = w as f32 * scale;
-                            let ch = h as f32 * scale;
-                            let cx = x as f32 + (w as f32 - cw) * 0.5;
-                            let cy = y as f32 + (h as f32 - ch) * 0.5;
-                            (cx, cy, cw, ch)
-                        } else {
-                            (x as f32, y as f32, w as f32, h as f32)
-                        };
-
-                        // Expand rect outward for outside-window border rendering.
-                        let bdr_x = draw_x - bw;
-                        let bdr_y = draw_y - bw;
-                        let bdr_w = draw_w + 2.0 * bw;
-                        let bdr_h = draw_h + 2.0 * bw;
-
-                        self.gl.uniform_1_f32(self.border_uniforms.border_width.as_ref(), bw);
-                        self.gl.uniform_4_f32(
-                            self.border_uniforms.border_color.as_ref(),
-                            color[0], color[1], color[2], color[3] * fade,
-                        );
-                        self.gl.uniform_1_f32(self.border_uniforms.radius.as_ref(), radius + bw);
-                        self.gl.uniform_2_f32(self.border_uniforms.size.as_ref(), bdr_w, bdr_h);
-                        self.gl.uniform_4_f32(
-                            self.border_uniforms.rect.as_ref(), bdr_x, bdr_y, bdr_w, bdr_h,
-                        );
-                        self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                    }
-
-                    self.gl.bind_vertex_array(None);
-                    self.gl.use_program(None);
-                }
             }
         }
 
