@@ -24,6 +24,18 @@ impl AdvancedTerminalProber {
     fn new() -> Self {
         let mut configs = HashMap::new();
 
+        // terminal_emulator - preferred terminal
+        configs.insert(
+            "terminal_emulator".to_string(),
+            TerminalConfig {
+                command: "terminal_emulator".to_string(),
+                execute_flag: "-e".to_string(),
+                title_flag: None,
+                geometry_flag: None,
+                working_dir_flag: None,
+            },
+        );
+
         // Wayland-first terminals (often needed for DRM/udev compositors)
         configs.insert(
             "foot".to_string(),
@@ -139,6 +151,7 @@ impl AdvancedTerminalProber {
 
         let priority_order = if is_wayland && !has_display {
             vec![
+                "terminal_emulator".to_string(),
                 "jterm4".to_string(),
                 "foot".to_string(),
                 "wezterm".to_string(),
@@ -152,6 +165,7 @@ impl AdvancedTerminalProber {
             ]
         } else {
             vec![
+                "terminal_emulator".to_string(),
                 "jterm4".to_string(),
                 "warp-terminal".to_string(),
                 "terminator".to_string(),
