@@ -6156,7 +6156,7 @@ impl Jwm {
     ///
     /// Argument encoding (via `StringVec`):
     ///   `["name", "cmd", "arg1", ...]`  — name + spawn command
-    ///   `["name"]`                      — name only (uses default terminal)
+    ///   `["name"]`                      — name only (uses default scratchpad terminal)
     ///
     /// Legacy `Int(0)` falls back to the default name `"term"`.
     pub fn togglescratchpad(
@@ -6171,11 +6171,11 @@ impl Jwm {
                 let cmd = if v.len() > 1 {
                     v[1..].to_vec()
                 } else {
-                    crate::config::Config::get_termcmd()
+                    crate::config::Config::get_scratchpad_termcmd()
                 };
                 (name, cmd)
             }
-            _ => ("term".to_string(), crate::config::Config::get_termcmd()),
+            _ => ("term".to_string(), crate::config::Config::get_scratchpad_termcmd()),
         };
 
         // Check if the scratchpad's client still exists

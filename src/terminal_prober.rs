@@ -197,6 +197,20 @@ impl AdvancedTerminalProber {
         None
     }
 
+    pub fn get_available_terminal_with_priority(&self, preferred: Option<&str>) -> Option<&TerminalConfig> {
+        // If a preferred terminal is specified and available, use it first
+        if let Some(pref) = preferred {
+            if let Some(config) = self.configs.get(pref) {
+                if self.is_command_available(&config.command) {
+                    println!("[get_available_terminal_with_priority] Using preferred terminal: {:?}", config);
+                    return Some(config);
+                }
+            }
+        }
+        // Fall back to the default priority order
+        self.get_available_terminal()
+    }
+
     fn is_command_available(&self, cmd: &str) -> bool {
         {
             let cache_reader = self.cache.read().unwrap();

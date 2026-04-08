@@ -1377,6 +1377,24 @@ impl Config {
             })
     }
 
+    pub fn get_scratchpad_termcmd() -> Vec<String> {
+        // Check for scratchpad-specific terminal environment variable
+        if let Ok(cmd) = std::env::var("JWM_SCRATCHPAD_TERMINAL") {
+            let cmd = cmd.trim();
+            if !cmd.is_empty() {
+                return vec![cmd.to_string()];
+            }
+        }
+        // Prefer jterm4 for scratchpad
+        ADVANCED_TERMINAL_PROBER
+            .get_available_terminal_with_priority(Some("jterm4"))
+            .map(|config| vec![config.command.clone()])
+            .unwrap_or_else(|| {
+                println!("scratchpad terminal fallback to terminator");
+                vec!["x-terminal-emulator".to_string()]
+            })
+    }
+
     fn convert_button_config(&self, btn_config: &ButtonConfig) -> Option<WMButton> {
         let click_type = self.parse_click_type(&btn_config.click_type)?;
         let modifiers = self.parse_modifiers(&btn_config.modifier);
