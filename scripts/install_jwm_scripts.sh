@@ -68,8 +68,8 @@ ALL_BARS=(
 # 默认值
 # ============================================================
 BUILD_MODE="release"
-BAR_NAME="egui_bar"
-SKIP_BAR=true
+BAR_NAME="tao_pixels_bar"
+SKIP_BAR=false
 SKIP_JWM=false
 JOBS=""
 
