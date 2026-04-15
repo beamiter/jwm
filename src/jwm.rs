@@ -6595,11 +6595,16 @@ impl Jwm {
             let _ = backend.key_ops().grab_keyboard(root);
         }
         // Grab pointer with crosshair cursor
+        let crosshair_handle = backend
+            .cursor_provider()
+            .get(StdCursorKind::Crosshair)
+            .ok()
+            .map(|h| h.0);
         let pointer_mask = (EventMaskBits::BUTTON_PRESS
             | EventMaskBits::BUTTON_RELEASE
             | EventMaskBits::POINTER_MOTION)
             .bits();
-        let _ = backend.input_ops().grab_pointer(pointer_mask, None);
+        let _ = backend.input_ops().grab_pointer(pointer_mask, crosshair_handle);
 
         Ok(())
     }
@@ -6641,6 +6646,10 @@ impl Jwm {
         }
         let _ = backend.key_ops().ungrab_keyboard();
         let _ = backend.input_ops().ungrab_pointer();
+        // Restore default cursor
+        if let Some(root) = backend.root_window() {
+            let _ = backend.cursor_provider().apply(root, StdCursorKind::LeftPtr);
+        }
     }
 
     /// Finish interactive screenshot selection: capture the selected region.
@@ -6672,6 +6681,10 @@ impl Jwm {
         }
         let _ = backend.key_ops().ungrab_keyboard();
         let _ = backend.input_ops().ungrab_pointer();
+        // Restore default cursor
+        if let Some(root) = backend.root_window() {
+            let _ = backend.cursor_provider().apply(root, StdCursorKind::LeftPtr);
+        }
 
         if w < 3 || h < 3 {
             info!("[take_screenshot] selection too small ({}x{}), ignoring", w, h);
