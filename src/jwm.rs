@@ -90,6 +90,7 @@ pub enum WMClickType {
 pub enum WMArgEnum {
     Int(i32),
     UInt(u32),
+    UInt64(u64),
     Float(f32),
     StringVec(Vec<String>),
     Layout(Rc<LayoutEnum>),
@@ -6780,6 +6781,61 @@ impl Jwm {
 
             self.suppress_mouse_focus_until =
                 Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+        }
+        Ok(())
+    }
+
+    /// IPC: focus_none — 取消所有窗口焦点，聚焦到 root window
+    pub fn focus_none(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        info!("[focus_none]");
+        self.focus(backend, None)
+    }
+
+    /// IPC: focus_window — 按窗口 ID 聚焦指定窗口
+    pub fn focus_window(
+        &mut self,
+        backend: &mut dyn Backend,
+        arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let win_id = match arg {
+            WMArgEnum::UInt64(id) => *id,
+            _ => return Err("focus_window requires a window id".into()),
+        };
+        info!("[focus_window] id={}", win_id);
+        let win = WindowId::from_raw(win_id);
+        let client_key = self
+            .wintoclient(win)
+            .ok_or_else(|| format!("window {} not found", win_id))?;
+        self.focus(backend, Some(client_key))?;
+        if let Some(mon_key) = self.state.sel_mon {
+            self.restack(backend, Some(mon_key))?;
+        }
+        Ok(())
+    }
+
+    /// IPC: refocus — unfocus 当前窗口再 focus 回来
+    pub fn refocus(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        info!("[refocus]");
+        let sel_client_key = match self.get_selected_client_key() {
+            Some(k) => k,
+            None => return Ok(()),
+        };
+        // 1. unfocus → root
+        self.unfocus_client(backend, sel_client_key, true)?;
+        self.set_root_focus(backend)?;
+        self.update_monitor_selection_by_key(None);
+        // 2. focus 回来
+        self.focus(backend, Some(sel_client_key))?;
+        if let Some(mon_key) = self.state.sel_mon {
+            self.restack(backend, Some(mon_key))?;
         }
         Ok(())
     }

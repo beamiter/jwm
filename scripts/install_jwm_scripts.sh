@@ -68,7 +68,7 @@ ALL_BARS=(
 # 默认值
 # ============================================================
 BUILD_MODE="release"
-BAR_NAME="tao_pixels_bar"
+BAR_NAME="tao_softbuffer_bar"
 SKIP_BAR=false
 SKIP_JWM=false
 JOBS=""

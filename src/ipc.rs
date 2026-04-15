@@ -139,6 +139,9 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
             Ok((Jwm::togglescratchpad, WMArgEnum::StringVec(cmd)))
         }
         "movestack" => Ok((Jwm::movestack, parse_int_arg(args, 1))),
+        "focus_none" => Ok((Jwm::focus_none, parse_int_arg(args, 0))),
+        "focus_window" => Ok((Jwm::focus_window, parse_window_id_arg(args)?)),
+        "refocus" => Ok((Jwm::refocus, parse_int_arg(args, 0))),
 
         // --- Layout ---
         "setmfact" => Ok((Jwm::setmfact, parse_float_arg(args, 0.0))),
@@ -228,6 +231,19 @@ fn parse_string_vec_arg(args: &Value) -> Result<Vec<String>, String> {
         Ok(vec![s.to_string()])
     } else {
         Err("spawn requires a command array or string".into())
+    }
+}
+
+fn parse_window_id_arg(args: &Value) -> Result<WMArgEnum, String> {
+    let v = args
+        .get("id")
+        .or_else(|| args.get("value"))
+        .or_else(|| args.get("v"))
+        .and_then(|v| v.as_u64())
+        .or_else(|| args.as_u64());
+    match v {
+        Some(id) => Ok(WMArgEnum::UInt64(id)),
+        None => Err("focus_window requires an \"id\" argument (window id as u64)".into()),
     }
 }
 
