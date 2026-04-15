@@ -709,6 +709,9 @@ impl Backend for X11Backend {
     fn compositor_set_snap_preview(&mut self, preview: Option<(f32, f32, f32, f32)>) {
         if let Some(c) = self.compositor.as_mut() { c.set_snap_preview(preview); }
     }
+    fn compositor_clear_snap_preview_immediate(&mut self) {
+        if let Some(c) = self.compositor.as_mut() { c.clear_snap_preview_immediate(); }
+    }
 
     fn compositor_set_peek_mode(&mut self, active: bool) {
         if let Some(c) = self.compositor.as_mut() { c.set_peek_mode(active); }

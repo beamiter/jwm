@@ -775,8 +775,11 @@ pub trait Backend: Send {
     /// Set expose/mission control mode. windows: Vec<(window_id, x, y, w, h)>.
     fn compositor_set_expose_mode(&mut self, _active: bool, _windows: Vec<(WindowId, i32, i32, u32, u32)>) {}
 
-    /// Set snap preview rectangle. None = hide preview.
+    /// Set snap preview rectangle. None = hide preview (with fade-out animation).
     fn compositor_set_snap_preview(&mut self, _preview: Option<(f32, f32, f32, f32)>) {}
+
+    /// Instantly clear snap preview (no fade-out). Used before screenshot capture.
+    fn compositor_clear_snap_preview_immediate(&mut self) {}
 
     /// Toggle window peek (boss key) mode.
     fn compositor_set_peek_mode(&mut self, _active: bool) {}

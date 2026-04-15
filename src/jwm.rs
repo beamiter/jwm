@@ -526,6 +526,7 @@ impl WMController for Jwm {
                 if w > 1.0 && h > 1.0 {
                     backend.compositor_set_snap_preview(Some((x, y, w, h)));
                 }
+                backend.compositor_force_full_redraw();
             }
             return;
         }
@@ -6665,7 +6666,9 @@ impl Jwm {
         self.screenshot_select_active = false;
         self.screenshot_select_dragging = false;
         if backend.has_compositor() {
-            backend.compositor_set_snap_preview(None);
+            // Instantly remove the overlay so the next rendered frame (which captures
+            // the screenshot) does not include the selection rectangle.
+            backend.compositor_clear_snap_preview_immediate();
         }
         let _ = backend.key_ops().ungrab_keyboard();
         let _ = backend.input_ops().ungrab_pointer();

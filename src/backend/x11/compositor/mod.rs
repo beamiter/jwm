@@ -4443,20 +4443,28 @@ impl Compositor {
             self.render_expose(&proj);
         }
 
-        // === Pass 5g: Snap preview ===
-        self.render_snap_preview(&proj);
-
-        // === Pass 5e: Annotations overlay ===
-        if self.annotation_active && !self.annotation_strokes.is_empty() {
-            self.render_annotations(&proj);
-        }
-
-        // === Feature 12: Screenshot capture (after all rendering, before swap) ===
+        // === Feature 12: Screenshot capture (after all rendering, before overlays) ===
+        // Capture BEFORE rendering snap preview / annotations so the screenshot
+        // doesn't include the selection overlay or annotation strokes.
+        let has_pending_screenshot = self.pending_screenshot.is_some()
+            || self.pending_screenshot_region.is_some();
         if let Some(path) = self.pending_screenshot.take() {
             self.capture_screenshot(&path);
         }
         if let Some((path, rx, ry, rw, rh)) = self.pending_screenshot_region.take() {
             self.capture_screenshot_region(&path, rx, ry, rw, rh);
+        }
+
+        // === Pass 5g: Snap preview ===
+        // Skip on the frame that captured a screenshot (overlay was already cleared
+        // logically; rendering it would leave a ghost on the next visible frame).
+        if !has_pending_screenshot {
+            self.render_snap_preview(&proj);
+        }
+
+        // === Pass 5e: Annotations overlay ===
+        if self.annotation_active && !self.annotation_strokes.is_empty() {
+            self.render_annotations(&proj);
         }
 
         // === Tag-switch transition overlay ===

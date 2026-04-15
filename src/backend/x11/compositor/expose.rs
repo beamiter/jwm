@@ -348,6 +348,12 @@ impl Compositor {
     // =========================================================================
 
     /// Set or clear the snap preview rectangle.
+    /// Instantly remove the snap preview (no fade-out animation).
+    pub(in crate::backend::x11) fn clear_snap_preview_immediate(&mut self) {
+        self.snap_target = None;
+        self.needs_render = true;
+    }
+
     pub(in crate::backend::x11) fn set_snap_preview(&mut self, preview: Option<(f32, f32, f32, f32)>) {
         if !self.snap_preview_enabled {
             return;
