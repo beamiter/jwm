@@ -210,6 +210,7 @@ pub struct Jwm {
     pub status_bar_last_spawn: Option<std::time::Instant>,
     pub status_bar_backoff_until: Option<std::time::Instant>,
     pub status_bar_restart_failures: u32,
+    pub status_bar_has_focus: bool,
 
     pub last_key_grab_refresh_at: Option<std::time::Instant>,
 
@@ -1149,9 +1150,13 @@ impl EventHandler for Jwm {
         let scene = self.build_compositor_scene(backend, &HashMap::new());
         let groups = self.build_window_groups();
         backend.compositor_set_window_groups(groups);
-        let focused = self.get_selected_client_key()
-            .and_then(|ck| self.state.clients.get(ck))
-            .map(|c| c.win.raw());
+        let focused = if self.status_bar_has_focus {
+            None
+        } else {
+            self.get_selected_client_key()
+                .and_then(|ck| self.state.clients.get(ck))
+                .map(|c| c.win.raw())
+        };
         let _ = backend.compositor_render_frame(&scene, focused);
     }
 }
@@ -1416,6 +1421,7 @@ impl Jwm {
             status_bar_last_spawn: None,
             status_bar_backoff_until: None,
             status_bar_restart_failures: 0,
+            status_bar_has_focus: false,
 
             last_key_grab_refresh_at: None,
             pending_bar_updates: HashSet::new(),
@@ -1929,14 +1935,15 @@ impl Jwm {
         }
         // 2. 尝试聚焦客户端
         if let Some(win) = window {
-            let is_already_focused = self
-                .get_selected_client_key()
-                .and_then(|key| self.state.clients.get(key))
-                .map(|c| c.win == win)
-                .unwrap_or(false);
+            let is_already_focused = !self.status_bar_has_focus
+                && self
+                    .get_selected_client_key()
+                    .and_then(|key| self.state.clients.get(key))
+                    .map(|c| c.win == win)
+                    .unwrap_or(false);
             if !is_already_focused {
                 if let Some(client_key) = self.wintoclient(win) {
-                    if !self.is_client_selected(client_key) {
+                    if self.status_bar_has_focus || !self.is_client_selected(client_key) {
                         self.focus(backend, Some(client_key))?;
                     }
                 }
@@ -3792,9 +3799,13 @@ impl Jwm {
                         log::warn!("[tick_animations] compositor scene is EMPTY (no windows to render)");
                     }
                 }
-                let focused = self.get_selected_client_key()
-                    .and_then(|ck| self.state.clients.get(ck))
-                    .map(|c| c.win.raw());
+                let focused = if self.status_bar_has_focus {
+                    None
+                } else {
+                    self.get_selected_client_key()
+                        .and_then(|ck| self.state.clients.get(ck))
+                        .map(|c| c.win.raw())
+                };
                 let _ = backend.compositor_render_frame(&scene, focused);
             }
             return;
@@ -3842,9 +3853,13 @@ impl Jwm {
 
         if composited {
             let scene = self.build_compositor_scene(backend, &visual_overrides);
-            let focused = self.get_selected_client_key()
-                .and_then(|ck| self.state.clients.get(ck))
-                .map(|c| c.win.raw());
+            let focused = if self.status_bar_has_focus {
+                None
+            } else {
+                self.get_selected_client_key()
+                    .and_then(|ck| self.state.clients.get(ck))
+                    .map(|c| c.win.raw())
+            };
             let _ = backend.compositor_render_frame(&scene, focused);
         }
 
@@ -4160,10 +4175,11 @@ impl Jwm {
                         let current_sel = self.get_selected_client_key();
                         self.unfocus_client_opt(backend, current_sel, true)?;
                         self.state.sel_mon = Some(target_monitor_key);
-                        self.focus(backend, None)?;
                     }
                 }
             }
+            // 让状态栏获取 X11 输入焦点
+            self.focus(backend, self.status_bar_client)?;
             return Ok(true);
         }
         Ok(false)
@@ -6415,7 +6431,10 @@ impl Jwm {
         backend: &mut dyn Backend,
         event_window: WindowId,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // info!("[focusin] Window {:?} got focus", event_window);
+        // 状态栏获取焦点时，允许它持有焦点（用于键盘交互）
+        if Some(event_window) == self.status_bar_window {
+            return Ok(());
+        }
         let sel_client_key = self.get_selected_client_key();
         if let Some(client_key) = sel_client_key {
             if let Some(client) = self.state.clients.get(client_key) {
@@ -8816,6 +8835,11 @@ impl Jwm {
         client_key_opt: Option<ClientKey>,
         is_on_selected_monitor: bool,
     ) -> bool {
+        // 状态栏持有焦点时，需要重新聚焦普通 client
+        if self.status_bar_has_focus {
+            return true;
+        }
+
         if !is_on_selected_monitor {
             return true;
         }
@@ -8867,14 +8891,39 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         info!("[focus]");
 
+        // Status bar: give it X11 input focus directly, but don't
+        // touch the WM focus stack / monitor selection so it stays
+        // out of Alt+Tab, tiling, etc.
         if let Some(client_key) = client_key_opt {
-            if let Some(client) = self.state.clients.get(client_key) {
+            let bar_win = self.state.clients.get(client_key).and_then(|client| {
                 info!("[focus] {}", client);
                 if Some(client.win) == self.status_bar_window {
-                    client_key_opt = None; // 忽略状态栏
+                    Some(client.win)
+                } else {
+                    None
                 }
+            });
+            if let Some(win) = bar_win {
+                if !self.status_bar_has_focus {
+                    // 去掉之前 client 的 focused border
+                    if let Some(prev) = self.get_selected_client_key() {
+                        self.unfocus_client(backend, prev, false)?;
+                    }
+                    backend.on_focused_client_changed(Some(win))?;
+                    self.status_bar_has_focus = true;
+                }
+                return Ok(());
             }
         }
+
+        // 状态栏持有焦点时，忽略 focus(None) 调用，避免其他代码路径
+        // 意外把焦点抢回给普通 client
+        if self.status_bar_has_focus && client_key_opt.is_none() {
+            return Ok(());
+        }
+
+        // 普通客户端获取焦点时清除状态栏焦点标记
+        self.status_bar_has_focus = false;
 
         let is_visible = match client_key_opt {
             Some(client_key) => self.is_client_visible_by_key(client_key),
@@ -9735,7 +9784,7 @@ impl Jwm {
         let mon_key = self.get_monitor_by_id(current_mon_id);
         if let Some(client) = self.state.clients.get_mut(client_key) {
             client.mon = mon_key;
-            client.state.never_focus = true;
+            client.state.never_focus = false;
             client.state.is_floating = true;
             client.state.is_dock = true;
             client.state.tags = CONFIG.load().tagmask();
@@ -9864,7 +9913,8 @@ impl Jwm {
 
         let mask_bits = (EventMaskBits::STRUCTURE_NOTIFY
             | EventMaskBits::PROPERTY_CHANGE
-            | EventMaskBits::ENTER_WINDOW)
+            | EventMaskBits::ENTER_WINDOW
+            | EventMaskBits::FOCUS_CHANGE)
             .bits();
         backend.window_ops().change_event_mask(win, mask_bits)?;
         self.configure_client(backend, client_key)?;
