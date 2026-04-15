@@ -495,6 +495,22 @@ impl Backend for X11Backend {
         }
     }
 
+    fn take_screenshot_region_to_file(
+        &mut self,
+        path: &std::path::Path,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+    ) -> Result<bool, BackendError> {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.request_screenshot_region(path.to_path_buf(), x, y, w, h);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     fn compositor_set_color_temperature(&mut self, temp: f32) {
         if let Some(c) = self.compositor.as_mut() { c.set_color_temperature(temp); }
     }

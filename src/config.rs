@@ -1066,6 +1066,12 @@ impl Config {
             },
             KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
+                key: "s".to_string(),
+                function: "take_screenshot_fullscreen".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Shift".to_string()],
                 key: "comma".to_string(),
                 function: "tagmon".to_string(),
                 argument: ArgumentConfig::Int(-1),
@@ -1428,6 +1434,7 @@ impl Config {
             "focusstack" => Some(Jwm::focusstack),
             "focusmon" => Some(Jwm::focusmon),
             "take_screenshot" => Some(Jwm::take_screenshot),
+            "take_screenshot_fullscreen" => Some(Jwm::take_screenshot_fullscreen),
             "quit" => Some(Jwm::quit),
             "restart" => Some(Jwm::restart),
             "killclient" => Some(Jwm::killclient),

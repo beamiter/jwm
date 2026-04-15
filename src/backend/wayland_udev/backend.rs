@@ -1997,6 +1997,24 @@ impl Backend for UdevBackend {
         }
     }
 
+    fn take_screenshot_region_to_file(
+        &mut self,
+        path: &std::path::Path,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+    ) -> Result<bool, BackendError> {
+        if let Some(kms) = &self.kms {
+            kms.borrow_mut()
+                .request_screenshot_region(path.to_path_buf(), x, y, w, h);
+            self.state.needs_redraw = true;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError> {
         loop {
             let mut handled_any = false;

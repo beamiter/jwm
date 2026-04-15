@@ -272,6 +272,12 @@ pub struct Jwm {
     /// Expose / Mission Control mode
     pub expose_active: bool,
 
+    /// Interactive screenshot region selection mode
+    pub screenshot_select_active: bool,
+    pub screenshot_select_dragging: bool,
+    pub screenshot_select_start: (f64, f64),
+    pub screenshot_select_path: Option<String>,
+
     /// Screen recording active
     pub recording_active: bool,
 
@@ -429,6 +435,12 @@ impl WMController for Jwm {
     }
 
     fn on_button_release(&mut self, backend: &mut dyn Backend, _target: HitTarget, _time: u32) {
+        // Screenshot region selection: finish capture on button release
+        if self.screenshot_select_active && self.screenshot_select_dragging {
+            self.finish_screenshot_select(backend);
+            return;
+        }
+
         match backend.handle_button_release(0) {
             Ok(handled) => {
                 if handled {
@@ -501,6 +513,23 @@ impl WMController for Jwm {
         root_y: f64,
         time: u32,
     ) {
+        // Screenshot region selection: update overlay rectangle while dragging
+        if self.screenshot_select_active && self.screenshot_select_dragging {
+            self.last_mouse_root = (root_x, root_y);
+            if backend.has_compositor() {
+                backend.compositor_set_mouse_position(root_x as f32, root_y as f32);
+                let (sx, sy) = self.screenshot_select_start;
+                let x = sx.min(root_x) as f32;
+                let y = sy.min(root_y) as f32;
+                let w = (sx - root_x).abs() as f32;
+                let h = (sy - root_y).abs() as f32;
+                if w > 1.0 && h > 1.0 {
+                    backend.compositor_set_snap_preview(Some((x, y, w, h)));
+                }
+            }
+            return;
+        }
+
         // Forward mouse position to compositor for effects (magnifier, etc.)
         if backend.has_compositor() {
             // When pointer is on the desktop (no window), clear edge-glow suppression
@@ -1457,6 +1486,10 @@ impl Jwm {
             magnifier_enabled: false,
             peek_active: false,
             expose_active: false,
+            screenshot_select_active: false,
+            screenshot_select_dragging: false,
+            screenshot_select_start: (0.0, 0.0),
+            screenshot_select_path: None,
             recording_active: false,
             recording_output_path: None,
             recording_segments: Vec::new(),
@@ -1671,6 +1704,14 @@ impl Jwm {
         let keysym = backend.key_ops_mut().keysym_from_keycode(keycode)?;
         let clean_state = self.clean_mask(backend, state_bits);
 
+        // Screenshot region selection: Escape cancels, consume all other keys
+        if self.screenshot_select_active {
+            if keysym == keys::KEY_Escape {
+                self.cancel_screenshot_select(backend);
+            }
+            return Ok(());
+        }
+
         if self.expose_active {
             if keysym == keys::KEY_Escape {
                 self.expose_active = false;
@@ -1788,6 +1829,20 @@ impl Jwm {
         detail_btn: u8,
         time: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // Screenshot region selection intercept
+        if self.screenshot_select_active {
+            let btn = MouseButton::from_u8(detail_btn);
+            if btn == MouseButton::Left {
+                // Start dragging
+                self.screenshot_select_dragging = true;
+                self.screenshot_select_start = self.last_mouse_root;
+            } else {
+                // Right-click or other button → cancel
+                self.cancel_screenshot_select(backend);
+            }
+            return Ok(());
+        }
+
         // Expose mode intercept: route clicks to compositor
         if self.expose_active {
             let (rx, ry) = self.last_mouse_root;
@@ -6480,11 +6535,8 @@ impl Jwm {
         Ok(())
     }
 
-    pub fn take_screenshot(
-        &mut self,
-        _backend: &mut dyn Backend,
-        _arg: &WMArgEnum,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    /// Prepare screenshot output path (shared by both interactive and fullscreen).
+    fn prepare_screenshot_path() -> Option<String> {
         let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
         let pictures_dir = std::env::var("XDG_PICTURES_DIR")
             .or_else(|_| std::env::var("HOME").map(|h| format!("{}/Pictures", h)))
@@ -6503,96 +6555,142 @@ impl Jwm {
                     output_dir.display(),
                     e2
                 );
-                return Ok(());
+                return None;
             }
         }
-        let screenshot_path = output_dir
-            .join(format!("screenshot-{}.png", timestamp))
-            .to_string_lossy()
-            .to_string();
+        Some(
+            output_dir
+                .join(format!("screenshot-{}.png", timestamp))
+                .to_string_lossy()
+                .to_string(),
+        )
+    }
 
-        if Self::is_udev_backend(_backend) {
-            // Use grim + slurp for interactive region selection (requires wlr-screencopy
-            // and wlr-layer-shell which this compositor now supports).
-            // The shell command: grim -g "$(slurp)" <path>
-            info!("[take_screenshot] launching grim + slurp → {}", screenshot_path);
-
-            let mut command = Command::new("sh");
-            command.args(["-c", &format!(
-                "grim -g \"$(slurp)\" '{}'",
-                screenshot_path,
-            )]);
-
-            Self::setup_smithay_child_env(&mut command, _backend);
-
-            command
-                .stdin(Stdio::null())
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit());
-
-            Self::apply_child_pre_exec(&mut command);
-
-            match command.spawn() {
-                Ok(child) => {
-                    debug!("[take_screenshot] spawned grim+slurp PID: {}", child.id());
-                }
-                Err(e) => {
-                    error!("[take_screenshot] failed to launch grim+slurp: {}", e);
-                    // Fall back to compositor-level full-screen screenshot.
-                    let path = std::path::PathBuf::from(&screenshot_path);
-                    if let Ok(true) = _backend.take_screenshot_to_file(&path) {
-                        info!("[take_screenshot] fallback compositor screenshot → {}", path.display());
-                    }
-                }
-            }
+    /// Alt+S: enter interactive region selection mode.
+    pub fn take_screenshot(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // If already in selection mode, cancel it first
+        if self.screenshot_select_active {
+            self.cancel_screenshot_select(backend);
             return Ok(());
         }
 
-        // Non-udev backends: try compositor screenshot, then fallback to flameshot.
+        let screenshot_path = match Self::prepare_screenshot_path() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+
+        info!("[take_screenshot] entering interactive region selection mode → {}", screenshot_path);
+        self.screenshot_select_active = true;
+        self.screenshot_select_dragging = false;
+        self.screenshot_select_start = (0.0, 0.0);
+        self.screenshot_select_path = Some(screenshot_path);
+
+        // Grab keyboard (to intercept Escape)
+        if let Some(root) = backend.root_window() {
+            let _ = backend.key_ops().grab_keyboard(root);
+        }
+        // Grab pointer with crosshair cursor
+        let pointer_mask = (EventMaskBits::BUTTON_PRESS
+            | EventMaskBits::BUTTON_RELEASE
+            | EventMaskBits::POINTER_MOTION)
+            .bits();
+        let _ = backend.input_ops().grab_pointer(pointer_mask, None);
+
+        Ok(())
+    }
+
+    /// Alt+Shift+S: take a full-screen screenshot immediately.
+    pub fn take_screenshot_fullscreen(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let screenshot_path = match Self::prepare_screenshot_path() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+
         let path = std::path::PathBuf::from(&screenshot_path);
-        match _backend.take_screenshot_to_file(&path) {
+        match backend.take_screenshot_to_file(&path) {
             Ok(true) => {
-                info!("[take_screenshot] compositor screenshot → {}", path.display());
-                return Ok(());
+                info!("[take_screenshot_fullscreen] compositor screenshot → {}", path.display());
             }
             Ok(false) => {
-                info!("[take_screenshot] backend doesn't support compositor screenshots, falling back to flameshot");
+                info!("[take_screenshot_fullscreen] backend doesn't support compositor screenshots");
             }
             Err(e) => {
-                error!("[take_screenshot] compositor screenshot failed: {e}, falling back to flameshot");
-            }
-        }
-
-        // Fallback: launch flameshot via XWayland.
-        let program = "flameshot";
-        let args = vec!["gui".to_string()];
-
-        info!("[take_screenshot] launching: {} {:?}", program, args);
-
-        let mut command = Command::new(program);
-        command.args(&args);
-
-        Self::setup_smithay_child_env(&mut command, _backend);
-
-        command.env_remove("WAYLAND_DISPLAY");
-        command.env("QT_QPA_PLATFORM", "xcb");
-
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-
-        Self::apply_child_pre_exec(&mut command);
-
-        match command.spawn() {
-            Ok(child) => {
-                debug!("[take_screenshot] spawned PID: {}", child.id());
-            }
-            Err(e) => {
-                error!("[take_screenshot] failed to launch {}: {}", program, e);
+                error!("[take_screenshot_fullscreen] compositor screenshot failed: {e}");
             }
         }
         Ok(())
+    }
+
+    /// Cancel interactive screenshot selection mode.
+    fn cancel_screenshot_select(&mut self, backend: &mut dyn Backend) {
+        info!("[take_screenshot] cancelling region selection");
+        self.screenshot_select_active = false;
+        self.screenshot_select_dragging = false;
+        self.screenshot_select_path = None;
+        if backend.has_compositor() {
+            backend.compositor_set_snap_preview(None);
+        }
+        let _ = backend.key_ops().ungrab_keyboard();
+        let _ = backend.input_ops().ungrab_pointer();
+    }
+
+    /// Finish interactive screenshot selection: capture the selected region.
+    fn finish_screenshot_select(&mut self, backend: &mut dyn Backend) {
+        let path_str = match self.screenshot_select_path.take() {
+            Some(p) => p,
+            None => {
+                self.cancel_screenshot_select(backend);
+                return;
+            }
+        };
+
+        let (sx, sy) = self.screenshot_select_start;
+        let (ex, ey) = self.last_mouse_root;
+
+        // Compute normalized rectangle
+        let x = sx.min(ex) as i32;
+        let y = sy.min(ey) as i32;
+        let w = (sx - ex).abs() as u32;
+        let h = (sy - ey).abs() as u32;
+
+        // Clear state before capturing
+        self.screenshot_select_active = false;
+        self.screenshot_select_dragging = false;
+        if backend.has_compositor() {
+            backend.compositor_set_snap_preview(None);
+        }
+        let _ = backend.key_ops().ungrab_keyboard();
+        let _ = backend.input_ops().ungrab_pointer();
+
+        if w < 3 || h < 3 {
+            info!("[take_screenshot] selection too small ({}x{}), ignoring", w, h);
+            return;
+        }
+
+        let path = std::path::PathBuf::from(&path_str);
+        match backend.take_screenshot_region_to_file(&path, x, y, w, h) {
+            Ok(true) => {
+                info!(
+                    "[take_screenshot] region screenshot → {} ({}x{} at {},{})",
+                    path.display(), w, h, x, y
+                );
+            }
+            Ok(false) => {
+                info!("[take_screenshot] backend doesn't support region screenshots, falling back to full");
+                let _ = backend.take_screenshot_to_file(&path);
+            }
+            Err(e) => {
+                error!("[take_screenshot] region screenshot failed: {e}");
+            }
+        }
     }
 
     pub fn tag(

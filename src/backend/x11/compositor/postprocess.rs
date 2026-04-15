@@ -68,6 +68,73 @@ impl Compositor {
         }
     }
 
+    /// Capture a region of the current framebuffer to a PNG file.
+    pub(super) fn capture_screenshot_region(
+        &mut self,
+        path: &std::path::Path,
+        rx: i32,
+        ry: i32,
+        rw: u32,
+        rh: u32,
+    ) -> bool {
+        // Clamp to screen bounds
+        let x = rx.max(0) as u32;
+        let y = ry.max(0) as u32;
+        let w = rw.min(self.screen_w.saturating_sub(x));
+        let h = rh.min(self.screen_h.saturating_sub(y));
+        if w == 0 || h == 0 {
+            log::warn!("compositor: screenshot region is empty");
+            return false;
+        }
+        // OpenGL Y is flipped: GL origin is bottom-left
+        let gl_y = self.screen_h.saturating_sub(y + h);
+        let mut pixels = vec![0u8; (w * h * 4) as usize];
+        unsafe {
+            self.gl.read_pixels(
+                x as i32, gl_y as i32, w as i32, h as i32,
+                glow::RGBA, glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut pixels)),
+            );
+        }
+        // Flip vertically
+        let row_bytes = (w * 4) as usize;
+        let mut flipped = vec![0u8; pixels.len()];
+        for row in 0..h as usize {
+            let src_row = (h as usize - 1 - row) * row_bytes;
+            let dst_row = row * row_bytes;
+            flipped[dst_row..dst_row + row_bytes]
+                .copy_from_slice(&pixels[src_row..src_row + row_bytes]);
+        }
+        // Write PNG
+        let file = match std::fs::File::create(path) {
+            Ok(f) => f,
+            Err(e) => {
+                log::warn!("compositor: screenshot region create failed: {e}");
+                return false;
+            }
+        };
+        let writer = std::io::BufWriter::new(file);
+        let mut encoder = png::Encoder::new(writer, w, h);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        match encoder
+            .write_header()
+            .and_then(|mut wr| wr.write_image_data(&flipped))
+        {
+            Ok(_) => {
+                log::info!(
+                    "compositor: region screenshot saved to {} ({}x{} at {},{})",
+                    path.display(), w, h, x, y
+                );
+                true
+            }
+            Err(e) => {
+                log::warn!("compositor: region screenshot encode failed: {e}");
+                false
+            }
+        }
+    }
+
     /// Render a specific window to an off-screen FBO and return RGBA pixel data.
     /// Returns None if the window isn't tracked. Dimensions are (width, height).
     pub(in crate::backend::x11) fn capture_window_thumbnail(&self, x11_win: u32, max_size: u32) -> Option<(Vec<u8>, u32, u32)> {

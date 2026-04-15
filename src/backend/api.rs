@@ -657,6 +657,18 @@ pub trait Backend: Send {
         Ok(false)
     }
 
+    /// Request a compositor-level screenshot of a specific region.
+    fn take_screenshot_region_to_file(
+        &mut self,
+        _path: &std::path::Path,
+        _x: i32,
+        _y: i32,
+        _w: u32,
+        _h: u32,
+    ) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
     // --- New compositor feature APIs ---
 
     /// Set color temperature for night mode (0.0 = neutral, >0 = warm).

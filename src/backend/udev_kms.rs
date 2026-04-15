@@ -114,6 +114,7 @@ pub(super) struct KmsState {
     cursor_fallback_shadow_ids: Vec<Id>,
 
     pending_screenshot: Option<std::path::PathBuf>,
+    pending_screenshot_region: Option<(std::path::PathBuf, i32, i32, u32, u32)>,
 
     /// Shared queue for pending screencopy frames (from wlr-screencopy-unstable-v1).
     screencopy_pending: Option<crate::backend::wayland_udev::screencopy::PendingScreencopyQueue>,
@@ -283,6 +284,18 @@ impl KmsState {
         self.needs_render = true;
     }
 
+    pub(super) fn request_screenshot_region(
+        &mut self,
+        path: std::path::PathBuf,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+    ) {
+        self.pending_screenshot_region = Some((path, x, y, w, h));
+        self.needs_render = true;
+    }
+
     /// Render all elements to an offscreen buffer and save as PNG.
     /// Split out as a free-standing function so it can borrow `self.renderer`
     /// without conflicting with the mutable borrow on `self.outputs`.
@@ -360,6 +373,105 @@ impl KmsState {
             log::error!("[screenshot] save PNG failed: {e}");
         } else {
             log::info!("[screenshot] saved to {}", path.display());
+        }
+    }
+
+    /// Render to offscreen, then crop a region and save as PNG.
+    fn capture_screenshot_region_impl(
+        renderer: &mut GlesRenderer,
+        width: i32,
+        height: i32,
+        elements: &[KmsRenderElement<GlesRenderer>],
+        path: &std::path::Path,
+        rx: i32,
+        ry: i32,
+        rw: u32,
+        rh: u32,
+    ) {
+        let size: Size<i32, BufferCoord> = (width, height).into();
+
+        let mut renderbuffer: GlesRenderbuffer = match Offscreen::create_buffer(
+            renderer,
+            Fourcc::Abgr8888,
+            size,
+        ) {
+            Ok(rb) => rb,
+            Err(e) => {
+                log::error!("[screenshot-region] create offscreen buffer failed: {e:?}");
+                return;
+            }
+        };
+
+        let mut target = match renderer.bind(&mut renderbuffer) {
+            Ok(t) => t,
+            Err(e) => {
+                log::error!("[screenshot-region] bind offscreen failed: {e:?}");
+                return;
+            }
+        };
+
+        let phys_size: smithay::utils::Size<i32, Physical> = (width, height).into();
+        let mut damage_tracker = OutputDamageTracker::new(
+            phys_size,
+            Scale::from(1.0f64),
+            Transform::Normal,
+        );
+        let clear_color = smithay::backend::renderer::Color32F::new(0.1, 0.15, 0.25, 1.0);
+        if let Err(e) = damage_tracker.render_output(
+            renderer,
+            &mut target,
+            0,
+            elements,
+            clear_color,
+        ) {
+            log::error!("[screenshot-region] render_output failed: {e:?}");
+            return;
+        }
+
+        // Read full framebuffer
+        let full_region = Rectangle::from_size(size);
+        let mapping = match renderer.copy_framebuffer(&target, full_region, Fourcc::Abgr8888) {
+            Ok(m) => m,
+            Err(e) => {
+                log::error!("[screenshot-region] copy_framebuffer failed: {e:?}");
+                return;
+            }
+        };
+        let full_pixels = match renderer.map_texture(&mapping) {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!("[screenshot-region] map_texture failed: {e:?}");
+                return;
+            }
+        };
+
+        // Crop the region from the full pixel buffer
+        let x = rx.max(0) as u32;
+        let y = ry.max(0) as u32;
+        let cw = rw.min((width as u32).saturating_sub(x));
+        let ch = rh.min((height as u32).saturating_sub(y));
+        if cw == 0 || ch == 0 {
+            log::warn!("[screenshot-region] region is empty");
+            return;
+        }
+
+        let full_row_bytes = (width as u32 * 4) as usize;
+        let crop_row_bytes = (cw * 4) as usize;
+        let mut cropped = vec![0u8; (cw * ch * 4) as usize];
+        for row in 0..ch as usize {
+            let src_offset = (y as usize + row) * full_row_bytes + (x as usize * 4);
+            let dst_offset = row * crop_row_bytes;
+            cropped[dst_offset..dst_offset + crop_row_bytes]
+                .copy_from_slice(&full_pixels[src_offset..src_offset + crop_row_bytes]);
+        }
+
+        if let Err(e) = save_rgba_png(path, cw, ch, &cropped) {
+            log::error!("[screenshot-region] save PNG failed: {e}");
+        } else {
+            log::info!(
+                "[screenshot-region] saved to {} ({}x{} at {},{})",
+                path.display(), cw, ch, x, y
+            );
         }
     }
 
@@ -778,6 +890,7 @@ impl KmsState {
             cursor_fallback_shadow_ids: (0..CURSOR_RECTS.len()).map(|_| Id::new()).collect(),
 
             pending_screenshot: None,
+            pending_screenshot_region: None,
             screencopy_pending: None,
 
             outputs,
@@ -1188,6 +1301,19 @@ impl KmsState {
                         out_h,
                         &elements,
                         &screenshot_path,
+                    );
+                }
+                if let Some((region_path, rx, ry, rw, rh)) = self.pending_screenshot_region.take() {
+                    Self::capture_screenshot_region_impl(
+                        &mut self.renderer,
+                        out_w,
+                        out_h,
+                        &elements,
+                        &region_path,
+                        rx,
+                        ry,
+                        rw,
+                        rh,
                     );
                 }
             }

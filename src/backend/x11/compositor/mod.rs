@@ -710,6 +710,7 @@ pub(super) struct Compositor {
 
     // --- Feature 12: Screenshot ---
     pending_screenshot: Option<std::path::PathBuf>,
+    pending_screenshot_region: Option<(std::path::PathBuf, i32, i32, u32, u32)>,
 
     // --- Feature 13: Blur mask / frame extents ---
     blur_use_frame_extents: bool,
@@ -2046,6 +2047,7 @@ impl Compositor {
             },
             // Feature 12: screenshot
             pending_screenshot: None,
+            pending_screenshot_region: None,
             // Feature 13: blur mask
             blur_use_frame_extents: behavior.blur_use_frame_extents,
             // Feature 14: shadow shape
@@ -3127,6 +3129,18 @@ impl Compositor {
         self.needs_render = true;
     }
 
+    pub(super) fn request_screenshot_region(
+        &mut self,
+        path: std::path::PathBuf,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+    ) {
+        self.pending_screenshot_region = Some((path, x, y, w, h));
+        self.needs_render = true;
+    }
+
     /// Check if there's a single fullscreen opaque window covering the screen.
     /// If so, and fullscreen_unredirect is enabled, we can skip compositing.
     fn check_fullscreen_unredirect(&mut self, scene: &[(u32, i32, i32, u32, u32)], focused: Option<u32>) -> bool {
@@ -3307,7 +3321,7 @@ impl Compositor {
             self.windows.get(&win).map_or(false, |wt| wt.dirty || wt.needs_pixmap_refresh)
         });
         let explicit_render = std::mem::replace(&mut self.needs_render, false);
-        let force_render = self.pending_screenshot.is_some() || self.debug_hud || self.transition_active() || self.overview_active
+        let force_render = self.pending_screenshot.is_some() || self.pending_screenshot_region.is_some() || self.debug_hud || self.transition_active() || self.overview_active
             || self.expose_active || expose_animating || snap_animating || peek_animating
             || genie_active || ripples_active || focus_highlight_active || wallpaper_crossfade_active
             || self.recording_active || self.annotation_active || wallpaper_just_loaded
@@ -4440,6 +4454,9 @@ impl Compositor {
         // === Feature 12: Screenshot capture (after all rendering, before swap) ===
         if let Some(path) = self.pending_screenshot.take() {
             self.capture_screenshot(&path);
+        }
+        if let Some((path, rx, ry, rw, rh)) = self.pending_screenshot_region.take() {
+            self.capture_screenshot_region(&path, rx, ry, rw, rh);
         }
 
         // === Tag-switch transition overlay ===
