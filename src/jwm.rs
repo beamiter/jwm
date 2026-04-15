@@ -275,7 +275,9 @@ pub struct Jwm {
     /// Interactive screenshot region selection mode
     pub screenshot_select_active: bool,
     pub screenshot_select_dragging: bool,
+    pub screenshot_select_committed: bool, // selection done, waiting for save action
     pub screenshot_select_start: (f64, f64),
+    pub screenshot_select_end: (f64, f64),
     pub screenshot_select_path: Option<String>,
 
     /// Screen recording active
@@ -435,9 +437,22 @@ impl WMController for Jwm {
     }
 
     fn on_button_release(&mut self, backend: &mut dyn Backend, _target: HitTarget, _time: u32) {
-        // Screenshot region selection: finish capture on button release
+        // Screenshot region selection: on mouse release, commit the selection
+        // and wait for the user to choose save action (Enter=file, c=clipboard).
         if self.screenshot_select_active && self.screenshot_select_dragging {
-            self.finish_screenshot_select(backend);
+            let (sx, sy) = self.screenshot_select_start;
+            let (ex, ey) = self.last_mouse_root;
+            let w = (sx - ex).abs();
+            let h = (sy - ey).abs();
+            if w < 3.0 || h < 3.0 {
+                info!("[take_screenshot] selection too small, cancelling");
+                self.cancel_screenshot_select(backend);
+                return;
+            }
+            self.screenshot_select_dragging = false;
+            self.screenshot_select_committed = true;
+            self.screenshot_select_end = self.last_mouse_root;
+            // Keep the snap preview visible so the user can see the selection
             return;
         }
 
@@ -1489,7 +1504,9 @@ impl Jwm {
             expose_active: false,
             screenshot_select_active: false,
             screenshot_select_dragging: false,
+            screenshot_select_committed: false,
             screenshot_select_start: (0.0, 0.0),
+            screenshot_select_end: (0.0, 0.0),
             screenshot_select_path: None,
             recording_active: false,
             recording_output_path: None,
@@ -1705,10 +1722,20 @@ impl Jwm {
         let keysym = backend.key_ops_mut().keysym_from_keycode(keycode)?;
         let clean_state = self.clean_mask(backend, state_bits);
 
-        // Screenshot region selection: Escape cancels, consume all other keys
+        // Screenshot region selection mode
         if self.screenshot_select_active {
             if keysym == keys::KEY_Escape {
                 self.cancel_screenshot_select(backend);
+            } else if self.screenshot_select_committed {
+                // Selection done — choose save action
+                if keysym == keys::KEY_Return || keysym == keys::KEY_s {
+                    // Enter or 's' → save to file
+                    self.finish_screenshot_select(backend, false);
+                } else if keysym == keys::KEY_c {
+                    // 'c' → copy to clipboard
+                    self.finish_screenshot_select(backend, true);
+                }
+                // Other keys are consumed silently
             }
             return Ok(());
         }
@@ -6587,7 +6614,9 @@ impl Jwm {
         info!("[take_screenshot] entering interactive region selection mode → {}", screenshot_path);
         self.screenshot_select_active = true;
         self.screenshot_select_dragging = false;
+        self.screenshot_select_committed = false;
         self.screenshot_select_start = (0.0, 0.0);
+        self.screenshot_select_end = (0.0, 0.0);
         self.screenshot_select_path = Some(screenshot_path);
 
         // Grab keyboard (to intercept Escape)
@@ -6640,6 +6669,7 @@ impl Jwm {
         info!("[take_screenshot] cancelling region selection");
         self.screenshot_select_active = false;
         self.screenshot_select_dragging = false;
+        self.screenshot_select_committed = false;
         self.screenshot_select_path = None;
         if backend.has_compositor() {
             backend.compositor_set_snap_preview(None);
@@ -6653,7 +6683,9 @@ impl Jwm {
     }
 
     /// Finish interactive screenshot selection: capture the selected region.
-    fn finish_screenshot_select(&mut self, backend: &mut dyn Backend) {
+    /// If `to_clipboard` is true, the image is copied to the system clipboard
+    /// instead of saved to a file.
+    fn finish_screenshot_select(&mut self, backend: &mut dyn Backend, to_clipboard: bool) {
         let path_str = match self.screenshot_select_path.take() {
             Some(p) => p,
             None => {
@@ -6663,7 +6695,7 @@ impl Jwm {
         };
 
         let (sx, sy) = self.screenshot_select_start;
-        let (ex, ey) = self.last_mouse_root;
+        let (ex, ey) = self.screenshot_select_end;
 
         // Compute normalized rectangle
         let x = sx.min(ex) as i32;
@@ -6674,14 +6706,12 @@ impl Jwm {
         // Clear state before capturing
         self.screenshot_select_active = false;
         self.screenshot_select_dragging = false;
+        self.screenshot_select_committed = false;
         if backend.has_compositor() {
-            // Instantly remove the overlay so the next rendered frame (which captures
-            // the screenshot) does not include the selection rectangle.
             backend.compositor_clear_snap_preview_immediate();
         }
         let _ = backend.key_ops().ungrab_keyboard();
         let _ = backend.input_ops().ungrab_pointer();
-        // Restore default cursor
         if let Some(root) = backend.root_window() {
             let _ = backend.cursor_provider().apply(root, StdCursorKind::LeftPtr);
         }
@@ -6691,20 +6721,72 @@ impl Jwm {
             return;
         }
 
-        let path = std::path::PathBuf::from(&path_str);
-        match backend.take_screenshot_region_to_file(&path, x, y, w, h) {
+        // When copying to clipboard, use a temp file as an intermediate
+        let save_path = if to_clipboard {
+            format!("/tmp/.jwm-screenshot-clipboard-{}.png", std::process::id())
+        } else {
+            path_str.clone()
+        };
+
+        let path = std::path::PathBuf::from(&save_path);
+        let captured = match backend.take_screenshot_region_to_file(&path, x, y, w, h) {
             Ok(true) => {
                 info!(
                     "[take_screenshot] region screenshot → {} ({}x{} at {},{})",
                     path.display(), w, h, x, y
                 );
+                true
             }
             Ok(false) => {
                 info!("[take_screenshot] backend doesn't support region screenshots, falling back to full");
-                let _ = backend.take_screenshot_to_file(&path);
+                backend.take_screenshot_to_file(&path).unwrap_or(false)
             }
             Err(e) => {
                 error!("[take_screenshot] region screenshot failed: {e}");
+                false
+            }
+        };
+
+        if to_clipboard && captured {
+            Self::copy_image_to_clipboard(backend, &save_path);
+        }
+    }
+
+    /// Copy a PNG image file to the system clipboard using xclip or wl-copy.
+    ///
+    /// The screenshot is captured asynchronously by the compositor on the next
+    /// render frame, so the PNG file does not exist yet when this is called.
+    /// We spawn a shell wrapper that polls for the file before running the
+    /// clipboard tool.
+    fn copy_image_to_clipboard(backend: &dyn Backend, png_path: &str) {
+        let copy_cmd = if Self::is_udev_backend(backend) {
+            format!("wl-copy -t image/png < '{}'", png_path)
+        } else {
+            format!("xclip -selection clipboard -t image/png -i '{}'", png_path)
+        };
+
+        // Poll up to 3 s for the file to appear (compositor writes it next frame),
+        // then copy to clipboard and remove the temp file.
+        let script = format!(
+            r#"for i in $(seq 1 60); do [ -s '{}' ] && {{ {}; rm -f '{}'; exit 0; }}; sleep 0.05; done"#,
+            png_path, copy_cmd, png_path,
+        );
+
+        info!("[take_screenshot] clipboard copy scheduled: {}", copy_cmd);
+
+        let mut command = Command::new("sh");
+        command.args(["-c", &script]);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        match command.spawn() {
+            Ok(_) => {
+                info!("[take_screenshot] clipboard copy helper spawned");
+            }
+            Err(e) => {
+                error!("[take_screenshot] failed to spawn clipboard helper: {e}");
             }
         }
     }
