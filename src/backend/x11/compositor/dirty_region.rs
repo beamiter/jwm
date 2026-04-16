@@ -12,7 +12,12 @@ pub struct DirtyRect {
 
 impl DirtyRect {
     pub fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     /// Check if this rect intersects with another
@@ -22,8 +27,7 @@ impl DirtyRect {
         let r2_right = other.x + other.width as i32;
         let r2_bottom = other.y + other.height as i32;
 
-        self.x < r2_right && r1_right > other.x
-            && self.y < r2_bottom && r1_bottom > other.y
+        self.x < r2_right && r1_right > other.x && self.y < r2_bottom && r1_bottom > other.y
     }
 
     /// Union two rects

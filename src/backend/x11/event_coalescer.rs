@@ -1,6 +1,6 @@
+use std::collections::VecDeque;
 /// Event coalescing for better performance
 use std::time::Instant;
-use std::collections::VecDeque;
 
 /// Motion event for coalescing
 #[derive(Clone, Copy, Debug)]

@@ -1,5 +1,5 @@
-use glow::HasContext;
 use super::{Compositor, ExposeEntry, SnapPreview, WindowTab};
+use glow::HasContext;
 
 impl Compositor {
     // =========================================================================
@@ -200,20 +200,11 @@ impl Compositor {
 
             // Draw each window at its current animated position
             self.gl.use_program(Some(self.program));
-            self.gl.uniform_matrix_4_f32_slice(
-                self.win_uniforms.projection.as_ref(),
-                false,
-                proj,
-            );
             self.gl
-                .uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
-            self.gl.uniform_4_f32(
-                self.win_uniforms.uv_rect.as_ref(),
-                0.0,
-                0.0,
-                1.0,
-                1.0,
-            );
+                .uniform_matrix_4_f32_slice(self.win_uniforms.projection.as_ref(), false, proj);
+            self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+            self.gl
+                .uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
             self.gl.active_texture(glow::TEXTURE0);
 
             for entry in &self.expose_entries {
@@ -233,8 +224,7 @@ impl Compositor {
                     .uniform_1_f32(self.win_uniforms.opacity.as_ref(), opacity);
                 self.gl
                     .uniform_1_f32(self.win_uniforms.radius.as_ref(), self.corner_radius);
-                self.gl
-                    .uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
+                self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
                 self.gl.uniform_2_f32(
                     self.win_uniforms.size.as_ref(),
                     entry.current_w,
@@ -247,8 +237,7 @@ impl Compositor {
                     entry.current_w,
                     entry.current_h,
                 );
-                self.gl
-                    .bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
                 // Highlight border if hovered
@@ -259,10 +248,8 @@ impl Compositor {
                         false,
                         proj,
                     );
-                    self.gl.uniform_1_f32(
-                        self.border_uniforms.border_width.as_ref(),
-                        3.0,
-                    );
+                    self.gl
+                        .uniform_1_f32(self.border_uniforms.border_width.as_ref(), 3.0);
                     self.gl.uniform_4_f32(
                         self.border_uniforms.border_color.as_ref(),
                         0.4,
@@ -270,10 +257,8 @@ impl Compositor {
                         1.0,
                         opacity,
                     );
-                    self.gl.uniform_1_f32(
-                        self.border_uniforms.radius.as_ref(),
-                        self.corner_radius,
-                    );
+                    self.gl
+                        .uniform_1_f32(self.border_uniforms.radius.as_ref(), self.corner_radius);
                     self.gl.uniform_2_f32(
                         self.border_uniforms.size.as_ref(),
                         entry.current_w,
@@ -295,15 +280,9 @@ impl Compositor {
                         false,
                         proj,
                     );
+                    self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
                     self.gl
-                        .uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
-                    self.gl.uniform_4_f32(
-                        self.win_uniforms.uv_rect.as_ref(),
-                        0.0,
-                        0.0,
-                        1.0,
-                        1.0,
-                    );
+                        .uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
                 }
             }
 
@@ -354,7 +333,10 @@ impl Compositor {
         self.needs_render = true;
     }
 
-    pub(in crate::backend::x11) fn set_snap_preview(&mut self, preview: Option<(f32, f32, f32, f32)>) {
+    pub(in crate::backend::x11) fn set_snap_preview(
+        &mut self,
+        preview: Option<(f32, f32, f32, f32)>,
+    ) {
         if !self.snap_preview_enabled {
             return;
         }
@@ -439,24 +421,14 @@ impl Compositor {
             let fill_size = sp.w.max(sp.h);
             self.gl
                 .uniform_1_f32(self.border_uniforms.border_width.as_ref(), fill_size);
-            self.gl.uniform_4_f32(
-                self.border_uniforms.border_color.as_ref(),
-                r,
-                g,
-                b,
-                alpha,
-            );
+            self.gl
+                .uniform_4_f32(self.border_uniforms.border_color.as_ref(), r, g, b, alpha);
             self.gl
                 .uniform_1_f32(self.border_uniforms.radius.as_ref(), self.corner_radius);
             self.gl
                 .uniform_2_f32(self.border_uniforms.size.as_ref(), sp.w, sp.h);
-            self.gl.uniform_4_f32(
-                self.border_uniforms.rect.as_ref(),
-                sp.x,
-                sp.y,
-                sp.w,
-                sp.h,
-            );
+            self.gl
+                .uniform_4_f32(self.border_uniforms.rect.as_ref(), sp.x, sp.y, sp.w, sp.h);
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
             // Draw a brighter border outline on top
@@ -606,10 +578,8 @@ impl Compositor {
 
                 // Draw filled rectangle for each tab
                 let fill_size = tab_w.max(bar_h);
-                self.gl.uniform_1_f32(
-                    self.border_uniforms.border_width.as_ref(),
-                    fill_size,
-                );
+                self.gl
+                    .uniform_1_f32(self.border_uniforms.border_width.as_ref(), fill_size);
                 self.gl.uniform_4_f32(
                     self.border_uniforms.border_color.as_ref(),
                     color[0],
@@ -621,13 +591,8 @@ impl Compositor {
                     .uniform_1_f32(self.border_uniforms.radius.as_ref(), 0.0);
                 self.gl
                     .uniform_2_f32(self.border_uniforms.size.as_ref(), tab_w, bar_h);
-                self.gl.uniform_4_f32(
-                    self.border_uniforms.rect.as_ref(),
-                    tx,
-                    bar_y,
-                    tab_w,
-                    bar_h,
-                );
+                self.gl
+                    .uniform_4_f32(self.border_uniforms.rect.as_ref(), tx, bar_y, tab_w, bar_h);
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
 
@@ -671,8 +636,7 @@ impl Compositor {
                             false,
                             proj,
                         );
-                        self.gl
-                            .uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+                        self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
                         self.gl.uniform_4_f32(
                             self.win_uniforms.uv_rect.as_ref(),
                             0.0,

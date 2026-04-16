@@ -69,7 +69,17 @@ impl LayoutEnum {
     pub fn is_tile(&self) -> bool {
         matches!(
             self.0,
-            "tile" | "fibonacci" | "centeredmaster" | "bstack" | "grid" | "deck" | "threecol" | "tatami" | "fullscreen" | "scrolling" | "vstack"
+            "tile"
+                | "fibonacci"
+                | "centeredmaster"
+                | "bstack"
+                | "grid"
+                | "deck"
+                | "threecol"
+                | "tatami"
+                | "fullscreen"
+                | "scrolling"
+                | "vstack"
         )
     }
     pub fn is_float(&self) -> bool {
@@ -414,7 +424,11 @@ pub fn calculate_centered_master<K: Copy>(
 
     let master_avail_h = wh - (n_master_count - 1).max(0) * gap;
     let left_avail_h = wh - (n_left - 1).max(0) * gap;
-    let right_avail_h = if n_right > 0 { wh - (n_right - 1).max(0) * gap } else { wh };
+    let right_avail_h = if n_right > 0 {
+        wh - (n_right - 1).max(0) * gap
+    } else {
+        wh
+    };
 
     let mut mi = 0i32;
     let mut li = 0i32;
@@ -491,7 +505,11 @@ pub fn calculate_bstack<K: Copy>(
     };
 
     let master_avail_w = ww - (n_master_count - 1).max(0) * gap;
-    let stack_avail_w = if n_stack > 0 { ww - (n_stack - 1).max(0) * gap } else { 0 };
+    let stack_avail_w = if n_stack > 0 {
+        ww - (n_stack - 1).max(0) * gap
+    } else {
+        0
+    };
 
     let mut mx = 0;
     let mut sx = 0;
@@ -677,7 +695,11 @@ pub fn calculate_three_col<K: Copy>(
 
     let master_avail_h = wh - (n_master_count - 1).max(0) * gap;
     let left_avail_h = wh - (n_left - 1).max(0) * gap;
-    let right_avail_h = if n_right > 0 { wh - (n_right - 1).max(0) * gap } else { wh };
+    let right_avail_h = if n_right > 0 {
+        wh - (n_right - 1).max(0) * gap
+    } else {
+        wh
+    };
 
     let mut mi = 0i32;
     let mut li = 0i32;
@@ -769,9 +791,18 @@ pub fn calculate_tatami<K: Copy>(
                 let b0 = 2 * clients[0].border_w;
                 let b1 = 2 * clients[1].border_w;
                 let b2 = 2 * clients[2].border_w;
-                results.push(LayoutResult { key: clients[0].key, rect: Rect::new(wx, wy, lw - b0, wh - b0) });
-                results.push(LayoutResult { key: clients[1].key, rect: Rect::new(wx + lw + gap, wy, rw - b1, rh - b1) });
-                results.push(LayoutResult { key: clients[2].key, rect: Rect::new(wx + lw + gap, wy + rh + gap, rw - b2, wh - rh - gap - b2) });
+                results.push(LayoutResult {
+                    key: clients[0].key,
+                    rect: Rect::new(wx, wy, lw - b0, wh - b0),
+                });
+                results.push(LayoutResult {
+                    key: clients[1].key,
+                    rect: Rect::new(wx + lw + gap, wy, rw - b1, rh - b1),
+                });
+                results.push(LayoutResult {
+                    key: clients[2].key,
+                    rect: Rect::new(wx + lw + gap, wy + rh + gap, rw - b2, wh - rh - gap - b2),
+                });
             }
             4 => {
                 let cw = (ww - gap) / 2;
@@ -782,7 +813,12 @@ pub fn calculate_tatami<K: Copy>(
                     let row = i as i32 / 2;
                     results.push(LayoutResult {
                         key: c.key,
-                        rect: Rect::new(wx + col * (cw + gap), wy + row * (ch + gap), cw - b2, ch - b2),
+                        rect: Rect::new(
+                            wx + col * (cw + gap),
+                            wy + row * (ch + gap),
+                            cw - b2,
+                            ch - b2,
+                        ),
                     });
                 }
             }
@@ -805,7 +841,11 @@ pub fn calculate_tatami<K: Copy>(
                 let cw = (ww - (cols - 1) * gap) / cols;
                 for j in 0..count {
                     let b2 = 2 * clients[idx + j].border_w;
-                    let actual_w = if j as i32 == cols - 1 { ww - (cols - 1) * (cw + gap) } else { cw };
+                    let actual_w = if j as i32 == cols - 1 {
+                        ww - (cols - 1) * (cw + gap)
+                    } else {
+                        cw
+                    };
                     results.push(LayoutResult {
                         key: clients[idx + j].key,
                         rect: Rect::new(wx + j as i32 * (cw + gap), gy, actual_w - b2, row_h - b2),
@@ -824,15 +864,32 @@ pub fn calculate_tatami<K: Copy>(
                     let bw_last = ww - bw - gap;
 
                     let (b0, b1, b2, b3, b4) = (
-                        2 * clients[idx].border_w, 2 * clients[idx + 1].border_w,
-                        2 * clients[idx + 2].border_w, 2 * clients[idx + 3].border_w,
+                        2 * clients[idx].border_w,
+                        2 * clients[idx + 1].border_w,
+                        2 * clients[idx + 2].border_w,
+                        2 * clients[idx + 3].border_w,
                         2 * clients[idx + 4].border_w,
                     );
-                    results.push(LayoutResult { key: clients[idx].key, rect: Rect::new(wx, gy, tw - b0, top_h - b0) });
-                    results.push(LayoutResult { key: clients[idx + 1].key, rect: Rect::new(wx + tw + gap, gy, tw - b1, top_h - b1) });
-                    results.push(LayoutResult { key: clients[idx + 2].key, rect: Rect::new(wx + 2 * (tw + gap), gy, tw_last - b2, top_h - b2) });
-                    results.push(LayoutResult { key: clients[idx + 3].key, rect: Rect::new(wx, gy + top_h + gap, bw - b3, bot_h - b3) });
-                    results.push(LayoutResult { key: clients[idx + 4].key, rect: Rect::new(wx + bw + gap, gy + top_h + gap, bw_last - b4, bot_h - b4) });
+                    results.push(LayoutResult {
+                        key: clients[idx].key,
+                        rect: Rect::new(wx, gy, tw - b0, top_h - b0),
+                    });
+                    results.push(LayoutResult {
+                        key: clients[idx + 1].key,
+                        rect: Rect::new(wx + tw + gap, gy, tw - b1, top_h - b1),
+                    });
+                    results.push(LayoutResult {
+                        key: clients[idx + 2].key,
+                        rect: Rect::new(wx + 2 * (tw + gap), gy, tw_last - b2, top_h - b2),
+                    });
+                    results.push(LayoutResult {
+                        key: clients[idx + 3].key,
+                        rect: Rect::new(wx, gy + top_h + gap, bw - b3, bot_h - b3),
+                    });
+                    results.push(LayoutResult {
+                        key: clients[idx + 4].key,
+                        rect: Rect::new(wx + bw + gap, gy + top_h + gap, bw_last - b4, bot_h - b4),
+                    });
                 } else {
                     // 图案 B: 上 2 下 3
                     let tw = (ww - gap) / 2;
@@ -841,15 +898,37 @@ pub fn calculate_tatami<K: Copy>(
                     let bw_last = ww - 2 * (bw + gap);
 
                     let (b0, b1, b2, b3, b4) = (
-                        2 * clients[idx].border_w, 2 * clients[idx + 1].border_w,
-                        2 * clients[idx + 2].border_w, 2 * clients[idx + 3].border_w,
+                        2 * clients[idx].border_w,
+                        2 * clients[idx + 1].border_w,
+                        2 * clients[idx + 2].border_w,
+                        2 * clients[idx + 3].border_w,
                         2 * clients[idx + 4].border_w,
                     );
-                    results.push(LayoutResult { key: clients[idx].key, rect: Rect::new(wx, gy, tw - b0, top_h - b0) });
-                    results.push(LayoutResult { key: clients[idx + 1].key, rect: Rect::new(wx + tw + gap, gy, tw_last - b1, top_h - b1) });
-                    results.push(LayoutResult { key: clients[idx + 2].key, rect: Rect::new(wx, gy + top_h + gap, bw - b2, bot_h - b2) });
-                    results.push(LayoutResult { key: clients[idx + 3].key, rect: Rect::new(wx + bw + gap, gy + top_h + gap, bw - b3, bot_h - b3) });
-                    results.push(LayoutResult { key: clients[idx + 4].key, rect: Rect::new(wx + 2 * (bw + gap), gy + top_h + gap, bw_last - b4, bot_h - b4) });
+                    results.push(LayoutResult {
+                        key: clients[idx].key,
+                        rect: Rect::new(wx, gy, tw - b0, top_h - b0),
+                    });
+                    results.push(LayoutResult {
+                        key: clients[idx + 1].key,
+                        rect: Rect::new(wx + tw + gap, gy, tw_last - b1, top_h - b1),
+                    });
+                    results.push(LayoutResult {
+                        key: clients[idx + 2].key,
+                        rect: Rect::new(wx, gy + top_h + gap, bw - b2, bot_h - b2),
+                    });
+                    results.push(LayoutResult {
+                        key: clients[idx + 3].key,
+                        rect: Rect::new(wx + bw + gap, gy + top_h + gap, bw - b3, bot_h - b3),
+                    });
+                    results.push(LayoutResult {
+                        key: clients[idx + 4].key,
+                        rect: Rect::new(
+                            wx + 2 * (bw + gap),
+                            gy + top_h + gap,
+                            bw_last - b4,
+                            bot_h - b4,
+                        ),
+                    });
                 }
             }
             idx += count;
@@ -935,12 +1014,7 @@ pub fn calculate_scrolling<K: Copy>(
 
             results.push(LayoutResult {
                 key: client.key,
-                rect: Rect::new(
-                    screen_x as i32,
-                    win_y,
-                    col_w - border2,
-                    h - border2,
-                ),
+                rect: Rect::new(screen_x as i32, win_y, col_w - border2, h - border2),
             });
 
             y_cursor += h;
@@ -1004,11 +1078,15 @@ pub fn calculate_vstack<K: Copy>(
         let (x, y) = if i == 0 {
             (center_x, bottom_y)
         } else {
-            let depth = ((i as i32) + 1) / 2;   // 1,1,2,2,3,3,...
+            let depth = ((i as i32) + 1) / 2; // 1,1,2,2,3,3,...
             let is_right = (i % 2) == 1;
             let dx = depth * step_x;
             let dy = depth * step_y;
-            let x = if is_right { center_x + dx } else { center_x - dx };
+            let x = if is_right {
+                center_x + dx
+            } else {
+                center_x - dx
+            };
             let y = bottom_y - dy;
             (x, y)
         };

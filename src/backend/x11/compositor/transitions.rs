@@ -1,6 +1,8 @@
-use glow::HasContext;
 use super::Compositor;
-use super::math::{perspective_matrix, translate_matrix, rotate_y_matrix, rotate_x_matrix, mat4_mul};
+use super::math::{
+    mat4_mul, perspective_matrix, rotate_x_matrix, rotate_y_matrix, translate_matrix,
+};
+use glow::HasContext;
 
 impl Compositor {
     /// Returns true if a tag-switch transition is in progress.
@@ -25,7 +27,14 @@ impl Compositor {
     /// Re-draw the wallpaper in a specific monitor region using the given
     /// ortho projection.  Used by transitions to keep the wallpaper static
     /// behind the animated content.
-    pub(crate) fn draw_wallpaper_in_region(&self, proj: &[f32; 16], mon_x: i32, mon_y: i32, mon_w: u32, mon_h: u32) {
+    pub(crate) fn draw_wallpaper_in_region(
+        &self,
+        proj: &[f32; 16],
+        mon_x: i32,
+        mon_y: i32,
+        mon_w: u32,
+        mon_h: u32,
+    ) {
         // Find the matching monitor wallpaper entry
         let (tex, mode, iw, ih) = if let Some(mw) = self.monitor_wallpapers.iter().find(|mw| {
             mw.mon_x == mon_x && mw.mon_y == mon_y && mw.mon_w == mon_w && mw.mon_h == mon_h
@@ -33,12 +42,22 @@ impl Compositor {
             if let Some(t) = mw.texture {
                 (t, mw.mode, mw.img_w, mw.img_h)
             } else if let Some(t) = self.wallpaper_texture {
-                (t, self.wallpaper_mode, self.wallpaper_img_w, self.wallpaper_img_h)
+                (
+                    t,
+                    self.wallpaper_mode,
+                    self.wallpaper_img_w,
+                    self.wallpaper_img_h,
+                )
             } else {
                 return;
             }
         } else if let Some(t) = self.wallpaper_texture {
-            (t, self.wallpaper_mode, self.wallpaper_img_w, self.wallpaper_img_h)
+            (
+                t,
+                self.wallpaper_mode,
+                self.wallpaper_img_w,
+                self.wallpaper_img_h,
+            )
         } else {
             return;
         };
@@ -48,19 +67,23 @@ impl Compositor {
 
         unsafe {
             self.gl.use_program(Some(self.program));
-            self.gl.uniform_matrix_4_f32_slice(
-                self.win_uniforms.projection.as_ref(), false, proj,
-            );
+            self.gl
+                .uniform_matrix_4_f32_slice(self.win_uniforms.projection.as_ref(), false, proj);
             self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
             self.gl.bind_vertex_array(Some(self.quad_vao));
-            self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
-            self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), 0.0);
+            self.gl
+                .uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
+            self.gl
+                .uniform_1_f32(self.win_uniforms.radius.as_ref(), 0.0);
             self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
-            self.gl.uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
+            self.gl
+                .uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
             self.gl.active_texture(glow::TEXTURE0);
 
-            self.gl.uniform_4_f32(self.win_uniforms.rect.as_ref(), rx, ry, rw, rh);
-            self.gl.uniform_2_f32(self.win_uniforms.size.as_ref(), rw, rh);
+            self.gl
+                .uniform_4_f32(self.win_uniforms.rect.as_ref(), rx, ry, rw, rh);
+            self.gl
+                .uniform_2_f32(self.win_uniforms.size.as_ref(), rw, rh);
             self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
@@ -90,9 +113,8 @@ impl Compositor {
 
         // Capture the current back-buffer (new scene) into transition_new_fbo
         if self.transition_new_fbo.is_none() {
-            self.transition_new_fbo = unsafe {
-                Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok()
-            };
+            self.transition_new_fbo =
+                unsafe { Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok() };
         }
         let new_tex = match &self.transition_new_fbo {
             Some((fbo, tex)) => {
@@ -103,9 +125,14 @@ impl Compositor {
                     self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
                     self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
                     self.gl.blit_framebuffer(
-                        mon_x, blit_gl_y,
-                        mon_x + mon_w as i32, blit_gl_y + mon_h as i32,
-                        0, 0, mon_w as i32, mon_h as i32,
+                        mon_x,
+                        blit_gl_y,
+                        mon_x + mon_w as i32,
+                        blit_gl_y + mon_h as i32,
+                        0,
+                        0,
+                        mon_w as i32,
+                        mon_h as i32,
                         glow::COLOR_BUFFER_BIT,
                         glow::NEAREST,
                     );
@@ -180,24 +207,33 @@ impl Compositor {
         unsafe {
             // Restrict rendering to the monitor's workspace area (below status bar)
             self.gl.enable(glow::SCISSOR_TEST);
-            self.gl.scissor(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
-            self.gl.viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
+            self.gl
+                .scissor(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
+            self.gl
+                .viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
 
             // Clear workspace area and draw wallpaper behind the cube so
             // the background stays static instead of showing black gaps.
             self.gl.clear(glow::COLOR_BUFFER_BIT);
             // Temporarily restore full viewport for wallpaper drawing
-            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            self.gl
+                .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
             self.draw_wallpaper_in_region(ortho_proj, mon_x, mon_y, mon_w, mon_h);
             // Re-set viewport for cube 3D rendering
-            self.gl.viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
+            self.gl
+                .viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
 
             self.gl.use_program(Some(self.cube_program));
-            self.gl.uniform_1_f32(self.cube_uniforms.aspect.as_ref(), aspect);
-            self.gl.uniform_1_i32(self.cube_uniforms.texture.as_ref(), 0);
+            self.gl
+                .uniform_1_f32(self.cube_uniforms.aspect.as_ref(), aspect);
+            self.gl
+                .uniform_1_i32(self.cube_uniforms.texture.as_ref(), 0);
             self.gl.uniform_4_f32(
                 self.cube_uniforms.uv_rect.as_ref(),
-                uv_rect[0], uv_rect[1], uv_rect[2], uv_rect[3],
+                uv_rect[0],
+                uv_rect[1],
+                uv_rect[2],
+                uv_rect[3],
             );
             self.gl.bind_vertex_array(Some(self.quad_vao));
             self.gl.active_texture(glow::TEXTURE0);
@@ -207,26 +243,46 @@ impl Compositor {
             // closer; at progress > 0.5 the new face is closer.
             if progress < 0.5 {
                 // New face farther → draw first
-                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &new_mvp);
-                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), new_brightness);
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.cube_uniforms.mvp.as_ref(),
+                    false,
+                    &new_mvp,
+                );
+                self.gl
+                    .uniform_1_f32(self.cube_uniforms.brightness.as_ref(), new_brightness);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
                 // Old face closer → draw second
-                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &old_mvp);
-                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), old_brightness);
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.cube_uniforms.mvp.as_ref(),
+                    false,
+                    &old_mvp,
+                );
+                self.gl
+                    .uniform_1_f32(self.cube_uniforms.brightness.as_ref(), old_brightness);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             } else {
                 // Old face farther → draw first
-                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &old_mvp);
-                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), old_brightness);
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.cube_uniforms.mvp.as_ref(),
+                    false,
+                    &old_mvp,
+                );
+                self.gl
+                    .uniform_1_f32(self.cube_uniforms.brightness.as_ref(), old_brightness);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
                 // New face closer → draw second
-                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &new_mvp);
-                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), new_brightness);
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.cube_uniforms.mvp.as_ref(),
+                    false,
+                    &new_mvp,
+                );
+                self.gl
+                    .uniform_1_f32(self.cube_uniforms.brightness.as_ref(), new_brightness);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
@@ -236,7 +292,8 @@ impl Compositor {
 
             // Restore viewport and disable scissor
             self.gl.disable(glow::SCISSOR_TEST);
-            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            self.gl
+                .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
         }
     }
 
@@ -256,9 +313,8 @@ impl Compositor {
 
         // Capture new scene
         if self.transition_new_fbo.is_none() {
-            self.transition_new_fbo = unsafe {
-                Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok()
-            };
+            self.transition_new_fbo =
+                unsafe { Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok() };
         }
         let new_tex = match &self.transition_new_fbo {
             Some((fbo, tex)) => {
@@ -269,10 +325,16 @@ impl Compositor {
                     self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
                     self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
                     self.gl.blit_framebuffer(
-                        mon_x, blit_gl_y,
-                        mon_x + mon_w as i32, blit_gl_y + mon_h as i32,
-                        0, 0, mon_w as i32, mon_h as i32,
-                        glow::COLOR_BUFFER_BIT, glow::NEAREST,
+                        mon_x,
+                        blit_gl_y,
+                        mon_x + mon_w as i32,
+                        blit_gl_y + mon_h as i32,
+                        0,
+                        0,
+                        mon_w as i32,
+                        mon_h as i32,
+                        glow::COLOR_BUFFER_BIT,
+                        glow::NEAREST,
                     );
                     self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                 }
@@ -283,10 +345,16 @@ impl Compositor {
 
         let exclude_top = self.transition_exclude_top.min(mon_h);
         let workspace_h = mon_h.saturating_sub(exclude_top);
-        if workspace_h == 0 { return; }
+        if workspace_h == 0 {
+            return;
+        }
 
         let aspect = mon_w as f32 / workspace_h as f32;
-        let top_frac = if mon_h == 0 { 0.0 } else { exclude_top as f32 / mon_h as f32 };
+        let top_frac = if mon_h == 0 {
+            0.0
+        } else {
+            exclude_top as f32 / mon_h as f32
+        };
         let uv_rect = [0.0f32, 0.0, 1.0, 1.0 - top_frac];
 
         let pi = std::f32::consts::PI;
@@ -305,21 +373,30 @@ impl Compositor {
 
         unsafe {
             self.gl.enable(glow::SCISSOR_TEST);
-            self.gl.scissor(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
-            self.gl.viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
+            self.gl
+                .scissor(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
+            self.gl
+                .viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
 
             // Draw wallpaper behind
             self.gl.clear(glow::COLOR_BUFFER_BIT);
-            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            self.gl
+                .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
             self.draw_wallpaper_in_region(ortho_proj, mon_x, mon_y, mon_w, mon_h);
-            self.gl.viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
+            self.gl
+                .viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
 
             self.gl.use_program(Some(self.cube_program));
-            self.gl.uniform_1_f32(self.cube_uniforms.aspect.as_ref(), aspect);
-            self.gl.uniform_1_i32(self.cube_uniforms.texture.as_ref(), 0);
+            self.gl
+                .uniform_1_f32(self.cube_uniforms.aspect.as_ref(), aspect);
+            self.gl
+                .uniform_1_i32(self.cube_uniforms.texture.as_ref(), 0);
             self.gl.uniform_4_f32(
                 self.cube_uniforms.uv_rect.as_ref(),
-                uv_rect[0], uv_rect[1], uv_rect[2], uv_rect[3],
+                uv_rect[0],
+                uv_rect[1],
+                uv_rect[2],
+                uv_rect[3],
             );
             self.gl.bind_vertex_array(Some(self.quad_vao));
             self.gl.active_texture(glow::TEXTURE0);
@@ -331,8 +408,10 @@ impl Compositor {
                 let model = mat4_mul(&rotate_y_matrix(angle), &translate_matrix(0.0, 0.0, d));
                 let mvp = mat4_mul(&persp, &mat4_mul(&view, &model));
                 let brightness = (1.0 - progress * 0.6).max(0.2);
-                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &mvp);
-                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), brightness);
+                self.gl
+                    .uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &mvp);
+                self.gl
+                    .uniform_1_f32(self.cube_uniforms.brightness.as_ref(), brightness);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             } else {
@@ -341,8 +420,10 @@ impl Compositor {
                 let model = mat4_mul(&rotate_y_matrix(new_angle), &translate_matrix(0.0, 0.0, d));
                 let mvp = mat4_mul(&persp, &mat4_mul(&view, &model));
                 let brightness = (0.4 + (progress - 0.5) * 1.2).min(1.0);
-                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &mvp);
-                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), brightness);
+                self.gl
+                    .uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &mvp);
+                self.gl
+                    .uniform_1_f32(self.cube_uniforms.brightness.as_ref(), brightness);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
@@ -350,7 +431,8 @@ impl Compositor {
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
             self.gl.disable(glow::SCISSOR_TEST);
-            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            self.gl
+                .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
         }
     }
 
@@ -369,9 +451,8 @@ impl Compositor {
 
         // Capture new scene
         if self.transition_new_fbo.is_none() {
-            self.transition_new_fbo = unsafe {
-                Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok()
-            };
+            self.transition_new_fbo =
+                unsafe { Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok() };
         }
         let new_tex = match &self.transition_new_fbo {
             Some((fbo, tex)) => {
@@ -382,10 +463,16 @@ impl Compositor {
                     self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
                     self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
                     self.gl.blit_framebuffer(
-                        mon_x, blit_gl_y,
-                        mon_x + mon_w as i32, blit_gl_y + mon_h as i32,
-                        0, 0, mon_w as i32, mon_h as i32,
-                        glow::COLOR_BUFFER_BIT, glow::NEAREST,
+                        mon_x,
+                        blit_gl_y,
+                        mon_x + mon_w as i32,
+                        blit_gl_y + mon_h as i32,
+                        0,
+                        0,
+                        mon_w as i32,
+                        mon_h as i32,
+                        glow::COLOR_BUFFER_BIT,
+                        glow::NEAREST,
                     );
                     self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                 }
@@ -396,9 +483,15 @@ impl Compositor {
 
         let exclude_top = self.transition_exclude_top.min(mon_h);
         let workspace_h = mon_h.saturating_sub(exclude_top);
-        if workspace_h == 0 { return; }
+        if workspace_h == 0 {
+            return;
+        }
 
-        let top_frac = if mon_h == 0 { 0.0 } else { exclude_top as f32 / mon_h as f32 };
+        let top_frac = if mon_h == 0 {
+            0.0
+        } else {
+            exclude_top as f32 / mon_h as f32
+        };
         let scissor_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
 
         let num_blinds: u32 = 8;
@@ -408,10 +501,16 @@ impl Compositor {
         unsafe {
             self.gl.enable(glow::SCISSOR_TEST);
 
-            self.gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+            self.gl
+                .blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
             self.gl.use_program(Some(self.transition_program));
-            self.gl.uniform_matrix_4_f32_slice(self.transition_uniforms.projection.as_ref(), false, ortho_proj);
-            self.gl.uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
+            self.gl.uniform_matrix_4_f32_slice(
+                self.transition_uniforms.projection.as_ref(),
+                false,
+                ortho_proj,
+            );
+            self.gl
+                .uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_vertex_array(Some(self.quad_vao));
 
@@ -445,9 +544,22 @@ impl Compositor {
                     let squeezed_w = strip_w * squeeze;
                     let offset_x = strip_x + (strip_w - squeezed_w) * 0.5;
                     let old_uv = [uv_x, 0.0f32, uv_w, 1.0 - top_frac];
-                    self.gl.uniform_4_f32(self.transition_uniforms.rect.as_ref(), offset_x, draw_y, squeezed_w.max(1.0), draw_h);
-                    self.gl.uniform_1_f32(self.transition_uniforms.opacity.as_ref(), 1.0);
-                    self.gl.uniform_4_f32(self.transition_uniforms.uv_rect.as_ref(), old_uv[0], old_uv[1], old_uv[2], old_uv[3]);
+                    self.gl.uniform_4_f32(
+                        self.transition_uniforms.rect.as_ref(),
+                        offset_x,
+                        draw_y,
+                        squeezed_w.max(1.0),
+                        draw_h,
+                    );
+                    self.gl
+                        .uniform_1_f32(self.transition_uniforms.opacity.as_ref(), 1.0);
+                    self.gl.uniform_4_f32(
+                        self.transition_uniforms.uv_rect.as_ref(),
+                        old_uv[0],
+                        old_uv[1],
+                        old_uv[2],
+                        old_uv[3],
+                    );
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
                     self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 } else {
@@ -456,9 +568,22 @@ impl Compositor {
                     let expanded_w = strip_w * expand;
                     let offset_x = strip_x + (strip_w - expanded_w) * 0.5;
                     let new_uv = [uv_x, 0.0f32, uv_w, 1.0 - top_frac];
-                    self.gl.uniform_4_f32(self.transition_uniforms.rect.as_ref(), offset_x, draw_y, expanded_w.max(1.0), draw_h);
-                    self.gl.uniform_1_f32(self.transition_uniforms.opacity.as_ref(), 1.0);
-                    self.gl.uniform_4_f32(self.transition_uniforms.uv_rect.as_ref(), new_uv[0], new_uv[1], new_uv[2], new_uv[3]);
+                    self.gl.uniform_4_f32(
+                        self.transition_uniforms.rect.as_ref(),
+                        offset_x,
+                        draw_y,
+                        expanded_w.max(1.0),
+                        draw_h,
+                    );
+                    self.gl
+                        .uniform_1_f32(self.transition_uniforms.opacity.as_ref(), 1.0);
+                    self.gl.uniform_4_f32(
+                        self.transition_uniforms.uv_rect.as_ref(),
+                        new_uv[0],
+                        new_uv[1],
+                        new_uv[2],
+                        new_uv[3],
+                    );
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
                     self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 }
@@ -491,9 +616,8 @@ impl Compositor {
 
         // Capture new scene
         if self.transition_new_fbo.is_none() {
-            self.transition_new_fbo = unsafe {
-                Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok()
-            };
+            self.transition_new_fbo =
+                unsafe { Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok() };
         }
         let new_tex = match &self.transition_new_fbo {
             Some((fbo, tex)) => {
@@ -504,10 +628,16 @@ impl Compositor {
                     self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
                     self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
                     self.gl.blit_framebuffer(
-                        mon_x, blit_gl_y,
-                        mon_x + mon_w as i32, blit_gl_y + mon_h as i32,
-                        0, 0, mon_w as i32, mon_h as i32,
-                        glow::COLOR_BUFFER_BIT, glow::NEAREST,
+                        mon_x,
+                        blit_gl_y,
+                        mon_x + mon_w as i32,
+                        blit_gl_y + mon_h as i32,
+                        0,
+                        0,
+                        mon_w as i32,
+                        mon_h as i32,
+                        glow::COLOR_BUFFER_BIT,
+                        glow::NEAREST,
                     );
                     self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                 }
@@ -518,10 +648,16 @@ impl Compositor {
 
         let exclude_top = self.transition_exclude_top.min(mon_h);
         let workspace_h = mon_h.saturating_sub(exclude_top);
-        if workspace_h == 0 { return; }
+        if workspace_h == 0 {
+            return;
+        }
 
         let aspect = mon_w as f32 / workspace_h as f32;
-        let top_frac = if mon_h == 0 { 0.0 } else { exclude_top as f32 / mon_h as f32 };
+        let top_frac = if mon_h == 0 {
+            0.0
+        } else {
+            exclude_top as f32 / mon_h as f32
+        };
         let uv_rect = [0.0f32, 0.0, 1.0, 1.0 - top_frac];
 
         let half_pi = std::f32::consts::FRAC_PI_2;
@@ -569,21 +705,30 @@ impl Compositor {
 
         unsafe {
             self.gl.enable(glow::SCISSOR_TEST);
-            self.gl.scissor(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
-            self.gl.viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
+            self.gl
+                .scissor(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
+            self.gl
+                .viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
 
             // Draw wallpaper behind
             self.gl.clear(glow::COLOR_BUFFER_BIT);
-            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            self.gl
+                .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
             self.draw_wallpaper_in_region(ortho_proj, mon_x, mon_y, mon_w, mon_h);
-            self.gl.viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
+            self.gl
+                .viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
 
             self.gl.use_program(Some(self.cube_program));
-            self.gl.uniform_1_f32(self.cube_uniforms.aspect.as_ref(), aspect);
-            self.gl.uniform_1_i32(self.cube_uniforms.texture.as_ref(), 0);
+            self.gl
+                .uniform_1_f32(self.cube_uniforms.aspect.as_ref(), aspect);
+            self.gl
+                .uniform_1_i32(self.cube_uniforms.texture.as_ref(), 0);
             self.gl.uniform_4_f32(
                 self.cube_uniforms.uv_rect.as_ref(),
-                uv_rect[0], uv_rect[1], uv_rect[2], uv_rect[3],
+                uv_rect[0],
+                uv_rect[1],
+                uv_rect[2],
+                uv_rect[3],
             );
             self.gl.bind_vertex_array(Some(self.quad_vao));
             self.gl.active_texture(glow::TEXTURE0);
@@ -591,24 +736,44 @@ impl Compositor {
             // Painter's order: draw farther card first
             if progress < 0.5 {
                 // New card is farther (on the side), draw first
-                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &new_mvp);
-                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), new_brightness);
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.cube_uniforms.mvp.as_ref(),
+                    false,
+                    &new_mvp,
+                );
+                self.gl
+                    .uniform_1_f32(self.cube_uniforms.brightness.as_ref(), new_brightness);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &old_mvp);
-                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), old_brightness);
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.cube_uniforms.mvp.as_ref(),
+                    false,
+                    &old_mvp,
+                );
+                self.gl
+                    .uniform_1_f32(self.cube_uniforms.brightness.as_ref(), old_brightness);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             } else {
                 // Old card is farther, draw first
-                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &old_mvp);
-                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), old_brightness);
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.cube_uniforms.mvp.as_ref(),
+                    false,
+                    &old_mvp,
+                );
+                self.gl
+                    .uniform_1_f32(self.cube_uniforms.brightness.as_ref(), old_brightness);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &new_mvp);
-                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), new_brightness);
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.cube_uniforms.mvp.as_ref(),
+                    false,
+                    &new_mvp,
+                );
+                self.gl
+                    .uniform_1_f32(self.cube_uniforms.brightness.as_ref(), new_brightness);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
@@ -616,7 +781,8 @@ impl Compositor {
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
             self.gl.disable(glow::SCISSOR_TEST);
-            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            self.gl
+                .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
         }
     }
 
@@ -639,9 +805,8 @@ impl Compositor {
 
         // Capture new scene
         if self.transition_new_fbo.is_none() {
-            self.transition_new_fbo = unsafe {
-                Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok()
-            };
+            self.transition_new_fbo =
+                unsafe { Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok() };
         }
         let new_tex = match &self.transition_new_fbo {
             Some((fbo, tex)) => {
@@ -652,10 +817,16 @@ impl Compositor {
                     self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
                     self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
                     self.gl.blit_framebuffer(
-                        mon_x, blit_gl_y,
-                        mon_x + mon_w as i32, blit_gl_y + mon_h as i32,
-                        0, 0, mon_w as i32, mon_h as i32,
-                        glow::COLOR_BUFFER_BIT, glow::NEAREST,
+                        mon_x,
+                        blit_gl_y,
+                        mon_x + mon_w as i32,
+                        blit_gl_y + mon_h as i32,
+                        0,
+                        0,
+                        mon_w as i32,
+                        mon_h as i32,
+                        glow::COLOR_BUFFER_BIT,
+                        glow::NEAREST,
                     );
                     self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                 }
@@ -666,10 +837,16 @@ impl Compositor {
 
         let exclude_top = self.transition_exclude_top.min(mon_h);
         let workspace_h = mon_h.saturating_sub(exclude_top);
-        if workspace_h == 0 { return; }
+        if workspace_h == 0 {
+            return;
+        }
 
         let aspect = mon_w as f32 / workspace_h as f32;
-        let top_frac = if mon_h == 0 { 0.0 } else { exclude_top as f32 / mon_h as f32 };
+        let top_frac = if mon_h == 0 {
+            0.0
+        } else {
+            exclude_top as f32 / mon_h as f32
+        };
         let uv_rect = [0.0f32, 0.0, 1.0, 1.0 - top_frac];
 
         let half_pi = std::f32::consts::FRAC_PI_2;
@@ -730,21 +907,30 @@ impl Compositor {
 
         unsafe {
             self.gl.enable(glow::SCISSOR_TEST);
-            self.gl.scissor(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
-            self.gl.viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
+            self.gl
+                .scissor(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
+            self.gl
+                .viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
 
             // Draw wallpaper behind
             self.gl.clear(glow::COLOR_BUFFER_BIT);
-            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            self.gl
+                .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
             self.draw_wallpaper_in_region(ortho_proj, mon_x, mon_y, mon_w, mon_h);
-            self.gl.viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
+            self.gl
+                .viewport(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
 
             self.gl.use_program(Some(self.cube_program));
-            self.gl.uniform_1_f32(self.cube_uniforms.aspect.as_ref(), aspect);
-            self.gl.uniform_1_i32(self.cube_uniforms.texture.as_ref(), 0);
+            self.gl
+                .uniform_1_f32(self.cube_uniforms.aspect.as_ref(), aspect);
+            self.gl
+                .uniform_1_i32(self.cube_uniforms.texture.as_ref(), 0);
             self.gl.uniform_4_f32(
                 self.cube_uniforms.uv_rect.as_ref(),
-                uv_rect[0], uv_rect[1], uv_rect[2], uv_rect[3],
+                uv_rect[0],
+                uv_rect[1],
+                uv_rect[2],
+                uv_rect[3],
             );
             self.gl.bind_vertex_array(Some(self.quad_vao));
             self.gl.active_texture(glow::TEXTURE0);
@@ -752,24 +938,44 @@ impl Compositor {
             // Draw farther face first (painter's algorithm based on z depth)
             if old_z > new_z {
                 // Old is farther, draw it first
-                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &old_mvp);
-                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), old_brightness);
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.cube_uniforms.mvp.as_ref(),
+                    false,
+                    &old_mvp,
+                );
+                self.gl
+                    .uniform_1_f32(self.cube_uniforms.brightness.as_ref(), old_brightness);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &new_mvp);
-                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), new_brightness);
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.cube_uniforms.mvp.as_ref(),
+                    false,
+                    &new_mvp,
+                );
+                self.gl
+                    .uniform_1_f32(self.cube_uniforms.brightness.as_ref(), new_brightness);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             } else {
                 // New is farther, draw it first
-                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &new_mvp);
-                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), new_brightness);
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.cube_uniforms.mvp.as_ref(),
+                    false,
+                    &new_mvp,
+                );
+                self.gl
+                    .uniform_1_f32(self.cube_uniforms.brightness.as_ref(), new_brightness);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
-                self.gl.uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, &old_mvp);
-                self.gl.uniform_1_f32(self.cube_uniforms.brightness.as_ref(), old_brightness);
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.cube_uniforms.mvp.as_ref(),
+                    false,
+                    &old_mvp,
+                );
+                self.gl
+                    .uniform_1_f32(self.cube_uniforms.brightness.as_ref(), old_brightness);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
@@ -777,7 +983,8 @@ impl Compositor {
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
             self.gl.disable(glow::SCISSOR_TEST);
-            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            self.gl
+                .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
         }
     }
 
@@ -800,9 +1007,8 @@ impl Compositor {
 
         // Capture new scene
         if self.transition_new_fbo.is_none() {
-            self.transition_new_fbo = unsafe {
-                Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok()
-            };
+            self.transition_new_fbo =
+                unsafe { Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok() };
         }
         let new_tex = match &self.transition_new_fbo {
             Some((fbo, tex)) => {
@@ -813,10 +1019,16 @@ impl Compositor {
                     self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
                     self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
                     self.gl.blit_framebuffer(
-                        mon_x, blit_gl_y,
-                        mon_x + mon_w as i32, blit_gl_y + mon_h as i32,
-                        0, 0, mon_w as i32, mon_h as i32,
-                        glow::COLOR_BUFFER_BIT, glow::NEAREST,
+                        mon_x,
+                        blit_gl_y,
+                        mon_x + mon_w as i32,
+                        blit_gl_y + mon_h as i32,
+                        0,
+                        0,
+                        mon_w as i32,
+                        mon_h as i32,
+                        glow::COLOR_BUFFER_BIT,
+                        glow::NEAREST,
                     );
                     self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                 }
@@ -827,9 +1039,15 @@ impl Compositor {
 
         let exclude_top = self.transition_exclude_top.min(mon_h);
         let workspace_h = mon_h.saturating_sub(exclude_top);
-        if workspace_h == 0 { return; }
+        if workspace_h == 0 {
+            return;
+        }
 
-        let top_frac = if mon_h == 0 { 0.0 } else { exclude_top as f32 / mon_h as f32 };
+        let top_frac = if mon_h == 0 {
+            0.0
+        } else {
+            exclude_top as f32 / mon_h as f32
+        };
 
         let draw_x = mon_x as f32;
         let draw_y = (mon_y as u32 + exclude_top) as f32;
@@ -845,26 +1063,38 @@ impl Compositor {
 
         unsafe {
             self.gl.enable(glow::SCISSOR_TEST);
-            self.gl.scissor(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
-            self.gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+            self.gl
+                .scissor(mon_x, scissor_gl_y, mon_w as i32, workspace_h as i32);
+            self.gl
+                .blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
 
             // Step 1: Draw the new scene as the base layer (fully visible)
             self.gl.use_program(Some(self.transition_program));
             self.gl.uniform_matrix_4_f32_slice(
-                self.transition_uniforms.projection.as_ref(), false, ortho_proj,
+                self.transition_uniforms.projection.as_ref(),
+                false,
+                ortho_proj,
             );
-            self.gl.uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
+            self.gl
+                .uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_vertex_array(Some(self.quad_vao));
 
             self.gl.uniform_4_f32(
                 self.transition_uniforms.rect.as_ref(),
-                draw_x, draw_y, draw_w, draw_h,
+                draw_x,
+                draw_y,
+                draw_w,
+                draw_h,
             );
-            self.gl.uniform_1_f32(self.transition_uniforms.opacity.as_ref(), 1.0);
+            self.gl
+                .uniform_1_f32(self.transition_uniforms.opacity.as_ref(), 1.0);
             self.gl.uniform_4_f32(
                 self.transition_uniforms.uv_rect.as_ref(),
-                uv[0], uv[1], uv[2], uv[3],
+                uv[0],
+                uv[1],
+                uv[2],
+                uv[3],
             );
             self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -877,19 +1107,31 @@ impl Compositor {
             // the hole (mask > 0) and fades as the circle grows.
             self.gl.use_program(Some(self.portal_program));
             self.gl.uniform_matrix_4_f32_slice(
-                self.portal_uniforms.projection.as_ref(), false, ortho_proj,
+                self.portal_uniforms.projection.as_ref(),
+                false,
+                ortho_proj,
             );
             self.gl.uniform_4_f32(
                 self.portal_uniforms.rect.as_ref(),
-                draw_x, draw_y, draw_w, draw_h,
+                draw_x,
+                draw_y,
+                draw_w,
+                draw_h,
             );
-            self.gl.uniform_1_i32(self.portal_uniforms.texture.as_ref(), 0);
-            self.gl.uniform_1_f32(self.portal_uniforms.progress.as_ref(), progress);
-            self.gl.uniform_1_f32(self.portal_uniforms.glow.as_ref(), glow_intensity);
-            self.gl.uniform_2_f32(self.portal_uniforms.center.as_ref(), 0.5, 0.5);
+            self.gl
+                .uniform_1_i32(self.portal_uniforms.texture.as_ref(), 0);
+            self.gl
+                .uniform_1_f32(self.portal_uniforms.progress.as_ref(), progress);
+            self.gl
+                .uniform_1_f32(self.portal_uniforms.glow.as_ref(), glow_intensity);
+            self.gl
+                .uniform_2_f32(self.portal_uniforms.center.as_ref(), 0.5, 0.5);
             self.gl.uniform_4_f32(
                 self.portal_uniforms.uv_rect.as_ref(),
-                uv[0], uv[1], uv[2], uv[3],
+                uv[0],
+                uv[1],
+                uv[2],
+                uv[3],
             );
             self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);

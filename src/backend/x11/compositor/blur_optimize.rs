@@ -1,7 +1,7 @@
+use super::BlurQuality;
+use std::sync::Arc;
 /// Blur effect optimizations including adaptive quality and dual-pass Gaussian
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
-use super::BlurQuality;
 
 /// Adaptive blur quality based on system load
 pub struct AdaptiveBlur {
@@ -34,7 +34,8 @@ impl AdaptiveBlur {
 
         if let Ok(mut q) = self.quality.lock() {
             if *q != quality {
-                log::info!("blur: adaptive quality changed to {}",
+                log::info!(
+                    "blur: adaptive quality changed to {}",
                     match quality {
                         BlurQuality::Full => "full",
                         BlurQuality::Reduced => "reduced",
@@ -48,7 +49,8 @@ impl AdaptiveBlur {
 
     /// Get current blur quality
     pub fn quality(&self) -> BlurQuality {
-        self.quality.lock()
+        self.quality
+            .lock()
             .ok()
             .map(|q| *q)
             .unwrap_or(BlurQuality::Full)
@@ -63,7 +65,8 @@ impl AdaptiveBlur {
     pub fn set_quality(&self, quality: BlurQuality) {
         if let Ok(mut q) = self.quality.lock() {
             if *q != quality {
-                log::info!("blur: quality manually set to {}",
+                log::info!(
+                    "blur: quality manually set to {}",
                     match quality {
                         BlurQuality::Full => "full",
                         BlurQuality::Reduced => "reduced",
@@ -202,7 +205,8 @@ impl BlurCache {
 
     /// Get cache statistics
     pub fn stats(&self) -> BlurCacheStats {
-        self.stats.lock()
+        self.stats
+            .lock()
             .ok()
             .map(|s| s.clone())
             .unwrap_or_default()

@@ -1,16 +1,26 @@
+use super::Compositor;
+use super::{
+    GLX_FRONT_LEFT_EXT, GLX_TEXTURE_2D_EXT, GLX_TEXTURE_FORMAT_EXT, GLX_TEXTURE_FORMAT_RGB_EXT,
+    GLX_TEXTURE_FORMAT_RGBA_EXT, GLX_TEXTURE_TARGET_EXT, RippleState, WindowTexture,
+};
 use glow::HasContext;
 use x11rb::connection::Connection;
 use x11rb::protocol::composite::ConnectionExt as CompositeExt;
 use x11rb::protocol::damage::{self, ConnectionExt as DamageExt};
 use x11rb::protocol::xproto::ConnectionExt as XProtoExt;
-use super::Compositor;
-use super::{WindowTexture, RippleState, GLX_TEXTURE_TARGET_EXT, GLX_TEXTURE_2D_EXT, GLX_TEXTURE_FORMAT_EXT, GLX_TEXTURE_FORMAT_RGBA_EXT, GLX_TEXTURE_FORMAT_RGB_EXT, GLX_FRONT_LEFT_EXT};
 
 impl Compositor {
     // =====================================================================
     // Feature 13: Set frame extents for blur mask
     // =====================================================================
-    pub(in crate::backend::x11) fn set_frame_extents(&mut self, x11_win: u32, left: u32, right: u32, top: u32, bottom: u32) {
+    pub(in crate::backend::x11) fn set_frame_extents(
+        &mut self,
+        x11_win: u32,
+        left: u32,
+        right: u32,
+        top: u32,
+        bottom: u32,
+    ) {
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             wt.frame_extents = [left, right, top, bottom];
         }
@@ -28,7 +38,11 @@ impl Compositor {
     // =====================================================================
     // Mark window as override-redirect (unmanaged overlay)
     // =====================================================================
-    pub(in crate::backend::x11) fn set_window_override_redirect(&mut self, x11_win: u32, is_or: bool) {
+    pub(in crate::backend::x11) fn set_window_override_redirect(
+        &mut self,
+        x11_win: u32,
+        is_or: bool,
+    ) {
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             wt.is_override_redirect = is_or;
         }
@@ -36,7 +50,14 @@ impl Compositor {
 
     // ----- Window management -----
 
-    pub(in crate::backend::x11) fn add_window(&mut self, x11_win: u32, x: i32, y: i32, w: u32, h: u32) {
+    pub(in crate::backend::x11) fn add_window(
+        &mut self,
+        x11_win: u32,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+    ) {
         if self.windows.contains_key(&x11_win) {
             return;
         }
@@ -45,7 +66,11 @@ impl Compositor {
         }
         log::info!(
             "compositor: add_window START 0x{:x} {}x{} at ({},{})",
-            x11_win, w, h, x, y
+            x11_win,
+            w,
+            h,
+            x,
+            y
         );
 
         // Create damage
@@ -104,7 +129,9 @@ impl Compositor {
         {
             log::debug!(
                 "compositor: win 0x{:x} visual 0x{:x} -> per-visual FBConfig (rgba={})",
-                x11_win, win_visual, is_rgba
+                x11_win,
+                win_visual,
+                is_rgba
             );
             (cfg, is_rgba)
         } else {
@@ -117,14 +144,19 @@ impl Compositor {
             };
             log::debug!(
                 "compositor: win 0x{:x} visual 0x{:x} depth={} -> depth-based FBConfig (rgba={})",
-                x11_win, win_visual, win_depth, rgba
+                x11_win,
+                win_visual,
+                win_depth,
+                rgba
             );
             (cfg, rgba)
         };
         if fbconfig.is_null() {
             log::warn!(
                 "compositor: no fbconfig for visual=0x{:x} depth={} win=0x{:x}",
-                win_visual, win_depth, x11_win
+                win_visual,
+                win_depth,
+                x11_win
             );
             let _ = self.conn.free_pixmap(pixmap);
             let _ = self.conn.damage_destroy(damage_id);
@@ -147,7 +179,10 @@ impl Compositor {
 
         log::info!(
             "compositor: add_window 0x{:x} depth={} rgba={} pixmap=0x{:x}, calling glXCreatePixmap...",
-            x11_win, win_depth, use_rgba, pixmap
+            x11_win,
+            win_depth,
+            use_rgba,
+            pixmap
         );
         let glx_pixmap = unsafe {
             // Sync both connections so the Xlib display can see the pixmap
@@ -184,7 +219,10 @@ impl Compositor {
         };
 
         // Bind texture
-        log::info!("compositor: add_window 0x{:x} binding TFP texture...", x11_win);
+        log::info!(
+            "compositor: add_window 0x{:x} binding TFP texture...",
+            x11_win
+        );
         unsafe {
             self.gl.bind_texture(glow::TEXTURE_2D, Some(gl_texture));
             self.gl.tex_parameter_i32(
@@ -245,7 +283,11 @@ impl Compositor {
                 scale: 1.0,
                 frame_extents: [0; 4],
                 is_shaped: false,
-                anim_scale: if self.window_animation { self.window_animation_scale } else { 1.0 },
+                anim_scale: if self.window_animation {
+                    self.window_animation_scale
+                } else {
+                    1.0
+                },
                 anim_scale_target: 1.0,
                 is_urgent: false,
                 is_pip: false,
@@ -286,7 +328,10 @@ impl Compositor {
         }
         log::info!(
             "compositor: resize {}x{} -> {}x{}",
-            self.screen_w, self.screen_h, new_w, new_h
+            self.screen_w,
+            self.screen_h,
+            new_w,
+            new_h
         );
         self.screen_w = new_w;
         self.screen_h = new_h;
@@ -343,8 +388,10 @@ impl Compositor {
             if let Some(wt) = self.windows.get(&x11_win) {
                 self.start_genie_animation(
                     x11_win,
-                    wt.x as f32, wt.y as f32,
-                    wt.w as f32, wt.h as f32,
+                    wt.x as f32,
+                    wt.y as f32,
+                    wt.w as f32,
+                    wt.h as f32,
                 );
             }
         }
@@ -388,7 +435,14 @@ impl Compositor {
         log::debug!("compositor: remove_window 0x{:x}", x11_win);
     }
 
-    pub(in crate::backend::x11) fn update_geometry(&mut self, x11_win: u32, x: i32, y: i32, w: u32, h: u32) {
+    pub(in crate::backend::x11) fn update_geometry(
+        &mut self,
+        x11_win: u32,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+    ) {
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             let size_changed = wt.w != w || wt.h != h;
             let moved = wt.x != x || wt.y != y;
@@ -566,7 +620,11 @@ impl Compositor {
     }
 
     /// Set/unset fullscreen state for a window (for fullscreen unredirect).
-    pub(in crate::backend::x11) fn set_window_fullscreen(&mut self, x11_win: u32, fullscreen: bool) {
+    pub(in crate::backend::x11) fn set_window_fullscreen(
+        &mut self,
+        x11_win: u32,
+        fullscreen: bool,
+    ) {
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             if wt.is_fullscreen != fullscreen {
                 wt.is_fullscreen = fullscreen;

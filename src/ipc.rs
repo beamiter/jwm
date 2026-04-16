@@ -134,8 +134,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "togglesticky" => Ok((Jwm::togglesticky, parse_int_arg(args, 0))),
         "togglepip" => Ok((Jwm::togglepip, parse_int_arg(args, 0))),
         "togglescratchpad" => {
-            let cmd = parse_string_vec_arg(args)
-                .unwrap_or_else(|_| vec!["term".to_string()]);
+            let cmd = parse_string_vec_arg(args).unwrap_or_else(|_| vec!["term".to_string()]);
             Ok((Jwm::togglescratchpad, WMArgEnum::StringVec(cmd)))
         }
         "movestack" => Ok((Jwm::movestack, parse_int_arg(args, 1))),
@@ -224,9 +223,15 @@ fn parse_uint_arg(args: &Value) -> WMArgEnum {
 
 fn parse_string_vec_arg(args: &Value) -> Result<Vec<String>, String> {
     if let Some(arr) = args.get("cmd").and_then(|v| v.as_array()) {
-        Ok(arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        Ok(arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect())
     } else if let Some(arr) = args.as_array() {
-        Ok(arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        Ok(arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect())
     } else if let Some(s) = args.as_str() {
         Ok(vec![s.to_string()])
     } else {
@@ -284,7 +289,9 @@ mod tests {
     fn parse_command_message() {
         let json = r#"{"command": "view", "args": {"tag": 2}}"#;
         let msg: IpcMessage = serde_json::from_str(json).unwrap();
-        assert!(matches!(msg, IpcMessage::Command(IpcCommand { command, .. }) if command == "view"));
+        assert!(
+            matches!(msg, IpcMessage::Command(IpcCommand { command, .. }) if command == "view")
+        );
     }
 
     #[test]
@@ -341,11 +348,7 @@ mod tests {
         let (_, arg) = dispatch_command("spawn", &args).unwrap();
         assert_eq!(
             arg,
-            WMArgEnum::StringVec(vec![
-                "alacritty".into(),
-                "--title".into(),
-                "test".into()
-            ])
+            WMArgEnum::StringVec(vec!["alacritty".into(), "--title".into(), "test".into()])
         );
     }
 

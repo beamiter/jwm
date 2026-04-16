@@ -1,7 +1,7 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 /// Frame rate limiter and VSync control
 use std::time::{Duration, Instant};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
 
 /// Controls frame timing and VSync behavior
 pub struct FrameRateLimiter {
@@ -18,7 +18,9 @@ impl FrameRateLimiter {
             target_fps: Arc::new(AtomicU32::new(target_fps)),
             enable_vsync: Arc::new(AtomicBool::new(true)),
             last_frame: Arc::new(std::sync::Mutex::new(Instant::now())),
-            frame_budget: Arc::new(std::sync::Mutex::new(Duration::from_nanos(frame_budget as u64))),
+            frame_budget: Arc::new(std::sync::Mutex::new(Duration::from_nanos(
+                frame_budget as u64,
+            ))),
         }
     }
 
@@ -71,7 +73,8 @@ impl FrameRateLimiter {
 
     /// Get frame time budget
     pub fn frame_budget(&self) -> Duration {
-        self.frame_budget.lock()
+        self.frame_budget
+            .lock()
             .ok()
             .map(|f| *f)
             .unwrap_or_else(|| Duration::from_millis(16))
@@ -79,7 +82,8 @@ impl FrameRateLimiter {
 
     /// Get time since last frame
     pub fn time_since_last_frame(&self) -> Duration {
-        self.last_frame.lock()
+        self.last_frame
+            .lock()
             .ok()
             .map(|t| t.elapsed())
             .unwrap_or_default()

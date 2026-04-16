@@ -1,16 +1,16 @@
 /// Performance metrics and monitoring for the compositor
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Frame timing statistics
 #[derive(Clone)]
 pub struct PerfMetrics {
     frame_times: Arc<Mutex<VecDeque<Duration>>>,
     compositor_times: Arc<Mutex<VecDeque<Duration>>>,
-    gpu_load: Arc<AtomicU32>,  // 0-100
-    cpu_load: Arc<AtomicU32>,  // 0-100
+    gpu_load: Arc<AtomicU32>, // 0-100
+    cpu_load: Arc<AtomicU32>, // 0-100
     frame_count: Arc<AtomicU64>,
     max_history: usize,
 }
@@ -114,7 +114,8 @@ impl PerfMetrics {
 
     /// Get max frame time (worst case)
     pub fn max_frame_time(&self) -> Duration {
-        self.frame_times.lock()
+        self.frame_times
+            .lock()
             .ok()
             .and_then(|t| t.iter().copied().max())
             .unwrap_or_default()
@@ -122,7 +123,8 @@ impl PerfMetrics {
 
     /// Get min frame time (best case)
     pub fn min_frame_time(&self) -> Duration {
-        self.frame_times.lock()
+        self.frame_times
+            .lock()
             .ok()
             .and_then(|t| t.iter().copied().min())
             .unwrap_or_default()

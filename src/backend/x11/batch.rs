@@ -1,14 +1,13 @@
+use crate::backend::error::BackendError;
+use std::sync::Arc;
+use std::sync::Mutex;
 /// X11 Request Batching - Reduces flush() calls for better performance
 ///
 /// Instead of flushing after every configure/property operation,
 /// batch operations and flush periodically to reduce X11 round-trips.
-
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::sync::Mutex;
 use x11rb::connection::Connection;
-use crate::backend::error::BackendError;
 
 /// Batches X11 requests and flushes intelligently
 pub struct X11RequestBatcher {
@@ -28,7 +27,7 @@ impl X11RequestBatcher {
         Self {
             pending_ops: Arc::new(AtomicU32::new(0)),
             last_flush: Arc::new(Mutex::new(Instant::now())),
-            flush_op_threshold: Arc::new(AtomicU32::new(8)),     // Flush after 8 queued operations
+            flush_op_threshold: Arc::new(AtomicU32::new(8)), // Flush after 8 queued operations
             flush_time_threshold_ms: Arc::new(std::sync::atomic::AtomicU64::new(8)), // OR after 8ms
             system_load: Arc::new(AtomicU32::new(50)),
         }

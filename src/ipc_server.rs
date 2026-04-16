@@ -32,7 +32,12 @@ impl IpcClient {
         let mut tmp = [0u8; 4096];
         loop {
             match self.stream.read(&mut tmp) {
-                Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "client disconnected")),
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "client disconnected",
+                    ));
+                }
                 Ok(n) => self.buf.extend_from_slice(&tmp[..n]),
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) => return Err(e),
@@ -63,9 +68,9 @@ impl IpcClient {
     }
 
     fn is_subscribed(&self, event_type: &str) -> bool {
-        self.subscriptions.iter().any(|s| {
-            s == "*" || s == event_type || event_type.starts_with(&format!("{s}/"))
-        })
+        self.subscriptions
+            .iter()
+            .any(|s| s == "*" || s == event_type || event_type.starts_with(&format!("{s}/")))
     }
 }
 
@@ -183,7 +188,8 @@ impl IpcServer {
                             }
                             Err(e) => {
                                 warn!("[ipc] bad message from client {id}: {e}");
-                                let _ = client.send_response(&IpcResponse::err(format!("parse error: {e}")));
+                                let _ = client
+                                    .send_response(&IpcResponse::err(format!("parse error: {e}")));
                             }
                         }
                     }
@@ -277,7 +283,9 @@ mod tests {
 
         // Connect a client and send a command
         let mut client = UnixStream::connect(&path).unwrap();
-        client.write_all(b"{\"command\":\"killclient\",\"args\":null}\n").unwrap();
+        client
+            .write_all(b"{\"command\":\"killclient\",\"args\":null}\n")
+            .unwrap();
 
         // Give the OS a moment
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -298,7 +306,9 @@ mod tests {
 
         let mut client = UnixStream::connect(&path).unwrap();
         client.set_nonblocking(false).unwrap();
-        client.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
         client.write_all(b"{\"query\":\"get_version\"}\n").unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -329,11 +339,13 @@ mod tests {
         let path = server.socket_path.clone();
 
         let mut c1 = UnixStream::connect(&path).unwrap();
-        c1.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        c1.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
         c1.write_all(b"{\"subscribe\":[\"window\"]}\n").unwrap();
 
         let mut c2 = UnixStream::connect(&path).unwrap();
-        c2.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        c2.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
         // c2 doesn't subscribe
 
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -367,7 +379,8 @@ mod tests {
         assert!(line.contains("window/new"));
 
         // c2 should NOT receive (no subscription, and read would block/timeout)
-        c2.set_read_timeout(Some(std::time::Duration::from_millis(100))).unwrap();
+        c2.set_read_timeout(Some(std::time::Duration::from_millis(100)))
+            .unwrap();
         let result = std::io::Read::read(&mut c2, &mut [0u8; 1024]);
         assert!(result.is_err() || result.unwrap() == 0);
     }

@@ -1,8 +1,8 @@
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
+use std::env;
 use std::process::Command;
 use std::sync::RwLock;
-use std::env;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -197,12 +197,18 @@ impl AdvancedTerminalProber {
         None
     }
 
-    pub fn get_available_terminal_with_priority(&self, preferred: Option<&str>) -> Option<&TerminalConfig> {
+    pub fn get_available_terminal_with_priority(
+        &self,
+        preferred: Option<&str>,
+    ) -> Option<&TerminalConfig> {
         // If a preferred terminal is specified and available, use it first
         if let Some(pref) = preferred {
             if let Some(config) = self.configs.get(pref) {
                 if self.is_command_available(&config.command) {
-                    println!("[get_available_terminal_with_priority] Using preferred terminal: {:?}", config);
+                    println!(
+                        "[get_available_terminal_with_priority] Using preferred terminal: {:?}",
+                        config
+                    );
                     return Some(config);
                 }
             }

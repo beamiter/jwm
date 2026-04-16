@@ -37,8 +37,8 @@ use crate::backend::api::Geometry;
 use crate::backend::api::NetWmAction;
 use crate::backend::api::NetWmState;
 use crate::backend::api::PropertyKind;
-use crate::backend::api::StrutPartial;
 use crate::backend::api::StackMode;
+use crate::backend::api::StrutPartial;
 use crate::backend::api::WindowChanges;
 use crate::backend::api::WindowType;
 use crate::backend::common_define::ArgbColor;
@@ -50,9 +50,13 @@ use crate::backend::common_define::keys;
 use crate::backend::common_define::{KeySym, Mods, MouseButton, StdCursorKind};
 use crate::config::CONFIG;
 use crate::core::layout::LayoutEnum;
-use crate::ipc::{self, IpcEvent, IpcResponse, MonitorInfoIpc, TreeNode, WindowInfo, WorkspaceInfo};
-use crate::ipc_server::{IpcServer, IncomingIpc};
-use crate::core::models::{ClientKey, MonitorKey, Pertag, ScrollingState, SizeHints, WMClient, WMMonitor};
+use crate::core::models::{
+    ClientKey, MonitorKey, Pertag, ScrollingState, SizeHints, WMClient, WMMonitor,
+};
+use crate::ipc::{
+    self, IpcEvent, IpcResponse, MonitorInfoIpc, TreeNode, WindowInfo, WorkspaceInfo,
+};
+use crate::ipc_server::{IncomingIpc, IpcServer};
 
 use crate::core::animation::{AnimationKind, AnimationManager};
 use crate::core::layout::{self, LayoutClient, LayoutParams, LayoutResult, ScrollingParams};
@@ -488,12 +492,19 @@ impl WMController for Jwm {
                         };
                         if let Some((sx, sy, sw, sh)) = snap_rect {
                             if let Some(ck) = self.get_selected_client_key() {
-                                let bw = self.state.clients.get(ck)
-                                    .map(|c| c.geometry.border_w).unwrap_or(0);
+                                let bw = self
+                                    .state
+                                    .clients
+                                    .get(ck)
+                                    .map(|c| c.geometry.border_w)
+                                    .unwrap_or(0);
                                 self.resize_client(
-                                    backend, ck,
-                                    sx + bw, sy + bw,
-                                    sw - 2 * bw, sh - 2 * bw,
+                                    backend,
+                                    ck,
+                                    sx + bw,
+                                    sy + bw,
+                                    sw - 2 * bw,
+                                    sh - 2 * bw,
                                     false,
                                 );
                             }
@@ -704,8 +715,10 @@ impl WMController for Jwm {
                         let changed = self.external_struts.get(&win) != Some(&strut);
                         self.external_struts.insert(win, strut);
                         if changed {
-                            info!("[strut] Updated external strut for {:?}: top={} bottom={} left={} right={}",
-                                win, strut.top, strut.bottom, strut.left, strut.right);
+                            info!(
+                                "[strut] Updated external strut for {:?}: top={} bottom={} left={} right={}",
+                                win, strut.top, strut.bottom, strut.left, strut.right
+                            );
                             self.apply_strut_reservations();
                             self.arrange(backend, None);
                         }
@@ -835,12 +848,7 @@ impl WMController for Jwm {
 // _NET_WM_MOVERESIZE & Strut helpers
 // =================================================================================
 impl Jwm {
-    fn on_moveresize_request(
-        &mut self,
-        backend: &mut dyn Backend,
-        win: WindowId,
-        direction: u32,
-    ) {
+    fn on_moveresize_request(&mut self, backend: &mut dyn Backend, win: WindowId, direction: u32) {
         const _NET_WM_MOVERESIZE_CANCEL: u32 = 11;
         const _NET_WM_MOVERESIZE_MOVE: u32 = 8;
 
@@ -1022,10 +1030,8 @@ impl EventHandler for Jwm {
                             // Cache initial geometry so build_compositor_scene doesn't
                             // need a synchronous GetGeometry round-trip every frame.
                             if let Ok(geom) = backend.window_ops().get_geometry(win) {
-                                self.or_window_geometries.insert(
-                                    win,
-                                    (geom.x, geom.y, geom.w, geom.h),
-                                );
+                                self.or_window_geometries
+                                    .insert(win, (geom.x, geom.y, geom.w, geom.h));
                             }
                         }
                     }
@@ -1763,7 +1769,11 @@ impl Jwm {
 
             // Tab / Shift+Tab / Alt+Tab / Alt+Shift+Tab → cycle forward / backward
             if keysym == keys::KEY_Tab && !overview_mods.contains(Mods::CONTROL) {
-                let direction = if overview_mods.contains(Mods::SHIFT) { -1 } else { 1 };
+                let direction = if overview_mods.contains(Mods::SHIFT) {
+                    -1
+                } else {
+                    1
+                };
                 if debug_keys {
                     info!(
                         "[overview] cycle via Tab keysym=0x{:x} mods=0x{:x} direction={}",
@@ -1818,10 +1828,7 @@ impl Jwm {
             if keysym == key_config.key_sym && kc_mask == clean_state {
                 matched = true;
                 if debug_keys {
-                    let func_name = key_config
-                        .func_opt
-                        .map(Self::func_name)
-                        .unwrap_or("<none>");
+                    let func_name = key_config.func_opt.map(Self::func_name).unwrap_or("<none>");
                     info!(
                         "[key] matched keysym=0x{:x} mods=0x{:x} func={} arg={:?}",
                         keysym,
@@ -2111,7 +2118,9 @@ impl Jwm {
         backend.window_ops().apply_window_changes(window, changes)?;
         backend.compositor_force_full_redraw();
 
-        let monitor_key = self.current_bar_monitor_id.and_then(|id| self.get_monitor_by_id(id));
+        let monitor_key = self
+            .current_bar_monitor_id
+            .and_then(|id| self.get_monitor_by_id(id));
         self.arrange(backend, monitor_key);
         if let Some(client_key) = self.wintoclient(window) {
             self.configure_client(backend, client_key)?;
@@ -2259,8 +2268,7 @@ impl Jwm {
                                 let left = clamp.x.max(parent_rect.x);
                                 let top = clamp.y.max(parent_rect.y);
                                 let right = (clamp.x + clamp.w).min(parent_rect.x + parent_rect.w);
-                                let bottom =
-                                    (clamp.y + clamp.h).min(parent_rect.y + parent_rect.h);
+                                let bottom = (clamp.y + clamp.h).min(parent_rect.y + parent_rect.h);
                                 let w = (right - left).max(0);
                                 let h = (bottom - top).max(0);
                                 if w > 0 && h > 0 {
@@ -2308,8 +2316,7 @@ impl Jwm {
 
             // Clamp floating (non-fullscreen) windows to the monitor workarea so they don't end
             // up under dock/statusbar reserved space.
-            if let (Some(mon_key), Some((x, y, total_w, total_h))) = (mon_key_opt, clamp_request)
-            {
+            if let (Some(mon_key), Some((x, y, total_w, total_h))) = (mon_key_opt, clamp_request) {
                 let clamp = self
                     .monitor_work_area(mon_key)
                     .unwrap_or(Rect::new(mx, my, mw, mh));
@@ -2531,7 +2538,10 @@ impl Jwm {
     fn reorder_client_in_monitor_groups(&mut self, client_key: ClientKey) {
         let (Some(mon_key), Some(is_floating)) = (
             self.state.clients.get(client_key).and_then(|c| c.mon),
-            self.state.clients.get(client_key).map(|c| c.state.is_floating),
+            self.state
+                .clients
+                .get(client_key)
+                .map(|c| c.state.is_floating),
         ) else {
             return;
         };
@@ -2641,7 +2651,8 @@ impl Jwm {
         if let Some(client) = self.state.clients.get(client_key) {
             if let Some(mon_key) = client.mon {
                 if let Some(monitor) = self.state.monitors.get(mon_key) {
-                    return client.state.is_sticky || (client.state.tags & monitor.get_active_tags()) > 0;
+                    return client.state.is_sticky
+                        || (client.state.tags & monitor.get_active_tags()) > 0;
                 }
             }
         }
@@ -2649,12 +2660,7 @@ impl Jwm {
         false
     }
 
-    fn should_animate_tag_switch(
-        &self,
-        mon_key: MonitorKey,
-        old_mask: u32,
-        new_mask: u32,
-    ) -> bool {
+    fn should_animate_tag_switch(&self, mon_key: MonitorKey, old_mask: u32, new_mask: u32) -> bool {
         let Some(client_keys) = self.state.monitor_clients.get(mon_key) else {
             return false;
         };
@@ -3464,7 +3470,11 @@ impl Jwm {
         };
 
         // Compositor renders borders via GPU — tell X11 border is 0.
-        let x11_bw = if backend.has_compositor() { 0 } else { border_w as u32 };
+        let x11_bw = if backend.has_compositor() {
+            0
+        } else {
+            border_w as u32
+        };
 
         let scheme = if is_focused {
             SchemeType::Sel
@@ -3712,7 +3722,10 @@ impl Jwm {
             // window still receives hover/click events at its old position.
             if backend.has_compositor() {
                 if let Err(e) = self.move_window(backend, win, hidden_x, y) {
-                    warn!("[hide_client] Failed to move window off-screen {:?}: {:?}", win, e);
+                    warn!(
+                        "[hide_client] Failed to move window off-screen {:?}: {:?}",
+                        win, e
+                    );
                 }
             }
         } else {
@@ -3806,14 +3819,9 @@ impl Jwm {
                 // can animate from the correct position. Without this, the window
                 // might be off-screen or at a stale position, causing visual glitches.
                 if backend.has_compositor() {
-                    backend.window_ops().configure(
-                        client.win,
-                        x,
-                        y,
-                        w as u32,
-                        h as u32,
-                        x11_bw,
-                    )?;
+                    backend
+                        .window_ops()
+                        .configure(client.win, x, y, w as u32, h as u32, x11_bw)?;
                 } else {
                     backend.window_ops().configure(
                         client.win,
@@ -3825,14 +3833,9 @@ impl Jwm {
                     )?;
                 }
             } else {
-                backend.window_ops().configure(
-                    client.win,
-                    x,
-                    y,
-                    w as u32,
-                    h as u32,
-                    x11_bw,
-                )?;
+                backend
+                    .window_ops()
+                    .configure(client.win, x, y, w as u32, h as u32, x11_bw)?;
             }
         }
         Ok(())
@@ -3871,7 +3874,8 @@ impl Jwm {
                 let scene = self.build_compositor_scene(backend, &HashMap::new());
                 if scene.is_empty() {
                     // Log once per second at most
-                    static LAST_EMPTY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    static LAST_EMPTY: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
@@ -3879,7 +3883,9 @@ impl Jwm {
                     let prev = LAST_EMPTY.load(std::sync::atomic::Ordering::Relaxed);
                     if now > prev {
                         LAST_EMPTY.store(now, std::sync::atomic::Ordering::Relaxed);
-                        log::warn!("[tick_animations] compositor scene is EMPTY (no windows to render)");
+                        log::warn!(
+                            "[tick_animations] compositor scene is EMPTY (no windows to render)"
+                        );
                     }
                 }
                 let focused = if self.status_bar_has_focus {
@@ -4107,13 +4113,7 @@ impl Jwm {
                     let w = bar.geometry.w as u32;
                     let h = bar.geometry.h as u32;
                     if w > 0 && h > 0 {
-                        scene.push((
-                            bar.win.raw(),
-                            bar.geometry.x,
-                            bar.geometry.y,
-                            w,
-                            h,
-                        ));
+                        scene.push((bar.win.raw(), bar.geometry.x, bar.geometry.y, w, h));
                     }
                 }
             }
@@ -4170,7 +4170,11 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(client) = self.state.clients.get(client_key) {
             // Compositor renders borders via GPU — tell X11 border is 0.
-            let x11_bw = if backend.has_compositor() { 0 } else { client.geometry.border_w as u32 };
+            let x11_bw = if backend.has_compositor() {
+                0
+            } else {
+                client.geometry.border_w as u32
+            };
 
             backend.window_ops().configure(
                 client.win,
@@ -4185,11 +4189,9 @@ impl Jwm {
             let border_color = backend
                 .color_allocator()
                 .get_border_pixel_of(SchemeType::Norm)?;
-            backend.window_ops().set_decoration_style(
-                client.win,
-                x11_bw,
-                border_color,
-            )?;
+            backend
+                .window_ops()
+                .set_decoration_style(client.win, x11_bw, border_color)?;
         }
         Ok(())
     }
@@ -4382,7 +4384,12 @@ impl Jwm {
             .map(|&(key, factor, _)| LayoutClient {
                 key,
                 factor,
-                border_w: self.state.clients.get(key).map(|c| c.geometry.border_w).unwrap_or(default_border),
+                border_w: self
+                    .state
+                    .clients
+                    .get(key)
+                    .map(|c| c.geometry.border_w)
+                    .unwrap_or(default_border),
             })
             .collect();
 
@@ -4433,7 +4440,12 @@ impl Jwm {
             .map(|&(key, factor, _)| LayoutClient {
                 key,
                 factor,
-                border_w: self.state.clients.get(key).map(|c| c.geometry.border_w).unwrap_or(default_border),
+                border_w: self
+                    .state
+                    .clients
+                    .get(key)
+                    .map(|c| c.geometry.border_w)
+                    .unwrap_or(default_border),
             })
             .collect();
 
@@ -4454,7 +4466,12 @@ impl Jwm {
     }
 
     fn centered_master(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
-        self.tiling_layout_wrapper(backend, mon_key, "centered_master", layout::calculate_centered_master);
+        self.tiling_layout_wrapper(
+            backend,
+            mon_key,
+            "centered_master",
+            layout::calculate_centered_master,
+        );
     }
 
     fn bstack(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
@@ -4510,7 +4527,12 @@ impl Jwm {
             .map(|&(key, factor, _)| LayoutClient {
                 key,
                 factor,
-                border_w: self.state.clients.get(key).map(|c| c.geometry.border_w).unwrap_or(default_border),
+                border_w: self
+                    .state
+                    .clients
+                    .get(key)
+                    .map(|c| c.geometry.border_w)
+                    .unwrap_or(default_border),
             })
             .collect();
 
@@ -4542,10 +4564,8 @@ impl Jwm {
 
         let results = layout::calculate_vstack(&params, &layout_clients);
 
-        let target_rects: Vec<(ClientKey, Rect)> = results
-            .iter()
-            .map(|res| (res.key, res.rect))
-            .collect();
+        let target_rects: Vec<(ClientKey, Rect)> =
+            results.iter().map(|res| (res.key, res.rect)).collect();
 
         for res in results {
             self.resize_client(
@@ -4595,7 +4615,10 @@ impl Jwm {
         let visible_keys: Vec<ClientKey> = raw_clients.iter().map(|&(k, _, _)| k).collect();
 
         // Get or create scrolling state
-        let state = self.scrolling_states.entry(mon_key).or_insert_with(ScrollingState::new);
+        let state = self
+            .scrolling_states
+            .entry(mon_key)
+            .or_insert_with(ScrollingState::new);
 
         // Sync columns with currently visible clients
         Self::sync_scrolling_columns(state, &visible_keys);
@@ -4603,9 +4626,7 @@ impl Jwm {
         // Determine focus column
         let sel = self.state.monitors.get(mon_key).and_then(|m| m.sel);
         let focus_col = sel
-            .and_then(|sel_key| {
-                state.columns.iter().position(|col| col.contains(&sel_key))
-            })
+            .and_then(|sel_key| state.columns.iter().position(|col| col.contains(&sel_key)))
             .unwrap_or(0);
 
         // Build layout clients grouped by column
@@ -4616,8 +4637,18 @@ impl Jwm {
                 col.iter()
                     .map(|&key| LayoutClient {
                         key,
-                        factor: self.state.clients.get(key).map(|c| c.state.client_fact).unwrap_or(1.0),
-                        border_w: self.state.clients.get(key).map(|c| c.geometry.border_w).unwrap_or(default_border),
+                        factor: self
+                            .state
+                            .clients
+                            .get(key)
+                            .map(|c| c.state.client_fact)
+                            .unwrap_or(1.0),
+                        border_w: self
+                            .state
+                            .clients
+                            .get(key)
+                            .map(|c| c.geometry.border_w)
+                            .unwrap_or(default_border),
                     })
                     .collect()
             })
@@ -4762,14 +4793,16 @@ impl Jwm {
                     if status.success() {
                         self.status_bar_restart_failures = 0;
                     } else {
-                        self.status_bar_restart_failures = self.status_bar_restart_failures.saturating_add(1);
+                        self.status_bar_restart_failures =
+                            self.status_bar_restart_failures.saturating_add(1);
                     }
 
                     // Backoff to avoid a tight respawn loop starving input/rendering.
                     let pow = self.status_bar_restart_failures.min(6);
                     let base_ms = 200u64;
                     let backoff_ms = base_ms.saturating_mul(1u64 << pow).min(10_000);
-                    self.status_bar_backoff_until = Some(now + std::time::Duration::from_millis(backoff_ms));
+                    self.status_bar_backoff_until =
+                        Some(now + std::time::Duration::from_millis(backoff_ms));
 
                     // Don't respawn in the same tick.
                     return;
@@ -4783,12 +4816,14 @@ impl Jwm {
                     );
 
                     self.status_bar_child = None;
-                    self.status_bar_restart_failures = self.status_bar_restart_failures.saturating_add(1);
+                    self.status_bar_restart_failures =
+                        self.status_bar_restart_failures.saturating_add(1);
 
                     let pow = self.status_bar_restart_failures.min(6);
                     let base_ms = 200u64;
                     let backoff_ms = base_ms.saturating_mul(1u64 << pow).min(10_000);
-                    self.status_bar_backoff_until = Some(now + std::time::Duration::from_millis(backoff_ms));
+                    self.status_bar_backoff_until =
+                        Some(now + std::time::Duration::from_millis(backoff_ms));
                     return;
                 }
             }
@@ -4845,11 +4880,13 @@ impl Jwm {
             Err(e) => {
                 error!("Failed to spawn status bar: {}", e);
 
-                self.status_bar_restart_failures = self.status_bar_restart_failures.saturating_add(1);
+                self.status_bar_restart_failures =
+                    self.status_bar_restart_failures.saturating_add(1);
                 let pow = self.status_bar_restart_failures.min(6);
                 let base_ms = 200u64;
                 let backoff_ms = base_ms.saturating_mul(1u64 << pow).min(10_000);
-                self.status_bar_backoff_until = Some(now + std::time::Duration::from_millis(backoff_ms));
+                self.status_bar_backoff_until =
+                    Some(now + std::time::Duration::from_millis(backoff_ms));
             }
         }
     }
@@ -4892,10 +4929,14 @@ impl Jwm {
 
         // Promote selected window to top of its layer, and if it's tiled,
         // raise it above floating windows so it's not obscured.
-        let sel_win = monitor.sel.and_then(|ck| self.state.clients.get(ck)).map(|c| (c.win, c.state.is_floating, c.state.is_pip));
+        let sel_win = monitor
+            .sel
+            .and_then(|ck| self.state.clients.get(ck))
+            .map(|c| (c.win, c.state.is_floating, c.state.is_pip));
 
-        let mut final_bottom_to_top: Vec<WindowId> =
-            Vec::with_capacity(tiled_bottom_to_top.len() + floating_bottom_to_top.len() + pip_bottom_to_top.len());
+        let mut final_bottom_to_top: Vec<WindowId> = Vec::with_capacity(
+            tiled_bottom_to_top.len() + floating_bottom_to_top.len() + pip_bottom_to_top.len(),
+        );
 
         if let Some((win, is_floating, is_pip)) = sel_win {
             if is_pip {
@@ -5234,27 +5275,37 @@ impl Jwm {
                 },
                 "focusstack" => match &kc.argument {
                     crate::config::ArgumentConfig::Int(i) => {
-                        if *i > 0 { "focus next".to_string() } else { "focus prev".to_string() }
+                        if *i > 0 {
+                            "focus next".to_string()
+                        } else {
+                            "focus prev".to_string()
+                        }
                     }
                     _ => "focusstack".to_string(),
                 },
                 "incnmaster" => match &kc.argument {
                     crate::config::ArgumentConfig::Int(i) => {
-                        if *i > 0 { "master +1".to_string() } else { "master -1".to_string() }
+                        if *i > 0 {
+                            "master +1".to_string()
+                        } else {
+                            "master -1".to_string()
+                        }
                     }
                     _ => "incnmaster".to_string(),
                 },
                 "setmfact" => match &kc.argument {
                     crate::config::ArgumentConfig::Float(f) => {
-                        if *f > 0.0 { "mfact +".to_string() } else { "mfact -".to_string() }
+                        if *f > 0.0 {
+                            "mfact +".to_string()
+                        } else {
+                            "mfact -".to_string()
+                        }
                     }
                     _ => "setmfact".to_string(),
                 },
-                "view" | "tag" | "toggleview" | "toggletag" => {
-                    match &kc.argument {
-                        crate::config::ArgumentConfig::UInt(u) => format!("{} tag {}", kc.function, u),
-                        _ => kc.function.clone(),
-                    }
+                "view" | "tag" | "toggleview" | "toggletag" => match &kc.argument {
+                    crate::config::ArgumentConfig::UInt(u) => format!("{} tag {}", kc.function, u),
+                    _ => kc.function.clone(),
                 },
                 other => other.to_string(),
             };
@@ -5264,10 +5315,26 @@ impl Jwm {
 
         // 添加 tag 快捷键说明
         let tags_len = CONFIG.load().tags_length();
-        lines.push(format!("{:<28} {}", "Mod1+[1-9]", format!("view tag 1-{}", tags_len)));
-        lines.push(format!("{:<28} {}", "Mod1+Shift+[1-9]", format!("move to tag 1-{}", tags_len)));
-        lines.push(format!("{:<28} {}", "Mod1+Ctrl+[1-9]", format!("toggle view tag 1-{}", tags_len)));
-        lines.push(format!("{:<28} {}", "Mod1+Ctrl+Shift+[1-9]", format!("toggle tag 1-{}", tags_len)));
+        lines.push(format!(
+            "{:<28} {}",
+            "Mod1+[1-9]",
+            format!("view tag 1-{}", tags_len)
+        ));
+        lines.push(format!(
+            "{:<28} {}",
+            "Mod1+Shift+[1-9]",
+            format!("move to tag 1-{}", tags_len)
+        ));
+        lines.push(format!(
+            "{:<28} {}",
+            "Mod1+Ctrl+[1-9]",
+            format!("toggle view tag 1-{}", tags_len)
+        ));
+        lines.push(format!(
+            "{:<28} {}",
+            "Mod1+Ctrl+Shift+[1-9]",
+            format!("toggle tag 1-{}", tags_len)
+        ));
         lines.push(format!("{:<28} {}", "Mod1+0", "view all tags"));
 
         let text = lines.join("\n");
@@ -5275,7 +5342,14 @@ impl Jwm {
         let cfg = CONFIG.load();
         let dmenu_font = cfg.dmenu_font();
         let mut command = Command::new("dmenu");
-        command.args(["-l", &lines.len().to_string(), "-fn", dmenu_font, "-p", "Keybindings:"]);
+        command.args([
+            "-l",
+            &lines.len().to_string(),
+            "-fn",
+            dmenu_font,
+            "-p",
+            "Keybindings:",
+        ]);
         command.stdin(std::process::Stdio::piped());
         command.stdout(std::process::Stdio::null());
         command.stderr(std::process::Stdio::inherit());
@@ -5359,7 +5433,12 @@ impl Jwm {
             .map(|&(key, factor, _)| LayoutClient {
                 key,
                 factor,
-                border_w: self.state.clients.get(key).map(|c| c.geometry.border_w).unwrap_or(default_border),
+                border_w: self
+                    .state
+                    .clients
+                    .get(key)
+                    .map(|c| c.geometry.border_w)
+                    .unwrap_or(default_border),
             })
             .collect();
 
@@ -5405,7 +5484,11 @@ impl Jwm {
         let is_single = clients.len() == 1;
         let default_border = CONFIG.load().border_px() as i32;
         let effective_border = if is_single { 0 } else { default_border };
-        let effective_gap = if is_single { 0 } else { CONFIG.load().gap_px() as i32 };
+        let effective_gap = if is_single {
+            0
+        } else {
+            CONFIG.load().gap_px() as i32
+        };
         for &(key, _, _) in clients {
             if let Some(client) = self.state.clients.get_mut(key) {
                 client.geometry.border_w = effective_border;
@@ -5422,7 +5505,11 @@ impl Jwm {
                 if !client.state.is_floating
                     && self.is_client_visible_on_monitor(client_key, mon_key)
                 {
-                    clients.push((client_key, client.state.client_fact, client.geometry.border_w));
+                    clients.push((
+                        client_key,
+                        client.state.client_fact,
+                        client.geometry.border_w,
+                    ));
                 }
             }
         }
@@ -5441,7 +5528,8 @@ impl Jwm {
             // Prefer the actual status bar geometry if we have it.
             // This is important for Wayland, where the bar may be a layer-shell surface
             // and its real size/position comes from the compositor arrangement.
-            let fallback = CONFIG.load().status_bar_height() + CONFIG.load().status_bar_padding() * 2;
+            let fallback =
+                CONFIG.load().status_bar_height() + CONFIG.load().status_bar_padding() * 2;
             let pad = CONFIG.load().status_bar_padding().max(0);
 
             // Use the real bar geometry only on the monitor that currently hosts
@@ -5537,13 +5625,7 @@ impl Jwm {
                     if debug_workarea {
                         info!(
                             "[workarea] skip fullscreen dock win={:?} geom=({},{} {}x{}) ww={} wh={}",
-                            client.win,
-                            dx,
-                            dy,
-                            dw,
-                            dh,
-                            ww,
-                            wh
+                            client.win, dx, dy, dw, dh, ww, wh
                         );
                     }
                     continue;
@@ -5560,9 +5642,17 @@ impl Jwm {
                 let is_vertical = dh >= (wh * 2 / 3) && dw <= (ww / 2).max(1);
 
                 let edge = if is_horizontal {
-                    if dist_top <= dist_bottom { "top" } else { "bottom" }
+                    if dist_top <= dist_bottom {
+                        "top"
+                    } else {
+                        "bottom"
+                    }
                 } else if is_vertical {
-                    if dist_left <= dist_right { "left" } else { "right" }
+                    if dist_left <= dist_right {
+                        "left"
+                    } else {
+                        "right"
+                    }
                 } else {
                     // Pick the closest edge.
                     let min = dist_top.min(dist_bottom).min(dist_left).min(dist_right);
@@ -5584,19 +5674,25 @@ impl Jwm {
                     .map(|i| i.exclusive_zone)
                     .unwrap_or(0);
 
-                let anchor_ok = client.state.dock_layer_info.as_ref().map(|i| {
-                    let any = i.anchor_top || i.anchor_bottom || i.anchor_left || i.anchor_right;
-                    if !any {
-                        return true;
-                    }
-                    match edge {
-                        "top" => i.anchor_top,
-                        "bottom" => i.anchor_bottom,
-                        "left" => i.anchor_left,
-                        "right" => i.anchor_right,
-                        _ => true,
-                    }
-                }).unwrap_or(true);
+                let anchor_ok = client
+                    .state
+                    .dock_layer_info
+                    .as_ref()
+                    .map(|i| {
+                        let any =
+                            i.anchor_top || i.anchor_bottom || i.anchor_left || i.anchor_right;
+                        if !any {
+                            return true;
+                        }
+                        match edge {
+                            "top" => i.anchor_top,
+                            "bottom" => i.anchor_bottom,
+                            "left" => i.anchor_left,
+                            "right" => i.anchor_right,
+                            _ => true,
+                        }
+                    })
+                    .unwrap_or(true);
 
                 let zone_px = if exclusive_zone == -1 {
                     match edge {
@@ -5683,19 +5779,7 @@ impl Jwm {
         if debug_workarea {
             info!(
                 "[workarea] result mon={} wx/wy/ww/wh=({},{},{},{}) offsets(top/bot/left/right)=({},{},{},{}) -> ({},{},{},{})",
-                monitor.num,
-                wx,
-                wy,
-                ww,
-                wh,
-                top,
-                bottom,
-                left,
-                right,
-                x,
-                y,
-                w,
-                h
+                monitor.num, wx, wy, ww, wh, top, bottom, left, right, x, y, w, h
             );
         }
         Some(Rect::new(x, y, w, h))
@@ -5784,7 +5868,10 @@ impl Jwm {
         let enable = !backend.has_compositor();
         match backend.set_compositor_enabled(enable) {
             Ok(true) => {
-                log::info!("Compositor toggled: now {}", if enable { "ON" } else { "OFF" });
+                log::info!(
+                    "Compositor toggled: now {}",
+                    if enable { "ON" } else { "OFF" }
+                );
             }
             Ok(false) => {
                 log::info!("Compositor state unchanged");
@@ -5808,14 +5895,22 @@ impl Jwm {
     ) -> f32 {
         fn parse_hhmm(s: &str) -> Option<u32> {
             let parts: Vec<&str> = s.split(':').collect();
-            if parts.len() != 2 { return None; }
+            if parts.len() != 2 {
+                return None;
+            }
             let h: u32 = parts[0].parse().ok()?;
             let m: u32 = parts[1].parse().ok()?;
             Some(h * 60 + m)
         }
 
-        let start = match parse_hhmm(start_str) { Some(v) => v, None => return 0.0 };
-        let end   = match parse_hhmm(end_str)   { Some(v) => v, None => return 0.0 };
+        let start = match parse_hhmm(start_str) {
+            Some(v) => v,
+            None => return 0.0,
+        };
+        let end = match parse_hhmm(end_str) {
+            Some(v) => v,
+            None => return 0.0,
+        };
 
         // Current time in minutes since midnight
         let now = {
@@ -5826,7 +5921,9 @@ impl Jwm {
             // Local time: offset from UTC.  Use libc localtime.
             let secs = d as libc::time_t;
             let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-            unsafe { libc::localtime_r(&secs, &mut tm); }
+            unsafe {
+                libc::localtime_r(&secs, &mut tm);
+            }
             (tm.tm_hour as u32) * 60 + (tm.tm_min as u32)
         };
 
@@ -5835,12 +5932,24 @@ impl Jwm {
 
         // Normalize everything so that `start` is time-zero (modular arithmetic).
         // Night window runs from 0 to `length` in the rotated space.
-        let length = if end >= start { end - start } else { end + day - start };
-        let cur = if now >= start { now - start } else { now + day - start };
+        let length = if end >= start {
+            end - start
+        } else {
+            end + day - start
+        };
+        let cur = if now >= start {
+            now - start
+        } else {
+            now + day - start
+        };
 
         if cur > length {
             // Outside the night window — check if approaching start (ramp in)
-            let before_start = if now < start { start - now } else { start + day - now };
+            let before_start = if now < start {
+                start - now
+            } else {
+                start + day - now
+            };
             if trans > 0 && before_start < trans {
                 // Ramping in: approaching start
                 let t = 1.0 - (before_start as f32 / trans as f32);
@@ -5892,7 +6001,8 @@ impl Jwm {
             let visible: Vec<ClientKey> = {
                 let mon_clients = self.state.monitor_clients.get(sel_mon_key);
                 match mon_clients {
-                    Some(clients) => clients.iter()
+                    Some(clients) => clients
+                        .iter()
                         .copied()
                         .filter(|&ck| self.is_client_visible_by_key(ck))
                         .filter(|&ck| Some(ck) != self.status_bar_client)
@@ -5901,7 +6011,9 @@ impl Jwm {
                 }
             };
 
-            if visible.is_empty() { return Ok(()); }
+            if visible.is_empty() {
+                return Ok(());
+            }
 
             // Tell compositor which monitor to render the prism on.
             if let Some(mon) = self.state.monitors.get(sel_mon_key) {
@@ -5931,7 +6043,10 @@ impl Jwm {
     /// Build the overview layout tuple list for the compositor.
     /// Takes a subset (or all) of visible clients and produces the
     /// (win, x, y, w, h, is_selected, title) tuples.
-    fn build_overview_layout(&self, clients: &[ClientKey]) -> Vec<(WindowId, f32, f32, f32, f32, bool, String)> {
+    fn build_overview_layout(
+        &self,
+        clients: &[ClientKey],
+    ) -> Vec<(WindowId, f32, f32, f32, f32, bool, String)> {
         let mut layout = Vec::new();
         for (i, &ck) in clients.iter().enumerate() {
             if let Some(client) = self.state.clients.get(ck) {
@@ -5957,7 +6072,9 @@ impl Jwm {
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if !self.overview_active || self.overview_clients.is_empty() { return Ok(()); }
+        if !self.overview_active || self.overview_clients.is_empty() {
+            return Ok(());
+        }
 
         let direction = match arg {
             WMArgEnum::Int(d) => *d,
@@ -6070,7 +6187,10 @@ impl Jwm {
             self.recording_current_segment = Some(seg_path.clone());
             Self::save_recording_state(&output_path, &[]);
 
-            info!("[toggle_recording] start → {} (segment: {})", output_path, seg_path);
+            info!(
+                "[toggle_recording] start → {} (segment: {})",
+                output_path, seg_path
+            );
             backend.compositor_start_recording(&seg_path);
         } else {
             backend.compositor_stop_recording();
@@ -6080,7 +6200,11 @@ impl Jwm {
             }
             let segments = std::mem::take(&mut self.recording_segments);
             let output_path = self.recording_output_path.take().unwrap_or_default();
-            info!("[toggle_recording] stop → {} ({} segments)", output_path, segments.len());
+            info!(
+                "[toggle_recording] stop → {} ({} segments)",
+                output_path,
+                segments.len()
+            );
             Self::finalize_recording(segments, output_path);
         }
         Ok(())
@@ -6103,7 +6227,9 @@ impl Jwm {
         let content = std::fs::read_to_string(Self::RECORDING_STATE_FILE).ok()?;
         let mut lines = content.lines();
         let output_path = lines.next()?.to_string();
-        if output_path.is_empty() { return None; }
+        if output_path.is_empty() {
+            return None;
+        }
         let segments: Vec<String> = lines
             .map(|l| l.to_string())
             .filter(|l| !l.is_empty())
@@ -6138,8 +6264,18 @@ impl Jwm {
                     .join("\n");
                 if std::fs::write(list_path, &list_content).is_ok() {
                     let _ = std::process::Command::new("ffmpeg")
-                        .args(["-f", "concat", "-safe", "0", "-i", list_path,
-                               "-c", "copy", "-y", &output_path])
+                        .args([
+                            "-f",
+                            "concat",
+                            "-safe",
+                            "0",
+                            "-i",
+                            list_path,
+                            "-c",
+                            "copy",
+                            "-y",
+                            &output_path,
+                        ])
                         .stdin(std::process::Stdio::null())
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
@@ -6202,13 +6338,7 @@ impl Jwm {
                         if let Some(client) = self.state.clients.get(ck) {
                             let g = &client.geometry;
                             if g.w > 0 && g.h > 0 {
-                                windows.push((
-                                    client.win,
-                                    g.x,
-                                    g.y,
-                                    g.w as u32,
-                                    g.h as u32,
-                                ));
+                                windows.push((client.win, g.x, g.y, g.w as u32, g.h as u32));
                             }
                         }
                     }
@@ -6275,7 +6405,10 @@ impl Jwm {
                 };
                 (name, cmd)
             }
-            _ => ("term".to_string(), crate::config::Config::get_scratchpad_termcmd()),
+            _ => (
+                "term".to_string(),
+                crate::config::Config::get_scratchpad_termcmd(),
+            ),
         };
 
         // Check if the scratchpad's client still exists
@@ -6299,12 +6432,8 @@ impl Jwm {
                     );
                     // Target: move up by window height
                     let hidden_y = current_rect.y - current_rect.h - 100;
-                    let hidden_rect = Rect::new(
-                        current_rect.x,
-                        hidden_y,
-                        current_rect.w,
-                        current_rect.h,
-                    );
+                    let hidden_rect =
+                        Rect::new(current_rect.x, hidden_y, current_rect.w, current_rect.h);
 
                     let cfg = CONFIG.load();
                     if cfg.animation_enabled() {
@@ -6385,7 +6514,10 @@ impl Jwm {
                             let from_rect = Rect::new(x, from_y, w, h);
                             let to_rect = Rect::new(x, y, w, h);
 
-                            info!("[togglescratchpad] scratchpad show animation from y={} to y={}", from_y, y);
+                            info!(
+                                "[togglescratchpad] scratchpad show animation from y={} to y={}",
+                                from_y, y
+                            );
 
                             self.animations.start(
                                 sp_key,
@@ -6414,11 +6546,7 @@ impl Jwm {
 
                 match command.spawn() {
                     Ok(child) => {
-                        info!(
-                            "[togglescratchpad] spawned '{}' PID: {}",
-                            name,
-                            child.id()
-                        );
+                        info!("[togglescratchpad] spawned '{}' PID: {}", name, child.id());
                         self.scratchpad_pending_name = Some(name);
                     }
                     Err(e) => {
@@ -6554,9 +6682,12 @@ impl Jwm {
 
                 let mon_num = self.state.monitors.get(target_mon_key).map(|m| m.num);
                 if let Some(num) = mon_num {
-                    self.broadcast_ipc_event("monitor/focus", serde_json::json!({
-                        "monitor": num,
-                    }));
+                    self.broadcast_ipc_event(
+                        "monitor/focus",
+                        serde_json::json!({
+                            "monitor": num,
+                        }),
+                    );
                 }
             }
         }
@@ -6611,7 +6742,10 @@ impl Jwm {
             None => return Ok(()),
         };
 
-        info!("[take_screenshot] entering interactive region selection mode → {}", screenshot_path);
+        info!(
+            "[take_screenshot] entering interactive region selection mode → {}",
+            screenshot_path
+        );
         self.screenshot_select_active = true;
         self.screenshot_select_dragging = false;
         self.screenshot_select_committed = false;
@@ -6633,7 +6767,9 @@ impl Jwm {
             | EventMaskBits::BUTTON_RELEASE
             | EventMaskBits::POINTER_MOTION)
             .bits();
-        let _ = backend.input_ops().grab_pointer(pointer_mask, crosshair_handle);
+        let _ = backend
+            .input_ops()
+            .grab_pointer(pointer_mask, crosshair_handle);
 
         Ok(())
     }
@@ -6652,10 +6788,15 @@ impl Jwm {
         let path = std::path::PathBuf::from(&screenshot_path);
         match backend.take_screenshot_to_file(&path) {
             Ok(true) => {
-                info!("[take_screenshot_fullscreen] compositor screenshot → {}", path.display());
+                info!(
+                    "[take_screenshot_fullscreen] compositor screenshot → {}",
+                    path.display()
+                );
             }
             Ok(false) => {
-                info!("[take_screenshot_fullscreen] backend doesn't support compositor screenshots");
+                info!(
+                    "[take_screenshot_fullscreen] backend doesn't support compositor screenshots"
+                );
             }
             Err(e) => {
                 error!("[take_screenshot_fullscreen] compositor screenshot failed: {e}");
@@ -6678,7 +6819,9 @@ impl Jwm {
         let _ = backend.input_ops().ungrab_pointer();
         // Restore default cursor
         if let Some(root) = backend.root_window() {
-            let _ = backend.cursor_provider().apply(root, StdCursorKind::LeftPtr);
+            let _ = backend
+                .cursor_provider()
+                .apply(root, StdCursorKind::LeftPtr);
         }
     }
 
@@ -6713,11 +6856,16 @@ impl Jwm {
         let _ = backend.key_ops().ungrab_keyboard();
         let _ = backend.input_ops().ungrab_pointer();
         if let Some(root) = backend.root_window() {
-            let _ = backend.cursor_provider().apply(root, StdCursorKind::LeftPtr);
+            let _ = backend
+                .cursor_provider()
+                .apply(root, StdCursorKind::LeftPtr);
         }
 
         if w < 3 || h < 3 {
-            info!("[take_screenshot] selection too small ({}x{}), ignoring", w, h);
+            info!(
+                "[take_screenshot] selection too small ({}x{}), ignoring",
+                w, h
+            );
             return;
         }
 
@@ -6733,12 +6881,18 @@ impl Jwm {
             Ok(true) => {
                 info!(
                     "[take_screenshot] region screenshot → {} ({}x{} at {},{})",
-                    path.display(), w, h, x, y
+                    path.display(),
+                    w,
+                    h,
+                    x,
+                    y
                 );
                 true
             }
             Ok(false) => {
-                info!("[take_screenshot] backend doesn't support region screenshots, falling back to full");
+                info!(
+                    "[take_screenshot] backend doesn't support region screenshots, falling back to full"
+                );
                 backend.take_screenshot_to_file(&path).unwrap_or(false)
             }
             Err(e) => {
@@ -7140,7 +7294,12 @@ impl Jwm {
     }
 
     fn grouped_visible_clients(&self, mon_key: MonitorKey) -> (Vec<ClientKey>, Vec<ClientKey>) {
-        let total = self.state.monitor_clients.get(mon_key).map(|v| v.len()).unwrap_or(0);
+        let total = self
+            .state
+            .monitor_clients
+            .get(mon_key)
+            .map(|v| v.len())
+            .unwrap_or(0);
         let mut tile_clients = Vec::with_capacity(total);
         let mut floating_clients = Vec::with_capacity(total / 4 + 1);
 
@@ -7174,7 +7333,10 @@ impl Jwm {
         group
             .iter()
             .position(|&k| k == current_sel)
-            .and_then(|idx| idx.checked_sub(1).and_then(|prev_idx| group.get(prev_idx).copied()))
+            .and_then(|idx| {
+                idx.checked_sub(1)
+                    .and_then(|prev_idx| group.get(prev_idx).copied())
+            })
     }
 
     pub fn togglebar(
@@ -7355,16 +7517,28 @@ impl Jwm {
 
     /// Check if the current monitor is in scrolling layout
     fn is_scrolling_layout(&self) -> bool {
-        self.state.sel_mon.and_then(|mk| {
-            self.state.monitors.get(mk).map(|m| *m.lt[m.sel_lt] == LayoutEnum::SCROLLING)
-        }).unwrap_or(false)
+        self.state
+            .sel_mon
+            .and_then(|mk| {
+                self.state
+                    .monitors
+                    .get(mk)
+                    .map(|m| *m.lt[m.sel_lt] == LayoutEnum::SCROLLING)
+            })
+            .unwrap_or(false)
     }
 
     /// Check if the current monitor is in vstack layout
     fn is_vstack_layout(&self) -> bool {
-        self.state.sel_mon.and_then(|mk| {
-            self.state.monitors.get(mk).map(|m| *m.lt[m.sel_lt] == LayoutEnum::VSTACK)
-        }).unwrap_or(false)
+        self.state
+            .sel_mon
+            .and_then(|mk| {
+                self.state
+                    .monitors
+                    .get(mk)
+                    .map(|m| *m.lt[m.sel_lt] == LayoutEnum::VSTACK)
+            })
+            .unwrap_or(false)
     }
 
     /// Move the currently focused client to the front of the monitor's client
@@ -7458,17 +7632,22 @@ impl Jwm {
         };
 
         let sel = self.state.monitors.get(mon_key).and_then(|m| m.sel);
-        let cur_col = match sel.and_then(|k| state.columns.iter().position(|col| col.contains(&k))) {
+        let cur_col = match sel.and_then(|k| state.columns.iter().position(|col| col.contains(&k)))
+        {
             Some(c) => c,
             None => return Ok(()),
         };
 
         let n_cols = state.columns.len();
         let new_col = if direction > 0 {
-            if cur_col + 1 >= n_cols { return Ok(()); }
+            if cur_col + 1 >= n_cols {
+                return Ok(());
+            }
             cur_col + 1
         } else {
-            if cur_col == 0 { return Ok(()); }
+            if cur_col == 0 {
+                return Ok(());
+            }
             cur_col - 1
         };
 
@@ -7504,18 +7683,25 @@ impl Jwm {
         };
 
         // Find column and position of selected client
-        let (cur_col, cur_pos) = match state.columns.iter().enumerate().find_map(|(ci, col)| {
-            col.iter().position(|&k| k == sel_key).map(|pos| (ci, pos))
-        }) {
+        let (cur_col, cur_pos) = match state
+            .columns
+            .iter()
+            .enumerate()
+            .find_map(|(ci, col)| col.iter().position(|&k| k == sel_key).map(|pos| (ci, pos)))
+        {
             Some(v) => v,
             None => return Ok(()),
         };
 
         let target_col = if direction > 0 {
-            if cur_col + 1 >= state.columns.len() { return Ok(()); }
+            if cur_col + 1 >= state.columns.len() {
+                return Ok(());
+            }
             cur_col + 1
         } else {
-            if cur_col == 0 { return Ok(()); }
+            if cur_col == 0 {
+                return Ok(());
+            }
             cur_col - 1
         };
 
@@ -7557,9 +7743,12 @@ impl Jwm {
         };
 
         // Find column of selected client
-        let (cur_col, cur_pos) = match state.columns.iter().enumerate().find_map(|(ci, col)| {
-            col.iter().position(|&k| k == sel_key).map(|pos| (ci, pos))
-        }) {
+        let (cur_col, cur_pos) = match state
+            .columns
+            .iter()
+            .enumerate()
+            .find_map(|(ci, col)| col.iter().position(|&k| k == sel_key).map(|pos| (ci, pos)))
+        {
             Some(v) => v,
             None => return Ok(()),
         };
@@ -7573,11 +7762,7 @@ impl Jwm {
         state.columns[cur_col].remove(cur_pos);
 
         // Insert as new column in the given direction
-        let insert_idx = if direction > 0 {
-            cur_col + 1
-        } else {
-            cur_col
-        };
+        let insert_idx = if direction > 0 { cur_col + 1 } else { cur_col };
         state.columns.insert(insert_idx, vec![sel_key]);
 
         self.arrange(backend, Some(mon_key));
@@ -7607,9 +7792,12 @@ impl Jwm {
         };
 
         // Find the column containing the selected window
-        let (col_idx, pos) = match state.columns.iter().enumerate().find_map(|(ci, col)| {
-            col.iter().position(|&k| k == sel_key).map(|pos| (ci, pos))
-        }) {
+        let (col_idx, pos) = match state
+            .columns
+            .iter()
+            .enumerate()
+            .find_map(|(ci, col)| col.iter().position(|&k| k == sel_key).map(|pos| (ci, pos)))
+        {
             Some(v) => v,
             None => return Ok(()),
         };
@@ -7765,11 +7953,7 @@ impl Jwm {
     }
 
     /// 退出当前 monitor 上所有全屏窗口的全屏状态
-    fn exit_fullscreen_on_monitor(
-        &mut self,
-        backend: &mut dyn Backend,
-        mon_key: MonitorKey,
-    ) {
+    fn exit_fullscreen_on_monitor(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
         let fs_clients: Vec<ClientKey> = self
             .state
             .monitor_clients
@@ -7834,9 +8018,12 @@ impl Jwm {
             self.mark_bar_update_needed_if_visible(mon_num);
         }
 
-        self.broadcast_ipc_event("layout/set", serde_json::json!({
-            "layout": format!("{:?}", *new_layout),
-        }));
+        self.broadcast_ipc_event(
+            "layout/set",
+            serde_json::json!({
+                "layout": format!("{:?}", *new_layout),
+            }),
+        );
 
         Ok(())
     }
@@ -7900,9 +8087,12 @@ impl Jwm {
             self.mark_bar_update_needed_if_visible(mon_num);
         }
 
-        self.broadcast_ipc_event("layout/set", serde_json::json!({
-            "layout": format!("{:?}", next),
-        }));
+        self.broadcast_ipc_event(
+            "layout/set",
+            serde_json::json!({
+                "layout": format!("{:?}", next),
+            }),
+        );
 
         Ok(())
     }
@@ -7922,11 +8112,7 @@ impl Jwm {
             return Ok(());
         }
 
-        let mon_num = self
-            .state
-            .monitors
-            .get(mon_key)
-            .map(|m| m.num);
+        let mon_num = self.state.monitors.get(mon_key).map(|m| m.num);
 
         if is_fullscreen {
             // Entering fullscreen layout: hide bar
@@ -8309,11 +8495,8 @@ impl Jwm {
             if cfg.animation_enabled()
                 && self.should_animate_tag_switch(sel_mon_key, old_tag_mask, new_tag_mask)
             {
-                let direction = Self::tag_switch_direction(
-                    old_tag_mask,
-                    new_tag_mask,
-                    cfg.tags_length(),
-                );
+                let direction =
+                    Self::tag_switch_direction(old_tag_mask, new_tag_mask, cfg.tags_length());
                 let mon_rect = self.monitor_rect(sel_mon_key);
                 let exclude_top = self.tag_transition_exclude_top(mon_rect.1);
                 backend.compositor_notify_tag_switch(
@@ -8332,9 +8515,12 @@ impl Jwm {
         self.refresh_bar_visibility_on_selected_monitor(backend)?;
         self.update_ewmh_desktop(backend)?;
 
-        self.broadcast_ipc_event("tag/view", serde_json::json!({
-            "tag": target_mask,
-        }));
+        self.broadcast_ipc_event(
+            "tag/view",
+            serde_json::json!({
+                "tag": target_mask,
+            }),
+        );
 
         Ok(())
     }
@@ -8493,11 +8679,8 @@ impl Jwm {
             if cfg.animation_enabled()
                 && self.should_animate_tag_switch(sel_mon_key, old_tag_mask, new_tag_mask)
             {
-                let direction = Self::tag_switch_direction(
-                    old_tag_mask,
-                    new_tag_mask,
-                    cfg.tags_length(),
-                );
+                let direction =
+                    Self::tag_switch_direction(old_tag_mask, new_tag_mask, cfg.tags_length());
                 let mon_rect = self.monitor_rect(sel_mon_key);
                 let exclude_top = self.tag_transition_exclude_top(mon_rect.1);
                 backend.compositor_notify_tag_switch(
@@ -8718,9 +8901,12 @@ impl Jwm {
         } else {
             return;
         }
-        self.broadcast_ipc_event("window/title", serde_json::json!({
-            "id": win.raw(), "name": title_for_event,
-        }));
+        self.broadcast_ipc_event(
+            "window/title",
+            serde_json::json!({
+                "id": win.raw(), "name": title_for_event,
+            }),
+        );
     }
 
     fn truncate_chars(input: String, max_chars: usize) -> String {
@@ -9144,11 +9330,18 @@ impl Jwm {
 
         // Broadcast focus event
         if let Some(ck) = client_key_opt {
-            let event_data = self.state.clients.get(ck).map(|c| (c.win.raw(), c.name.clone()));
+            let event_data = self
+                .state
+                .clients
+                .get(ck)
+                .map(|c| (c.win.raw(), c.name.clone()));
             if let Some((id, name)) = event_data {
-                self.broadcast_ipc_event("window/focus", serde_json::json!({
-                    "id": id, "name": name,
-                }));
+                self.broadcast_ipc_event(
+                    "window/focus",
+                    serde_json::json!({
+                        "id": id, "name": name,
+                    }),
+                );
             }
         }
 
@@ -9272,7 +9465,11 @@ impl Jwm {
         let current = if let Some(sel_mon_key) = self.state.sel_mon {
             if let Some(monitor) = self.state.monitors.get(sel_mon_key) {
                 let tagset = monitor.get_active_tags();
-                if tagset > 0 { tagset.trailing_zeros() } else { 0 }
+                if tagset > 0 {
+                    tagset.trailing_zeros()
+                } else {
+                    0
+                }
             } else {
                 0
             }
@@ -9364,13 +9561,18 @@ impl Jwm {
         self.manage_regular_client(backend, client_key)?;
 
         // Broadcast window/new event
-        let new_event_data = self.state.clients.get(client_key).map(|c| {
-            (c.win.raw(), c.name.clone(), c.class.clone())
-        });
+        let new_event_data = self
+            .state
+            .clients
+            .get(client_key)
+            .map(|c| (c.win.raw(), c.name.clone(), c.class.clone()));
         if let Some((id, name, class)) = new_event_data {
-            self.broadcast_ipc_event("window/new", serde_json::json!({
-                "id": id, "name": name, "class": class,
-            }));
+            self.broadcast_ipc_event(
+                "window/new",
+                serde_json::json!({
+                    "id": id, "name": name, "class": class,
+                }),
+            );
         }
 
         // Appear animation for new windows
@@ -9408,7 +9610,10 @@ impl Jwm {
         // Detect named scratchpad window
         if let Some(sp_name) = self.scratchpad_pending_name.take() {
             self.scratchpads.insert(sp_name.clone(), client_key);
-            info!("[manage] detected scratchpad '{}' client {:?}", sp_name, client_key);
+            info!(
+                "[manage] detected scratchpad '{}' client {:?}",
+                sp_name, client_key
+            );
             let mon_key = self.state.clients.get(client_key).and_then(|c| c.mon);
             if let Some(client) = self.state.clients.get_mut(client_key) {
                 client.state.is_floating = true;
@@ -9441,7 +9646,10 @@ impl Jwm {
                         let from_y = area.y - h;
                         let from_rect = Rect::new(x, from_y, w, h);
                         let to_rect = Rect::new(x, y, w, h);
-                        info!("[manage] scratchpad '{}' initial animation from y={} to y={}", sp_name, from_y, y);
+                        info!(
+                            "[manage] scratchpad '{}' initial animation from y={} to y={}",
+                            sp_name, from_y, y
+                        );
                         self.animations.start(
                             client_key,
                             from_rect,
@@ -10175,7 +10383,11 @@ impl Jwm {
         }
 
         let default_border = CONFIG.load().border_px() as i32;
-        let effective_border = if tiled_keys.len() == 1 { 0 } else { default_border };
+        let effective_border = if tiled_keys.len() == 1 {
+            0
+        } else {
+            default_border
+        };
         for &ck in &tiled_keys {
             if let Some(client) = self.state.clients.get_mut(ck) {
                 client.geometry.border_w = effective_border;
@@ -10272,13 +10484,18 @@ impl Jwm {
         }
 
         // Broadcast window/close event before removing the client
-        let close_event_data = self.state.clients.get(client_key).map(|c| {
-            (c.win.raw(), c.name.clone())
-        });
+        let close_event_data = self
+            .state
+            .clients
+            .get(client_key)
+            .map(|c| (c.win.raw(), c.name.clone()));
         if let Some((id, name)) = close_event_data {
-            self.broadcast_ipc_event("window/close", serde_json::json!({
-                "id": id, "name": name,
-            }));
+            self.broadcast_ipc_event(
+                "window/close",
+                serde_json::json!({
+                    "id": id, "name": name,
+                }),
+            );
         }
 
         self.unmanage_regular_client(backend, client_key, destroyed)?;
@@ -10332,14 +10549,13 @@ impl Jwm {
 
     fn adjust_client_position(&mut self, backend: &mut dyn Backend, client_key: ClientKey) {
         info!("[adjust_client_position]");
-        let (client_total_width, client_mon_key_opt, win) = if let Some(client) =
-            self.state.clients.get(client_key)
-        {
-            (client.total_width(), client.mon, client.win)
-        } else {
-            error!("Client {:?} not found", client_key);
-            return;
-        };
+        let (client_total_width, client_mon_key_opt, win) =
+            if let Some(client) = self.state.clients.get(client_key) {
+                (client.total_width(), client.mon, client.win)
+            } else {
+                error!("Client {:?} not found", client_key);
+                return;
+            };
 
         // Most popup-like windows (menus/tooltips/etc.) should not be clamped by the WM.
         // Notifications are a special case: if they spawn at monitor y=0 they can end up
@@ -10348,8 +10564,8 @@ impl Jwm {
         // workarea (i.e. avoid any top strut / status bar).
         if self.is_popup_like(backend, client_key) {
             let types = backend.property_ops().get_window_types(win);
-            let should_clamp = types.contains(&WindowType::Notification)
-                || types.contains(&WindowType::Dialog);
+            let should_clamp =
+                types.contains(&WindowType::Notification) || types.contains(&WindowType::Dialog);
 
             if !should_clamp {
                 info!("is_popup_like (skip position adjustment)");
@@ -11111,13 +11327,21 @@ impl Jwm {
 
         for msg in messages {
             match msg {
-                IncomingIpc::Command { client_id, name, args } => {
+                IncomingIpc::Command {
+                    client_id,
+                    name,
+                    args,
+                } => {
                     let resp = self.handle_ipc_command(backend, &name, &args);
                     if let Some(ipc) = self.ipc_server.as_mut() {
                         ipc.respond(client_id, &resp);
                     }
                 }
-                IncomingIpc::Query { client_id, name, args } => {
+                IncomingIpc::Query {
+                    client_id,
+                    name,
+                    args,
+                } => {
                     let resp = self.handle_ipc_query(&name, &args);
                     if let Some(ipc) = self.ipc_server.as_mut() {
                         ipc.respond(client_id, &resp);
@@ -11145,12 +11369,10 @@ impl Jwm {
         }
 
         match ipc::dispatch_command(name, args) {
-            Ok((func, arg)) => {
-                match func(self, backend, &arg) {
-                    Ok(()) => IpcResponse::ok(None),
-                    Err(e) => IpcResponse::err(format!("{e}")),
-                }
-            }
+            Ok((func, arg)) => match func(self, backend, &arg) {
+                Ok(()) => IpcResponse::ok(None),
+                Err(e) => IpcResponse::err(format!("{e}")),
+            },
             Err(e) => IpcResponse::err(e),
         }
     }
@@ -11185,12 +11407,10 @@ impl Jwm {
                     "show_bar": cfg.show_bar(),
                 })))
             }
-            "get_version" => {
-                IpcResponse::ok(Some(serde_json::json!({
-                    "version": env!("CARGO_PKG_VERSION"),
-                    "name": "jwm",
-                })))
-            }
+            "get_version" => IpcResponse::ok(Some(serde_json::json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "name": "jwm",
+            }))),
             _ => IpcResponse::err(format!("unknown query: {name}")),
         }
     }
@@ -11201,29 +11421,33 @@ impl Jwm {
 
     fn query_windows(&self) -> Vec<WindowInfo> {
         let sel_client = self.get_selected_client_key();
-        self.state.client_order.iter().filter_map(|&ck| {
-            let c = self.state.clients.get(ck)?;
-            if Some(c.win) == self.status_bar_window {
-                return None;
-            }
-            Some(WindowInfo {
-                id: c.win.raw(),
-                name: c.name.clone(),
-                class: c.class.clone(),
-                instance: c.instance.clone(),
-                tags: c.state.tags,
-                monitor: c.monitor_num as i32,
-                x: c.geometry.x,
-                y: c.geometry.y,
-                w: c.geometry.w,
-                h: c.geometry.h,
-                is_floating: c.state.is_floating,
-                is_fullscreen: c.state.is_fullscreen,
-                is_urgent: c.state.is_urgent,
-                is_sticky: c.state.is_sticky,
-                is_focused: sel_client == Some(ck),
+        self.state
+            .client_order
+            .iter()
+            .filter_map(|&ck| {
+                let c = self.state.clients.get(ck)?;
+                if Some(c.win) == self.status_bar_window {
+                    return None;
+                }
+                Some(WindowInfo {
+                    id: c.win.raw(),
+                    name: c.name.clone(),
+                    class: c.class.clone(),
+                    instance: c.instance.clone(),
+                    tags: c.state.tags,
+                    monitor: c.monitor_num as i32,
+                    x: c.geometry.x,
+                    y: c.geometry.y,
+                    w: c.geometry.w,
+                    h: c.geometry.h,
+                    is_floating: c.state.is_floating,
+                    is_fullscreen: c.state.is_fullscreen,
+                    is_urgent: c.state.is_urgent,
+                    is_sticky: c.state.is_sticky,
+                    is_focused: sel_client == Some(ck),
+                })
             })
-        }).collect()
+            .collect()
     }
 
     fn query_workspaces(&self) -> Vec<WorkspaceInfo> {
@@ -11235,7 +11459,10 @@ impl Jwm {
                 None => continue,
             };
             let active_tags = mon.get_active_tags();
-            let client_count = self.state.monitor_clients.get(mk)
+            let client_count = self
+                .state
+                .monitor_clients
+                .get(mk)
                 .map(|v| v.len())
                 .unwrap_or(0);
             for i in 0..cfg.tags_length() {
@@ -11257,54 +11484,12 @@ impl Jwm {
     }
 
     fn query_monitors(&self) -> Vec<MonitorInfoIpc> {
-        self.state.monitor_order.iter().filter_map(|&mk| {
-            let m = self.state.monitors.get(mk)?;
-            Some(MonitorInfoIpc {
-                num: m.num,
-                x: m.geometry.m_x,
-                y: m.geometry.m_y,
-                w: m.geometry.m_w,
-                h: m.geometry.m_h,
-                active_tags: m.get_active_tags(),
-                layout: format!("{:?}", *m.lt[m.sel_lt]),
-                focused: self.state.sel_mon == Some(mk),
-            })
-        }).collect()
-    }
-
-    fn query_tree(&self) -> Vec<TreeNode> {
-        self.state.monitor_order.iter().filter_map(|&mk| {
-            let m = self.state.monitors.get(mk)?;
-            let sel_client = m.sel;
-            let windows: Vec<WindowInfo> = self.state.monitor_clients.get(mk)
-                .map(|clients| {
-                    clients.iter().filter_map(|&ck| {
-                        let c = self.state.clients.get(ck)?;
-                        if Some(c.win) == self.status_bar_window {
-                            return None;
-                        }
-                        Some(WindowInfo {
-                            id: c.win.raw(),
-                            name: c.name.clone(),
-                            class: c.class.clone(),
-                            instance: c.instance.clone(),
-                            tags: c.state.tags,
-                            monitor: c.monitor_num as i32,
-                            x: c.geometry.x,
-                            y: c.geometry.y,
-                            w: c.geometry.w,
-                            h: c.geometry.h,
-                            is_floating: c.state.is_floating,
-                            is_fullscreen: c.state.is_fullscreen,
-                            is_urgent: c.state.is_urgent,
-                            is_sticky: c.state.is_sticky,
-                            is_focused: sel_client == Some(ck),
-                        })
-                    }).collect()
-                })
-                .unwrap_or_default();
-            Some(TreeNode {
-                monitor: MonitorInfoIpc {
+        self.state
+            .monitor_order
+            .iter()
+            .filter_map(|&mk| {
+                let m = self.state.monitors.get(mk)?;
+                Some(MonitorInfoIpc {
                     num: m.num,
                     x: m.geometry.m_x,
                     y: m.geometry.m_y,
@@ -11313,10 +11498,66 @@ impl Jwm {
                     active_tags: m.get_active_tags(),
                     layout: format!("{:?}", *m.lt[m.sel_lt]),
                     focused: self.state.sel_mon == Some(mk),
-                },
-                windows,
+                })
             })
-        }).collect()
+            .collect()
+    }
+
+    fn query_tree(&self) -> Vec<TreeNode> {
+        self.state
+            .monitor_order
+            .iter()
+            .filter_map(|&mk| {
+                let m = self.state.monitors.get(mk)?;
+                let sel_client = m.sel;
+                let windows: Vec<WindowInfo> = self
+                    .state
+                    .monitor_clients
+                    .get(mk)
+                    .map(|clients| {
+                        clients
+                            .iter()
+                            .filter_map(|&ck| {
+                                let c = self.state.clients.get(ck)?;
+                                if Some(c.win) == self.status_bar_window {
+                                    return None;
+                                }
+                                Some(WindowInfo {
+                                    id: c.win.raw(),
+                                    name: c.name.clone(),
+                                    class: c.class.clone(),
+                                    instance: c.instance.clone(),
+                                    tags: c.state.tags,
+                                    monitor: c.monitor_num as i32,
+                                    x: c.geometry.x,
+                                    y: c.geometry.y,
+                                    w: c.geometry.w,
+                                    h: c.geometry.h,
+                                    is_floating: c.state.is_floating,
+                                    is_fullscreen: c.state.is_fullscreen,
+                                    is_urgent: c.state.is_urgent,
+                                    is_sticky: c.state.is_sticky,
+                                    is_focused: sel_client == Some(ck),
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some(TreeNode {
+                    monitor: MonitorInfoIpc {
+                        num: m.num,
+                        x: m.geometry.m_x,
+                        y: m.geometry.m_y,
+                        w: m.geometry.m_w,
+                        h: m.geometry.m_h,
+                        active_tags: m.get_active_tags(),
+                        layout: format!("{:?}", *m.lt[m.sel_lt]),
+                        focused: self.state.sel_mon == Some(mk),
+                    },
+                    windows,
+                })
+            })
+            .collect()
     }
 
     // =========================================================================
@@ -11392,14 +11633,20 @@ impl Jwm {
             ArgbColor::from_hex(&colors.light_sky_blue1, colors.opaque),
             ArgbColor::from_hex(&colors.light_sky_blue1, colors.opaque),
         ) {
-            alloc.set_scheme(SchemeType::Norm, ColorScheme::new(norm_fg, norm_bg, norm_border));
+            alloc.set_scheme(
+                SchemeType::Norm,
+                ColorScheme::new(norm_fg, norm_bg, norm_border),
+            );
         }
         if let (Ok(sel_fg), Ok(sel_bg), Ok(sel_border)) = (
             ArgbColor::from_hex(&colors.dark_sea_green2, colors.opaque),
             ArgbColor::from_hex(&colors.pale_turquoise1, colors.opaque),
             ArgbColor::from_hex(&colors.cyan, colors.opaque),
         ) {
-            alloc.set_scheme(SchemeType::Sel, ColorScheme::new(sel_fg, sel_bg, sel_border));
+            alloc.set_scheme(
+                SchemeType::Sel,
+                ColorScheme::new(sel_fg, sel_bg, sel_border),
+            );
         }
         let _ = alloc.allocate_schemes_pixels();
 
@@ -11417,7 +11664,14 @@ impl Jwm {
         let compositor_active = backend.has_compositor();
         if compositor_wanted != compositor_active {
             match backend.set_compositor_enabled(compositor_wanted) {
-                Ok(true) => log::info!("Compositor {}", if compositor_wanted { "enabled" } else { "disabled" }),
+                Ok(true) => log::info!(
+                    "Compositor {}",
+                    if compositor_wanted {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                ),
                 Ok(false) => {}
                 Err(e) => log::warn!("Failed to set compositor: {e}"),
             }

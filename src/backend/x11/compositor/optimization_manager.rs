@@ -1,18 +1,17 @@
+use super::BlurQuality;
+use super::blur_optimize::AdaptiveBlur;
+use super::frame_rate::{AdaptiveFrameRate, FrameRateLimiter};
+use super::per_monitor::PerMonitorRenderer;
 /// Unified optimization management for the compositor
 /// Integrates all optimization modules for easy access and coordination
-
 use super::perf_metrics::PerfMetrics;
-use super::texture_pool::TexturePool;
-use super::shader_cache::ShaderCache;
 use super::pixel_buffer_pool::PixelBufferPool;
-use super::frame_rate::{FrameRateLimiter, AdaptiveFrameRate};
-use super::blur_optimize::AdaptiveBlur;
-use super::per_monitor::PerMonitorRenderer;
-use super::BlurQuality;
-use crate::backend::x11::event_coalescer::EventCoalescer;
+use super::shader_cache::ShaderCache;
+use super::texture_pool::TexturePool;
 use crate::backend::x11::batch::X11RequestBatcher;
-use std::time::Instant;
+use crate::backend::x11::event_coalescer::EventCoalescer;
 use std::path::PathBuf;
+use std::time::Instant;
 
 /// Central optimization manager coordinating all subsystems
 pub struct OptimizationManager {
@@ -69,9 +68,9 @@ impl OptimizationManager {
 
     /// Update all adaptive systems based on performance metrics
     fn update_adaptive_systems(&mut self) {
-        let gpu_load = self.perf_metrics.estimate_gpu_load(
-            self.frame_rate_limiter.target_fps() as f32
-        );
+        let gpu_load = self
+            .perf_metrics
+            .estimate_gpu_load(self.frame_rate_limiter.target_fps() as f32);
 
         // Update metrics
         self.perf_metrics.set_gpu_load(gpu_load);
@@ -95,7 +94,8 @@ impl OptimizationManager {
             BlurQuality::Minimal => "minimal",
         };
 
-        log::debug!("optimization: GPU load={}, FPS={:.1}, quality={}",
+        log::debug!(
+            "optimization: GPU load={}, FPS={:.1}, quality={}",
             gpu_load,
             self.perf_metrics.recent_fps(),
             quality_name
@@ -134,14 +134,31 @@ impl OptimizationManager {
         log::info!("=== Optimization Statistics ===");
         log::info!("  GPU Load: {}%", status.gpu_load);
         log::info!("  CPU Load: {}%", status.cpu_load);
-        log::info!("  FPS: {:.1} (target: {})", status.recent_fps, status.target_fps);
+        log::info!(
+            "  FPS: {:.1} (target: {})",
+            status.recent_fps,
+            status.target_fps
+        );
         log::info!("  Blur Quality: {}", quality_name);
-        log::info!("  VSync: {}", if status.vsync_enabled { "enabled" } else { "disabled" });
-        log::info!("  Texture Pool: {} available, {} in use",
-            status.texture_pool_available, status.texture_pool_in_use);
+        log::info!(
+            "  VSync: {}",
+            if status.vsync_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+        log::info!(
+            "  Texture Pool: {} available, {} in use",
+            status.texture_pool_available,
+            status.texture_pool_in_use
+        );
         log::info!("  Pixel Buffers: {} buffered", status.pixel_buffer_count);
         log::info!("  Shader Cache: {} programs", status.shader_cache_count);
-        log::info!("  Per-Monitor: {:.0}% dirty", status.per_monitor_dirty_fraction * 100.0);
+        log::info!(
+            "  Per-Monitor: {:.0}% dirty",
+            status.per_monitor_dirty_fraction * 100.0
+        );
         log::info!("  Event Queue: {} events", status.event_queue_size);
     }
 
@@ -219,7 +236,13 @@ impl OptimizationStatus {
             self.cpu_load,
             self.recent_fps,
             quality_name,
-            if self.is_overloaded() { "HIGH" } else if self.is_idle() { "IDLE" } else { "OK" },
+            if self.is_overloaded() {
+                "HIGH"
+            } else if self.is_idle() {
+                "IDLE"
+            } else {
+                "OK"
+            },
             self.target_fps
         )
     }

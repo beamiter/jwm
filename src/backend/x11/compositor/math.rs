@@ -88,9 +88,7 @@ pub fn mat4_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
     let mut m = [0.0f32; 16];
     for col in 0..4 {
         for row in 0..4 {
-            m[col * 4 + row] = (0..4)
-                .map(|k| a[k * 4 + row] * b[col * 4 + k])
-                .sum();
+            m[col * 4 + row] = (0..4).map(|k| a[k * 4 + row] * b[col * 4 + k]).sum();
         }
     }
     m

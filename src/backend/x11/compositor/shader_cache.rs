@@ -1,10 +1,10 @@
+use glow::HasContext;
 /// Shader compilation and caching
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
-use glow::HasContext;
 
 /// Cached compiled shader program
 pub struct CachedProgram {
@@ -66,11 +66,14 @@ impl ShaderCache {
                     Ok(program) => {
                         log::info!("shader: loaded '{}' from disk cache", name);
                         if let Ok(mut programs) = self.programs.lock() {
-                            programs.insert(cache_key.clone(), CachedProgram {
-                                program,
-                                vert_hash,
-                                frag_hash,
-                            });
+                            programs.insert(
+                                cache_key.clone(),
+                                CachedProgram {
+                                    program,
+                                    vert_hash,
+                                    frag_hash,
+                                },
+                            );
                         }
                         return Ok(program);
                     }
@@ -93,11 +96,14 @@ impl ShaderCache {
         }
 
         if let Ok(mut programs) = self.programs.lock() {
-            programs.insert(cache_key, CachedProgram {
-                program,
-                vert_hash,
-                frag_hash,
-            });
+            programs.insert(
+                cache_key,
+                CachedProgram {
+                    program,
+                    vert_hash,
+                    frag_hash,
+                },
+            );
         }
 
         Ok(program)
@@ -111,10 +117,13 @@ impl ShaderCache {
         frag: &str,
     ) -> Result<glow::Program, String> {
         unsafe {
-            let program = gl.create_program().map_err(|e| format!("create_program: {e}"))?;
+            let program = gl
+                .create_program()
+                .map_err(|e| format!("create_program: {e}"))?;
 
             // Compile vertex shader
-            let vert_shader = gl.create_shader(glow::VERTEX_SHADER)
+            let vert_shader = gl
+                .create_shader(glow::VERTEX_SHADER)
                 .map_err(|e| format!("create_vertex_shader: {e}"))?;
             gl.shader_source(vert_shader, vert);
             gl.compile_shader(vert_shader);
@@ -126,7 +135,8 @@ impl ShaderCache {
             }
 
             // Compile fragment shader
-            let frag_shader = gl.create_shader(glow::FRAGMENT_SHADER)
+            let frag_shader = gl
+                .create_shader(glow::FRAGMENT_SHADER)
                 .map_err(|e| format!("create_fragment_shader: {e}"))?;
             gl.shader_source(frag_shader, frag);
             gl.compile_shader(frag_shader);
@@ -157,7 +167,11 @@ impl ShaderCache {
     }
 
     /// Get binary representation of a compiled program
-    fn get_program_binary(&self, _gl: &glow::Context, _program: glow::Program) -> Result<Vec<u8>, String> {
+    fn get_program_binary(
+        &self,
+        _gl: &glow::Context,
+        _program: glow::Program,
+    ) -> Result<Vec<u8>, String> {
         // Note: This requires GL_ARB_get_program_binary extension
         // For now, we just return empty to indicate binary caching is not available
         Ok(vec![])

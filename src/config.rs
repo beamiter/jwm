@@ -450,67 +450,189 @@ pub struct WallpaperMonitorConfig {
     pub mode: String,
 }
 
-fn default_corner_radius() -> f32 { 10.0 }
-fn default_true() -> bool { true }
-fn default_shadow_radius() -> f32 { 24.0 }
-fn default_shadow_offset() -> [f32; 2] { [4.0, 4.0] }
-fn default_shadow_color() -> [f32; 4] { [0.0, 0.0, 0.0, 0.5] }
-fn default_inactive_opacity() -> f32 { 0.98 }
-fn default_active_opacity() -> f32 { 1.0 }
-fn default_blur_strength() -> u32 { 3 }
-fn default_fade_step() -> f32 { 0.03 }
-fn default_border_width() -> f32 { 2.0 }
-fn default_border_color_focused() -> [f32; 4] { [0.4, 0.6, 0.9, 1.0] }
-fn default_border_color_unfocused() -> [f32; 4] { [0.3, 0.3, 0.3, 0.6] }
-fn default_one() -> f32 { 1.0 }
-fn default_shadow_bottom_extra() -> f32 { 4.0 }
-fn default_transition_mode() -> String { "slide".to_string() }
-fn default_window_animation_scale() -> f32 { 0.85 }
-fn default_edge_glow_color() -> [f32; 4] { [0.3, 0.5, 1.0, 0.6] }
-fn default_edge_glow_width() -> f32 { 50.0 }
-fn default_attention_color() -> [f32; 4] { [1.0, 0.4, 0.1, 1.0] }
-fn default_pip_border_color() -> [f32; 4] { [0.0, 0.8, 1.0, 0.8] }
-fn default_pip_border_width() -> f32 { 3.0 }
-fn default_night_light_temp() -> f32 { 0.4 }
-fn default_night_light_start() -> String { "20:00".to_string() }
-fn default_night_light_end() -> String { "06:00".to_string() }
-fn default_night_light_transition() -> u32 { 30 }
-fn default_magnifier_radius() -> f32 { 100.0 }
-fn default_magnifier_zoom() -> f32 { 2.0 }
-fn default_tilt_amount() -> f32 { 0.26 }
-fn default_tilt_perspective() -> f32 { 800.0 }
-fn default_tilt_speed() -> f32 { 12.0 }
-fn default_tilt_grid() -> u32 { 8 }
-fn default_frosted_glass_strength() -> u32 { 2 }
-fn default_overview_gap() -> f32 { 20.0 }
-fn default_wobbly_stiffness() -> f32 { 400.0 }
-fn default_wobbly_damping() -> f32 { 25.0 }
-fn default_wobbly_restore_stiffness() -> f32 { 200.0 }
-fn default_wobbly_grid_size() -> u32 { 8 }
-fn default_particle_count() -> u32 { 150 }
-fn default_particle_lifetime() -> f32 { 0.8 }
-fn default_particle_gravity() -> f32 { 800.0 }
-fn default_wallpaper_mode() -> String { "fill".to_string() }
-fn default_annotation_color() -> [f32; 4] { [1.0, 0.0, 0.0, 1.0] }
-fn default_annotation_line_width() -> f32 { 3.0 }
-fn default_recording_fps() -> u32 { 30 }
-fn default_recording_bitrate() -> String { "20M".to_string() }
-fn default_recording_encoder() -> String { "auto".to_string() }
-fn default_recording_quality() -> u32 { 23 }
-fn default_motion_trail_frames() -> u32 { 5 }
-fn default_motion_trail_opacity() -> f32 { 0.3 }
-fn default_genie_duration() -> u64 { 300 }
-fn default_ripple_duration() -> f32 { 0.6 }
-fn default_ripple_amplitude() -> f32 { 0.015 }
-fn default_focus_highlight_color() -> [f32; 4] { [0.4, 0.7, 1.0, 0.9] }
-fn default_focus_highlight_duration() -> u64 { 300 }
-fn default_wallpaper_crossfade_duration() -> u64 { 500 }
-fn default_expose_gap() -> f32 { 20.0 }
-fn default_snap_preview_color() -> [f32; 4] { [0.3, 0.5, 1.0, 0.3] }
-fn default_snap_animation_duration_ms() -> u64 { 200 }
-fn default_tab_bar_height() -> f32 { 28.0 }
-fn default_tab_bar_color() -> [f32; 4] { [0.15, 0.15, 0.18, 0.9] }
-fn default_tab_active_color() -> [f32; 4] { [0.3, 0.5, 0.9, 0.9] }
+fn default_corner_radius() -> f32 {
+    10.0
+}
+fn default_true() -> bool {
+    true
+}
+fn default_shadow_radius() -> f32 {
+    24.0
+}
+fn default_shadow_offset() -> [f32; 2] {
+    [4.0, 4.0]
+}
+fn default_shadow_color() -> [f32; 4] {
+    [0.0, 0.0, 0.0, 0.5]
+}
+fn default_inactive_opacity() -> f32 {
+    0.98
+}
+fn default_active_opacity() -> f32 {
+    1.0
+}
+fn default_blur_strength() -> u32 {
+    3
+}
+fn default_fade_step() -> f32 {
+    0.03
+}
+fn default_border_width() -> f32 {
+    2.0
+}
+fn default_border_color_focused() -> [f32; 4] {
+    [0.4, 0.6, 0.9, 1.0]
+}
+fn default_border_color_unfocused() -> [f32; 4] {
+    [0.3, 0.3, 0.3, 0.6]
+}
+fn default_one() -> f32 {
+    1.0
+}
+fn default_shadow_bottom_extra() -> f32 {
+    4.0
+}
+fn default_transition_mode() -> String {
+    "slide".to_string()
+}
+fn default_window_animation_scale() -> f32 {
+    0.85
+}
+fn default_edge_glow_color() -> [f32; 4] {
+    [0.3, 0.5, 1.0, 0.6]
+}
+fn default_edge_glow_width() -> f32 {
+    50.0
+}
+fn default_attention_color() -> [f32; 4] {
+    [1.0, 0.4, 0.1, 1.0]
+}
+fn default_pip_border_color() -> [f32; 4] {
+    [0.0, 0.8, 1.0, 0.8]
+}
+fn default_pip_border_width() -> f32 {
+    3.0
+}
+fn default_night_light_temp() -> f32 {
+    0.4
+}
+fn default_night_light_start() -> String {
+    "20:00".to_string()
+}
+fn default_night_light_end() -> String {
+    "06:00".to_string()
+}
+fn default_night_light_transition() -> u32 {
+    30
+}
+fn default_magnifier_radius() -> f32 {
+    100.0
+}
+fn default_magnifier_zoom() -> f32 {
+    2.0
+}
+fn default_tilt_amount() -> f32 {
+    0.26
+}
+fn default_tilt_perspective() -> f32 {
+    800.0
+}
+fn default_tilt_speed() -> f32 {
+    12.0
+}
+fn default_tilt_grid() -> u32 {
+    8
+}
+fn default_frosted_glass_strength() -> u32 {
+    2
+}
+fn default_overview_gap() -> f32 {
+    20.0
+}
+fn default_wobbly_stiffness() -> f32 {
+    400.0
+}
+fn default_wobbly_damping() -> f32 {
+    25.0
+}
+fn default_wobbly_restore_stiffness() -> f32 {
+    200.0
+}
+fn default_wobbly_grid_size() -> u32 {
+    8
+}
+fn default_particle_count() -> u32 {
+    150
+}
+fn default_particle_lifetime() -> f32 {
+    0.8
+}
+fn default_particle_gravity() -> f32 {
+    800.0
+}
+fn default_wallpaper_mode() -> String {
+    "fill".to_string()
+}
+fn default_annotation_color() -> [f32; 4] {
+    [1.0, 0.0, 0.0, 1.0]
+}
+fn default_annotation_line_width() -> f32 {
+    3.0
+}
+fn default_recording_fps() -> u32 {
+    30
+}
+fn default_recording_bitrate() -> String {
+    "20M".to_string()
+}
+fn default_recording_encoder() -> String {
+    "auto".to_string()
+}
+fn default_recording_quality() -> u32 {
+    23
+}
+fn default_motion_trail_frames() -> u32 {
+    5
+}
+fn default_motion_trail_opacity() -> f32 {
+    0.3
+}
+fn default_genie_duration() -> u64 {
+    300
+}
+fn default_ripple_duration() -> f32 {
+    0.6
+}
+fn default_ripple_amplitude() -> f32 {
+    0.015
+}
+fn default_focus_highlight_color() -> [f32; 4] {
+    [0.4, 0.7, 1.0, 0.9]
+}
+fn default_focus_highlight_duration() -> u64 {
+    300
+}
+fn default_wallpaper_crossfade_duration() -> u64 {
+    500
+}
+fn default_expose_gap() -> f32 {
+    20.0
+}
+fn default_snap_preview_color() -> [f32; 4] {
+    [0.3, 0.5, 1.0, 0.3]
+}
+fn default_snap_animation_duration_ms() -> u64 {
+    200
+}
+fn default_tab_bar_height() -> f32 {
+    28.0
+}
+fn default_tab_bar_color() -> [f32; 4] {
+    [0.15, 0.15, 0.18, 0.9]
+}
+fn default_tab_active_color() -> [f32; 4] {
+    [0.3, 0.5, 0.9, 0.9]
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusBarConfig {
@@ -550,7 +672,9 @@ pub struct AnimationConfig {
     pub speed: String,
 }
 
-fn default_animation_speed() -> String { "normal".to_string() }
+fn default_animation_speed() -> String {
+    "normal".to_string()
+}
 
 impl AnimationConfig {
     pub fn default_value() -> Self {
@@ -788,10 +912,7 @@ impl Default for Config {
 #[allow(dead_code)]
 impl Config {
     fn get_default_keys() -> Vec<KeyConfig> {
-        let is_x11 = matches!(
-            std::env::var("JWM_BACKEND").as_deref(),
-            Err(_) | Ok("x11")
-        );
+        let is_x11 = matches!(std::env::var("JWM_BACKEND").as_deref(), Err(_) | Ok("x11"));
 
         let dmenu_cmd = if is_x11 {
             vec!["dmenu_run".to_string()]
@@ -1093,13 +1214,19 @@ impl Config {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
                 key: "m".to_string(),
                 function: "togglescratchpad".to_string(),
-                argument: ArgumentConfig::StringVec(vec!["music".to_string(), "spotify".to_string()]),
+                argument: ArgumentConfig::StringVec(vec![
+                    "music".to_string(),
+                    "spotify".to_string(),
+                ]),
             },
             KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
                 key: "c".to_string(),
                 function: "togglescratchpad".to_string(),
-                argument: ArgumentConfig::StringVec(vec!["calc".to_string(), "qalculate-gtk".to_string()]),
+                argument: ArgumentConfig::StringVec(vec![
+                    "calc".to_string(),
+                    "qalculate-gtk".to_string(),
+                ]),
             },
             KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
@@ -1139,13 +1266,21 @@ impl Config {
                 argument: ArgumentConfig::Int(1),
             },
             KeyConfig {
-                modifier: vec!["Mod1".to_string(), "Control".to_string(), "Shift".to_string()],
+                modifier: vec![
+                    "Mod1".to_string(),
+                    "Control".to_string(),
+                    "Shift".to_string(),
+                ],
                 key: "h".to_string(),
                 function: "scrolling_expel".to_string(),
                 argument: ArgumentConfig::Int(-1),
             },
             KeyConfig {
-                modifier: vec!["Mod1".to_string(), "Control".to_string(), "Shift".to_string()],
+                modifier: vec![
+                    "Mod1".to_string(),
+                    "Control".to_string(),
+                    "Shift".to_string(),
+                ],
                 key: "l".to_string(),
                 function: "scrolling_expel".to_string(),
                 argument: ArgumentConfig::Int(1),
@@ -1356,10 +1491,7 @@ impl Config {
                 _ => None,
             })
             .unwrap_or_else(|| {
-                let is_x11 = matches!(
-                    std::env::var("JWM_BACKEND").as_deref(),
-                    Err(_) | Ok("x11")
-                );
+                let is_x11 = matches!(std::env::var("JWM_BACKEND").as_deref(), Err(_) | Ok("x11"));
                 if is_x11 {
                     vec!["dmenu_run".to_string()]
                 } else {
@@ -1705,11 +1837,15 @@ impl Config {
             }
             // colorblind_mode (in [behavior])
             else if section == "behavior" && trimmed.starts_with("colorblind_mode") {
-                result.push_str("# available: \"\" (disabled), deuteranopia, protanopia, tritanopia\n");
+                result.push_str(
+                    "# available: \"\" (disabled), deuteranopia, protanopia, tritanopia\n",
+                );
             }
             // easing (in [animation])
             else if section == "animation" && trimmed.starts_with("easing") {
-                result.push_str("# available: linear, ease-out, ease-in, ease-in-out, bounce, elastic\n");
+                result.push_str(
+                    "# available: linear, ease-out, ease-in, ease-in-out, bounce, elastic\n",
+                );
             }
             // speed (in [animation])
             else if section == "animation" && trimmed.starts_with("speed") {

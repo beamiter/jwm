@@ -13,9 +13,9 @@ use crate::backend::error::BackendError;
 use crate::jwm::InteractionAction;
 use calloop::signals::{Signal, Signals};
 use std::any::Any;
+use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use std::env;
 use x11rb::connection::Connection;
 use x11rb::connection::RequestConnection;
 use x11rb::protocol::randr::ConnectionExt as RandrExt;
@@ -33,18 +33,12 @@ use crate::backend::api::{
     PropertyOps, WindowOps,
 };
 
-use super::Atoms;
 use self::{
-    color::X11ColorAllocator,
-    cursor::X11CursorProvider,
-    event_source::X11EventSource,
-    ewmh_facade::X11EwmhFacade,
-    input_ops::X11InputOps,
-    key_ops::X11KeyOps,
-    output_ops::X11OutputOps,
-    property_ops::X11PropertyOps,
-    window_ops::X11WindowOps,
+    color::X11ColorAllocator, cursor::X11CursorProvider, event_source::X11EventSource,
+    ewmh_facade::X11EwmhFacade, input_ops::X11InputOps, key_ops::X11KeyOps,
+    output_ops::X11OutputOps, property_ops::X11PropertyOps, window_ops::X11WindowOps,
 };
+use super::Atoms;
 
 pub struct X11LoopData<'a> {
     pub backend: &'a mut X11Backend,
@@ -236,8 +230,13 @@ impl X11Backend {
         };
 
         let overlay_x11 = compositor.as_ref().map(|c| c.overlay_window());
-        let event_source =
-            X11EventSource::new(conn.clone(), atoms.clone(), screen.root, overlay_x11, ids.clone());
+        let event_source = X11EventSource::new(
+            conn.clone(),
+            atoms.clone(),
+            screen.root,
+            overlay_x11,
+            ids.clone(),
+        );
 
         Ok(Self {
             conn,
@@ -300,7 +299,13 @@ impl X11Backend {
                     compositor.remove_window(x11w);
                 }
             }
-            BackendEvent::WindowConfigured { window, x, y, width, height } => {
+            BackendEvent::WindowConfigured {
+                window,
+                x,
+                y,
+                width,
+                height,
+            } => {
                 if let Ok(x11w) = self.ids.x11(*window) {
                     // Skip the overlay window
                     if x11w != overlay {
@@ -308,12 +313,18 @@ impl X11Backend {
                     }
                 }
             }
-            BackendEvent::WindowStateRequest { window, state, action } => {
+            BackendEvent::WindowStateRequest {
+                window,
+                state,
+                action,
+            } => {
                 // Track fullscreen state changes for unredirect optimisation
                 if *state == crate::backend::api::NetWmState::Fullscreen {
                     if let Ok(x11w) = self.ids.x11(*window) {
-                        let is_fs = matches!(action,
-                            crate::backend::api::NetWmAction::Add | crate::backend::api::NetWmAction::Toggle
+                        let is_fs = matches!(
+                            action,
+                            crate::backend::api::NetWmAction::Add
+                                | crate::backend::api::NetWmAction::Toggle
                         );
                         compositor.set_window_fullscreen(x11w, is_fs);
                     }
@@ -422,7 +433,9 @@ impl Backend for X11Backend {
                 }
                 Err(e) => {
                     log::warn!("Failed to enable compositor at runtime: {e}");
-                    Err(BackendError::Message(format!("compositor init failed: {e}")))
+                    Err(BackendError::Message(format!(
+                        "compositor init failed: {e}"
+                    )))
                 }
             }
         } else {
@@ -437,7 +450,9 @@ impl Backend for X11Backend {
     }
 
     fn compositor_overlay_window(&self) -> Option<WindowId> {
-        self.compositor.as_ref().map(|c| self.ids.intern(c.overlay_window()))
+        self.compositor
+            .as_ref()
+            .map(|c| self.ids.intern(c.overlay_window()))
     }
 
     fn compositor_render_frame(
@@ -474,7 +489,11 @@ impl Backend for X11Backend {
             if !compositor.has_window(x11w) && x11w != self.root_x11 {
                 log::info!(
                     "[compositor] lazily adding untracked window 0x{:x} {}x{} at ({},{})",
-                    x11w, w, h, x, y
+                    x11w,
+                    w,
+                    h,
+                    x,
+                    y
                 );
                 compositor.add_window(x11w, x, y, w, h);
             }
@@ -512,40 +531,73 @@ impl Backend for X11Backend {
     }
 
     fn compositor_set_color_temperature(&mut self, temp: f32) {
-        if let Some(c) = self.compositor.as_mut() { c.set_color_temperature(temp); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_color_temperature(temp);
+        }
     }
     fn compositor_set_saturation(&mut self, sat: f32) {
-        if let Some(c) = self.compositor.as_mut() { c.set_saturation(sat); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_saturation(sat);
+        }
     }
     fn compositor_set_brightness(&mut self, val: f32) {
-        if let Some(c) = self.compositor.as_mut() { c.set_brightness(val); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_brightness(val);
+        }
     }
     fn compositor_set_contrast(&mut self, val: f32) {
-        if let Some(c) = self.compositor.as_mut() { c.set_contrast(val); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_contrast(val);
+        }
     }
     fn compositor_set_invert_colors(&mut self, invert: bool) {
-        if let Some(c) = self.compositor.as_mut() { c.set_invert_colors(invert); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_invert_colors(invert);
+        }
     }
     fn compositor_set_grayscale(&mut self, gs: bool) {
-        if let Some(c) = self.compositor.as_mut() { c.set_grayscale(gs); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_grayscale(gs);
+        }
     }
     fn compositor_set_debug_hud(&mut self, enabled: bool) {
-        if let Some(c) = self.compositor.as_mut() { c.set_debug_hud(enabled); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_debug_hud(enabled);
+        }
     }
     fn compositor_set_transition_mode(&mut self, mode: &str) {
-        if let Some(c) = self.compositor.as_mut() { c.set_transition_mode(mode); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_transition_mode(mode);
+        }
     }
     fn compositor_apply_config(&mut self) {
-        if let Some(c) = self.compositor.as_mut() { c.apply_config(); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.apply_config();
+        }
     }
     fn compositor_fps(&self) -> f32 {
-        self.compositor.as_ref().map_or(0.0, |c| c.frame_stats_fps())
+        self.compositor
+            .as_ref()
+            .map_or(0.0, |c| c.frame_stats_fps())
     }
-    fn compositor_capture_thumbnail(&self, window: WindowId, max_size: u32) -> Option<(Vec<u8>, u32, u32)> {
+    fn compositor_capture_thumbnail(
+        &self,
+        window: WindowId,
+        max_size: u32,
+    ) -> Option<(Vec<u8>, u32, u32)> {
         let x11w = self.ids.x11(window).ok()?;
-        self.compositor.as_ref()?.capture_window_thumbnail(x11w, max_size)
+        self.compositor
+            .as_ref()?
+            .capture_window_thumbnail(x11w, max_size)
     }
-    fn compositor_set_frame_extents(&mut self, window: WindowId, left: u32, right: u32, top: u32, bottom: u32) {
+    fn compositor_set_frame_extents(
+        &mut self,
+        window: WindowId,
+        left: u32,
+        right: u32,
+        top: u32,
+        bottom: u32,
+    ) {
         if let Some(c) = self.compositor.as_mut() {
             if let Ok(x11w) = self.ids.x11(window) {
                 c.set_frame_extents(x11w, left, right, top, bottom);
@@ -579,15 +631,21 @@ impl Backend for X11Backend {
     }
 
     fn compositor_set_mouse_position(&mut self, x: f32, y: f32) {
-        if let Some(c) = self.compositor.as_mut() { c.set_mouse_position(x, y); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_mouse_position(x, y);
+        }
     }
 
     fn compositor_deactivate_edge_glow(&mut self) {
-        if let Some(c) = self.compositor.as_mut() { c.deactivate_edge_glow(); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.deactivate_edge_glow();
+        }
     }
 
     fn compositor_unsuppress_edge_glow(&mut self) {
-        if let Some(c) = self.compositor.as_mut() { c.unsuppress_edge_glow(); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.unsuppress_edge_glow();
+        }
     }
 
     fn compositor_set_window_urgent(&mut self, window: WindowId, urgent: bool) {
@@ -607,14 +665,24 @@ impl Backend for X11Backend {
     }
 
     fn compositor_set_magnifier(&mut self, enabled: bool) {
-        if let Some(c) = self.compositor.as_mut() { c.set_magnifier(enabled); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_magnifier(enabled);
+        }
     }
 
-    fn compositor_set_overview_mode(&mut self, active: bool, windows: &[(WindowId, f32, f32, f32, f32, bool, String)]) {
+    fn compositor_set_overview_mode(
+        &mut self,
+        active: bool,
+        windows: &[(WindowId, f32, f32, f32, f32, bool, String)],
+    ) {
         if let Some(c) = self.compositor.as_mut() {
-            let x11_windows: Vec<(u32, f32, f32, f32, f32, bool, String)> = windows.iter()
+            let x11_windows: Vec<(u32, f32, f32, f32, f32, bool, String)> = windows
+                .iter()
                 .filter_map(|(wid, x, y, w, h, sel, title)| {
-                    self.ids.x11(*wid).ok().map(|x11w| (x11w, *x, *y, *w, *h, *sel, title.clone()))
+                    self.ids
+                        .x11(*wid)
+                        .ok()
+                        .map(|x11w| (x11w, *x, *y, *w, *h, *sel, title.clone()))
                 })
                 .collect();
             c.set_overview_mode(active, x11_windows);
@@ -672,32 +740,49 @@ impl Backend for X11Backend {
     }
 
     fn compositor_set_colorblind_mode(&mut self, mode: &str) {
-        if let Some(c) = self.compositor.as_mut() { c.set_colorblind_mode(mode); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_colorblind_mode(mode);
+        }
     }
 
     fn compositor_set_annotation_mode(&mut self, active: bool) {
-        if let Some(c) = self.compositor.as_mut() { c.set_annotation_mode(active); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_annotation_mode(active);
+        }
     }
 
     fn compositor_annotation_add_point(&mut self, x: f32, y: f32) {
-        if let Some(c) = self.compositor.as_mut() { c.annotation_add_point(x, y); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.annotation_add_point(x, y);
+        }
     }
 
     fn compositor_zoom_to_fit(&mut self, window: Option<u32>) {
-        if let Some(c) = self.compositor.as_mut() { c.zoom_to_fit(window); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.zoom_to_fit(window);
+        }
     }
 
     fn compositor_start_recording(&mut self, path: &str) {
-        if let Some(c) = self.compositor.as_mut() { c.start_recording(path); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.start_recording(path);
+        }
     }
 
     fn compositor_stop_recording(&mut self) {
-        if let Some(c) = self.compositor.as_mut() { c.stop_recording(); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.stop_recording();
+        }
     }
 
-    fn compositor_set_expose_mode(&mut self, active: bool, windows: Vec<(WindowId, i32, i32, u32, u32)>) {
+    fn compositor_set_expose_mode(
+        &mut self,
+        active: bool,
+        windows: Vec<(WindowId, i32, i32, u32, u32)>,
+    ) {
         if let Some(c) = self.compositor.as_mut() {
-            let x11_windows: Vec<(u32, i32, i32, u32, u32)> = windows.iter()
+            let x11_windows: Vec<(u32, i32, i32, u32, u32)> = windows
+                .iter()
                 .filter_map(|(wid, x, y, w, h)| {
                     self.ids.x11(*wid).ok().map(|x11w| (x11w, *x, *y, *w, *h))
                 })
@@ -707,22 +792,36 @@ impl Backend for X11Backend {
     }
 
     fn compositor_set_snap_preview(&mut self, preview: Option<(f32, f32, f32, f32)>) {
-        if let Some(c) = self.compositor.as_mut() { c.set_snap_preview(preview); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_snap_preview(preview);
+        }
     }
     fn compositor_clear_snap_preview_immediate(&mut self) {
-        if let Some(c) = self.compositor.as_mut() { c.clear_snap_preview_immediate(); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.clear_snap_preview_immediate();
+        }
     }
 
     fn compositor_set_peek_mode(&mut self, active: bool) {
-        if let Some(c) = self.compositor.as_mut() { c.set_peek_mode(active); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_peek_mode(active);
+        }
     }
 
     fn compositor_set_window_groups(&mut self, groups: Vec<(u32, Vec<(u32, String, bool)>)>) {
-        if let Some(c) = self.compositor.as_mut() { c.set_window_groups(groups); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_window_groups(groups);
+        }
     }
 
-    fn compositor_request_live_thumbnail(&mut self, window: u32, max_size: u32) -> Option<(Vec<u8>, u32, u32)> {
-        self.compositor.as_ref()?.request_live_thumbnail(window, max_size)
+    fn compositor_request_live_thumbnail(
+        &mut self,
+        window: u32,
+        max_size: u32,
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        self.compositor
+            .as_ref()?
+            .request_live_thumbnail(window, max_size)
     }
 
     fn compositor_expose_click(&mut self, x: f32, y: f32) -> Option<WindowId> {
@@ -889,7 +988,12 @@ impl Backend for X11Backend {
         let (rx, ry) = self.input_ops.get_pointer_position()?;
 
         if Self::debug_drag_enabled() {
-            log::info!("[drag] begin_resize win={:?} edge={:?} geom={:?}", win, edge, geom);
+            log::info!(
+                "[drag] begin_resize win={:?} edge={:?} geom={:?}",
+                win,
+                edge,
+                geom
+            );
         }
 
         // Do not warp pointer: resizemouse already picked an edge based on current cursor.
@@ -993,7 +1097,13 @@ impl Backend for X11Backend {
 
     fn interaction_geometry(&self) -> Option<(WindowId, i32, i32, u32, u32)> {
         let state = self.interaction.as_ref()?;
-        Some((state.win, state.current_x, state.current_y, state.current_w, state.current_h))
+        Some((
+            state.win,
+            state.current_x,
+            state.current_y,
+            state.current_w,
+            state.current_h,
+        ))
     }
 
     // [实现] 处理 ButtonRelease
@@ -1001,7 +1111,11 @@ impl Backend for X11Backend {
         if self.interaction.is_some() {
             if Self::debug_drag_enabled() {
                 if let Some(state) = self.interaction.as_ref() {
-                    log::info!("[drag] end_interaction win={:?} action={:?}", state.win, state.action);
+                    log::info!(
+                        "[drag] end_interaction win={:?} action={:?}",
+                        state.win,
+                        state.action
+                    );
                 } else {
                     log::info!("[drag] end_interaction");
                 }
@@ -1094,13 +1208,12 @@ impl Backend for X11Backend {
             // Without this, dispatch(None) only wakes on the 20ms calloop timer,
             // which drifts against the vblank period and produces severe stutter
             // (the exact symptom: smooth when mouse moves, choppy when still).
-            let timeout = if loop_data.handler.needs_tick()
-                || loop_data.backend.compositor_needs_render()
-            {
-                Some(Duration::from_millis(1))
-            } else {
-                None
-            };
+            let timeout =
+                if loop_data.handler.needs_tick() || loop_data.backend.compositor_needs_render() {
+                    Some(Duration::from_millis(1))
+                } else {
+                    None
+                };
             event_loop
                 .dispatch(timeout, &mut loop_data)
                 .map_err(|e| BackendError::Other(Box::new(e)))?;
@@ -1110,7 +1223,9 @@ impl Backend for X11Backend {
             // This dramatically reduces visual latency for rapidly-updating
             // overlay windows (e.g. flameshot screenshot selection).
             if !loop_data.should_exit {
-                loop_data.handler.render_compositor_immediate(loop_data.backend);
+                loop_data
+                    .handler
+                    .render_compositor_immediate(loop_data.backend);
             }
 
             if loop_data.should_exit {
@@ -1181,7 +1296,12 @@ mod ids {
 
         /// Return a snapshot of all known (x11_window, WindowId) pairs.
         pub(super) fn all_x11_windows(&self) -> Vec<(u32, WindowId)> {
-            self.x11_to_wid.read().unwrap().iter().map(|(&x, &w)| (x, w)).collect()
+            self.x11_to_wid
+                .read()
+                .unwrap()
+                .iter()
+                .map(|(&x, &w)| (x, w))
+                .collect()
         }
     }
 }
@@ -1416,10 +1536,10 @@ mod color {
 }
 
 mod cursor {
+    use super::ids::X11IdRegistry;
     use crate::backend::api::CursorProvider;
     use crate::backend::common_define::{CursorHandle, StdCursorKind, WindowId};
     use crate::backend::error::BackendError;
-    use super::ids::X11IdRegistry;
     use std::collections::HashMap;
     use std::sync::Arc;
     use x11rb::connection::Connection;
@@ -1508,7 +1628,11 @@ mod cursor {
     }
 
     impl X11StdCursor {
-        pub(super) fn create(&self, conn: &impl Connection, font: Font) -> Result<Cursor, BackendError> {
+        pub(super) fn create(
+            &self,
+            conn: &impl Connection,
+            font: Font,
+        ) -> Result<Cursor, BackendError> {
             let cursor_id = conn.generate_id()?;
             let glyph = *self as u16;
             conn.create_glyph_cursor(
@@ -1845,13 +1969,13 @@ mod event_source {
     use x11rb::protocol::{Event as XEvent, xproto};
     use x11rb::rust_connection::RustConnection;
 
+    use super::ids::X11IdRegistry;
     use crate::backend::api::{
         BackendEvent, NetWmAction, NetWmState, PropertyKind, StackMode, WindowChanges,
     };
     use crate::backend::api::{HitTarget, NotifyMode};
     use crate::backend::error::BackendError;
     use crate::backend::x11::Atoms;
-    use super::ids::X11IdRegistry;
 
     use calloop::{EventSource, Interest, Mode, Poll, PostAction, Readiness, Token, TokenFactory};
 
@@ -1864,7 +1988,13 @@ mod event_source {
     }
 
     impl X11EventSource {
-        pub(super) fn new(conn: Arc<RustConnection>, atoms: Atoms, root_x11: u32, overlay_x11: Option<u32>, ids: X11IdRegistry) -> Self {
+        pub(super) fn new(
+            conn: Arc<RustConnection>,
+            atoms: Atoms,
+            root_x11: u32,
+            overlay_x11: Option<u32>,
+            ids: X11IdRegistry,
+        ) -> Self {
             Self {
                 conn,
                 atoms,
@@ -1889,7 +2019,9 @@ mod event_source {
                 PropertyKind::SizeHints
             } else if atom == u32::from(xproto::AtomEnum::WM_HINTS) {
                 PropertyKind::Urgency
-            } else if atom == u32::from(xproto::AtomEnum::WM_NAME) || atom == self.atoms._NET_WM_NAME {
+            } else if atom == u32::from(xproto::AtomEnum::WM_NAME)
+                || atom == self.atoms._NET_WM_NAME
+            {
                 PropertyKind::Title
             } else if atom == u32::from(xproto::AtomEnum::WM_CLASS) {
                 PropertyKind::Class
@@ -1897,9 +2029,7 @@ mod event_source {
                 PropertyKind::WindowType
             } else if atom == self.atoms.WM_PROTOCOLS {
                 PropertyKind::Protocols
-            } else if atom == self.atoms._NET_WM_STRUT
-                || atom == self.atoms._NET_WM_STRUT_PARTIAL
-            {
+            } else if atom == self.atoms._NET_WM_STRUT || atom == self.atoms._NET_WM_STRUT_PARTIAL {
                 PropertyKind::Strut
             } else {
                 PropertyKind::Other
@@ -1920,7 +2050,12 @@ mod event_source {
                 XEvent::ButtonPress(e) => {
                     log::info!(
                         "[X11] ButtonPress: event=0x{:x} child=0x{:x} root=0x{:x} root_xy=({},{}) detail={}",
-                        e.event, e.child, self.root_x11, e.root_x, e.root_y, e.detail
+                        e.event,
+                        e.child,
+                        self.root_x11,
+                        e.root_x,
+                        e.root_y,
+                        e.detail
                     );
                     Some(BackendEvent::ButtonPress {
                         target: self.hit_target_from_event_window(e.event),
@@ -1953,9 +2088,13 @@ mod event_source {
                     state: e.state.bits(),
                     time: e.time,
                 }),
-                XEvent::MapRequest(e) => Some(BackendEvent::WindowCreated(self.ids.intern(e.window))),
+                XEvent::MapRequest(e) => {
+                    Some(BackendEvent::WindowCreated(self.ids.intern(e.window)))
+                }
                 XEvent::MapNotify(e) => Some(BackendEvent::WindowMapped(self.ids.intern(e.window))),
-                XEvent::UnmapNotify(e) => Some(BackendEvent::WindowUnmapped(self.ids.intern(e.window))),
+                XEvent::UnmapNotify(e) => {
+                    Some(BackendEvent::WindowUnmapped(self.ids.intern(e.window)))
+                }
                 XEvent::DestroyNotify(e) => {
                     let id = self.ids.intern(e.window);
                     self.ids.remove_x11(e.window);
@@ -2121,7 +2260,9 @@ mod event_source {
             }
         }
 
-        pub(super) fn poll_event(&mut self) -> Result<Option<BackendEvent>, Box<dyn std::error::Error>> {
+        pub(super) fn poll_event(
+            &mut self,
+        ) -> Result<Option<BackendEvent>, Box<dyn std::error::Error>> {
             let ev = self.conn.poll_for_event()?;
             Ok(ev.and_then(|e| self.map_event(e)))
         }
@@ -2214,11 +2355,11 @@ mod event_source {
 }
 
 mod ewmh_facade {
+    use super::ids::X11IdRegistry;
     use crate::backend::api::{EwmhFacade, EwmhFeature};
     use crate::backend::common_define::WindowId;
     use crate::backend::error::BackendError;
     use crate::backend::x11::Atoms;
-    use super::ids::X11IdRegistry;
     use std::sync::Arc;
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::ConnectionExt as _;
@@ -2389,7 +2530,12 @@ mod ewmh_facade {
             Ok(())
         }
 
-        fn set_desktop_info(&self, current: u32, total: u32, names: &[&str]) -> Result<(), BackendError> {
+        fn set_desktop_info(
+            &self,
+            current: u32,
+            total: u32,
+            names: &[&str],
+        ) -> Result<(), BackendError> {
             let r = self.ids.x11(self.root)?;
 
             // _NET_NUMBER_OF_DESKTOPS
@@ -2446,11 +2592,11 @@ mod input_ops {
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::*;
 
+    use super::ids::X11IdRegistry;
     use crate::backend::api::AllowMode;
     use crate::backend::api::InputOps as InputOpsTrait;
     use crate::backend::common_define::StdCursorKind;
     use crate::backend::common_define::WindowId;
-    use super::ids::X11IdRegistry;
 
     pub(super) struct X11InputOps<C: Connection> {
         conn: Arc<C>,
@@ -2565,7 +2711,12 @@ mod input_ops {
             ))
         }
 
-        fn warp_pointer_to_window(&self, win: WindowId, x: i16, y: i16) -> Result<(), BackendError> {
+        fn warp_pointer_to_window(
+            &self,
+            win: WindowId,
+            x: i16,
+            y: i16,
+        ) -> Result<(), BackendError> {
             let w = self.ids.x11(win)?;
             self.conn.warp_pointer(0u32, w, 0, 0, 0, 0, x, y)?;
             Ok(())
@@ -2582,12 +2733,12 @@ mod key_ops {
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::*;
 
+    use super::adapter::mods_to_x11;
+    use super::ids::X11IdRegistry;
     use crate::backend::api::KeyOps;
     use crate::backend::common_define::WindowId;
     use crate::backend::common_define::{KeySym, Mods};
     use crate::backend::error::BackendError;
-    use super::adapter::mods_to_x11;
-    use super::ids::X11IdRegistry;
 
     pub(super) struct X11KeyOps<C: Connection> {
         conn: Arc<C>,
@@ -2638,7 +2789,9 @@ mod key_ops {
                     }
                 }
             }
-            let km = self.full_keymap.as_ref()
+            let km = self
+                .full_keymap
+                .as_ref()
                 .ok_or_else(|| BackendError::Message("keymap not initialized".into()))?;
             Ok((&km.0, km.1, km.2))
         }
@@ -2709,7 +2862,11 @@ mod key_ops {
             Ok(())
         }
 
-        fn grab_keys(&self, root: WindowId, bindings: &[(Mods, KeySym)]) -> Result<(), BackendError> {
+        fn grab_keys(
+            &self,
+            root: WindowId,
+            bindings: &[(Mods, KeySym)],
+        ) -> Result<(), BackendError> {
             let numlock_local = *self.numlock_mask.lock().unwrap();
             let r = self.ids.x11(root)?;
 
@@ -2792,13 +2949,15 @@ mod key_ops {
 
         fn grab_keyboard(&self, root: WindowId) -> Result<(), BackendError> {
             let r = self.ids.x11(root)?;
-            self.conn.grab_keyboard(
-                false,
-                r,
-                x11rb::CURRENT_TIME,
-                GrabMode::ASYNC,
-                GrabMode::ASYNC,
-            )?.reply()?;
+            self.conn
+                .grab_keyboard(
+                    false,
+                    r,
+                    x11rb::CURRENT_TIME,
+                    GrabMode::ASYNC,
+                    GrabMode::ASYNC,
+                )?
+                .reply()?;
             self.conn.flush()?;
             Ok(())
         }
@@ -3038,6 +3197,7 @@ mod output_ops {
 }
 
 mod property_ops {
+    use super::ids::X11IdRegistry;
     use crate::backend::api::NormalHints;
     use crate::backend::api::StrutPartial;
     use crate::backend::api::WmHints;
@@ -3045,7 +3205,6 @@ mod property_ops {
     use crate::backend::common_define::WindowId;
     use crate::backend::error::BackendError;
     use crate::backend::x11::Atoms;
-    use super::ids::X11IdRegistry;
     use std::sync::Arc;
     use x11rb::connection::Connection;
     use x11rb::properties::WmSizeHints;
@@ -3194,13 +3353,14 @@ mod property_ops {
                 Ok(w) => w,
                 Err(_) => return (String::new(), String::new()),
             };
-            let reply = match self
-                .conn
-                .get_property(false, w, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 256)
-            {
-                Ok(cookie) => cookie.reply().ok(),
-                Err(_) => None,
-            };
+            let reply =
+                match self
+                    .conn
+                    .get_property(false, w, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 256)
+                {
+                    Ok(cookie) => cookie.reply().ok(),
+                    Err(_) => None,
+                };
 
             if let Some(reply) = reply {
                 if reply.type_ == u32::from(AtomEnum::STRING) && reply.format == 8 {
@@ -3474,14 +3634,7 @@ mod property_ops {
             // Fallback: _NET_WM_STRUT (4 CARDINAL values, no start/end ranges)
             if let Ok(reply) = self
                 .conn
-                .get_property(
-                    false,
-                    w,
-                    self.atoms._NET_WM_STRUT,
-                    AtomEnum::CARDINAL,
-                    0,
-                    4,
-                )
+                .get_property(false, w, self.atoms._NET_WM_STRUT, AtomEnum::CARDINAL, 0, 4)
                 .ok()?
                 .reply()
             {
@@ -3553,14 +3706,14 @@ mod property_ops {
 }
 
 mod window_ops {
+    use super::adapter::{event_mask_from_generic, mods_to_x11};
+    use super::ids::X11IdRegistry;
     use crate::backend::api::{CloseResult, Geometry, WindowAttributes, WindowOps};
     use crate::backend::api::{StackMode, WindowChanges};
     use crate::backend::common_define::{Mods, Pixel, WindowId};
     use crate::backend::error::BackendError;
     use crate::backend::x11::Atoms;
     use crate::backend::x11::batch::X11RequestBatcher;
-    use super::adapter::{event_mask_from_generic, mods_to_x11};
-    use super::ids::X11IdRegistry;
     use log::debug;
     use std::env;
     use std::sync::Arc;
@@ -3701,7 +3854,8 @@ mod window_ops {
 
         fn raise_window(&self, win: WindowId) -> Result<(), BackendError> {
             let w = self.ids.x11(win)?;
-            let aux = ConfigureWindowAux::new().stack_mode(x11rb::protocol::xproto::StackMode::ABOVE);
+            let aux =
+                ConfigureWindowAux::new().stack_mode(x11rb::protocol::xproto::StackMode::ABOVE);
             self.conn.configure_window(w, &aux)?;
             Ok(())
         }
@@ -3712,8 +3866,8 @@ mod window_ops {
             }
             // Raise the first window to the top of the stack
             let first = self.ids.x11(windows[0])?;
-            let aux = ConfigureWindowAux::new()
-                .stack_mode(x11rb::protocol::xproto::StackMode::ABOVE);
+            let aux =
+                ConfigureWindowAux::new().stack_mode(x11rb::protocol::xproto::StackMode::ABOVE);
             self.conn.configure_window(first, &aux)?;
 
             // Stack subsequent windows above their predecessor using sibling
@@ -3792,7 +3946,8 @@ mod window_ops {
             let w = self.ids.x11(win)?;
             log::info!(
                 "[grab_button_any_anymod] WindowId={:?} -> X11 window=0x{:x}",
-                win, w
+                win,
+                w
             );
             self.conn.grab_button(
                 false,
@@ -3883,8 +4038,11 @@ mod window_ops {
         }
 
         fn set_input_focus_root(&self) -> Result<(), BackendError> {
-            self.conn
-                .set_input_focus(InputFocus::POINTER_ROOT, self.root_x11, x11rb::CURRENT_TIME)?;
+            self.conn.set_input_focus(
+                InputFocus::POINTER_ROOT,
+                self.root_x11,
+                x11rb::CURRENT_TIME,
+            )?;
             Ok(())
         }
 
@@ -3917,9 +4075,16 @@ mod window_ops {
                     32,
                     w,
                     self.atoms.WM_PROTOCOLS,
-                    [self.atoms.WM_TAKE_FOCUS, x11rb::CURRENT_TIME as u32, 0, 0, 0],
+                    [
+                        self.atoms.WM_TAKE_FOCUS,
+                        x11rb::CURRENT_TIME as u32,
+                        0,
+                        0,
+                        0,
+                    ],
                 );
-                self.conn.send_event(false, w, EventMask::NO_EVENT, event.serialize())?;
+                self.conn
+                    .send_event(false, w, EventMask::NO_EVENT, event.serialize())?;
                 self.conn.flush()?;
                 return Ok(true);
             }
@@ -3976,4 +4141,3 @@ mod window_ops {
         }
     }
 }
-

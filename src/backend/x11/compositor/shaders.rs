@@ -831,4 +831,3 @@ void main() {
 "#;
 
 // Genie uses the same fragment shader as windows (FRAGMENT_SHADER)
-

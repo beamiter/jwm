@@ -1,10 +1,12 @@
-use glow::HasContext;
 use super::{Compositor, Particle};
+use glow::HasContext;
 
 impl Compositor {
     /// Tick wobbly grid spring-mass physics. Returns true if any wobbly is active.
     pub(super) fn tick_wobbly(&mut self) -> bool {
-        if !self.wobbly_windows { return false; }
+        if !self.wobbly_windows {
+            return false;
+        }
         let neighbor_k = self.wobbly_stiffness;
         let restore_k = self.wobbly_restore_stiffness;
         let damping = self.wobbly_damping;
@@ -92,8 +94,7 @@ impl Compositor {
 
                 // Check if settled
                 let all_settled = w.offsets.iter().zip(w.velocities.iter()).all(|(o, v)| {
-                    o[0].abs() < 0.1 && o[1].abs() < 0.1
-                        && v[0].abs() < 0.1 && v[1].abs() < 0.1
+                    o[0].abs() < 0.1 && o[1].abs() < 0.1 && v[0].abs() < 0.1 && v[1].abs() < 0.1
                 });
 
                 if all_settled && !w.dragging {
@@ -132,7 +133,9 @@ impl Compositor {
 
     /// Render active particle systems.
     pub(super) fn render_particles(&self, proj: &[f32; 16]) {
-        if self.particle_systems.is_empty() { return; }
+        if self.particle_systems.is_empty() {
+            return;
+        }
 
         // Collect all particles into a flat buffer
         let mut data: Vec<f32> = Vec::new();
@@ -140,29 +143,36 @@ impl Compositor {
         for sys in &self.particle_systems {
             for p in &sys.particles {
                 let life_frac = (p.lifetime / p.max_lifetime).clamp(0.0, 1.0);
-                data.extend_from_slice(&[p.x, p.y, p.color[0], p.color[1], p.color[2], p.color[3], life_frac]);
+                data.extend_from_slice(&[
+                    p.x, p.y, p.color[0], p.color[1], p.color[2], p.color[3], life_frac,
+                ]);
                 count += 1;
             }
         }
 
-        if count == 0 { return; }
+        if count == 0 {
+            return;
+        }
 
         unsafe {
             self.gl.use_program(Some(self.particle_program));
             self.gl.uniform_matrix_4_f32_slice(
-                self.particle_uniforms.projection.as_ref(), false, proj,
+                self.particle_uniforms.projection.as_ref(),
+                false,
+                proj,
             );
-            self.gl.uniform_1_f32(self.particle_uniforms.point_size.as_ref(), 4.0);
+            self.gl
+                .uniform_1_f32(self.particle_uniforms.point_size.as_ref(), 4.0);
 
             self.gl.enable(glow::PROGRAM_POINT_SIZE);
             self.gl.bind_vertex_array(Some(self.particle_vao));
-            self.gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.particle_vbo));
+            self.gl
+                .bind_buffer(glow::ARRAY_BUFFER, Some(self.particle_vbo));
 
-            let byte_data: &[u8] = std::slice::from_raw_parts(
-                data.as_ptr() as *const u8,
-                data.len() * 4,
-            );
-            self.gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, byte_data, glow::DYNAMIC_DRAW);
+            let byte_data: &[u8] =
+                std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4);
+            self.gl
+                .buffer_data_u8_slice(glow::ARRAY_BUFFER, byte_data, glow::DYNAMIC_DRAW);
             self.gl.draw_arrays(glow::POINTS, 0, count as i32);
 
             self.gl.disable(glow::PROGRAM_POINT_SIZE);
@@ -174,7 +184,9 @@ impl Compositor {
 
     /// Spawn particles when a window is removed (particle effect).
     pub(super) fn spawn_particles_for_window(&mut self, x: i32, y: i32, w: u32, h: u32) {
-        if !self.particle_effects { return; }
+        if !self.particle_effects {
+            return;
+        }
 
         let count = self.particle_count as usize;
         let lifetime = self.particle_lifetime;
@@ -201,15 +213,18 @@ impl Compositor {
             let b = 0.8;
 
             particles.push(Particle {
-                x: px, y: py,
-                vx, vy,
+                x: px,
+                y: py,
+                vx,
+                vy,
                 color: [r, g, b, 1.0],
                 lifetime,
                 max_lifetime: lifetime,
             });
         }
 
-        self.particle_systems.push(super::ParticleSystem { particles });
+        self.particle_systems
+            .push(super::ParticleSystem { particles });
         self.needs_render = true;
     }
 
@@ -243,7 +258,11 @@ impl Compositor {
             if self.window_animation {
                 let diff = wt.anim_scale_target - wt.anim_scale;
                 if diff.abs() > 0.001 {
-                    let step = if diff > 0.0 { self.fade_in_step } else { -self.fade_out_step };
+                    let step = if diff > 0.0 {
+                        self.fade_in_step
+                    } else {
+                        -self.fade_out_step
+                    };
                     wt.anim_scale += step;
                     if (wt.anim_scale_target - wt.anim_scale).abs() < 0.001
                         || (step > 0.0 && wt.anim_scale >= wt.anim_scale_target)
@@ -270,7 +289,9 @@ impl Compositor {
 
     /// Record the current window position into the motion trail ring buffer.
     pub(super) fn update_motion_trail(&mut self, x11_win: u32, x: i32, y: i32) {
-        if !self.motion_trail_enabled { return; }
+        if !self.motion_trail_enabled {
+            return;
+        }
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             wt.motion_trail.push_back((x, y));
             while wt.motion_trail.len() > self.motion_trail_frames as usize {
@@ -292,26 +313,32 @@ impl Compositor {
 
     /// Tick genie animations. Returns true if any are active.
     pub(super) fn tick_genie(&mut self) -> bool {
-        if self.genie_active.is_empty() { return false; }
+        if self.genie_active.is_empty() {
+            return false;
+        }
         let duration = std::time::Duration::from_millis(self.genie_duration_ms);
         let now = std::time::Instant::now();
         // Remove completed animations and clean up their textures
-        self.genie_active.retain(|ga| {
-            now.duration_since(ga.start) < duration
-        });
+        self.genie_active
+            .retain(|ga| now.duration_since(ga.start) < duration);
         !self.genie_active.is_empty()
     }
 
     /// Start a genie animation for a window being removed.
     pub(super) fn start_genie_animation(&mut self, x11_win: u32, x: f32, y: f32, w: f32, h: f32) {
-        if !self.genie_minimize { return; }
+        if !self.genie_minimize {
+            return;
+        }
         // We need the window's GL texture — if it still exists, grab it
         // The texture won't be deleted because we prevent remove_window_immediate
         if let Some(wt) = self.windows.get(&x11_win) {
             self.genie_active.push(super::GenieAnimation {
                 x11_win,
                 start: std::time::Instant::now(),
-                x, y, w, h,
+                x,
+                y,
+                w,
+                h,
                 gl_texture: wt.gl_texture,
                 has_rgba: wt.has_rgba,
             });
@@ -324,12 +351,13 @@ impl Compositor {
 
     /// Tick ripple effects. Returns true if any are active.
     pub(super) fn tick_ripples(&mut self) -> bool {
-        if self.ripple_active.is_empty() { return false; }
+        if self.ripple_active.is_empty() {
+            return false;
+        }
         let duration = std::time::Duration::from_secs_f32(self.ripple_duration);
         let now = std::time::Instant::now();
-        self.ripple_active.retain(|r| {
-            now.duration_since(r.start) < duration
-        });
+        self.ripple_active
+            .retain(|r| now.duration_since(r.start) < duration);
         !self.ripple_active.is_empty()
     }
 
@@ -339,7 +367,9 @@ impl Compositor {
 
     /// Returns true if focus highlight is currently animating.
     pub(super) fn tick_focus_highlight(&self) -> bool {
-        if !self.focus_highlight { return false; }
+        if !self.focus_highlight {
+            return false;
+        }
         if let Some((_, start)) = self.focus_highlight_start {
             let elapsed = start.elapsed().as_millis() as u64;
             elapsed < self.focus_highlight_duration_ms
@@ -354,7 +384,9 @@ impl Compositor {
 
     /// Tick tilt smooth interpolation. Returns true if tilt is visually active.
     pub(super) fn tick_tilt(&mut self, dt: f32) -> bool {
-        if !self.window_tilt { return false; }
+        if !self.window_tilt {
+            return false;
+        }
         let dt = dt.clamp(0.001, 0.05);
         let alpha = 1.0 - (-dt * self.tilt_speed).exp();
         self.tilt_current_x += (self.tilt_target_x - self.tilt_current_x) * alpha;
@@ -366,19 +398,25 @@ impl Compositor {
             self.tilt_current_x = self.tilt_target_x;
             self.tilt_current_y = self.tilt_target_y;
         }
-        self.tilt_current_x.abs() > epsilon || self.tilt_current_y.abs() > epsilon
-            || dx > epsilon || dy > epsilon
+        self.tilt_current_x.abs() > epsilon
+            || self.tilt_current_y.abs() > epsilon
+            || dx > epsilon
+            || dy > epsilon
     }
 
     /// Returns true if wallpaper crossfade is currently animating.
     pub(super) fn tick_wallpaper_crossfade(&mut self) -> bool {
-        if !self.wallpaper_crossfade { return false; }
+        if !self.wallpaper_crossfade {
+            return false;
+        }
         if let Some(start) = self.wallpaper_transition_start {
             let elapsed = start.elapsed().as_millis() as u64;
             if elapsed >= self.wallpaper_crossfade_duration_ms {
                 // Transition finished — clean up old texture
                 if let Some(tex) = self.old_wallpaper_texture.take() {
-                    unsafe { self.gl.delete_texture(tex); }
+                    unsafe {
+                        self.gl.delete_texture(tex);
+                    }
                 }
                 self.wallpaper_transition_start = None;
                 false

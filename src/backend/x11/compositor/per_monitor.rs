@@ -34,16 +34,26 @@ impl PerMonitorRenderer {
 
     /// Register a monitor
     pub fn add_monitor(&mut self, id: u32, x: i32, y: i32, width: u32, height: u32) {
-        self.monitors.insert(id, MonitorRenderRegion {
-            monitor_id: id,
+        self.monitors.insert(
+            id,
+            MonitorRenderRegion {
+                monitor_id: id,
+                x,
+                y,
+                width,
+                height,
+                needs_redraw: true,
+                last_rendered_frame: 0,
+            },
+        );
+        log::info!(
+            "per-monitor: added monitor {} at ({}, {}) {}x{}",
+            id,
             x,
             y,
             width,
-            height,
-            needs_redraw: true,
-            last_rendered_frame: 0,
-        });
-        log::info!("per-monitor: added monitor {} at ({}, {}) {}x{}", id, x, y, width, height);
+            height
+        );
     }
 
     /// Remove a monitor
@@ -69,9 +79,7 @@ impl PerMonitorRenderer {
 
     /// Get monitors that need rendering this frame
     pub fn monitors_to_render(&self) -> Vec<&MonitorRenderRegion> {
-        self.monitors.values()
-            .filter(|m| m.needs_redraw)
-            .collect()
+        self.monitors.values().filter(|m| m.needs_redraw).collect()
     }
 
     /// Get monitor by ID

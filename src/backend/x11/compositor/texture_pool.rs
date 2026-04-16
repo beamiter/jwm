@@ -1,7 +1,7 @@
+use glow::HasContext;
 /// Texture pool for reusing GPU texture objects
 use std::collections::HashMap;
-use std::sync::{Mutex, Arc};
-use glow::HasContext;
+use std::sync::{Arc, Mutex};
 
 /// Pooled texture for reuse
 pub struct PooledTexture {
@@ -57,7 +57,9 @@ impl TexturePool {
 
         // Create new texture
         unsafe {
-            let tex = gl.create_texture().map_err(|e| format!("Failed to create texture: {e}"))?;
+            let tex = gl
+                .create_texture()
+                .map_err(|e| format!("Failed to create texture: {e}"))?;
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
@@ -70,10 +72,26 @@ impl TexturePool {
                 glow::UNSIGNED_BYTE,
                 glow::PixelUnpackData::Slice(None),
             );
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
             gl.bind_texture(glow::TEXTURE_2D, None);
 
             self.stats.allocations += 1;
@@ -130,9 +148,11 @@ impl TexturePool {
 
     /// Get number of available textures
     pub fn available_count(&self) -> usize {
-        self.available.lock().ok().map(|a| {
-            a.values().map(|v| v.len()).sum()
-        }).unwrap_or(0)
+        self.available
+            .lock()
+            .ok()
+            .map(|a| a.values().map(|v| v.len()).sum())
+            .unwrap_or(0)
     }
 
     /// Get number of in-use textures

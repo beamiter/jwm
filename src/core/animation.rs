@@ -48,9 +48,7 @@ impl Easing {
                     1.0 - p * p * p / 2.0
                 }
             }
-            Easing::EaseIn => {
-                t * t * t
-            }
+            Easing::EaseIn => t * t * t,
             Easing::Bounce => {
                 let t = 1.0 - t;
                 let v = if t < 1.0 / 2.75 {
@@ -74,8 +72,7 @@ impl Easing {
                     let p = 0.3;
                     let s = p / 4.0;
                     let t1 = t - 1.0;
-                    -(2.0_f32.powf(10.0 * t1)
-                        * (std::f32::consts::PI * 2.0 * (t1 - s) / p).sin())
+                    -(2.0_f32.powf(10.0 * t1) * (std::f32::consts::PI * 2.0 * (t1 - s) / p).sin())
                         + 1.0
                 }
             }
