@@ -4,19 +4,19 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-anyhow = "1.0.100"
-chrono = "0.4.42"
-sysinfo = { version = "0.37.1", features = ["multithread"] }
+anyhow = "1.0.102"
+chrono = "0.4.44"
+sysinfo = { version = "0.37.2", features = ["multithread"] }
 
 shared_structures = { git = "https://github.com/beamiter/shared_structures.git", features = ["use-futex"] }
 serde = { version = "1.0.228", features = ["derive"] }
 
 alsa = "0.10.0"
-log = "0.4.28"
-flexi_logger = "0.31.4"
+log = "0.4.29"
+flexi_logger = "0.31.8"
 battery = "0.7.8"
-libc = "0.2.176"
+libc = "0.2.185"
 
-cairo-rs = { version = "0.21.2", features = ["xcb"] }
-pango = "0.21.3"
-pangocairo = "0.21.2"
+cairo-rs = { version = "0.22.0", features = ["xcb"] }
+pango = "0.22.4"
+pangocairo = "0.22.0"
