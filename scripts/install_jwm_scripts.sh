@@ -60,6 +60,7 @@ ALL_BARS=(
     winit_pixels_bar
     winit_softbuffer_bar
     winit_wgpu_bar
+    xcb_wgpu_bar
     x11rb_bar
     xcb_bar
 )
@@ -68,7 +69,7 @@ ALL_BARS=(
 # 默认值
 # ============================================================
 BUILD_MODE="release"
-BAR_NAME="tao_softbuffer_bar"
+BAR_NAME="xcb_wgpu_bar"
 SKIP_BAR=false
 SKIP_JWM=false
 JOBS=""
