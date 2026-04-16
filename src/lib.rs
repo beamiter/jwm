@@ -17,6 +17,9 @@ use std::f64::consts::{FRAC_PI_2, PI};
 
 pub mod audio_manager;
 pub mod system_monitor;
+pub use cairo;
+pub use pango;
+pub use pangocairo;
 pub use audio_manager::AudioManager;
 pub use system_monitor::SystemMonitor;
 
