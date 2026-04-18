@@ -549,9 +549,8 @@ impl WMController for Jwm {
                 let y = sy.min(root_y) as f32;
                 let w = (sx - root_x).abs() as f32;
                 let h = (sy - root_y).abs() as f32;
-                if w > 1.0 && h > 1.0 {
-                    backend.compositor_set_snap_preview(Some((x, y, w, h)));
-                }
+                // Always update preview, even for tiny movements
+                backend.compositor_set_snap_preview(Some((x, y, w.max(1.0), h.max(1.0))));
                 backend.compositor_force_full_redraw();
             }
             return;
@@ -1871,6 +1870,12 @@ impl Jwm {
                 // Start dragging
                 self.screenshot_select_dragging = true;
                 self.screenshot_select_start = self.last_mouse_root;
+                // Immediately show a 1x1 preview to avoid animation delay
+                if backend.has_compositor() {
+                    let (x, y) = self.last_mouse_root;
+                    backend.compositor_set_snap_preview(Some((x as f32, y as f32, 1.0, 1.0)));
+                    backend.compositor_force_full_redraw();
+                }
             } else {
                 // Right-click or other button → cancel
                 self.cancel_screenshot_select(backend);
