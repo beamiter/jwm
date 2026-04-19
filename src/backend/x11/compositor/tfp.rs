@@ -296,6 +296,7 @@ impl Compositor {
                 wobbly: None,
                 pending_fence: None,
                 motion_trail: std::collections::VecDeque::new(),
+                audio_sync_target: None,
             },
         );
 
@@ -605,6 +606,10 @@ impl Compositor {
         let corner_radius_override = self.lookup_corner_radius_rule(class_name);
         let scale = self.lookup_scale_rule(class_name);
         let is_frosted = self.lookup_frosted_glass_rule(class_name);
+
+        // Auto-detect known video players for audio sync
+        let is_video_player = self.is_known_video_player(class_name);
+
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             if wt.class_name != class_name {
                 wt.class_name = class_name.to_string();
@@ -615,8 +620,29 @@ impl Compositor {
                     wt.scale = s;
                 }
                 self.needs_render = true;
+
+                // Auto-enable audio sync for known video players
+                if is_video_player && wt.audio_sync_target.is_none() {
+                    log::info!(
+                        "compositor: detected video player {} (0x{:x}), enabling audio sync",
+                        class_name, x11_win
+                    );
+                    // Default audio sync at 60fps; will be overridden by app notification
+                    wt.audio_sync_target = Some(60.0);
+                }
             }
         }
+    }
+
+    /// Check if a window class is a known video player
+    fn is_known_video_player(&self, class_name: &str) -> bool {
+        let class_lower = class_name.to_lowercase();
+        matches!(
+            class_lower.as_str(),
+            "mpv" | "vlc" | "ffplay" | "kodi" | "mplayer" | "mplayer2"
+                | "smplayer" | "totem" | "gstreamer"
+                | "rhythmbox" | "audacious" | "clementine"
+        )
     }
 
     /// Set/unset fullscreen state for a window (for fullscreen unredirect).

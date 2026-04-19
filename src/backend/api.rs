@@ -252,6 +252,19 @@ pub enum BackendEvent {
     },
     MappingNotify,
     DamageNotify { drawable: WindowId },
+
+    // === Present extension events ===
+    PresentComplete {
+        window: WindowId,
+        serial: u32,
+        msc: u64,
+        ust: u64,
+    },
+    PresentIdle {
+        window: WindowId,
+        serial: u32,
+        pixmap: u32,
+    },
 }
 
 pub trait WindowOps: Send {
@@ -746,6 +759,14 @@ pub trait Backend: Send {
 
     /// Toggle magnifier effect.
     fn compositor_set_magnifier(&mut self, _enabled: bool) {}
+
+    /// Notify the compositor about audio stream timing for a window.
+    /// Used for audio-video synchronization: helps the compositor know when to present
+    /// video frames to match the audio stream's clock.
+    /// `window`: the window with the audio stream
+    /// `fps`: target frame rate of the audio stream
+    /// `buffer_latency_ms`: audio buffer latency in milliseconds
+    fn compositor_notify_audio_timing(&mut self, _window: WindowId, _fps: f32, _buffer_latency_ms: u32) {}
 
     /// Set overview mode for Alt-Tab window preview.
     fn compositor_set_overview_mode(&mut self, _active: bool, _windows: &[(WindowId, f32, f32, f32, f32, bool, String)]) {}

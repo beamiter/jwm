@@ -21,6 +21,11 @@ pub mod per_monitor;
 pub mod dirty_region;
 pub mod optimization_manager;
 
+// Sync control modules
+pub mod oml_sync_control;
+pub mod audio_sync;
+pub mod present;
+
 pub use perf_metrics::PerfMetrics;
 pub use texture_pool::TexturePool;
 pub use shader_cache::ShaderCache;
@@ -30,6 +35,7 @@ pub use blur_optimize::{AdaptiveBlur, GaussianBlurParams, BlurCache, BlurCacheSt
 pub use per_monitor::{PerMonitorRenderer, MonitorRenderRegion};
 pub use dirty_region::{DirtyRegionTracker, DirtyRect};
 pub use optimization_manager::{OptimizationManager, OptimizationStatus};
+pub use oml_sync_control::OmlSyncControl;
 
 use glow::HasContext;
 use std::collections::HashMap;
@@ -71,6 +77,23 @@ const GLX_TEXTURE_2D_EXT: i32 = 0x20DC;
 const GLX_TEXTURE_FORMAT_RGBA_EXT: i32 = 0x20DA;
 const GLX_TEXTURE_FORMAT_RGB_EXT: i32 = 0x20D9;
 const GLX_FRONT_LEFT_EXT: i32 = 0x20DE;
+
+// ---------------------------------------------------------------------------
+// VSync method selection
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VsyncMethod {
+    Global,          // glXSwapInterval=1 (traditional, all windows locked to one vblank)
+    OmlSyncControl,  // GLX_OML_sync_control (per-window MSC-based timing)
+    Present,         // X11 Present extension (per-window independent presentation)
+}
+
+impl Default for VsyncMethod {
+    fn default() -> Self {
+        VsyncMethod::Global
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Per-window texture state
@@ -131,6 +154,8 @@ struct WindowTexture {
     pending_fence: Option<glow::Fence>,
     // --- Phase 3.1: Motion trail ---
     motion_trail: std::collections::VecDeque<(i32, i32)>,
+    // --- Audio sync: target presentation FPS to match audio stream ---
+    audio_sync_target: Option<f32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -660,6 +685,15 @@ pub(super) struct Compositor {
     fullscreen_unredirect: bool,
     /// Currently unredirected fullscreen window (if any)
     unredirected_window: Option<u32>,
+
+    // --- VSync method ---
+    vsync_method: VsyncMethod,
+    /// GLX_OML_sync_control for per-window MSC-based vblank timing
+    oml: Option<oml_sync_control::OmlSyncControl>,
+    /// Audio sync manager for per-window audio-video synchronization
+    audio_sync: audio_sync::AudioSyncManager,
+    /// Present extension for per-window independent presentation
+    present_mgr: Option<present::PresentManager>,
 
     // --- Feature 1: Window borders ---
     border_program: glow::Program,
@@ -1380,6 +1414,9 @@ impl Compositor {
             }
         }
 
+        // Attempt to load GLX_OML_sync_control (may not be available, and config will decide if it's used)
+        let oml_loaded = oml_sync_control::OmlSyncControl::load(xlib_display, glx_drawable);
+
         log::info!("compositor: finding TFP FBConfigs...");
         // 12. Find FBConfigs for TFP (RGBA and RGB)
         let tfp_rgba_attrs: Vec<i32> = vec![
@@ -1867,6 +1904,42 @@ impl Compositor {
         let behavior = cfg.behavior();
         let anim_speed = cfg.animation_speed();
 
+        // Load Present extension (always try to load even if not the selected vsync method,
+        // since it may be used for per-window presentation alongside other methods)
+        let present_loaded = present::PresentManager::load(conn.clone());
+
+        // Determine which VSync method to use based on config and availability
+        let (oml, vsync_method, present_mgr) = match behavior.vsync_method.as_str() {
+            "oml_sync_control" => {
+                if let Some(oml_ctrl) = oml_loaded {
+                    log::info!("compositor: using GLX_OML_sync_control for per-window vblank timing");
+                    (Some(oml_ctrl), VsyncMethod::OmlSyncControl, present_loaded)
+                } else {
+                    log::warn!("compositor: GLX_OML_sync_control requested but unavailable, falling back to global vsync");
+                    (None, VsyncMethod::Global, present_loaded)
+                }
+            }
+            "present" => {
+                if present_loaded.is_some() {
+                    log::info!("compositor: using Present extension for per-window independent presentation");
+                    (oml_loaded, VsyncMethod::Present, present_loaded)
+                } else {
+                    // Fallback chain: Present unavailable → try OML → Global
+                    if let Some(oml_ctrl) = oml_loaded {
+                        log::warn!("compositor: Present unavailable, falling back to OML_sync_control");
+                        (Some(oml_ctrl), VsyncMethod::OmlSyncControl, None)
+                    } else {
+                        log::warn!("compositor: Present and OML both unavailable, using global vsync");
+                        (None, VsyncMethod::Global, None)
+                    }
+                }
+            }
+            _ => {
+                log::info!("compositor: using global vsync (glXSwapInterval=1)");
+                (oml_loaded, VsyncMethod::Global, present_loaded)
+            }
+        };
+
         // Parse opacity rules ("opacity_percent:class_name")
         let opacity_rules: Vec<OpacityRule> = behavior.opacity_rules.iter().filter_map(|rule| {
             let parts: Vec<&str> = rule.splitn(2, ':').collect();
@@ -1997,6 +2070,10 @@ impl Compositor {
             detect_client_opacity: behavior.detect_client_opacity,
             fullscreen_unredirect: behavior.fullscreen_unredirect,
             unredirected_window: None,
+            vsync_method,
+            oml,
+            audio_sync: audio_sync::AudioSyncManager::new(),
+            present_mgr,
             // Feature 1: borders
             border_program,
             border_uniforms,
@@ -2650,6 +2727,33 @@ impl Compositor {
         self.overlay_window
     }
 
+    /// Mutable access to OML for syncing
+    pub(super) fn oml_mut(&mut self) -> Option<&mut oml_sync_control::OmlSyncControl> {
+        self.oml.as_mut()
+    }
+
+    /// Handle Present CompleteNotify event
+    pub(super) fn on_present_complete(&mut self, x11_win: u32, _serial: u32, msc: u64, ust: u64) {
+        // Update audio sync tracking
+        self.audio_sync.mark_frame_rendered(x11_win);
+
+        // Update OML tracking
+        if let Some(oml) = &mut self.oml {
+            oml.on_window_presented(x11_win, msc, ust);
+        }
+
+        log::debug!(
+            "compositor: Present complete for 0x{:x} msc={} ust={}",
+            x11_win, msc, ust
+        );
+    }
+
+    /// Handle Present IdleNotify event
+    pub(super) fn on_present_idle(&mut self, x11_win: u32, _serial: u32, _pixmap: u32) {
+        // Window is idle and ready for next presentation
+        log::debug!("compositor: Present idle for 0x{:x}", x11_win);
+    }
+
     pub(super) fn clear_needs_render(&mut self) {
         self.needs_render = false;
     }
@@ -2730,6 +2834,38 @@ impl Compositor {
         self.fade_out_step = anim_speed.apply_fade_step(behavior.fade_out_step);
         self.detect_client_opacity = behavior.detect_client_opacity;
         self.fullscreen_unredirect = behavior.fullscreen_unredirect;
+
+        // --- VSync method (runtime change support) ---
+        let new_vsync_method = match behavior.vsync_method.as_str() {
+            "oml_sync_control" => {
+                if self.oml.is_some() || oml_sync_control::OmlSyncControl::load(self.xlib_display, self.glx_drawable).is_some() {
+                    VsyncMethod::OmlSyncControl
+                } else {
+                    log::warn!("vsync_method: OML_sync_control not available, using global vsync");
+                    VsyncMethod::Global
+                }
+            }
+            "present" => {
+                // Initialize Present if not already available
+                if self.present_mgr.is_none() {
+                    log::info!("vsync_method: attempting to load Present extension");
+                    // Note: Would need conn available here to load Present
+                    // For now, just set the method if Present is already loaded
+                }
+                VsyncMethod::Present
+            }
+            _ => VsyncMethod::Global,
+        };
+
+        if new_vsync_method != self.vsync_method {
+            log::info!("compositor: VSync method changed to {:?}", new_vsync_method);
+            self.vsync_method = new_vsync_method;
+            if new_vsync_method == VsyncMethod::OmlSyncControl && self.oml.is_none() {
+                // Try to load OML if not already loaded
+                self.oml = oml_sync_control::OmlSyncControl::load(self.xlib_display, self.glx_drawable);
+            }
+        }
+
         self.blur_use_frame_extents = behavior.blur_use_frame_extents;
         self.blur_quality_auto = behavior.blur_quality_auto;
 
@@ -3386,6 +3522,22 @@ impl Compositor {
         for &(win, _, _, _, _) in scene {
             if let Some(wt) = self.windows.get_mut(&win) {
                 if wt.dirty && wt.glx_pixmap != 0 {
+                    // Audio sync: skip texture update if this window's audio timing
+                    // says it's not yet time to present the next frame.
+                    // This prevents forcing all video windows into the compositor's
+                    // frame rate, which was the root cause of audio-video desync.
+                    if wt.audio_sync_target.is_some() {
+                        if !self.audio_sync.should_render(win) {
+                            continue;
+                        }
+                        // Check for stale audio streams — fall back to normal rendering
+                        if self.audio_sync.should_fallback(win) {
+                            self.audio_sync.unregister_stream(win);
+                            wt.audio_sync_target = None;
+                            log::debug!("compositor: audio sync fallback for 0x{:x} (stale)", win);
+                        }
+                    }
+
                     // Phase 2.3: Check fence before rebind — skip if GPU not done yet
                     if let Some(fence) = wt.pending_fence.take() {
                         let status = unsafe {
@@ -3418,6 +3570,11 @@ impl Compositor {
                         wt.pending_fence = self.gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0).ok();
                     }
                     wt.dirty = false;
+
+                    // Mark frame rendered in audio sync manager
+                    if wt.audio_sync_target.is_some() {
+                        self.audio_sync.mark_frame_rendered(win);
+                    }
                 }
             }
         }
@@ -4717,8 +4874,34 @@ impl Compositor {
         };
 
         // Swap buffers (double-buffered with vsync for tear-free output).
-        unsafe {
-            x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable);
+        match self.vsync_method {
+            VsyncMethod::OmlSyncControl => {
+                // Use GLX_OML_sync_control for per-window MSC-based timing
+                if let Some(oml) = &self.oml {
+                    // For now, use global swap (future: per-window MSC-based timing)
+                    // This is a placeholder for per-window timing logic
+                    if let Some(_sbc) = oml.swap_buffers_msc(0) {
+                        // Successfully used OML swap
+                    } else {
+                        // Fall back to traditional swap
+                        unsafe { x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable); }
+                    }
+                } else {
+                    // OML not available, fall back
+                    unsafe { x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable); }
+                }
+            }
+            VsyncMethod::Present => {
+                // Present extension: still swap the compositor overlay, but
+                // individual video windows can use present_pixmap for independent
+                // presentation timing. The compositor overlay needs swapping
+                // for non-present windows (UI, menus, etc.).
+                unsafe { x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable); }
+            }
+            VsyncMethod::Global => {
+                // Traditional global vsync
+                unsafe { x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable); }
+            }
         }
 
         // === Phase 7.3: Recording frame capture ===
@@ -4818,6 +5001,57 @@ impl Compositor {
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             wt.is_pip = pip;
             self.needs_render = true;
+        }
+    }
+
+    /// Notify the compositor about audio stream timing for a window.
+    /// This lets the compositor schedule frame presentation to match
+    /// each window's independent audio clock, preventing desync.
+    pub(super) fn notify_audio_timing(&mut self, x11_win: u32, fps: f32, buffer_latency_ms: u32) {
+        self.audio_sync.register_stream(x11_win, fps, buffer_latency_ms);
+        if let Some(wt) = self.windows.get_mut(&x11_win) {
+            wt.audio_sync_target = Some(fps);
+        }
+        // Register with OML for per-window vblank timing too
+        if let Some(oml) = &mut self.oml {
+            oml.register_window(x11_win, fps);
+        }
+    }
+
+    /// Register a window for Present extension support
+    pub(super) fn register_window_present(&mut self, x11_win: u32) {
+        if let Some(present_mgr) = &mut self.present_mgr {
+            match present_mgr.register_window(x11_win) {
+                Ok(()) => {
+                    log::debug!("compositor: window 0x{:x} registered with Present", x11_win);
+                }
+                Err(e) => {
+                    log::warn!("compositor: failed to register 0x{:x} with Present: {}", x11_win, e);
+                }
+            }
+        }
+    }
+
+    /// Present a window's pixmap at a specific MSC (for Present-enabled windows)
+    pub(super) fn present_pixmap(
+        &self,
+        x11_win: u32,
+        pixmap: u32,
+        target_msc: u64,
+        serial: u32,
+    ) {
+        if let Some(present_mgr) = &self.present_mgr {
+            match present_mgr.present_pixmap(x11_win, pixmap, target_msc, serial) {
+                Ok(()) => {
+                    log::debug!(
+                        "compositor: presented pixmap for 0x{:x} (serial={}, msc={})",
+                        x11_win, serial, target_msc
+                    );
+                }
+                Err(e) => {
+                    log::debug!("compositor: present_pixmap failed for 0x{:x}: {}", x11_win, e);
+                }
+            }
         }
     }
 

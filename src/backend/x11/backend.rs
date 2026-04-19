@@ -349,6 +349,21 @@ impl X11Backend {
                     }
                 }
             }
+            BackendEvent::PresentComplete { window, serial, msc, ust } => {
+                if let Ok(x11w) = self.ids.x11(*window) {
+                    // Update OML sync tracking with actual presentation MSC
+                    if let Some(oml) = compositor.oml_mut() {
+                        oml.on_window_presented(x11w, *msc, *ust);
+                    }
+                    // Update audio sync: mark frame as rendered
+                    compositor.on_present_complete(x11w, *serial, *msc, *ust);
+                }
+            }
+            BackendEvent::PresentIdle { window, serial, pixmap } => {
+                if let Ok(x11w) = self.ids.x11(*window) {
+                    compositor.on_present_idle(x11w, *serial, *pixmap);
+                }
+            }
             BackendEvent::MotionNotify { root_x, root_y, .. } => {
                 compositor.set_mouse_position(*root_x as f32, *root_y as f32);
             }
@@ -667,6 +682,14 @@ impl Backend for X11Backend {
     fn compositor_set_magnifier(&mut self, enabled: bool) {
         if let Some(c) = self.compositor.as_mut() {
             c.set_magnifier(enabled);
+        }
+    }
+
+    fn compositor_notify_audio_timing(&mut self, window: crate::backend::common_define::WindowId, fps: f32, buffer_latency_ms: u32) {
+        if let Some(c) = self.compositor.as_mut() {
+            if let Ok(x11w) = self.ids.x11(window) {
+                c.notify_audio_timing(x11w, fps, buffer_latency_ms);
+            }
         }
     }
 
@@ -2254,6 +2277,17 @@ mod event_source {
                 }),
                 XEvent::DamageNotify(e) => Some(BackendEvent::DamageNotify {
                     drawable: self.ids.intern(e.drawable),
+                }),
+                XEvent::PresentCompleteNotify(e) => Some(BackendEvent::PresentComplete {
+                    window: self.ids.intern(e.window),
+                    serial: e.serial,
+                    msc: e.msc,
+                    ust: e.ust,
+                }),
+                XEvent::PresentIdleNotify(e) => Some(BackendEvent::PresentIdle {
+                    window: self.ids.intern(e.window),
+                    serial: e.serial,
+                    pixmap: e.pixmap,
                 }),
                 XEvent::Unknown(_) => None,
                 _ => None,

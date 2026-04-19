@@ -1117,6 +1117,10 @@ impl EventHandler for Jwm {
             // Compositor: damage events are handled at the backend level
             BackendEvent::DamageNotify { .. } => {}
 
+            // Present extension events are handled at the compositor level
+            BackendEvent::PresentComplete { .. } => {}
+            BackendEvent::PresentIdle { .. } => {}
+
             // 忽略或不需要显式处理的事件
             BackendEvent::ClientMessage { .. } => { /* ClientMessage Generic */ }
         }

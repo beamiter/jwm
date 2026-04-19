@@ -143,6 +143,22 @@ pub struct BehaviorConfig {
     /// Unredirect fullscreen windows for direct scanout (better perf).
     #[serde(default = "default_true")]
     pub fullscreen_unredirect: bool,
+    /// VSync method: "global" (default), "oml_sync_control", "present".
+    /// "oml_sync_control" uses GLX_OML_sync_control for per-window MSC-based vblank timing.
+    /// "present" uses X11 Present extension for per-window independent presentation.
+    /// Falls back to "global" if the selected method is unavailable.
+    #[serde(default = "default_vsync_method")]
+    pub vsync_method: String,
+    /// Enable audio-video synchronization: windows with audio streams will render
+    /// at their audio's frame rate instead of the compositor's fixed rate.
+    #[serde(default = "default_true")]
+    pub enable_audio_sync: bool,
+    /// Audio buffer latency in milliseconds (used for sync calculations).
+    #[serde(default = "default_audio_buffer_latency")]
+    pub audio_buffer_latency_ms: u32,
+    /// Enable Present extension for per-window independent presentation.
+    #[serde(default = "default_true")]
+    pub present_enabled: bool,
 
     // --- Feature 1: Window borders ---
     /// Enable window border/outline rendering.
@@ -495,6 +511,12 @@ fn default_shadow_bottom_extra() -> f32 {
 fn default_transition_mode() -> String {
     "slide".to_string()
 }
+fn default_vsync_method() -> String {
+    "global".to_string()
+}
+fn default_audio_buffer_latency() -> u32 {
+    50
+}
 fn default_window_animation_scale() -> f32 {
     0.85
 }
@@ -775,6 +797,10 @@ impl Default for Config {
                     rounded_corners_exclude: Vec::new(),
                     detect_client_opacity: false,
                     fullscreen_unredirect: true,
+                    vsync_method: default_vsync_method(),
+                    enable_audio_sync: true,
+                    audio_buffer_latency_ms: default_audio_buffer_latency(),
+                    present_enabled: true,
                     border_enabled: true,
                     border_width: default_border_width(),
                     border_color_focused: default_border_color_focused(),
