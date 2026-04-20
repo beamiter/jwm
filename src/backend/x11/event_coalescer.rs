@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
-/// Event coalescing for better performance
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Motion event for coalescing
 #[derive(Clone, Copy, Debug)]
@@ -13,50 +12,87 @@ pub struct MotionEvent {
 /// Coalesces similar events to reduce event processing overhead
 pub struct EventCoalescer {
     last_motion: Option<MotionEvent>,
+    last_emitted: Option<MotionEvent>,
+    pending: Option<MotionEvent>,
     motion_queue: VecDeque<MotionEvent>,
     max_queue_size: usize,
+    time_threshold: Duration,
+    distance_threshold_sq: i32,
 }
 
 impl EventCoalescer {
     pub fn new() -> Self {
         Self {
             last_motion: None,
+            last_emitted: None,
+            pending: None,
             motion_queue: VecDeque::with_capacity(32),
             max_queue_size: 32,
+            time_threshold: Duration::from_millis(16), // 60Hz frame time
+            distance_threshold_sq: 4,                  // 2px squared
+        }
+    }
+
+    /// Create a new coalescer with custom thresholds
+    pub fn with_thresholds(time_ms: u64, distance_px: i32) -> Self {
+        Self {
+            last_motion: None,
+            last_emitted: None,
+            pending: None,
+            motion_queue: VecDeque::with_capacity(32),
+            max_queue_size: 32,
+            time_threshold: Duration::from_millis(time_ms),
+            distance_threshold_sq: distance_px * distance_px,
         }
     }
 
     /// Record a motion event, returns Some if should be processed immediately
     /// Returns None if the event should be coalesced with the next one
     pub fn coalesce_motion(&mut self, x: i32, y: i32) -> Option<MotionEvent> {
-        let event = MotionEvent {
-            x,
-            y,
-            time: Instant::now(),
-        };
+        let now = Instant::now();
+        let event = MotionEvent { x, y, time: now };
 
+        // Time + distance based coalescing:
+        // Always pass through if queue empty or time window exceeded or distance threshold exceeded
+        if let Some(last) = self.last_emitted {
+            let dt = now.duration_since(last.time);
+            let dist_sq = (x - last.x).pow(2) + (y - last.y).pow(2);
+
+            if dt < self.time_threshold && dist_sq < self.distance_threshold_sq {
+                // Within coalescing window: store but don't emit
+                self.pending = Some(event);
+                self.motion_queue.push_back(event);
+                if self.motion_queue.len() > self.max_queue_size {
+                    self.motion_queue.pop_front();
+                }
+                return None;
+            }
+        }
+
+        // Emit this event
+        self.last_emitted = Some(event);
+        self.last_motion = Some(event);
+        self.pending = None;
         self.motion_queue.push_back(event);
         if self.motion_queue.len() > self.max_queue_size {
-            // Keep queue bounded
             self.motion_queue.pop_front();
         }
-
-        // Return the last queued event (coalesced from any duplicates)
-        // This reduces the number of events we actually process
-        if self.motion_queue.len() % 3 == 0 {
-            // Process every 3rd event, or let frame boundary decide
-            self.motion_queue.pop_back()
-        } else {
-            None
-        }
+        Some(event)
     }
 
     /// Get the most recent motion event, clearing the queue
     /// Call this at frame boundaries to get the latest coalesced motion
     pub fn flush_motion(&mut self) -> Option<MotionEvent> {
-        if let Some(event) = self.motion_queue.pop_back() {
+        // If there's a pending event, emit it
+        if let Some(event) = self.pending.take() {
             self.motion_queue.clear();
             self.last_motion = Some(event);
+            self.last_emitted = Some(event);
+            Some(event)
+        } else if let Some(event) = self.motion_queue.pop_back() {
+            self.motion_queue.clear();
+            self.last_motion = Some(event);
+            self.last_emitted = Some(event);
             Some(event)
         } else {
             None
@@ -72,6 +108,8 @@ impl EventCoalescer {
     pub fn clear(&mut self) {
         self.motion_queue.clear();
         self.last_motion = None;
+        self.last_emitted = None;
+        self.pending = None;
     }
 
     /// Get queue size (for debugging)
@@ -96,6 +134,7 @@ pub fn events_similar(e1: &MotionEvent, e2: &MotionEvent, threshold: i32) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread::sleep;
 
     #[test]
     fn test_motion_coalescing() {
@@ -115,5 +154,59 @@ mod tests {
 
         // Queue should be cleared
         assert_eq!(coalescer.queue_size(), 0);
+    }
+
+    #[test]
+    fn test_time_based_coalescing() {
+        let mut coalescer = EventCoalescer::with_thresholds(50, 10);
+
+        // First event passes through
+        let e1 = coalescer.coalesce_motion(100, 100);
+        assert!(e1.is_some());
+
+        // Second event within time window - coalesced
+        let e2 = coalescer.coalesce_motion(101, 101);
+        assert!(e2.is_none());
+
+        // Wait for time window to expire
+        sleep(Duration::from_millis(60));
+
+        // Third event after time window - passes through
+        let e3 = coalescer.coalesce_motion(102, 102);
+        assert!(e3.is_some());
+    }
+
+    #[test]
+    fn test_distance_based_coalescing() {
+        let mut coalescer = EventCoalescer::with_thresholds(1000, 2);
+
+        // First event passes through
+        let e1 = coalescer.coalesce_motion(100, 100);
+        assert!(e1.is_some());
+
+        // Second event within distance threshold (1px) - coalesced
+        let e2 = coalescer.coalesce_motion(101, 100);
+        assert!(e2.is_none());
+
+        // Third event beyond distance threshold (50px) - passes through
+        let e3 = coalescer.coalesce_motion(150, 100);
+        assert!(e3.is_some());
+    }
+
+    #[test]
+    fn test_pending_flush() {
+        let mut coalescer = EventCoalescer::with_thresholds(50, 10);
+
+        // First event passes through
+        coalescer.coalesce_motion(100, 100);
+
+        // Second event coalesced (pending)
+        let e2 = coalescer.coalesce_motion(101, 101);
+        assert!(e2.is_none());
+
+        // Flush should return the pending event
+        let flushed = coalescer.flush_motion();
+        assert!(flushed.is_some());
+        assert_eq!(flushed.unwrap().x, 101);
     }
 }

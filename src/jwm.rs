@@ -1014,6 +1014,15 @@ impl EventHandler for Jwm {
             BackendEvent::OutputChanged(info) => self.on_output_changed(backend, info),
             BackendEvent::ScreenLayoutChanged => self.on_screen_layout_changed(backend),
             BackendEvent::ChildProcessExited => self.on_child_process_exited(backend),
+            BackendEvent::ConfigChanged => {
+                info!("[config] file change detected via inotify, reloading");
+                let resp = self.do_config_reload(backend);
+                if resp.success {
+                    info!("[config] reload successful");
+                } else {
+                    warn!("[config] reload failed: {:?}", resp.error);
+                }
+            }
 
             // === 窗口生命周期 ===
             BackendEvent::WindowCreated(win) => self.on_map_request(backend, win),
@@ -1156,7 +1165,8 @@ impl EventHandler for Jwm {
 
         self.process_commands_from_status_bar(backend);
         self.process_ipc(backend);
-        self.check_config_reload(backend);
+        // Config reload is now handled by inotify (ConfigChanged event)
+        // self.check_config_reload(backend);
         self.flush_pending_bar_updates();
         self.tick_animations(backend);
 

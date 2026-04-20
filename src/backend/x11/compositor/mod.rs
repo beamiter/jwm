@@ -9,6 +9,7 @@ mod postprocess;
 pub mod shaders;
 mod tfp;
 mod transitions;
+mod glx_context;
 
 // Optimization modules
 pub mod perf_metrics;
@@ -96,10 +97,64 @@ impl Default for VsyncMethod {
 }
 
 // ---------------------------------------------------------------------------
-// Per-window texture state
+// TFP window texture state machine
+// ---------------------------------------------------------------------------
+
+/// Explicit state machine for window texture lifecycle.
+/// Replaces scattered bool flags (dirty, needs_pixmap_refresh, fading_out).
+#[derive(Debug, Clone)]
+enum WindowTextureState {
+    /// Window just mapped, pixmap being created
+    Initializing,
+    /// Normal operation, texture ready for rendering
+    Active {
+        /// Whether the texture needs TFP refresh from pixmap
+        dirty: bool,
+    },
+    /// Geometry changed, pixmap needs recreation on next render
+    PendingRefresh,
+    /// Window closing, fading out opacity
+    FadingOut {
+        /// Current opacity (0.0 = fully transparent)
+        opacity: f32,
+    },
+    /// Special animation (e.g., genie minimize)
+    Animating {
+        /// Animation type/context
+        kind: String,
+    },
+}
+
+impl WindowTextureState {
+    /// Check if texture is ready for rendering
+    fn is_renderable(&self) -> bool {
+        matches!(self, WindowTextureState::Active { .. } | WindowTextureState::FadingOut { .. } | WindowTextureState::Animating { .. })
+    }
+
+    /// Check if TFP refresh is needed
+    fn needs_tfp_refresh(&self) -> bool {
+        matches!(self, WindowTextureState::Active { dirty: true })
+    }
+
+    /// Mark texture as dirty (needs TFP refresh)
+    fn mark_dirty(&mut self) {
+        if let WindowTextureState::Active { dirty } = self {
+            *dirty = true;
+        }
+    }
+
+    /// Mark texture clean (TFP refresh complete)
+    fn mark_clean(&mut self) {
+        if let WindowTextureState::Active { dirty } = self {
+            *dirty = false;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 
 struct WindowTexture {
+
     #[allow(dead_code)]
     x: i32,
     #[allow(dead_code)]
@@ -488,28 +543,62 @@ struct ParticleUniforms {
 // Tile-based damage tracker for partial redraw optimization (Phase 2.1)
 // ---------------------------------------------------------------------------
 
-const TILE_COLS: u32 = 8;
-const TILE_ROWS: u32 = 6;
-
 struct DamageTracker {
-    /// Screen divided into TILE_COLS x TILE_ROWS tiles.
+    /// Screen divided into dynamically-sized tiles.
     dirty_tiles: Vec<bool>,
     tile_w: u32,
     tile_h: u32,
+    tile_cols: u32,
+    tile_rows: u32,
     screen_w: u32,
     screen_h: u32,
+    window_count: usize,
+    animating: bool,
 }
 
 impl DamageTracker {
     fn new(screen_w: u32, screen_h: u32) -> Self {
-        let tile_w = (screen_w + TILE_COLS - 1) / TILE_COLS;
-        let tile_h = (screen_h + TILE_ROWS - 1) / TILE_ROWS;
+        let (tile_cols, tile_rows) = Self::compute_grid_size(screen_w, screen_h);
+        let tile_w = (screen_w + tile_cols - 1) / tile_cols;
+        let tile_h = (screen_h + tile_rows - 1) / tile_rows;
         Self {
-            dirty_tiles: vec![true; (TILE_COLS * TILE_ROWS) as usize],
+            dirty_tiles: vec![true; (tile_cols * tile_rows) as usize],
             tile_w,
             tile_h,
+            tile_cols,
+            tile_rows,
             screen_w,
             screen_h,
+            window_count: 0,
+            animating: false,
+        }
+    }
+
+    /// Compute dynamic grid size based on resolution
+    /// 4K: 16x12, 1080p: 8x6, 720p: 5x4
+    fn compute_grid_size(screen_w: u32, screen_h: u32) -> (u32, u32) {
+        let cols = (screen_w / 240).clamp(4, 16);
+        let rows = (screen_h / 180).clamp(3, 12);
+        (cols, rows)
+    }
+
+    /// Update tracking state for dynamic threshold calculation
+    fn update_state(&mut self, window_count: usize, animating: bool) {
+        self.window_count = window_count;
+        self.animating = animating;
+    }
+
+    /// Calculate dynamic threshold based on scene complexity
+    fn dynamic_threshold(&self) -> f32 {
+        // Animations need more precision (smaller threshold = more likely to use scissor)
+        if self.animating {
+            return 0.3;
+        }
+        // More windows = more likely to have localized damage
+        match self.window_count {
+            0..=3 => 0.7,  // Few windows = large tiles OK, higher threshold
+            4..=8 => 0.5,  // Moderate
+            _ => 0.35,     // Many windows = keep scissor precision
         }
     }
 
@@ -521,15 +610,35 @@ impl DamageTracker {
         self.dirty_tiles.fill(false);
     }
 
+    /// Mark a specific region as dirty (tiles overlapping the rect)
+    fn mark_region_dirty(&mut self, x: i32, y: i32, w: u32, h: u32) {
+        let x1 = x.max(0) as u32;
+        let y1 = y.max(0) as u32;
+        let x2 = (x + w as i32).min(self.screen_w as i32) as u32;
+        let y2 = (y + h as i32).min(self.screen_h as i32) as u32;
+
+        let tile_x1 = x1 / self.tile_w;
+        let tile_y1 = y1 / self.tile_h;
+        let tile_x2 = (x2 + self.tile_w - 1) / self.tile_w;
+        let tile_y2 = (y2 + self.tile_h - 1) / self.tile_h;
+
+        for ty in tile_y1..tile_y2.min(self.tile_rows) {
+            for tx in tile_x1..tile_x2.min(self.tile_cols) {
+                self.dirty_tiles[(ty * self.tile_cols + tx) as usize] = true;
+            }
+        }
+    }
+
     fn dirty_fraction(&self) -> f32 {
         let dirty = self.dirty_tiles.iter().filter(|&&d| d).count();
         dirty as f32 / self.dirty_tiles.len() as f32
     }
 
     /// Returns the bounding rectangle of all dirty tiles, or None if nothing is dirty.
-    /// If >50% dirty, returns full screen (cheaper than many scissor switches).
+    /// Uses dynamic threshold based on scene complexity.
     fn dirty_bounds(&self) -> Option<(i32, i32, u32, u32)> {
-        if self.dirty_fraction() > 0.5 {
+        let threshold = self.dynamic_threshold();
+        if self.dirty_fraction() > threshold {
             return Some((0, 0, self.screen_w, self.screen_h));
         }
         let mut min_x = self.screen_w as i32;
@@ -537,9 +646,9 @@ impl DamageTracker {
         let mut max_x = 0i32;
         let mut max_y = 0i32;
         let mut any_dirty = false;
-        for ty in 0..TILE_ROWS {
-            for tx in 0..TILE_COLS {
-                if self.dirty_tiles[(ty * TILE_COLS + tx) as usize] {
+        for ty in 0..self.tile_rows {
+            for tx in 0..self.tile_cols {
+                if self.dirty_tiles[(ty * self.tile_cols + tx) as usize] {
                     any_dirty = true;
                     let px = (tx * self.tile_w) as i32;
                     let py = (ty * self.tile_h) as i32;
@@ -560,17 +669,22 @@ impl DamageTracker {
     fn resize(&mut self, screen_w: u32, screen_h: u32) {
         self.screen_w = screen_w;
         self.screen_h = screen_h;
-        self.tile_w = (screen_w + TILE_COLS - 1) / TILE_COLS;
-        self.tile_h = (screen_h + TILE_ROWS - 1) / TILE_ROWS;
-        self.dirty_tiles.fill(true);
+        // Recompute grid size based on new resolution
+        let (tile_cols, tile_rows) = Self::compute_grid_size(screen_w, screen_h);
+        self.tile_cols = tile_cols;
+        self.tile_rows = tile_rows;
+        self.tile_w = (screen_w + tile_cols - 1) / tile_cols;
+        self.tile_h = (screen_h + tile_rows - 1) / tile_rows;
+        self.dirty_tiles = vec![true; (tile_cols * tile_rows) as usize];
     }
 }
+
 
 // ---------------------------------------------------------------------------
 // Blur quality auto-downgrade (Phase 2.2)
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum BlurQuality {
     Full,     // All blur levels
     Reduced,  // Half blur levels
@@ -3404,6 +3518,12 @@ impl Compositor {
         let focus_highlight_active = self.tick_focus_highlight();
         let wallpaper_crossfade_active = self.tick_wallpaper_crossfade();
 
+        // Update damage tracker scene state for dynamic thresholds
+        let any_animating = fades_active || wobbly_active || expose_animating
+            || snap_animating || peek_animating || genie_active || ripples_active
+            || focus_highlight_active || wallpaper_crossfade_active;
+        self.damage_tracker.update_state(self.windows.len(), any_animating);
+
         // Phase 3.4: Detect focus change
         if self.focus_highlight {
             if let Some(fw) = focused {
@@ -3508,18 +3628,33 @@ impl Compositor {
             })
             .collect();
 
-        // Refresh TFP textures for dirty windows.
-        // NOTE: We intentionally do NOT call glGetError() here.  The old code
-        // checked for GL errors after every TFP rebind and, on error, set
-        // needs_pixmap_refresh which triggers a costly pixmap recreation +
-        // XSync on the *next* frame.  For rapidly-updating windows (e.g.
-        // flameshot selection overlay) a transient TFP race could cause this
-        // error every frame, creating a cascade of XSync stalls that made
-        // the compositor lag seconds behind the actual window content.
-        // Removing the per-frame glGetError avoids the GPU pipeline sync and
-        // the refresh cascade.  Genuine pixmap invalidation (window resize)
-        // is handled by update_geometry → needs_pixmap_refresh instead.
+        // Refresh TFP textures for dirty windows with per-frame time budget.
+        // Focused window always updates; others update within 3ms budget.
+        // NOTE: We intentionally do NOT call glGetError() here.
+        // Genuine pixmap invalidation is handled by update_geometry → needs_pixmap_refresh.
+        let tfp_budget = std::time::Duration::from_micros(3000); // 3ms
+        let tfp_start = std::time::Instant::now();
+
+        // Build priority-ordered window list: focused first, then rest of scene
+        let mut tfp_order: Vec<u32> = Vec::with_capacity(scene.len());
+        if let Some(fw) = focused {
+            if scene.iter().any(|&(w, _, _, _, _)| w == fw) {
+                tfp_order.push(fw);
+            }
+        }
         for &(win, _, _, _, _) in scene {
+            if Some(win) != focused {
+                tfp_order.push(win);
+            }
+        }
+
+        let mut tfp_budget_exhausted = false;
+        for win in &tfp_order {
+            let win = *win;
+            // Budget check: focused window (index 0) always updates
+            if tfp_budget_exhausted && Some(win) != focused {
+                continue;
+            }
             if let Some(wt) = self.windows.get_mut(&win) {
                 if wt.dirty && wt.glx_pixmap != 0 {
                     // Audio sync: skip texture update if this window's audio timing
@@ -3574,6 +3709,11 @@ impl Compositor {
                     // Mark frame rendered in audio sync manager
                     if wt.audio_sync_target.is_some() {
                         self.audio_sync.mark_frame_rendered(win);
+                    }
+
+                    // Check budget (but not for focused window)
+                    if Some(win) != focused && tfp_start.elapsed() > tfp_budget {
+                        tfp_budget_exhausted = true;
                     }
                 }
             }

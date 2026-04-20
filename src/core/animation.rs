@@ -259,3 +259,180 @@ impl AnimationManager {
         self.active.get(&key).map(|anim| anim.sample(now).0)
     }
 }
+
+// ---------------------------------------------------------------------------
+// MagneticSnap — spring-physics edge snapping
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapEdge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+#[derive(Debug, Clone)]
+pub struct SnapAttraction {
+    pub edge: SnapEdge,
+    pub target_pos: f32,
+    pub current_offset: f32,
+    pub velocity: f32,
+}
+
+#[derive(Debug)]
+pub struct MagneticSnap {
+    pub snap_distance: f32,
+    pub spring_stiffness: f32,
+    pub damping: f32,
+    pub active_snaps: HashMap<ClientKey, SnapAttraction>,
+}
+
+impl MagneticSnap {
+    pub fn new(snap_distance: f32) -> Self {
+        Self {
+            snap_distance,
+            spring_stiffness: 300.0,
+            damping: 20.0,
+            active_snaps: HashMap::new(),
+        }
+    }
+
+    /// Check if a window edge is close enough to a snap target.
+    /// Returns the snap target position if within range.
+    pub fn detect_snap(
+        &self,
+        window_pos: f32,
+        window_size: f32,
+        targets: &[f32],
+    ) -> Option<(SnapEdge, f32)> {
+        for &target in targets {
+            let left_dist = (window_pos - target).abs();
+            let right_dist = (window_pos + window_size - target).abs();
+
+            if left_dist < self.snap_distance {
+                return Some((SnapEdge::Left, target));
+            }
+            if right_dist < self.snap_distance {
+                return Some((SnapEdge::Right, target - window_size));
+            }
+        }
+        None
+    }
+
+    /// Start a snap attraction for a client
+    pub fn start_snap(&mut self, key: ClientKey, edge: SnapEdge, target_pos: f32, current_pos: f32) {
+        self.active_snaps.insert(key, SnapAttraction {
+            edge,
+            target_pos,
+            current_offset: current_pos - target_pos,
+            velocity: 0.0,
+        });
+    }
+
+    /// Tick all active snap animations. Returns true if any are still active.
+    /// Uses critically damped spring: F = -k*x - c*v
+    pub fn tick(&mut self, dt: f32) -> bool {
+        let mut done_keys = Vec::new();
+
+        for (key, snap) in self.active_snaps.iter_mut() {
+            let force = -self.spring_stiffness * snap.current_offset
+                - self.damping * snap.velocity;
+            snap.velocity += force * dt;
+            snap.current_offset += snap.velocity * dt;
+
+            // Settled: offset and velocity near zero
+            if snap.current_offset.abs() < 0.5 && snap.velocity.abs() < 0.5 {
+                snap.current_offset = 0.0;
+                snap.velocity = 0.0;
+                done_keys.push(*key);
+            }
+        }
+
+        for key in done_keys {
+            self.active_snaps.remove(&key);
+        }
+
+        !self.active_snaps.is_empty()
+    }
+
+    /// Get the snapped position for a client (target + current offset)
+    pub fn snapped_position(&self, key: ClientKey) -> Option<f32> {
+        self.active_snaps.get(&key).map(|s| s.target_pos + s.current_offset)
+    }
+
+    /// Remove snap for a client (e.g., when drag starts)
+    pub fn cancel(&mut self, key: ClientKey) {
+        self.active_snaps.remove(&key);
+    }
+
+    /// Check if any snaps are active
+    pub fn is_active(&self) -> bool {
+        !self.active_snaps.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ElasticScroll — iOS-style overscroll bounce
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub struct ElasticScroll {
+    pub offset: f32,
+    pub velocity: f32,
+    pub spring_k: f32,
+    pub damping: f32,
+    pub max_overscroll: f32,
+    pub active: bool,
+}
+
+impl ElasticScroll {
+    pub fn new() -> Self {
+        Self {
+            offset: 0.0,
+            velocity: 0.0,
+            spring_k: 400.0,
+            damping: 25.0,
+            max_overscroll: 100.0,
+            active: false,
+        }
+    }
+
+    /// Apply scroll delta. Returns the clamped overscroll offset.
+    pub fn apply_scroll(&mut self, delta: f32) -> f32 {
+        self.offset = (self.offset + delta).clamp(-self.max_overscroll, self.max_overscroll);
+        self.velocity = delta * 10.0;
+        self.active = true;
+        self.offset
+    }
+
+    /// Tick the spring-back animation. Returns true if still active.
+    pub fn tick(&mut self, dt: f32) -> bool {
+        if !self.active {
+            return false;
+        }
+
+        // Spring force toward zero
+        let force = -self.spring_k * self.offset - self.damping * self.velocity;
+        self.velocity += force * dt;
+        self.offset += self.velocity * dt;
+
+        if self.offset.abs() < 0.5 && self.velocity.abs() < 0.5 {
+            self.offset = 0.0;
+            self.velocity = 0.0;
+            self.active = false;
+        }
+
+        self.active
+    }
+
+    pub fn current_offset(&self) -> f32 {
+        self.offset
+    }
+}
+
+impl Default for ElasticScroll {
+    fn default() -> Self {
+        Self::new()
+    }
+}

@@ -8,6 +8,7 @@ pub mod ipc;
 pub mod ipc_server;
 pub mod jwm;
 pub mod miscellaneous;
+pub mod renderer;
 pub mod terminal_prober;
 
 pub use jwm::Jwm;

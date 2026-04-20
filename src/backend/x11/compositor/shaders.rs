@@ -162,6 +162,31 @@ void main() {
 "#;
 
 // ---------------------------------------------------------------------------
+// Box Blur shader (fast fallback for low-end hardware)
+// ---------------------------------------------------------------------------
+
+/// Box blur fragment shader: 3x3 uniform kernel, single pass
+/// Much faster than Kawase but lower quality. Used when BlurQuality::Minimal.
+pub const BOX_BLUR_FRAGMENT: &str = r#"#version 330 core
+
+uniform sampler2D u_texture;
+uniform vec2 u_halfpixel; // 0.5 / texture_size (reuse same uniform as Kawase)
+in vec2 v_uv;
+out vec4 frag_color;
+
+void main() {
+    vec4 sum = vec4(0.0);
+    // 3x3 box kernel with equal weights
+    for (int y = -1; y <= 1; y++) {
+        for (int x = -1; x <= 1; x++) {
+            sum += texture(u_texture, v_uv + vec2(x, y) * u_halfpixel);
+        }
+    }
+    frag_color = sum / 9.0;
+}
+"#;
+
+// ---------------------------------------------------------------------------
 // Feature 1: Window border / outline shader
 // ---------------------------------------------------------------------------
 

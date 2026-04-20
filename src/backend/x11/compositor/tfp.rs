@@ -447,15 +447,23 @@ impl Compositor {
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             let size_changed = wt.w != w || wt.h != h;
             let moved = wt.x != x || wt.y != y;
+            let (old_x, old_y, old_w, old_h) = (wt.x, wt.y, wt.w, wt.h);
             wt.x = x;
             wt.y = y;
             self.needs_render = true;
 
             if moved {
-                // Window move exposes old screen area and occupies new area.
-                // Damage events are not always sufficient for both regions,
-                // so request a full-frame redraw to prevent trails/ghosting.
-                self.damage_tracker.mark_all_dirty();
+                // Mark old and new positions as dirty instead of full screen.
+                // Expand by shadow radius to cover shadow artifacts.
+                let expand = self.shadow_radius as i32 + self.shadow_offset[0].abs() as i32 + 4;
+                self.damage_tracker.mark_region_dirty(
+                    old_x - expand, old_y - expand,
+                    old_w + expand as u32 * 2, old_h + expand as u32 * 2,
+                );
+                self.damage_tracker.mark_region_dirty(
+                    x - expand, y - expand,
+                    w.max(old_w) + expand as u32 * 2, h.max(old_h) + expand as u32 * 2,
+                );
             }
 
             if size_changed && w > 0 && h > 0 {
@@ -594,6 +602,13 @@ impl Compositor {
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             wt.dirty = true;
             self.needs_render = true;
+            // Mark the window's region as dirty in the damage tracker
+            // Expand by shadow radius to cover shadow
+            let expand = self.shadow_radius as i32 + self.shadow_offset[0].abs() as i32 + 4;
+            self.damage_tracker.mark_region_dirty(
+                wt.x - expand, wt.y - expand,
+                wt.w + expand as u32 * 2, wt.h + expand as u32 * 2,
+            );
             // Subtract damage so we get future notifications
             let _ = self.conn.damage_subtract(wt.damage, 0u32, 0u32);
         }

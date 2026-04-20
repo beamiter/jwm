@@ -9,6 +9,12 @@ pub struct AudioStreamTiming {
     pub registered_at: Instant,
     pub last_update: Instant,
     pub frames_rendered: u64,
+    /// Exponential moving average of clock drift (for dynamic buffer adjustment)
+    pub drift_ema: f32,
+    /// PTS offset between audio and display clock (nanoseconds)
+    pub pts_offset_ns: i64,
+    /// Dynamically adjusted buffer latency
+    pub dynamic_latency_ms: f32,
 }
 
 impl AudioStreamTiming {
@@ -20,6 +26,23 @@ impl AudioStreamTiming {
             registered_at: now,
             last_update: now,
             frames_rendered: 0,
+            drift_ema: 0.0,
+            pts_offset_ns: 0,
+            dynamic_latency_ms: buffer_latency_ms as f32,
+        }
+    }
+
+    /// Update drift estimation for dynamic buffer adjustment
+    pub fn update_drift(&mut self, actual_delta_ms: f32, expected_delta_ms: f32) {
+        let drift = actual_delta_ms - expected_delta_ms;
+        // EMA with alpha=0.1 (smooth but responsive)
+        self.drift_ema = self.drift_ema * 0.9 + drift * 0.1;
+
+        // Adjust buffer latency based on drift
+        if self.drift_ema.abs() > 5.0 {
+            // Significant drift: adjust buffer
+            self.dynamic_latency_ms = (self.buffer_latency_ms as f32 + self.drift_ema)
+                .clamp(10.0, self.buffer_latency_ms as f32 * 2.0);
         }
     }
 
@@ -32,7 +55,7 @@ impl AudioStreamTiming {
         let elapsed_ms = self.last_update.elapsed().as_secs_f32() * 1000.0;
         let next_frame_ms = ((self.frames_rendered as f32 + 1.0) * frame_duration_ms)
             - elapsed_ms
-            - (self.buffer_latency_ms as f32);
+            - self.dynamic_latency_ms; // Use dynamic instead of static latency
 
         if next_frame_ms > 0.0 {
             Instant::now() + std::time::Duration::from_secs_f32(next_frame_ms / 1000.0)
@@ -51,14 +74,21 @@ impl AudioStreamTiming {
 pub struct AudioSyncManager {
     audio_streams: HashMap<u32, AudioStreamTiming>,
     fallback_timeout_ms: u64,
+    max_observed_gap_ms: u64,
 }
 
 impl AudioSyncManager {
     pub fn new() -> Self {
         Self {
             audio_streams: HashMap::new(),
-            fallback_timeout_ms: 1000, // 1 second to receive audio timing before fallback
+            fallback_timeout_ms: 1000, // Base timeout: 1 second
+            max_observed_gap_ms: 0,
         }
+    }
+
+    /// Get adaptive timeout based on observed gaps
+    fn adaptive_timeout(&self) -> u64 {
+        self.fallback_timeout_ms + 3 * self.max_observed_gap_ms
     }
 
     /// Register an audio stream for a window
@@ -81,9 +111,21 @@ impl AudioSyncManager {
     /// Update audio timing for a window
     pub fn update_stream(&mut self, x11_win: u32, fps: f32, buffer_latency_ms: u32) {
         if let Some(timing) = self.audio_streams.get_mut(&x11_win) {
+            let now = Instant::now();
+            // Track inter-update gap for adaptive timeout
+            let gap_ms = now.duration_since(timing.last_update).as_millis() as u64;
+            if gap_ms > self.max_observed_gap_ms && gap_ms < 5000 {
+                self.max_observed_gap_ms = gap_ms;
+            }
+            // Update drift estimation
+            if timing.fps > 0.0 {
+                let expected_ms = 1000.0 / timing.fps;
+                let actual_ms = gap_ms as f32;
+                timing.update_drift(actual_ms, expected_ms);
+            }
             timing.fps = fps;
             timing.buffer_latency_ms = buffer_latency_ms;
-            timing.last_update = Instant::now();
+            timing.last_update = now;
         }
     }
 
@@ -117,8 +159,9 @@ impl AudioSyncManager {
     pub fn should_fallback(&self, x11_win: u32) -> bool {
         match self.audio_streams.get(&x11_win) {
             Some(timing) => {
-                // Fall back if no update for fallback_timeout_ms
-                timing.last_update.elapsed().as_millis() as u64 > self.fallback_timeout_ms
+                // Use adaptive timeout instead of hardcoded 1 second
+                let timeout = self.adaptive_timeout();
+                timing.last_update.elapsed().as_millis() as u64 > timeout
             }
             None => false,
         }

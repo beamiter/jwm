@@ -1216,7 +1216,66 @@ impl Backend for X11Backend {
             })
             .map_err(|e| BackendError::Message(format!("Failed to insert Timer source: {}", e)))?;
 
-        // 4. 运行事件循环
+        // 4. 注册 inotify 配置文件监听
+        let setup_inotify = || -> Result<(), BackendError> {
+            use nix::sys::inotify::{AddWatchFlags, Inotify, InitFlags};
+            use std::os::unix::io::{AsFd, AsRawFd};
+
+            let config_path = crate::config::Config::get_default_config_path();
+            let inotify = Inotify::init(InitFlags::IN_NONBLOCK)
+                .map_err(|e| BackendError::Message(format!("Failed to init inotify: {}", e)))?;
+
+            inotify
+                .add_watch(
+                    &config_path,
+                    AddWatchFlags::IN_MODIFY | AddWatchFlags::IN_CLOSE_WRITE,
+                )
+                .map_err(|e| {
+                    BackendError::Message(format!(
+                        "Failed to watch config file {:?}: {}",
+                        config_path, e
+                    ))
+                })?;
+
+            let inotify_fd = inotify.as_fd().as_raw_fd();
+
+            // Register as a Generic source with the raw fd
+            handle
+                .insert_source(
+                    calloop::generic::Generic::new(
+                        unsafe { std::os::unix::io::BorrowedFd::borrow_raw(inotify_fd) },
+                        calloop::Interest::READ,
+                        calloop::Mode::Level,
+                    ),
+                    move |_, _, data| {
+                        // Drain inotify events
+                        let mut buf = [0u8; 4096];
+                        unsafe { libc::read(inotify_fd, buf.as_mut_ptr() as *mut _, buf.len()); }
+
+                        // Emit ConfigChanged event
+                        if let Err(e) = data.handler.handle_event(
+                            data.backend,
+                            crate::backend::api::BackendEvent::ConfigChanged,
+                        ) {
+                            log::error!("Error handling ConfigChanged: {:?}", e);
+                        }
+                        Ok(calloop::PostAction::Continue)
+                    },
+                )
+                .map_err(|e| BackendError::Message(format!("Failed to insert inotify source: {}", e)))?;
+
+            // Keep inotify alive for the duration of the event loop
+            std::mem::forget(inotify);
+            Ok(())
+        };
+
+        if let Err(e) = setup_inotify() {
+            log::warn!("Failed to set up config file watching: {}. Falling back to polling.", e);
+        } else {
+            log::info!("Config file hot-reload enabled via inotify");
+        }
+
+        // 5. 运行事件循环
         let mut loop_data = X11LoopData {
             backend: self,
             handler,
