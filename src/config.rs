@@ -160,6 +160,21 @@ pub struct BehaviorConfig {
     #[serde(default = "default_true")]
     pub present_enabled: bool,
 
+    // --- VRR (Variable Refresh Rate) Support ---
+    /// Enable Variable Refresh Rate (VRR/G-Sync/FreeSync) support for game windows.
+    #[serde(default = "default_true")]
+    pub vrr_enabled: bool,
+    /// Minimum FPS for VRR range (Hz).
+    #[serde(default = "default_vrr_min_fps")]
+    pub vrr_min_fps: u32,
+    /// Maximum FPS for VRR range (Hz).
+    #[serde(default = "default_vrr_max_fps")]
+    pub vrr_max_fps: u32,
+    /// Window classes to treat as games (enable VRR when focused).
+    /// Examples: ["steam", "lutris", "wine", "minecraft"].
+    #[serde(default)]
+    pub game_classes: Vec<String>,
+
     // --- Feature 1: Window borders ---
     /// Enable window border/outline rendering.
     #[serde(default = "default_true")]
@@ -517,6 +532,12 @@ fn default_vsync_method() -> String {
 fn default_audio_buffer_latency() -> u32 {
     50
 }
+fn default_vrr_min_fps() -> u32 {
+    30
+}
+fn default_vrr_max_fps() -> u32 {
+    240
+}
 fn default_window_animation_scale() -> f32 {
     0.85
 }
@@ -801,6 +822,10 @@ impl Default for Config {
                     enable_audio_sync: true,
                     audio_buffer_latency_ms: default_audio_buffer_latency(),
                     present_enabled: true,
+                    vrr_enabled: default_true(),
+                    vrr_min_fps: default_vrr_min_fps(),
+                    vrr_max_fps: default_vrr_max_fps(),
+                    game_classes: Vec::new(),
                     border_enabled: true,
                     border_width: default_border_width(),
                     border_color_focused: default_border_color_focused(),

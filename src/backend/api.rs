@@ -47,6 +47,14 @@ pub struct OutputInfo {
     pub refresh_rate: u32,
 }
 
+#[derive(Clone, Debug)]
+pub struct VrrCapabilities {
+    pub supported: bool,
+    pub current_enabled: bool,
+    pub min_refresh_hz: u32,
+    pub max_refresh_hz: u32,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ScreenInfo {
     pub width: i32,
@@ -738,6 +746,12 @@ pub trait Backend: Send {
 
     /// Get detailed compositor performance metrics.
     fn compositor_get_metrics(&self) -> Option<CompositorMetrics> { None }
+
+    /// Query VRR capabilities of an output.
+    fn query_vrr_capabilities(&self, _output: OutputId) -> Option<VrrCapabilities> { None }
+
+    /// Enable or disable VRR for an output.
+    fn set_vrr_enabled(&mut self, _output: OutputId, _enabled: bool) -> Result<(), BackendError> { Ok(()) }
 
     /// Capture a window thumbnail (returns RGBA pixels, width, height).
     fn compositor_capture_thumbnail(&self, _window: WindowId, _max_size: u32) -> Option<(Vec<u8>, u32, u32)> {

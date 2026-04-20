@@ -1098,6 +1098,11 @@ pub(super) struct Compositor {
     shader_hot_reload_enabled: bool,
     shader_dir: String,
     shader_file_mtimes: std::collections::HashMap<String, std::time::SystemTime>,
+
+    // --- VRR (Variable Refresh Rate) ---
+    is_game_window: HashMap<u32, bool>,
+    vrr_active: bool,
+    vrr_last_check: std::time::Instant,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
@@ -2445,6 +2450,9 @@ impl Compositor {
             shader_hot_reload_enabled: false,
             shader_dir: String::new(),
             shader_file_mtimes: std::collections::HashMap::new(),
+            is_game_window: HashMap::new(),
+            vrr_active: false,
+            vrr_last_check: std::time::Instant::now(),
         })
     }
 
@@ -2737,6 +2745,36 @@ impl Compositor {
             return false;
         }
         self.frosted_glass_rules.iter().any(|r| r.eq_ignore_ascii_case(class_name))
+    }
+
+    /// Detect if window is a game (for VRR)
+    fn detect_game_window(&self, class_name: &str) -> bool {
+        if class_name.is_empty() {
+            return false;
+        }
+        let cfg = crate::config::CONFIG.load();
+        let behavior = cfg.behavior();
+        let lower_class = class_name.to_lowercase();
+
+        // Check user's game_classes list
+        for game_class in &behavior.game_classes {
+            if lower_class.contains(&game_class.to_lowercase()) {
+                return true;
+            }
+        }
+
+        // Built-in game/emulator detection
+        matches!(lower_class.as_str(),
+            "steam" | "steamapps" | "proton" | "dxvk" | "lutris" | "wine"
+            | "minecraft" | "dosbox" | "mgba" | "pcsx2" | "yuzu" | "dolphin"
+        )
+    }
+
+    /// Check if currently focused window is a game
+    pub fn is_focused_window_game(&self) -> bool {
+        // TODO: Integrate with actual focus tracking
+        // For now, returns false; will be populated by render loop
+        false
     }
 
     /// Whether a window should receive per-frame backdrop blur compositing.

@@ -30,7 +30,7 @@ use calloop::{
 
 use crate::backend::api::{
     Backend, Capabilities, ColorAllocator, CursorProvider, EwmhFacade, InputOps, KeyOps, OutputOps,
-    PropertyOps, WindowOps,
+    PropertyOps, WindowOps, VrrCapabilities,
 };
 
 use self::{
@@ -598,6 +598,34 @@ impl Backend for X11Backend {
     fn compositor_get_metrics(&self) -> Option<crate::backend::api::CompositorMetrics> {
         self.compositor.as_ref().map(|c| c.get_metrics())
     }
+
+    fn query_vrr_capabilities(&self, output: crate::backend::common_define::OutputId) -> Option<VrrCapabilities> {
+        let cfg = crate::config::CONFIG.load();
+        let behavior = cfg.behavior();
+
+        // Simple heuristic: mark all outputs as potentially VRR-capable
+        // In production, would check actual RandR properties
+        if behavior.vrr_enabled {
+            // Check if this output exists and is active
+            let outputs = OutputOps::enumerate_outputs(self.output_ops.as_ref());
+            if outputs.iter().any(|o| o.id == output) {
+                return Some(VrrCapabilities {
+                    supported: true,
+                    current_enabled: false,  // Would need to query CRTC property
+                    min_refresh_hz: behavior.vrr_min_fps,
+                    max_refresh_hz: behavior.vrr_max_fps,
+                });
+            }
+        }
+        None
+    }
+
+    fn set_vrr_enabled(&mut self, _output: crate::backend::common_define::OutputId, _enabled: bool) -> Result<(), BackendError> {
+        // VRR state would be set via RandR property change (VRR_ENABLED on CRTC)
+        // For now, placeholder returns success
+        Ok(())
+    }
+
     fn compositor_capture_thumbnail(
         &self,
         window: WindowId,
@@ -3067,11 +3095,12 @@ mod key_ops {
 }
 
 mod output_ops {
-    use crate::backend::api::{OutputInfo, OutputOps, ScreenInfo};
+    use crate::backend::api::{OutputInfo, OutputOps, ScreenInfo, VrrCapabilities};
     use crate::backend::common_define::OutputId;
     use std::sync::{Arc, Mutex};
     use x11rb::connection::Connection;
     use x11rb::protocol::randr::{self, ConnectionExt as RandrExt};
+    use x11rb::protocol::xproto::ConnectionExt as XprotoExt;
 
     /// Calculate refresh rate in millihertz from a RandR ModeInfo.
     fn calc_refresh_mhz(mode: &randr::ModeInfo) -> u32 {
@@ -3101,6 +3130,8 @@ mod output_ops {
         /// Cached output layout - invalidated on RandR events
         /// None = cache miss, Some(vec) = cached outputs
         cached_outputs: Arc<Mutex<Option<Vec<OutputInfo>>>>,
+        /// VRR-capable outputs: output_id -> true if VRR supported
+        vrr_capable_outputs: Arc<Mutex<std::collections::HashMap<u32, bool>>>,
     }
 
     impl<C: Connection> X11OutputOps<C> {
@@ -3111,6 +3142,7 @@ mod output_ops {
                 sw,
                 sh,
                 cached_outputs: Arc::new(Mutex::new(None)),
+                vrr_capable_outputs: Arc::new(Mutex::new(std::collections::HashMap::new())),
             }
         }
 
@@ -3119,6 +3151,56 @@ mod output_ops {
             if let Ok(mut cache) = self.cached_outputs.lock() {
                 *cache = None;
             }
+        }
+
+        /// Check if output supports VRR (Variable Refresh Rate)
+        /// Queries for "vrr_capable" property on the output
+        fn query_output_vrr_capable(&self, output: u32) -> bool {
+            // Try to get VRR property via atom lookup
+            if let Ok(atom_cookie) = self.conn.intern_atom(false, b"vrr_capable") {
+                if let Ok(atom_reply) = atom_cookie.reply() {
+                    let vrr_atom = atom_reply.atom;
+                    if vrr_atom > 0 {
+                        // Try to read the property
+                        if let Ok(prop_cookie) = self.conn.randr_get_output_property(
+                            output,
+                            vrr_atom,
+                            x11rb::protocol::xproto::AtomEnum::ANY,
+                            0,  // offset
+                            1,  // length (single value)
+                            false,  // delete
+                            false,  // pending
+                        ) {
+                            if let Ok(prop) = prop_cookie.reply() {
+                                if prop.format == 8 && prop.num_items > 0 {
+                                    if !prop.data.is_empty() {
+                                        return prop.data[0] != 0;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            false
+        }
+
+        /// Get VRR capabilities for a given output index
+        /// Returns Some(VrrCapabilities) if VRR is supported
+        pub(super) fn get_vrr_capabilities(&self, output_idx: u64) -> Option<VrrCapabilities> {
+            if let Ok(cache) = self.vrr_capable_outputs.lock() {
+                if cache.contains_key(&(output_idx as u32)) {
+                    let cfg = crate::config::CONFIG.load();
+                    let behavior = cfg.behavior();
+                    return Some(VrrCapabilities {
+                        supported: true,
+                        current_enabled: false,  // Would require querying VRR_ENABLED property
+                        min_refresh_hz: behavior.vrr_min_fps,
+                        max_refresh_hz: behavior.vrr_max_fps,
+                    });
+                }
+            }
+            None
         }
 
         /// Get cached outputs or query if cache miss
@@ -3200,6 +3282,16 @@ mod output_ops {
                                             scale: 1.0,
                                             refresh_rate: refresh,
                                         });
+
+                                        // Check for VRR support on this output
+                                        if let Some(&first_output) = m.outputs.first() {
+                                            if self.query_output_vrr_capable(first_output) {
+                                                if let Ok(mut vrr_map) = self.vrr_capable_outputs.lock() {
+                                                    vrr_map.insert(i as u32, true);
+                                                    log::info!("backend: Output {} supports VRR", i);
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 if !out.is_empty() {

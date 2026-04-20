@@ -624,6 +624,8 @@ impl Compositor {
 
         // Auto-detect known video players for audio sync
         let is_video_player = self.is_known_video_player(class_name);
+        // Detect games for VRR
+        let is_game = self.detect_game_window(class_name);
 
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             if wt.class_name != class_name {
@@ -644,6 +646,14 @@ impl Compositor {
                     );
                     // Default audio sync at 60fps; will be overridden by app notification
                     wt.audio_sync_target = Some(60.0);
+                }
+
+                // Track game windows for VRR
+                if is_game {
+                    self.is_game_window.insert(x11_win, true);
+                    log::debug!("compositor: detected game window: {} (0x{:x})", class_name, x11_win);
+                } else {
+                    self.is_game_window.remove(&x11_win);
                 }
             }
         }
