@@ -2846,6 +2846,48 @@ impl Compositor {
         (avg, sorted[p50_idx], sorted[p95_idx], sorted[p99_idx])
     }
 
+    /// Compute blur quality for a specific window (Task 10: Adaptive Blur)
+    fn compute_window_blur_quality(&self, wt: &WindowTexture, focused: Option<u32>) -> BlurQuality {
+        let cfg = crate::config::CONFIG.load();
+        let behavior = cfg.behavior();
+
+        // If adaptive blur is disabled, use global quality
+        if !behavior.blur_quality_auto {
+            return self.blur_quality;
+        }
+
+        // Global quality acts as an upper bound (e.g. Minimal under heavy load)
+        let max_quality = self.blur_quality;
+
+        // Check if this window is focused
+        let is_focused = focused.map_or(false, |f| f == wt.x11_win);
+
+        // Check if window is visible on screen (simple heuristic)
+        let is_onscreen = wt.x + (wt.w as i32) > 0
+            && wt.y + (wt.h as i32) > 0
+            && wt.x < self.screen_w as i32
+            && wt.y < self.screen_h as i32;
+
+        // Priority-based quality, capped by global max
+        let per_window_quality = if is_focused {
+            BlurQuality::Full  // Focused: always full quality
+        } else if !is_onscreen {
+            BlurQuality::Minimal  // Off-screen: minimal
+        } else {
+            BlurQuality::Reduced  // Inactive but visible: reduced
+        };
+
+        // Apply global cap (if system under load, further reduce all windows)
+        match max_quality {
+            BlurQuality::Minimal => BlurQuality::Minimal,
+            BlurQuality::Reduced => match per_window_quality {
+                BlurQuality::Full => BlurQuality::Reduced,
+                other => other,
+            },
+            BlurQuality::Full => per_window_quality,
+        }
+    }
+
     /// Whether a window should receive per-frame backdrop blur compositing.
     fn needs_backdrop_blur(&self, wt: &WindowTexture) -> bool {
         if Self::class_matches_exclude(&wt.class_name, &self.blur_exclude) {
@@ -4319,8 +4361,9 @@ impl Compositor {
                                 } else {
                                     self.blur_fbos.len()
                                 };
-                                // Phase 2.2: Apply blur quality cap
-                                let blur_levels = match self.blur_quality {
+                                // Phase 2.2: Apply blur quality cap (per-window adaptive)
+                                let window_quality = self.compute_window_blur_quality(wt, focused);
+                                let blur_levels = match window_quality {
                                     BlurQuality::Full => base_levels,
                                     BlurQuality::Reduced => (base_levels / 2).max(1),
                                     BlurQuality::Minimal => 1,
