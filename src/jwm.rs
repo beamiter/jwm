@@ -11462,6 +11462,14 @@ impl Jwm {
                 "version": env!("CARGO_PKG_VERSION"),
                 "name": "jwm",
             }))),
+            "get_metrics" => {
+                // Return performance metrics
+                IpcResponse::ok(Some(serde_json::json!({
+                    "window_count": self.state.clients.len(),
+                    "monitor_count": self.state.monitors.len(),
+                    "tag_count": crate::config::CONFIG.load().tags_length(),
+                })))
+            }
             _ => IpcResponse::err(format!("unknown query: {name}")),
         }
     }
