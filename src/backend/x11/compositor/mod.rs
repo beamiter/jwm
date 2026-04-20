@@ -4651,18 +4651,31 @@ impl Compositor {
             // Format HUD text
             let avg_dt = if self.frame_stats.frame_times.is_empty() { 0.0 }
                 else { self.frame_stats.frame_times.iter().sum::<f32>() / self.frame_stats.frame_times.len() as f32 };
+            let max_dt = self.frame_stats.frame_times.iter().copied().fold(0.0, f32::max);
+            let min_dt = self.frame_stats.frame_times.iter().copied().fold(f32::MAX, f32::min);
+            let min_dt = if min_dt == f32::MAX { 0.0 } else { min_dt };
+
             let mut hud_text = format!(
-                "FPS: {:.1}  {:.1}ms\nWindows: {}",
-                self.frame_stats.fps, avg_dt * 1000.0, self.windows.len(),
+                "FPS: {:.1}  Avg: {:.1}ms  Max: {:.1}ms  Min: {:.1}ms\nWindows: {}  Tiles: {}  Dirty: {:.0}%",
+                self.frame_stats.fps, avg_dt * 1000.0, max_dt * 1000.0, min_dt * 1000.0,
+                self.windows.len(),
+                self.damage_tracker.dirty_tiles.len(),
+                self.damage_tracker.dirty_fraction() * 100.0,
             );
             if self.debug_hud_extended {
                 let tex_mem_kb = self.frame_stats.texture_memory_bytes / 1024;
+                let blur_hit_rate = if self.frame_stats.blur_cache_hits + self.frame_stats.blur_cache_misses > 0 {
+                    100.0 * self.frame_stats.blur_cache_hits as f32 / (self.frame_stats.blur_cache_hits + self.frame_stats.blur_cache_misses) as f32
+                } else {
+                    0.0
+                };
                 use std::fmt::Write;
                 let _ = write!(
                     hud_text,
-                    "\nDraw calls: {}\nTex mem: {}KB\nBlur: {}h/{}m",
+                    "\nDraw calls: {}  Mem: {}KB\nBlur: {:.0}% hit rate ({}/{})\nQuality: {:?}",
                     self.frame_stats.draw_calls, tex_mem_kb,
-                    self.frame_stats.blur_cache_hits, self.frame_stats.blur_cache_misses,
+                    blur_hit_rate, self.frame_stats.blur_cache_hits, self.frame_stats.blur_cache_misses,
+                    self.blur_quality,
                 );
             }
 
