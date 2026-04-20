@@ -5,8 +5,29 @@ use crate::backend::common_define::{
     ColorScheme, CursorHandle, KeySym, Mods, Pixel, SchemeType, StdCursorKind, WindowId,
 };
 use crate::backend::error::BackendError;
+use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::fmt::Debug;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompositorMetrics {
+    pub fps: f32,
+    pub frame_count: u64,
+    pub avg_frame_time_ms: f32,
+    pub max_frame_time_ms: f32,
+    pub min_frame_time_ms: f32,
+    pub gpu_load_percent: u32,
+    pub cpu_load_percent: u32,
+    pub draw_calls: u32,
+    pub texture_memory_bytes: u64,
+    pub blur_cache_hits: u64,
+    pub blur_cache_misses: u64,
+    pub blur_cache_hit_rate: f32,
+    pub dirty_regions_count: usize,
+    pub dirty_fraction_percent: f32,
+    pub window_count: usize,
+    pub blur_quality: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HitTarget {
@@ -714,6 +735,9 @@ pub trait Backend: Send {
 
     /// Get current FPS from compositor debug stats.
     fn compositor_fps(&self) -> f32 { 0.0 }
+
+    /// Get detailed compositor performance metrics.
+    fn compositor_get_metrics(&self) -> Option<CompositorMetrics> { None }
 
     /// Capture a window thumbnail (returns RGBA pixels, width, height).
     fn compositor_capture_thumbnail(&self, _window: WindowId, _max_size: u32) -> Option<(Vec<u8>, u32, u32)> {

@@ -595,6 +595,9 @@ impl Backend for X11Backend {
             .as_ref()
             .map_or(0.0, |c| c.frame_stats_fps())
     }
+    fn compositor_get_metrics(&self) -> Option<crate::backend::api::CompositorMetrics> {
+        self.compositor.as_ref().map(|c| c.get_metrics())
+    }
     fn compositor_capture_thumbnail(
         &self,
         window: WindowId,

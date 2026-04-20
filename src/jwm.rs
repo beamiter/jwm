@@ -11393,7 +11393,7 @@ impl Jwm {
                     name,
                     args,
                 } => {
-                    let resp = self.handle_ipc_query(&name, &args);
+                    let resp = self.handle_ipc_query(&name, &args, backend);
                     if let Some(ipc) = self.ipc_server.as_mut() {
                         ipc.respond(client_id, &resp);
                     }
@@ -11428,7 +11428,7 @@ impl Jwm {
         }
     }
 
-    fn handle_ipc_query(&self, name: &str, _args: &serde_json::Value) -> IpcResponse {
+    fn handle_ipc_query(&self, name: &str, _args: &serde_json::Value, backend: &dyn Backend) -> IpcResponse {
         match name {
             "get_windows" => {
                 let windows = self.query_windows();
@@ -11463,12 +11463,16 @@ impl Jwm {
                 "name": "jwm",
             }))),
             "get_metrics" => {
-                // Return performance metrics
-                IpcResponse::ok(Some(serde_json::json!({
-                    "window_count": self.state.clients.len(),
-                    "monitor_count": self.state.monitors.len(),
-                    "tag_count": crate::config::CONFIG.load().tags_length(),
-                })))
+                if let Some(metrics) = backend.compositor_get_metrics() {
+                    IpcResponse::ok(Some(serde_json::to_value(metrics).unwrap_or_default()))
+                } else {
+                    // Fallback if no compositor
+                    IpcResponse::ok(Some(serde_json::json!({
+                        "window_count": self.state.clients.len(),
+                        "monitor_count": self.state.monitors.len(),
+                        "tag_count": CONFIG.load().tags_length(),
+                    })))
+                }
             }
             _ => IpcResponse::err(format!("unknown query: {name}")),
         }

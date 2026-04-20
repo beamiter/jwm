@@ -3340,6 +3340,47 @@ impl Compositor {
         self.frame_stats.fps
     }
 
+    pub(super) fn get_metrics(&self) -> crate::backend::api::CompositorMetrics {
+        let frame_times_vec: Vec<f32> = self.frame_stats.frame_times.iter().copied().collect();
+        let avg_frame_time = if frame_times_vec.is_empty() {
+            0.0
+        } else {
+            frame_times_vec.iter().sum::<f32>() / frame_times_vec.len() as f32
+        };
+        let max_frame_time = frame_times_vec.iter().copied().fold(0.0, f32::max);
+        let min_frame_time = frame_times_vec.iter().copied().fold(f32::MAX, f32::min);
+        let min_frame_time = if min_frame_time == f32::MAX { 0.0 } else { min_frame_time };
+
+        let blur_hit_rate = if self.frame_stats.blur_cache_hits + self.frame_stats.blur_cache_misses > 0 {
+            100.0 * self.frame_stats.blur_cache_hits as f32
+                / (self.frame_stats.blur_cache_hits + self.frame_stats.blur_cache_misses) as f32
+        } else {
+            0.0
+        };
+
+        let dirty_tiles_count = self.damage_tracker.dirty_tiles.iter().filter(|&&d| d).count();
+        let dirty_fraction = self.damage_tracker.dirty_fraction();
+
+        crate::backend::api::CompositorMetrics {
+            fps: self.frame_stats.fps,
+            frame_count: self.frame_stats.frame_count,
+            avg_frame_time_ms: avg_frame_time,
+            max_frame_time_ms: max_frame_time,
+            min_frame_time_ms: min_frame_time,
+            gpu_load_percent: 0, // To be updated from perf_metrics
+            cpu_load_percent: 0, // To be updated from perf_metrics
+            draw_calls: self.frame_stats.draw_calls,
+            texture_memory_bytes: self.frame_stats.texture_memory_bytes,
+            blur_cache_hits: self.frame_stats.blur_cache_hits,
+            blur_cache_misses: self.frame_stats.blur_cache_misses,
+            blur_cache_hit_rate: blur_hit_rate,
+            dirty_regions_count: dirty_tiles_count,
+            dirty_fraction_percent: dirty_fraction * 100.0,
+            window_count: self.windows.len(),
+            blur_quality: format!("{:?}", self.blur_quality),
+        }
+    }
+
     /// Rasterize HUD text and upload as a GL texture. Skips upload when the
     /// formatted string is identical to the previous frame.
     fn update_hud_text_texture(&mut self, text: &str) {
