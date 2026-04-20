@@ -2777,6 +2777,30 @@ impl Compositor {
         false
     }
 
+    /// Update VRR state based on focused window type
+    pub fn update_vrr_state(&mut self) {
+        let cfg = crate::config::CONFIG.load();
+        let behavior = cfg.behavior();
+
+        if !behavior.vrr_enabled {
+            self.vrr_active = false;
+            return;
+        }
+
+        // Limit updates to once per second to avoid flapping
+        if self.vrr_last_check.elapsed().as_secs() < 1 {
+            return;
+        }
+        self.vrr_last_check = std::time::Instant::now();
+
+        // Would enable VRR for game windows, disable for desktop
+        let should_vrr = self.is_focused_window_game();
+        if should_vrr != self.vrr_active {
+            self.vrr_active = should_vrr;
+            log::info!("VRR {}", if should_vrr { "enabled" } else { "disabled" });
+        }
+    }
+
     /// Whether a window should receive per-frame backdrop blur compositing.
     fn needs_backdrop_blur(&self, wt: &WindowTexture) -> bool {
         if Self::class_matches_exclude(&wt.class_name, &self.blur_exclude) {
@@ -3416,6 +3440,7 @@ impl Compositor {
             dirty_fraction_percent: dirty_fraction * 100.0,
             window_count: self.windows.len(),
             blur_quality: format!("{:?}", self.blur_quality),
+            vrr_enabled: self.vrr_active,
         }
     }
 
@@ -3548,6 +3573,11 @@ impl Compositor {
         // Shader hot-reload: poll every 60 frames (~1s at 60fps)
         if self.shader_hot_reload_enabled && self.frame_stats.frame_count % 60 == 0 {
             self.poll_shader_hot_reload();
+        }
+
+        // VRR state update: check every 60 frames (~1s at 60fps)
+        if self.frame_stats.frame_count % 60 == 0 {
+            self.update_vrr_state();
         }
 
         // Feature 11: Frame timing start

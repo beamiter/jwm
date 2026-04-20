@@ -27,6 +27,7 @@ pub struct CompositorMetrics {
     pub dirty_fraction_percent: f32,
     pub window_count: usize,
     pub blur_quality: String,
+    pub vrr_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
