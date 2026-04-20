@@ -155,9 +155,7 @@ impl WindowTextureState {
 
 struct WindowTexture {
 
-    #[allow(dead_code)]
     x: i32,
-    #[allow(dead_code)]
     y: i32,
     w: u32,
     h: u32,
@@ -421,10 +419,6 @@ struct WobblyState {
 /// Entry for Alt-Tab overview mode.
 struct OverviewEntry {
     x11_win: u32,
-    #[allow(dead_code)]
-    target_x: f32,
-    #[allow(dead_code)]
-    target_y: f32,
     target_w: f32,
     target_h: f32,
     is_selected: bool,
@@ -711,8 +705,6 @@ struct GenieUniforms {
 
 /// Active genie minimize animation for one window.
 struct GenieAnimation {
-    #[allow(dead_code)]
-    x11_win: u32,
     start: std::time::Instant,
     x: f32,
     y: f32,
@@ -1101,6 +1093,11 @@ pub(super) struct Compositor {
     /// Receivers for per-monitor wallpapers decoded on background threads.
     /// Each entry: (mon_index_in_vec, receiver).
     pending_monitor_wallpapers: Vec<(usize, mpsc::Receiver<WallpaperImageData>)>,
+
+    // --- Shader hot-reload ---
+    shader_hot_reload_enabled: bool,
+    shader_dir: String,
+    shader_file_mtimes: std::collections::HashMap<String, std::time::SystemTime>,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
@@ -2444,6 +2441,10 @@ impl Compositor {
             // Async wallpaper loading
             pending_wallpaper,
             pending_monitor_wallpapers: Vec::new(),
+            // Shader hot-reload
+            shader_hot_reload_enabled: false,
+            shader_dir: String::new(),
+            shader_file_mtimes: std::collections::HashMap::new(),
         })
     }
 
@@ -3186,6 +3187,14 @@ impl Compositor {
             }
         }
 
+        // --- Shader hot-reload ---
+        if behavior.shader_hot_reload && !behavior.shader_dir.is_empty() {
+            self.enable_shader_hot_reload(&behavior.shader_dir);
+        } else if !behavior.shader_hot_reload && self.shader_hot_reload_enabled {
+            self.shader_hot_reload_enabled = false;
+            self.shader_file_mtimes.clear();
+        }
+
         self.needs_render = true;
     }
 
@@ -3457,6 +3466,11 @@ impl Compositor {
         scene: &[(u32, i32, i32, u32, u32)],
         focused: Option<u32>,
     ) -> bool {
+        // Shader hot-reload: poll every 60 frames (~1s at 60fps)
+        if self.shader_hot_reload_enabled && self.frame_stats.frame_count % 60 == 0 {
+            self.poll_shader_hot_reload();
+        }
+
         // Feature 11: Frame timing start
         let _frame_start = std::time::Instant::now();
 
@@ -5226,8 +5240,6 @@ impl Compositor {
         self.overview_windows = windows.into_iter().enumerate().map(|(i, (win, _x, _y, _w, _h, sel, title))| {
             OverviewEntry {
                 x11_win: win,
-                target_x: 0.0,
-                target_y: 0.0,
                 target_w: face_w,
                 target_h: face_h,
                 is_selected: sel,
@@ -5419,24 +5431,125 @@ impl Compositor {
     // Phase 7: Diagnostics
     // =====================================================================
 
-    #[allow(dead_code)]
     pub(super) fn reload_shader_from_file(&mut self, name: &str, path: &std::path::Path) -> Result<(), String> {
-        let fs_src = std::fs::read_to_string(path)
+        let file_content = std::fs::read_to_string(path)
             .map_err(|e| format!("read shader file: {e}"))?;
-        let vs_src = shaders::VERTEX_SHADER;
-        match unsafe { Self::create_program(&self.gl, vs_src, &fs_src) } {
+
+        let (vs_src, fs_src) = match name {
+            "window" => (shaders::VERTEX_SHADER, file_content.as_str()),
+            "shadow" => (shaders::VERTEX_SHADER, file_content.as_str()),
+            "border" => (shaders::VERTEX_SHADER, file_content.as_str()),
+            "blur_down" => (shaders::BLUR_DOWN_VERTEX, file_content.as_str()),
+            "blur_up" => (shaders::BLUR_DOWN_VERTEX, file_content.as_str()),
+            "box_blur" => (shaders::BLUR_DOWN_VERTEX, file_content.as_str()),
+            "postprocess" => (shaders::BLUR_DOWN_VERTEX, file_content.as_str()),
+            "hud" => (shaders::VERTEX_SHADER, file_content.as_str()),
+            "hud_text" => (shaders::VERTEX_SHADER, file_content.as_str()),
+            "transition" => (shaders::BLUR_DOWN_VERTEX, file_content.as_str()),
+            "cube" => (shaders::CUBE_VERTEX_SHADER, file_content.as_str()),
+            "portal" => (shaders::BLUR_DOWN_VERTEX, file_content.as_str()),
+            "edge_glow" => (shaders::VERTEX_SHADER, file_content.as_str()),
+            "tilt" => (shaders::TILT_VERTEX_SHADER, file_content.as_str()),
+            "wobbly" => (shaders::WOBBLY_VERTEX_SHADER, file_content.as_str()),
+            "particle" => (shaders::PARTICLE_VERTEX_SHADER, file_content.as_str()),
+            "genie" => (shaders::GENIE_VERTEX_SHADER, file_content.as_str()),
+            "overview_bg" => (shaders::VERTEX_SHADER, file_content.as_str()),
+            _ if name.ends_with("_vs") => {
+                log::warn!("compositor: shader reload requires both vertex and fragment shaders to be specified");
+                return Err(format!("shader {} needs corresponding fragment shader", name));
+            }
+            _ => return Err(format!("unknown shader: {name}")),
+        };
+
+        match unsafe { Self::create_program(&self.gl, vs_src, fs_src) } {
             Ok(new_program) => {
-                match name {
-                    "window" => { unsafe { self.gl.delete_program(self.program); } self.program = new_program; }
-                    "shadow" => { unsafe { self.gl.delete_program(self.shadow_program); } self.shadow_program = new_program; }
-                    _ => { unsafe { self.gl.delete_program(new_program); } return Err(format!("unknown shader: {name}")); }
+                unsafe {
+                    match name {
+                        "window" => { self.gl.delete_program(self.program); self.program = new_program; }
+                        "shadow" => { self.gl.delete_program(self.shadow_program); self.shadow_program = new_program; }
+                        "border" => { self.gl.delete_program(self.border_program); self.border_program = new_program; }
+                        "blur_down" => { self.gl.delete_program(self.blur_down_program); self.blur_down_program = new_program; }
+                        "blur_up" => { self.gl.delete_program(self.blur_up_program); self.blur_up_program = new_program; }
+                        "box_blur" => { /* no separate program, used in blur_optimize */ }
+                        "postprocess" => { self.gl.delete_program(self.postprocess_program); self.postprocess_program = new_program; }
+                        "hud" => { self.gl.delete_program(self.hud_program); self.hud_program = new_program; }
+                        "hud_text" => { self.gl.delete_program(self.hud_text_program); self.hud_text_program = new_program; }
+                        "transition" => { self.gl.delete_program(self.transition_program); self.transition_program = new_program; }
+                        "cube" => { self.gl.delete_program(self.cube_program); self.cube_program = new_program; }
+                        "portal" => { self.gl.delete_program(self.portal_program); self.portal_program = new_program; }
+                        "edge_glow" => { self.gl.delete_program(self.edge_glow_program); self.edge_glow_program = new_program; }
+                        "tilt" => { self.gl.delete_program(self.tilt_program); self.tilt_program = new_program; }
+                        "wobbly" => { self.gl.delete_program(self.wobbly_program); self.wobbly_program = new_program; }
+                        "particle" => { self.gl.delete_program(self.particle_program); self.particle_program = new_program; }
+                        "genie" => { self.gl.delete_program(self.genie_program); self.genie_program = new_program; }
+                        "overview_bg" => { self.gl.delete_program(self.overview_bg_program); self.overview_bg_program = new_program; }
+                        _ => { self.gl.delete_program(new_program); }
+                    }
                 }
                 self.needs_render = true;
+                log::info!("compositor: shader reload succeeded for {name}");
                 Ok(())
             }
             Err(e) => {
                 log::warn!("compositor: shader reload failed for {name}: {e}");
                 Err(e)
+            }
+        }
+    }
+
+    pub(super) fn enable_shader_hot_reload(&mut self, shader_dir: &str) {
+        if shader_dir.is_empty() {
+            log::warn!("compositor: shader_dir is empty, cannot enable hot-reload");
+            return;
+        }
+        let dir = std::path::PathBuf::from(shader_dir);
+        if !dir.exists() {
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                log::warn!("compositor: failed to create shader_dir '{shader_dir}': {e}");
+                return;
+            }
+        }
+        self.shader_hot_reload_enabled = true;
+        self.shader_dir = shader_dir.to_string();
+        self.shader_file_mtimes.clear();
+        log::info!("compositor: shader hot-reload enabled, watching '{shader_dir}'");
+    }
+
+    pub(super) fn poll_shader_hot_reload(&mut self) {
+        if !self.shader_hot_reload_enabled || self.shader_dir.is_empty() {
+            return;
+        }
+
+        const SHADER_NAMES: &[&str] = &[
+            "window", "shadow", "border", "blur_down", "blur_up", "box_blur",
+            "postprocess", "hud", "hud_text", "transition", "cube", "portal",
+            "edge_glow", "tilt", "wobbly", "particle", "genie", "overview_bg",
+        ];
+
+        let dir = std::path::PathBuf::from(&self.shader_dir);
+        let mut to_reload: Vec<(String, std::path::PathBuf)> = Vec::new();
+
+        for &name in SHADER_NAMES {
+            let path = dir.join(format!("{name}.frag"));
+            if !path.exists() { continue; }
+            let mtime = match std::fs::metadata(&path).and_then(|m| m.modified()) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let changed = match self.shader_file_mtimes.get(name) {
+                Some(&prev) => mtime != prev,
+                None => true,
+            };
+            if changed {
+                self.shader_file_mtimes.insert(name.to_string(), mtime);
+                to_reload.push((name.to_string(), path));
+            }
+        }
+
+        for (name, path) in to_reload {
+            match self.reload_shader_from_file(&name, &path) {
+                Ok(()) => log::info!("compositor: hot-reloaded shader '{name}'"),
+                Err(e) => log::warn!("compositor: hot-reload failed for '{name}': {e}"),
             }
         }
     }

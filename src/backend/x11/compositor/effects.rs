@@ -333,7 +333,6 @@ impl Compositor {
         // The texture won't be deleted because we prevent remove_window_immediate
         if let Some(wt) = self.windows.get(&x11_win) {
             self.genie_active.push(super::GenieAnimation {
-                x11_win,
                 start: std::time::Instant::now(),
                 x,
                 y,
