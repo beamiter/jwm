@@ -28,6 +28,11 @@ pub struct CompositorMetrics {
     pub window_count: usize,
     pub blur_quality: String,
     pub vrr_enabled: bool,
+    // Task 8: Input latency metrics
+    pub input_latency_avg_ms: f32,
+    pub input_latency_p50_ms: f32,
+    pub input_latency_p95_ms: f32,
+    pub input_latency_p99_ms: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

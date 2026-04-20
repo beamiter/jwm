@@ -366,6 +366,7 @@ impl X11Backend {
             }
             BackendEvent::MotionNotify { root_x, root_y, .. } => {
                 compositor.set_mouse_position(*root_x as f32, *root_y as f32);
+                compositor.record_input_event();
             }
             BackendEvent::ScreenLayoutChanged => {
                 // Root window may have been resized by xrandr; update compositor

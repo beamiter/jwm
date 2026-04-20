@@ -403,6 +403,9 @@ struct FrameStats {
     texture_memory_bytes: u64,
     blur_cache_hits: u64,
     blur_cache_misses: u64,
+    // Task 8: Input latency tracking
+    last_input_time: Option<std::time::Instant>,
+    latency_samples: Vec<f32>,  // in ms, ring buffer up to 300 samples
 }
 
 /// Per-window wobbly animation state (grid spring-mass system).
@@ -2237,6 +2240,8 @@ impl Compositor {
                 texture_memory_bytes: 0,
                 blur_cache_hits: 0,
                 blur_cache_misses: 0,
+                last_input_time: None,
+                latency_samples: Vec::with_capacity(300),
             },
             // Feature 12: screenshot
             pending_screenshot: None,
@@ -2799,6 +2804,46 @@ impl Compositor {
             self.vrr_active = should_vrr;
             log::info!("VRR {}", if should_vrr { "enabled" } else { "disabled" });
         }
+    }
+
+    /// Record input event for latency tracking (Task 8)
+    pub fn record_input_event(&mut self) {
+        self.frame_stats.last_input_time = Some(std::time::Instant::now());
+    }
+
+    /// Compute and record input→display latency when frame is rendered
+    fn record_latency_sample(&mut self) {
+        if let Some(input_time) = self.frame_stats.last_input_time {
+            let now = std::time::Instant::now();
+            let latency_ms = now.duration_since(input_time).as_secs_f32() * 1000.0;
+
+            self.frame_stats.latency_samples.push(latency_ms);
+            // Ring buffer: keep最多 300 samples (~5 seconds at 60fps)
+            if self.frame_stats.latency_samples.len() > 300 {
+                self.frame_stats.latency_samples.remove(0);
+            }
+
+            // Clear the input timestamp after recording
+            self.frame_stats.last_input_time = None;
+        }
+    }
+
+    /// Compute latency statistics (p50, p95, p99)
+    fn compute_latency_stats(&self) -> (f32, f32, f32, f32) {
+        if self.frame_stats.latency_samples.is_empty() {
+            return (0.0, 0.0, 0.0, 0.0);
+        }
+
+        let mut sorted = self.frame_stats.latency_samples.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let len = sorted.len();
+        let p50_idx = (len * 50 / 100).min(len - 1);
+        let p95_idx = (len * 95 / 100).min(len - 1);
+        let p99_idx = (len * 99 / 100).min(len - 1);
+
+        let avg = sorted.iter().sum::<f32>() / len as f32;
+        (avg, sorted[p50_idx], sorted[p95_idx], sorted[p99_idx])
     }
 
     /// Whether a window should receive per-frame backdrop blur compositing.
@@ -3423,6 +3468,8 @@ impl Compositor {
         let dirty_tiles_count = self.damage_tracker.dirty_tiles.iter().filter(|&&d| d).count();
         let dirty_fraction = self.damage_tracker.dirty_fraction();
 
+        let latency_stats = self.compute_latency_stats();
+
         crate::backend::api::CompositorMetrics {
             fps: self.frame_stats.fps,
             frame_count: self.frame_stats.frame_count,
@@ -3441,6 +3488,10 @@ impl Compositor {
             window_count: self.windows.len(),
             blur_quality: format!("{:?}", self.blur_quality),
             vrr_enabled: self.vrr_active,
+            input_latency_avg_ms: latency_stats.0,
+            input_latency_p50_ms: latency_stats.1,
+            input_latency_p95_ms: latency_stats.2,
+            input_latency_p99_ms: latency_stats.3,
         }
     }
 
@@ -4716,6 +4767,9 @@ impl Compositor {
                 self.frame_stats.last_fps_update = now;
             }
 
+            // Record input→display latency sample if we had input this frame
+            self.record_latency_sample();
+
             // Format HUD text
             let avg_dt = if self.frame_stats.frame_times.is_empty() { 0.0 }
                 else { self.frame_stats.frame_times.iter().sum::<f32>() / self.frame_stats.frame_times.len() as f32 };
@@ -4745,6 +4799,16 @@ impl Compositor {
                     blur_hit_rate, self.frame_stats.blur_cache_hits, self.frame_stats.blur_cache_misses,
                     self.blur_quality,
                 );
+
+                // Add input latency stats if available
+                let (avg, p50, p95, p99) = self.compute_latency_stats();
+                if avg > 0.0 {
+                    let _ = write!(
+                        hud_text,
+                        "\nLatency: avg {:.1}ms  p50 {:.1}ms  p95 {:.1}ms  p99 {:.1}ms",
+                        avg, p50, p95, p99,
+                    );
+                }
             }
 
             // Update text texture (skips upload if content unchanged)
