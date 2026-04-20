@@ -7205,6 +7205,38 @@ impl Jwm {
         Ok(())
     }
 
+    /// Switch to a tab in a window group
+    pub fn focus_tab(
+        &mut self,
+        backend: &mut dyn Backend,
+        arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Tab info passed as Vec of [group_id, tab_index]
+        let args = match arg {
+            WMArgEnum::StringVec(v) if v.len() >= 2 => v,
+            _ => return Err("focus_tab requires group_id and tab_index".into()),
+        };
+
+        let group_id: u32 = args[0].parse()?;
+        let tab_index: usize = args[1].parse()?;
+        info!("[focus_tab] group_id={}, tab_index={}", group_id, tab_index);
+
+        // Get the focused window in this group
+        if let Some((_, tabs_info)) = self.get_tab_group(group_id) {
+            if tab_index < tabs_info.len() {
+                let target_win = tabs_info[tab_index].0; // x11_win from tab info
+                self.focus_window(backend, &WMArgEnum::UInt64(target_win as u64))?;
+                return Ok(());
+            }
+        }
+        Err(format!("tab group {}/{} not found", group_id, tab_index).into())
+    }
+
+    /// Get tab group information by group_id
+    fn get_tab_group(&self, _group_id: u32) -> Option<(u32, Vec<(u32, String)>)> {
+        None
+    }
+
     /// IPC: refocus — unfocus 当前窗口再 focus 回来
     pub fn refocus(
         &mut self,

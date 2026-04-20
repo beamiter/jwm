@@ -699,4 +699,50 @@ impl Compositor {
     ) -> Option<(Vec<u8>, u32, u32)> {
         self.capture_window_thumbnail(x11_win, max_size)
     }
+
+    // =========================================================================
+    // 5.6 Window Tab Click Detection
+    // =========================================================================
+
+    /// Check if a click at (x, y) is on a tab bar and return the tab group and index.
+    /// Returns Some((group_id, tab_index)) if click is on a tab, None otherwise.
+    pub(super) fn check_tab_click(&self, x: f32, y: f32) -> Option<(u32, usize)> {
+        if !self.window_tabs_enabled {
+            return None;
+        }
+
+        // Check all window groups for tab hit
+        for (&group_id, tabs) in &self.window_groups {
+            if tabs.is_empty() {
+                continue;
+            }
+
+            // Find the active tab's window to get its position
+            for tab in tabs {
+                if !tab.is_active {
+                    continue;
+                }
+
+                if let Some(wt) = self.windows.get(&tab.x11_win) {
+                    let win_x = wt.x as f32;
+                    let win_y = wt.y as f32;
+                    let win_w = wt.w as f32;
+                    let bar_h = self.tab_bar_height;
+                    let bar_y = win_y - bar_h;
+
+                    // Check if click is within tab bar bounds
+                    if x >= win_x && x < win_x + win_w && y >= bar_y && y < win_y {
+                        // Find which tab was clicked
+                        let tab_w = win_w / tabs.len() as f32;
+                        let clicked_index = ((x - win_x) / tab_w) as usize;
+                        if clicked_index < tabs.len() {
+                            return Some((group_id, clicked_index));
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        None
+    }
 }
