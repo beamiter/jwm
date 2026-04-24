@@ -3891,6 +3891,22 @@ mod property_ops {
             )?;
             Ok(())
         }
+
+        fn get_window_pid(&self, win: WindowId) -> Option<u32> {
+            let w = self.ids.x11(win).ok()?;
+            let reply = self
+                .conn
+                .get_property(false, w, self.atoms._NET_WM_PID, AtomEnum::CARDINAL, 0, 1)
+                .ok()?
+                .reply()
+                .ok()?;
+
+            if reply.format == 32 {
+                reply.value32()?.next()
+            } else {
+                None
+            }
+        }
     }
 }
 

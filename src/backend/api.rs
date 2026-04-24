@@ -462,6 +462,11 @@ pub trait PropertyOps: Send {
     fn get_layer_surface_info(&self, _win: WindowId) -> Option<LayerSurfaceInfo> {
         None
     }
+
+    /// Get the PID of the process that owns this window
+    fn get_window_pid(&self, _win: WindowId) -> Option<u32> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
