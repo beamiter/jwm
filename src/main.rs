@@ -1,7 +1,5 @@
 use anyhow::Result;
-use cairo::{Context, Format, ImageSurface};
 use log::warn;
-use pango::FontDescription;
 use pixels::wgpu::TextureFormat;
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use shared_structures::SharedRingBuffer;
@@ -20,8 +18,11 @@ use winit::{
 };
 
 use xbar_core::{
-    AppState, BarConfig, Color, ShapeStyle, ThemeMode, colors_for_theme, draw_bar,
-    initialize_logging, spawn_shared_eventfd_notifier,
+    AppState, BarConfig, Color, ShapeStyle, ThemeMode,
+    cairo::{self, Context, Format, ImageSurface},
+    colors_for_theme, draw_bar, initialize_logging,
+    pango::FontDescription,
+    spawn_shared_eventfd_notifier,
 };
 
 fn tuned_colors_for_theme(mode: ThemeMode) -> xbar_core::Colors {
@@ -582,7 +583,7 @@ impl ApplicationHandler<UserEvent> for App {
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
-    let shared_path = args.get(1).cloned().unwrap_or_default();
+    let shared_path = args.iter().skip(1).last().cloned().unwrap_or_default();
 
     if let Err(e) = initialize_logging("winit_pixels_bar", &shared_path) {
         eprintln!("Failed to initialize logging: {}", e);
