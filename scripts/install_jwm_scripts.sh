@@ -69,7 +69,23 @@ ALL_BARS=(
 # 默认值
 # ============================================================
 BUILD_MODE="release"
-BAR_NAME="xcb_wgpu_bar"
+JWM_BAR_NAME="winit_pixels_bar"
+JWM_BAR_SET_BY_ARGS=false
+SELECTED_BARS=(
+    egui_bar
+    gtk_bar
+    iced_bar
+    relm_bar
+    tao_pixels_bar
+    tao_softbuffer_bar
+    tao_wgpu_bar
+    winit_pixels_bar
+    winit_softbuffer_bar
+    winit_wgpu_bar
+    xcb_wgpu_bar
+    x11rb_bar
+    xcb_bar
+)
 SKIP_BAR=false
 SKIP_JWM=false
 JOBS=""
@@ -83,7 +99,7 @@ usage() {
 
 选项:
   -m, --mode <debug|release>  构建模式（默认: release）
-  -b, --bar <bar_name>        选择要编译安装的 status bar
+    -b, --bar <bar_name>        选择要编译安装的 status bar，可重复传入或使用逗号分隔；第一个显式传入的 bar 同时作为 jwm feature
   -l, --list-bars             列出所有可用的 bar
   -j, --jobs <N>              并行编译任务数（传给 cargo）
   --skip-bar                  跳过 bar 编译安装
@@ -91,9 +107,11 @@ usage() {
   -h, --help                  显示此帮助信息
 
 示例:
-  $(basename "$0")                          # release 模式编译安装 jwm（不编译 bar）
+    $(basename "$0")                          # release 模式编译配置中的所有测试 bar，jwm 默认启用 $JWM_BAR_NAME
   $(basename "$0") -m debug                 # debug 模式编译安装 jwm
-  $(basename "$0") -b xcb_bar              # release 模式编译安装 jwm + xcb_bar
+    $(basename "$0") -b xcb_bar              # release 模式编译安装 jwm + xcb_bar
+    $(basename "$0") -b xcb_bar -b egui_bar # release 模式依次编译安装多个 bar，jwm 仅启用 xcb_bar feature
+  $(basename "$0") -b xcb_bar,egui_bar    # 与上面等价，支持逗号分隔
   $(basename "$0") -b xcb_bar --skip-jwm   # 仅编译安装 xcb_bar
   $(basename "$0") -m debug -b egui_bar    # debug 模式编译安装 jwm + egui_bar
 EOF
@@ -106,6 +124,57 @@ list_bars() {
         echo "  - $bar"
     done
     exit 0
+}
+
+is_valid_bar() {
+    local candidate="$1"
+    local bar
+
+    for bar in "${ALL_BARS[@]}"; do
+        if [[ "$bar" == "$candidate" ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+add_selected_bars() {
+    local raw_value="$1"
+    local candidate=""
+    local parsed_bars=()
+    local existing=""
+
+    IFS=',' read -r -a parsed_bars <<< "$raw_value"
+    for candidate in "${parsed_bars[@]}"; do
+        candidate="${candidate//[[:space:]]/}"
+
+        if [[ -z "$candidate" ]]; then
+            continue
+        fi
+
+        if ! is_valid_bar "$candidate"; then
+            err "未知的 bar: $candidate"
+            info "使用 --list-bars 查看所有可用的 bar"
+            exit 1
+        fi
+
+        if [[ "$JWM_BAR_SET_BY_ARGS" == false ]]; then
+            JWM_BAR_NAME="$candidate"
+            JWM_BAR_SET_BY_ARGS=true
+        fi
+
+        for existing in "${SELECTED_BARS[@]}"; do
+            if [[ "$existing" == "$candidate" ]]; then
+                candidate=""
+                break
+            fi
+        done
+
+        if [[ -n "$candidate" ]]; then
+            SELECTED_BARS+=("$candidate")
+        fi
+    done
 }
 
 # ============================================================
@@ -122,20 +191,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -b|--bar)
-            BAR_NAME="$2"
-            # 验证 bar 名称
-            valid=false
-            for bar in "${ALL_BARS[@]}"; do
-                if [[ "$bar" == "$BAR_NAME" ]]; then
-                    valid=true
-                    break
-                fi
-            done
-            if [[ "$valid" == false ]]; then
-                err "未知的 bar: $BAR_NAME"
-                info "使用 --list-bars 查看所有可用的 bar"
-                exit 1
-            fi
+            add_selected_bars "$2"
             shift 2
             ;;
         -l|--list-bars)
@@ -235,15 +291,15 @@ build_and_install_bar() {
 build_and_install_jwm() {
     info "编译 jwm（$BUILD_MODE 模式）..."
 
-    local feature_flag=""
-    if [[ -n "$BAR_NAME" ]]; then
-        feature_flag="--features $BAR_NAME"
-        info "启用 feature: $BAR_NAME"
+    local feature_args=()
+    if [[ -n "$JWM_BAR_NAME" ]]; then
+        feature_args=(--features "$JWM_BAR_NAME")
+        info "启用 jwm feature: $JWM_BAR_NAME"
     fi
 
     cd "$PROJECT_ROOT"
     # shellcheck disable=SC2086
-    cargo build $CARGO_BUILD_FLAG $CARGO_JOBS $feature_flag
+    cargo build $CARGO_BUILD_FLAG $CARGO_JOBS "${feature_args[@]}"
 
     info "安装 jwm, jwm-tool -> /usr/local/bin/"
     sudo rm -f /usr/local/bin/jwm /usr/local/bin/jwm-tool
@@ -288,14 +344,19 @@ echo ""
 info "========================================="
 info " JWM 安装脚本"
 info " 构建模式: $BUILD_MODE"
-[[ -n "$BAR_NAME" ]] && info " Status Bar: $BAR_NAME"
+info " JWM Feature Bar: $JWM_BAR_NAME"
+if [[ ${#SELECTED_BARS[@]} -gt 0 ]]; then
+    info " Status Bars: ${SELECTED_BARS[*]}"
+fi
 info "========================================="
 echo ""
 
 # 1. 处理 bar
-if [[ -n "$BAR_NAME" && "$SKIP_BAR" == false ]]; then
-    sync_bar_repo "$BAR_NAME"
-    build_and_install_bar "$BAR_NAME"
+if [[ ${#SELECTED_BARS[@]} -gt 0 && "$SKIP_BAR" == false ]]; then
+    for bar in "${SELECTED_BARS[@]}"; do
+        sync_bar_repo "$bar"
+        build_and_install_bar "$bar"
+    done
 fi
 
 # 2. 处理 jwm
