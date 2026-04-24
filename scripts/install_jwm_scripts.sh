@@ -69,26 +69,27 @@ ALL_BARS=(
 # 默认值
 # ============================================================
 BUILD_MODE="release"
-JWM_BAR_NAME="winit_pixels_bar"
+JWM_BAR_NAME="xcb_bar"
 JWM_BAR_SET_BY_ARGS=false
 SELECTED_BARS=(
-    egui_bar
-    gtk_bar
-    iced_bar
-    relm_bar
-    tao_pixels_bar
-    tao_softbuffer_bar
-    tao_wgpu_bar
-    winit_pixels_bar
-    winit_softbuffer_bar
-    winit_wgpu_bar
-    xcb_wgpu_bar
-    x11rb_bar
-    xcb_bar
+    # egui_bar
+    # gtk_bar
+    # iced_bar
+    # relm_bar
+    # tao_pixels_bar
+    # tao_softbuffer_bar
+    # tao_wgpu_bar
+    # winit_pixels_bar
+    # winit_softbuffer_bar
+    # winit_wgpu_bar
+    # xcb_wgpu_bar
+    # x11rb_bar
+    # xcb_bar
 )
 SKIP_BAR=false
 SKIP_JWM=false
 JOBS=""
+BARS_TO_INSTALL=()
 
 # ============================================================
 # 帮助信息
@@ -340,20 +341,25 @@ show_jwm_tool_help() {
 # ============================================================
 # 主流程
 # ============================================================
+BARS_TO_INSTALL=("${SELECTED_BARS[@]}")
+if [[ ${#BARS_TO_INSTALL[@]} -eq 0 && -n "$JWM_BAR_NAME" ]]; then
+    BARS_TO_INSTALL=("$JWM_BAR_NAME")
+fi
+
 echo ""
 info "========================================="
 info " JWM 安装脚本"
 info " 构建模式: $BUILD_MODE"
 info " JWM Feature Bar: $JWM_BAR_NAME"
-if [[ ${#SELECTED_BARS[@]} -gt 0 ]]; then
-    info " Status Bars: ${SELECTED_BARS[*]}"
+if [[ ${#BARS_TO_INSTALL[@]} -gt 0 ]]; then
+    info " Status Bars: ${BARS_TO_INSTALL[*]}"
 fi
 info "========================================="
 echo ""
 
 # 1. 处理 bar
-if [[ ${#SELECTED_BARS[@]} -gt 0 && "$SKIP_BAR" == false ]]; then
-    for bar in "${SELECTED_BARS[@]}"; do
+if [[ ${#BARS_TO_INSTALL[@]} -gt 0 && "$SKIP_BAR" == false ]]; then
+    for bar in "${BARS_TO_INSTALL[@]}"; do
         sync_bar_repo "$bar"
         build_and_install_bar "$bar"
     done
