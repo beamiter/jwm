@@ -82,7 +82,6 @@ pub const WITHDRAWN_STATE: u8 = 0;
 pub const STEXT_MAX_LEN: usize = 512;
 pub const NORMAL_STATE: u8 = 1;
 pub const ICONIC_STATE: u8 = 2;
-pub const SHARED_PATH: &str = "/dev/shm/jwm_bar_global";
 lazy_static::lazy_static! {
     pub static ref BUTTONMASK: EventMaskBits  = EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE;
     pub static ref MOUSEMASK: EventMaskBits   = EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE | EventMaskBits::POINTER_MOTION;
@@ -217,19 +216,19 @@ pub struct Jwm {
 
     pub message: SharedMessage,
 
-    // Primary monitor status bar (original fields kept for compatibility)
+    // Legacy global bar fields (deprecated, kept for compatibility during cleanup)
     pub status_bar_shmem: Option<SharedRingBuffer>,
     pub status_bar_child: Option<Child>,
     pub status_bar_client: Option<ClientKey>,
     pub status_bar_window: Option<WindowId>,
-    pub current_bar_monitor_id: Option<i32>,
-
     pub status_bar_last_spawn: Option<std::time::Instant>,
     pub status_bar_backoff_until: Option<std::time::Instant>,
     pub status_bar_restart_failures: u32,
     pub status_bar_has_focus: bool,
 
-    // Secondary monitors' status bars (new multi-bar support)
+    pub current_bar_monitor_id: Option<i32>,
+
+    // Per-monitor status bars
     pub secondary_bars: HashMap<i32, SecondaryBarInstance>,
 
     pub last_key_grab_refresh_at: Option<std::time::Instant>,
@@ -1155,14 +1154,9 @@ impl EventHandler for Jwm {
     }
 
     fn update(&mut self, backend: &mut dyn Backend) -> Result<(), BackendError> {
-        if self.status_bar_shmem.is_none() {
-            let ring_buffer = SharedRingBuffer::create_aux(SHARED_PATH, None, None)
-                .expect("Create bar shmem failed");
-            info!("Create bar shmem");
-            self.status_bar_shmem = Some(ring_buffer);
-            return Ok(());
-        }
-        self.ensure_bar_is_running(SHARED_PATH);
+        // Ensure all monitor bars are running (sequential creation)
+        let now = std::time::Instant::now();
+        self.ensure_secondary_bars_running(now);
 
         // Some status bar implementations may grab keys after starting.
         // Re-assert our grabs once per (re)spawn to keep WM shortcuts working.
@@ -1496,13 +1490,12 @@ impl Jwm {
             status_bar_child: None,
             status_bar_client: None,
             status_bar_window: None,
-            current_bar_monitor_id: None,
-
             status_bar_last_spawn: None,
             status_bar_backoff_until: None,
             status_bar_restart_failures: 0,
             status_bar_has_focus: false,
 
+            current_bar_monitor_id: None,
             secondary_bars: HashMap::new(),
 
             last_key_grab_refresh_at: None,
@@ -3367,60 +3360,9 @@ impl Jwm {
         Ok(())
     }
 
-    fn cleanup_statusbar_processes_old(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut child = if let Some(child) = self.status_bar_child.take() {
-            child
-        } else {
-            return Ok(());
-        };
-        let pid = child.id();
-        let nix_pid = Pid::from_raw(pid as i32);
-        match signal::kill(nix_pid, None) {
-            Err(_) => {
-                info!("Process already terminated",);
-                return Ok(());
-            }
-            Ok(_) => {}
-        }
-        if let Ok(_) = signal::kill(nix_pid, Signal::SIGTERM) {
-            let timeout = Duration::from_secs(3);
-            let start = Instant::now();
-            while start.elapsed() < timeout {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        info!("Process exited gracefully: {:?}", status);
-                        return Ok(());
-                    }
-                    Ok(None) => {
-                        std::thread::sleep(Duration::from_millis(100));
-                    }
-                    Err(_) => {
-                        return Err("Error waiting".into());
-                    }
-                }
-            }
-            warn!("Graceful termination timeout, forcing kill");
-        }
-        signal::kill(nix_pid, Signal::SIGKILL)?;
-
-        Ok(())
-    }
 
     fn cleanup_shared_memory_resources(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Clean up primary bar shared memory
-        if let Some(rb) = self.status_bar_shmem.take() {
-            drop(rb);
-        }
-        #[cfg(unix)]
-        {
-            if std::path::Path::new(&SHARED_PATH).exists() {
-                if let Err(e) = std::fs::remove_file(&SHARED_PATH) {
-                    warn!("Failed to remove {}: {}", SHARED_PATH, e);
-                }
-            }
-        }
-
-        // Clean up secondary bars shared memory
+        // Clean up all monitor bars shared memory
         for (mon_id, bar) in self.secondary_bars.drain() {
             drop(bar.shmem);
             #[cfg(unix)]
@@ -4910,7 +4852,7 @@ impl Jwm {
         }
     }
 
-    fn ensure_bar_is_running(&mut self, shared_path: &str) {
+    fn ensure_bar_is_running(&mut self, _shared_path: &str) {
         let now = std::time::Instant::now();
 
         if let Some(until) = self.status_bar_backoff_until {
@@ -4919,136 +4861,52 @@ impl Jwm {
             }
         }
 
-        // 1. Ensure primary monitor bar is running (existing logic)
-        self.ensure_primary_bar_running(shared_path, now);
-
-        // 2. Ensure secondary monitor bars are running (new multi-bar logic)
+        // Ensure all monitor bars are running (sequential creation)
         self.ensure_secondary_bars_running(now);
     }
 
-    fn ensure_primary_bar_running(&mut self, shared_path: &str, now: Instant) {
-
-        // 1. 检查现有进程状态
-        if let Some(child) = self.status_bar_child.as_mut() {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    info!("Status bar process exited with: {status}");
-
-                    // Mark as stopped so we can respawn later.
-                    self.status_bar_child = None;
-
-                    if status.success() {
-                        self.status_bar_restart_failures = 0;
-                    } else {
-                        self.status_bar_restart_failures =
-                            self.status_bar_restart_failures.saturating_add(1);
-                    }
-
-                    // Backoff to avoid a tight respawn loop starving input/rendering.
-                    let pow = self.status_bar_restart_failures.min(6);
-                    let base_ms = 200u64;
-                    let backoff_ms = base_ms.saturating_mul(1u64 << pow).min(10_000);
-                    self.status_bar_backoff_until =
-                        Some(now + std::time::Duration::from_millis(backoff_ms));
-
-                    // Don't respawn in the same tick.
-                    return;
-                }
-                Ok(None) => {
-                    return;
-                }
-                Err(e) => {
-                    info!(
-                        "Error attempting to wait on status bar child: {e}, will try to respawn."
-                    );
-
-                    self.status_bar_child = None;
-                    self.status_bar_restart_failures =
-                        self.status_bar_restart_failures.saturating_add(1);
-
-                    let pow = self.status_bar_restart_failures.min(6);
-                    let base_ms = 200u64;
-                    let backoff_ms = base_ms.saturating_mul(1u64 << pow).min(10_000);
-                    self.status_bar_backoff_until =
-                        Some(now + std::time::Duration::from_millis(backoff_ms));
-                    return;
-                }
-            }
-        }
-
-        if let Some(until) = self.status_bar_backoff_until {
-            if now < until {
-                return;
-            }
-        }
-
-        // 3. 准备启动命令
-        let mut command = if cfg!(feature = "nixgl") {
-            let mut cmd = Command::new("nixGL");
-            cmd.arg(CONFIG.load().status_bar_name()).arg(shared_path);
-            cmd
-        } else {
-            let mut cmd = Command::new(CONFIG.load().status_bar_name());
-            cmd.arg(shared_path);
-            cmd
-        };
-
-        // Make sure the bar inherits the Wayland env we set up.
-        if let Ok(v) = std::env::var("WAYLAND_DISPLAY") {
-            command.env("WAYLAND_DISPLAY", v);
-        }
-        if let Ok(v) = std::env::var("XDG_RUNTIME_DIR") {
-            command.env("XDG_RUNTIME_DIR", v);
-        }
-
-        // GTK4 bars may render via EGL buffers on some setups. When the compositor's renderer
-        // can't import those buffers (common with certain driver stacks), the bar can become
-        // invisible while still receiving input. Default to the cairo renderer unless the user
-        // explicitly chose another one.
-        if CONFIG.load().status_bar_name() == "gtk_bar" {
-            if std::env::var_os("GSK_RENDERER").is_none() {
-                command.env("GSK_RENDERER", "cairo");
-            }
-        }
-
-        // 4. 执行启动并更新时间戳
-        match command
-            .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
-        {
-            Ok(child) => {
-                info!("Spawning status bar (PID: {})", child.id());
-                self.status_bar_child = Some(child);
-                self.status_bar_last_spawn = Some(now);
-                self.status_bar_backoff_until = None;
-            }
-            Err(e) => {
-                error!("Failed to spawn status bar: {}", e);
-
-                self.status_bar_restart_failures =
-                    self.status_bar_restart_failures.saturating_add(1);
-                let pow = self.status_bar_restart_failures.min(6);
-                let base_ms = 200u64;
-                let backoff_ms = base_ms.saturating_mul(1u64 << pow).min(10_000);
-                self.status_bar_backoff_until =
-                    Some(now + std::time::Duration::from_millis(backoff_ms));
-            }
-        }
-    }
 
     fn ensure_secondary_bars_running(&mut self, now: Instant) {
-        // Get all monitors except the primary one
-        let primary_mon_id = self.current_bar_monitor_id;
-        let secondary_mon_ids: Vec<i32> = self.state.monitors.values()
+        // Get all monitor IDs sorted
+        let mut all_mon_ids: Vec<i32> = self.state.monitors.values()
             .map(|m| m.num)
-            .filter(|&id| Some(id) != primary_mon_id)
             .collect();
+        all_mon_ids.sort();
 
-        // Clean up dead bars and spawn missing ones
-        for mon_id in secondary_mon_ids {
-            self.ensure_secondary_bar_for_monitor(mon_id, now);
+        // Sequential creation: only create the next bar if all previous bars are managed
+        for &mon_id in &all_mon_ids {
+            // Check if this bar already exists
+            if let Some(bar) = self.secondary_bars.get_mut(&mon_id) {
+                // Check if process is still alive
+                match bar.child.try_wait() {
+                    Ok(Some(status)) => {
+                        info!("Bar for monitor {} exited: {}", mon_id, status);
+                        self.secondary_bars.remove(&mon_id);
+                        // Don't create next bar yet, wait for next tick
+                        return;
+                    }
+                    Ok(None) => {
+                        // Process still running
+                        // If not yet managed (window not created), don't create next bar
+                        if bar.window.is_none() {
+                            return;
+                        }
+                        // This bar is managed, continue to check next
+                        continue;
+                    }
+                    Err(e) => {
+                        info!("Error checking bar for monitor {}: {}", mon_id, e);
+                        self.secondary_bars.remove(&mon_id);
+                        return;
+                    }
+                }
+            }
+
+            // Bar doesn't exist, create it
+            info!("Creating bar for monitor {} (sequential creation)", mon_id);
+            self.spawn_secondary_bar(mon_id, now);
+            // Only create one at a time, stop here
+            return;
         }
 
         // Remove bars for monitors that no longer exist
@@ -5058,28 +4916,6 @@ impl Jwm {
         self.secondary_bars.retain(|&mon_id, _| existing_monitors.contains(&mon_id));
     }
 
-    fn ensure_secondary_bar_for_monitor(&mut self, monitor_id: i32, now: Instant) {
-        // Check if bar exists and is running
-        if let Some(bar) = self.secondary_bars.get_mut(&monitor_id) {
-            match bar.child.try_wait() {
-                Ok(Some(status)) => {
-                    info!("Secondary bar for monitor {} exited: {}", monitor_id, status);
-                    self.secondary_bars.remove(&monitor_id);
-                }
-                Ok(None) => {
-                    // Still running
-                    return;
-                }
-                Err(e) => {
-                    info!("Error checking secondary bar for monitor {}: {}", monitor_id, e);
-                    self.secondary_bars.remove(&monitor_id);
-                }
-            }
-        }
-
-        // Spawn new bar for this monitor
-        self.spawn_secondary_bar(monitor_id, now);
-    }
 
     fn spawn_secondary_bar(&mut self, monitor_id: i32, now: Instant) {
         // Create unique shared memory path for this monitor
@@ -5276,24 +5112,18 @@ impl Jwm {
         if self.pending_bar_updates.is_empty() {
             return;
         }
-        let target_mon_id = self
-            .current_bar_monitor_id
-            .or_else(|| {
-                self.state
-                    .sel_mon
-                    .and_then(|k| self.state.monitors.get(k))
-                    .map(|m| m.num)
-            })
-            .or_else(|| self.pending_bar_updates.iter().copied().next());
-        if let Some(mon_id) = target_mon_id {
+
+        // Update all monitor bars that have pending updates
+        for &mon_id in self.pending_bar_updates.clone().iter() {
             if let Some(mon_key) = self.get_monitor_by_id(mon_id) {
                 if !self.is_bar_visible_on_mon(mon_key) {
-                    self.pending_bar_updates.clear();
-                    return;
+                    continue;
                 }
                 self.update_bar_message_for_monitor(Some(mon_key));
-                if let Some(rb) = self.status_bar_shmem.as_mut() {
-                    let _ = rb.try_write_message(&self.message);
+
+                // Send message to this monitor's bar via shared memory
+                if let Some(bar) = self.secondary_bars.get_mut(&mon_id) {
+                    let _ = bar.shmem.try_write_message(&self.message);
                 }
             }
         }
@@ -9838,38 +9668,27 @@ impl Jwm {
 
         info!("{}", client);
         if client.is_status_bar(CONFIG.load().status_bar_name()) {
-            info!("Detected status bar window, identifying by PID");
+            info!("Detected status bar window");
 
-            // Get window PID to match with our bar instances
-            let matched_mon_id = if let Some(win_pid) = backend.property_ops().get_window_pid(win) {
-                info!("Bar window PID: {}", win_pid);
+            // With sequential creation, the first unmanaged bar is always the one we just created
+            let matched_mon_id = self.secondary_bars
+                .iter()
+                .filter(|(_, bar)| bar.window.is_none())
+                .min_by_key(|(mon_id, _)| **mon_id)
+                .map(|(mon_id, _)| *mon_id);
 
-                // Check if this PID matches any secondary bar
-                self.secondary_bars.iter().find(|(_, bar)| bar.pid == win_pid).map(|(mon_id, _)| *mon_id)
-            } else {
-                warn!("Could not get PID for bar window");
-                None
-            };
-
-            // If matched to secondary bar, handle it
             if let Some(mon_id) = matched_mon_id {
-                info!("Matched bar window to monitor {} via PID", mon_id);
+                info!("Matched bar window to monitor {} (sequential creation)", mon_id);
                 let client_key = self.insert_client(client);
                 if let Some(bar) = self.secondary_bars.get_mut(&mon_id) {
                     bar.client_key = Some(client_key);
                     bar.window = Some(win);
                 }
                 return self.manage_secondary_statusbar(backend, client_key, win, mon_id);
+            } else {
+                warn!("Received bar window but no unmanaged bar found!");
+                return Ok(());
             }
-
-            // Otherwise treat as primary bar
-            info!("Treating as primary bar");
-            let client_key = self.insert_client(client);
-            let current_mon_id = self.get_sel_mon().map(|m| m.num).unwrap_or(0);
-            self.status_bar_client = Some(client_key);
-            self.status_bar_window = Some(win);
-            self.current_bar_monitor_id = Some(current_mon_id);
-            return self.manage_statusbar(backend, client_key, win, current_mon_id);
         }
 
         // Check for external strut (polybar, trayer, etc.)
@@ -10621,30 +10440,6 @@ impl Jwm {
         Ok(())
     }
 
-    fn manage_statusbar_old(
-        &mut self,
-        backend: &mut dyn Backend,
-        client_key: ClientKey,
-        win: WindowId,
-        current_mon_id: i32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mon_key = self.get_monitor_by_id(current_mon_id);
-        if let Some(client) = self.state.clients.get_mut(client_key) {
-            client.mon = mon_key;
-            client.state.never_focus = false;
-            client.state.is_floating = true;
-            client.state.is_dock = true;
-            client.state.tags = CONFIG.load().tagmask();
-            client.geometry.border_w = 0;
-        }
-
-        self.position_statusbar_on_monitor(backend, current_mon_id)?;
-
-        self.setup_statusbar_window_by_key(backend, client_key)?;
-
-        backend.window_ops().map_window(win)?;
-        Ok(())
-    }
 
     fn set_bar_strut(
         &self,
@@ -12032,32 +11827,6 @@ impl Jwm {
     // Config hot-reload
     // =========================================================================
 
-    fn check_config_reload(&mut self, backend: &mut dyn Backend) {
-        let now = Instant::now();
-
-        // Check if file modification time changed
-        if let Ok(mtime) = crate::config::Config::get_config_modified_time() {
-            if self.config_last_modified != Some(mtime) {
-                // File changed — start or restart debounce timer
-                self.config_last_modified = Some(mtime);
-                self.config_reload_debounce = Some(now);
-            }
-        }
-
-        // Process debounced reload
-        if let Some(debounce_start) = self.config_reload_debounce {
-            if now.duration_since(debounce_start) >= Duration::from_millis(300) {
-                self.config_reload_debounce = None;
-                info!("[config] detected config file change, reloading");
-                let resp = self.do_config_reload(backend);
-                if resp.success {
-                    info!("[config] reload successful");
-                } else {
-                    warn!("[config] reload failed: {:?}", resp.error);
-                }
-            }
-        }
-    }
 
     fn do_config_reload(&mut self, backend: &mut dyn Backend) -> IpcResponse {
         match crate::config::reload_global() {

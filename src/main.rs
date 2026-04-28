@@ -1,5 +1,5 @@
 // src/main.rs
-use jwm::{Jwm, jwm::SHARED_PATH};
+use jwm::Jwm;
 use log::{error, info, warn};
 use std::os::unix::process::CommandExt;
 use std::{env, process::Command, sync::atomic::Ordering};
@@ -12,7 +12,8 @@ use jwm::backend::wayland_x11::backend::WaylandX11Backend;
 use jwm::backend::x11::backend::X11Backend;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    initialize_logging("jwm", SHARED_PATH)?;
+    // Use a generic shared memory path for logging (not used for bars anymore)
+    initialize_logging("jwm", "/dev/shm/jwm_bar_global")?;
     install_panic_hook();
     info!("[main] begin");
 
