@@ -31,11 +31,12 @@ use std::time::{Duration, Instant};
 use std::usize;
 
 /// Per-monitor status bar instance for secondary monitors
-struct SecondaryBarInstance {
+#[allow(dead_code)]
+pub struct SecondaryBarInstance {
     monitor_id: i32,
     shmem: SharedRingBuffer,
     child: Child,
-    pid: u32,  // Store PID to match window with bar instance
+    pid: u32, // Store PID to match window with bar instance
     client_key: Option<ClientKey>,
     window: Option<WindowId>,
     has_focus: bool,
@@ -216,15 +217,8 @@ pub struct Jwm {
 
     pub message: SharedMessage,
 
-    // Legacy global bar fields (deprecated, kept for compatibility during cleanup)
-    pub status_bar_shmem: Option<SharedRingBuffer>,
-    pub status_bar_child: Option<Child>,
     pub status_bar_client: Option<ClientKey>,
     pub status_bar_window: Option<WindowId>,
-    pub status_bar_last_spawn: Option<std::time::Instant>,
-    pub status_bar_backoff_until: Option<std::time::Instant>,
-    pub status_bar_restart_failures: u32,
-    pub status_bar_has_focus: bool,
 
     pub current_bar_monitor_id: Option<i32>,
 
@@ -765,31 +759,6 @@ impl WMController for Jwm {
             if let Err(e) = res {
                 error!("Error handling PropertyChanged {:?}: {:?}", kind, e);
             }
-
-            // Wayland clients (including gtk_bar) may only become identifiable after they
-            // set title/app_id. Promote to status bar as soon as it matches.
-            if self.status_bar_client.is_none() {
-                let is_bar = self
-                    .state
-                    .clients
-                    .get(client_key)
-                    .map(|c| c.is_status_bar(CONFIG.load().status_bar_name()))
-                    .unwrap_or(false);
-
-                if is_bar {
-                    info!("Detected status bar via property update, promoting client");
-                    self.status_bar_client = Some(client_key);
-                    self.status_bar_window = Some(win);
-
-                    let current_mon_id = self.get_sel_mon().map(|m| m.num).unwrap_or(0);
-                    self.current_bar_monitor_id = Some(current_mon_id);
-
-                    if let Err(e) = self.manage_statusbar(backend, client_key, win, current_mon_id)
-                    {
-                        error!("Error promoting status bar: {e}");
-                    }
-                }
-            }
         }
     }
 
@@ -1158,21 +1127,6 @@ impl EventHandler for Jwm {
         let now = std::time::Instant::now();
         self.ensure_secondary_bars_running(now);
 
-        // Some status bar implementations may grab keys after starting.
-        // Re-assert our grabs once per (re)spawn to keep WM shortcuts working.
-        if let Some(spawned_at) = self.status_bar_last_spawn {
-            let need_refresh = self
-                .last_key_grab_refresh_at
-                .map(|t| t < spawned_at)
-                .unwrap_or(true);
-            if need_refresh {
-                if let Err(e) = self.grabkeys(backend) {
-                    warn!("Failed to refresh key grabs after bar spawn: {e}");
-                }
-                self.last_key_grab_refresh_at = Some(spawned_at);
-            }
-        }
-
         self.process_commands_from_status_bar(backend);
         self.process_ipc(backend);
         // Config reload is now handled by inotify (ConfigChanged event)
@@ -1224,13 +1178,10 @@ impl EventHandler for Jwm {
         let scene = self.build_compositor_scene(backend, &HashMap::new());
         let groups = self.build_window_groups();
         backend.compositor_set_window_groups(groups);
-        let focused = if self.status_bar_has_focus {
-            None
-        } else {
-            self.get_selected_client_key()
-                .and_then(|ck| self.state.clients.get(ck))
-                .map(|c| c.win.raw())
-        };
+        let focused = self
+            .get_selected_client_key()
+            .and_then(|ck| self.state.clients.get(ck))
+            .map(|c| c.win.raw());
         let _ = backend.compositor_render_frame(&scene, focused);
     }
 }
@@ -1486,14 +1437,8 @@ impl Jwm {
 
             message: SharedMessage::default(),
 
-            status_bar_shmem: None,
-            status_bar_child: None,
             status_bar_client: None,
             status_bar_window: None,
-            status_bar_last_spawn: None,
-            status_bar_backoff_until: None,
-            status_bar_restart_failures: 0,
-            status_bar_has_focus: false,
 
             current_bar_monitor_id: None,
             secondary_bars: HashMap::new(),
@@ -2052,22 +1997,6 @@ impl Jwm {
         // 1. 如果因为键盘操作等原因暂时阻塞了鼠标聚焦，直接返回
         if self.mouse_focus_blocked() {
             return Ok(());
-        }
-        // 2. 尝试聚焦客户端
-        if let Some(win) = window {
-            let is_already_focused = !self.status_bar_has_focus
-                && self
-                    .get_selected_client_key()
-                    .and_then(|key| self.state.clients.get(key))
-                    .map(|c| c.win == win)
-                    .unwrap_or(false);
-            if !is_already_focused {
-                if let Some(client_key) = self.wintoclient(win) {
-                    if self.status_bar_has_focus || !self.is_client_selected(client_key) {
-                        self.focus(backend, Some(client_key))?;
-                    }
-                }
-            }
         }
         // 3. 更新当前鼠标所在的显示器状态
         let new_monitor_key = self.recttomon(backend, root_x as i32, root_y as i32);
@@ -3279,46 +3208,6 @@ impl Jwm {
     }
 
     fn cleanup_statusbar_processes(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Clean up primary bar
-        let mut child = if let Some(child) = self.status_bar_child.take() {
-            child
-        } else {
-            // No primary bar, but still clean up secondary bars
-            self.cleanup_secondary_bars()?;
-            return Ok(());
-        };
-        let pid = child.id();
-        let nix_pid = Pid::from_raw(pid as i32);
-        match signal::kill(nix_pid, None) {
-            Err(_) => {
-                info!("Primary bar process already terminated");
-            }
-            Ok(_) => {
-                if let Ok(_) = signal::kill(nix_pid, Signal::SIGTERM) {
-                    let timeout = Duration::from_secs(3);
-                    let start = Instant::now();
-                    while start.elapsed() < timeout {
-                        match child.try_wait() {
-                            Ok(Some(status)) => {
-                                info!("Primary bar exited gracefully: {:?}", status);
-                                break;
-                            }
-                            Ok(None) => {
-                                std::thread::sleep(Duration::from_millis(100));
-                            }
-                            Err(_) => {
-                                break;
-                            }
-                        }
-                    }
-                    if child.try_wait()?.is_none() {
-                        warn!("Primary bar termination timeout, forcing kill");
-                        signal::kill(nix_pid, Signal::SIGKILL)?;
-                    }
-                }
-            }
-        }
-
         // Clean up secondary bars
         self.cleanup_secondary_bars()?;
         Ok(())
@@ -3362,7 +3251,6 @@ impl Jwm {
         }
         Ok(())
     }
-
 
     fn cleanup_shared_memory_resources(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Clean up all monitor bars shared memory
@@ -3971,13 +3859,10 @@ impl Jwm {
                         );
                     }
                 }
-                let focused = if self.status_bar_has_focus {
-                    None
-                } else {
-                    self.get_selected_client_key()
-                        .and_then(|ck| self.state.clients.get(ck))
-                        .map(|c| c.win.raw())
-                };
+                let focused = self
+                    .get_selected_client_key()
+                    .and_then(|ck| self.state.clients.get(ck))
+                    .map(|c| c.win.raw());
                 let _ = backend.compositor_render_frame(&scene, focused);
             }
             return;
@@ -4025,13 +3910,10 @@ impl Jwm {
 
         if composited {
             let scene = self.build_compositor_scene(backend, &visual_overrides);
-            let focused = if self.status_bar_has_focus {
-                None
-            } else {
-                self.get_selected_client_key()
-                    .and_then(|ck| self.state.clients.get(ck))
-                    .map(|c| c.win.raw())
-            };
+            let focused = self
+                .get_selected_client_key()
+                .and_then(|ck| self.state.clients.get(ck))
+                .map(|c| c.win.raw());
             let _ = backend.compositor_render_frame(&scene, focused);
         }
 
@@ -4868,25 +4750,9 @@ impl Jwm {
         }
     }
 
-    fn ensure_bar_is_running(&mut self, _shared_path: &str) {
-        let now = std::time::Instant::now();
-
-        if let Some(until) = self.status_bar_backoff_until {
-            if now < until {
-                return;
-            }
-        }
-
-        // Ensure all monitor bars are running (sequential creation)
-        self.ensure_secondary_bars_running(now);
-    }
-
-
     fn ensure_secondary_bars_running(&mut self, now: Instant) {
         // Get all monitor IDs sorted
-        let mut all_mon_ids: Vec<i32> = self.state.monitors.values()
-            .map(|m| m.num)
-            .collect();
+        let mut all_mon_ids: Vec<i32> = self.state.monitors.values().map(|m| m.num).collect();
         all_mon_ids.sort();
 
         // Sequential creation: only create the next bar if all previous bars are managed
@@ -4926,12 +4792,10 @@ impl Jwm {
         }
 
         // Remove bars for monitors that no longer exist
-        let existing_monitors: HashSet<i32> = self.state.monitors.values()
-            .map(|m| m.num)
-            .collect();
-        self.secondary_bars.retain(|&mon_id, _| existing_monitors.contains(&mon_id));
+        let existing_monitors: HashSet<i32> = self.state.monitors.values().map(|m| m.num).collect();
+        self.secondary_bars
+            .retain(|&mon_id, _| existing_monitors.contains(&mon_id));
     }
-
 
     fn spawn_secondary_bar(&mut self, monitor_id: i32, now: Instant) {
         // Create unique shared memory path for this monitor
@@ -4941,7 +4805,10 @@ impl Jwm {
         let ring_buffer = match SharedRingBuffer::create_aux(&shared_path, None, None) {
             Ok(rb) => rb,
             Err(e) => {
-                error!("Failed to create shared memory for monitor {}: {}", monitor_id, e);
+                error!(
+                    "Failed to create shared memory for monitor {}: {}",
+                    monitor_id, e
+                );
                 return;
             }
         };
@@ -4984,7 +4851,10 @@ impl Jwm {
         {
             Ok(child) => {
                 let pid = child.id();
-                info!("Spawned secondary bar for monitor {} (PID: {})", monitor_id, pid);
+                info!(
+                    "Spawned secondary bar for monitor {} (PID: {})",
+                    monitor_id, pid
+                );
 
                 let bar_instance = SecondaryBarInstance {
                     monitor_id,
@@ -5000,7 +4870,10 @@ impl Jwm {
                 self.secondary_bars.insert(monitor_id, bar_instance);
             }
             Err(e) => {
-                error!("Failed to spawn secondary bar for monitor {}: {}", monitor_id, e);
+                error!(
+                    "Failed to spawn secondary bar for monitor {}: {}",
+                    monitor_id, e
+                );
             }
         }
     }
@@ -5153,13 +5026,6 @@ impl Jwm {
 
     fn process_commands_from_status_bar(&mut self, backend: &mut dyn Backend) {
         let mut commands_to_process: Vec<SharedCommand> = Vec::new();
-
-        // Read commands from global status bar (if it exists)
-        if let Some(buffer) = self.status_bar_shmem.as_mut() {
-            while let Some(cmd) = buffer.receive_command() {
-                commands_to_process.push(cmd);
-            }
-        }
 
         // Read commands from all per-monitor status bars
         for bar in self.secondary_bars.values_mut() {
@@ -5499,22 +5365,9 @@ impl Jwm {
             match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
                 Ok(WaitStatus::Exited(pid, status)) => {
                     info!("Child process {} exited with status {}", pid, status);
-
-                    // 检查是否是状态栏退出了，如果是，清理句柄以便重启
-                    if let Some(child) = &self.status_bar_child {
-                        if child.id() as i32 == pid.as_raw() {
-                            warn!("Status bar process died.");
-                            self.status_bar_child = None;
-                        }
-                    }
                 }
                 Ok(WaitStatus::Signaled(pid, sig, _)) => {
                     info!("Child process {} killed by signal {:?}", pid, sig);
-                    if let Some(child) = &self.status_bar_child {
-                        if child.id() as i32 == pid.as_raw() {
-                            self.status_bar_child = None;
-                        }
-                    }
                 }
                 // StillAlive 表示还有子进程在运行，Break 退出循环
                 Ok(WaitStatus::StillAlive) => break,
@@ -9368,11 +9221,6 @@ impl Jwm {
         client_key_opt: Option<ClientKey>,
         is_on_selected_monitor: bool,
     ) -> bool {
-        // 状态栏持有焦点时，需要重新聚焦普通 client
-        if self.status_bar_has_focus {
-            return true;
-        }
-
         if !is_on_selected_monitor {
             return true;
         }
@@ -9437,26 +9285,9 @@ impl Jwm {
                 }
             });
             if let Some(win) = bar_win {
-                if !self.status_bar_has_focus {
-                    // 去掉之前 client 的 focused border
-                    if let Some(prev) = self.get_selected_client_key() {
-                        self.unfocus_client(backend, prev, false)?;
-                    }
-                    backend.on_focused_client_changed(Some(win))?;
-                    self.status_bar_has_focus = true;
-                }
                 return Ok(());
             }
         }
-
-        // 状态栏持有焦点时，忽略 focus(None) 调用，避免其他代码路径
-        // 意外把焦点抢回给普通 client
-        if self.status_bar_has_focus && client_key_opt.is_none() {
-            return Ok(());
-        }
-
-        // 普通客户端获取焦点时清除状态栏焦点标记
-        self.status_bar_has_focus = false;
 
         let is_visible = match client_key_opt {
             Some(client_key) => self.is_client_visible_by_key(client_key),
@@ -9698,14 +9529,18 @@ impl Jwm {
             info!("Detected status bar window");
 
             // With sequential creation, the first unmanaged bar is always the one we just created
-            let matched_mon_id = self.secondary_bars
+            let matched_mon_id = self
+                .secondary_bars
                 .iter()
                 .filter(|(_, bar)| bar.window.is_none())
                 .min_by_key(|(mon_id, _)| **mon_id)
                 .map(|(mon_id, _)| *mon_id);
 
             if let Some(mon_id) = matched_mon_id {
-                info!("Matched bar window to monitor {} (sequential creation)", mon_id);
+                info!(
+                    "Matched bar window to monitor {} (sequential creation)",
+                    mon_id
+                );
                 let client_key = self.insert_client(client);
                 if let Some(bar) = self.secondary_bars.get_mut(&mon_id) {
                     bar.client_key = Some(client_key);
@@ -10467,7 +10302,6 @@ impl Jwm {
         Ok(())
     }
 
-
     fn set_bar_strut(
         &self,
         backend: &mut dyn Backend,
@@ -10770,8 +10604,6 @@ impl Jwm {
     fn unmanage_statusbar(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         debug!("unmanage_statusbar");
         self.cleanup_statusbar_processes()?;
-        self.status_bar_shmem = None;
-        self.status_bar_child = None;
         if let Some(bar_win) = self.status_bar_window {
             self.state.win_to_client.remove(&bar_win);
         }
@@ -11642,7 +11474,12 @@ impl Jwm {
         }
     }
 
-    fn handle_ipc_query(&self, name: &str, _args: &serde_json::Value, backend: &dyn Backend) -> IpcResponse {
+    fn handle_ipc_query(
+        &self,
+        name: &str,
+        _args: &serde_json::Value,
+        backend: &dyn Backend,
+    ) -> IpcResponse {
         match name {
             "get_windows" => {
                 let windows = self.query_windows();
@@ -11853,7 +11690,6 @@ impl Jwm {
     // =========================================================================
     // Config hot-reload
     // =========================================================================
-
 
     fn do_config_reload(&mut self, backend: &mut dyn Backend) -> IpcResponse {
         match crate::config::reload_global() {
