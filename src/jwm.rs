@@ -5150,11 +5150,22 @@ impl Jwm {
 
     fn process_commands_from_status_bar(&mut self, backend: &mut dyn Backend) {
         let mut commands_to_process: Vec<SharedCommand> = Vec::new();
+
+        // Read commands from global status bar (if it exists)
         if let Some(buffer) = self.status_bar_shmem.as_mut() {
             while let Some(cmd) = buffer.receive_command() {
                 commands_to_process.push(cmd);
             }
         }
+
+        // Read commands from all per-monitor status bars
+        for bar in self.secondary_bars.values_mut() {
+            while let Some(cmd) = bar.shmem.receive_command() {
+                commands_to_process.push(cmd);
+            }
+        }
+
+        // Process all collected commands
         for cmd in commands_to_process {
             match cmd.cmd_type.into() {
                 CommandType::ViewTag => {
