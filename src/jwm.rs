@@ -7153,24 +7153,6 @@ impl Jwm {
         Ok(())
     }
 
-    fn refresh_bar_visibility_on_selected_monitor(
-        &mut self,
-        backend: &mut dyn Backend,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let (sel_mon_key, mon_num) = match self.state.sel_mon {
-            Some(k) => {
-                if let Some(m) = self.state.monitors.get(k) {
-                    (k, m.num)
-                } else {
-                    return Ok(());
-                }
-            }
-            None => return Ok(()),
-        };
-
-        Ok(())
-    }
-
     pub fn incnmaster(
         &mut self,
         backend: &mut dyn Backend,
@@ -7879,8 +7861,6 @@ impl Jwm {
             return Ok(());
         }
 
-        let mon_num = self.state.monitors.get(mon_key).map(|m| m.num);
-
         if is_fullscreen {
             // Entering fullscreen layout: hide bar
             if let Some(monitor) = self.state.monitors.get_mut(mon_key) {
@@ -8128,8 +8108,6 @@ impl Jwm {
         self.arrange(backend, self.state.sel_mon.clone());
         self.suppress_layout_animation = false;
 
-        self.refresh_bar_visibility_on_selected_monitor(backend)?;
-
         Ok(())
     }
 
@@ -8269,7 +8247,6 @@ impl Jwm {
         self.suppress_layout_animation = transitioning;
         self.arrange(backend, Some(sel_mon_key));
         self.suppress_layout_animation = false;
-        self.refresh_bar_visibility_on_selected_monitor(backend)?;
         self.update_ewmh_desktop(backend)?;
 
         self.broadcast_ipc_event(
@@ -8453,7 +8430,6 @@ impl Jwm {
         self.suppress_layout_animation = transitioning;
         self.arrange(backend, Some(sel_mon_key));
         self.suppress_layout_animation = false;
-        self.refresh_bar_visibility_on_selected_monitor(backend)?;
         self.update_ewmh_desktop(backend)?;
 
         Ok(())
