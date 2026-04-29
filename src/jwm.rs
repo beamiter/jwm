@@ -4199,6 +4199,19 @@ impl Jwm {
             }
         }
 
+        // Include per-monitor secondary status bars
+        for bar_instance in self.secondary_bars.values() {
+            if let Some(bar_key) = bar_instance.client_key {
+                if let Some(bar) = self.state.clients.get(bar_key) {
+                    let w = bar.geometry.w as u32;
+                    let h = bar.geometry.h as u32;
+                    if w > 0 && h > 0 {
+                        scene.push((bar.win.raw(), bar.geometry.x, bar.geometry.y, w, h));
+                    }
+                }
+            }
+        }
+
         // Include override-redirect windows (menus, dmenu, tooltips) on top.
         // These are not managed by the WM but must be composited.
         // Filter out the compositor's overlay window to avoid feedback loops.
