@@ -3419,25 +3419,11 @@ impl Compositor {
         self.transition_mon_h = mon_h;
 
         if let Some((snap_fbo, _)) = &self.transition_fbo {
-            // OpenGL Y is flipped: glY = screen_h - (mon_y + mon_h)
-            let gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
-            unsafe {
-                // Blit only the monitor region from back-buffer into snapshot FBO
-                self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-                self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(*snap_fbo));
-                self.gl.blit_framebuffer(
-                    mon_x, gl_y,
-                    mon_x + mon_w as i32, gl_y + mon_h as i32,
-                    0, 0, mon_w as i32, mon_h as i32,
-                    glow::COLOR_BUFFER_BIT,
-                    glow::NEAREST,
-                );
-                self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            }
+            self.transition_exclude_top = exclude_top.min(mon_h.saturating_sub(1));
+            self.capture_transition_scene(*snap_fbo, mon_x, mon_y, mon_w, mon_h);
             self.transition_start = Some(std::time::Instant::now());
             self.transition_duration = duration;
             self.transition_direction = if direction >= 0 { 1.0 } else { -1.0 };
-            self.transition_exclude_top = exclude_top.min(mon_h.saturating_sub(1));
             // Tag switch can radically change visible scene; force a full redraw
             // to avoid stale pixels from partial-damage scissor regions.
             self.damage_tracker.mark_all_dirty();
@@ -3448,6 +3434,48 @@ impl Compositor {
                 direction,
                 mon_w, mon_h, mon_x, mon_y,
             );
+        }
+    }
+
+    fn capture_transition_scene(
+        &self,
+        dst_fbo: glow::Framebuffer,
+        mon_x: i32,
+        mon_y: i32,
+        mon_w: u32,
+        mon_h: u32,
+    ) {
+        let exclude_top = self.transition_exclude_top.min(mon_h);
+        let workspace_h = mon_h.saturating_sub(exclude_top);
+        let gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
+
+        unsafe {
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(dst_fbo));
+            self.gl.viewport(0, 0, mon_w as i32, mon_h as i32);
+            self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            self.gl.clear(glow::COLOR_BUFFER_BIT);
+            self.gl.clear_color(0.0, 0.0, 0.0, 1.0);
+
+            if workspace_h > 0 {
+                self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+                self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(dst_fbo));
+                self.gl.blit_framebuffer(
+                    mon_x,
+                    gl_y,
+                    mon_x + mon_w as i32,
+                    gl_y + workspace_h as i32,
+                    0,
+                    0,
+                    mon_w as i32,
+                    workspace_h as i32,
+                    glow::COLOR_BUFFER_BIT,
+                    glow::NEAREST,
+                );
+            }
+
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.gl
+                .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
         }
     }
 
@@ -5203,17 +5231,7 @@ impl Compositor {
                                 if let Some((new_fbo, new_tex)) = &self.transition_new_fbo {
                                     let new_fbo = *new_fbo;
                                     let new_tex = *new_tex;
-                                    // Blit current back-buffer into new_fbo
-                                    let blit_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
-                                    self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-                                    self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(new_fbo));
-                                    self.gl.blit_framebuffer(
-                                        mon_x, blit_gl_y,
-                                        mon_x + mon_w as i32, blit_gl_y + mon_h as i32,
-                                        0, 0, mon_w as i32, mon_h as i32,
-                                        glow::COLOR_BUFFER_BIT, glow::NEAREST,
-                                    );
-                                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                                    self.capture_transition_scene(new_fbo, mon_x, mon_y, mon_w, mon_h);
 
                                     // New scene slides in from the side
                                     let new_slide = (1.0 - progress) * self.transition_direction * mon_w as f32;

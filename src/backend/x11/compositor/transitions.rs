@@ -118,26 +118,8 @@ impl Compositor {
         }
         let new_tex = match &self.transition_new_fbo {
             Some((fbo, tex)) => {
-                let fbo = *fbo;
                 let tex = *tex;
-                let blit_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
-                unsafe {
-                    self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-                    self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
-                    self.gl.blit_framebuffer(
-                        mon_x,
-                        blit_gl_y,
-                        mon_x + mon_w as i32,
-                        blit_gl_y + mon_h as i32,
-                        0,
-                        0,
-                        mon_w as i32,
-                        mon_h as i32,
-                        glow::COLOR_BUFFER_BIT,
-                        glow::NEAREST,
-                    );
-                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-                }
+                self.capture_transition_scene(*fbo, mon_x, mon_y, mon_w, mon_h);
                 tex
             }
             None => return,
@@ -318,26 +300,8 @@ impl Compositor {
         }
         let new_tex = match &self.transition_new_fbo {
             Some((fbo, tex)) => {
-                let fbo = *fbo;
                 let tex = *tex;
-                let blit_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
-                unsafe {
-                    self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-                    self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
-                    self.gl.blit_framebuffer(
-                        mon_x,
-                        blit_gl_y,
-                        mon_x + mon_w as i32,
-                        blit_gl_y + mon_h as i32,
-                        0,
-                        0,
-                        mon_w as i32,
-                        mon_h as i32,
-                        glow::COLOR_BUFFER_BIT,
-                        glow::NEAREST,
-                    );
-                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-                }
+                self.capture_transition_scene(*fbo, mon_x, mon_y, mon_w, mon_h);
                 tex
             }
             None => return,
@@ -456,26 +420,8 @@ impl Compositor {
         }
         let new_tex = match &self.transition_new_fbo {
             Some((fbo, tex)) => {
-                let fbo = *fbo;
                 let tex = *tex;
-                let blit_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
-                unsafe {
-                    self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-                    self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
-                    self.gl.blit_framebuffer(
-                        mon_x,
-                        blit_gl_y,
-                        mon_x + mon_w as i32,
-                        blit_gl_y + mon_h as i32,
-                        0,
-                        0,
-                        mon_w as i32,
-                        mon_h as i32,
-                        glow::COLOR_BUFFER_BIT,
-                        glow::NEAREST,
-                    );
-                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-                }
+                self.capture_transition_scene(*fbo, mon_x, mon_y, mon_w, mon_h);
                 tex
             }
             None => return,
@@ -621,26 +567,8 @@ impl Compositor {
         }
         let new_tex = match &self.transition_new_fbo {
             Some((fbo, tex)) => {
-                let fbo = *fbo;
                 let tex = *tex;
-                let blit_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
-                unsafe {
-                    self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-                    self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
-                    self.gl.blit_framebuffer(
-                        mon_x,
-                        blit_gl_y,
-                        mon_x + mon_w as i32,
-                        blit_gl_y + mon_h as i32,
-                        0,
-                        0,
-                        mon_w as i32,
-                        mon_h as i32,
-                        glow::COLOR_BUFFER_BIT,
-                        glow::NEAREST,
-                    );
-                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-                }
+                self.capture_transition_scene(*fbo, mon_x, mon_y, mon_w, mon_h);
                 tex
             }
             None => return,
@@ -810,26 +738,8 @@ impl Compositor {
         }
         let new_tex = match &self.transition_new_fbo {
             Some((fbo, tex)) => {
-                let fbo = *fbo;
                 let tex = *tex;
-                let blit_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
-                unsafe {
-                    self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-                    self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
-                    self.gl.blit_framebuffer(
-                        mon_x,
-                        blit_gl_y,
-                        mon_x + mon_w as i32,
-                        blit_gl_y + mon_h as i32,
-                        0,
-                        0,
-                        mon_w as i32,
-                        mon_h as i32,
-                        glow::COLOR_BUFFER_BIT,
-                        glow::NEAREST,
-                    );
-                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-                }
+                self.capture_transition_scene(*fbo, mon_x, mon_y, mon_w, mon_h);
                 tex
             }
             None => return,
@@ -1012,26 +922,8 @@ impl Compositor {
         }
         let new_tex = match &self.transition_new_fbo {
             Some((fbo, tex)) => {
-                let fbo = *fbo;
                 let tex = *tex;
-                let blit_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
-                unsafe {
-                    self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-                    self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
-                    self.gl.blit_framebuffer(
-                        mon_x,
-                        blit_gl_y,
-                        mon_x + mon_w as i32,
-                        blit_gl_y + mon_h as i32,
-                        0,
-                        0,
-                        mon_w as i32,
-                        mon_h as i32,
-                        glow::COLOR_BUFFER_BIT,
-                        glow::NEAREST,
-                    );
-                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-                }
+                self.capture_transition_scene(*fbo, mon_x, mon_y, mon_w, mon_h);
                 tex
             }
             None => return,

@@ -2726,18 +2726,21 @@ impl Jwm {
     }
 
     /// Return the number of pixels at the top of the monitor to exclude from
-    /// the tag-switch transition (the status bar area), relative to `mon_y`.
-    fn tag_transition_exclude_top(&self, mon_y: i32) -> u32 {
-        let Some(bar_key) = self.status_bar_client else {
-            return 0;
-        };
-        let Some(bar) = self.state.clients.get(bar_key) else {
+    /// the tag-switch transition. Use the monitor workarea so compositor
+    /// transitions respect any top-reserved space, whether it comes from the
+    /// built-in bar, secondary bars, or external panels via struts.
+    fn tag_transition_exclude_top(&self, mon_key: MonitorKey) -> u32 {
+        let Some(monitor) = self.state.monitors.get(mon_key) else {
             return 0;
         };
 
-        let bottom = (bar.geometry.y + bar.geometry.h).max(0);
-        // Make relative to monitor top
-        (bottom - mon_y).max(0) as u32
+        let monitor_top = monitor.geometry.m_y;
+        let workarea_top = self
+            .monitor_work_area(mon_key)
+            .map(|rect| rect.y)
+            .unwrap_or(monitor.geometry.w_y);
+
+        (workarea_top - monitor_top).max(0) as u32
     }
 
     /// Return the (x, y, w, h) rect of the given monitor for compositor transitions.
@@ -8493,7 +8496,7 @@ impl Jwm {
                 backend.compositor_notify_tag_switch(
                     cfg.animation_duration(),
                     dir,
-                    self.tag_transition_exclude_top(mon_rect.1),
+                    self.tag_transition_exclude_top(sel_mon_key),
                     mon_rect,
                 );
                 transitioning = true;
@@ -8646,7 +8649,7 @@ impl Jwm {
                 let direction =
                     Self::tag_switch_direction(old_tag_mask, new_tag_mask, cfg.tags_length());
                 let mon_rect = self.monitor_rect(sel_mon_key);
-                let exclude_top = self.tag_transition_exclude_top(mon_rect.1);
+                let exclude_top = self.tag_transition_exclude_top(sel_mon_key);
                 backend.compositor_notify_tag_switch(
                     cfg.animation_duration(),
                     direction,
@@ -8830,7 +8833,7 @@ impl Jwm {
                 let direction =
                     Self::tag_switch_direction(old_tag_mask, new_tag_mask, cfg.tags_length());
                 let mon_rect = self.monitor_rect(sel_mon_key);
-                let exclude_top = self.tag_transition_exclude_top(mon_rect.1);
+                let exclude_top = self.tag_transition_exclude_top(sel_mon_key);
                 backend.compositor_notify_tag_switch(
                     cfg.animation_duration(),
                     direction,
