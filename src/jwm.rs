@@ -217,11 +217,6 @@ pub struct Jwm {
 
     pub message: SharedMessage,
 
-    pub status_bar_client: Option<ClientKey>,
-    pub status_bar_window: Option<WindowId>,
-
-    pub current_bar_monitor_id: Option<i32>,
-
     // Per-monitor status bars
     pub secondary_bars: HashMap<i32, SecondaryBarInstance>,
 
@@ -717,32 +712,30 @@ impl WMController for Jwm {
         // both managed and unmanaged (override-redirect) windows.
         if kind == PropertyKind::Strut {
             // Skip our own bar window
-            if Some(win) != self.status_bar_window {
-                if let Some(strut) = backend.property_ops().get_window_strut_partial(win) {
-                    if strut.left > 0 || strut.right > 0 || strut.top > 0 || strut.bottom > 0 {
-                        let changed = self.external_struts.get(&win) != Some(&strut);
-                        self.external_struts.insert(win, strut);
-                        if changed {
-                            info!(
-                                "[strut] Updated external strut for {:?}: top={} bottom={} left={} right={}",
-                                win, strut.top, strut.bottom, strut.left, strut.right
-                            );
-                            self.apply_strut_reservations();
-                            self.arrange(backend, None);
-                        }
-                    } else {
-                        // All edges zero — remove
-                        if self.external_struts.remove(&win).is_some() {
-                            info!("[strut] Removed external strut for {:?}", win);
-                            self.apply_strut_reservations();
-                            self.arrange(backend, None);
-                        }
+            if let Some(strut) = backend.property_ops().get_window_strut_partial(win) {
+                if strut.left > 0 || strut.right > 0 || strut.top > 0 || strut.bottom > 0 {
+                    let changed = self.external_struts.get(&win) != Some(&strut);
+                    self.external_struts.insert(win, strut);
+                    if changed {
+                        info!(
+                            "[strut] Updated external strut for {:?}: top={} bottom={} left={} right={}",
+                            win, strut.top, strut.bottom, strut.left, strut.right
+                        );
+                        self.apply_strut_reservations();
+                        self.arrange(backend, None);
                     }
-                } else if self.external_struts.remove(&win).is_some() {
-                    info!("[strut] Property deleted for {:?}", win);
-                    self.apply_strut_reservations();
-                    self.arrange(backend, None);
+                } else {
+                    // All edges zero — remove
+                    if self.external_struts.remove(&win).is_some() {
+                        info!("[strut] Removed external strut for {:?}", win);
+                        self.apply_strut_reservations();
+                        self.arrange(backend, None);
+                    }
                 }
+            } else if self.external_struts.remove(&win).is_some() {
+                info!("[strut] Property deleted for {:?}", win);
+                self.apply_strut_reservations();
+                self.arrange(backend, None);
             }
         }
 
@@ -959,9 +952,6 @@ impl Jwm {
 
     /// Check and read strut property on newly mapped windows.
     fn check_strut_on_manage(&mut self, backend: &mut dyn Backend, win: WindowId) {
-        if Some(win) == self.status_bar_window {
-            return;
-        }
         if let Some(strut) = backend.property_ops().get_window_strut_partial(win) {
             if strut.left > 0 || strut.right > 0 || strut.top > 0 || strut.bottom > 0 {
                 info!(
@@ -1437,10 +1427,6 @@ impl Jwm {
 
             message: SharedMessage::default(),
 
-            status_bar_client: None,
-            status_bar_window: None,
-
-            current_bar_monitor_id: None,
             secondary_bars: HashMap::new(),
 
             last_key_grab_refresh_at: None,
@@ -2015,76 +2001,12 @@ impl Jwm {
         mask_bits: u16,
         changes: WindowChanges,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if Some(window) == self.status_bar_window {
-            return self
-                .handle_statusbar_configure_request_params(backend, window, mask_bits, changes);
-        }
-
         if let Some(client_key) = self.wintoclient(window) {
             return self
                 .handle_regular_configure_request_params(backend, client_key, mask_bits, changes);
         }
 
         self.handle_unmanaged_configure_request_params(backend, window, mask_bits, changes)
-    }
-
-    fn handle_statusbar_configure_request_params(
-        &mut self,
-        backend: &mut dyn Backend,
-        window: WindowId,
-        mask_bits: u16,
-        req: WindowChanges,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.status_bar_client.is_none() {
-            error!("[handle_statusbar_configure_request] StatusBar not found");
-            return self.handle_unmanaged_configure_request_params(backend, window, mask_bits, req);
-        }
-
-        let mut changes = WindowChanges::default();
-        let mask = ConfigWindowBits::from_bits_truncate(mask_bits);
-
-        let bar_key = match self.status_bar_client {
-            Some(k) => k,
-            None => return Ok(()),
-        };
-        let statusbar_mut = match self.state.clients.get_mut(bar_key) {
-            Some(c) => c,
-            None => return Ok(()),
-        };
-
-        if mask.contains(ConfigWindowBits::X) {
-            if let Some(x) = req.x {
-                statusbar_mut.geometry.x = x;
-                changes.x = Some(x);
-            }
-        }
-        if mask.contains(ConfigWindowBits::Y) {
-            if let Some(y) = req.y {
-                statusbar_mut.geometry.y = y;
-                changes.y = Some(y);
-            }
-        }
-        if mask.contains(ConfigWindowBits::HEIGHT) {
-            if let Some(h) = req.height {
-                let new_h = (h as i32).max(CONFIG.load().status_bar_height());
-                statusbar_mut.geometry.h = new_h;
-                changes.height = Some(new_h as u32);
-            }
-        }
-
-        changes.width = Some(statusbar_mut.geometry.w as u32);
-
-        backend.window_ops().apply_window_changes(window, changes)?;
-        backend.compositor_force_full_redraw();
-
-        let monitor_key = self
-            .current_bar_monitor_id
-            .and_then(|id| self.get_monitor_by_id(id));
-        self.arrange(backend, monitor_key);
-        if let Some(client_key) = self.wintoclient(window) {
-            self.configure_client(backend, client_key)?;
-        }
-        Ok(())
     }
 
     fn handle_regular_configure_request_params(
@@ -2447,13 +2369,6 @@ impl Jwm {
             .unwrap_or(&[])
     }
 
-    fn get_sel_mon(&self) -> Option<&WMMonitor> {
-        self.state
-            .sel_mon
-            .and_then(|sel_mon_key| self.state.monitors.get(sel_mon_key))
-            .and_then(|monitor| Some(monitor))
-    }
-
     fn get_selected_client_key(&self) -> Option<ClientKey> {
         self.state
             .sel_mon
@@ -2627,10 +2542,6 @@ impl Jwm {
         let mut has_membership_change = false;
 
         for client_key in client_keys.iter().copied() {
-            if Some(client_key) == self.status_bar_client {
-                continue;
-            }
-
             let Some(client) = self.state.clients.get(client_key) else {
                 continue;
             };
@@ -2723,11 +2634,6 @@ impl Jwm {
     }
 
     fn wintoclient(&self, win: WindowId) -> Option<ClientKey> {
-        if let Some(bar_win) = self.status_bar_window {
-            if bar_win == win {
-                return self.status_bar_client;
-            }
-        }
         self.state.win_to_client.get(&win).copied()
     }
 
@@ -3300,27 +3206,6 @@ impl Jwm {
         w: u32,
         h: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // If the backend reports the status bar moved/resized, track it and re-arrange.
-        // This is required for Wayland layer-shell bars, where JWM does not control
-        // the final geometry.
-        if Some(window) == self.status_bar_window {
-            if let Some(bar_key) = self.status_bar_client {
-                if let Some(bar) = self.state.clients.get_mut(bar_key) {
-                    bar.geometry.x = x;
-                    bar.geometry.y = y;
-                    bar.geometry.w = w as i32;
-                    bar.geometry.h = h as i32;
-                }
-
-                if let Some(mon_key) = self.state.clients.get(bar_key).and_then(|c| c.mon) {
-                    self.arrange(backend, Some(mon_key));
-                } else {
-                    self.arrange(backend, None);
-                }
-            }
-            return Ok(());
-        }
-
         if window == backend.root_window().expect("no root window") {
             let dirty = self.s_w != w as i32 || self.s_h != h as i32;
             self.s_w = w as i32;
@@ -4036,54 +3921,6 @@ impl Jwm {
         // this check the real status bar would render beneath the overlay's
         // semi-transparent region, producing a "double bar" artifact.
         let overlay_win = backend.compositor_overlay_window();
-        let bar_covered = if let Some(bar_key) = self.status_bar_client {
-            if let Some(bar) = self.state.clients.get(bar_key) {
-                let bx = bar.geometry.x;
-                let by = bar.geometry.y;
-                let bw = bar.geometry.w;
-                let bh = bar.geometry.h;
-                self.override_redirect_windows.iter().any(|&or_win| {
-                    if Some(or_win) == overlay_win {
-                        return false;
-                    }
-                    if let Some(&(ox, oy, ow, oh)) = self.or_window_geometries.get(&or_win) {
-                        // Allow a small tolerance (2px) because some apps
-                        // (e.g. Feishu/Electron) create windows 1px smaller
-                        // than the screen to avoid fullscreen detection.
-                        let tol = 2;
-                        let covered = ox <= bx + tol
-                            && oy <= by + tol
-                            && (ox + ow as i32) >= (bx + bw - tol)
-                            && (oy + oh as i32) >= (by + bh - tol);
-                        if covered {
-                            info!(
-                                "[bar_covered] OR {:?} ({},{} {}x{}) covers bar ({},{} {}x{})",
-                                or_win, ox, oy, ow, oh, bx, by, bw, bh
-                            );
-                        }
-                        covered
-                    } else {
-                        false
-                    }
-                })
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        if !bar_covered {
-            if let Some(bar_key) = self.status_bar_client {
-                if let Some(bar) = self.state.clients.get(bar_key) {
-                    let w = bar.geometry.w as u32;
-                    let h = bar.geometry.h as u32;
-                    if w > 0 && h > 0 {
-                        scene.push((bar.win.raw(), bar.geometry.x, bar.geometry.y, w, h));
-                    }
-                }
-            }
-        }
-
         // Include per-monitor secondary status bars
         for bar_instance in self.secondary_bars.values() {
             if let Some(bar_key) = bar_instance.client_key {
@@ -4231,20 +4068,6 @@ impl Jwm {
         backend: &mut dyn Backend,
         event_window: WindowId,
     ) -> Result<bool, Box<dyn std::error::Error>> {
-        if Some(event_window) == self.status_bar_window {
-            if let Some(cur_bar_mon_id) = self.current_bar_monitor_id {
-                if let Some(target_monitor_key) = self.get_monitor_by_id(cur_bar_mon_id) {
-                    if Some(target_monitor_key) != self.state.sel_mon {
-                        let current_sel = self.get_selected_client_key();
-                        self.unfocus_client_opt(backend, current_sel, true)?;
-                        self.state.sel_mon = Some(target_monitor_key);
-                    }
-                }
-            }
-            // 让状态栏获取 X11 输入焦点
-            self.focus(backend, self.status_bar_client)?;
-            return Ok(true);
-        }
         Ok(false)
     }
 
@@ -4969,28 +4792,6 @@ impl Jwm {
                 .insert(mon_key, final_bottom_to_top.clone());
         }
 
-        if self.current_bar_monitor_id == Some(monitor_num) {
-            if let Some(bar_key) = self.status_bar_client {
-                if let Some(bar_client) = self.state.clients.get(bar_key) {
-                    let show_bar = monitor
-                        .pertag
-                        .as_ref()
-                        .and_then(|p| p.show_bars.get(p.cur_tag))
-                        .copied()
-                        .unwrap_or(true);
-                    if show_bar {
-                        let changes = WindowChanges {
-                            stack_mode: Some(StackMode::Above),
-                            ..Default::default()
-                        };
-                        backend
-                            .window_ops()
-                            .apply_window_changes(bar_client.win, changes)?;
-                    }
-                }
-            }
-        }
-
         self.mark_bar_update_needed_if_visible(Some(monitor_num));
 
         info!("[restack] finish");
@@ -5504,21 +5305,6 @@ impl Jwm {
                 CONFIG.load().status_bar_height() + CONFIG.load().status_bar_padding() * 2;
             let pad = CONFIG.load().status_bar_padding().max(0);
 
-            // Use the real bar geometry only on the monitor that currently hosts
-            // the bar.  All other monitors get the static fallback so they always
-            // reserve the same amount of space — this prevents windows from
-            // resizing every time the bar follows the cursor to a different
-            // monitor.
-            if self.current_bar_monitor_id == Some(monitor.num) {
-                if let Some(bar_key) = self.status_bar_client {
-                    if let Some(bar) = self.state.clients.get(bar_key) {
-                        let gap_from_top = (bar.geometry.y - monitor.geometry.w_y).max(0);
-                        let dynamic = gap_from_top + bar.geometry.h + pad;
-                        return dynamic.max(fallback);
-                    }
-                }
-            }
-
             fallback
         } else {
             0
@@ -5558,10 +5344,6 @@ impl Jwm {
 
         if let Some(client_keys) = self.state.monitor_clients.get(mon_key) {
             for &client_key in client_keys {
-                if Some(client_key) == self.status_bar_client {
-                    // status bar is included via is_dock anyway; keep behavior consistent.
-                }
-
                 let client = match self.state.clients.get(client_key) {
                     Some(c) => c,
                     None => continue,
@@ -5977,7 +5759,6 @@ impl Jwm {
                         .iter()
                         .copied()
                         .filter(|&ck| self.is_client_visible_by_key(ck))
-                        .filter(|&ck| Some(ck) != self.status_bar_client)
                         .collect(),
                     None => Vec::new(),
                 }
@@ -6304,9 +6085,6 @@ impl Jwm {
                         if !self.is_client_visible_on_monitor(ck, mon_key) {
                             continue;
                         }
-                        if Some(ck) == self.status_bar_client {
-                            continue;
-                        }
                         if let Some(client) = self.state.clients.get(ck) {
                             let g = &client.geometry;
                             if g.w > 0 && g.h > 0 {
@@ -6614,10 +6392,6 @@ impl Jwm {
         backend: &mut dyn Backend,
         event_window: WindowId,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // 状态栏获取焦点时，允许它持有焦点（用于键盘交互）
-        if Some(event_window) == self.status_bar_window {
-            return Ok(());
-        }
         let sel_client_key = self.get_selected_client_key();
         if let Some(client_key) = sel_client_key {
             if let Some(client) = self.state.clients.get(client_key) {
@@ -7373,11 +7147,6 @@ impl Jwm {
         }
 
         if let Some(mon_num) = monitor_num_opt {
-            if self.current_bar_monitor_id == Some(mon_num) {
-                self.position_statusbar_on_monitor(backend, mon_num)?;
-                self.arrange(backend, Some(sel_mon_key));
-                let _ = self.restack(backend, Some(sel_mon_key));
-            }
             self.mark_bar_update_needed_if_visible(Some(mon_num));
         }
 
@@ -7399,12 +7168,6 @@ impl Jwm {
             None => return Ok(()),
         };
 
-        if self.current_bar_monitor_id == Some(mon_num) {
-            self.position_statusbar_on_monitor(backend, mon_num)?;
-            self.arrange(backend, Some(sel_mon_key));
-            let _ = self.restack(backend, Some(sel_mon_key));
-            self.mark_bar_update_needed_if_visible(Some(mon_num));
-        }
         Ok(())
     }
 
@@ -8128,11 +7891,6 @@ impl Jwm {
                     }
                 }
             }
-            if let Some(num) = mon_num {
-                if self.current_bar_monitor_id == Some(num) {
-                    self.position_statusbar_on_monitor(backend, num)?;
-                }
-            }
         } else {
             // Leaving fullscreen layout: show bar, restore border_w
             if let Some(monitor) = self.state.monitors.get_mut(mon_key) {
@@ -8141,11 +7899,6 @@ impl Jwm {
                     if let Some(show_bar) = pertag.show_bars.get_mut(cur_tag) {
                         *show_bar = true;
                     }
-                }
-            }
-            if let Some(num) = mon_num {
-                if self.current_bar_monitor_id == Some(num) {
-                    self.position_statusbar_on_monitor(backend, num)?;
                 }
             }
 
@@ -9190,29 +8943,6 @@ impl Jwm {
         backend: &mut dyn Backend,
         target_monitor_key: MonitorKey,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let prev_sel = self.get_selected_client_key();
-
-        self.state.sel_mon = Some(target_monitor_key);
-
-        self.focus(backend, None)?;
-        if let Some(old_key) = prev_sel {
-            self.unfocus_client(backend, old_key, false)?;
-        }
-
-        let old_id = self.current_bar_monitor_id;
-        let new_id = self.state.monitors.get(target_monitor_key).map(|m| m.num);
-        if old_id != new_id {
-            if let Some(id) = new_id {
-                self.current_bar_monitor_id = Some(id);
-                self.position_statusbar_on_monitor(backend, id)?;
-            }
-            if let Some(old) = old_id.and_then(|oid| self.get_monitor_by_id(oid)) {
-                self.arrange(backend, Some(old));
-            }
-            self.arrange(backend, Some(target_monitor_key));
-            self.restack(backend, Some(target_monitor_key))?;
-        }
-
         Ok(())
     }
 
@@ -9253,41 +8983,12 @@ impl Jwm {
         Ok(())
     }
 
-    fn unfocus_client_opt(
-        &mut self,
-        backend: &mut dyn Backend,
-        client_key_opt: Option<ClientKey>,
-        setfocus: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(client_key) = client_key_opt {
-            self.unfocus_client(backend, client_key, setfocus)?;
-        }
-        Ok(())
-    }
-
     fn focus(
         &mut self,
         backend: &mut dyn Backend,
         mut client_key_opt: Option<ClientKey>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         info!("[focus]");
-
-        // Status bar: give it X11 input focus directly, but don't
-        // touch the WM focus stack / monitor selection so it stays
-        // out of Alt+Tab, tiling, etc.
-        if let Some(client_key) = client_key_opt {
-            let bar_win = self.state.clients.get(client_key).and_then(|client| {
-                info!("[focus] {}", client);
-                if Some(client.win) == self.status_bar_window {
-                    Some(client.win)
-                } else {
-                    None
-                }
-            });
-            if let Some(win) = bar_win {
-                return Ok(());
-            }
-        }
 
         let is_visible = match client_key_opt {
             Some(client_key) => self.is_client_visible_by_key(client_key),
@@ -10177,31 +9878,6 @@ impl Jwm {
         Ok(())
     }
 
-    fn manage_statusbar(
-        &mut self,
-        backend: &mut dyn Backend,
-        client_key: ClientKey,
-        win: WindowId,
-        current_mon_id: i32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mon_key = self.get_monitor_by_id(current_mon_id);
-        if let Some(client) = self.state.clients.get_mut(client_key) {
-            client.mon = mon_key;
-            client.state.never_focus = false;
-            client.state.is_floating = true;
-            client.state.is_dock = true;
-            client.state.tags = CONFIG.load().tagmask();
-            client.geometry.border_w = 0;
-        }
-
-        self.position_statusbar_on_monitor(backend, current_mon_id)?;
-
-        self.setup_statusbar_window_by_key(backend, client_key)?;
-
-        backend.window_ops().map_window(win)?;
-        Ok(())
-    }
-
     fn manage_secondary_statusbar(
         &mut self,
         backend: &mut dyn Backend,
@@ -10326,77 +10002,6 @@ impl Jwm {
         bar_win: WindowId,
     ) -> Result<(), Box<dyn std::error::Error>> {
         Ok(backend.property_ops().clear_window_strut(bar_win)?)
-    }
-
-    fn position_statusbar_on_monitor(
-        &mut self,
-        backend: &mut dyn Backend,
-        monitor_id: i32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let client_key = match self.status_bar_client {
-            Some(k) => k,
-            None => return Ok(()),
-        };
-        let mon_key = match self.get_monitor_by_id(monitor_id) {
-            Some(k) => k,
-            None => return Ok(()),
-        };
-        let monitor = match self.state.monitors.get(mon_key) {
-            Some(m) => m,
-            None => return Ok(()),
-        };
-
-        let show_bar = monitor
-            .pertag
-            .as_ref()
-            .and_then(|p| p.show_bars.get(p.cur_tag))
-            .copied()
-            .unwrap_or(true);
-
-        let (client_win, client_height) =
-            if let Some(client) = self.state.clients.get_mut(client_key) {
-                if show_bar {
-                    let pad = CONFIG.load().status_bar_padding();
-                    let border_width = client.geometry.border_w;
-                    client.geometry.x = monitor.geometry.m_x + pad;
-                    client.geometry.y = monitor.geometry.m_y + pad;
-                    client.geometry.w = monitor.geometry.m_w - 2 * pad - 2 * border_width;
-                    client.geometry.h = CONFIG.load().status_bar_height();
-
-                    let changes = WindowChanges {
-                        x: Some(client.geometry.x),
-                        y: Some(client.geometry.y),
-                        width: Some(client.geometry.w as u32),
-                        height: Some(client.geometry.h as u32),
-                        ..Default::default()
-                    };
-                    backend
-                        .window_ops()
-                        .apply_window_changes(client.win, changes)?;
-                    backend.compositor_force_full_redraw();
-                    (client.win, Some(client.geometry.h))
-                } else {
-                    let changes = WindowChanges {
-                        x: Some(-1000),
-                        y: Some(-1000),
-                        ..Default::default()
-                    };
-                    backend
-                        .window_ops()
-                        .apply_window_changes(client.win, changes)?;
-                    backend.compositor_force_full_redraw();
-                    (client.win, None)
-                }
-            } else {
-                return Ok(());
-            };
-
-        if let Some(height) = client_height {
-            self.set_bar_strut(backend, client_win, monitor, height)?;
-        } else {
-            self.remove_bar_strut(backend, client_win)?;
-        }
-        Ok(())
     }
 
     fn setup_statusbar_window_by_key(
@@ -10578,10 +10183,6 @@ impl Jwm {
         // Remove any external strut reservation for this window
         self.remove_strut_on_unmanage(backend, win);
 
-        if Some(win) == self.status_bar_window {
-            return self.unmanage_statusbar();
-        }
-
         // Broadcast window/close event before removing the client
         let close_event_data = self
             .state
@@ -10598,22 +10199,6 @@ impl Jwm {
         }
 
         self.unmanage_regular_client(backend, client_key, destroyed)?;
-        Ok(())
-    }
-
-    fn unmanage_statusbar(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        debug!("unmanage_statusbar");
-        self.cleanup_statusbar_processes()?;
-        if let Some(bar_win) = self.status_bar_window {
-            self.state.win_to_client.remove(&bar_win);
-        }
-        if let Some(bar_key) = self.status_bar_client {
-            self.state.clients.remove(bar_key);
-            self.state.client_order.retain(|&k| k != bar_key);
-        }
-        self.status_bar_client = None;
-        self.status_bar_window = None;
-        info!("Successfully removed statusbar",);
         Ok(())
     }
 
@@ -11338,10 +10923,6 @@ impl Jwm {
         if let Some(client_keys) = self.state.monitor_clients.get(mon_key) {
             for &client_key in client_keys {
                 if let Some(client) = self.state.clients.get(client_key) {
-                    if Some(client_key) == self.status_bar_client {
-                        continue;
-                    }
-
                     let effective_tags = client.state.tags & config_mask;
 
                     if effective_tags == config_mask {
@@ -11540,9 +11121,6 @@ impl Jwm {
             .iter()
             .filter_map(|&ck| {
                 let c = self.state.clients.get(ck)?;
-                if Some(c.win) == self.status_bar_window {
-                    return None;
-                }
                 Some(WindowInfo {
                     id: c.win.raw(),
                     name: c.name.clone(),
@@ -11633,9 +11211,6 @@ impl Jwm {
                             .iter()
                             .filter_map(|&ck| {
                                 let c = self.state.clients.get(ck)?;
-                                if Some(c.win) == self.status_bar_window {
-                                    return None;
-                                }
                                 Some(WindowInfo {
                                     id: c.win.raw(),
                                     name: c.name.clone(),
@@ -11770,10 +11345,8 @@ impl Jwm {
         let client_keys: Vec<ClientKey> = self.state.client_order.clone();
         for ck in client_keys {
             if let Some(client) = self.state.clients.get(ck) {
-                if Some(client.win) != self.status_bar_window {
-                    let is_sel = sel_ck == Some(ck);
-                    let _ = self.update_client_decoration(backend, ck, is_sel);
-                }
+                let is_sel = sel_ck == Some(ck);
+                let _ = self.update_client_decoration(backend, ck, is_sel);
             }
         }
     }
