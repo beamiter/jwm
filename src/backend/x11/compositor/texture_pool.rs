@@ -3,13 +3,6 @@ use glow::HasContext;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// Pooled texture for reuse
-pub struct PooledTexture {
-    texture: glow::Texture,
-    width: u32,
-    height: u32,
-}
-
 /// Manages a pool of reusable textures to reduce allocation overhead
 pub struct TexturePool {
     available: Arc<Mutex<HashMap<(u32, u32), Vec<glow::Texture>>>>,

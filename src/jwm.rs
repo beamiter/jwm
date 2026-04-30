@@ -1984,7 +1984,7 @@ impl Jwm {
     fn on_motion_notify_internal(
         &mut self,
         backend: &mut dyn Backend,
-        window: Option<WindowId>,
+        _window: Option<WindowId>,
         root_x: i16,
         root_y: i16,
         _time: u32,
@@ -4132,8 +4132,8 @@ impl Jwm {
 
     fn handle_statusbar_enter_generic(
         &mut self,
-        backend: &mut dyn Backend,
-        event_window: WindowId,
+        _backend: &mut dyn Backend,
+        _event_window: WindowId,
     ) -> Result<bool, Box<dyn std::error::Error>> {
         Ok(false)
     }
@@ -5370,7 +5370,6 @@ impl Jwm {
             // and its real size/position comes from the compositor arrangement.
             let fallback =
                 CONFIG.load().status_bar_height() + CONFIG.load().status_bar_padding() * 2;
-            let pad = CONFIG.load().status_bar_padding().max(0);
 
             fallback
         } else {
@@ -7186,7 +7185,7 @@ impl Jwm {
 
     pub fn togglebar(
         &mut self,
-        backend: &mut dyn Backend,
+        _backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
         info!("[togglebar]");
@@ -7916,7 +7915,7 @@ impl Jwm {
     /// Handle bar visibility and border_w changes when transitioning to/from fullscreen layout
     fn handle_fullscreen_layout_transition(
         &mut self,
-        backend: &mut dyn Backend,
+        _backend: &mut dyn Backend,
         mon_key: MonitorKey,
         old_layout: &LayoutEnum,
         new_layout: &LayoutEnum,
@@ -8983,8 +8982,8 @@ impl Jwm {
 
     fn switch_to_monitor(
         &mut self,
-        backend: &mut dyn Backend,
-        target_monitor_key: MonitorKey,
+        _backend: &mut dyn Backend,
+        _target_monitor_key: MonitorKey,
     ) -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     }
@@ -11398,7 +11397,7 @@ impl Jwm {
 
         let client_keys: Vec<ClientKey> = self.state.client_order.clone();
         for ck in client_keys {
-            if let Some(client) = self.state.clients.get(ck) {
+            if let Some(_client) = self.state.clients.get(ck) {
                 let is_sel = sel_ck == Some(ck);
                 let _ = self.update_client_decoration(backend, ck, is_sel);
             }

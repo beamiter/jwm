@@ -9,7 +9,6 @@ mod postprocess;
 pub mod shaders;
 mod tfp;
 mod transitions;
-mod glx_context;
 
 // Optimization modules
 pub mod perf_metrics;

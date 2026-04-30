@@ -3096,7 +3096,7 @@ mod key_ops {
 }
 
 mod output_ops {
-    use crate::backend::api::{OutputInfo, OutputOps, ScreenInfo, VrrCapabilities};
+    use crate::backend::api::{OutputInfo, OutputOps, ScreenInfo};
     use crate::backend::common_define::OutputId;
     use std::sync::{Arc, Mutex};
     use x11rb::connection::Connection;
@@ -3184,24 +3184,6 @@ mod output_ops {
                 }
             }
             false
-        }
-
-        /// Get VRR capabilities for a given output index
-        /// Returns Some(VrrCapabilities) if VRR is supported
-        pub(super) fn get_vrr_capabilities(&self, output_idx: u64) -> Option<VrrCapabilities> {
-            if let Ok(cache) = self.vrr_capable_outputs.lock() {
-                if cache.contains_key(&(output_idx as u32)) {
-                    let cfg = crate::config::CONFIG.load();
-                    let behavior = cfg.behavior();
-                    return Some(VrrCapabilities {
-                        supported: true,
-                        current_enabled: false,  // Would require querying VRR_ENABLED property
-                        min_refresh_hz: behavior.vrr_min_fps,
-                        max_refresh_hz: behavior.vrr_max_fps,
-                    });
-                }
-            }
-            None
         }
 
         /// Get cached outputs or query if cache miss
