@@ -279,24 +279,10 @@ fn redraw(
 ) -> Result<()> {
     let cr = back.ensure_surface(cairo_xcb)?;
 
-    // Use dirty bits to conditionally redraw
-    // If dirty_fields is empty, skip redraw entirely
-    if !state.dirty_fields.is_empty() {
-        // Pass dirty bits to draw_bar_with_dirty for future selective redraw support
-        xbar_core::draw_bar_with_dirty(
-            cr,
-            width,
-            height,
-            colors,
-            state,
-            font,
-            cfg,
-            Some(state.dirty_fields),
-        )?;
-
-        // Clear dirty bits after successful redraw
-        state.dirty_fields = xbar_core::DirtyBits::new(0);
-    }
+    // xbar_core's selective redraw path repaints the full background before drawing
+    // only dirty regions, which erases untouched sections on a single retained surface.
+    // For now, redraw the full bar whenever a redraw is requested.
+    xbar_core::draw_bar_with_dirty(cr, width, height, colors, state, font, cfg, None)?;
 
     back.flush();
     back.blit_to_window(conn, win, gc)?;
