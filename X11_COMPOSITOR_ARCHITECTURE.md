@@ -7,9 +7,10 @@
 4. [整体架构](#整体架构)
 5. [渲染管道详解](#渲染管道详解)
 6. [关键优化技术](#关键优化技术)
-7. [模块设计](#模块设计)
-8. [性能特性](#性能特性)
-9. [扩展点](#扩展点)
+7. [FBO 和 Blur 管道详解](#fbo-和-blur-管道详解)
+8. [模块设计](#模块设计)
+9. [性能特性](#性能特性)
+10. [扩展点](#扩展点)
 
 ---
 
@@ -715,19 +716,500 @@ if shader_hot_reload_enabled && frame_count % 60 == 0 {
 
 ---
 
+## FBO 和 Blur 管道详解
+
+### 6.0 Framebuffer Object (FBO) 概述
+
+**FBO 是什么**：OpenGL Framebuffer Object 是离屏渲染目标。JWM Compositor 使用三种 FBO：
+
+| FBO 类型 | 用途 | 分辨率 | 生命周期 |
+|---------|------|-------|--------|
+| **Scene FBO** | 捕获场景作为 Blur 源 | 全屏 | Blur 启用时常驻 |
+| **Blur FBO (Pyramid)** | 多级模糊金字塔 | 逐级 1/2 | Blur 启用时常驻 |
+| **PostProcess FBO** | 全屏后处理 | 全屏 | 需要时动态创建 |
+
+### 6.1 Scene FBO - 场景捕获缓冲区
+
+**文件**：`src/backend/x11/compositor/pipeline.rs:93-150`
+
+**结构**：
+```rust
+// 单个 Scene FBO
+pub struct Compositor {
+    scene_fbo: Option<(glow::Framebuffer, glow::Texture)>,
+}
+```
+
+**创建过程**：
+
+```rust
+// pipeline.rs:93-150
+pub(super) unsafe fn create_scene_fbo(
+    gl: &glow::Context,
+    w: u32,
+    h: u32,
+) -> Result<(glow::Framebuffer, glow::Texture), String> {
+    // 1. 创建纹理
+    let tex = gl.create_texture()?;
+    gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+    gl.tex_image_2d(
+        glow::TEXTURE_2D,
+        0,
+        glow::RGBA8 as i32,      // RGBA 8-bit 格式
+        w as i32,
+        h as i32,
+        0,
+        glow::RGBA,
+        glow::UNSIGNED_BYTE,
+        None,                      // 无初始数据（零初始化）
+    );
+    
+    // 2. 纹理参数设置（Linear 采样，边界 Clamp）
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+    
+    // 3. 创建 Framebuffer
+    let fbo = gl.create_framebuffer()?;
+    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+    
+    // 4. 连接纹理到 FBO
+    gl.framebuffer_texture_2d(
+        glow::FRAMEBUFFER,
+        glow::COLOR_ATTACHMENT0,      // 颜色输出
+        glow::TEXTURE_2D,
+        Some(tex),
+        0,                            // mipmap level
+    );
+    
+    gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+    gl.bind_texture(glow::TEXTURE_2D, None);
+    
+    Ok((fbo, tex))
+}
+```
+
+**用途**：
+1. **Blur 源**：将整个场景（除了 frosted 窗口）渲染到此 FBO
+2. **临时存储**：作为后续 Blur 管道的输入
+
+### 6.2 Blur FBO 金字塔 - 多级 Kawase 模糊
+
+**文件**：`src/backend/x11/compositor/pipeline.rs:1-91`
+
+**概念**：构建一个从全屏到 1/64 尺寸的多级纹理金字塔
+
+```
+Level 0 (1024x768)  ← Scene FBO 输入
+    ↓ [Downsampling + Blur]
+Level 1 (512x384)   ← 中间结果
+    ↓ [Downsampling + Blur]
+Level 2 (256x192)
+    ↓ [Downsampling + Blur]
+Level 3 (128x96)    ← 最小级
+    ↓ [Upsampling + Blur] 反向传播
+Level 2 (256x192)
+    ↓ [Upsampling + Blur]
+Level 1 (512x384)
+    ↓ [Upsampling + Blur]
+Level 0 (1024x768)  ← 最终模糊结果输出
+```
+
+**数据结构**：
+
+```rust
+// mod.rs:248-253
+struct BlurFboLevel {
+    fbo: glow::Framebuffer,       // 渲染目标
+    texture: glow::Texture,       // 输出纹理
+    w: u32,                       // 宽度
+    h: u32,                       // 高度
+}
+
+// mod.rs:780
+pub struct Compositor {
+    blur_fbos: Vec<BlurFboLevel>,  // 通常 3-6 级
+}
+```
+
+**创建过程**：
+
+```rust
+// pipeline.rs:5-91
+pub(super) unsafe fn create_blur_fbos(
+    gl: &glow::Context,
+    w: u32,
+    h: u32,
+    levels: u32,
+) -> Vec<BlurFboLevel> {
+    let levels = levels.clamp(1, 6);  // 限制 1-6 级
+    let mut fbos = Vec::new();
+    
+    let mut cur_w = w / 2;  // 从 1/2 尺寸开始
+    let mut cur_h = h / 2;
+    
+    for _ in 0..levels {
+        // 防止为 0
+        if cur_w == 0 { cur_w = 1; }
+        if cur_h == 0 { cur_h = 1; }
+        
+        // 创建纹理
+        let tex = gl.create_texture().ok()?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA8 as i32,
+            cur_w as i32,
+            cur_h as i32,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            None,
+        );
+        
+        // 设置 Linear 采样（重要：用于 upsampling）
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+        
+        // 创建 FBO
+        let fbo = gl.create_framebuffer().ok()?;
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+        gl.framebuffer_texture_2d(
+            glow::FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(tex),
+            0,
+        );
+        
+        fbos.push(BlurFboLevel {
+            fbo,
+            texture: tex,
+            w: cur_w,
+            h: cur_h,
+        });
+        
+        // 进入下一级：1/2 尺寸
+        cur_w /= 2;
+        cur_h /= 2;
+    }
+    
+    gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+    gl.bind_texture(glow::TEXTURE_2D, None);
+    
+    log::info!("compositor: created {} blur FBO levels", fbos.len());
+    fbos
+}
+```
+
+**优势**：
+- **低分辨率处理**：大多数模糊计算在 256x192 等小分辨率进行
+- **高效缓存**：较低分辨率的 FBO 着色器计算快得多
+- **灵活质量**：可根据 GPU 负载动态调整级数
+
+### 6.3 Kawase Blur - 双向多级模糊算法
+
+**文件**：`src/backend/x11/compositor/pipeline.rs:155-280`
+
+**原理**：Kawase blur 是一种分离的、高效的模糊算法
+
+#### Downsampling Pass（降采样 + 模糊）
+
+```rust
+// pipeline.rs:184-224
+self.gl.use_program(Some(self.blur_down_program));
+
+let mut src_tex = *scene_tex;    // 从 Scene FBO 开始
+let mut src_w = self.screen_w;
+let mut src_h = self.screen_h;
+
+for level in &self.blur_fbos[..levels] {
+    // 绑定目标 FBO（当前级）
+    gl.bind_framebuffer(FRAMEBUFFER, Some(level.fbo));
+    gl.viewport(0, 0, level.w as i32, level.h as i32);
+    
+    // 设置投影矩阵（适应当前级分辨率）
+    proj = ortho(0, level.w as f32, level.h as f32, 0, -1, 1)
+    gl.uniform_matrix_4_f32_slice(projection, false, &proj)
+    
+    // halfpixel 均匀变量用于采样偏移
+    gl.uniform_2_f32(
+        halfpixel,
+        0.5 / src_w as f32,      // X 偏移
+        0.5 / src_h as f32,      // Y 偏移
+    )
+    
+    // 绑定源纹理
+    gl.active_texture(TEXTURE0)
+    gl.bind_texture(TEXTURE_2D, Some(src_tex))
+    
+    // 绘制四边形（执行着色器）
+    gl.draw_arrays(TRIANGLE_STRIP, 0, 4)
+    
+    // 下一级的输入
+    src_tex = level.texture
+    src_w = level.w
+    src_h = level.h
+}
+```
+
+**Blur Down 着色器逻辑**（伪代码）：
+
+```glsl
+#version 130
+
+uniform sampler2D texture;
+uniform vec2 halfpixel;
+
+void main() {
+    vec4 sum = vec4(0);
+    
+    // Kawase 采样模式：十字形 4 个点
+    sum += texture(texture, tc + vec2( halfpixel.x,  halfpixel.y));  // 右下
+    sum += texture(texture, tc + vec2(-halfpixel.x,  halfpixel.y));  // 左下
+    sum += texture(texture, tc + vec2( halfpixel.x, -halfpixel.y));  // 右上
+    sum += texture(texture, tc + vec2(-halfpixel.x, -halfpixel.y));  // 左上
+    
+    // 平均 4 个采样值
+    gl_FragColor = sum * 0.25;
+}
+```
+
+#### Upsampling Pass（升采样 + 模糊）
+
+```rust
+// pipeline.rs:226-268
+self.gl.use_program(Some(self.blur_up_program));
+
+// 从最小级反向迭代到第一级
+for i in (0..levels - 1).rev() {
+    let target = &self.blur_fbos[i];
+    let source_tex = self.blur_fbos[i + 1].texture;
+    
+    gl.bind_framebuffer(FRAMEBUFFER, Some(target.fbo));
+    gl.viewport(0, 0, target.w as i32, target.h as i32);
+    
+    // 设置投影（当前级）
+    proj = ortho(0, target.w as f32, target.h as f32, 0, -1, 1)
+    gl.uniform_matrix_4_f32_slice(projection, false, &proj)
+    
+    // 从上一级（更小的）采样
+    let src_level = &self.blur_fbos[i + 1];
+    gl.uniform_2_f32(
+        halfpixel,
+        0.5 / src_level.w as f32,
+        0.5 / src_level.h as f32,
+    )
+    
+    gl.active_texture(TEXTURE0)
+    gl.bind_texture(TEXTURE_2D, Some(source_tex))
+    
+    gl.draw_arrays(TRIANGLE_STRIP, 0, 4)
+}
+
+// 回到屏幕 FBO
+gl.bind_framebuffer(FRAMEBUFFER, None);
+```
+
+**Blur Up 着色器逻辑**（伪代码）：
+
+```glsl
+#version 130
+
+uniform sampler2D texture;
+uniform vec2 halfpixel;
+
+void main() {
+    // 升采样时，采样的点需要通过 LINEAR 纹理过滤
+    // GPU 会自动在低分辨率纹理中 bilinear 插值
+    
+    vec4 sum = vec4(0);
+    
+    // 升采样采样更多点（保证覆盖）
+    sum += texture(texture, tc + vec2( halfpixel.x,  halfpixel.y));
+    sum += texture(texture, tc + vec2(-halfpixel.x,  halfpixel.y));
+    sum += texture(texture, tc + vec2( halfpixel.x, -halfpixel.y));
+    sum += texture(texture, tc + vec2(-halfpixel.x, -halfpixel.y));
+    
+    gl_FragColor = sum * 0.25;
+}
+```
+
+**效果对比**：
+
+| 级数 | 分辨率 | 计算复杂度 | 模糊强度 |
+|------|--------|-----------|--------|
+| 1 级 | 1024x768 | 高 | 弱 |
+| 2 级 | 512x384 → 1024x768 | 中 | 中 |
+| 3 级 | 256x192 → 512x384 → 1024x768 | 低 | 强 |
+| 4+ 级 | 最小化 | 很低 | 很强 |
+
+### 6.4 模糊流程在渲染管道中的位置
+
+**render_frame() 中的 Blur 集成**（来自前面的第 15-16 步）：
+
+```rust
+// ========== Pass 6: 窗口背景（Blur Base） ==========
+
+// 只有当存在 frosted 窗口时才执行
+if any_window_uses_frosted_blur {
+    // 1. 绑定 Scene FBO 作为目标
+    gl.bind_framebuffer(FRAMEBUFFER, scene_fbo)
+    
+    // 2. 渲染所有窗口到 scene_fbo（除了 frosted 窗口本身）
+    for window in visible_scene_excluding_frosted {
+        if window.blur_amount == 0 {
+            draw_window_quad(window)
+        }
+    }
+    // 此时 scene_fbo.texture 包含整个场景的渲染
+}
+
+// ========== Pass 7: 模糊处理（Dual Kawase） ==========
+
+if frosted_window_active {
+    // 调用核心模糊函数
+    blur_result = run_blur_passes_from_fbo(
+        source_fbo: Some(scene_fbo),
+        max_levels: blur_fbos.len()
+    )
+    // 返回值：blur_fbos[0].texture（已模糊的场景）
+}
+
+// ========== Pass 8: 主窗口栈 ==========
+
+// 回到屏幕渲染
+gl.bind_framebuffer(FRAMEBUFFER, 0)
+
+for window in visible_scene {
+    if window.blur_amount > 0 {
+        // 使用模糊纹理作为背景
+        gl.bind_texture(TEXTURE1, blur_result)
+        gl.uniform_1_i32(blur_texture_uniform, 1)
+    }
+    
+    // 绘制窗口（可能应用模糊背景）
+    draw_window_quad(window)
+}
+```
+
+### 6.5 PostProcess FBO - 后处理管道
+
+**文件**：`src/backend/x11/compositor/postprocess.rs`
+
+**用途**：应用全屏特效（色调映射、色彩校正等）
+
+**创建**：动态创建（延迟初始化）
+
+```rust
+// mod.rs:3031-3071
+fn ensure_postprocess_fbo(&mut self) {
+    if self.postprocess_fbo.is_none() && self.needs_postprocess() {
+        self.postprocess_fbo = unsafe {
+            Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h).ok()
+        };
+    }
+}
+```
+
+**使用流程**：
+
+```rust
+// render_frame() 中
+if postprocess_active {
+    // 1. 绑定 PostProcess FBO
+    let (pp_fbo, _) = self.postprocess_fbo.as_ref().unwrap();
+    gl.bind_framebuffer(FRAMEBUFFER, Some(*pp_fbo))
+}
+
+// 2. 在此 FBO 中进行所有渲染（所有 Pass）
+
+if postprocess_active {
+    // 3. 回到屏幕，应用后处理
+    gl.bind_framebuffer(FRAMEBUFFER, 0)
+    gl.use_program(postprocess_program)
+    draw_postprocess_quad()
+}
+```
+
+### 6.6 自适应 Blur 质量
+
+**文件**：`src/backend/x11/compositor/blur_optimize.rs`
+
+**机制**：根据 GPU 负载动态调整 Blur 级数
+
+```rust
+pub struct AdaptiveBlur {
+    quality: Arc<Mutex<BlurQuality>>,
+    current_load: Arc<AtomicU32>,
+}
+
+pub enum BlurQuality {
+    Full,      // 4-6 级
+    Reduced,   // 2-3 级
+    Minimal,   // 1 级或禁用
+}
+
+// 动态调整
+fn update_load(&self, load: u32) {
+    let quality = if load > 90 {
+        BlurQuality::Minimal      // 系统繁忙，最小模糊
+    } else if load > 70 {
+        BlurQuality::Reduced      // 中等负载
+    } else {
+        BlurQuality::Full         // 空闲，最高质量
+    };
+}
+```
+
+**参数**：
+
+```rust
+pub struct GaussianBlurParams {
+    pub sigma: f32,           // 高斯标准差（控制模糊强度）
+    pub passes: u32,          // Kawase 迭代次数
+    pub use_separable: bool,  // 是否使用分离过滤
+}
+
+impl GaussianBlurParams {
+    pub fn fast() -> Self {
+        Self { sigma: 0.8, passes: 1, use_separable: true }
+    }
+    
+    pub fn high_quality() -> Self {
+        Self { sigma: 1.5, passes: 4, use_separable: true }
+    }
+}
+```
+
+**Blur 缓存统计**：
+
+```rust
+pub struct BlurCacheStats {
+    pub hits: u64,                  // 缓存命中次数
+    pub misses: u64,                // 缓存未命中次数
+    pub total_blur_time_us: u64,    // 总模糊耗时（微秒）
+    pub cache_memory_bytes: u64,    // 缓存内存使用
+}
+```
+
+---
+
 ## 模块设计
 
-### 6.1 Compositor 核心模块
+### 7.1 Compositor 核心模块
 
 | 模块 | 职责 | 关键函数 |
 |------|------|---------|
 | `mod.rs` | 主结构、render_frame() | `render_frame()`, `create_window()`, `destroy_window()` |
 | `glx_context.rs` | GLX 上下文管理 | `make_current()`, `swap_buffers()` |
 | `tfp.rs` | Pixmap->Texture 映射 | `create_window_texture()`, `refresh_pixmaps()` |
-| `pipeline.rs` | FBO 和 blur 管道 | `create_blur_fbos()`, `create_scene_fbo()` |
+| `pipeline.rs` | FBO 和 blur 管道 | `create_blur_fbos()`, `create_scene_fbo()`, `run_blur_passes_from_fbo()` |
 | `present.rs` | VSync 呈现 | `present_frame()` |
 
-### 6.2 优化和缓存模块
+### 7.2 优化和缓存模块
 
 | 模块 | 职责 |
 |------|------|
@@ -738,16 +1220,16 @@ if shader_hot_reload_enabled && frame_count % 60 == 0 {
 | `frame_rate.rs` | 自适应帧率控制 |
 | `optimization_manager.rs` | 优化策略统一管理 |
 
-### 6.3 视觉效果模块
+### 7.3 视觉效果模块
 
 | 模块 | 效果 |
 |------|------|
 | `effects.rs` | 通用效果框架 |
-| `blur_optimize.rs` | Kawase 模糊 |
+| `blur_optimize.rs` | Kawase 模糊、自适应质量 |
 | `transitions.rs` | 窗口切换过渡 |
 | `postprocess.rs` | 全屏后处理 |
 
-### 6.4 UI 和调试模块
+### 7.4 UI 和调试模块
 
 | 模块 | 功能 |
 |------|------|
@@ -760,7 +1242,7 @@ if shader_hot_reload_enabled && frame_count % 60 == 0 {
 
 ## 性能特性
 
-### 7.1 VSync 策略
+### 8.1 VSync 策略
 
 ```rust
 // src/backend/x11/compositor/mod.rs:86
@@ -777,7 +1259,7 @@ enum VsyncMethod {
 | **OML** | 每窗口独立 | 需要精细 VSync 控制 |
 | **Present** | 最现代、最灵活 | 新型驱动 + 硬件 |
 
-### 7.2 帧率管理
+### 8.2 帧率管理
 
 ```rust
 // 事件循环中
@@ -788,7 +1270,7 @@ timeout = if needs_render {
 }
 ```
 
-### 7.3 性能指标
+### 8.3 性能指标
 
 **文件**：`src/backend/x11/compositor/perf_metrics.rs`
 
@@ -803,31 +1285,31 @@ timeout = if needs_render {
 
 ## 扩展点
 
-### 8.1 添加新的视觉效果
+### 9.1 添加新的视觉效果
 
 1. 在 `src/backend/x11/compositor/effects.rs` 中实现新效果
 2. 在 `render_frame()` 中添加新的 Pass
 3. 示例：现有的模糊、阴影、过渡等
 
-### 8.2 优化策略扩展
+### 9.2 优化策略扩展
 
 1. 修改 `OptimizationManager` 中的策略
 2. 调整阈值或启用新的优化路径
 3. 示例：自适应分辨率、动态纹理压缩等
 
-### 8.3 新的 VSync 方法
+### 9.3 新的 VSync 方法
 
 1. 在 `VsyncMethod` enum 中添加新变体
 2. 在 `present_frame()` 中实现逻辑
 3. 支持 HDR、高刷新率等新特性
 
-### 8.4 音频集成扩展
+### 9.4 音频集成扩展
 
 1. 增强 `audio_sync.rs` 中的音频时间码解析
 2. 支持多音频流同步
 3. 添加网络音频源（如 PulseAudio、JACK）
 
-### 8.5 HDR 支持
+### 9.5 HDR 支持
 
 **计划**（待实现）：
 - 10-bit 颜色输出
@@ -846,6 +1328,10 @@ timeout = if needs_render {
 | GLX 初始化 | `src/backend/x11/compositor/mod.rs` (init code) |
 | 脏区域追踪 | `src/backend/x11/compositor/dirty_region.rs` |
 | 着色器编译 | `src/backend/x11/compositor/shaders.rs` |
+| FBO 创建 | `src/backend/x11/compositor/pipeline.rs:1-150` |
+| Blur 管道 | `src/backend/x11/compositor/pipeline.rs:155-280` |
+| Blur 优化 | `src/backend/x11/compositor/blur_optimize.rs` |
+| 后处理 | `src/backend/x11/compositor/postprocess.rs` |
 
 ---
 
@@ -863,5 +1349,50 @@ timeout = if needs_render {
 
 ---
 
+## 快速导航
+
+### 关键概念速查表
+
+| 概念 | 说明 | 文件 |
+|------|------|------|
+| **Compositor** | X11 合成引擎核心 | `mod.rs` |
+| **TFP** | 零拷贝纹理映射 | `tfp.rs` |
+| **FBO** | 离屏渲染目标 | `pipeline.rs` |
+| **Blur** | Kawase 双向模糊 | `blur_optimize.rs` |
+| **VSync** | 垂直同步控制 | `present.rs` |
+| **Damage** | 脏区域追踪 | `dirty_region.rs` |
+| **Render Pass** | 单一渲染阶段 | `mod.rs:render_frame()` |
+
+### 性能优化关键指标
+
+| 指标 | 目标 | 优化点 |
+|------|------|--------|
+| **FPS** | 60+ | VSync、自适应帧率 |
+| **Frame Time** | <16.6ms | 脏区域、遮挡剔除 |
+| **VRAM** | <500MB | 纹理池、对象池 |
+| **Power** | 低 | 自适应质量、Blur 级数 |
+
+### 常用命令
+
+```bash
+# 查看性能指标
+JWM_DEBUG_HUD=1 jwm
+
+# 启用着色器热重载
+JWM_SHADER_HOT_RELOAD=1 jwm
+
+# 音频同步调试
+JWM_AUDIO_SYNC_DEBUG=1 jwm
+
+# 脏区域可视化
+JWM_DEBUG_DAMAGE=1 jwm
+```
+
+---
+
+*文档版本：2.0*
+
 *最后更新：2026-04-30*
+
+*新增内容：FBO 和 Blur 管道详解*
 
