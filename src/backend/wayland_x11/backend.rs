@@ -503,6 +503,10 @@ impl PropertyOps for WaylandPropertyOps {
         Ok(())
     }
 
+    fn set_window_type_dock(&self, _win: WindowId) -> Result<(), BackendError> {
+        Ok(())
+    }
+
     fn clear_window_strut(&self, _win: WindowId) -> Result<(), BackendError> {
         Ok(())
     }

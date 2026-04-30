@@ -443,6 +443,7 @@ pub trait PropertyOps: Send {
         start_x: u32,
         end_x: u32,
     ) -> Result<(), BackendError>;
+    fn set_window_type_dock(&self, win: WindowId) -> Result<(), BackendError>;
     fn clear_window_strut(&self, win: WindowId) -> Result<(), BackendError>;
 
     fn get_wm_state(&self, win: WindowId) -> Result<i64, BackendError>;

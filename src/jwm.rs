@@ -2028,6 +2028,38 @@ impl Jwm {
         let is_popup = self.is_popup_like(backend, client_key);
         let mask = ConfigWindowBits::from_bits_truncate(mask_bits);
 
+        let is_dock = self
+            .state
+            .clients
+            .get(client_key)
+            .map(|client| client.state.is_dock)
+            .unwrap_or(false);
+
+        if is_dock {
+            if let Some(client) = self.state.clients.get(client_key) {
+                info!(
+                    "[dock_configure_request] win={:?} mask=0x{:x} req={:?} current={}x{}+{}+{}",
+                    client.win,
+                    mask_bits,
+                    req,
+                    client.geometry.w,
+                    client.geometry.h,
+                    client.geometry.x,
+                    client.geometry.y
+                );
+                let changes = WindowChanges {
+                    x: Some(client.geometry.x),
+                    y: Some(client.geometry.y),
+                    width: Some(client.geometry.w as u32),
+                    height: Some(client.geometry.h as u32),
+                    border_width: Some(client.geometry.border_w.max(0) as u32),
+                    ..Default::default()
+                };
+                backend.window_ops().apply_window_changes(client.win, changes)?;
+            }
+            return Ok(());
+        }
+
         if mask.contains(ConfigWindowBits::BORDER_WIDTH) {
             if let Some(border) = req.border_width {
                 if !is_popup {
@@ -3237,6 +3269,21 @@ impl Jwm {
                 || layer_info.is_some();
 
             if is_likely_dock {
+                if let Some(c) = self.state.clients.get(client_key) {
+                    info!(
+                        "[dock_configure_notify] win={:?} event={}x{}+{}+{} current={}x{}+{}+{}",
+                        window,
+                        w,
+                        h,
+                        x,
+                        y,
+                        c.geometry.w,
+                        c.geometry.h,
+                        c.geometry.x,
+                        c.geometry.y
+                    );
+                }
+
                 let geometry_changed = self
                     .state
                     .clients
@@ -9943,6 +9990,16 @@ impl Jwm {
                 client.geometry.y = monitor.geometry.m_y + pad;
                 client.geometry.w = monitor.geometry.m_w - 2 * pad - 2 * border_width;
                 client.geometry.h = bar_height;
+                info!(
+                    "[position_secondary_bar_on_monitor] win={:?} target={}x{}+{}+{} pad={} monitor_id={}",
+                    win,
+                    client.geometry.w,
+                    client.geometry.h,
+                    client.geometry.x,
+                    client.geometry.y,
+                    pad,
+                    monitor_id
+                );
 
                 let changes = WindowChanges {
                     x: Some(client.geometry.x),
@@ -10021,6 +10078,7 @@ impl Jwm {
             | EventMaskBits::FOCUS_CHANGE)
             .bits();
         backend.window_ops().change_event_mask(win, mask_bits)?;
+        backend.property_ops().set_window_type_dock(win)?;
         self.configure_client(backend, client_key)?;
         info!(
             "[setup_statusbar_window_by_key] Statusbar window setup completed for {:?}",

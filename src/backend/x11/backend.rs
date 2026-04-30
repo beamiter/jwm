@@ -3775,6 +3775,18 @@ mod property_ops {
             Ok(())
         }
 
+        fn set_window_type_dock(&self, win: WindowId) -> Result<(), BackendError> {
+            let w = self.ids.x11(win)?;
+            self.conn.change_property32(
+                PropMode::REPLACE,
+                w,
+                self.atoms._NET_WM_WINDOW_TYPE,
+                AtomEnum::ATOM,
+                &[self.atoms._NET_WM_WINDOW_TYPE_DOCK],
+            )?;
+            Ok(())
+        }
+
         fn clear_window_strut(&self, win: WindowId) -> Result<(), BackendError> {
             let w = self.ids.x11(win)?;
             let _ = self.conn.delete_property(w, self.atoms._NET_WM_STRUT);
