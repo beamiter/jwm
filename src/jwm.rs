@@ -3237,6 +3237,17 @@ impl Jwm {
                 || layer_info.is_some();
 
             if is_likely_dock {
+                let geometry_changed = self
+                    .state
+                    .clients
+                    .get(client_key)
+                    .map(|c| c.geometry.x != x || c.geometry.y != y || c.geometry.w != w as i32 || c.geometry.h != h as i32)
+                    .unwrap_or(true);
+
+                if !geometry_changed {
+                    return Ok(());
+                }
+
                 if let Some(c) = self.state.clients.get_mut(client_key) {
                     c.geometry.x = x;
                     c.geometry.y = y;
