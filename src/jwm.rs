@@ -711,7 +711,16 @@ impl WMController for Jwm {
         // Handle external strut changes (polybar, trayer, etc.) — works for
         // both managed and unmanaged (override-redirect) windows.
         if kind == PropertyKind::Strut {
-            // Skip our own bar window
+            // Skip bar windows managed by jwm (secondary_bars)
+            let is_bar_window = self
+                .secondary_bars
+                .values()
+                .any(|bar| bar.window == Some(win));
+
+            if is_bar_window {
+                return;
+            }
+
             if let Some(strut) = backend.property_ops().get_window_strut_partial(win) {
                 if strut.left > 0 || strut.right > 0 || strut.top > 0 || strut.bottom > 0 {
                     let changed = self.external_struts.get(&win) != Some(&strut);
