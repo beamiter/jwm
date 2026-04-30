@@ -4091,22 +4091,23 @@ impl Jwm {
 
     fn createmon(&mut self, show_bar: bool) -> WMMonitor {
         // info!("[createmon]");
+        let cfg = CONFIG.load();
         let mut m: WMMonitor = WMMonitor::new();
         m.tag_set[0] = 1;
         m.tag_set[1] = 1;
-        m.layout.m_fact = CONFIG.load().m_fact();
-        m.layout.n_master = CONFIG.load().n_master();
+        m.layout.m_fact = cfg.m_fact();
+        m.layout.n_master = cfg.n_master();
         m.lt[0] = Rc::new(LayoutEnum::FIBONACCI);
         m.lt[1] = Rc::new(LayoutEnum::TILE);
         m.lt_symbol = m.lt[0].symbol().to_string();
-        m.pertag = Some(Pertag::new(show_bar, CONFIG.load().tags_length()));
+        m.pertag = Some(Pertag::new(show_bar, cfg.tags_length()));
         // SAFETY: pertag was just set to Some on the line above
         let ref_pertag = m.pertag.as_mut().expect("pertag just initialized");
         ref_pertag.cur_tag = 1;
         ref_pertag.prev_tag = 1;
         let default_layout_0 = m.lt[0].clone();
         let default_layout_1 = m.lt[1].clone();
-        for i in 0..=CONFIG.load().tags_length() {
+        for i in 0..=cfg.tags_length() {
             ref_pertag.n_masters[i] = m.layout.n_master;
             ref_pertag.m_facts[i] = m.layout.m_fact;
 
@@ -4365,6 +4366,7 @@ impl Jwm {
     fn vstack(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
         info!("[vstack] via pure layout engine");
 
+        let cfg = CONFIG.load();
         let (wx, wy, ww, wh, mfact, nmaster, _monitor_num, _client_y_offset) =
             self.get_monitor_info(mon_key);
 
@@ -4378,7 +4380,7 @@ impl Jwm {
         }
 
         let (_effective_border, effective_gap) = self.apply_smart_borders(&raw_clients);
-        let default_border = CONFIG.load().border_px() as i32;
+        let default_border = cfg.border_px() as i32;
 
         // Reorder: move the focused client (monitor.sel) to clients[0]
         let sel_key = self.state.monitors.get(mon_key).and_then(|m| m.sel);
@@ -4441,7 +4443,6 @@ impl Jwm {
             );
         }
 
-        let cfg = CONFIG.load();
         if cfg.animation_enabled() {
             let duration = cfg.animation_duration();
             let easing = cfg.animation_easing();
@@ -4704,12 +4705,14 @@ impl Jwm {
         };
 
         // Prepare command
+        let cfg = CONFIG.load();
+        let bar_name = cfg.status_bar_name();
         let mut command = if cfg!(feature = "nixgl") {
             let mut cmd = Command::new("nixGL");
-            cmd.arg(CONFIG.load().status_bar_name()).arg(&shared_path);
+            cmd.arg(bar_name).arg(&shared_path);
             cmd
         } else {
-            let mut cmd = Command::new(CONFIG.load().status_bar_name());
+            let mut cmd = Command::new(bar_name);
             cmd.arg(&shared_path);
             cmd
         };
@@ -4726,7 +4729,7 @@ impl Jwm {
         command.env("JWM_MONITOR_ID", monitor_id.to_string());
 
         // GTK4 bars may need cairo renderer
-        if CONFIG.load().status_bar_name() == "gtk_bar" {
+        if bar_name == "gtk_bar" {
             if std::env::var_os("GSK_RENDERER").is_none() {
                 command.env("GSK_RENDERER", "cairo");
             }
@@ -5105,8 +5108,9 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         info!("[show_keybindings]");
 
+        let cfg = CONFIG.load();
         let mut lines: Vec<String> = Vec::new();
-        for kc in CONFIG.load().key_configs() {
+        for kc in cfg.key_configs() {
             let mods = kc.modifier.join("+");
             let shortcut = if mods.is_empty() {
                 kc.key.clone()
@@ -5167,7 +5171,7 @@ impl Jwm {
         }
 
         // 添加 tag 快捷键说明
-        let tags_len = CONFIG.load().tags_length();
+        let tags_len = cfg.tags_length();
         lines.push(format!(
             "{:<28} {}",
             "Mod1+[1-9]",
@@ -5192,7 +5196,6 @@ impl Jwm {
 
         let text = lines.join("\n");
 
-        let cfg = CONFIG.load();
         let dmenu_font = cfg.dmenu_font();
         let mut command = Command::new("dmenu");
         command.args([
