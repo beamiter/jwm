@@ -5325,12 +5325,13 @@ impl Jwm {
     /// multiple tiled windows get the configured border and gap.
     fn apply_smart_borders(&mut self, clients: &[(ClientKey, f32, i32)]) -> (i32, i32) {
         let is_single = clients.len() == 1;
-        let default_border = CONFIG.load().border_px() as i32;
+        let cfg = CONFIG.load();
+        let default_border = cfg.border_px() as i32;
         let effective_border = if is_single { 0 } else { default_border };
         let effective_gap = if is_single {
             0
         } else {
-            CONFIG.load().gap_px() as i32
+            cfg.gap_px() as i32
         };
         for &(key, _, _) in clients {
             if let Some(client) = self.state.clients.get_mut(key) {
@@ -5371,8 +5372,8 @@ impl Jwm {
             // Prefer the actual status bar geometry if we have it.
             // This is important for Wayland, where the bar may be a layer-shell surface
             // and its real size/position comes from the compositor arrangement.
-            let fallback =
-                CONFIG.load().status_bar_height() + CONFIG.load().status_bar_padding() * 2;
+            let cfg = CONFIG.load();
+            let fallback = cfg.status_bar_height() + cfg.status_bar_padding() * 2;
 
             fallback
         } else {
@@ -6213,6 +6214,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let cfg = CONFIG.load();
         // Parse name and optional command from argument
         let (name, spawn_cmd) = match arg {
             WMArgEnum::StringVec(v) if !v.is_empty() => {
@@ -6254,7 +6256,6 @@ impl Jwm {
                     let hidden_rect =
                         Rect::new(current_rect.x, hidden_y, current_rect.w, current_rect.h);
 
-                    let cfg = CONFIG.load();
                     if cfg.animation_enabled() {
                         self.animations.start(
                             sp_key,
@@ -6325,7 +6326,6 @@ impl Jwm {
                         let x = area.x + (area.w - w) / 2;
                         let y = area.y + (area.h - h) / 2;
 
-                        let cfg = CONFIG.load();
                         if cfg.animation_enabled() {
                             // Animate from above screen to target position
                             // from_y: window top is at (area.y - h), so window is completely above visible area
@@ -8264,7 +8264,8 @@ impl Jwm {
             WMArgEnum::UInt(val) => *val,
             _ => return Ok(()),
         };
-        let target_mask = ui & CONFIG.load().tagmask();
+        let cfg = CONFIG.load();
+        let target_mask = ui & cfg.tagmask();
 
         let sel_mon_key = match self.state.sel_mon {
             Some(k) => k,
@@ -8295,7 +8296,6 @@ impl Jwm {
         // Notify compositor to capture old scene for slide transition
         let mut transitioning = false;
         if backend.has_compositor() {
-            let cfg = CONFIG.load();
             if cfg.animation_enabled()
                 && self.should_animate_tag_switch(sel_mon_key, old_tag_mask, new_tag_mask)
             {
@@ -8461,7 +8461,8 @@ impl Jwm {
             WMArgEnum::UInt(val) => *val,
             _ => return Ok(()),
         };
-        let mask = ui & CONFIG.load().tagmask();
+        let cfg = CONFIG.load();
+        let mask = ui & cfg.tagmask();
         let sel_mon_key = self.state.sel_mon.ok_or("No monitor selected")?;
 
         // 1. 状态变更
@@ -8478,7 +8479,6 @@ impl Jwm {
         // Notify compositor to capture old scene for slide transition
         let mut transitioning = false;
         if backend.has_compositor() {
-            let cfg = CONFIG.load();
             if cfg.animation_enabled()
                 && self.should_animate_tag_switch(sel_mon_key, old_tag_mask, new_tag_mask)
             {
@@ -9256,6 +9256,7 @@ impl Jwm {
             warn!("Window {:?} already managed", win);
             return Ok(());
         }
+        let cfg = CONFIG.load();
         let mut client = WMClient::new(win);
         client.geometry.x = geom.x as i32;
         client.geometry.old_x = geom.x as i32;
@@ -9271,7 +9272,7 @@ impl Jwm {
         self.update_class_info(backend, &mut client);
 
         info!("{}", client);
-        if client.is_status_bar(CONFIG.load().status_bar_name()) {
+        if client.is_status_bar(cfg.status_bar_name()) {
             info!("Detected status bar window");
 
             // With sequential creation, the first unmanaged bar is always the one we just created
@@ -9325,7 +9326,6 @@ impl Jwm {
             // Check if this is a scratchpad before starting default animation
             let is_scratchpad = self.scratchpad_pending_name.is_some();
 
-            let cfg = CONFIG.load();
             if cfg.animation_enabled() && !is_scratchpad {
                 if let Some(client) = self.state.clients.get(client_key) {
                     let target = Rect::new(
@@ -9386,7 +9386,6 @@ impl Jwm {
                     let x = area.x + (area.w - w) / 2;
                     let y = area.y + (area.h - h) / 2;
 
-                    let cfg = CONFIG.load();
                     if cfg.animation_enabled() {
                         let from_y = area.y - h;
                         let from_rect = Rect::new(x, from_y, w, h);
@@ -9978,15 +9977,16 @@ impl Jwm {
             .copied()
             .unwrap_or(true);
 
+        let cfg = CONFIG.load();
         let bar_height = if show_bar {
-            CONFIG.load().status_bar_height()
+            cfg.status_bar_height()
         } else {
             0
         };
 
         if let Some(client) = self.state.clients.get_mut(client_key) {
             if show_bar {
-                let pad = CONFIG.load().status_bar_padding();
+                let pad = cfg.status_bar_padding();
                 let border_width = client.geometry.border_w;
                 client.geometry.x = monitor.geometry.m_x + pad;
                 client.geometry.y = monitor.geometry.m_y + pad;
@@ -11117,6 +11117,7 @@ impl Jwm {
         _args: &serde_json::Value,
         backend: &dyn Backend,
     ) -> IpcResponse {
+        let cfg = CONFIG.load();
         match name {
             "get_windows" => {
                 let windows = self.query_windows();
@@ -11135,7 +11136,6 @@ impl Jwm {
                 IpcResponse::ok(Some(serde_json::to_value(tree).unwrap_or_default()))
             }
             "get_config" => {
-                let cfg = CONFIG.load();
                 IpcResponse::ok(Some(serde_json::json!({
                     "border_px": cfg.border_px(),
                     "gap_px": cfg.gap_px(),
@@ -11158,7 +11158,7 @@ impl Jwm {
                     IpcResponse::ok(Some(serde_json::json!({
                         "window_count": self.state.clients.len(),
                         "monitor_count": self.state.monitors.len(),
-                        "tag_count": CONFIG.load().tags_length(),
+                        "tag_count": cfg.tags_length(),
                     })))
                 }
             }
