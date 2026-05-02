@@ -4180,6 +4180,12 @@ impl Compositor {
                         Some(wt) => wt,
                         None => continue,
                     };
+                    // Skip shadow for statusbar
+                    let cfg = crate::config::CONFIG.load();
+                    let status_bar_name = cfg.status_bar_name();
+                    if wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name) {
+                        continue;
+                    }
                     // Per-window shadow exclude
                     if Self::class_matches_exclude(&wt.class_name, &self.shadow_exclude) {
                         continue;
@@ -4602,7 +4608,12 @@ impl Compositor {
                         }
                     }
 
-                    if (effective_border_enabled && base_border_width > 0.0) || has_special_border {
+                    // Skip border for statusbar
+                    let cfg = crate::config::CONFIG.load();
+                    let status_bar_name = cfg.status_bar_name();
+                    let is_statusbar = wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name);
+
+                    if !is_statusbar && ((effective_border_enabled && base_border_width > 0.0) || has_special_border) {
                         let color = if focus_highlight_active_for_win {
                             let elapsed_ms = self.focus_highlight_start.unwrap().1.elapsed().as_millis() as f32;
                             let dur = self.focus_highlight_duration_ms as f32;
