@@ -4676,7 +4676,7 @@ impl Compositor {
                                 color[0], color[1], color[2], color[3] * fade,
                             );
                             self.gl.uniform_1_f32(
-                                self.border_uniforms.radius.as_ref(), radius + bw,
+                                self.border_uniforms.radius.as_ref(), radius,
                             );
                             self.gl.uniform_2_f32(
                                 self.border_uniforms.size.as_ref(), bdr_w, bdr_h,
