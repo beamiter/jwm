@@ -886,9 +886,23 @@ fn main() -> glib::ExitCode {
 
     info!("Starting GTK4 Bar (layout selector optimized like iced_bar)");
 
+    // Get monitor ID from environment or shared path to create unique application ID
+    let monitor_id = env::var("JWM_MONITOR_ID").unwrap_or_else(|_| {
+        // Extract monitor ID from shared path like "/dev/shm/jwm_bar_mon_1"
+        shared_path
+            .split('_')
+            .last()
+            .and_then(|s| s.parse::<i32>().ok())
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "0".to_string())
+    });
+
+    let app_id = format!("dev.gtk.bar.mon{}", monitor_id);
+    info!("Application ID: {}", app_id);
+
     // GTK 应用
     let app = Application::builder()
-        .application_id("dev.gtk.bar")
+        .application_id(&app_id)
         .flags(gio::ApplicationFlags::HANDLES_OPEN | gio::ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
 
