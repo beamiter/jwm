@@ -3295,6 +3295,18 @@ impl Jwm {
                     return Ok(());
                 }
 
+                // Check if this is a status bar being moved back to origin by GTK
+                // If so, skip the update to prevent feedback loop with arrange
+                let is_status_bar_reset = self.state.clients.get(client_key).map(|c| {
+                    c.state.is_dock && x == 0 && y == 0 && c.geometry.x != 0
+                }).unwrap_or(false);
+
+                if is_status_bar_reset {
+                    // Status bar trying to reset to (0,0), ignore this configure notify
+                    // to prevent feedback loop with arrange repositioning it
+                    return Ok(());
+                }
+
                 if let Some(c) = self.state.clients.get_mut(client_key) {
                     c.geometry.x = x;
                     c.geometry.y = y;
@@ -9295,7 +9307,8 @@ impl Jwm {
                 }
                 return self.manage_secondary_statusbar(backend, client_key, win, mon_id);
             } else {
-                warn!("Received bar window but no unmanaged bar found!");
+                // Don't warn - bar may have exited and been removed while window was still being mapped
+                info!("No unmanaged bar found for status bar window, ignoring");
                 return Ok(());
             }
         }
