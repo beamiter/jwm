@@ -4268,7 +4268,18 @@ impl Compositor {
 
         // === Pass 2: Draw window textures ===
         let wm_border_px = crate::config::CONFIG.load().border_px() as f32;
-        let effective_border_enabled = self.border_enabled || wm_border_px > 0.0;
+
+        // Count actual client windows (excluding statusbar) to apply smart borders
+        let cfg = crate::config::CONFIG.load();
+        let status_bar_name = cfg.status_bar_name();
+        let client_window_count = visible_scene.iter().filter(|&&(win, _, _, _, _)| {
+            self.windows.get(&win)
+                .map(|wt| !(wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name)))
+                .unwrap_or(false)
+        }).count();
+        drop(cfg);
+
+        let effective_border_enabled = (self.border_enabled || wm_border_px > 0.0) && client_window_count > 1;
         let base_border_width = if self.border_enabled { self.border_width } else { wm_border_px };
 
         // Track the below-scene for blur caching: a running hash of (win, x, y, w, h)
