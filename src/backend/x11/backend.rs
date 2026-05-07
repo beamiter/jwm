@@ -208,12 +208,21 @@ impl X11Backend {
         let compositor_enabled = env::var("JWM_COMPOSITOR")
             .map(|v| v == "1")
             .unwrap_or_else(|_| crate::config::CONFIG.load().compositor_enabled());
+
+        // P4: Query primary monitor refresh rate before compositor init
+        let outputs = OutputOps::enumerate_outputs(output_ops.as_ref());
+        let primary_refresh_hz = outputs.iter()
+            .find_map(|o| if o.refresh_rate > 0 { Some(o.refresh_rate) } else { None })
+            .unwrap_or(60);
+        log::info!("backend: primary monitor refresh rate: {}Hz", primary_refresh_hz);
+
         let compositor = if compositor_enabled {
             match super::compositor::Compositor::new(
                 conn.clone(),
                 root_x11,
                 screen.width_in_pixels as u32,
                 screen.height_in_pixels as u32,
+                primary_refresh_hz,
             ) {
                 Ok(c) => {
                     log::info!("GPU compositor initialized successfully");
@@ -397,6 +406,24 @@ impl X11Backend {
     pub fn screen(&self) -> &Screen {
         &self.screen
     }
+
+    /// P4: Get primary monitor refresh rate in Hz from RandR (for dynamic blur strength)
+    pub fn get_primary_monitor_refresh_rate(&self) -> u32 {
+        let outputs = OutputOps::enumerate_outputs(self.output_ops.as_ref());
+
+        // Find primary output (first connected, or marked as primary)
+        for output in &outputs {
+            // Assume refresh_rate is already populated by RandR query
+            if output.refresh_rate > 0 {
+                log::info!("backend: primary monitor refresh rate: {}Hz", output.refresh_rate);
+                return output.refresh_rate;
+            }
+        }
+
+        // Fallback: return 60Hz
+        log::warn!("backend: no output with refresh rate found, defaulting to 60Hz");
+        60
+    }
 }
 
 impl Backend for X11Backend {
@@ -434,11 +461,13 @@ impl Backend for X11Backend {
             return Ok(false);
         }
         if enabled {
+            let primary_refresh_hz = self.get_primary_monitor_refresh_rate();
             match super::compositor::Compositor::new(
                 self.conn.clone(),
                 self.root_x11,
                 self.screen.width_in_pixels as u32,
                 self.screen.height_in_pixels as u32,
+                primary_refresh_hz,
             ) {
                 Ok(mut compositor) => {
                     // Register all existing managed windows with the new compositor

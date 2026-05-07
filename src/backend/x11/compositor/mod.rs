@@ -1252,6 +1252,7 @@ impl Compositor {
         root: u32,
         screen_w: u32,
         screen_h: u32,
+        primary_refresh_hz: u32,
     ) -> Result<Self, String> {
         // 1. Check composite extension
         conn.composite_query_version(0, 4)
@@ -2196,13 +2197,13 @@ impl Compositor {
         let blur_quality_by_monitor = Self::parse_blur_quality_by_monitor(&behavior.blur_quality_by_monitor);
 
         // P5: Apply dynamic blur strength based on Hz
-        // For now, use 60Hz as default. In future, query actual monitor refresh rate from RandR.
+        // Use actual primary monitor refresh rate (now queried from RandR)
         let mut dynamic_blur_strength = behavior.blur_strength;
         if !blur_strength_by_hz.is_empty() {
-            // Use 60Hz as baseline for MVP; in future, query actual Hz from RandR
-            if let Some(hz_strength) = Self::new_get_blur_strength_for_hz_static(&blur_strength_by_hz, 60) {
+            // Use actual primary monitor refresh rate from RandR
+            if let Some(hz_strength) = Self::new_get_blur_strength_for_hz_static(&blur_strength_by_hz, primary_refresh_hz) {
                 dynamic_blur_strength = hz_strength;
-                log::info!("compositor: dynamic blur strength at 60Hz: {} (config: {})", hz_strength, behavior.blur_strength);
+                log::info!("compositor: dynamic blur strength at {}Hz: {} (config: {})", primary_refresh_hz, hz_strength, behavior.blur_strength);
             }
         }
 
