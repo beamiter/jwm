@@ -754,6 +754,9 @@ pub(super) struct Compositor {
     shadow_program: glow::Program,
     blur_down_program: glow::Program,
     blur_up_program: glow::Program,
+    // P4: Temporal blur mix program
+    temporal_blur_mix_program: glow::Program,
+    temporal_blur_mix_uniforms: BlurUniforms,
     win_uniforms: WindowUniforms,
     shadow_uniforms: ShadowUniforms,
     blur_down_uniforms: BlurUniforms,
@@ -1151,6 +1154,7 @@ impl Drop for Compositor {
             self.gl.delete_program(self.shadow_program);
             self.gl.delete_program(self.blur_down_program);
             self.gl.delete_program(self.blur_up_program);
+            self.gl.delete_program(self.temporal_blur_mix_program);
             self.gl.delete_program(self.border_program);
             self.gl.delete_program(self.postprocess_program);
             self.gl.delete_program(self.hud_program);
@@ -1744,6 +1748,17 @@ impl Compositor {
             }
         };
 
+        // P4: Compile temporal blur mix shader
+        let temporal_blur_mix_program = unsafe { Self::create_program(&gl, shaders::TEMPORAL_BLUR_MIX_VERTEX, shaders::TEMPORAL_BLUR_MIX_FRAGMENT)? };
+        let temporal_blur_mix_uniforms = unsafe {
+            BlurUniforms {
+                projection: gl.get_uniform_location(temporal_blur_mix_program, "u_projection"),
+                rect: gl.get_uniform_location(temporal_blur_mix_program, "u_rect"),
+                texture: gl.get_uniform_location(temporal_blur_mix_program, "u_texture"),
+                halfpixel: gl.get_uniform_location(temporal_blur_mix_program, "u_halfpixel"),
+            }
+        };
+
         // Compile border shader (feature 1)
         let border_program = unsafe { Self::create_program(&gl, shaders::VERTEX_SHADER, shaders::BORDER_FRAGMENT_SHADER)? };
         let border_uniforms = unsafe {
@@ -2196,6 +2211,8 @@ impl Compositor {
             shadow_program,
             blur_down_program,
             blur_up_program,
+            temporal_blur_mix_program,
+            temporal_blur_mix_uniforms,
             win_uniforms,
             shadow_uniforms,
             blur_down_uniforms,
@@ -3142,6 +3159,86 @@ impl Compositor {
             wt.fade_opacity.to_bits().hash(&mut hasher);
         }
         hasher.finish()
+    }
+
+    /// P4: Apply temporal blur mixing: blend current with previous frame if content is stable
+    /// When window positions are unchanged, we can mix current blur with previous blur for:
+    /// - Higher visual stability (less flicker from blur recomputation)
+    /// - Lower GPU cost (fewer blur samples needed for same quality)
+    fn apply_temporal_blur_mix(&mut self, current_blur_tex: glow::Texture) -> glow::Texture {
+        if !self.temporal_blur_enabled || self.prev_blur_fbo.is_none() {
+            return current_blur_tex;
+        }
+
+        // Create output FBO if needed
+        if self.prev_blur_fbo.is_none() {
+            if let Ok((fbo, tex)) = unsafe { Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h) } {
+                self.prev_blur_fbo = Some((fbo, tex));
+            }
+        }
+
+        let prev_blur_fbo = match &self.prev_blur_fbo {
+            Some((fbo, _)) => *fbo,
+            None => return current_blur_tex,
+        };
+
+        let proj = math::ortho(0.0, self.screen_w as f32, self.screen_h as f32, 0.0, -1.0, 1.0);
+
+        unsafe {
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(prev_blur_fbo));
+            self.gl.use_program(Some(self.temporal_blur_mix_program));
+            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+
+            // Bind current blur as TEXTURE0
+            self.gl.active_texture(glow::TEXTURE0);
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(current_blur_tex));
+            self.gl.uniform_1_i32(
+                self.gl.get_uniform_location(self.temporal_blur_mix_program, "u_current_blur").as_ref(),
+                0,
+            );
+
+            // Bind previous blur as TEXTURE1
+            if let Some((_, prev_tex)) = &self.prev_blur_fbo {
+                self.gl.active_texture(glow::TEXTURE1);
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(*prev_tex));
+                self.gl.uniform_1_i32(
+                    self.gl.get_uniform_location(self.temporal_blur_mix_program, "u_previous_blur").as_ref(),
+                    1,
+                );
+            }
+
+            // Set blend ratio
+            self.gl.uniform_1_f32(
+                self.gl.get_uniform_location(self.temporal_blur_mix_program, "u_temporal_mix").as_ref(),
+                self.temporal_blur_mix_ratio,
+            );
+
+            // Set projection and rect
+            self.gl.uniform_matrix_4_f32_slice(
+                self.temporal_blur_mix_uniforms.projection.as_ref(),
+                false,
+                &proj,
+            );
+            self.gl.uniform_4_f32(
+                self.temporal_blur_mix_uniforms.rect.as_ref(),
+                0.0,
+                0.0,
+                self.screen_w as f32,
+                self.screen_h as f32,
+            );
+
+            // Draw quad
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.gl.bind_vertex_array(None);
+        }
+
+        // Return mixed result texture
+        if let Some((_, tex)) = &self.prev_blur_fbo {
+            *tex
+        } else {
+            current_blur_tex
+        }
     }
 
     /// Whether a window should receive per-frame backdrop blur compositing.

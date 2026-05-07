@@ -883,3 +883,42 @@ void main() {
 "#;
 
 // Genie uses the same fragment shader as windows (FRAGMENT_SHADER)
+
+// ---------------------------------------------------------------------------
+// P4: Temporal Blur Mix shader (for temporal blur reuse)
+// ---------------------------------------------------------------------------
+
+/// Mix current blur frame with previous blur frame for temporal stability.
+/// Formula: output = (1 - u_temporal_mix) * current + u_temporal_mix * previous
+pub const TEMPORAL_BLUR_MIX_VERTEX: &str = r#"#version 330 core
+
+uniform vec4 u_rect;
+uniform mat4 u_projection;
+out vec2 v_uv;
+
+void main() {
+    vec2 pos = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1));
+    v_uv = pos;
+    vec2 pixel = u_rect.xy + pos * u_rect.zw;
+    gl_Position = u_projection * vec4(pixel, 0.0, 1.0);
+}
+"#;
+
+pub const TEMPORAL_BLUR_MIX_FRAGMENT: &str = r#"#version 330 core
+
+uniform sampler2D u_current_blur;    // Current frame blur result
+uniform sampler2D u_previous_blur;   // Previous frame blur result
+uniform float u_temporal_mix;        // 0.0 = all current, 1.0 = all previous (typical: 0.8)
+in vec2 v_uv;
+out vec4 frag_color;
+
+void main() {
+    vec4 current = texture(u_current_blur, v_uv);
+    vec4 previous = texture(u_previous_blur, v_uv);
+
+    // Linear blend: (1-ratio)*new + ratio*previous
+    // High ratio (e.g., 0.8) = 80% previous, 20% new (more stable)
+    frag_color = mix(current, previous, u_temporal_mix);
+}
+"#;
+
