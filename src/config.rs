@@ -134,6 +134,21 @@ pub struct BehaviorConfig {
     /// Window classes to exclude from blur.
     #[serde(default)]
     pub blur_exclude: Vec<String>,
+    /// Enable temporal blur reuse: blend current frame blur with previous frame for stable content.
+    #[serde(default = "default_true")]
+    pub blur_temporal_enabled: bool,
+    /// Temporal blur mix ratio: 0.0 = all new, 1.0 = all previous frame. Default 0.8 = 80% prev + 20% new.
+    #[serde(default = "default_temporal_blur_ratio")]
+    pub blur_temporal_mix_ratio: f32,
+    /// Dynamic blur strength based on monitor refresh rate (Hz). Format: "60:2,75:2.5,144:3.5".
+    /// If monitor Hz not listed, uses closest lower Hz value. If no lower value, uses closest higher.
+    #[serde(default = "default_blur_strength_by_hz")]
+    pub blur_strength_by_hz: String,
+    /// Per-monitor blur quality. Format: "primary:Full,secondary:Reduced".
+    /// Monitors: "primary" (0), "secondary" (1), "tertiary" (2), etc.
+    /// Quality: "Full", "Reduced", "Minimal".
+    #[serde(default = "default_blur_quality_by_monitor")]
+    pub blur_quality_by_monitor: String,
     /// Window classes to exclude from rounded corners.
     #[serde(default)]
     pub rounded_corners_exclude: Vec<String>,
@@ -555,6 +570,17 @@ fn default_hdr_peak_nits() -> f32 {
 fn default_tone_mapping_method() -> String {
     "aces".to_string()  // ACES filmic tone mapping (best quality)
 }
+fn default_temporal_blur_ratio() -> f32 {
+    0.8  // 80% previous frame + 20% new
+}
+fn default_blur_strength_by_hz() -> String {
+    // Default: 60Hz→2, 75Hz→2.5, 90Hz→3, 120Hz→3.5, 144Hz→4
+    "60:2,75:2.5,90:3,120:3.5,144:4".to_string()
+}
+fn default_blur_quality_by_monitor() -> String {
+    // Default: primary=Full, others=Reduced (can be overridden per-monitor)
+    "".to_string()
+}
 fn default_window_animation_scale() -> f32 {
     0.85
 }
@@ -826,6 +852,10 @@ impl Default for Config {
                     blur_enabled: true,
                     blur_strength: default_blur_strength(),
                     blur_quality_auto: true,
+                    blur_temporal_enabled: default_true(),
+                    blur_temporal_mix_ratio: default_temporal_blur_ratio(),
+                    blur_strength_by_hz: default_blur_strength_by_hz(),
+                    blur_quality_by_monitor: default_blur_quality_by_monitor(),
                     fading: false,
                     fade_in_step: default_fade_step(),
                     fade_out_step: default_fade_step(),

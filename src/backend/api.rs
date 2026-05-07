@@ -23,6 +23,10 @@ pub struct CompositorMetrics {
     pub blur_cache_hits: u64,
     pub blur_cache_misses: u64,
     pub blur_cache_hit_rate: f32,
+    // P4: Temporal blur reuse metrics
+    pub temporal_blur_reuse_count: u64,
+    pub temporal_blur_total_count: u64,
+    pub temporal_blur_reuse_rate: f32,
     pub dirty_regions_count: usize,
     pub dirty_fraction_percent: f32,
     pub window_count: usize,

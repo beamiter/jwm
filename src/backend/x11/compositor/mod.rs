@@ -1117,6 +1117,26 @@ pub(super) struct Compositor {
     // --- Adaptive Blur: Hysteresis to prevent flicker ---
     last_gpu_load: u32,
     last_gpu_load_update: std::time::Instant,
+
+    // --- P4: Per-monitor and temporal blur optimization ---
+    /// Parsed blur strength mapping: Hz -> strength (e.g., 60->2, 144->4)
+    blur_strength_by_hz: Vec<(u32, u32)>,  // [(hz, strength), ...]
+    /// Per-monitor blur quality: monitor_index -> BlurQuality
+    blur_quality_by_monitor: HashMap<u32, BlurQuality>,
+    /// Monitor refresh rates: monitor_index -> Hz
+    monitor_refresh_rates: HashMap<u32, u32>,
+    /// Temporal blur: previous frame blur FBO
+    prev_blur_fbo: Option<(glow::Framebuffer, glow::Texture)>,
+    /// Temporal blur: previous frame window positions hash (to detect movement)
+    prev_window_positions_hash: u64,
+    /// Temporal blur: mix ratio (0.0 = all new, 1.0 = all previous)
+    temporal_blur_mix_ratio: f32,
+    /// Temporal blur: is enabled
+    temporal_blur_enabled: bool,
+    /// Temporal blur: count of reuse frames
+    temporal_blur_reuse_count: u64,
+    /// Temporal blur: total blur frames (for hit rate calculation)
+    temporal_blur_total_count: u64,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
@@ -2154,6 +2174,12 @@ impl Compositor {
             None
         };
 
+        // Parse P4: blur_strength_by_hz configuration
+        let blur_strength_by_hz = Self::parse_blur_strength_by_hz(&behavior.blur_strength_by_hz);
+
+        // Parse P4: blur_quality_by_monitor configuration
+        let blur_quality_by_monitor = Self::parse_blur_quality_by_monitor(&behavior.blur_quality_by_monitor);
+
         Ok(Self {
             conn,
             xlib_display,
@@ -2482,6 +2508,16 @@ impl Compositor {
             vrr_last_check: std::time::Instant::now(),
             last_gpu_load: 0,
             last_gpu_load_update: std::time::Instant::now(),
+            // P4: Per-monitor and temporal blur
+            blur_strength_by_hz,
+            blur_quality_by_monitor,
+            monitor_refresh_rates: HashMap::new(),
+            prev_blur_fbo: None,
+            prev_window_positions_hash: 0,
+            temporal_blur_mix_ratio: behavior.blur_temporal_mix_ratio,
+            temporal_blur_enabled: behavior.blur_temporal_enabled,
+            temporal_blur_reuse_count: 0,
+            temporal_blur_total_count: 0,
         })
     }
 
@@ -3013,6 +3049,99 @@ impl Compositor {
             },
             BlurQuality::Full => per_window_quality,
         }
+    }
+
+    /// Parse blur_strength_by_hz config string: "60:2,75:2.5,144:3.5" -> [(60, 2), (75, 2), (144, 3)]
+    fn parse_blur_strength_by_hz(config_str: &str) -> Vec<(u32, u32)> {
+        let mut result = Vec::new();
+        if config_str.is_empty() {
+            return result;
+        }
+        for pair in config_str.split(',') {
+            let parts: Vec<&str> = pair.trim().split(':').collect();
+            if parts.len() == 2 {
+                if let (Ok(hz), Ok(strength_f)) = (parts[0].trim().parse::<u32>(), parts[1].trim().parse::<f32>()) {
+                    result.push((hz, strength_f as u32));
+                }
+            }
+        }
+        result.sort_by_key(|p| p.0);  // Sort by Hz ascending
+        result
+    }
+
+    /// Parse blur_quality_by_monitor config string: "primary:Full,secondary:Reduced"
+    fn parse_blur_quality_by_monitor(config_str: &str) -> HashMap<u32, BlurQuality> {
+        let mut result = HashMap::new();
+        if config_str.is_empty() {
+            return result;
+        }
+        let monitor_names = ["primary", "secondary", "tertiary", "quaternary", "quinary"];
+        for pair in config_str.split(',') {
+            let parts: Vec<&str> = pair.trim().split(':').collect();
+            if parts.len() == 2 {
+                let monitor_name = parts[0].trim();
+                let quality_str = parts[1].trim();
+
+                // Map monitor name to index
+                if let Some(idx) = monitor_names.iter().position(|&n| n == monitor_name) {
+                    let quality = match quality_str {
+                        "Full" => BlurQuality::Full,
+                        "Reduced" => BlurQuality::Reduced,
+                        "Minimal" => BlurQuality::Minimal,
+                        _ => continue,
+                    };
+                    result.insert(idx as u32, quality);
+                }
+            }
+        }
+        result
+    }
+
+    /// Get blur strength for a given refresh rate Hz.
+    /// If exact Hz not found, returns closest lower, or if none, closest higher.
+    fn get_blur_strength_for_hz(&self, hz: u32) -> Option<u32> {
+        if self.blur_strength_by_hz.is_empty() {
+            return None;
+        }
+
+        // Find exact match or closest lower
+        for (i, &(config_hz, strength)) in self.blur_strength_by_hz.iter().enumerate() {
+            if config_hz == hz {
+                return Some(strength);
+            }
+            if config_hz > hz {
+                // Not found exact, try previous
+                if i > 0 {
+                    return Some(self.blur_strength_by_hz[i - 1].1);
+                }
+                // No lower value, use this one
+                return Some(strength);
+            }
+        }
+        // All values are lower, use the last one
+        self.blur_strength_by_hz.last().map(|p| p.1)
+    }
+
+    /// Compute a hash of all visible window positions (for temporal blur reuse detection).
+    /// If positions are stable (hash unchanged), we can reuse/blend previous frame's blur.
+    fn compute_window_positions_hash(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::{Hash, Hasher};
+
+        let mut sorted_windows: Vec<_> = self.windows.iter().collect();
+        sorted_windows.sort_by_key(|(id, _)| *id);
+
+        for (_, wt) in sorted_windows {
+            if wt.dirty || wt.fading_out {
+                continue;  // Skip dirty/fading windows for stability
+            }
+            wt.x.hash(&mut hasher);
+            wt.y.hash(&mut hasher);
+            wt.w.hash(&mut hasher);
+            wt.h.hash(&mut hasher);
+            wt.fade_opacity.to_bits().hash(&mut hasher);
+        }
+        hasher.finish()
     }
 
     /// Whether a window should receive per-frame backdrop blur compositing.
@@ -3668,6 +3797,12 @@ impl Compositor {
             0.0
         };
 
+        let temporal_blur_reuse_rate = if self.temporal_blur_total_count > 0 {
+            100.0 * self.temporal_blur_reuse_count as f32 / self.temporal_blur_total_count as f32
+        } else {
+            0.0
+        };
+
         let dirty_tiles_count = self.damage_tracker.dirty_tiles.iter().filter(|&&d| d).count();
         let dirty_fraction = self.damage_tracker.dirty_fraction();
 
@@ -3686,6 +3821,9 @@ impl Compositor {
             blur_cache_hits: self.frame_stats.blur_cache_hits,
             blur_cache_misses: self.frame_stats.blur_cache_misses,
             blur_cache_hit_rate: blur_hit_rate,
+            temporal_blur_reuse_count: self.temporal_blur_reuse_count,
+            temporal_blur_total_count: self.temporal_blur_total_count,
+            temporal_blur_reuse_rate,
             dirty_regions_count: dirty_tiles_count,
             dirty_fraction_percent: dirty_fraction * 100.0,
             window_count: self.windows.len(),
