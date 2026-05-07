@@ -222,6 +222,17 @@ pub struct BehaviorConfig {
     #[serde(default)]
     pub grayscale: bool,
 
+    // --- P3: HDR / 10-bit output ---
+    /// Enable HDR (High Dynamic Range) output with tone mapping.
+    #[serde(default)]
+    pub hdr_enabled: bool,
+    /// Target display peak luminance in nits (400=HDR400, 600=HDR600, 1000=HDR1000).
+    #[serde(default = "default_hdr_peak_nits")]
+    pub hdr_peak_nits: f32,
+    /// Tone mapping method: "none", "reinhard", "aces".
+    #[serde(default = "default_tone_mapping_method")]
+    pub tone_mapping_method: String,
+
     // --- Feature 11: Performance debug HUD ---
     /// Show FPS / frame time debug overlay.
     #[serde(default)]
@@ -538,6 +549,12 @@ fn default_vrr_min_fps() -> u32 {
 fn default_vrr_max_fps() -> u32 {
     240
 }
+fn default_hdr_peak_nits() -> f32 {
+    400.0  // Conservative HDR400 baseline
+}
+fn default_tone_mapping_method() -> String {
+    "aces".to_string()  // ACES filmic tone mapping (best quality)
+}
 fn default_window_animation_scale() -> f32 {
     0.85
 }
@@ -838,6 +855,9 @@ impl Default for Config {
                     contrast: default_one(),
                     invert_colors: false,
                     grayscale: false,
+                    hdr_enabled: false,  // Disabled by default (requires HDR display)
+                    hdr_peak_nits: default_hdr_peak_nits(),
+                    tone_mapping_method: default_tone_mapping_method(),
                     debug_hud: false,
                     blur_use_frame_extents: false,
                     shadow_bottom_extra: default_shadow_bottom_extra(),

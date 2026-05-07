@@ -21,6 +21,7 @@ impl Compositor {
             || self.grayscale
             || self.magnifier_enabled
             || self.colorblind_mode != 0
+            || self.hdr_enabled
     }
 
     /// Capture the current framebuffer to a PNG file.
@@ -178,15 +179,17 @@ impl Compositor {
             // Create temp FBO
             let tex = self.gl.create_texture().ok()?;
             self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            // Use 10-bit internal format for HDR-ready pipeline
+            const GL_RGB10_A2: u32 = 0x8059;
             self.gl.tex_image_2d(
                 glow::TEXTURE_2D,
                 0,
-                glow::RGBA8 as i32,
+                GL_RGB10_A2 as i32,
                 tw as i32,
                 th as i32,
                 0,
                 glow::RGBA,
-                glow::UNSIGNED_BYTE,
+                glow::UNSIGNED_INT_2_10_10_10_REV,
                 glow::PixelUnpackData::Slice(None),
             );
             self.gl.tex_parameter_i32(

@@ -373,6 +373,9 @@ struct PostprocessUniforms {
     contrast: Option<glow::UniformLocation>,
     invert: Option<glow::UniformLocation>,
     grayscale: Option<glow::UniformLocation>,
+    hdr_enabled: Option<glow::UniformLocation>,
+    hdr_peak_nits: Option<glow::UniformLocation>,
+    tone_mapping_method: Option<glow::UniformLocation>,
 }
 
 // --- Feature 11: HUD uniforms ---
@@ -837,6 +840,11 @@ pub(super) struct Compositor {
     // --- Feature 10: Invert / accessibility ---
     invert_colors: bool,
     grayscale: bool,
+
+    // --- P3: HDR / 10-bit output ---
+    hdr_enabled: bool,
+    hdr_peak_nits: f32,
+    tone_mapping_method: i32,  // 0=none, 1=Reinhard, 2=ACES
 
     // --- Feature 11: Debug HUD ---
     hud_program: glow::Program,
@@ -1740,6 +1748,9 @@ impl Compositor {
                 contrast: gl.get_uniform_location(postprocess_program, "u_contrast"),
                 invert: gl.get_uniform_location(postprocess_program, "u_invert"),
                 grayscale: gl.get_uniform_location(postprocess_program, "u_grayscale"),
+                hdr_enabled: gl.get_uniform_location(postprocess_program, "u_hdr_enabled"),
+                hdr_peak_nits: gl.get_uniform_location(postprocess_program, "u_hdr_peak_nits"),
+                tone_mapping_method: gl.get_uniform_location(postprocess_program, "u_tone_mapping_method"),
             }
         };
 
@@ -2223,6 +2234,14 @@ impl Compositor {
             // Feature 10: invert / accessibility
             invert_colors: behavior.invert_colors,
             grayscale: behavior.grayscale,
+            // P3: HDR / 10-bit output
+            hdr_enabled: behavior.hdr_enabled,
+            hdr_peak_nits: behavior.hdr_peak_nits,
+            tone_mapping_method: match behavior.tone_mapping_method.as_str() {
+                "reinhard" => 1,
+                "aces" => 2,
+                _ => 0,  // "none" or unknown
+            },
             // Feature 11: debug HUD
             hud_program,
             hud_uniforms,
@@ -2567,15 +2586,17 @@ impl Compositor {
                 }
             };
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            // Use 10-bit internal format for HDR-ready pipeline
+            const GL_RGB10_A2: u32 = 0x8059;
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
                 0,
-                glow::RGBA8 as i32,
+                GL_RGB10_A2 as i32,
                 data.width as i32,
                 data.height as i32,
                 0,
                 glow::RGBA,
-                glow::UNSIGNED_BYTE,
+                glow::UNSIGNED_BYTE,  // Source data is still 8-bit, GPU converts to 10-bit
                 glow::PixelUnpackData::Slice(Some(&data.rgba)),
             );
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
@@ -4946,6 +4967,11 @@ impl Compositor {
                 self.gl.uniform_1_f32(self.postprocess_uniforms.contrast.as_ref(), self.contrast);
                 self.gl.uniform_1_i32(self.postprocess_uniforms.invert.as_ref(), if self.invert_colors { 1 } else { 0 });
                 self.gl.uniform_1_i32(self.postprocess_uniforms.grayscale.as_ref(), if self.grayscale { 1 } else { 0 });
+
+                // HDR tone mapping uniforms
+                self.gl.uniform_1_i32(self.postprocess_uniforms.hdr_enabled.as_ref(), if self.hdr_enabled { 1 } else { 0 });
+                self.gl.uniform_1_f32(self.postprocess_uniforms.hdr_peak_nits.as_ref(), self.hdr_peak_nits);
+                self.gl.uniform_1_i32(self.postprocess_uniforms.tone_mapping_method.as_ref(), self.tone_mapping_method);
 
                 // Magnifier uniforms
                 self.gl.uniform_1_i32(self.magnifier_uniforms.magnifier_enabled.as_ref(), if self.magnifier_enabled { 1 } else { 0 });

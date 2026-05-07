@@ -26,15 +26,18 @@ impl Compositor {
                     Err(_) => break,
                 };
                 gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                // Use 10-bit internal format for reduced banding (HDR-ready pipeline)
+                // GL_RGB10_A2 = 10 bits per RGB channel + 2 bits alpha = 32 bits total
+                const GL_RGB10_A2: u32 = 0x8059;
                 gl.tex_image_2d(
                     glow::TEXTURE_2D,
                     0,
-                    glow::RGBA8 as i32,
+                    GL_RGB10_A2 as i32,
                     cur_w as i32,
                     cur_h as i32,
                     0,
                     glow::RGBA,
-                    glow::UNSIGNED_BYTE,
+                    glow::UNSIGNED_INT_2_10_10_10_REV,
                     glow::PixelUnpackData::Slice(None),
                 );
                 gl.tex_parameter_i32(
@@ -101,15 +104,17 @@ impl Compositor {
                 .create_texture()
                 .map_err(|e| format!("scene_fbo tex: {e}"))?;
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            // Use 10-bit internal format for HDR-ready pipeline
+            const GL_RGB10_A2: u32 = 0x8059;
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
                 0,
-                glow::RGBA8 as i32,
+                GL_RGB10_A2 as i32,
                 w as i32,
                 h as i32,
                 0,
                 glow::RGBA,
-                glow::UNSIGNED_BYTE,
+                glow::UNSIGNED_INT_2_10_10_10_REV,
                 glow::PixelUnpackData::Slice(None),
             );
             gl.tex_parameter_i32(

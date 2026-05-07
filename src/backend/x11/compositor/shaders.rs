@@ -477,6 +477,10 @@ uniform float u_magnifier_radius;  // in normalized coords
 uniform float u_magnifier_zoom;    // zoom factor (e.g. 2.0)
 // Colorblind correction uniform
 uniform int   u_colorblind_mode;   // 0=none, 1=deuteranopia, 2=protanopia, 3=tritanopia
+// HDR tone mapping uniforms
+uniform int   u_hdr_enabled;           // 0=off, 1=on
+uniform float u_hdr_peak_nits;         // Target display peak luminance (400-1000 nits)
+uniform int   u_tone_mapping_method;   // 0=none, 1=Reinhard, 2=ACES
 in vec2 v_uv;
 out vec4 frag_color;
 
@@ -560,6 +564,29 @@ void main() {
         c.r += t * 0.1;
         c.b -= t * 0.1;
         c.rgb = clamp(c.rgb, 0.0, 1.0);
+    }
+
+    // HDR tone mapping (SDR→HDR expansion)
+    if (u_hdr_enabled == 1) {
+        // Expand SDR content (assumed 0-80 nits) to HDR range (0-peak_nits)
+        float sdr_white_nits = 80.0;
+        float scale = u_hdr_peak_nits / sdr_white_nits;
+        c.rgb *= scale;
+
+        // Apply tone mapping curve to prevent clipping
+        if (u_tone_mapping_method == 1) {
+            // Reinhard tone mapping: x / (1 + x)
+            c.rgb = c.rgb / (vec3(1.0) + c.rgb);
+        } else if (u_tone_mapping_method == 2) {
+            // ACES filmic tone mapping (simplified Narkowicz 2015)
+            const float a = 2.51;
+            const float b = 0.03;
+            const float c_coef = 2.43;
+            const float d = 0.59;
+            const float e = 0.14;
+            c.rgb = clamp((c.rgb * (a * c.rgb + b)) / (c.rgb * (c_coef * c.rgb + d) + e), 0.0, 1.0);
+        }
+        // else: u_tone_mapping_method == 0, no tone curve (linear expansion)
     }
 
     // Magnifier border ring
