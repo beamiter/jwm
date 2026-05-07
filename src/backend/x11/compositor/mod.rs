@@ -3995,6 +3995,13 @@ impl Compositor {
             self.update_vrr_state(focused);
         }
 
+        // P4: Temporal blur reuse detection
+        let current_window_hash = if self.temporal_blur_enabled {
+            self.compute_window_positions_hash()
+        } else {
+            0
+        };
+
         // Feature 11: Frame timing start
         let _frame_start = std::time::Instant::now();
 
@@ -5660,6 +5667,15 @@ impl Compositor {
                 self.zoom_to_fit_scale = self.zoom_to_fit_target;
             }
             self.needs_render = true;
+        }
+
+        // P4: Record temporal blur statistics (if blur happened)
+        if self.temporal_blur_enabled && current_window_hash != 0 {
+            self.temporal_blur_total_count += 1;
+            if current_window_hash == self.prev_window_positions_hash {
+                self.temporal_blur_reuse_count += 1;
+            }
+            self.prev_window_positions_hash = current_window_hash;
         }
 
         true
