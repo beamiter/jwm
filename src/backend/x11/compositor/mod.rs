@@ -2195,6 +2195,17 @@ impl Compositor {
         // Parse P4: blur_quality_by_monitor configuration
         let blur_quality_by_monitor = Self::parse_blur_quality_by_monitor(&behavior.blur_quality_by_monitor);
 
+        // P5: Apply dynamic blur strength based on Hz
+        // For now, use 60Hz as default. In future, query actual monitor refresh rate from RandR.
+        let mut dynamic_blur_strength = behavior.blur_strength;
+        if !blur_strength_by_hz.is_empty() {
+            // Use 60Hz as baseline for MVP; in future, query actual Hz from RandR
+            if let Some(hz_strength) = Self::new_get_blur_strength_for_hz_static(&blur_strength_by_hz, 60) {
+                dynamic_blur_strength = hz_strength;
+                log::info!("compositor: dynamic blur strength at 60Hz: {} (config: {})", hz_strength, behavior.blur_strength);
+            }
+        }
+
         Ok(Self {
             conn,
             xlib_display,
@@ -2233,7 +2244,7 @@ impl Compositor {
             inactive_opacity: behavior.inactive_opacity,
             active_opacity: behavior.active_opacity,
             blur_enabled: behavior.blur_enabled,
-            blur_strength: behavior.blur_strength,
+            blur_strength: dynamic_blur_strength,
             blur_fbos,
             scene_fbo,
             fading: behavior.fading,
@@ -3084,6 +3095,31 @@ impl Compositor {
         }
         result.sort_by_key(|p| p.0);  // Sort by Hz ascending
         result
+    }
+
+    /// Get blur strength for a given refresh rate Hz (static version for use during init).
+    /// If exact Hz not found, returns closest lower, or if none, closest higher.
+    fn new_get_blur_strength_for_hz_static(blur_strength_by_hz: &[(u32, u32)], hz: u32) -> Option<u32> {
+        if blur_strength_by_hz.is_empty() {
+            return None;
+        }
+
+        // Find exact match or closest lower
+        for (i, &(config_hz, strength)) in blur_strength_by_hz.iter().enumerate() {
+            if config_hz == hz {
+                return Some(strength);
+            }
+            if config_hz > hz {
+                // Not found exact, try previous
+                if i > 0 {
+                    return Some(blur_strength_by_hz[i - 1].1);
+                }
+                // No lower value, use this one
+                return Some(strength);
+            }
+        }
+        // All values are lower, use the last one
+        blur_strength_by_hz.last().map(|p| p.1)
     }
 
     /// Parse blur_quality_by_monitor config string: "primary:Full,secondary:Reduced"
