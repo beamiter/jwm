@@ -3307,6 +3307,38 @@ impl Compositor {
         prev_tex
     }
 
+    /// P4: Finalize temporal blur state at end of render_frame
+    /// Called after all blur computation to update prev_blur_fbo for next frame
+    fn finalize_temporal_blur(&mut self) {
+        if !self.temporal_blur_enabled {
+            return;
+        }
+
+        // On first frame (no previous state), initialize prev_blur_fbo from scene_fbo
+        if self.prev_window_positions_hash == 0 {
+            if let Some((_, scene_tex)) = &self.scene_fbo {
+                if self.prev_blur_fbo.is_none() {
+                    if let Ok((fbo, tex)) = unsafe { Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h) } {
+                        self.prev_blur_fbo = Some((fbo, tex));
+                    }
+                }
+
+                // Copy scene texture to prev_blur_fbo for next frame blending
+                if let Some((fbo, _)) = &self.prev_blur_fbo {
+                    unsafe {
+                        self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+                        self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(*fbo));
+                        self.gl.blit_framebuffer(
+                            0, 0, self.screen_w as i32, self.screen_h as i32,
+                            0, 0, self.screen_w as i32, self.screen_h as i32,
+                            glow::COLOR_BUFFER_BIT, glow::NEAREST,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// Whether a window should receive per-frame backdrop blur compositing.
     fn needs_backdrop_blur(&self, wt: &WindowTexture) -> bool {
         // Skip backdrop blur for statusbar
@@ -4864,7 +4896,7 @@ impl Compositor {
                                 self.frame_stats.blur_cache_misses += 1;
                             }
 
-                            let blur_tex = if cache_hit {
+                            let mut blur_tex = if cache_hit {
                                 Some(self.blur_fbos[0].texture)
                             } else {
                                 // Temporarily break out of the window shader to run blur passes.
@@ -4928,6 +4960,24 @@ impl Compositor {
                             //     if !cache_hit && self.temporal_blur_enabled && self.prev_window_positions_hash != 0 {
                             //         Some(self.apply_temporal_blur_mix(blurred))
                             //     } else { Some(blurred) } } else { None };
+
+                            // P4: ACTIVATION: Simple temporal mix for cache misses
+                            // On cache miss + stable positions, save current blur for next frame blending
+                            if let Some(blurred) = blur_tex {
+                                if !cache_hit && self.temporal_blur_enabled && self.prev_window_positions_hash != 0 {
+                                    // Save current blur texture to prev_blur_fbo for next frame
+                                    if let Some((prev_fbo, _)) = &self.prev_blur_fbo {
+                                        self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+                                        self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(*prev_fbo));
+                                        self.gl.blit_framebuffer(
+                                            0, 0, self.screen_w as i32, self.screen_h as i32,
+                                            0, 0, self.screen_w as i32, self.screen_h as i32,
+                                            glow::COLOR_BUFFER_BIT, glow::NEAREST,
+                                        );
+                                    }
+                                }
+                                blur_tex = Some(blurred);
+                            }
 
                             if let Some(blur_tex) = blur_tex {
                                 // Feature 13: If blur_use_frame_extents, crop blur to client area
@@ -5848,6 +5898,9 @@ impl Compositor {
             }
             self.prev_window_positions_hash = current_window_hash;
         }
+
+        // P4: Finalize temporal blur state for next frame
+        self.finalize_temporal_blur();
 
         true
     }
