@@ -2826,12 +2826,45 @@ impl Compositor {
     fn record_latency_sample(&mut self) {
         if let Some(input_time) = self.frame_stats.last_input_time {
             let now = std::time::Instant::now();
-            let latency_ms = now.duration_since(input_time).as_secs_f32() * 1000.0;
+            let input_to_render_ms = now.duration_since(input_time).as_secs_f32() * 1000.0;
 
-            self.frame_stats.latency_samples.push(latency_ms);
+            // Estimate GPU→display latency using OML sync or vblank period
+            let gpu_to_display_ms = if let Some(oml) = &self.oml {
+                // If OML available, estimate remaining time to vblank
+                if let Some((ust, _msc, _sbc)) = oml.get_sync_values() {
+                    // Assume 60Hz default; in practice, would query RandR for actual refresh rate
+                    let vblank_interval_ns = 16_666_667u64;  // 60Hz = 16.67ms
+                    let frame_age_ns = ust % vblank_interval_ns;
+                    let time_to_next_vblank_ns = vblank_interval_ns - frame_age_ns;
+                    (time_to_next_vblank_ns as f32 / 1_000_000.0) + 1.0  // +1ms buffer for display pipeline
+                } else {
+                    // Fallback: assume 1 frame time (~16.67ms at 60Hz)
+                    16.67
+                }
+            } else {
+                // Fallback without OML: assume 1-2 frames of pipeline latency
+                33.33
+            };
+
+            let total_latency_ms = input_to_render_ms + gpu_to_display_ms;
+
+            self.frame_stats.latency_samples.push(total_latency_ms);
             // Ring buffer: keep最多 300 samples (~5 seconds at 60fps)
             if self.frame_stats.latency_samples.len() > 300 {
                 self.frame_stats.latency_samples.remove(0);
+            }
+
+            // Diagnostic logging for high latency
+            if total_latency_ms > 100.0 {
+                log::warn!(
+                    "compositor: high input latency detected: {:.1}ms (input→render: {:.1}ms, gpu→display: {:.1}ms)",
+                    total_latency_ms, input_to_render_ms, gpu_to_display_ms
+                );
+            } else if total_latency_ms > 50.0 {
+                log::debug!(
+                    "compositor: elevated input latency: {:.1}ms (input→render: {:.1}ms, gpu→display: {:.1}ms)",
+                    total_latency_ms, input_to_render_ms, gpu_to_display_ms
+                );
             }
 
             // Clear the input timestamp after recording
