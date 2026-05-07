@@ -2867,6 +2867,13 @@ impl Compositor {
             && wt.x < self.screen_w as i32
             && wt.y < self.screen_h as i32;
 
+        // Status bar should not have adaptive blur quality changes
+        let status_bar_name = cfg.status_bar_name();
+        let is_statusbar = wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name);
+        if is_statusbar {
+            return self.blur_quality;
+        }
+
         // Priority-based quality, capped by global max
         let per_window_quality = if is_focused {
             BlurQuality::Full  // Focused: always full quality
@@ -2889,6 +2896,12 @@ impl Compositor {
 
     /// Whether a window should receive per-frame backdrop blur compositing.
     fn needs_backdrop_blur(&self, wt: &WindowTexture) -> bool {
+        // Skip backdrop blur for statusbar
+        let cfg = crate::config::CONFIG.load();
+        let status_bar_name = cfg.status_bar_name();
+        if wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name) {
+            return false;
+        }
         if Self::class_matches_exclude(&wt.class_name, &self.blur_exclude) {
             return false;
         }
@@ -4323,10 +4336,14 @@ impl Compositor {
                     self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
 
                     // Compute effective opacity
-                    let base_opacity = if is_focused { self.active_opacity } else { self.inactive_opacity };
+                    let cfg = crate::config::CONFIG.load();
+                    let status_bar_name = cfg.status_bar_name();
+                    let is_statusbar = wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name);
+
+                    let base_opacity = if is_statusbar { 1.0 } else if is_focused { self.active_opacity } else { self.inactive_opacity };
                     let rule_opacity = wt.opacity_override.unwrap_or(base_opacity);
                     let has_explicit_transparency = wt.opacity_override.map_or(false, |o| o < 1.0);
-                    let inactive_dim_factor = if is_focused { 1.0 } else { self.inactive_dim };
+                    let inactive_dim_factor = if is_statusbar || is_focused { 1.0 } else { self.inactive_dim };
                     let dim = if wt.has_rgba {
                         rule_opacity * fade * inactive_dim_factor
                     } else {
@@ -4358,7 +4375,7 @@ impl Compositor {
                         opacity
                     };
                     // Feature 4: Apply per-window scale + Phase 3.4 focus bounce
-                    let focus_bounce = if self.focus_highlight && focused == Some(win) {
+                    let focus_bounce = if !is_statusbar && self.focus_highlight && focused == Some(win) {
                         if let Some((hw, start)) = self.focus_highlight_start {
                             if hw == win && start.elapsed().as_millis() < self.focus_highlight_duration_ms as u128 {
                                 let t = start.elapsed().as_millis() as f32 / self.focus_highlight_duration_ms as f32;
@@ -4545,7 +4562,7 @@ impl Compositor {
                             self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0,
                         );
                         self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
-                    } else if self.window_tilt && is_focused {
+                    } else if self.window_tilt && is_focused && !is_statusbar {
                         // Update tilt target from mouse position (clamped)
                         let cx = draw_x + draw_w * 0.5;
                         let cy = draw_y + draw_h * 0.5;
@@ -4618,11 +4635,6 @@ impl Compositor {
                             self.gl.uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
                         }
                     }
-
-                    // Skip border for statusbar
-                    let cfg = crate::config::CONFIG.load();
-                    let status_bar_name = cfg.status_bar_name();
-                    let is_statusbar = wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name);
 
                     if !is_statusbar && ((effective_border_enabled && base_border_width > 0.0) || has_special_border) {
                         let color = if focus_highlight_active_for_win {
