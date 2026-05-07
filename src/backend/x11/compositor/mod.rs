@@ -1105,6 +1105,10 @@ pub(super) struct Compositor {
     is_game_window: HashMap<u32, bool>,
     vrr_active: bool,
     vrr_last_check: std::time::Instant,
+
+    // --- Adaptive Blur: Hysteresis to prevent flicker ---
+    last_gpu_load: u32,
+    last_gpu_load_update: std::time::Instant,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
@@ -2457,6 +2461,8 @@ impl Compositor {
             is_game_window: HashMap::new(),
             vrr_active: false,
             vrr_last_check: std::time::Instant::now(),
+            last_gpu_load: 0,
+            last_gpu_load_update: std::time::Instant::now(),
         })
     }
 
@@ -2921,7 +2927,7 @@ impl Compositor {
 
         // Estimate GPU load from recent frame times (naive approach)
         // Assume 60Hz = 16.67ms ideal frame time; if actual is higher, GPU is under pressure
-        let gpu_load = {
+        let current_gpu_load = {
             let target_frame_time_ms = 1000.0 / 60.0;  // 60Hz baseline
             if self.frame_stats.frame_times.is_empty() {
                 0  // No data yet
@@ -2931,6 +2937,21 @@ impl Compositor {
                 let load = (avg_frame_time_ms / target_frame_time_ms * 100.0) as u32;
                 load.min(100)
             }
+        };
+
+        // Apply hysteresis: only update if delta > 5% or elapsed > 0.5s
+        // This prevents rapid quality oscillation when load hovers around thresholds
+        let gpu_load = if current_gpu_load > self.last_gpu_load + 5
+            || current_gpu_load + 5 < self.last_gpu_load
+            || self.last_gpu_load_update.elapsed().as_millis() > 500
+        {
+            // Update the cached load
+            // Note: We can't mutate self here, so we use current_gpu_load
+            // The actual update happens in the blur rendering pass
+            current_gpu_load
+        } else {
+            // Use previous value for stability
+            self.last_gpu_load
         };
 
         // Under high GPU load (>80%), only focused window keeps full quality
@@ -3784,6 +3805,27 @@ impl Compositor {
         scene: &[(u32, i32, i32, u32, u32)],
         focused: Option<u32>,
     ) -> bool {
+        // Update GPU load cache with hysteresis: update if delta > 5% or elapsed > 0.5s
+        let current_gpu_load = {
+            let target_frame_time_ms = 1000.0 / 60.0;
+            if self.frame_stats.frame_times.is_empty() {
+                0
+            } else {
+                let avg_frame_time_ms = self.frame_stats.frame_times.iter().sum::<f32>()
+                    / self.frame_stats.frame_times.len() as f32;
+                let load = (avg_frame_time_ms / target_frame_time_ms * 100.0) as u32;
+                load.min(100)
+            }
+        };
+
+        if current_gpu_load > self.last_gpu_load + 5
+            || current_gpu_load + 5 < self.last_gpu_load
+            || self.last_gpu_load_update.elapsed().as_millis() > 500
+        {
+            self.last_gpu_load = current_gpu_load;
+            self.last_gpu_load_update = std::time::Instant::now();
+        }
+
         // Shader hot-reload: poll every 60 frames (~1s at 60fps)
         if self.shader_hot_reload_enabled && self.frame_stats.frame_count % 60 == 0 {
             self.poll_shader_hot_reload();
@@ -4485,6 +4527,13 @@ impl Compositor {
                             let cache_hit = !blur_below_dirty
                                 && blur_below_hash != 0
                                 && blur_below_hash == self.blur_cache_hash;
+
+                            // Track blur cache statistics for diagnostics
+                            if cache_hit {
+                                self.frame_stats.blur_cache_hits += 1;
+                            } else {
+                                self.frame_stats.blur_cache_misses += 1;
+                            }
 
                             let blur_tex = if cache_hit {
                                 Some(self.blur_fbos[0].texture)
