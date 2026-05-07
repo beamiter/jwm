@@ -31,3 +31,5 @@ export XMODIFIERS=@im=fcitx
 run_if_not_running fcitx5 -d
 
 echo "[autostart.sh] Initialization finished."
+
+# convert input.jpg -resize 2560x1440^ -gravity center -extent 2560x1440 output.jpg

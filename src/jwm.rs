@@ -8997,10 +8997,10 @@ impl Jwm {
 
     fn switch_to_monitor(
         &mut self,
-        _backend: &mut dyn Backend,
-        _target_monitor_key: MonitorKey,
+        backend: &mut dyn Backend,
+        target_monitor_key: MonitorKey,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(())
+        self.handle_monitor_switch_by_key(backend, Some(target_monitor_key))
     }
 
     fn should_focus_client(
