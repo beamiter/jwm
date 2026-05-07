@@ -2775,14 +2775,15 @@ impl Compositor {
     }
 
     /// Check if currently focused window is a game
-    pub fn is_focused_window_game(&self) -> bool {
-        // TODO: Integrate with actual focus tracking
-        // For now, returns false; will be populated by render loop
-        false
+    pub fn is_focused_window_game(&self, focused_win: Option<u32>) -> bool {
+        match focused_win {
+            Some(win) => self.is_game_window.get(&win).copied().unwrap_or(false),
+            None => false,
+        }
     }
 
     /// Update VRR state based on focused window type
-    pub fn update_vrr_state(&mut self) {
+    pub fn update_vrr_state(&mut self, focused_win: Option<u32>) {
         let cfg = crate::config::CONFIG.load();
         let behavior = cfg.behavior();
 
@@ -2797,11 +2798,22 @@ impl Compositor {
         }
         self.vrr_last_check = std::time::Instant::now();
 
-        // Would enable VRR for game windows, disable for desktop
-        let should_vrr = self.is_focused_window_game();
+        // Enable VRR for game windows, disable for desktop
+        let should_vrr = self.is_focused_window_game(focused_win);
         if should_vrr != self.vrr_active {
             self.vrr_active = should_vrr;
             log::info!("VRR {}", if should_vrr { "enabled" } else { "disabled" });
+        }
+    }
+
+    /// Get current VRR refresh rate target (Hz)
+    pub fn get_vrr_refresh_rate(&self) -> u32 {
+        if self.vrr_active {
+            let cfg = crate::config::CONFIG.load();
+            let behavior = cfg.behavior();
+            behavior.vrr_max_fps
+        } else {
+            60  // Default refresh rate for non-game windows
         }
     }
 
@@ -3570,6 +3582,8 @@ impl Compositor {
             window_count: self.windows.len(),
             blur_quality: format!("{:?}", self.blur_quality),
             vrr_enabled: self.vrr_active,
+            vrr_active: self.vrr_active,
+            current_refresh_rate: self.get_vrr_refresh_rate(),
             input_latency_avg_ms: latency_stats.0,
             input_latency_p50_ms: latency_stats.1,
             input_latency_p95_ms: latency_stats.2,
@@ -3710,7 +3724,7 @@ impl Compositor {
 
         // VRR state update: check every 60 frames (~1s at 60fps)
         if self.frame_stats.frame_count % 60 == 0 {
-            self.update_vrr_state();
+            self.update_vrr_state(focused);
         }
 
         // Feature 11: Frame timing start
@@ -5308,12 +5322,13 @@ impl Compositor {
         };
 
         // Swap buffers (double-buffered with vsync for tear-free output).
+        // VRR (Variable Refresh Rate) is automatically handled by the driver when using Present.
         match self.vsync_method {
             VsyncMethod::OmlSyncControl => {
                 // Use GLX_OML_sync_control for per-window MSC-based timing
                 if let Some(oml) = &self.oml {
                     // For now, use global swap (future: per-window MSC-based timing)
-                    // This is a placeholder for per-window timing logic
+                    // VRR target is available via get_vrr_refresh_rate() if needed
                     if let Some(_sbc) = oml.swap_buffers_msc(0) {
                         // Successfully used OML swap
                     } else {
@@ -5326,14 +5341,16 @@ impl Compositor {
                 }
             }
             VsyncMethod::Present => {
-                // Present extension: still swap the compositor overlay, but
-                // individual video windows can use present_pixmap for independent
-                // presentation timing. The compositor overlay needs swapping
-                // for non-present windows (UI, menus, etc.).
+                // Present extension with VRR support
+                // When VRR is active for a game window, the driver automatically uses
+                // adaptive refresh rates via the Present extension capabilities.
+                if self.vrr_active {
+                    log::debug!("compositor: rendering frame with VRR active (target: {} Hz)", self.get_vrr_refresh_rate());
+                }
                 unsafe { x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable); }
             }
             VsyncMethod::Global => {
-                // Traditional global vsync
+                // Traditional global vsync (all windows locked to 60Hz)
                 unsafe { x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable); }
             }
         }

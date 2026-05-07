@@ -604,20 +604,30 @@ impl Backend for X11Backend {
         let cfg = crate::config::CONFIG.load();
         let behavior = cfg.behavior();
 
-        // Simple heuristic: mark all outputs as potentially VRR-capable
-        // In production, would check actual RandR properties
-        if behavior.vrr_enabled {
-            // Check if this output exists and is active
-            let outputs = OutputOps::enumerate_outputs(self.output_ops.as_ref());
-            if outputs.iter().any(|o| o.id == output) {
-                return Some(VrrCapabilities {
-                    supported: true,
-                    current_enabled: false,  // Would need to query CRTC property
-                    min_refresh_hz: behavior.vrr_min_fps,
-                    max_refresh_hz: behavior.vrr_max_fps,
-                });
-            }
+        if !behavior.vrr_enabled {
+            return None;
         }
+
+        // Check if this output exists and is active
+        let outputs = OutputOps::enumerate_outputs(self.output_ops.as_ref());
+        if !outputs.iter().any(|o| o.id == output) {
+            return None;
+        }
+
+        // Try to get the actual RandR output ID for property queries
+        if let Some(o) = outputs.iter().find(|o| o.id == output) {
+            // o.connector_type can tell us if it's DisplayPort, HDMI, etc.
+            // For now, assume VRR is supported if the output exists
+            // In production, would query "vrr_capable" property more explicitly
+
+            return Some(VrrCapabilities {
+                supported: true,  // Optimistic: assume VRR supported for active outputs
+                current_enabled: false,  // Would need to query CRTC property dynamically
+                min_refresh_hz: behavior.vrr_min_fps,
+                max_refresh_hz: behavior.vrr_max_fps,
+            });
+        }
+
         None
     }
 

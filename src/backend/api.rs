@@ -28,6 +28,8 @@ pub struct CompositorMetrics {
     pub window_count: usize,
     pub blur_quality: String,
     pub vrr_enabled: bool,
+    pub vrr_active: bool,  // VRR currently active for focused game window
+    pub current_refresh_rate: u32,  // Current target refresh rate (Hz)
     // Task 8: Input latency metrics
     pub input_latency_avg_ms: f32,
     pub input_latency_p50_ms: f32,
