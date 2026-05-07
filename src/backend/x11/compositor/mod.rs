@@ -2919,16 +2919,50 @@ impl Compositor {
             return self.blur_quality;
         }
 
-        // Priority-based quality, capped by global max
-        let per_window_quality = if is_focused {
-            BlurQuality::Full  // Focused: always full quality
-        } else if !is_onscreen {
-            BlurQuality::Minimal  // Off-screen: minimal
-        } else {
-            BlurQuality::Reduced  // Inactive but visible: reduced
+        // Estimate GPU load from recent frame times (naive approach)
+        // Assume 60Hz = 16.67ms ideal frame time; if actual is higher, GPU is under pressure
+        let gpu_load = {
+            let target_frame_time_ms = 1000.0 / 60.0;  // 60Hz baseline
+            if self.frame_stats.frame_times.is_empty() {
+                0  // No data yet
+            } else {
+                let avg_frame_time_ms = self.frame_stats.frame_times.iter().sum::<f32>()
+                    / self.frame_stats.frame_times.len() as f32;
+                let load = (avg_frame_time_ms / target_frame_time_ms * 100.0) as u32;
+                load.min(100)
+            }
         };
 
-        // Apply global cap (if system under load, further reduce all windows)
+        // Under high GPU load (>80%), only focused window keeps full quality
+        // Unfocused/off-screen windows degrade to minimal to reduce GPU pressure
+        let per_window_quality = if gpu_load > 80 {
+            // Critical load: protect focused window, minimize others
+            if is_focused {
+                BlurQuality::Full  // Focused: maintain full quality
+            } else {
+                BlurQuality::Minimal  // Unfocused/off-screen: minimal
+            }
+        } else if gpu_load > 70 {
+            // Moderate load: reduce unfocused windows only
+            if is_focused {
+                BlurQuality::Full  // Focused: full quality
+            } else if !is_onscreen {
+                BlurQuality::Minimal  // Off-screen: minimal
+            } else {
+                BlurQuality::Reduced  // Inactive but visible: reduced
+            }
+        } else {
+            // Low load: normal priority-based tiering
+            if is_focused {
+                BlurQuality::Full
+            } else if !is_onscreen {
+                BlurQuality::Minimal
+            } else {
+                BlurQuality::Reduced
+            }
+        };
+
+        // Apply global cap (animation/overview can further reduce)
         match max_quality {
             BlurQuality::Minimal => BlurQuality::Minimal,
             BlurQuality::Reduced => match per_window_quality {
