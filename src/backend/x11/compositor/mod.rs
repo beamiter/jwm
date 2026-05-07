@@ -683,7 +683,7 @@ impl DamageTracker {
 // Blur quality auto-downgrade (Phase 2.2)
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd)]
 enum BlurQuality {
     Full,     // All blur levels
     Reduced,  // Half blur levels
@@ -2982,7 +2982,7 @@ impl Compositor {
         (avg, sorted[p50_idx], sorted[p95_idx], sorted[p99_idx])
     }
 
-    /// Compute blur quality for a specific window (Task 10: Adaptive Blur)
+    /// Compute blur quality for a specific window (Task 10: Adaptive Blur + Per-Monitor)
     fn compute_window_blur_quality(&self, wt: &WindowTexture, focused: Option<u32>) -> BlurQuality {
         let cfg = crate::config::CONFIG.load();
         let behavior = cfg.behavior();
@@ -3009,6 +3009,22 @@ impl Compositor {
         let is_statusbar = wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name);
         if is_statusbar {
             return self.blur_quality;
+        }
+
+        // P4: Apply per-monitor quality override if configured
+        // For now, use a simple heuristic: primary display = Full, secondary = Reduced
+        let window_center_x = wt.x + (wt.w as i32) / 2;
+        let is_primary_monitor = window_center_x < (self.screen_w as i32) / 2;  // Assume primary on left
+
+        let monitor_override = if is_primary_monitor {
+            self.blur_quality_by_monitor.get(&0)  // Monitor 0 = primary
+        } else {
+            self.blur_quality_by_monitor.get(&1)  // Monitor 1 = secondary
+        };
+
+        if let Some(&override_quality) = monitor_override {
+            // Per-monitor config takes precedence
+            return override_quality.min(max_quality);
         }
 
         // Estimate GPU load from recent frame times (naive approach)
@@ -3203,30 +3219,47 @@ impl Compositor {
     /// - Higher visual stability (less flicker from blur recomputation)
     /// - Lower GPU cost (fewer blur samples needed for same quality)
     fn apply_temporal_blur_mix(&mut self, current_blur_tex: glow::Texture) -> glow::Texture {
-        if !self.temporal_blur_enabled || self.prev_blur_fbo.is_none() {
+        if !self.temporal_blur_enabled {
             return current_blur_tex;
         }
 
-        // Create output FBO if needed
+        // Lazily create prev_blur_fbo on first use
         if self.prev_blur_fbo.is_none() {
             if let Ok((fbo, tex)) = unsafe { Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h) } {
                 self.prev_blur_fbo = Some((fbo, tex));
             }
         }
 
-        let prev_blur_fbo = match &self.prev_blur_fbo {
-            Some((fbo, _)) => *fbo,
+        let (prev_fbo, prev_tex) = match &self.prev_blur_fbo {
+            Some((fbo, tex)) => (*fbo, *tex),
             None => return current_blur_tex,
         };
 
+        // If we have a previous frame, blend current with previous
+        let has_prev = self.prev_window_positions_hash != 0;
+        if !has_prev {
+            // No previous frame yet - just save current for next frame
+            unsafe {
+                self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+                self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(prev_fbo));
+                self.gl.blit_framebuffer(
+                    0, 0, self.screen_w as i32, self.screen_h as i32,
+                    0, 0, self.screen_w as i32, self.screen_h as i32,
+                    glow::COLOR_BUFFER_BIT, glow::NEAREST,
+                );
+            }
+            return current_blur_tex;
+        }
+
+        // Perform temporal mix: blend current with previous
         let proj = math::ortho(0.0, self.screen_w as f32, self.screen_h as f32, 0.0, -1.0, 1.0);
 
         unsafe {
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(prev_blur_fbo));
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(prev_fbo));
             self.gl.use_program(Some(self.temporal_blur_mix_program));
             self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
 
-            // Bind current blur as TEXTURE0
+            // Bind current blur as input
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_texture(glow::TEXTURE_2D, Some(current_blur_tex));
             self.gl.uniform_1_i32(
@@ -3234,23 +3267,21 @@ impl Compositor {
                 0,
             );
 
-            // Bind previous blur as TEXTURE1
-            if let Some((_, prev_tex)) = &self.prev_blur_fbo {
-                self.gl.active_texture(glow::TEXTURE1);
-                self.gl.bind_texture(glow::TEXTURE_2D, Some(*prev_tex));
-                self.gl.uniform_1_i32(
-                    self.gl.get_uniform_location(self.temporal_blur_mix_program, "u_previous_blur").as_ref(),
-                    1,
-                );
-            }
+            // Bind previous blur as input
+            self.gl.active_texture(glow::TEXTURE1);
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(prev_tex));
+            self.gl.uniform_1_i32(
+                self.gl.get_uniform_location(self.temporal_blur_mix_program, "u_previous_blur").as_ref(),
+                1,
+            );
 
-            // Set blend ratio
+            // Set temporal mix ratio
             self.gl.uniform_1_f32(
                 self.gl.get_uniform_location(self.temporal_blur_mix_program, "u_temporal_mix").as_ref(),
                 self.temporal_blur_mix_ratio,
             );
 
-            // Set projection and rect
+            // Set projection and screen rect
             self.gl.uniform_matrix_4_f32_slice(
                 self.temporal_blur_mix_uniforms.projection.as_ref(),
                 false,
@@ -3258,24 +3289,22 @@ impl Compositor {
             );
             self.gl.uniform_4_f32(
                 self.temporal_blur_mix_uniforms.rect.as_ref(),
-                0.0,
-                0.0,
+                0.0, 0.0,
                 self.screen_w as f32,
                 self.screen_h as f32,
             );
 
-            // Draw quad
+            // Draw mix quad
             self.gl.bind_vertex_array(Some(self.quad_vao));
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             self.gl.bind_vertex_array(None);
+
+            // Restore state
+            self.gl.active_texture(glow::TEXTURE0);
         }
 
-        // Return mixed result texture
-        if let Some((_, tex)) = &self.prev_blur_fbo {
-            *tex
-        } else {
-            current_blur_tex
-        }
+        // Return mixed texture (stored in prev_fbo now)
+        prev_tex
     }
 
     /// Whether a window should receive per-frame backdrop blur compositing.
@@ -4891,6 +4920,14 @@ impl Compositor {
                                 self.blur_cache_hash = blur_below_hash;
                                 tex
                             };
+
+                            // P4: Temporal blur mix is ready but deferred due to borrow checker constraints
+                            // TODO: Can be activated once render_frame refactoring separates blur computation from application
+                            // Current: apply_temporal_blur_mix() prepared in apply_temporal_blur_mix() method
+                            // let blur_tex = if let Some(blurred) = blur_tex {
+                            //     if !cache_hit && self.temporal_blur_enabled && self.prev_window_positions_hash != 0 {
+                            //         Some(self.apply_temporal_blur_mix(blurred))
+                            //     } else { Some(blurred) } } else { None };
 
                             if let Some(blur_tex) = blur_tex {
                                 // Feature 13: If blur_use_frame_extents, crop blur to client area
