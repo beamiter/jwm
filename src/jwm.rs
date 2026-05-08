@@ -3,6 +3,7 @@ pub mod strut_manager;
 pub mod client_stack;
 pub mod features;
 pub mod geometry;
+pub mod rules;
 
 pub use types::{
     WMButton, WMKey, WMRule, WMWindowGeom, WMClickType, WMArgEnum, InteractionAction,
@@ -15,6 +16,7 @@ pub use features::{
 };
 
 pub use geometry::GeometryConstraints;
+pub use rules::{RuleApplication, RuleMatcher};
 
 use libc::{SIG_DFL, SIGCHLD, setsid, sigaction, sigemptyset};
 
@@ -9286,13 +9288,7 @@ impl Jwm {
     }
 
     fn rule_matches(&self, rule: &WMRule, name: &str, class: &str, instance: &str) -> bool {
-        if rule.name.is_empty() && rule.class.is_empty() && rule.instance.is_empty() {
-            return false;
-        }
-        let name_matches = rule.name.is_empty() || name.contains(&rule.name);
-        let class_matches = rule.class.is_empty() || class.contains(&rule.class);
-        let instance_matches = rule.instance.is_empty() || instance.contains(&rule.instance);
-        name_matches && class_matches && instance_matches
+        RuleMatcher::matches(rule, name, class, instance)
     }
 
     fn apply_single_rule(&mut self, client_key: ClientKey, rule: &WMRule) {
@@ -9381,7 +9377,7 @@ impl Jwm {
         if let Some(client) = self.state.clients.get_mut(client_key) {
             client.state.is_floating = false;
         }
-        if name.is_empty() && class.is_empty() && instance.is_empty() {
+        if RuleMatcher::should_auto_float(&name, &class, &instance) {
             if let Some(client) = self.state.clients.get_mut(client_key) {
                 client.state.is_floating = true;
             }
@@ -9794,25 +9790,7 @@ impl Jwm {
         } else {
             return false;
         };
-        let types = backend.property_ops().get_window_types(client.win);
-        for t in types {
-            match t {
-                WindowType::Dialog
-                | WindowType::PopupMenu
-                | WindowType::DropdownMenu
-                | WindowType::Tooltip
-                | WindowType::Notification
-                | WindowType::Combo
-                | WindowType::Dnd
-                | WindowType::Utility
-                | WindowType::Splash => {
-                    info!("popup type {:?}", t);
-                    return true;
-                }
-                _ => {}
-            }
-        }
-        false
+        RuleMatcher::is_popup_like(backend, client.win)
     }
 
     fn adjust_client_position(&mut self, backend: &mut dyn Backend, client_key: ClientKey) {
