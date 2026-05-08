@@ -1,11 +1,16 @@
 pub mod types;
 pub mod strut_manager;
 pub mod client_stack;
+pub mod features;
 
 pub use types::{
     WMButton, WMKey, WMRule, WMWindowGeom, WMClickType, WMArgEnum, InteractionAction,
     InteractionState, SecondaryBarInstance, WMFuncType, MonitorIndex,
     WITHDRAWN_STATE, STEXT_MAX_LEN, NORMAL_STATE, ICONIC_STATE,
+};
+
+pub use features::{
+    FeatureStates, MagnifierState, OverviewState, RecordingState, ScreenshotState,
 };
 
 use libc::{SIG_DFL, SIGCHLD, setsid, sigaction, sigemptyset};
@@ -139,37 +144,8 @@ pub struct Jwm {
     /// Night light: last time we updated color temperature
     pub last_night_light_update: Option<std::time::Instant>,
 
-    /// Overview mode (Alt+Ctrl+Tab modal 3D prism carousel)
-    pub overview_active: bool,
-    pub overview_index: usize,
-    pub overview_clients: Vec<ClientKey>,
-    /// Sliding window offset for >6 clients in overview prism.
-    pub overview_slide_offset: usize,
-
-    /// Magnifier state
-    pub magnifier_enabled: bool,
-
-    /// Peek (boss key) mode — all windows fade to transparent.
-    pub peek_active: bool,
-
-    /// Expose / Mission Control mode
-    pub expose_active: bool,
-
-    /// Interactive screenshot region selection mode
-    pub screenshot_select_active: bool,
-    pub screenshot_select_dragging: bool,
-    pub screenshot_select_committed: bool, // selection done, waiting for save action
-    pub screenshot_select_start: (f64, f64),
-    pub screenshot_select_end: (f64, f64),
-    pub screenshot_select_path: Option<String>,
-
-    /// Screen recording active
-    pub recording_active: bool,
-
-    /// Recording output path (final target) and completed segment paths
-    pub recording_output_path: Option<String>,
-    pub recording_segments: Vec<String>,
-    pub recording_current_segment: Option<String>,
+    /// 所有特殊功能的状态（截图、overview、录制、放大镜等）
+    pub features: FeatureStates,
 }
 
 // =================================================================================
@@ -322,8 +298,8 @@ impl WMController for Jwm {
     fn on_button_release(&mut self, backend: &mut dyn Backend, _target: HitTarget, _time: u32) {
         // Screenshot region selection: on mouse release, commit the selection
         // and wait for the user to choose save action (Enter=file, c=clipboard).
-        if self.screenshot_select_active && self.screenshot_select_dragging {
-            let (sx, sy) = self.screenshot_select_start;
+        if self.features.screenshot.active && self.features.screenshot.dragging {
+            let (sx, sy) = self.features.screenshot.start;
             let (ex, ey) = self.last_mouse_root;
             let w = (sx - ex).abs();
             let h = (sy - ey).abs();
@@ -332,9 +308,9 @@ impl WMController for Jwm {
                 self.cancel_screenshot_select(backend);
                 return;
             }
-            self.screenshot_select_dragging = false;
-            self.screenshot_select_committed = true;
-            self.screenshot_select_end = self.last_mouse_root;
+            self.features.screenshot.dragging = false;
+            self.features.screenshot.committed = true;
+            self.features.screenshot.end = self.last_mouse_root;
             // Keep the snap preview visible so the user can see the selection
             return;
         }
@@ -419,11 +395,11 @@ impl WMController for Jwm {
         time: u32,
     ) {
         // Screenshot region selection: update overlay rectangle while dragging
-        if self.screenshot_select_active && self.screenshot_select_dragging {
+        if self.features.screenshot.active && self.features.screenshot.dragging {
             self.last_mouse_root = (root_x, root_y);
             if backend.has_compositor() {
                 backend.compositor_set_mouse_position(root_x as f32, root_y as f32);
-                let (sx, sy) = self.screenshot_select_start;
+                let (sx, sy) = self.features.screenshot.start;
                 let x = sx.min(root_x) as f32;
                 let y = sy.min(root_y) as f32;
                 let w = (sx - root_x).abs() as f32;
@@ -915,7 +891,7 @@ impl EventHandler for Jwm {
         // PointerMotion, so when the pointer is over a client's internal
         // subwindow the WM misses the events and the magnifier gets stuck.
         // Polling via QueryPointer on the root window always succeeds.
-        if self.magnifier_enabled && backend.has_compositor() {
+        if self.features.magnifier.enabled && backend.has_compositor() {
             if let Ok((x, y)) = backend.input_ops().get_pointer_position() {
                 backend.compositor_set_mouse_position(x as f32, y as f32);
             }
@@ -931,7 +907,7 @@ impl EventHandler for Jwm {
     }
 
     fn needs_tick(&self) -> bool {
-        self.animations.has_active() || self.overview_active || self.expose_active
+        self.animations.has_active() || self.features.overview.active || self.features.expose_active
     }
 
     fn render_compositor_immediate(&mut self, backend: &mut dyn Backend) {
@@ -948,7 +924,7 @@ impl EventHandler for Jwm {
         // render_frame() wipes the flag it sets.  So we must keep rendering
         // every frame unconditionally while overview is up; vsync provides
         // natural ~60 fps pacing.
-        if !backend.compositor_needs_render() && !self.overview_active {
+        if !backend.compositor_needs_render() && !self.features.overview.active {
             return;
         }
         let scene = self.build_compositor_scene(backend, &HashMap::new());
@@ -1242,23 +1218,7 @@ impl Jwm {
             or_window_geometries: HashMap::new(),
             scrolling_states: HashMap::new(),
             last_night_light_update: None,
-            overview_active: false,
-            overview_index: 0,
-            overview_clients: Vec::new(),
-            overview_slide_offset: 0,
-            magnifier_enabled: false,
-            peek_active: false,
-            expose_active: false,
-            screenshot_select_active: false,
-            screenshot_select_dragging: false,
-            screenshot_select_committed: false,
-            screenshot_select_start: (0.0, 0.0),
-            screenshot_select_end: (0.0, 0.0),
-            screenshot_select_path: None,
-            recording_active: false,
-            recording_output_path: None,
-            recording_segments: Vec::new(),
-            recording_current_segment: None,
+            features: FeatureStates::new(),
         };
         if let Ok((x, y)) = backend.input_ops().get_pointer_position() {
             jwm.last_mouse_root = (x, y);
@@ -1470,10 +1430,10 @@ impl Jwm {
         let clean_state = self.clean_mask(backend, state_bits);
 
         // Screenshot region selection mode
-        if self.screenshot_select_active {
+        if self.features.screenshot.active {
             if keysym == keys::KEY_Escape {
                 self.cancel_screenshot_select(backend);
-            } else if self.screenshot_select_committed {
+            } else if self.features.screenshot.committed {
                 // Selection done — choose save action
                 if keysym == keys::KEY_Return || keysym == keys::KEY_s {
                     // Enter or 's' → save to file
@@ -1487,9 +1447,9 @@ impl Jwm {
             return Ok(());
         }
 
-        if self.expose_active {
+        if self.features.expose_active {
             if keysym == keys::KEY_Escape {
-                self.expose_active = false;
+                self.features.expose_active = false;
                 backend.compositor_set_expose_mode(false, vec![]);
                 let _ = backend.key_ops().ungrab_keyboard();
                 let _ = backend.input_ops().ungrab_pointer();
@@ -1498,7 +1458,7 @@ impl Jwm {
             // Fall through to normal keybinding dispatch so Alt+E can toggle off
         }
 
-        if self.overview_active {
+        if self.features.overview.active {
             let overview_mods = clean_state
                 & (Mods::SHIFT
                     | Mods::CONTROL
@@ -1545,9 +1505,9 @@ impl Jwm {
             }
             // Escape → cancel (close overview, no focus change)
             if keysym == keys::KEY_Escape {
-                self.overview_active = false;
-                self.overview_clients.clear();
-                self.overview_index = 0;
+                self.features.overview.active = false;
+                self.features.overview.clients.clear();
+                self.features.overview.index = 0;
                 backend.compositor_set_overview_mode(false, &[]);
                 let _ = backend.key_ops().ungrab_keyboard();
                 return Ok(());
@@ -1606,12 +1566,12 @@ impl Jwm {
         time: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Screenshot region selection intercept
-        if self.screenshot_select_active {
+        if self.features.screenshot.active {
             let btn = MouseButton::from_u8(detail_btn);
             if btn == MouseButton::Left {
                 // Start dragging
-                self.screenshot_select_dragging = true;
-                self.screenshot_select_start = self.last_mouse_root;
+                self.features.screenshot.dragging = true;
+                self.features.screenshot.start = self.last_mouse_root;
                 // Immediately show a 1x1 preview to avoid animation delay
                 if backend.has_compositor() {
                     let (x, y) = self.last_mouse_root;
@@ -1626,11 +1586,11 @@ impl Jwm {
         }
 
         // Expose mode intercept: route clicks to compositor
-        if self.expose_active {
+        if self.features.expose_active {
             let (rx, ry) = self.last_mouse_root;
             if let Some(wid) = backend.compositor_expose_click(rx as f32, ry as f32) {
                 // Compositor handled the click and already deactivated expose animation
-                self.expose_active = false;
+                self.features.expose_active = false;
                 let _ = backend.key_ops().ungrab_keyboard();
                 let _ = backend.input_ops().ungrab_pointer();
                 if let Some(ck) = self.wintoclient(wid) {
@@ -1641,7 +1601,7 @@ impl Jwm {
                 }
             } else {
                 // Clicked outside any exposed window — exit expose
-                self.expose_active = false;
+                self.features.expose_active = false;
                 backend.compositor_set_expose_mode(false, vec![]);
                 let _ = backend.key_ops().ungrab_keyboard();
                 let _ = backend.input_ops().ungrab_pointer();
@@ -2704,16 +2664,16 @@ impl Jwm {
         info!("[cleanup_x11_resources] Cleaning X11 resources");
 
         // On restart: stop recording normally, state file persists for auto-resume
-        if self.is_restarting.load(Ordering::SeqCst) && self.recording_active {
+        if self.is_restarting.load(Ordering::SeqCst) && self.features.recording.active {
             backend.compositor_stop_recording();
-            if let Some(seg) = self.recording_current_segment.take() {
-                self.recording_segments.push(seg);
+            if let Some(seg) = self.features.recording.current_segment.take() {
+                self.features.recording.segments.push(seg);
             }
             Self::save_recording_state(
-                self.recording_output_path.as_deref().unwrap_or(""),
-                &self.recording_segments,
+                self.features.recording.output_path.as_deref().unwrap_or(""),
+                &self.features.recording.segments,
             );
-            self.recording_active = false;
+            self.features.recording.active = false;
             info!("[cleanup_x11_resources] Recording stopped for restart, state saved");
         }
 
@@ -5461,9 +5421,9 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.overview_active {
+        if self.features.overview.active {
             // End overview: focus selected window and promote it to master
-            if let Some(&client_key) = self.overview_clients.get(self.overview_index) {
+            if let Some(&client_key) = self.features.overview.clients.get(self.features.overview.index) {
                 if let Some(mon_key) = self.state.sel_mon {
                     self.detach(client_key);
                     self.attach_front(client_key);
@@ -5473,7 +5433,7 @@ impl Jwm {
                     self.focus(backend, Some(client_key))?;
                 }
             }
-            self.overview_active = false;
+            self.features.overview.active = false;
             backend.compositor_set_overview_mode(false, &[]);
             let _ = backend.key_ops().ungrab_keyboard();
         } else {
@@ -5511,10 +5471,10 @@ impl Jwm {
             // Build simple client list; the compositor handles all 3D positioning.
             let layout = self.build_overview_layout(&visible);
 
-            self.overview_active = true;
-            self.overview_index = 0;
-            self.overview_slide_offset = 0;
-            self.overview_clients = visible;
+            self.features.overview.active = true;
+            self.features.overview.index = 0;
+            self.features.overview.slide_offset = 0;
+            self.features.overview.clients = visible;
             backend.compositor_set_overview_mode(true, &layout);
             if let Some(root) = backend.root_window() {
                 let _ = backend.key_ops().grab_keyboard(root);
@@ -5555,7 +5515,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if !self.overview_active || self.overview_clients.is_empty() {
+        if !self.features.overview.active || self.features.overview.clients.is_empty() {
             return Ok(());
         }
 
@@ -5564,16 +5524,16 @@ impl Jwm {
             _ => 1,
         };
 
-        let len = self.overview_clients.len();
+        let len = self.features.overview.clients.len();
         if direction > 0 {
-            self.overview_index = (self.overview_index + 1) % len;
+            self.features.overview.index = (self.features.overview.index + 1) % len;
         } else {
-            self.overview_index = (self.overview_index + len - 1) % len;
+            self.features.overview.index = (self.features.overview.index + len - 1) % len;
         }
 
         if len <= 6 {
             // All clients fit on the prism; just rotate to selection.
-            if let Some(&ck) = self.overview_clients.get(self.overview_index) {
+            if let Some(&ck) = self.features.overview.clients.get(self.features.overview.index) {
                 if let Some(client) = self.state.clients.get(ck) {
                     backend.compositor_set_overview_selection(client.win);
                 }
@@ -5581,30 +5541,30 @@ impl Jwm {
         } else {
             // Sliding window: keep selected index near center of 6-window view.
             let half = 3usize;
-            let new_start = if self.overview_index < half {
+            let new_start = if self.features.overview.index < half {
                 0
-            } else if self.overview_index + half >= len {
+            } else if self.features.overview.index + half >= len {
                 len.saturating_sub(6)
             } else {
-                self.overview_index - half
+                self.features.overview.index - half
             };
             let window_end = (new_start + 6).min(len);
 
-            if new_start != self.overview_slide_offset {
+            if new_start != self.features.overview.slide_offset {
                 // Window shifted: refresh prism with new 6-client subset.
-                self.overview_slide_offset = new_start;
-                let subset: Vec<ClientKey> = self.overview_clients[new_start..window_end].to_vec();
+                self.features.overview.slide_offset = new_start;
+                let subset: Vec<ClientKey> = self.features.overview.clients[new_start..window_end].to_vec();
                 let mut layout = self.build_overview_layout(&subset);
                 // Mark the correct entry as selected.
-                let sel_in_window = self.overview_index - new_start;
+                let sel_in_window = self.features.overview.index - new_start;
                 for (i, entry) in layout.iter_mut().enumerate() {
                     entry.5 = i == sel_in_window;
                 }
                 backend.compositor_set_overview_mode(true, &layout);
             }
             // Set selection (rotation) to the face within the current window.
-            let sel_in_window = self.overview_index - new_start;
-            if let Some(&ck) = self.overview_clients.get(self.overview_index) {
+            let sel_in_window = self.features.overview.index - new_start;
+            if let Some(&ck) = self.features.overview.clients.get(self.features.overview.index) {
                 if let Some(client) = self.state.clients.get(ck) {
                     backend.compositor_set_overview_selection(client.win);
                 }
@@ -5619,8 +5579,8 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.magnifier_enabled = !self.magnifier_enabled;
-        backend.compositor_set_magnifier(self.magnifier_enabled);
+        self.features.magnifier.enabled = !self.features.magnifier.enabled;
+        backend.compositor_set_magnifier(self.features.magnifier.enabled);
         Ok(())
     }
 
@@ -5629,8 +5589,8 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.peek_active = !self.peek_active;
-        backend.compositor_set_peek_mode(self.peek_active);
+        self.features.peek_active = !self.features.peek_active;
+        backend.compositor_set_peek_mode(self.features.peek_active);
         Ok(())
     }
 
@@ -5639,8 +5599,8 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.recording_active = !self.recording_active;
-        if self.recording_active {
+        self.features.recording.active = !self.features.recording.active;
+        if self.features.recording.active {
             let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
             let cfg_dir = CONFIG.load().behavior().recording_output_dir.clone();
             let videos_dir = if !cfg_dir.is_empty() {
@@ -5665,9 +5625,9 @@ impl Jwm {
                 .to_string();
             let seg_path = format!("/tmp/jwm-rec-{}-seg0.mp4", timestamp);
 
-            self.recording_output_path = Some(output_path.clone());
-            self.recording_segments = Vec::new();
-            self.recording_current_segment = Some(seg_path.clone());
+            self.features.recording.output_path = Some(output_path.clone());
+            self.features.recording.segments = Vec::new();
+            self.features.recording.current_segment = Some(seg_path.clone());
             Self::save_recording_state(&output_path, &[]);
 
             info!(
@@ -5678,11 +5638,11 @@ impl Jwm {
         } else {
             backend.compositor_stop_recording();
             // Collect current segment
-            if let Some(seg) = self.recording_current_segment.take() {
-                self.recording_segments.push(seg);
+            if let Some(seg) = self.features.recording.current_segment.take() {
+                self.features.recording.segments.push(seg);
             }
-            let segments = std::mem::take(&mut self.recording_segments);
-            let output_path = self.recording_output_path.take().unwrap_or_default();
+            let segments = std::mem::take(&mut self.features.recording.segments);
+            let output_path = self.features.recording.output_path.take().unwrap_or_default();
             info!(
                 "[toggle_recording] stop → {} ({} segments)",
                 output_path,
@@ -5786,10 +5746,10 @@ impl Jwm {
                 .trim_start_matches("recording-");
             let seg_path = format!("/tmp/jwm-rec-{}-seg{}.mp4", base, seg_index);
 
-            self.recording_output_path = Some(output_path);
-            self.recording_segments = segments;
-            self.recording_current_segment = Some(seg_path.clone());
-            self.recording_active = true;
+            self.features.recording.output_path = Some(output_path);
+            self.features.recording.segments = segments;
+            self.features.recording.current_segment = Some(seg_path.clone());
+            self.features.recording.active = true;
 
             backend.compositor_start_recording(&seg_path);
             info!("[recording] auto-resumed from restart (segment {seg_index}: {seg_path})");
@@ -5801,8 +5761,8 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.expose_active {
-            self.expose_active = false;
+        if self.features.expose_active {
+            self.features.expose_active = false;
             backend.compositor_set_expose_mode(false, vec![]);
             let _ = backend.key_ops().ungrab_keyboard();
             let _ = backend.input_ops().ungrab_pointer();
@@ -5827,7 +5787,7 @@ impl Jwm {
             if windows.is_empty() {
                 return Ok(());
             }
-            self.expose_active = true;
+            self.features.expose_active = true;
             backend.compositor_set_expose_mode(true, windows);
             if let Some(root) = backend.root_window() {
                 let _ = backend.key_ops().grab_keyboard(root);
@@ -6207,7 +6167,7 @@ impl Jwm {
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // If already in selection mode, cancel it first
-        if self.screenshot_select_active {
+        if self.features.screenshot.active {
             self.cancel_screenshot_select(backend);
             return Ok(());
         }
@@ -6221,12 +6181,12 @@ impl Jwm {
             "[take_screenshot] entering interactive region selection mode → {}",
             screenshot_path
         );
-        self.screenshot_select_active = true;
-        self.screenshot_select_dragging = false;
-        self.screenshot_select_committed = false;
-        self.screenshot_select_start = (0.0, 0.0);
-        self.screenshot_select_end = (0.0, 0.0);
-        self.screenshot_select_path = Some(screenshot_path);
+        self.features.screenshot.active = true;
+        self.features.screenshot.dragging = false;
+        self.features.screenshot.committed = false;
+        self.features.screenshot.start = (0.0, 0.0);
+        self.features.screenshot.end = (0.0, 0.0);
+        self.features.screenshot.output_path = Some(screenshot_path);
 
         // Grab keyboard (to intercept Escape)
         if let Some(root) = backend.root_window() {
@@ -6283,10 +6243,10 @@ impl Jwm {
     /// Cancel interactive screenshot selection mode.
     fn cancel_screenshot_select(&mut self, backend: &mut dyn Backend) {
         info!("[take_screenshot] cancelling region selection");
-        self.screenshot_select_active = false;
-        self.screenshot_select_dragging = false;
-        self.screenshot_select_committed = false;
-        self.screenshot_select_path = None;
+        self.features.screenshot.active = false;
+        self.features.screenshot.dragging = false;
+        self.features.screenshot.committed = false;
+        self.features.screenshot.output_path = None;
         if backend.has_compositor() {
             backend.compositor_set_snap_preview(None);
         }
@@ -6304,7 +6264,7 @@ impl Jwm {
     /// If `to_clipboard` is true, the image is copied to the system clipboard
     /// instead of saved to a file.
     fn finish_screenshot_select(&mut self, backend: &mut dyn Backend, to_clipboard: bool) {
-        let path_str = match self.screenshot_select_path.take() {
+        let path_str = match self.features.screenshot.output_path.take() {
             Some(p) => p,
             None => {
                 self.cancel_screenshot_select(backend);
@@ -6312,8 +6272,8 @@ impl Jwm {
             }
         };
 
-        let (sx, sy) = self.screenshot_select_start;
-        let (ex, ey) = self.screenshot_select_end;
+        let (sx, sy) = self.features.screenshot.start;
+        let (ex, ey) = self.features.screenshot.end;
 
         // Compute normalized rectangle
         let x = sx.min(ex) as i32;
@@ -6322,9 +6282,9 @@ impl Jwm {
         let h = (sy - ey).abs() as u32;
 
         // Clear state before capturing
-        self.screenshot_select_active = false;
-        self.screenshot_select_dragging = false;
-        self.screenshot_select_committed = false;
+        self.features.screenshot.active = false;
+        self.features.screenshot.dragging = false;
+        self.features.screenshot.committed = false;
         if backend.has_compositor() {
             backend.compositor_clear_snap_preview_immediate();
         }
