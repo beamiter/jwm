@@ -4,6 +4,7 @@ pub mod client_stack;
 pub mod features;
 pub mod geometry;
 pub mod rules;
+pub mod statusbar;
 
 pub use types::{
     WMButton, WMKey, WMRule, WMWindowGeom, WMClickType, WMArgEnum, InteractionAction,
@@ -17,6 +18,7 @@ pub use features::{
 
 pub use geometry::GeometryConstraints;
 pub use rules::{RuleApplication, RuleMatcher};
+pub use statusbar::{StatusBarBuilder, StatusBarUpdateManager};
 
 use libc::{SIG_DFL, SIGCHLD, setsid, sigaction, sigemptyset};
 
@@ -10438,79 +10440,25 @@ impl Jwm {
     }
 
     fn calculate_tag_masks(&self, mon_key: MonitorKey) -> (u32, u32) {
-        let mut occupied_tags_mask = 0u32;
-        let mut urgent_tags_mask = 0u32;
-
-        let config_mask = crate::config::CONFIG.load().tagmask();
-
-        if let Some(client_keys) = self.state.monitor_clients.get(mon_key) {
-            for &client_key in client_keys {
-                if let Some(client) = self.state.clients.get(client_key) {
-                    let effective_tags = client.state.tags & config_mask;
-
-                    if effective_tags == config_mask {
-                        continue;
-                    }
-
-                    occupied_tags_mask |= effective_tags;
-
-                    if client.state.is_urgent {
-                        urgent_tags_mask |= effective_tags;
-                    }
-                }
-            }
-        }
-
-        let final_occupied = occupied_tags_mask & config_mask;
-        let final_urgent = urgent_tags_mask & config_mask;
-
-        log::info!(
-            "[MaskDebug] Occupied: {:b}, Urgent: {:b}",
-            final_occupied,
-            final_urgent
-        );
-
-        (final_occupied, final_urgent)
+        let monitor_clients = self.state.monitor_clients.get(mon_key).map(|v| v.as_slice()).unwrap_or(&[]);
+        StatusBarBuilder::calculate_tag_masks(&self.state.clients, monitor_clients)
     }
 
     fn is_filled_tag(&self, mon_key: MonitorKey, tag_bit: u32) -> bool {
-        // 如果不是当前选中的显示器，不用高亮 Focus 状态
-        if self.state.sel_mon != Some(mon_key) {
-            return false;
-        }
-
+        let is_selected = self.state.sel_mon == Some(mon_key);
         if let Some(monitor) = self.state.monitors.get(mon_key) {
-            if let Some(sel_client_key) = monitor.sel {
-                if let Some(client) = self.state.clients.get(sel_client_key) {
-                    let mask = crate::config::CONFIG.load().tagmask();
-
-                    if (client.state.tags & mask) == mask {
-                        // 策略 A: 直接返回 false。
-                        // 视觉效果: 状态栏显示当前 Tag 为 "Selected" (通常是亮色)，
-                        // 其他 Tag 恢复为 "Occupied" 或 "Empty"。
-                        // 这是最符合直觉的，因为 Sticky 窗口是浮在所有 Tag 之上的。
-                        return false;
-
-                        // 策略 B (备选): 只高亮当前 Monitor 正在查看的 Tag
-                        // return (monitor.get_active_tags() & tag_bit) != 0;
-                    }
-
-                    return (client.state.tags & tag_bit) != 0;
-                }
-            }
+            StatusBarBuilder::is_filled_tag(&self.state.clients, monitor, tag_bit, is_selected)
+        } else {
+            false
         }
-        false
     }
 
     fn get_selected_client_name(&self, mon_key: MonitorKey) -> String {
         if let Some(monitor) = self.state.monitors.get(mon_key) {
-            if let Some(sel_client_key) = monitor.sel {
-                if let Some(client) = self.state.clients.get(sel_client_key) {
-                    return client.name.clone();
-                }
-            }
+            StatusBarBuilder::get_selected_client_name(&self.state.clients, monitor)
+        } else {
+            String::new()
         }
-        String::new()
     }
 
     // =========================================================================
