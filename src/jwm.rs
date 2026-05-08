@@ -2,6 +2,7 @@ pub mod types;
 pub mod strut_manager;
 pub mod client_stack;
 pub mod features;
+pub mod geometry;
 
 pub use types::{
     WMButton, WMKey, WMRule, WMWindowGeom, WMClickType, WMArgEnum, InteractionAction,
@@ -12,6 +13,8 @@ pub use types::{
 pub use features::{
     FeatureStates, MagnifierState, OverviewState, RecordingState, ScreenshotState,
 };
+
+pub use geometry::GeometryConstraints;
 
 use libc::{SIG_DFL, SIGCHLD, setsid, sigaction, sigemptyset};
 
@@ -2436,29 +2439,7 @@ impl Jwm {
     }
 
     fn constrain_to_screen(&self, x: &mut i32, y: &mut i32, total_width: i32, total_height: i32) {
-        let min_x = -(total_width - 1);
-        let max_x = self.s_w - 1;
-        if min_x <= max_x {
-            *x = (*x).clamp(min_x, max_x);
-        } else {
-            warn!(
-                "Skip screen X clamp because max_x({}) < min_x({}); total_width={}, s_w={}",
-                max_x, min_x, total_width, self.s_w
-            );
-            *x = min_x;
-        }
-
-        let min_y = -(total_height - 1);
-        let max_y = self.s_h - 1;
-        if min_y <= max_y {
-            *y = (*y).clamp(min_y, max_y);
-        } else {
-            warn!(
-                "Skip screen Y clamp because max_y({}) < min_y({}); total_height={}, s_h={}",
-                max_y, min_y, total_height, self.s_h
-            );
-            *y = min_y;
-        }
+        GeometryConstraints::constrain_to_screen(x, y, total_width, total_height, self.s_w, self.s_h);
     }
 
     fn constrain_to_monitor(
@@ -2469,37 +2450,7 @@ impl Jwm {
         total_height: i32,
         monitor_geometry: &MonitorGeometry,
     ) {
-        let MonitorGeometry {
-            w_x: wx,
-            w_y: wy,
-            w_w: ww,
-            w_h: wh,
-            ..
-        } = *monitor_geometry;
-
-        let min_x = wx - total_width + 1;
-        let max_x = wx + ww - 1;
-        if min_x <= max_x {
-            *x = (*x).clamp(min_x, max_x);
-        } else {
-            warn!(
-                "Skip monitor X clamp because max_x({}) < min_x({}); total_width={}, monitor_ww={}",
-                max_x, min_x, total_width, ww
-            );
-            *x = min_x;
-        }
-
-        let min_y = wy - total_height + 1;
-        let max_y = wy + wh - 1;
-        if min_y <= max_y {
-            *y = (*y).clamp(min_y, max_y);
-        } else {
-            warn!(
-                "Skip monitor Y clamp because max_y({}) < min_y({}); total_height={}, monitor_wh={}",
-                max_y, min_y, total_height, wh
-            );
-            *y = min_y;
-        }
+        GeometryConstraints::constrain_to_monitor(x, y, total_width, total_height, monitor_geometry);
     }
 
     fn apply_size_hints_constraints(
@@ -2554,50 +2505,8 @@ impl Jwm {
         Ok(())
     }
 
-    fn calculate_constrained_size(&self, mut w: i32, mut h: i32, hints: &SizeHints) -> (i32, i32) {
-        w = self.apply_increments(w - hints.base_w, hints.inc_w) + hints.base_w;
-        h = self.apply_increments(h - hints.base_h, hints.inc_h) + hints.base_h;
-
-        (w, h) = self.apply_aspect_ratio_constraints(w, h, hints);
-
-        w = w.max(hints.min_w);
-        h = h.max(hints.min_h);
-
-        if hints.max_w > 0 {
-            w = w.min(hints.max_w);
-        }
-        if hints.max_h > 0 {
-            h = h.min(hints.max_h);
-        }
-
-        (w, h)
-    }
-
-    fn apply_increments(&self, size: i32, increment: i32) -> i32 {
-        if increment > 0 {
-            (size / increment) * increment
-        } else {
-            size
-        }
-    }
-
-    fn apply_aspect_ratio_constraints(
-        &self,
-        mut w: i32,
-        mut h: i32,
-        hints: &SizeHints,
-    ) -> (i32, i32) {
-        if hints.min_aspect > 0.0 && hints.max_aspect > 0.0 {
-            if hints.min_aspect > 0.0 && hints.max_aspect > 0.0 {
-                let ratio = w as f32 / h as f32;
-                if ratio < hints.min_aspect {
-                    w = (h as f32 * hints.min_aspect + 0.5) as i32;
-                } else if ratio > hints.max_aspect {
-                    h = (w as f32 / hints.max_aspect + 0.5) as i32;
-                }
-            }
-        }
-        (w, h)
+    fn calculate_constrained_size(&self, w: i32, h: i32, hints: &SizeHints) -> (i32, i32) {
+        GeometryConstraints::calculate_constrained_size(w, h, hints)
     }
 
     fn updatesizehints(
@@ -9976,17 +9885,14 @@ impl Jwm {
         // bars.  Skip all workarea clamping so they are not shifted into the
         // workarea.
         if let Some(monitor) = self.state.monitors.get(client_mon_key) {
-            let (m_x, m_y, m_w, m_h) = (
+            let window_rect = Rect::new(client_x, client_y, client_total_width, client_total_height);
+            let monitor_rect = Rect::new(
                 monitor.geometry.m_x,
                 monitor.geometry.m_y,
                 monitor.geometry.m_w,
                 monitor.geometry.m_h,
             );
-            if client_x <= m_x
-                && client_y <= m_y
-                && client_total_width >= m_w
-                && client_total_height >= m_h
-            {
+            if GeometryConstraints::covers_full_monitor(&window_rect, &monitor_rect) {
                 info!(
                     "Window covers full monitor ({}x{} at ({},{})), skipping workarea clamping",
                     client_total_width, client_total_height, client_x, client_y
@@ -10032,15 +9938,8 @@ impl Jwm {
                     );
 
                     // Intersect clamp rect with parent rect.
-                    let left = clamp.x.max(parent_rect.x);
-                    let top = clamp.y.max(parent_rect.y);
-                    let right = (clamp.x + clamp.w).min(parent_rect.x + parent_rect.w);
-                    let bottom = (clamp.y + clamp.h).min(parent_rect.y + parent_rect.h);
-                    let w = (right - left).max(0);
-                    let h = (bottom - top).max(0);
-
-                    if w > 0 && h > 0 {
-                        clamp = Rect::new(left, top, w, h);
+                    if let Some(intersection) = GeometryConstraints::rect_intersection(&clamp, &parent_rect) {
+                        clamp = intersection;
                         info!(
                             "Dialog transient clamp: parent=({},{} {}x{}) clamp=({},{} {}x{})",
                             parent_rect.x,
@@ -10070,54 +9969,23 @@ impl Jwm {
         }
 
         // Clamp to the computed clamp rect (workarea or workarea∩parent).
-        let min_x = clamp.x;
-        let max_x = clamp.x + clamp.w - client_total_width;
-        if min_x <= max_x {
-            client_x = client_x.clamp(min_x, max_x);
-        } else {
-            client_x = min_x;
-            warn!(
-                "Skip X clamp because max_x({}) < min_x({}); client_total_width={}, clamp_w={}",
-                max_x, min_x, client_total_width, clamp.w
-            );
-        }
-
-        let min_y = clamp.y;
-        let max_y = clamp.y + clamp.h - client_total_height;
-        if min_y <= max_y {
-            client_y = client_y.clamp(min_y, max_y);
-        } else {
-            client_y = min_y;
-            warn!(
-                "Skip Y clamp because max_y({}) < min_y({}); client_total_height={}, clamp_h={}",
-                max_y, min_y, client_total_height, clamp.h
-            );
-        }
+        GeometryConstraints::clamp_rect_to_boundary(
+            &mut client_x,
+            &mut client_y,
+            client_total_width,
+            client_total_height,
+            &clamp,
+        );
 
         // Keep within the monitor bounds as a final guard.
-        let min_x = mon_wx;
-        let max_x = mon_wx + mon_ww - client_total_width;
-        if min_x <= max_x {
-            client_x = client_x.clamp(min_x, max_x);
-        } else {
-            client_x = min_x;
-            warn!(
-                "Skip X clamp because max_x({}) < min_x({}); client_total_width={}, mon_ww={}",
-                max_x, min_x, client_total_width, mon_ww
-            );
-        }
-
-        let min_y = mon_wy;
-        let max_y = mon_wy + mon_wh - client_total_height;
-        if min_y <= max_y {
-            client_y = client_y.clamp(min_y, max_y);
-        } else {
-            client_y = min_y;
-            warn!(
-                "Skip Y clamp because max_y({}) < min_y({}); client_total_height={}, mon_wh={}",
-                max_y, min_y, client_total_height, mon_wh
-            );
-        }
+        let monitor_bounds = Rect::new(mon_wx, mon_wy, mon_ww, mon_wh);
+        GeometryConstraints::clamp_rect_to_boundary(
+            &mut client_x,
+            &mut client_y,
+            client_total_width,
+            client_total_height,
+            &monitor_bounds,
+        );
         if let Some(client) = self.state.clients.get_mut(client_key) {
             client.geometry.x = client_x;
             client.geometry.y = client_y;
