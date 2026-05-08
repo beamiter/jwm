@@ -5,6 +5,7 @@ pub mod features;
 pub mod geometry;
 pub mod rules;
 pub mod statusbar;
+pub mod layout;
 
 pub use types::{
     WMButton, WMKey, WMRule, WMWindowGeom, WMClickType, WMArgEnum, InteractionAction,
@@ -81,7 +82,7 @@ use crate::ipc::{
 use crate::ipc_server::{IncomingIpc, IpcServer};
 
 use crate::core::animation::{AnimationKind, AnimationManager};
-use crate::core::layout::{self, LayoutClient, LayoutParams, LayoutResult, ScrollingParams};
+use crate::core::layout::{self as core_layout, LayoutClient, LayoutParams, LayoutResult, ScrollingParams};
 use crate::core::types::Rect;
 use shared_structures::CommandType;
 use shared_structures::SharedCommand;
@@ -3804,7 +3805,7 @@ impl Jwm {
         };
 
         // 4. 计算布局
-        let results = layout::calculate_fibonacci(&params, &layout_clients);
+        let results = core_layout::calculate_fibonacci(&params, &layout_clients);
 
         // 5. 应用结果 (调整窗口大小和位置)
         for res in results {
@@ -3872,28 +3873,28 @@ impl Jwm {
             backend,
             mon_key,
             "centered_master",
-            layout::calculate_centered_master,
+            core_layout::calculate_centered_master,
         );
     }
 
     fn bstack(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
-        self.tiling_layout_wrapper(backend, mon_key, "bstack", layout::calculate_bstack);
+        self.tiling_layout_wrapper(backend, mon_key, "bstack", core_layout::calculate_bstack);
     }
 
     fn grid(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
-        self.tiling_layout_wrapper(backend, mon_key, "grid", layout::calculate_grid);
+        self.tiling_layout_wrapper(backend, mon_key, "grid", core_layout::calculate_grid);
     }
 
     fn deck(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
-        self.tiling_layout_wrapper(backend, mon_key, "deck", layout::calculate_deck);
+        self.tiling_layout_wrapper(backend, mon_key, "deck", core_layout::calculate_deck);
     }
 
     fn three_col(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
-        self.tiling_layout_wrapper(backend, mon_key, "three_col", layout::calculate_three_col);
+        self.tiling_layout_wrapper(backend, mon_key, "three_col", core_layout::calculate_three_col);
     }
 
     fn tatami(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
-        self.tiling_layout_wrapper(backend, mon_key, "tatami", layout::calculate_tatami);
+        self.tiling_layout_wrapper(backend, mon_key, "tatami", core_layout::calculate_tatami);
     }
 
     fn vstack(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
@@ -3965,7 +3966,7 @@ impl Jwm {
             gap: effective_gap,
         };
 
-        let results = layout::calculate_vstack(&params, &layout_clients);
+        let results = core_layout::calculate_vstack(&params, &layout_clients);
 
         let target_rects: Vec<(ClientKey, Rect)> =
             results.iter().map(|res| (res.key, res.rect)).collect();
@@ -4063,7 +4064,7 @@ impl Jwm {
             viewport_x: state.viewport_x,
         };
 
-        let (results, new_vp_x) = layout::calculate_scrolling(&params, &columns, focus_col);
+        let (results, new_vp_x) = core_layout::calculate_scrolling(&params, &columns, focus_col);
 
         // Update viewport
         self.scrolling_states.get_mut(&mon_key).unwrap().viewport_x = new_vp_x;
@@ -4135,7 +4136,7 @@ impl Jwm {
             gap: 0,
         };
 
-        let results = layout::calculate_fullscreen(&params, &layout_clients);
+        let results = core_layout::calculate_fullscreen(&params, &layout_clients);
 
         // 临时将 border_w 设为 0，应用布局后恢复
         for &(key, _, _original_border_w) in &raw_clients {
@@ -4825,7 +4826,7 @@ impl Jwm {
             m_fact: mfact,
             gap: effective_gap,
         };
-        let results = layout::calculate_tile(&params, &layout_clients);
+        let results = core_layout::calculate_tile(&params, &layout_clients);
 
         // 3. 应用结果 (执行副作用：移动窗口)
         for res in results {
@@ -9713,7 +9714,7 @@ impl Jwm {
             m_fact: 0.0, // 不相关
             gap: 0,      // monocle 不使用 gap
         };
-        let results = layout::calculate_monocle(&params, &layout_clients);
+        let results = core_layout::calculate_monocle(&params, &layout_clients);
         // 应用
         for res in results {
             self.resize_client(
