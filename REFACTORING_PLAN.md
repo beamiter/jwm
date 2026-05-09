@@ -20,11 +20,17 @@
   - 减少: 120 行
   - 提取函数: `spawn`, `reap_zombies`, `setup_smithay_child_env`, `apply_child_pre_exec`, `is_smithay_backend`, `is_udev_backend`
 
+- **monitor_management.rs** (227 行) - 显示器与状态栏管理
+  - Commit: `3ff84e7`
+  - 状态: ✅ 已提交
+  - 减少: 206 行
+  - 提取函数: `createmon`, `dirtomon`, `ensure_secondary_bars_running`, `spawn_secondary_bar`, `flush_pending_bar_updates`, `switch_to_monitor`
+
 ### 📊 当前状态
-- **jwm.rs**: 5241 行 → **4536 行** (-13.5%)
+- **jwm.rs**: 5241 行 → **4330 行** (-17.4%)
 - **编译状态**: ✅ 通过
 - **测试状态**: ✅ 正常
-- **已提取**: 3 个模块，共减少 705 行
+- **已提取**: 4 个模块，共减少 911 行
 
 ---
 
@@ -32,48 +38,27 @@
 
 按优先级和安全性排序：
 
-### 1. monitor_management.rs (中优先级) ⭐️
-**预计**: ~250 行
-**推荐理由**: 相对独立，主要管理多显示器和状态栏
-**预计**: ~250 行
+### 1. positioning.rs (低优先级) ⭐️
+**预计**: ~400 行
+**推荐理由**: 几何与定位相关，虽然与 layout 紧密耦合，但可独立提取
 
 #### 需要提取的函数
-| 函数名 | 原始行号 | 说明 |
-|--------|---------|------|
-| `createmon` | 2433 | 创建显示器 |
-| `dirtomon` | 2463 | 方向查找显示器 |
-| `ensure_secondary_bars_running` | 2486 | 确保状态栏运行 |
-| `spawn_secondary_bar` | 2533 | 生成状态栏进程 |
-| `flush_pending_bar_updates` | 2713 | 刷新状态栏更新 |
-| `switch_to_monitor` | 4851 | 切换到显示器 |
+| 函数名 | 说明 |
+|--------|------|
+| `resize_client` | 调整客户端大小 |
+| `resizeclient` | 实际调整操作 |
+| `recttomon` | 矩形到显示器 |
+| `wintomon` | 窗口到显示器 |
+| `getrootptr` | 获取根指针位置 |
 
 #### 特点
-- 相对独立
-- 主要管理多显示器和状态栏
-- 依赖 `CONFIG`、`message` 字段
-
----
-
-### 3. positioning.rs (低优先级)
-**预计**: ~400 行
-
-#### 需要提取的函数
-| 函数名 | 原始行号 | 说明 |
-|--------|---------|------|
-| `resize_client` | 1869 | 调整客户端大小 |
-| `resizeclient` | 1889 | 实际调整操作 |
-| `recttomon` | 2794 | 矩形到显示器 |
-| `wintomon` | 2805 | 窗口到显示器 |
-| `getrootptr` | 2786 | 获取根指针位置 |
-
-#### 注意
 - 与 layout 模块紧密耦合
 - 调用 `arrange` 频繁
-- 建议最后拆分
+- 最后拆分
 
 ---
 
-### 4. utils.rs (低优先级)
+### 2. utils.rs (低优先级)
 **预计**: ~250 行
 
 #### 需要提取的函数
@@ -124,14 +109,14 @@
 ### 文件大小对比
 | 文件 | 原始 | 当前 | 目标 | 状态 |
 |------|------|------|------|------|
-| jwm.rs | 5241 行 | 4536 行 | ~3500 行 | 🔄 进行中 (-13.5%) |
+| jwm.rs | 5241 行 | 4330 行 | ~3500 行 | 🔄 进行中 (-17.4%) |
 | window_state.rs | - | 240 行 | 240 行 | ✅ 完成 |
 | rendering.rs | - | 364 行 | 364 行 | ✅ 完成 |
 | process.rs | - | 131 行 | 131 行 | ✅ 完成 |
-| monitor_management.rs | - | - | ~250 行 | ⏳ 待提取 |
+| monitor_management.rs | - | 227 行 | 227 行 | ✅ 完成 |
 | positioning.rs | - | - | ~400 行 | ⏳ 待提取 |
 | utils.rs | - | - | ~250 行 | ⏳ 待提取 |
-| **总计** | 5241 行 | 5271 行 | 5535 行 | 已完成 50% |
+| **总计** | 5241 行 | 5292 行 | 5142 行 | 已完成 66.7% |
 
 > 注: 总行数增加是因为模块声明和必要的导入，但每个文件更小更易维护
 
@@ -145,7 +130,7 @@ src/jwm/
 ├── window_state.rs           # 窗口状态管理 (240 行) ✅
 ├── rendering.rs              # 渲染与合成器 (364 行) ✅
 ├── process.rs                # 进程管理 (131 行) ✅
-├── monitor_management.rs     # 显示器管理 (~250 行) ⏳
+├── monitor_management.rs     # 显示器管理 (227 行) ✅
 ├── positioning.rs            # 几何与定位 (~400 行) ⏳
 ├── utils.rs                  # 工具函数 (~250 行) ⏳
 ├── client.rs                 # 客户端管理 ✅
@@ -248,9 +233,17 @@ Stats: jwm.rs reduced from XXXX to YYYY lines (-ZZ lines)"
 - ✅ **效果**: 
   - 提取 131 行，减少 jwm.rs 120 行
   - 编译通过，括号完美平衡 (1031 vs 1031)
-- 💡 **改进**: 
-  - 删除时需更仔细检查 impl 块的结束位置
-  - 可考虑在删除前验证目标函数确实完整
+
+### 第四次拆分 (monitor_management.rs)
+- ✅ **成功点**: 
+  - 工作流验证再次有效
+  - 函数提取 6 个（displayer + status bar 管理）
+  - 中等复杂度，依赖关系清晰
+- ✅ **效果**: 
+  - 提取 227 行，减少 jwm.rs 206 行
+  - 编译通过，括号完美平衡 (982 vs 982)
+  - 一次性删除工作流完全有效！
+- 💡 **改进**: 批量删除工作流已验证为标准方法
 1. **准备阶段**: 
    - 列出所有要提取的函数及其行号
    - 检查函数间的调用关系
@@ -291,7 +284,7 @@ Stats: jwm.rs reduced from XXXX to YYYY lines (-ZZ lines)"
 
 ---
 
-**文档版本**: 1.2  
+**文档版本**: 1.3  
 **最后更新**: 2026-05-09  
-**下次更新计划**: 完成 monitor_management.rs 或 positioning.rs 后  
-**完成进度**: 3/6 模块 (50%)
+**下次更新计划**: 完成 positioning.rs 或 utils.rs 后  
+**完成进度**: 4/6 模块 (66.7%)
