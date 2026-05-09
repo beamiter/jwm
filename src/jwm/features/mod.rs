@@ -5,11 +5,13 @@
 //! - overview: 3D 窗口切换器
 //! - recording: 屏幕录制
 //! - magnifier: 放大镜
+//! - toggles: 所有特性的切换函数
 
 pub mod screenshot;
 pub mod overview;
 pub mod recording;
 pub mod magnifier;
+pub mod toggles;
 
 pub use screenshot::ScreenshotState;
 pub use overview::OverviewState;
