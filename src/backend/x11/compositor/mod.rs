@@ -2360,6 +2360,16 @@ impl Compositor {
         // P5B Phase 2: Build monitor refresh rates from RandR
         let monitor_refresh_rates = Self::build_monitor_refresh_rates(&conn, root);
 
+        // P5B: Log detected monitor configuration
+        log::info!("compositor: P5B detected {} monitors", monitor_rects.len());
+        for (id, x, y, w, h) in &monitor_rects {
+            let hz = monitor_refresh_rates.get(id).copied().unwrap_or(60);
+            log::info!(
+                "  Monitor {}: rect=({},{} {}x{}) refresh={}Hz",
+                id, x, y, w, h, hz
+            );
+        }
+
         Ok(Self {
             conn,
             xlib_display,
