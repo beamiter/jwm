@@ -3233,6 +3233,47 @@ mod output_ops {
             false
         }
 
+        /// Check if output supports HDR
+        /// Queries for "max_bpc" property on the output (>= 10 indicates HDR support)
+        fn query_output_hdr_capable(&self, output: u32) -> bool {
+            // Try to get max_bpc property via atom lookup
+            if let Ok(atom_cookie) = self.conn.intern_atom(false, b"max_bpc") {
+                if let Ok(atom_reply) = atom_cookie.reply() {
+                    let max_bpc_atom = atom_reply.atom;
+                    if max_bpc_atom > 0 {
+                        // Try to read the property
+                        if let Ok(prop_cookie) = self.conn.randr_get_output_property(
+                            output,
+                            max_bpc_atom,
+                            x11rb::protocol::xproto::AtomEnum::INTEGER,
+                            0,  // offset
+                            1,  // length (single value)
+                            false,  // delete
+                            false,  // pending
+                        ) {
+                            if let Ok(prop) = prop_cookie.reply() {
+                                // Property should be 32-bit integer format
+                                if prop.format == 32 && prop.num_items > 0 {
+                                    if !prop.data.is_empty() && prop.data.len() >= 4 {
+                                        // Read as 32-bit little-endian integer
+                                        let value = u32::from_le_bytes([
+                                            prop.data[0],
+                                            prop.data[1],
+                                            prop.data[2],
+                                            prop.data[3],
+                                        ]);
+                                        return value >= 10;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Fallback: assume HDR capable (let config decide)
+            true
+        }
+
         /// Get cached outputs or query if cache miss
         fn get_cached_or_query(&self) -> Vec<OutputInfo> {
             // Fast path: check cache
@@ -3302,6 +3343,12 @@ mod output_ops {
                                             })
                                             .unwrap_or(60000);
 
+                                        let hdr_capable = if let Some(&first_output) = m.outputs.first() {
+                                            self.query_output_hdr_capable(first_output)
+                                        } else {
+                                            true
+                                        };
+
                                         out.push(OutputInfo {
                                             id: OutputId(i as u64),
                                             name: format!("Monitor-{}", i),
@@ -3311,6 +3358,7 @@ mod output_ops {
                                             height: m.height as i32,
                                             scale: 1.0,
                                             refresh_rate: refresh,
+                                            hdr_capable,
                                         });
 
                                         // Check for VRR support on this output
@@ -3356,6 +3404,7 @@ mod output_ops {
                                         height: ci.height as i32,
                                         scale: 1.0,
                                         refresh_rate: refresh,
+                                        hdr_capable: true,
                                     });
                                 }
                             }
@@ -3377,6 +3426,7 @@ mod output_ops {
                 height: self.sh,
                 scale: 1.0,
                 refresh_rate: 60000,
+                hdr_capable: true,
             }]
         }
     }

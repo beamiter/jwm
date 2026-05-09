@@ -57,6 +57,7 @@ pub struct OutputInfo {
     pub height: i32,
     pub scale: f32,
     pub refresh_rate: u32,
+    pub hdr_capable: bool,
 }
 
 #[derive(Clone, Debug)]

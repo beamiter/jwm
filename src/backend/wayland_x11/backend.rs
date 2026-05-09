@@ -600,6 +600,7 @@ impl WaylandX11Backend {
             height,
             scale: 1.0,
             refresh_rate: 60_000,
+            hdr_capable: true,
         };
 
         if emit_events {
@@ -1332,6 +1333,7 @@ Fallback: run the winit backend instead: `JWM_BACKEND=wayland-winit` (same binar
                                 height: mode.size.h,
                                 scale: 1.0,
                                 refresh_rate: 60_000,
+                                hdr_capable: true,
                             };
                             {
                                 let mut s = shared.lock().unwrap();

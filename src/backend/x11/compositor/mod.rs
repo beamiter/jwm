@@ -1355,6 +1355,9 @@ impl Compositor {
             log::info!("compositor: overlay input shape set successfully (verified via sync)");
         }
 
+        // Read HDR setting from config early for GLX setup
+        let hdr_enabled = crate::config::CONFIG.load().behavior().hdr_enabled;
+
         // 6. Open Xlib display for GLX
         let xlib_display = unsafe { x11::xlib::XOpenDisplay(std::ptr::null()) };
         if xlib_display.is_null() {
@@ -1411,21 +1414,42 @@ impl Compositor {
         // Request a double-buffered FBConfig matching the overlay's exact visual.
         // We use glXSwapBuffers with swap interval=1 for vsync, which eliminates
         // tearing during window movement.
-        let ctx_attrs_visual: Vec<i32> = vec![
-            x11::glx::GLX_RENDER_TYPE,
-            x11::glx::GLX_RGBA_BIT,
-            x11::glx::GLX_DRAWABLE_TYPE,
-            x11::glx::GLX_WINDOW_BIT,
-            x11::glx::GLX_DOUBLEBUFFER,
-            1, // double-buffered for tear-free rendering
-            x11::glx::GLX_RED_SIZE,
-            8,
-            x11::glx::GLX_GREEN_SIZE,
-            8,
-            x11::glx::GLX_BLUE_SIZE,
-            8,
-            0,
-        ];
+        // If HDR is enabled, request 10-bit RGB instead of 8-bit
+        let ctx_attrs_visual: Vec<i32> = if hdr_enabled {
+            vec![
+                x11::glx::GLX_RENDER_TYPE,
+                x11::glx::GLX_RGBA_BIT,
+                x11::glx::GLX_DRAWABLE_TYPE,
+                x11::glx::GLX_WINDOW_BIT,
+                x11::glx::GLX_DOUBLEBUFFER,
+                1,
+                x11::glx::GLX_RED_SIZE,
+                10,
+                x11::glx::GLX_GREEN_SIZE,
+                10,
+                x11::glx::GLX_BLUE_SIZE,
+                10,
+                x11::glx::GLX_ALPHA_SIZE,
+                2,
+                0,
+            ]
+        } else {
+            vec![
+                x11::glx::GLX_RENDER_TYPE,
+                x11::glx::GLX_RGBA_BIT,
+                x11::glx::GLX_DRAWABLE_TYPE,
+                x11::glx::GLX_WINDOW_BIT,
+                x11::glx::GLX_DOUBLEBUFFER,
+                1,
+                x11::glx::GLX_RED_SIZE,
+                8,
+                x11::glx::GLX_GREEN_SIZE,
+                8,
+                x11::glx::GLX_BLUE_SIZE,
+                8,
+                0,
+            ]
+        };
 
         let mut n_configs: i32 = 0;
         let configs = unsafe {
@@ -1466,6 +1490,26 @@ impl Compositor {
             x11::xlib::XFree(configs as *mut _);
         }
         log::info!("compositor: found matching FBConfig for context (from {} candidates)", n_configs);
+
+        // Log the actual visual depth from selected FBConfig
+        let visual_depth = unsafe {
+            let vi = x11::glx::glXGetVisualFromFBConfig(xlib_display, ctx_fbconfig);
+            if !vi.is_null() {
+                let depth = (*vi).depth;
+                x11::xlib::XFree(vi as *mut _);
+                depth
+            } else {
+                0
+            }
+        };
+        if hdr_enabled {
+            log::info!(
+                "compositor: HDR output requested, selected FBConfig visual depth={}",
+                visual_depth
+            );
+        } else {
+            log::info!("compositor: HDR disabled, using standard 8-bit visual depth={}", visual_depth);
+        }
 
         // 8. Create GLX context
         log::info!("compositor: creating GLX context...");

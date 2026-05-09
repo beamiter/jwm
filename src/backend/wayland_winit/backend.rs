@@ -586,6 +586,7 @@ impl WaylandWinitBackend {
             height,
             scale: 1.0,
             refresh_rate: 60_000,
+            hdr_capable: true,
         };
 
         if emit_events {
@@ -1185,6 +1186,7 @@ impl WaylandWinitBackend {
                                 height: mode.size.h,
                                 scale: scale_factor as f32,
                                 refresh_rate: 60_000,
+                                hdr_capable: true,
                             };
                             {
                                 let mut s = shared.lock().unwrap();

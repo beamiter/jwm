@@ -2230,6 +2230,7 @@ fn scan_drm_outputs(dev_id: u64, path: &Path) -> Result<Vec<(u64, OutputInfo)>, 
                 height,
                 scale: 1.0,
                 refresh_rate,
+                hdr_capable: true,
             },
         ));
     }
