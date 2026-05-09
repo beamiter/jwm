@@ -4201,6 +4201,7 @@ impl Compositor {
             // Tag switch can radically change visible scene; force a full redraw
             // to avoid stale pixels from partial-damage scissor regions.
             self.damage_tracker.mark_all_dirty();
+            self.dirty_region_tracker.mark_all_dirty();  // P5C: Sync rect tracker
             self.needs_render = true;
             log::debug!(
                 "compositor: tag-switch slide transition started ({:?}, dir={}, mon={}x{}+{}+{})",
@@ -4646,6 +4647,16 @@ impl Compositor {
         }
         self.last_scene_hash = hash;
 
+        // P5C Phase 2: Mark dirty windows' rectangles for precise tracking
+        for &(win, _, _, _, _) in scene.iter() {
+            if let Some(wt) = self.windows.get(&win) {
+                if wt.dirty || wt.needs_pixmap_refresh {
+                    let dirty_rect = DirtyRect::new(wt.x, wt.y, wt.w, wt.h);
+                    self.dirty_region_tracker.mark_dirty(dirty_rect);
+                }
+            }
+        }
+
         // Reset tilt targets — the render loop will set them if a focused window
         // uses tilt; otherwise they stay at 0 so the tilt smoothly returns to rest.
         if self.window_tilt {
@@ -4817,6 +4828,7 @@ impl Compositor {
             }
         }
         self.damage_tracker.clear();
+        self.dirty_region_tracker.clear();  // P5C: Clear rect tracker
 
         // Clear
         unsafe {
@@ -6497,6 +6509,7 @@ impl Compositor {
             && self.windows.values().any(|wt| self.needs_backdrop_blur(wt));
         if blur_active {
             self.damage_tracker.mark_all_dirty();
+            self.dirty_region_tracker.mark_all_dirty();  // P5C: Sync rect tracker
         }
         self.needs_render = true;
     }
