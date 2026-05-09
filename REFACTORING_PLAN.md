@@ -14,11 +14,17 @@
   - 减少: 344 行
   - 提取函数: `render_compositor_immediate`, `tick_animations`, `build_window_groups`, `build_compositor_scene`, `sync_focused_floating_geometry`, `configure_client`, `move_window`
 
+- **process.rs** (131 行) - 进程管理
+  - Commit: `3c54e38`
+  - 状态: ✅ 已提交
+  - 减少: 120 行
+  - 提取函数: `spawn`, `reap_zombies`, `setup_smithay_child_env`, `apply_child_pre_exec`, `is_smithay_backend`, `is_udev_backend`
+
 ### 📊 当前状态
-- **jwm.rs**: 5241 行 → **4656 行** (-11.2%)
+- **jwm.rs**: 5241 行 → **4536 行** (-13.5%)
 - **编译状态**: ✅ 通过
 - **测试状态**: ✅ 正常
-- **已提取**: 2 个模块，共减少 585 行
+- **已提取**: 3 个模块，共减少 705 行
 
 ---
 
@@ -26,28 +32,9 @@
 
 按优先级和安全性排序：
 
-### 1. process.rs (高优先级 - 最安全) ⭐️
-**预计**: ~200 行
-**推荐理由**: 几乎无内部依赖，最安全提取
-
-#### 需要提取的函数
-| 函数名 | 说明 |
-|--------|------|
-| `spawn` | 生成子进程 |
-| `reap_zombies` | 回收僵尸进程 |
-| `setup_smithay_child_env` | 设置 Smithay 环境 |
-| `apply_child_pre_exec` | 应用 pre-exec 钩子 |
-| `is_smithay_backend` | 检查后端类型 |
-| `is_udev_backend` | 检查 udev 后端 |
-
-#### 特点
-- 进程管理相关
-- 几乎无内部依赖
-- 最安全提取
-
----
-
-### 2. monitor_management.rs (中优先级)
+### 1. monitor_management.rs (中优先级) ⭐️
+**预计**: ~250 行
+**推荐理由**: 相对独立，主要管理多显示器和状态栏
 **预计**: ~250 行
 
 #### 需要提取的函数
@@ -137,14 +124,14 @@
 ### 文件大小对比
 | 文件 | 原始 | 当前 | 目标 | 状态 |
 |------|------|------|------|------|
-| jwm.rs | 5241 行 | 4656 行 | ~3500 行 | 🔄 进行中 (-11.2%) |
+| jwm.rs | 5241 行 | 4536 行 | ~3500 行 | 🔄 进行中 (-13.5%) |
 | window_state.rs | - | 240 行 | 240 行 | ✅ 完成 |
 | rendering.rs | - | 364 行 | 364 行 | ✅ 完成 |
+| process.rs | - | 131 行 | 131 行 | ✅ 完成 |
 | monitor_management.rs | - | - | ~250 行 | ⏳ 待提取 |
-| process.rs | - | - | ~200 行 | ⏳ 待提取 |
 | positioning.rs | - | - | ~400 行 | ⏳ 待提取 |
 | utils.rs | - | - | ~250 行 | ⏳ 待提取 |
-| **总计** | 5241 行 | 5260 行 | 5704 行 | 已完成 33.8% |
+| **总计** | 5241 行 | 5271 行 | 5535 行 | 已完成 50% |
 
 > 注: 总行数增加是因为模块声明和必要的导入，但每个文件更小更易维护
 
@@ -157,8 +144,8 @@ src/jwm/
 │   └── 核心业务逻辑
 ├── window_state.rs           # 窗口状态管理 (240 行) ✅
 ├── rendering.rs              # 渲染与合成器 (364 行) ✅
+├── process.rs                # 进程管理 (131 行) ✅
 ├── monitor_management.rs     # 显示器管理 (~250 行) ⏳
-├── process.rs                # 进程管理 (~200 行) ⏳
 ├── positioning.rs            # 几何与定位 (~400 行) ⏳
 ├── utils.rs                  # 工具函数 (~250 行) ⏳
 ├── client.rs                 # 客户端管理 ✅
@@ -250,7 +237,20 @@ Stats: jwm.rs reduced from XXXX to YYYY lines (-ZZ lines)"
   - 括号完美平衡 (1062 vs 1062)
 - 💡 **确认**: 批量删除工作流是正确的方法
 
-### 建议工作流 ✅
+### 第三次拆分 (process.rs)
+- ✅ **成功点**: 
+  - 工作流验证完全有效
+  - 函数提取 6 个（spawn, reap_zombies, 4 个辅助函数）
+  - 无复杂依赖，提取最安全
+- ⚠️ **问题**: 
+  - 初始删除时留下了多余的空的 impl 块闭包
+  - 需要手动清理多余的 `}`
+- ✅ **效果**: 
+  - 提取 131 行，减少 jwm.rs 120 行
+  - 编译通过，括号完美平衡 (1031 vs 1031)
+- 💡 **改进**: 
+  - 删除时需更仔细检查 impl 块的结束位置
+  - 可考虑在删除前验证目标函数确实完整
 1. **准备阶段**: 
    - 列出所有要提取的函数及其行号
    - 检查函数间的调用关系
@@ -291,7 +291,7 @@ Stats: jwm.rs reduced from XXXX to YYYY lines (-ZZ lines)"
 
 ---
 
-**文档版本**: 1.1  
+**文档版本**: 1.2  
 **最后更新**: 2026-05-09  
-**下次更新计划**: 完成 process.rs 或 monitor_management.rs 后  
-**完成进度**: 2/6 模块 (33.8%)
+**下次更新计划**: 完成 monitor_management.rs 或 positioning.rs 后  
+**完成进度**: 3/6 模块 (50%)
