@@ -5211,10 +5211,18 @@ impl Compositor {
                                     self.gl.disable(glow::SCISSOR_TEST);
                                 }
 
+                                // P5B Phase 3: Compute monitor-aware blur strength
                                 let base_levels = if wt.is_frosted {
                                     self.frosted_glass_strength as usize
                                 } else {
-                                    self.blur_fbos.len()
+                                    // Get monitor-specific blur strength based on refresh rate
+                                    let monitor_id = self.get_window_monitor_id(wt.x, wt.y, wt.w, wt.h);
+                                    let monitor_hz = self.get_monitor_refresh_hz(monitor_id);
+                                    let monitor_strength = self.get_blur_strength_for_hz(monitor_hz)
+                                        .unwrap_or(self.blur_strength);
+
+                                    // Cap at available FBO levels (can't exceed pre-created fbos)
+                                    (monitor_strength as usize).min(self.blur_fbos.len())
                                 };
                                 // Phase 2.2: Apply blur quality cap (per-window adaptive)
                                 let window_quality = self.compute_window_blur_quality(wt, focused);
