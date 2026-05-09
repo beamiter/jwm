@@ -48,6 +48,7 @@ use x11rb::protocol::composite::ConnectionExt as CompositeExt;
 use x11rb::protocol::damage::{self, ConnectionExt as DamageExt};
 use x11rb::protocol::xfixes::ConnectionExt as XFixesExt;
 use x11rb::protocol::xproto::{self, ConnectionExt as XProtoExt};
+use x11rb::protocol::randr::ConnectionExt as RandrExt;
 use x11rb::rust_connection::RustConnection;
 
 use math::ortho;
@@ -1128,6 +1129,8 @@ pub(super) struct Compositor {
     blur_strength_by_hz: Vec<(u32, u32)>,  // [(hz, strength), ...]
     /// Per-monitor blur quality: monitor_index -> BlurQuality
     blur_quality_by_monitor: HashMap<u32, BlurQuality>,
+    /// Monitor rectangles: monitor_index -> (x, y, width, height) from RandR
+    monitor_rects: Vec<(u32, i32, i32, u32, u32)>,  // P5B: Real geometry for window->monitor mapping
     /// Monitor refresh rates: monitor_index -> Hz
     monitor_refresh_rates: HashMap<u32, u32>,
     /// Temporal blur: previous frame blur FBO
@@ -2352,6 +2355,9 @@ impl Compositor {
             }
         }
 
+        // P5B Phase 1: Build monitor rectangles from RandR (must do before consuming conn)
+        let monitor_rects = Self::build_monitor_rects(&conn, root);
+
         Ok(Self {
             conn,
             xlib_display,
@@ -2686,6 +2692,7 @@ impl Compositor {
             // P4: Per-monitor and temporal blur
             blur_strength_by_hz,
             blur_quality_by_monitor,
+            monitor_rects,  // P5B: Use pre-built rects
             monitor_refresh_rates: HashMap::new(),
             prev_blur_fbo: None,
             prev_window_positions_hash: 0,
@@ -3128,6 +3135,73 @@ impl Compositor {
         (avg, sorted[p50_idx], sorted[p95_idx], sorted[p99_idx])
     }
 
+    /// P5B: Build monitor rectangles from RandR outputs
+    fn build_monitor_rects(conn: &Arc<RustConnection>, root: u32) -> Vec<(u32, i32, i32, u32, u32)> {
+        // Query RandR for outputs to get monitor positions and dimensions
+        let mut rects = Vec::new();
+
+        // Try RandR 1.5 get_monitors API first
+        if let Ok(ver_cookie) = conn.as_ref().randr_query_version(1, 5) {
+            if let Ok(ver) = ver_cookie.reply() {
+                if ver.major_version > 1 || (ver.major_version == 1 && ver.minor_version >= 5) {
+                    if let Ok(mon_cookie) = conn.as_ref().randr_get_monitors(root, true) {
+                        if let Ok(reply) = mon_cookie.reply() {
+                            for (idx, mon) in reply.monitors.iter().enumerate() {
+                                if mon.width > 0 && mon.height > 0 {
+                                    rects.push((idx as u32, mon.x as i32, mon.y as i32, mon.width as u32, mon.height as u32));
+                                }
+                            }
+                            if !rects.is_empty() {
+                                return rects;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: use screen resources (older RandR)
+        if let Ok(res_cookie) = conn.as_ref().randr_get_screen_resources(root) {
+            if let Ok(resources) = res_cookie.reply() {
+                for (idx, crtc_id) in resources.crtcs.iter().enumerate() {
+                    if let Ok(info_cookie) = conn.as_ref().randr_get_crtc_info(*crtc_id, 0) {
+                        if let Ok(info) = info_cookie.reply() {
+                            if info.width > 0 && info.height > 0 {
+                                rects.push((idx as u32, info.x as i32, info.y as i32, info.width as u32, info.height as u32));
+                            }
+                        }
+                    }
+                }
+                if !rects.is_empty() {
+                    return rects;
+                }
+            }
+        }
+
+        // Fallback: return empty vector (will use center-point detection with fallback to monitor 0)
+        rects
+    }
+
+    /// P5B Phase 1: Map window position to monitor index using real RandR geometry
+    fn get_window_monitor_id(&self, window_x: i32, window_y: i32, window_w: u32, window_h: u32) -> u32 {
+        // Calculate window center
+        let center_x = window_x + (window_w as i32) / 2;
+        let center_y = window_y + (window_h as i32) / 2;
+
+        // Find which monitor contains the window center
+        for &(monitor_id, mon_x, mon_y, mon_w, mon_h) in self.monitor_rects.iter() {
+            let mon_x2 = mon_x + mon_w as i32;
+            let mon_y2 = mon_y + mon_h as i32;
+
+            if center_x >= mon_x && center_x < mon_x2 && center_y >= mon_y && center_y < mon_y2 {
+                return monitor_id;
+            }
+        }
+
+        // Fallback: return first monitor (primary)
+        self.monitor_rects.first().map(|r| r.0).unwrap_or(0)
+    }
+
     /// Compute blur quality for a specific window (Task 10: Adaptive Blur + Per-Monitor)
     fn compute_window_blur_quality(&self, wt: &WindowTexture, focused: Option<u32>) -> BlurQuality {
         let cfg = crate::config::CONFIG.load();
@@ -3157,16 +3231,9 @@ impl Compositor {
             return self.blur_quality;
         }
 
-        // P4: Apply per-monitor quality override if configured
-        // For now, use a simple heuristic: primary display = Full, secondary = Reduced
-        let window_center_x = wt.x + (wt.w as i32) / 2;
-        let is_primary_monitor = window_center_x < (self.screen_w as i32) / 2;  // Assume primary on left
-
-        let monitor_override = if is_primary_monitor {
-            self.blur_quality_by_monitor.get(&0)  // Monitor 0 = primary
-        } else {
-            self.blur_quality_by_monitor.get(&1)  // Monitor 1 = secondary
-        };
+        // P5B: Apply per-monitor quality override using real RandR geometry
+        let monitor_id = self.get_window_monitor_id(wt.x, wt.y, wt.w, wt.h);
+        let monitor_override = self.blur_quality_by_monitor.get(&monitor_id);
 
         if let Some(&override_quality) = monitor_override {
             // Per-monitor config takes precedence
