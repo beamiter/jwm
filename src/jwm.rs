@@ -1,31 +1,30 @@
-pub mod types;
-pub mod strut_manager;
 pub mod client;
-pub mod focus;
-pub mod monitor;
-pub mod constraints;
-pub mod ipc_handler;
-pub mod input_handler;
-pub mod lifecycle;
-pub mod navigation;
 pub mod client_stack;
+pub mod constraints;
 pub mod features;
+pub mod focus;
 pub mod geometry;
+pub mod input_handler;
+pub mod ipc_handler;
+pub mod layout;
+pub mod lifecycle;
+pub mod monitor;
+pub mod navigation;
 pub mod rules;
 pub mod statusbar;
-pub mod layout;
+pub mod strut_manager;
+pub mod types;
 
-pub mod window_state;
+pub mod process;
 pub mod rendering;
+pub mod window_state;
 pub use types::{
-    WMButton, WMKey, WMRule, WMWindowGeom, WMClickType, WMArgEnum, InteractionAction,
-    InteractionState, SecondaryBarInstance, WMFuncType, MonitorIndex,
-    WITHDRAWN_STATE, STEXT_MAX_LEN, NORMAL_STATE, ICONIC_STATE,
+    ICONIC_STATE, InteractionAction, InteractionState, MonitorIndex, NORMAL_STATE, STEXT_MAX_LEN,
+    SecondaryBarInstance, WITHDRAWN_STATE, WMArgEnum, WMButton, WMClickType, WMFuncType, WMKey,
+    WMRule, WMWindowGeom,
 };
 
-pub use features::{
-    FeatureStates, MagnifierState, OverviewState, RecordingState, ScreenshotState,
-};
+pub use features::{FeatureStates, MagnifierState, OverviewState, RecordingState, ScreenshotState};
 
 pub use geometry::GeometryConstraints;
 pub use rules::{RuleApplication, RuleMatcher};
@@ -56,8 +55,8 @@ use slotmap::SecondaryMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::env;
-use std::process::Stdio;
 use std::process::Command;
+use std::process::Stdio;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -926,7 +925,6 @@ impl EventHandler for Jwm {
     fn needs_tick(&self) -> bool {
         self.animations.has_active() || self.features.overview.active || self.features.expose_active
     }
-
 }
 
 impl Jwm {
@@ -1532,8 +1530,6 @@ impl Jwm {
         }
     }
 
-
-
     fn reset_input_focus(
         &mut self,
         backend: &mut dyn Backend,
@@ -1576,15 +1572,7 @@ impl Jwm {
                 if let Some(c) = self.state.clients.get(client_key) {
                     info!(
                         "[dock_configure_notify] win={:?} event={}x{}+{}+{} current={}x{}+{}+{}",
-                        window,
-                        w,
-                        h,
-                        x,
-                        y,
-                        c.geometry.w,
-                        c.geometry.h,
-                        c.geometry.x,
-                        c.geometry.y
+                        window, w, h, x, y, c.geometry.w, c.geometry.h, c.geometry.x, c.geometry.y
                     );
                 }
 
@@ -1592,7 +1580,12 @@ impl Jwm {
                     .state
                     .clients
                     .get(client_key)
-                    .map(|c| c.geometry.x != x || c.geometry.y != y || c.geometry.w != w as i32 || c.geometry.h != h as i32)
+                    .map(|c| {
+                        c.geometry.x != x
+                            || c.geometry.y != y
+                            || c.geometry.w != w as i32
+                            || c.geometry.h != h as i32
+                    })
                     .unwrap_or(true);
 
                 if !geometry_changed {
@@ -1601,9 +1594,12 @@ impl Jwm {
 
                 // Check if this is a status bar being moved back to origin by GTK
                 // If so, skip the update to prevent feedback loop with arrange
-                let is_status_bar_reset = self.state.clients.get(client_key).map(|c| {
-                    c.state.is_dock && x == 0 && y == 0 && c.geometry.x != 0
-                }).unwrap_or(false);
+                let is_status_bar_reset = self
+                    .state
+                    .clients
+                    .get(client_key)
+                    .map(|c| c.state.is_dock && x == 0 && y == 0 && c.geometry.x != 0)
+                    .unwrap_or(false);
 
                 if is_status_bar_reset {
                     // Status bar trying to reset to (0,0), ignore this configure notify
@@ -1949,12 +1945,6 @@ impl Jwm {
         }
         Ok(())
     }
-
-
-
-
-
-
 
     fn createmon(&mut self, show_bar: bool) -> WMMonitor {
         // info!("[createmon]");
@@ -2417,109 +2407,6 @@ impl Jwm {
         self.state.sel_mon
     }
 
-    /// Returns `true` if `backend` is one of the Smithay-based compositors (udev, wayland-x11, wayland-winit).
-    fn is_smithay_backend(backend: &dyn Backend) -> bool {
-        backend
-            .as_any()
-            .is::<crate::backend::wayland_udev::backend::UdevBackend>()
-            || backend
-                .as_any()
-                .is::<crate::backend::wayland_x11::backend::WaylandX11Backend>()
-            || backend
-                .as_any()
-                .is::<crate::backend::wayland_winit::backend::WaylandWinitBackend>()
-    }
-
-    /// Returns `true` if `backend` is the udev/KMS backend (no Xwayland, no X11 DISPLAY).
-    fn is_udev_backend(backend: &dyn Backend) -> bool {
-        backend
-            .as_any()
-            .is::<crate::backend::wayland_udev::backend::UdevBackend>()
-    }
-
-    /// Set Wayland-related environment variables on a child `Command` so that
-    /// toolkits can connect to this compositor.  When running the udev backend
-    /// we propagate the XWayland DISPLAY so X11 apps can connect.
-    fn setup_smithay_child_env(command: &mut Command, backend: &dyn Backend) {
-        if Self::is_smithay_backend(backend) {
-            if let Ok(v) = std::env::var("WAYLAND_DISPLAY") {
-                command.env("WAYLAND_DISPLAY", &v);
-            }
-            if let Ok(v) = std::env::var("XDG_RUNTIME_DIR") {
-                command.env("XDG_RUNTIME_DIR", &v);
-            }
-            if std::env::var_os("XDG_SESSION_TYPE").is_none() {
-                command.env("XDG_SESSION_TYPE", "wayland");
-            }
-            if std::env::var_os("WINIT_UNIX_BACKEND").is_none() {
-                command.env("WINIT_UNIX_BACKEND", "wayland");
-            }
-        }
-        if Self::is_udev_backend(backend) {
-            // With XWayland running, DISPLAY is set to e.g. ":0" and is valid.
-            // Propagate it so X11 apps can connect via XWayland.
-            if let Ok(display) = std::env::var("DISPLAY") {
-                command.env("DISPLAY", &display);
-            }
-        }
-    }
-
-    /// Apply common child-process isolation: `setsid()` + restore `SIGCHLD` default.
-    fn apply_child_pre_exec(command: &mut Command) {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            command.pre_exec(move || {
-                setsid();
-                let mut sa: sigaction = std::mem::zeroed();
-                sigemptyset(&mut sa.sa_mask);
-                sa.sa_flags = 0;
-                sa.sa_sigaction = SIG_DFL;
-                sigaction(SIGCHLD, &sa, std::ptr::null_mut());
-                Ok(())
-            });
-        }
-    }
-
-    pub fn spawn(
-        &mut self,
-        _backend: &mut dyn Backend,
-        arg: &WMArgEnum,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        info!("[spawn]");
-
-        let mut mut_arg: WMArgEnum = arg.clone();
-        if let WMArgEnum::StringVec(ref mut v) = mut_arg {
-            info!("[spawn] spawning command: {:?}", v);
-
-            let mut command = Command::new(&v[0]);
-            command.args(&v[1..]);
-
-            Self::setup_smithay_child_env(&mut command, _backend);
-
-            command
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit());
-
-            Self::apply_child_pre_exec(&mut command);
-
-            match command.spawn() {
-                Ok(child) => {
-                    debug!(
-                        "[spawn] successfully spawned process with PID: {}",
-                        child.id()
-                    );
-                }
-                Err(e) => {
-                    error!("[spawn] failed to spawn command {:?}: {}", v, e);
-                    return Err(e.into());
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     pub fn show_keybindings(
         &mut self,
         _backend: &mut dyn Backend,
@@ -2647,25 +2534,6 @@ impl Jwm {
         }
 
         Ok(())
-    }
-
-    pub fn reap_zombies(&mut self) {
-        // 使用 WNOHANG 循环回收所有已退出的子进程
-        loop {
-            match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
-                Ok(WaitStatus::Exited(pid, status)) => {
-                    info!("Child process {} exited with status {}", pid, status);
-                }
-                Ok(WaitStatus::Signaled(pid, sig, _)) => {
-                    info!("Child process {} killed by signal {:?}", pid, sig);
-                }
-                // StillAlive 表示还有子进程在运行，Break 退出循环
-                Ok(WaitStatus::StillAlive) => break,
-                // Err 通常表示没有子进程了 (ECHILD)，也退出循环
-                Err(_) => break,
-                _ => break,
-            }
-        }
     }
 
     pub fn togglefloating(
@@ -2862,7 +2730,12 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         if self.features.overview.active {
             // End overview: focus selected window and promote it to master
-            if let Some(&client_key) = self.features.overview.clients.get(self.features.overview.index) {
+            if let Some(&client_key) = self
+                .features
+                .overview
+                .clients
+                .get(self.features.overview.index)
+            {
                 if let Some(mon_key) = self.state.sel_mon {
                     self.detach(client_key);
                     self.attach_front(client_key);
@@ -2945,7 +2818,12 @@ impl Jwm {
 
         if len <= 6 {
             // All clients fit on the prism; just rotate to selection.
-            if let Some(&ck) = self.features.overview.clients.get(self.features.overview.index) {
+            if let Some(&ck) = self
+                .features
+                .overview
+                .clients
+                .get(self.features.overview.index)
+            {
                 if let Some(client) = self.state.clients.get(ck) {
                     backend.compositor_set_overview_selection(client.win);
                 }
@@ -2965,7 +2843,8 @@ impl Jwm {
             if new_start != self.features.overview.slide_offset {
                 // Window shifted: refresh prism with new 6-client subset.
                 self.features.overview.slide_offset = new_start;
-                let subset: Vec<ClientKey> = self.features.overview.clients[new_start..window_end].to_vec();
+                let subset: Vec<ClientKey> =
+                    self.features.overview.clients[new_start..window_end].to_vec();
                 let mut layout = self.build_overview_layout(&subset);
                 // Mark the correct entry as selected.
                 let sel_in_window = self.features.overview.index - new_start;
@@ -2976,7 +2855,12 @@ impl Jwm {
             }
             // Set selection (rotation) to the face within the current window.
             let sel_in_window = self.features.overview.index - new_start;
-            if let Some(&ck) = self.features.overview.clients.get(self.features.overview.index) {
+            if let Some(&ck) = self
+                .features
+                .overview
+                .clients
+                .get(self.features.overview.index)
+            {
                 if let Some(client) = self.state.clients.get(ck) {
                     backend.compositor_set_overview_selection(client.win);
                 }
@@ -3054,7 +2938,12 @@ impl Jwm {
                 self.features.recording.segments.push(seg);
             }
             let segments = std::mem::take(&mut self.features.recording.segments);
-            let output_path = self.features.recording.output_path.take().unwrap_or_default();
+            let output_path = self
+                .features
+                .recording
+                .output_path
+                .take()
+                .unwrap_or_default();
             info!(
                 "[toggle_recording] stop → {} ({} segments)",
                 output_path,
@@ -4088,7 +3977,6 @@ impl Jwm {
         Ok(())
     }
 
-
     fn handle_transient_for_change(
         &mut self,
         backend: &mut dyn Backend,
@@ -4537,7 +4425,6 @@ impl Jwm {
         Ok(())
     }
 
-
     fn update_net_client_list(
         &mut self,
         backend: &mut dyn Backend,
@@ -4563,8 +4450,6 @@ impl Jwm {
         backend.on_client_list_changed(&ordered, &stacking)?;
         Ok(())
     }
-
-
 
     fn update_bar_message_for_monitor(&mut self, mon_key_opt: Option<MonitorKey>) {
         // info!("[update_bar_message_for_monitor]");
@@ -4623,7 +4508,12 @@ impl Jwm {
     }
 
     fn calculate_tag_masks(&self, mon_key: MonitorKey) -> (u32, u32) {
-        let monitor_clients = self.state.monitor_clients.get(mon_key).map(|v| v.as_slice()).unwrap_or(&[]);
+        let monitor_clients = self
+            .state
+            .monitor_clients
+            .get(mon_key)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
         StatusBarBuilder::calculate_tag_masks(&self.state.clients, monitor_clients)
     }
 
@@ -4643,14 +4533,4 @@ impl Jwm {
             String::new()
         }
     }
-
-    // =========================================================================
-    // IPC processing
-    // =========================================================================
-
-
-    // =========================================================================
-    // Config hot-reload
-    // =========================================================================
-
 }
