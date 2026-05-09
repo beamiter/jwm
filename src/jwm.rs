@@ -15,8 +15,10 @@ pub mod mouse_handler;
 pub mod navigation;
 pub mod property_handler;
 pub mod rules;
+pub mod stacking;
 pub mod statusbar;
 pub mod strut_manager;
+pub mod visibility;
 pub mod tag_manager;
 pub mod types;
 
@@ -676,22 +678,6 @@ impl Jwm {
         }
     }
 
-    fn pop(&mut self, backend: &mut dyn Backend, client_key: ClientKey) {
-        let mon_key = if let Some(client) = self.state.clients.get(client_key) {
-            client.mon
-        } else {
-            return;
-        };
-
-        self.detach(client_key);
-        self.attach_front(client_key);
-
-        let _ = self.focus(backend, Some(client_key));
-        if let Some(mon_key) = mon_key {
-            self.arrange(backend, Some(mon_key));
-        }
-    }
-
     fn wintoclient(&self, win: WindowId) -> Option<ClientKey> {
         self.state.win_to_client.get(&win).copied()
     }
@@ -949,143 +935,6 @@ impl Jwm {
         Ok(())
     }
 
-    fn showhide_monitor(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
-        if let Some(stack_clients) = self.state.monitor_stack.get(mon_key).cloned() {
-            for client_key in stack_clients {
-                self.showhide_client(backend, client_key, mon_key);
-            }
-        }
-    }
-
-    fn showhide_client(
-        &mut self,
-        backend: &mut dyn Backend,
-        client_key: ClientKey,
-        mon_key: MonitorKey,
-    ) {
-        let is_visible = self.is_client_visible_on_monitor(client_key, mon_key);
-
-        if is_visible {
-            self.show_client(backend, client_key);
-        } else {
-            self.hide_client(backend, client_key);
-        }
-    }
-
-    fn show_client(&mut self, backend: &mut dyn Backend, client_key: ClientKey) {
-        // Cancel any in-flight Hide animation so it doesn't keep moving
-        // the window off-screen.  Preserve Layout / Appear animations so
-        // that repeated arrange() calls don't kill in-flight transitions.
-        self.animations.remove_if_hide(client_key);
-
-        // Restore on-screen x from old_x if client.geometry.x is still at
-        // the hidden position (negative, off-screen).
-        if let Some(client) = self.state.clients.get_mut(client_key) {
-            if client.geometry.x < -(client.geometry.w) {
-                client.geometry.x = client.geometry.old_x;
-            }
-        }
-
-        let (win, x, y, is_floating, is_fullscreen) =
-            if let Some(client) = self.state.clients.get(client_key) {
-                (
-                    client.win,
-                    client.geometry.x,
-                    client.geometry.y,
-                    client.state.is_floating,
-                    client.state.is_fullscreen,
-                )
-            } else {
-                warn!("[show_client] Client {:?} not found", client_key);
-                return;
-            };
-
-        if let Err(e) = self.move_window(backend, win, x, y) {
-            warn!("[show_client] Failed to move window {:?}: {:?}", win, e);
-        }
-
-        if is_floating && !is_fullscreen {
-            let (w, h) = if let Some(client) = self.state.clients.get(client_key) {
-                (client.geometry.w, client.geometry.h)
-            } else {
-                return;
-            };
-            self.resize_client(backend, client_key, x, y, w, h, false);
-        }
-    }
-
-    fn hide_client(&mut self, backend: &mut dyn Backend, client_key: ClientKey) {
-        let (win, x, y, w, h, width) = if let Some(client) = self.state.clients.get(client_key) {
-            (
-                client.win,
-                client.geometry.x,
-                client.geometry.y,
-                client.geometry.w,
-                client.geometry.h,
-                client.total_width(),
-            )
-        } else {
-            warn!("[hide_client] Client {:?} not found", client_key);
-            return;
-        };
-
-        let hidden_x = width * -2;
-
-        // Save visible geometry so show_client can restore it, then update
-        // client.geometry to the hidden position. This prevents
-        // tick_animations from snapping the window back on-screen when the
-        // Hide animation completes.
-        //
-        // Guard: only save old_x/old_y when the window is still on-screen.
-        // If it is already hidden (x is far negative), a repeated hide_client
-        // call must NOT overwrite old_x with the hidden position — otherwise
-        // show_client will restore the window to an off-screen coordinate.
-        if let Some(client) = self.state.clients.get_mut(client_key) {
-            if client.geometry.x >= -(client.geometry.w) {
-                client.geometry.old_x = client.geometry.x;
-                client.geometry.old_y = client.geometry.y;
-            }
-            client.geometry.x = hidden_x;
-            // y, w, h stay unchanged
-        }
-
-        let cfg = CONFIG.load();
-        if cfg.animation_enabled() {
-            let now = Instant::now();
-            let visual = self
-                .animations
-                .current_visual_rect(client_key, now)
-                .unwrap_or(Rect::new(x, y, w, h));
-            let target = Rect::new(hidden_x, y, w, h);
-            self.animations.start(
-                client_key,
-                visual,
-                target,
-                cfg.animation_duration(),
-                cfg.animation_easing(),
-                AnimationKind::Hide,
-            );
-            // When compositor is active, move the actual X11 window to the
-            // hidden position immediately.  The compositor handles the visual
-            // slide-out via the scene, but the X server delivers input events
-            // based on the real window geometry — without this the hidden
-            // window still receives hover/click events at its old position.
-            if backend.has_compositor() {
-                if let Err(e) = self.move_window(backend, win, hidden_x, y) {
-                    warn!(
-                        "[hide_client] Failed to move window off-screen {:?}: {:?}",
-                        win, e
-                    );
-                }
-            }
-        } else {
-            if let Err(e) = self.move_window(backend, win, hidden_x, y) {
-                warn!("[hide_client] Failed to hide window {:?}: {:?}", win, e);
-            }
-        }
-    }
-
-
     fn enter_notify(
         &mut self,
         backend: &mut dyn Backend,
@@ -1155,107 +1004,6 @@ impl Jwm {
         }
         Ok(())
     }
-
-
-
-
-    fn restack(
-        &mut self,
-        backend: &mut dyn Backend,
-        mon_key_opt: Option<MonitorKey>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        info!("[restack]");
-
-        let mon_key = mon_key_opt.ok_or("Monitor is required for restack operation")?;
-        let monitor = self
-            .state
-            .monitors
-            .get(mon_key)
-            .ok_or("Monitor not found")?;
-        let monitor_num = monitor.num;
-
-        let stack = self.get_monitor_stack(mon_key);
-
-        let mut tiled_bottom_to_top: Vec<WindowId> = Vec::new();
-        let mut floating_bottom_to_top: Vec<WindowId> = Vec::new();
-        let mut pip_bottom_to_top: Vec<WindowId> = Vec::new();
-
-        for &ck in stack.iter().rev() {
-            if let Some(c) = self.state.clients.get(ck) {
-                if !self.is_client_visible_on_monitor(ck, mon_key) {
-                    continue;
-                }
-                if c.state.is_pip {
-                    pip_bottom_to_top.push(c.win);
-                } else if c.state.is_floating {
-                    floating_bottom_to_top.push(c.win);
-                } else {
-                    tiled_bottom_to_top.push(c.win);
-                }
-            }
-        }
-
-        // Promote selected window to top of its layer, and if it's tiled,
-        // raise it above floating windows so it's not obscured.
-        let sel_win = monitor
-            .sel
-            .and_then(|ck| self.state.clients.get(ck))
-            .map(|c| (c.win, c.state.is_floating, c.state.is_pip));
-
-        let mut final_bottom_to_top: Vec<WindowId> = Vec::with_capacity(
-            tiled_bottom_to_top.len() + floating_bottom_to_top.len() + pip_bottom_to_top.len(),
-        );
-
-        if let Some((win, is_floating, is_pip)) = sel_win {
-            if is_pip {
-                // PiP: promote within pip layer
-                if let Some(idx) = pip_bottom_to_top.iter().position(|&w| w == win) {
-                    let w = pip_bottom_to_top.remove(idx);
-                    pip_bottom_to_top.push(w);
-                }
-                final_bottom_to_top.extend(tiled_bottom_to_top);
-                final_bottom_to_top.extend(floating_bottom_to_top);
-                final_bottom_to_top.extend(pip_bottom_to_top);
-            } else if is_floating {
-                // Floating: promote to top of floating layer (above other floats, below pip)
-                if let Some(idx) = floating_bottom_to_top.iter().position(|&w| w == win) {
-                    let w = floating_bottom_to_top.remove(idx);
-                    floating_bottom_to_top.push(w);
-                }
-                final_bottom_to_top.extend(tiled_bottom_to_top);
-                final_bottom_to_top.extend(floating_bottom_to_top);
-                final_bottom_to_top.extend(pip_bottom_to_top);
-            } else {
-                // Tiled: raise focused tiled window above all floats so it's not obscured
-                tiled_bottom_to_top.retain(|&w| w != win);
-                final_bottom_to_top.extend(tiled_bottom_to_top);
-                final_bottom_to_top.extend(floating_bottom_to_top);
-                final_bottom_to_top.push(win); // focused tiled above floats
-                final_bottom_to_top.extend(pip_bottom_to_top);
-            }
-        } else {
-            final_bottom_to_top.extend(tiled_bottom_to_top);
-            final_bottom_to_top.extend(floating_bottom_to_top);
-            final_bottom_to_top.extend(pip_bottom_to_top);
-        }
-
-        let need_restack_windows = match self.last_stacking.get(mon_key) {
-            Some(prev) => prev.as_slice() != final_bottom_to_top.as_slice(),
-            None => true,
-        };
-
-        if need_restack_windows {
-            backend.window_ops().restack_windows(&final_bottom_to_top)?;
-            self.last_stacking
-                .insert(mon_key, final_bottom_to_top.clone());
-        }
-
-        self.mark_bar_update_needed_if_visible(Some(monitor_num));
-
-        info!("[restack] finish");
-        Ok(())
-    }
-
 
     pub fn run(&mut self, backend: &mut dyn Backend) -> Result<(), Box<dyn std::error::Error>> {
         info!("[run] Handing over control to backend");
