@@ -2357,6 +2357,8 @@ impl Compositor {
 
         // P5B Phase 1: Build monitor rectangles from RandR (must do before consuming conn)
         let monitor_rects = Self::build_monitor_rects(&conn, root);
+        // P5B Phase 2: Build monitor refresh rates from RandR
+        let monitor_refresh_rates = Self::build_monitor_refresh_rates(&conn, root);
 
         Ok(Self {
             conn,
@@ -2692,8 +2694,8 @@ impl Compositor {
             // P4: Per-monitor and temporal blur
             blur_strength_by_hz,
             blur_quality_by_monitor,
-            monitor_rects,  // P5B: Use pre-built rects
-            monitor_refresh_rates: HashMap::new(),
+            monitor_rects,  // P5B Phase 1: Real monitor geometry
+            monitor_refresh_rates,  // P5B Phase 2: Per-monitor refresh rates
             prev_blur_fbo: None,
             prev_window_positions_hash: 0,
             temporal_blur_mix_ratio: behavior.blur_temporal_mix_ratio,
@@ -3182,6 +3184,86 @@ impl Compositor {
         rects
     }
 
+    /// P5B Phase 2: Build monitor refresh rates from RandR outputs
+    fn build_monitor_refresh_rates(conn: &Arc<RustConnection>, root: u32) -> HashMap<u32, u32> {
+        let mut rates = HashMap::new();
+
+        // Helper to calculate refresh rate from mode info
+        fn calc_refresh_mhz(mode: &x11rb::protocol::randr::ModeInfo) -> u32 {
+            if mode.htotal == 0 || mode.vtotal == 0 {
+                return 60000; // 60Hz fallback
+            }
+            let dot_clock = mode.dot_clock as u64;
+            let htotal = mode.htotal as u64;
+            let vtotal = mode.vtotal as u64;
+            ((dot_clock * 1000) / (htotal * vtotal)) as u32
+        }
+
+        // Try RandR 1.5 get_monitors API
+        if let Ok(ver_cookie) = conn.as_ref().randr_query_version(1, 5) {
+            if let Ok(ver) = ver_cookie.reply() {
+                if ver.major_version > 1 || (ver.major_version == 1 && ver.minor_version >= 5) {
+                    // Get screen resources for mode info
+                    if let Ok(res_cookie) = conn.as_ref().randr_get_screen_resources(root) {
+                        if let Ok(resources) = res_cookie.reply() {
+                            let modes = resources.modes;
+
+                            if let Ok(mon_cookie) = conn.as_ref().randr_get_monitors(root, true) {
+                                if let Ok(reply) = mon_cookie.reply() {
+                                    for (idx, mon) in reply.monitors.iter().enumerate() {
+                                        // Get first output's current mode to determine refresh rate
+                                        if let Some(&output_id) = mon.outputs.first() {
+                                            if let Ok(output_cookie) = conn.as_ref().randr_get_output_info(output_id, 0) {
+                                                if let Ok(output_info) = output_cookie.reply() {
+                                                    if output_info.crtc != 0 {
+                                                        if let Ok(crtc_cookie) = conn.as_ref().randr_get_crtc_info(output_info.crtc, 0) {
+                                                            if let Ok(crtc_info) = crtc_cookie.reply() {
+                                                                let refresh = modes.iter()
+                                                                    .find(|m| m.id == crtc_info.mode)
+                                                                    .map(calc_refresh_mhz)
+                                                                    .unwrap_or(60000);
+                                                                rates.insert(idx as u32, refresh / 1000); // mHz -> Hz
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if !rates.is_empty() {
+                                        return rates;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: use screen resources directly
+        if let Ok(res_cookie) = conn.as_ref().randr_get_screen_resources(root) {
+            if let Ok(resources) = res_cookie.reply() {
+                let modes = resources.modes;
+                for (idx, crtc_id) in resources.crtcs.iter().enumerate() {
+                    if let Ok(info_cookie) = conn.as_ref().randr_get_crtc_info(*crtc_id, 0) {
+                        if let Ok(info) = info_cookie.reply() {
+                            if info.width > 0 && info.height > 0 {
+                                let refresh = modes.iter()
+                                    .find(|m| m.id == info.mode)
+                                    .map(calc_refresh_mhz)
+                                    .unwrap_or(60000);
+                                rates.insert(idx as u32, refresh / 1000); // mHz -> Hz
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        rates
+    }
+
     /// P5B Phase 1: Map window position to monitor index using real RandR geometry
     fn get_window_monitor_id(&self, window_x: i32, window_y: i32, window_w: u32, window_h: u32) -> u32 {
         // Calculate window center
@@ -3200,6 +3282,14 @@ impl Compositor {
 
         // Fallback: return first monitor (primary)
         self.monitor_rects.first().map(|r| r.0).unwrap_or(0)
+    }
+
+    /// P5B Phase 2: Get refresh rate for a specific monitor
+    fn get_monitor_refresh_hz(&self, monitor_id: u32) -> u32 {
+        self.monitor_refresh_rates
+            .get(&monitor_id)
+            .copied()
+            .unwrap_or(60) // Fallback to 60Hz if not found
     }
 
     /// Compute blur quality for a specific window (Task 10: Adaptive Blur + Per-Monitor)
