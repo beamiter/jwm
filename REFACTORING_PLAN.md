@@ -8,10 +8,17 @@
   - 状态: ✅ 已提交
   - 减少: 241 行
 
+- **rendering.rs** (364 行) - 渲染与合成器管理
+  - Commit: `f60e1da`
+  - 状态: ✅ 已提交
+  - 减少: 344 行
+  - 提取函数: `render_compositor_immediate`, `tick_animations`, `build_window_groups`, `build_compositor_scene`, `sync_focused_floating_geometry`, `configure_client`, `move_window`
+
 ### 📊 当前状态
-- **jwm.rs**: 5241 行 → **5000 行** (-4.6%)
+- **jwm.rs**: 5241 行 → **4656 行** (-11.2%)
 - **编译状态**: ✅ 通过
 - **测试状态**: ✅ 正常
+- **已提取**: 2 个模块，共减少 585 行
 
 ---
 
@@ -19,59 +26,24 @@
 
 按优先级和安全性排序：
 
-### 1. rendering.rs (高优先级) 
-**预计**: ~350 行
+### 1. process.rs (高优先级 - 最安全) ⭐️
+**预计**: ~200 行
+**推荐理由**: 几乎无内部依赖，最安全提取
 
 #### 需要提取的函数
-| 函数名 | 原始行号 | 说明 |
-|--------|---------|------|
-| `render_compositor_immediate` | 929-954 | 渲染器立即渲染 |
-| `tick_animations` | 2107-2218 | 动画帧更新 |
-| `build_window_groups` | 2219-2247 | 构建窗口标签组 |
-| `build_compositor_scene` | 2248-2361 | 构建渲染场景 |
-| `sync_focused_floating_geometry` | 2363-2386 | 同步浮动窗口几何 |
-| `configure_client` | 2388-2419 | 配置客户端窗口 |
-| `move_window` | 2421-2430 | 移动窗口 |
+| 函数名 | 说明 |
+|--------|------|
+| `spawn` | 生成子进程 |
+| `reap_zombies` | 回收僵尸进程 |
+| `setup_smithay_child_env` | 设置 Smithay 环境 |
+| `apply_child_pre_exec` | 应用 pre-exec 钩子 |
+| `is_smithay_backend` | 检查后端类型 |
+| `is_udev_backend` | 检查 udev 后端 |
 
-#### 依赖关系
-- **被调用者**: X11 backend (render_compositor_immediate), 主循环 (tick_animations)
-- **调用其他**: `get_selected_client_key`, `is_client_visible_on_monitor`, `get_monitor_clients`
-- **访问字段**: `last_stacking`, `or_window_geometries`, `secondary_bars`, `animations`
-
-#### 提取步骤
-```bash
-# 1. 创建 rendering.rs 并添加必要导入
-cat > src/jwm/rendering.rs << 'EOF'
-use crate::backend::api::Backend;
-use crate::backend::common_define::WindowId;
-use crate::core::models::ClientKey;
-use crate::core::types::Rect;
-use std::collections::HashMap;
-use log::info;
-
-use super::Jwm;
-
-impl Jwm {
-    // 在这里添加函数...
-}
-EOF
-
-# 2. 从 jwm.rs 提取函数（手动复制并添加 pub(super)）
-# 3. 添加模块声明到 jwm.rs
-sed -i '17 a pub mod rendering;' src/jwm.rs
-
-# 4. 从后往前删除函数（避免行号偏移）
-sed -i '2421,2430d' src/jwm.rs  # move_window
-sed -i '2388,2419d' src/jwm.rs  # configure_client
-sed -i '2363,2386d' src/jwm.rs  # sync_focused_floating_geometry
-sed -i '2248,2361d' src/jwm.rs  # build_compositor_scene
-sed -i '2219,2247d' src/jwm.rs  # build_window_groups
-sed -i '2107,2218d' src/jwm.rs  # tick_animations
-sed -i '929,954d' src/jwm.rs    # render_compositor_immediate
-
-# 5. 验证编译
-cargo check --lib
-```
+#### 特点
+- 进程管理相关
+- 几乎无内部依赖
+- 最安全提取
 
 ---
 
@@ -95,27 +67,7 @@ cargo check --lib
 
 ---
 
-### 3. process.rs (中优先级)
-**预计**: ~200 行
-
-#### 需要提取的函数
-| 函数名 | 原始行号 | 说明 |
-|--------|---------|------|
-| `spawn` | 2887 | 生成子进程 |
-| `reap_zombies` | 3056 | 回收僵尸进程 |
-| `setup_smithay_child_env` | 2847 | 设置 Smithay 环境 |
-| `apply_child_pre_exec` | 2872 | 应用 pre-exec 钩子 |
-| `is_smithay_backend` | 2825 | 检查后端类型 |
-| `is_udev_backend` | 2838 | 检查 udev 后端 |
-
-#### 特点
-- 进程管理相关
-- 几乎无内部依赖
-- 最安全提取
-
----
-
-### 4. positioning.rs (低优先级)
+### 3. positioning.rs (低优先级)
 **预计**: ~400 行
 
 #### 需要提取的函数
@@ -134,7 +86,7 @@ cargo check --lib
 
 ---
 
-### 5. utils.rs (低优先级)
+### 4. utils.rs (低优先级)
 **预计**: ~250 行
 
 #### 需要提取的函数
@@ -183,32 +135,32 @@ cargo check --lib
 ## 📈 预期最终效果
 
 ### 文件大小对比
-| 文件 | 当前 | 目标 | 减少 |
-|------|------|------|------|
-| jwm.rs | 5000 行 | ~3500 行 | -30% |
-| window_state.rs | 240 行 | 240 行 | 新增 |
-| rendering.rs | - | ~350 行 | 新增 |
-| monitor_management.rs | - | ~250 行 | 新增 |
-| process.rs | - | ~200 行 | 新增 |
-| positioning.rs | - | ~400 行 | 新增 |
-| utils.rs | - | ~250 行 | 新增 |
-| **总计** | 5000 行 | 5190 行 | +190 行 |
+| 文件 | 原始 | 当前 | 目标 | 状态 |
+|------|------|------|------|------|
+| jwm.rs | 5241 行 | 4656 行 | ~3500 行 | 🔄 进行中 (-11.2%) |
+| window_state.rs | - | 240 行 | 240 行 | ✅ 完成 |
+| rendering.rs | - | 364 行 | 364 行 | ✅ 完成 |
+| monitor_management.rs | - | - | ~250 行 | ⏳ 待提取 |
+| process.rs | - | - | ~200 行 | ⏳ 待提取 |
+| positioning.rs | - | - | ~400 行 | ⏳ 待提取 |
+| utils.rs | - | - | ~250 行 | ⏳ 待提取 |
+| **总计** | 5241 行 | 5260 行 | 5704 行 | 已完成 33.8% |
 
 > 注: 总行数增加是因为模块声明和必要的导入，但每个文件更小更易维护
 
 ### 最终模块结构
 ```
 src/jwm/
-├── mod.rs (jwm.rs)           # 核心 traits 实现 (~3500 行)
+├── mod.rs (jwm.rs)           # 核心 traits 实现 (~3500 行) 🔄
 │   ├── WMController impl
 │   ├── EventHandler impl
 │   └── 核心业务逻辑
 ├── window_state.rs           # 窗口状态管理 (240 行) ✅
-├── rendering.rs              # 渲染与合成器 (350 行)
-├── monitor_management.rs     # 显示器管理 (250 行)
-├── process.rs                # 进程管理 (200 行)
-├── positioning.rs            # 几何与定位 (400 行)
-├── utils.rs                  # 工具函数 (250 行)
+├── rendering.rs              # 渲染与合成器 (364 行) ✅
+├── monitor_management.rs     # 显示器管理 (~250 行) ⏳
+├── process.rs                # 进程管理 (~200 行) ⏳
+├── positioning.rs            # 几何与定位 (~400 行) ⏳
+├── utils.rs                  # 工具函数 (~250 行) ⏳
 ├── client.rs                 # 客户端管理 ✅
 ├── navigation.rs             # 窗口导航 ✅
 ├── input_handler.rs          # 输入处理 ✅
@@ -287,7 +239,18 @@ Stats: jwm.rs reduced from XXXX to YYYY lines (-ZZ lines)"
 - ⚠️ **问题**: 多次遇到括号不平衡（因为分步删除）
 - 💡 **改进**: 应该一次性记录所有行号，然后从后往前批量删除
 
-### 建议工作流
+### 第二次拆分 (rendering.rs)
+- ✅ **成功点**: 
+  - 一次性从后往前批量删除，避免括号不平衡问题
+  - 函数提取完整，包括所有相关注释
+  - 导入依赖识别准确
+- ✅ **效果**: 
+  - 提取 364 行，减少 jwm.rs 344 行
+  - 编译通过，仅有未使用导入警告
+  - 括号完美平衡 (1062 vs 1062)
+- 💡 **确认**: 批量删除工作流是正确的方法
+
+### 建议工作流 ✅
 1. **准备阶段**: 
    - 列出所有要提取的函数及其行号
    - 检查函数间的调用关系
@@ -299,7 +262,8 @@ Stats: jwm.rs reduced from XXXX to YYYY lines (-ZZ lines)"
    - 添加必要的 use 语句
 
 3. **删除阶段**:
-   - **一次性**从后往前删除所有函数
+   - **一次性**从后往前删除所有函数（关键！）
+   - 使用 sed 命令批量删除
    - 不要分步删除（避免行号混乱）
 
 4. **验证阶段**:
@@ -327,6 +291,7 @@ Stats: jwm.rs reduced from XXXX to YYYY lines (-ZZ lines)"
 
 ---
 
-**文档版本**: 1.0  
+**文档版本**: 1.1  
 **最后更新**: 2026-05-09  
-**下次更新计划**: 完成 rendering.rs 后
+**下次更新计划**: 完成 process.rs 或 monitor_management.rs 后  
+**完成进度**: 2/6 模块 (33.8%)
