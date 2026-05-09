@@ -828,6 +828,8 @@ pub(super) struct Compositor {
 
     // --- Feature 6: Damage region tracking for partial redraw ---
     damage_tracker: DamageTracker,
+    // P5C: Rectangle-level precise dirty tracking
+    dirty_region_tracker: DirtyRegionTracker,
 
     // --- Phase 2.2: Blur quality auto-downgrade ---
     blur_quality: BlurQuality,
@@ -2439,6 +2441,8 @@ impl Compositor {
             scale_rules,
             // Feature 6: damage tracking (tile-based, Phase 2.1)
             damage_tracker: DamageTracker::new(screen_w, screen_h),
+            // P5C: Rectangle-level dirty tracking
+            dirty_region_tracker: DirtyRegionTracker::new(screen_w, screen_h),
             // Phase 2.2: Blur quality auto-downgrade
             blur_quality: BlurQuality::Full,
             blur_quality_auto: behavior.blur_quality_auto,
