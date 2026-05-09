@@ -744,6 +744,8 @@ pub(super) struct Compositor {
     /// match the source window's visual exactly — a generic depth-based
     /// fallback produces garbled textures for mismatched visuals.
     tfp_visual_configs: HashMap<u32, (x11::glx::GLXFBConfig, bool)>,
+    /// 10-bit TFP FBConfig map (for HDR source windows): visual_id -> (FBConfig, is_rgba)
+    tfp_visual_configs_10bit: HashMap<u32, (x11::glx::GLXFBConfig, bool)>,
     overlay_window: u32,
     /// Window that owns the _NET_WM_CM_Sn selection, advertising this
     /// compositor to other clients (screenshot tools, etc.).
@@ -1617,7 +1619,7 @@ impl Compositor {
         let oml_loaded = oml_sync_control::OmlSyncControl::load(xlib_display, glx_drawable);
 
         log::info!("compositor: finding TFP FBConfigs...");
-        // 12. Find FBConfigs for TFP (RGBA and RGB)
+        // 12. Find FBConfigs for TFP (RGBA and RGB, 8-bit and optionally 10-bit)
         let tfp_rgba_attrs: Vec<i32> = vec![
             x11::glx::GLX_DRAWABLE_TYPE,
             x11::glx::GLX_PIXMAP_BIT,
@@ -1651,13 +1653,50 @@ impl Compositor {
             0,
         ];
 
+        // 10-bit TFP configs (if HDR enabled)
+        let tfp_rgba_10bit_attrs: Vec<i32> = vec![
+            x11::glx::GLX_DRAWABLE_TYPE,
+            x11::glx::GLX_PIXMAP_BIT,
+            x11::glx::GLX_RENDER_TYPE,
+            x11::glx::GLX_RGBA_BIT,
+            GLX_BIND_TO_TEXTURE_RGBA_EXT,
+            1,
+            x11::glx::GLX_RED_SIZE,
+            10,
+            x11::glx::GLX_GREEN_SIZE,
+            10,
+            x11::glx::GLX_BLUE_SIZE,
+            10,
+            x11::glx::GLX_ALPHA_SIZE,
+            2,
+            0,
+        ];
+        let tfp_rgb_10bit_attrs: Vec<i32> = vec![
+            x11::glx::GLX_DRAWABLE_TYPE,
+            x11::glx::GLX_PIXMAP_BIT,
+            x11::glx::GLX_RENDER_TYPE,
+            x11::glx::GLX_RGBA_BIT,
+            GLX_BIND_TO_TEXTURE_RGB_EXT,
+            1,
+            x11::glx::GLX_RED_SIZE,
+            10,
+            x11::glx::GLX_GREEN_SIZE,
+            10,
+            x11::glx::GLX_BLUE_SIZE,
+            10,
+            0,
+        ];
+
         // Enumerate ALL TFP-compatible FBConfigs and build a per-visual map.
         // On older drivers (e.g. Ubuntu 20's Mesa), using a FBConfig whose
         // visual doesn't match the source pixmap's visual produces garbled
         // textures (e.g. solid orange).  Per-visual matching fixes this.
         let mut tfp_visual_configs: HashMap<u32, (x11::glx::GLXFBConfig, bool)> = HashMap::new();
+        let mut tfp_visual_configs_10bit: HashMap<u32, (x11::glx::GLXFBConfig, bool)> = HashMap::new();
         let mut fbconfig_rgba: x11::glx::GLXFBConfig = std::ptr::null_mut();
         let mut fbconfig_rgb: x11::glx::GLXFBConfig = std::ptr::null_mut();
+        let mut fbconfig_rgba_10bit: x11::glx::GLXFBConfig = std::ptr::null_mut();
+        let mut fbconfig_rgb_10bit: x11::glx::GLXFBConfig = std::ptr::null_mut();
 
         let mut n = 0i32;
 
@@ -1720,14 +1759,76 @@ impl Compositor {
             unsafe { x11::xlib::XFree(cfgs_rgb as *mut _) };
         }
 
+        // --- 10-bit RGBA TFP configs (if HDR enabled) ---
+        if hdr_enabled {
+            let cfgs_rgba_10 = unsafe {
+                x11::glx::glXChooseFBConfig(
+                    xlib_display,
+                    screen_num,
+                    tfp_rgba_10bit_attrs.as_ptr(),
+                    &mut n,
+                )
+            };
+            if !cfgs_rgba_10.is_null() && n > 0 {
+                fbconfig_rgba_10bit = unsafe { *cfgs_rgba_10 };
+                for i in 0..n {
+                    let cfg = unsafe { *cfgs_rgba_10.offset(i as isize) };
+                    let mut vid: i32 = 0;
+                    unsafe {
+                        x11::glx::glXGetFBConfigAttrib(
+                            xlib_display,
+                            cfg,
+                            x11::glx::GLX_VISUAL_ID,
+                            &mut vid,
+                        );
+                    }
+                    if vid != 0 {
+                        tfp_visual_configs_10bit.entry(vid as u32).or_insert((cfg, true));
+                    }
+                }
+                unsafe { x11::xlib::XFree(cfgs_rgba_10 as *mut _) };
+            }
+
+            // --- 10-bit RGB TFP configs ---
+            let cfgs_rgb_10 = unsafe {
+                x11::glx::glXChooseFBConfig(
+                    xlib_display,
+                    screen_num,
+                    tfp_rgb_10bit_attrs.as_ptr(),
+                    &mut n,
+                )
+            };
+            if !cfgs_rgb_10.is_null() && n > 0 {
+                fbconfig_rgb_10bit = unsafe { *cfgs_rgb_10 };
+                for i in 0..n {
+                    let cfg = unsafe { *cfgs_rgb_10.offset(i as isize) };
+                    let mut vid: i32 = 0;
+                    unsafe {
+                        x11::glx::glXGetFBConfigAttrib(
+                            xlib_display,
+                            cfg,
+                            x11::glx::GLX_VISUAL_ID,
+                            &mut vid,
+                        );
+                    }
+                    if vid != 0 {
+                        tfp_visual_configs_10bit.entry(vid as u32).or_insert((cfg, false));
+                    }
+                }
+                unsafe { x11::xlib::XFree(cfgs_rgb_10 as *mut _) };
+            }
+        }
+
         if fbconfig_rgba.is_null() && fbconfig_rgb.is_null() {
             return Err("No FBConfig for texture_from_pixmap".into());
         }
+        let has_10bit = !fbconfig_rgba_10bit.is_null() || !fbconfig_rgb_10bit.is_null();
         log::info!(
-            "compositor: TFP FBConfigs: rgba={} rgb={} per_visual={}",
+            "compositor: TFP FBConfigs: rgba={} rgb={} per_visual={} hdr_10bit={}",
             !fbconfig_rgba.is_null(),
             !fbconfig_rgb.is_null(),
             tfp_visual_configs.len(),
+            has_10bit,
         );
 
         // 13. Create glow GL context
@@ -2259,6 +2360,7 @@ impl Compositor {
             fbconfig_rgba,
             fbconfig_rgb,
             tfp_visual_configs,
+            tfp_visual_configs_10bit,
             overlay_window,
             cm_selection_owner,
             glx_drawable,
