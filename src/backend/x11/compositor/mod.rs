@@ -4814,16 +4814,16 @@ impl Compositor {
             }
         }
 
-        // Feature 6 / Phase 2.1: Apply scissor test using tile-based damage tracker
-        let damage_bounds = self.damage_tracker.dirty_bounds();
-        let use_scissor = damage_bounds.is_some() && !force_render;
+        // P5C Phase 3: Apply scissor test using rectangle-based dirty tracker
+        let dirty_rect = self.dirty_region_tracker.merged();
+        let use_scissor = dirty_rect.is_some() && !force_render;
         let mut damage_scissor = (0i32, 0i32, self.screen_w as i32, self.screen_h as i32);
-        if let (true, Some((dx, dy, dw, dh))) = (use_scissor, damage_bounds) {
+        if let (true, Some(rect)) = (use_scissor, dirty_rect) {
             unsafe {
                 self.gl.enable(glow::SCISSOR_TEST);
                 // GL scissor uses bottom-left origin
-                let gl_y = self.screen_h as i32 - dy - dh as i32;
-                damage_scissor = (dx, gl_y, dw as i32, dh as i32);
+                let gl_y = self.screen_h as i32 - rect.y - rect.height as i32;
+                damage_scissor = (rect.x, gl_y, rect.width as i32, rect.height as i32);
                 self.gl.scissor(damage_scissor.0, damage_scissor.1, damage_scissor.2, damage_scissor.3);
             }
         }
