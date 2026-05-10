@@ -17,6 +17,7 @@ pub mod shader_cache;
 pub mod pixel_buffer_pool;
 pub mod pbo_uploader;
 pub mod gpu_fence_sync;
+pub mod async_x11;
 pub mod frame_rate;
 pub mod blur_optimize;
 pub mod per_monitor;
@@ -34,6 +35,7 @@ pub use shader_cache::ShaderCache;
 pub use pixel_buffer_pool::PixelBufferPool;
 pub use pbo_uploader::PBOUploader;
 pub use gpu_fence_sync::GPUFenceSyncManager;
+pub use async_x11::{EventQueue, DeferredOpQueue, PriorityEventQueue, InputPriority};
 pub use frame_rate::{FrameRateLimiter, AdaptiveFrameRate};
 pub use blur_optimize::{AdaptiveBlur, GaussianBlurParams, BlurCache, BlurCacheStats};
 pub use per_monitor::{PerMonitorRenderer, MonitorRenderRegion};
@@ -1162,6 +1164,12 @@ pub(super) struct Compositor {
     // --- P6B: GPU Fence Sync optimization ---
     /// GPU fence manager for non-blocking TFP sync
     gpu_fence_sync_mgr: GPUFenceSyncManager,
+
+    // --- P6A: Async X11 communication ---
+    /// Priority-aware event queue (separates event processing from rendering)
+    priority_event_queue: PriorityEventQueue,
+    /// Deferred X11 operations (NameWindowPixmap, etc.)
+    deferred_ops_queue: DeferredOpQueue,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
@@ -2738,6 +2746,9 @@ impl Compositor {
             pbo_uploader: PBOUploader::new(4 * 1024 * 1024, 4),
             // P6B: GPU fence sync manager
             gpu_fence_sync_mgr: GPUFenceSyncManager::new(),
+            // P6A: Async X11 communication
+            priority_event_queue: PriorityEventQueue::new(),
+            deferred_ops_queue: DeferredOpQueue::new(256),
         })
     }
 
@@ -4499,6 +4510,9 @@ impl Compositor {
         scene: &[(u32, i32, i32, u32, u32)],
         focused: Option<u32>,
     ) -> bool {
+        // P6A: Process deferred X11 operations at start of render frame
+        self.process_deferred_x11_ops();
+
         // P6B: Update GPU fence states (non-blocking check)
         unsafe {
             self.gpu_fence_sync_mgr.update_fence_states(&self.gl);
@@ -6920,6 +6934,28 @@ impl Compositor {
                     log::warn!("compositor: recording PBO map returned null");
                 }
                 self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+            }
+        }
+    }
+
+    /// P6A: Process deferred X11 operations
+    /// Called at start of render_frame to batch operations
+    fn process_deferred_x11_ops(&mut self) {
+        while let Some(op) = self.deferred_ops_queue.pop() {
+            match op.op_type.as_str() {
+                "name_pixmap" => {
+                    // Deferred NameWindowPixmap operation
+                    // This was originally in event handler, now batched in render thread
+                    log::debug!("compositor: processing deferred name_pixmap for window 0x{:x}", op.window_id);
+                    // Implementation would go here (currently placeholder)
+                }
+                "destroy_pixmap" => {
+                    // Deferred pixmap destruction
+                    log::debug!("compositor: processing deferred destroy_pixmap for window 0x{:x}", op.window_id);
+                }
+                _ => {
+                    log::warn!("compositor: unknown deferred op type: {}", op.op_type);
+                }
             }
         }
     }
