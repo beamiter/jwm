@@ -16,6 +16,7 @@ pub mod texture_pool;
 pub mod shader_cache;
 pub mod pixel_buffer_pool;
 pub mod pbo_uploader;
+pub mod gpu_fence_sync;
 pub mod frame_rate;
 pub mod blur_optimize;
 pub mod per_monitor;
@@ -32,6 +33,7 @@ pub use texture_pool::TexturePool;
 pub use shader_cache::ShaderCache;
 pub use pixel_buffer_pool::PixelBufferPool;
 pub use pbo_uploader::PBOUploader;
+pub use gpu_fence_sync::GPUFenceSyncManager;
 pub use frame_rate::{FrameRateLimiter, AdaptiveFrameRate};
 pub use blur_optimize::{AdaptiveBlur, GaussianBlurParams, BlurCache, BlurCacheStats};
 pub use per_monitor::{PerMonitorRenderer, MonitorRenderRegion};
@@ -1156,6 +1158,10 @@ pub(super) struct Compositor {
     // --- P6C: Zero-copy texture upload optimization ---
     /// PBO uploader for async texture uploads (overview/font rendering)
     pbo_uploader: PBOUploader,
+
+    // --- P6B: GPU Fence Sync optimization ---
+    /// GPU fence manager for non-blocking TFP sync
+    gpu_fence_sync_mgr: GPUFenceSyncManager,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
@@ -2730,6 +2736,8 @@ impl Compositor {
             temporal_blur_total_count: 0,
             // P6C: PBO uploader (4MB PBOs, pool of 4)
             pbo_uploader: PBOUploader::new(4 * 1024 * 1024, 4),
+            // P6B: GPU fence sync manager
+            gpu_fence_sync_mgr: GPUFenceSyncManager::new(),
         })
     }
 
@@ -4491,6 +4499,12 @@ impl Compositor {
         scene: &[(u32, i32, i32, u32, u32)],
         focused: Option<u32>,
     ) -> bool {
+        // P6B: Update GPU fence states (non-blocking check)
+        unsafe {
+            self.gpu_fence_sync_mgr.update_fence_states(&self.gl);
+            self.gpu_fence_sync_mgr.cleanup_old_fences(&self.gl);
+        }
+
         // Update GPU load cache with hysteresis: update if delta > 5% or elapsed > 0.5s
         let current_gpu_load = {
             let target_frame_time_ms = 1000.0 / 60.0;
@@ -4783,8 +4797,10 @@ impl Compositor {
                         );
                         self.gl.bind_texture(glow::TEXTURE_2D, None);
 
-                        // Insert fence after rebind
-                        wt.pending_fence = self.gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0).ok();
+                        // P6B: Use GPU fence sync manager for non-blocking TFP sync
+                        if let Ok(fence) = self.gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
+                            self.gpu_fence_sync_mgr.register_fence(win, fence);
+                        }
                     }
                     wt.dirty = false;
 
