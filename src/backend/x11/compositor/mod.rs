@@ -19,6 +19,7 @@ pub mod pbo_uploader;
 pub mod gpu_fence_sync;
 pub mod async_x11;
 pub mod async_blur;
+pub mod predictive_render;
 pub mod frame_rate;
 pub mod blur_optimize;
 pub mod per_monitor;
@@ -38,6 +39,7 @@ pub use pbo_uploader::PBOUploader;
 pub use gpu_fence_sync::GPUFenceSyncManager;
 pub use async_x11::{EventQueue, DeferredOpQueue, PriorityEventQueue, InputPriority};
 pub use async_blur::{AsyncBlurCompute, BlurComputePipeline, BlurComputeRequest};
+pub use predictive_render::{PredictiveRenderManager, SceneActivity};
 pub use frame_rate::{FrameRateLimiter, AdaptiveFrameRate};
 pub use blur_optimize::{AdaptiveBlur, GaussianBlurParams, BlurCache, BlurCacheStats};
 pub use per_monitor::{PerMonitorRenderer, MonitorRenderRegion};
@@ -1176,6 +1178,10 @@ pub(super) struct Compositor {
     // --- P6D: Async blur computation ---
     /// Blur computation pipeline (async thread or compute shader)
     blur_compute_pipeline: BlurComputePipeline,
+
+    // --- P7A: Predictive rendering ---
+    /// Predictive render manager for adaptive FPS and power saving
+    predictive_render_mgr: PredictiveRenderManager,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
@@ -2757,6 +2763,8 @@ impl Compositor {
             deferred_ops_queue: DeferredOpQueue::new(256),
             // P6D: Async blur computation
             blur_compute_pipeline: BlurComputePipeline::new(),
+            // P7A: Predictive rendering
+            predictive_render_mgr: PredictiveRenderManager::new(),
         })
     }
 
