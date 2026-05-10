@@ -21,6 +21,7 @@ pub mod async_x11;
 pub mod async_blur;
 pub mod predictive_render;
 pub mod cache_warmup;
+pub mod power_saving;
 pub mod frame_rate;
 pub mod blur_optimize;
 pub mod per_monitor;
@@ -42,6 +43,7 @@ pub use async_x11::{EventQueue, DeferredOpQueue, PriorityEventQueue, InputPriori
 pub use async_blur::{AsyncBlurCompute, BlurComputePipeline, BlurComputeRequest};
 pub use predictive_render::{PredictiveRenderManager, SceneActivity};
 pub use cache_warmup::{CacheWarmupManager, BlurSizeStats};
+pub use power_saving::{PowerSavingManager, PowerProfile, BatteryStatus, PowerSavingConfig};
 pub use frame_rate::{FrameRateLimiter, AdaptiveFrameRate};
 pub use blur_optimize::{AdaptiveBlur, GaussianBlurParams, BlurCache, BlurCacheStats};
 pub use per_monitor::{PerMonitorRenderer, MonitorRenderRegion};
@@ -1188,6 +1190,10 @@ pub(super) struct Compositor {
     // --- P7C: Smart cache warmup ---
     /// Cache warmup manager for predictive pre-loading
     cache_warmup_mgr: CacheWarmupManager,
+
+    // --- P7D: Power saving mode ---
+    /// Power saving manager for battery-aware optimization
+    power_saving_mgr: PowerSavingManager,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
@@ -2773,6 +2779,8 @@ impl Compositor {
             predictive_render_mgr: PredictiveRenderManager::new(),
             // P7C: Smart cache warmup
             cache_warmup_mgr: CacheWarmupManager::new(),
+            // P7D: Power saving mode
+            power_saving_mgr: PowerSavingManager::new(PowerSavingConfig::new()),
         })
     }
 
