@@ -169,23 +169,63 @@ impl ShaderCache {
     /// Get binary representation of a compiled program
     fn get_program_binary(
         &self,
-        _gl: &glow::Context,
-        _program: glow::Program,
+        gl: &glow::Context,
+        program: glow::Program,
     ) -> Result<Vec<u8>, String> {
-        // Note: This requires GL_ARB_get_program_binary extension
-        // For now, we just return empty to indicate binary caching is not available
-        Ok(vec![])
+        unsafe {
+            if let Some(binary) = gl.get_program_binary(program) {
+                // Serialize ProgramBinary (format + buffer)
+                let mut result = binary.format.to_le_bytes().to_vec();
+                result.extend_from_slice(&binary.buffer);
+                Ok(result)
+            } else {
+                Err("GL_ARB_get_program_binary not available".to_string())
+            }
+        }
     }
 
     /// Create program from binary
     fn create_program_from_binary(
         &self,
-        _gl: &glow::Context,
-        _binary: &[u8],
+        gl: &glow::Context,
+        binary_data: &[u8],
     ) -> Result<glow::Program, String> {
-        // This would need GL_ARB_get_program_binary support
-        // For now, just fail and fall back to source compilation
-        Err("binary loading not available".to_string())
+        if binary_data.len() < 4 {
+            return Err("binary too short (missing format header)".to_string());
+        }
+
+        unsafe {
+            // Extract format and buffer
+            let binary_format = u32::from_le_bytes([
+                binary_data[0],
+                binary_data[1],
+                binary_data[2],
+                binary_data[3],
+            ]);
+            let program_buffer = binary_data[4..].to_vec();
+
+            // Create ProgramBinary struct
+            let program_binary = glow::ProgramBinary {
+                format: binary_format,
+                buffer: program_buffer,
+            };
+
+            // Create program and load binary
+            let program = gl
+                .create_program()
+                .map_err(|e| format!("create_program: {e}"))?;
+
+            gl.program_binary(program, &program_binary);
+
+            // Check link status
+            if !gl.get_program_link_status(program) {
+                let info = gl.get_program_info_log(program);
+                gl.delete_program(program);
+                return Err(format!("program binary link failed: {}", info));
+            }
+
+            Ok(program)
+        }
     }
 
     /// Save binary to disk cache

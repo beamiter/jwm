@@ -19,15 +19,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     setup_locale();
 
-    // exec restart 时跳过 autostart，避免重复启动 picom/fcitx 等
     let is_restart = env::var("JWM_RESTARTING").is_ok();
     if is_restart {
         info!("[main] Detected exec restart, skipping autostart");
         unsafe { env::remove_var("JWM_RESTARTING") };
-    } else {
-        jwm::miscellaneous::init_auto_command();
-        jwm::miscellaneous::init_auto_start();
     }
+    jwm::miscellaneous::init_auto_command();
+    jwm::miscellaneous::init_auto_start();
 
     run_jwm()?;
     Ok(())
