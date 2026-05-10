@@ -367,6 +367,8 @@ struct BorderUniforms {
 
 // --- Feature 9/10: Post-process uniforms ---
 struct PostprocessUniforms {
+    projection: Option<glow::UniformLocation>,  // P5F.1: Cache to avoid per-frame lookup
+    rect: Option<glow::UniformLocation>,        // P5F.1: Cache to avoid per-frame lookup
     texture: Option<glow::UniformLocation>,
     color_temp: Option<glow::UniformLocation>,
     saturation: Option<glow::UniformLocation>,
@@ -1934,6 +1936,8 @@ impl Compositor {
         let postprocess_program = shader_cache.get_or_compile(&gl, "postprocess", shaders::BLUR_DOWN_VERTEX, shaders::MAGNIFIER_POSTPROCESS_FRAGMENT_SHADER)?;
         let postprocess_uniforms = unsafe {
             PostprocessUniforms {
+                projection: gl.get_uniform_location(postprocess_program, "u_projection"),  // P5F.1
+                rect: gl.get_uniform_location(postprocess_program, "u_rect"),              // P5F.1
                 texture: gl.get_uniform_location(postprocess_program, "u_texture"),
                 color_temp: gl.get_uniform_location(postprocess_program, "u_color_temp"),
                 saturation: gl.get_uniform_location(postprocess_program, "u_saturation"),
@@ -5662,12 +5666,9 @@ impl Compositor {
                 self.gl.use_program(Some(self.postprocess_program));
                 // Set up fullscreen quad
                 let pp_proj = ortho(0.0, self.screen_w as f32, self.screen_h as f32, 0.0, -1.0, 1.0);
-                // The postprocess program uses blur vertex shader which has u_rect and u_projection
-                // We need to get those uniform locations
-                let pp_proj_loc = self.gl.get_uniform_location(self.postprocess_program, "u_projection");
-                let pp_rect_loc = self.gl.get_uniform_location(self.postprocess_program, "u_rect");
-                self.gl.uniform_matrix_4_f32_slice(pp_proj_loc.as_ref(), false, &pp_proj);
-                self.gl.uniform_4_f32(pp_rect_loc.as_ref(), 0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
+                // P5F.1: Use cached uniform locations (no per-frame driver call)
+                self.gl.uniform_matrix_4_f32_slice(self.postprocess_uniforms.projection.as_ref(), false, &pp_proj);
+                self.gl.uniform_4_f32(self.postprocess_uniforms.rect.as_ref(), 0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
 
                 self.gl.uniform_1_i32(self.postprocess_uniforms.texture.as_ref(), 0);
                 self.gl.uniform_1_f32(self.postprocess_uniforms.color_temp.as_ref(), self.color_temperature);
