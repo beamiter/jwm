@@ -15,6 +15,7 @@ pub mod perf_metrics;
 pub mod texture_pool;
 pub mod shader_cache;
 pub mod pixel_buffer_pool;
+pub mod pbo_uploader;
 pub mod frame_rate;
 pub mod blur_optimize;
 pub mod per_monitor;
@@ -30,6 +31,7 @@ pub use perf_metrics::PerfMetrics;
 pub use texture_pool::TexturePool;
 pub use shader_cache::ShaderCache;
 pub use pixel_buffer_pool::PixelBufferPool;
+pub use pbo_uploader::PBOUploader;
 pub use frame_rate::{FrameRateLimiter, AdaptiveFrameRate};
 pub use blur_optimize::{AdaptiveBlur, GaussianBlurParams, BlurCache, BlurCacheStats};
 pub use per_monitor::{PerMonitorRenderer, MonitorRenderRegion};
@@ -1150,6 +1152,10 @@ pub(super) struct Compositor {
     temporal_blur_reuse_count: u64,
     /// Temporal blur: total blur frames (for hit rate calculation)
     temporal_blur_total_count: u64,
+
+    // --- P6C: Zero-copy texture upload optimization ---
+    /// PBO uploader for async texture uploads (overview/font rendering)
+    pbo_uploader: PBOUploader,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
@@ -2722,6 +2728,8 @@ impl Compositor {
             temporal_blur_enabled: behavior.blur_temporal_enabled,
             temporal_blur_reuse_count: 0,
             temporal_blur_total_count: 0,
+            // P6C: PBO uploader (4MB PBOs, pool of 4)
+            pbo_uploader: PBOUploader::new(4 * 1024 * 1024, 4),
         })
     }
 

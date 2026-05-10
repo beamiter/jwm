@@ -144,6 +144,7 @@ impl Compositor {
                 unsafe {
                     let tex = self.gl.create_texture().ok()?;
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                    // P6C: Allocate texture storage first
                     self.gl.tex_image_2d(
                         glow::TEXTURE_2D,
                         0,
@@ -153,7 +154,7 @@ impl Compositor {
                         0,
                         glow::RGBA,
                         glow::UNSIGNED_BYTE,
-                        glow::PixelUnpackData::Slice(Some(&pixels)),
+                        glow::PixelUnpackData::Slice(None),  // Allocate without data
                     );
                     self.gl.tex_parameter_i32(
                         glow::TEXTURE_2D,
@@ -176,6 +177,10 @@ impl Compositor {
                         glow::CLAMP_TO_EDGE as i32,
                     );
                     self.gl.bind_texture(glow::TEXTURE_2D, None);
+
+                    // P6C: Upload data via PBO (async, reduces CPU stall)
+                    self.pbo_uploader.upload_texture(&self.gl, tex, w, h, glow::RGBA, &pixels);
+
                     Some((tex, w, h))
                 }
             })
@@ -187,7 +192,7 @@ impl Compositor {
     }
 
     pub(super) fn upload_overview_snapshot_texture(
-        &self,
+        &mut self,  // P6C: mut needed for pbo_uploader
         pixels: &[u8],
         width: u32,
         height: u32,
@@ -195,6 +200,7 @@ impl Compositor {
         unsafe {
             let texture = self.gl.create_texture().ok()?;
             self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            // P6C: Allocate texture storage first
             self.gl.tex_image_2d(
                 glow::TEXTURE_2D,
                 0,
@@ -204,7 +210,7 @@ impl Compositor {
                 0,
                 glow::RGBA,
                 glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(Some(pixels)),
+                glow::PixelUnpackData::Slice(None),  // Allocate without data
             );
             self.gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
@@ -227,12 +233,16 @@ impl Compositor {
                 glow::CLAMP_TO_EDGE as i32,
             );
             self.gl.bind_texture(glow::TEXTURE_2D, None);
+
+            // P6C: Upload data via PBO (async, reduces CPU stall)
+            self.pbo_uploader.upload_texture(&self.gl, texture, width, height, glow::RGBA, pixels);
+
             Some(texture)
         }
     }
 
     pub(super) fn create_overview_snapshot_texture(
-        &self,
+        &mut self,  // P6C: mut needed for pbo_uploader
         x11_win: u32,
         max_size: u32,
     ) -> Option<glow::Texture> {
