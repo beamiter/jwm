@@ -753,6 +753,7 @@ pub(super) struct Compositor {
     cm_selection_owner: u32,
     glx_drawable: x11::glx::GLXDrawable,
     gl: glow::Context,
+    shader_cache: ShaderCache,
     program: glow::Program,
     shadow_program: glow::Program,
     blur_down_program: glow::Program,
@@ -1848,10 +1849,16 @@ impl Compositor {
             })
         };
 
+        // P5D: Create shader cache
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join("jwm").join("shaders");
+        let shader_cache = ShaderCache::new(cache_dir);
+
         log::info!("compositor: glow GL context created, compiling shaders...");
-        // 14. Compile shaders and create program
-        let program = unsafe { Self::create_program(&gl, shaders::VERTEX_SHADER, shaders::FRAGMENT_SHADER)? };
-        let shadow_program = unsafe { Self::create_program(&gl, shaders::VERTEX_SHADER, shaders::SHADOW_FRAGMENT_SHADER)? };
+        // 14. Compile shaders with caching
+        let program = shader_cache.get_or_compile(&gl, "main", shaders::VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
+        let shadow_program = shader_cache.get_or_compile(&gl, "shadow", shaders::VERTEX_SHADER, shaders::SHADOW_FRAGMENT_SHADER)?;
 
         // Cache uniform locations (avoids per-frame string lookups)
         let win_uniforms = unsafe {
@@ -1880,8 +1887,8 @@ impl Compositor {
         };
 
         // Compile blur shaders
-        let blur_down_program = unsafe { Self::create_program(&gl, shaders::BLUR_DOWN_VERTEX, shaders::BLUR_DOWN_FRAGMENT)? };
-        let blur_up_program = unsafe { Self::create_program(&gl, shaders::BLUR_DOWN_VERTEX, shaders::BLUR_UP_FRAGMENT)? };
+        let blur_down_program = shader_cache.get_or_compile(&gl, "blur_down", shaders::BLUR_DOWN_VERTEX, shaders::BLUR_DOWN_FRAGMENT)?;
+        let blur_up_program = shader_cache.get_or_compile(&gl, "blur_up", shaders::BLUR_DOWN_VERTEX, shaders::BLUR_UP_FRAGMENT)?;
         let blur_down_uniforms = unsafe {
             BlurUniforms {
                 projection: gl.get_uniform_location(blur_down_program, "u_projection"),
@@ -1900,7 +1907,7 @@ impl Compositor {
         };
 
         // P4: Compile temporal blur mix shader
-        let temporal_blur_mix_program = unsafe { Self::create_program(&gl, shaders::TEMPORAL_BLUR_MIX_VERTEX, shaders::TEMPORAL_BLUR_MIX_FRAGMENT)? };
+        let temporal_blur_mix_program = shader_cache.get_or_compile(&gl, "temporal_mix", shaders::TEMPORAL_BLUR_MIX_VERTEX, shaders::TEMPORAL_BLUR_MIX_FRAGMENT)?;
         let temporal_blur_mix_uniforms = unsafe {
             BlurUniforms {
                 projection: gl.get_uniform_location(temporal_blur_mix_program, "u_projection"),
@@ -1911,7 +1918,7 @@ impl Compositor {
         };
 
         // Compile border shader (feature 1)
-        let border_program = unsafe { Self::create_program(&gl, shaders::VERTEX_SHADER, shaders::BORDER_FRAGMENT_SHADER)? };
+        let border_program = shader_cache.get_or_compile(&gl, "border", shaders::VERTEX_SHADER, shaders::BORDER_FRAGMENT_SHADER)?;
         let border_uniforms = unsafe {
             BorderUniforms {
                 projection: gl.get_uniform_location(border_program, "u_projection"),
@@ -1924,7 +1931,7 @@ impl Compositor {
         };
 
         // Compile post-process shader (features 8/9/10 + magnifier)
-        let postprocess_program = unsafe { Self::create_program(&gl, shaders::BLUR_DOWN_VERTEX, shaders::MAGNIFIER_POSTPROCESS_FRAGMENT_SHADER)? };
+        let postprocess_program = shader_cache.get_or_compile(&gl, "postprocess", shaders::BLUR_DOWN_VERTEX, shaders::MAGNIFIER_POSTPROCESS_FRAGMENT_SHADER)?;
         let postprocess_uniforms = unsafe {
             PostprocessUniforms {
                 texture: gl.get_uniform_location(postprocess_program, "u_texture"),
@@ -1951,7 +1958,7 @@ impl Compositor {
         };
 
         // Compile HUD shader (feature 11)
-        let hud_program = unsafe { Self::create_program(&gl, shaders::VERTEX_SHADER, shaders::HUD_FRAGMENT_SHADER)? };
+        let hud_program = shader_cache.get_or_compile(&gl, "hud", shaders::VERTEX_SHADER, shaders::HUD_FRAGMENT_SHADER)?;
         let hud_uniforms = unsafe {
             HudUniforms {
                 projection: gl.get_uniform_location(hud_program, "u_projection"),
@@ -1963,7 +1970,7 @@ impl Compositor {
         };
 
         // Compile HUD text shader (feature 11b)
-        let hud_text_program = unsafe { Self::create_program(&gl, shaders::VERTEX_SHADER, shaders::HUD_TEXT_FRAGMENT_SHADER)? };
+        let hud_text_program = shader_cache.get_or_compile(&gl, "hud_text", shaders::VERTEX_SHADER, shaders::HUD_TEXT_FRAGMENT_SHADER)?;
         let hud_text_uniforms = unsafe {
             HudTextUniforms {
                 projection: gl.get_uniform_location(hud_text_program, "u_projection"),
@@ -1973,9 +1980,7 @@ impl Compositor {
         };
 
         // Compile tag-switch transition shader
-        let transition_program = unsafe {
-            Self::create_program(&gl, shaders::BLUR_DOWN_VERTEX, shaders::TRANSITION_FRAGMENT_SHADER)?
-        };
+        let transition_program = shader_cache.get_or_compile(&gl, "transition", shaders::BLUR_DOWN_VERTEX, shaders::TRANSITION_FRAGMENT_SHADER)?;
         let transition_uniforms = unsafe {
             TransitionUniforms {
                 projection: gl.get_uniform_location(transition_program, "u_projection"),
@@ -1987,9 +1992,7 @@ impl Compositor {
         };
 
         // Compile cube transition shader
-        let cube_program = unsafe {
-            Self::create_program(&gl, shaders::CUBE_VERTEX_SHADER, shaders::CUBE_FRAGMENT_SHADER)?
-        };
+        let cube_program = shader_cache.get_or_compile(&gl, "cube", shaders::CUBE_VERTEX_SHADER, shaders::CUBE_FRAGMENT_SHADER)?;
         let cube_uniforms = unsafe {
             CubeUniforms {
                 mvp: gl.get_uniform_location(cube_program, "u_mvp"),
@@ -2001,9 +2004,7 @@ impl Compositor {
         };
 
         // Compile portal transition shader
-        let portal_program = unsafe {
-            Self::create_program(&gl, shaders::BLUR_DOWN_VERTEX, shaders::PORTAL_FRAGMENT_SHADER)?
-        };
+        let portal_program = shader_cache.get_or_compile(&gl, "portal", shaders::BLUR_DOWN_VERTEX, shaders::PORTAL_FRAGMENT_SHADER)?;
         let portal_uniforms = unsafe {
             PortalUniforms {
                 projection: gl.get_uniform_location(portal_program, "u_projection"),
@@ -2017,7 +2018,7 @@ impl Compositor {
         };
 
         // Compile edge glow shader
-        let edge_glow_program = unsafe { Self::create_program(&gl, shaders::VERTEX_SHADER, shaders::EDGE_GLOW_FRAGMENT_SHADER)? };
+        let edge_glow_program = shader_cache.get_or_compile(&gl, "edge_glow", shaders::VERTEX_SHADER, shaders::EDGE_GLOW_FRAGMENT_SHADER)?;
         let edge_glow_uniforms = unsafe {
             EdgeGlowUniforms {
                 projection: gl.get_uniform_location(edge_glow_program, "u_projection"),
@@ -2031,7 +2032,7 @@ impl Compositor {
         };
 
         // Compile tilt shader (uses tilt vertex + tilt fragment)
-        let tilt_program = unsafe { Self::create_program(&gl, shaders::TILT_VERTEX_SHADER, shaders::TILT_FRAGMENT_SHADER)? };
+        let tilt_program = shader_cache.get_or_compile(&gl, "tilt", shaders::TILT_VERTEX_SHADER, shaders::TILT_FRAGMENT_SHADER)?;
         let tilt_uniforms = unsafe {
             TiltUniforms {
                 projection: gl.get_uniform_location(tilt_program, "u_projection"),
@@ -2050,7 +2051,7 @@ impl Compositor {
         };
 
         // Compile wobbly shader (uses wobbly vertex + standard fragment)
-        let wobbly_program = unsafe { Self::create_program(&gl, shaders::WOBBLY_VERTEX_SHADER, shaders::FRAGMENT_SHADER)? };
+        let wobbly_program = shader_cache.get_or_compile(&gl, "wobbly", shaders::WOBBLY_VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
         let wobbly_uniforms = unsafe {
             WobblyUniforms {
                 projection: gl.get_uniform_location(wobbly_program, "u_projection"),
@@ -2067,7 +2068,7 @@ impl Compositor {
         };
 
         // Compile overview background shader
-        let overview_bg_program = unsafe { Self::create_program(&gl, shaders::VERTEX_SHADER, shaders::OVERVIEW_BG_FRAGMENT_SHADER)? };
+        let overview_bg_program = shader_cache.get_or_compile(&gl, "overview_bg", shaders::VERTEX_SHADER, shaders::OVERVIEW_BG_FRAGMENT_SHADER)?;
         let overview_bg_uniforms = unsafe {
             OverviewBgUniforms {
                 projection: gl.get_uniform_location(overview_bg_program, "u_projection"),
@@ -2077,7 +2078,7 @@ impl Compositor {
         };
 
         // Compile particle shader
-        let particle_program = unsafe { Self::create_program(&gl, shaders::PARTICLE_VERTEX_SHADER, shaders::PARTICLE_FRAGMENT_SHADER)? };
+        let particle_program = shader_cache.get_or_compile(&gl, "particle", shaders::PARTICLE_VERTEX_SHADER, shaders::PARTICLE_FRAGMENT_SHADER)?;
         let particle_uniforms = unsafe {
             ParticleUniforms {
                 projection: gl.get_uniform_location(particle_program, "u_projection"),
@@ -2115,7 +2116,7 @@ impl Compositor {
         };
 
         // Phase 3.2: Compile genie minimize shader
-        let genie_program = unsafe { Self::create_program(&gl, shaders::GENIE_VERTEX_SHADER, shaders::FRAGMENT_SHADER)? };
+        let genie_program = shader_cache.get_or_compile(&gl, "genie", shaders::GENIE_VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
         let genie_uniforms = unsafe {
             GenieUniforms {
                 projection: gl.get_uniform_location(genie_program, "u_projection"),
@@ -2385,6 +2386,7 @@ impl Compositor {
             cm_selection_owner,
             glx_drawable,
             gl,
+            shader_cache,
             program,
             shadow_program,
             blur_down_program,
