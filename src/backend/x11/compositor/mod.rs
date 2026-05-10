@@ -5002,6 +5002,10 @@ impl Compositor {
                     self.shadow_uniforms.spread.as_ref(), spread,
                 );
 
+                // P5E: Load config once before loop (not per-window)
+                let cfg = crate::config::CONFIG.load();
+                let status_bar_name = cfg.status_bar_name();
+
                 for &(win, x, y, w, h) in visible_scene {
                     if overview_skip(x, y, w, h) { continue; }
                     let wt = match self.windows.get(&win) {
@@ -5009,8 +5013,6 @@ impl Compositor {
                         None => continue,
                     };
                     // Skip shadow for statusbar
-                    let cfg = crate::config::CONFIG.load();
-                    let status_bar_name = cfg.status_bar_name();
                     if wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name) {
                         continue;
                     }
@@ -5125,6 +5127,10 @@ impl Compositor {
             self.gl.uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
             self.gl.bind_vertex_array(Some(self.quad_vao));
 
+            // P5E: Load config once before loop (not per-window)
+            let cfg_main = crate::config::CONFIG.load();
+            let status_bar_name_main = cfg_main.status_bar_name();
+
             for &(win, x, y, w, h) in visible_scene {
                 if overview_skip(x, y, w, h) { continue; }
                 if let Some(wt) = self.windows.get(&win) {
@@ -5151,9 +5157,7 @@ impl Compositor {
                     self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
 
                     // Compute effective opacity
-                    let cfg = crate::config::CONFIG.load();
-                    let status_bar_name = cfg.status_bar_name();
-                    let is_statusbar = wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name);
+                    let is_statusbar = wt.class_name == status_bar_name_main || wt.class_name.contains(status_bar_name_main);
 
                     let base_opacity = if is_statusbar { 1.0 } else if is_focused { self.active_opacity } else { self.inactive_opacity };
                     let rule_opacity = wt.opacity_override.unwrap_or(base_opacity);
