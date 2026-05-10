@@ -401,7 +401,7 @@ struct FrameStats {
     frame_count: u64,
     last_fps_update: std::time::Instant,
     fps: f32,
-    frame_times: Vec<f32>,
+    frame_times: std::collections::VecDeque<f32>,  // P5F.3: VecDeque for O(1) operations
     last_frame_time: std::time::Instant,
     // Phase 7.2: Extended debug stats
     draw_calls: u32,
@@ -2485,7 +2485,7 @@ impl Compositor {
                 frame_count: 0,
                 last_fps_update: std::time::Instant::now(),
                 fps: 0.0,
-                frame_times: Vec::with_capacity(120),
+                frame_times: std::collections::VecDeque::with_capacity(120),  // P5F.3
                 last_frame_time: std::time::Instant::now(),
                 draw_calls: 0,
                 texture_memory_bytes: 0,
@@ -5726,9 +5726,10 @@ impl Compositor {
             let dt = now.duration_since(self.frame_stats.last_frame_time).as_secs_f32();
             self.frame_stats.last_frame_time = now;
             self.frame_stats.frame_count += 1;
-            self.frame_stats.frame_times.push(dt);
+            // P5F.3: VecDeque push_back + pop_front (O(1) instead of O(n) remove(0))
+            self.frame_stats.frame_times.push_back(dt);
             if self.frame_stats.frame_times.len() > 120 {
-                self.frame_stats.frame_times.remove(0);
+                self.frame_stats.frame_times.pop_front();
             }
             let elapsed = now.duration_since(self.frame_stats.last_fps_update).as_secs_f32();
             if elapsed >= 1.0 {
