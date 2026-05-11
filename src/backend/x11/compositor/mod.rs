@@ -27,6 +27,8 @@ pub mod blur_optimize;
 pub mod per_monitor;
 pub mod dirty_region;
 pub mod optimization_manager;
+pub mod subpixel_render;
+pub mod subpixel_integration;
 
 // Sync control modules
 pub mod oml_sync_control;
@@ -50,6 +52,8 @@ pub use per_monitor::{PerMonitorRenderer, MonitorRenderRegion};
 pub use dirty_region::{DirtyRegionTracker, DirtyRect};
 pub use optimization_manager::{OptimizationManager, OptimizationStatus};
 pub use oml_sync_control::OmlSyncControl;
+pub use subpixel_render::{SubpixelRenderManager, SubpixelMode, WindowType, SubpixelMetrics};
+pub use subpixel_integration::{SubpixelCompositorIntegration, SubpixelRenderParams};
 
 use glow::HasContext;
 use std::collections::HashMap;
@@ -1194,6 +1198,10 @@ pub(super) struct Compositor {
     // --- P7D: Power saving mode ---
     /// Power saving manager for battery-aware optimization
     power_saving_mgr: PowerSavingManager,
+
+    // --- P7B: Subpixel rendering optimization ---
+    /// Subpixel rendering manager for improved text quality
+    subpixel_render_mgr: SubpixelRenderManager,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
@@ -2781,6 +2789,7 @@ impl Compositor {
             cache_warmup_mgr: CacheWarmupManager::new(),
             // P7D: Power saving mode
             power_saving_mgr: PowerSavingManager::new(PowerSavingConfig::new()),
+            subpixel_render_mgr: SubpixelRenderManager::new(),
         })
     }
 
