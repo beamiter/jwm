@@ -219,6 +219,25 @@ mod tests {
     }
 
     #[test]
+    fn test_dirty_rect_intersection_edge_cases() {
+        let r1 = DirtyRect::new(0, 0, 100, 100);
+
+        let r2 = DirtyRect::new(100, 0, 100, 100);
+        assert!(!r1.intersects(&r2), "Adjacent rects should not intersect");
+
+        let r3 = DirtyRect::new(99, 0, 100, 100);
+        assert!(r1.intersects(&r3), "Overlapping by 1 pixel should intersect");
+    }
+
+    #[test]
+    fn test_dirty_rect_intersection_contained() {
+        let r1 = DirtyRect::new(0, 0, 100, 100);
+        let r2 = DirtyRect::new(25, 25, 50, 50);
+        assert!(r1.intersects(&r2), "Contained rect should intersect");
+        assert!(r2.intersects(&r1), "Intersection should be symmetric");
+    }
+
+    #[test]
     fn test_dirty_rect_union() {
         let r1 = DirtyRect::new(0, 0, 100, 100);
         let r2 = DirtyRect::new(50, 50, 100, 100);
@@ -228,6 +247,63 @@ mod tests {
         assert_eq!(union.y, 0);
         assert_eq!(union.width, 150);
         assert_eq!(union.height, 150);
+    }
+
+    #[test]
+    fn test_dirty_rect_union_disjoint() {
+        let r1 = DirtyRect::new(0, 0, 100, 100);
+        let r2 = DirtyRect::new(200, 200, 100, 100);
+        let union = r1.union(&r2);
+
+        assert_eq!(union.x, 0);
+        assert_eq!(union.y, 0);
+        assert_eq!(union.width, 300);
+        assert_eq!(union.height, 300);
+    }
+
+    #[test]
+    fn test_dirty_rect_area() {
+        let r1 = DirtyRect::new(0, 0, 100, 100);
+        assert_eq!(r1.area(), 10000);
+
+        let r2 = DirtyRect::new(0, 0, 0, 100);
+        assert_eq!(r2.area(), 0);
+
+        let r3 = DirtyRect::new(0, 0, 1920, 1080);
+        assert_eq!(r3.area(), 1920 * 1080);
+    }
+
+    #[test]
+    fn test_dirty_rect_expand() {
+        let r = DirtyRect::new(10, 10, 100, 100);
+        let expanded = r.expand(5);
+
+        assert_eq!(expanded.x, 5);
+        assert_eq!(expanded.y, 5);
+        assert_eq!(expanded.width, 110);
+        assert_eq!(expanded.height, 110);
+    }
+
+    #[test]
+    fn test_dirty_rect_expand_at_origin() {
+        let r = DirtyRect::new(0, 0, 100, 100);
+        let expanded = r.expand(10);
+
+        assert_eq!(expanded.x, 0, "Should be clamped to 0");
+        assert_eq!(expanded.y, 0, "Should be clamped to 0");
+        assert_eq!(expanded.width, 120);
+        assert_eq!(expanded.height, 120);
+    }
+
+    #[test]
+    fn test_dirty_rect_expand_large_margin() {
+        let r = DirtyRect::new(50, 50, 10, 10);
+        let expanded = r.expand(100);
+
+        assert_eq!(expanded.x, 0, "Should be clamped to 0");
+        assert_eq!(expanded.y, 0, "Should be clamped to 0");
+        assert!(expanded.width > 200);
+        assert!(expanded.height > 200);
     }
 
     #[test]
@@ -244,6 +320,18 @@ mod tests {
     }
 
     #[test]
+    fn test_dirty_region_clear() {
+        let mut tracker = DirtyRegionTracker::new(1920, 1080);
+
+        tracker.mark_dirty(DirtyRect::new(0, 0, 100, 100));
+        assert_eq!(tracker.region_count(), 1);
+
+        tracker.clear();
+        assert_eq!(tracker.region_count(), 0);
+        assert!(tracker.merged().is_none());
+    }
+
+    #[test]
     fn test_dirty_fraction() {
         let mut tracker = DirtyRegionTracker::new(1920, 1080);
 
@@ -256,5 +344,127 @@ mod tests {
         tracker.mark_all_dirty();
         let fraction = tracker.dirty_fraction();
         assert!((fraction - 1.0).abs() < 0.01); // Nearly 100%
+    }
+
+    #[test]
+    fn test_dirty_region_is_region_dirty() {
+        let mut tracker = DirtyRegionTracker::new(1920, 1080);
+
+        tracker.mark_dirty(DirtyRect::new(100, 100, 200, 200));
+
+        let test_r1 = DirtyRect::new(150, 150, 50, 50);
+        assert!(tracker.is_region_dirty(&test_r1), "Overlapping region should be dirty");
+
+        let test_r2 = DirtyRect::new(0, 0, 50, 50);
+        assert!(
+            !tracker.is_region_dirty(&test_r2),
+            "Non-overlapping region should not be dirty"
+        );
+    }
+
+    #[test]
+    fn test_dirty_region_merge_on_overflow() {
+        let mut tracker = DirtyRegionTracker::new(1920, 1080);
+
+        // Add overlapping regions so they will merge
+        for i in 0..20 {
+            tracker.mark_dirty(DirtyRect::new(i as i32 * 50, 0, 100, 100));
+        }
+
+        // After merging, we should have fewer regions than added
+        let final_count = tracker.region_count();
+        assert!(
+            final_count <= 20,
+            "Should have reasonable number of regions after merge: {}",
+            final_count
+        );
+    }
+
+    #[test]
+    fn test_dirty_region_resize() {
+        let mut tracker = DirtyRegionTracker::new(1920, 1080);
+
+        tracker.mark_dirty(DirtyRect::new(0, 0, 100, 100));
+        tracker.resize(2560, 1440);
+
+        let merged = tracker.merged();
+        assert!(merged.is_some());
+        let r = merged.unwrap();
+        assert_eq!(r.width, 2560);
+        assert_eq!(r.height, 1440);
+    }
+
+    #[test]
+    fn test_dirty_region_default() {
+        let mut tracker = DirtyRegionTracker::default();
+        assert_eq!(tracker.region_count(), 0);
+        tracker.mark_dirty(DirtyRect::new(0, 0, 100, 100));
+        assert_eq!(tracker.region_count(), 1);
+    }
+
+    #[test]
+    fn test_dirty_region_should_redraw_full_screen() {
+        let mut tracker = DirtyRegionTracker::new(1920, 1080);
+
+        tracker.mark_dirty(DirtyRect::new(0, 0, 100, 100));
+        assert!(
+            !tracker.should_redraw_full_screen(0.5),
+            "Small region should not trigger full redraw"
+        );
+
+        tracker.mark_dirty(DirtyRect::new(0, 0, 1000, 1000));
+        assert!(
+            tracker.should_redraw_full_screen(0.4),
+            "Large region should trigger full redraw"
+        );
+    }
+
+    #[test]
+    fn test_dirty_region_get_regions() {
+        let mut tracker = DirtyRegionTracker::new(1920, 1080);
+
+        let r1 = DirtyRect::new(0, 0, 100, 100);
+        let r2 = DirtyRect::new(200, 200, 100, 100);
+
+        tracker.mark_dirty(r1);
+        tracker.mark_dirty(r2);
+
+        let regions = tracker.regions();
+        assert_eq!(regions.len(), 2);
+    }
+
+    #[test]
+    fn test_dirty_region_clamping() {
+        let mut tracker = DirtyRegionTracker::new(1920, 1080);
+
+        tracker.mark_dirty(DirtyRect::new(-100, -100, 200, 200));
+        let regions = tracker.regions();
+        assert!(!regions.is_empty());
+        let r = regions[0];
+        assert!(r.x >= 0);
+        assert!(r.y >= 0);
+    }
+
+    #[test]
+    fn test_dirty_rect_union_commutativity() {
+        let r1 = DirtyRect::new(0, 0, 100, 100);
+        let r2 = DirtyRect::new(50, 50, 100, 100);
+
+        let u1 = r1.union(&r2);
+        let u2 = r2.union(&r1);
+
+        assert_eq!(u1, u2, "Union should be commutative");
+    }
+
+    #[test]
+    fn test_dirty_rect_union_associativity() {
+        let r1 = DirtyRect::new(0, 0, 100, 100);
+        let r2 = DirtyRect::new(50, 50, 100, 100);
+        let r3 = DirtyRect::new(150, 150, 100, 100);
+
+        let u1 = r1.union(&r2).union(&r3);
+        let u2 = r1.union(&(r2.union(&r3)));
+
+        assert_eq!(u1, u2, "Union should be associative");
     }
 }

@@ -171,6 +171,9 @@ pub struct Jwm {
 
     /// 所有特殊功能的状态（截图、overview、录制、放大镜等）
     pub features: FeatureStates,
+
+    /// Event coalescer for reducing high-frequency updates
+    pub event_coalescer: crate::backend::x11::event_coalescer::EventCoalescer,
 }
 
 
@@ -455,6 +458,7 @@ impl Jwm {
             scrolling_states: HashMap::new(),
             last_night_light_update: None,
             features: FeatureStates::new(),
+            event_coalescer: crate::backend::x11::event_coalescer::EventCoalescer::new(),
         };
         if let Ok((x, y)) = backend.input_ops().get_pointer_position() {
             jwm.last_mouse_root = (x, y);

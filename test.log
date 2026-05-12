@@ -1,0 +1,150 @@
+[2026-05-12 13:56:19.723915 +08:00] INFO [jwm::backend::x11::compositor] src/backend/x11/compositor/mod.rs:4631: [compositor::render_freq] 2.8 renders/sec (needs_render=true, focused=Some(33554437))
+[2026-05-12 13:56:19.952275 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:436: compositor: remove_window 0x200003
+[2026-05-12 13:56:19.952395 +08:00] DEBUG [jwm::jwm::client] src/jwm/client.rs:1261: Unmap event for unmanaged window: 0Win(0x6)
+[2026-05-12 13:56:20.281002 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:67: compositor: add_window START 0x200003 326x58 at (3002,982)
+[2026-05-12 13:56:20.290699 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:130: compositor: win 0x200003 visual 0x9d -> per-visual FBConfig (rgba=true)
+[2026-05-12 13:56:20.290799 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:180: compositor: add_window 0x200003 depth=32 rgba=true pixmap=0x400538, calling glXCreatePixmap...
+[2026-05-12 13:56:20.293318 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:199: compositor: glXCreatePixmap returned 0x60084b
+[2026-05-12 13:56:20.293377 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:222: compositor: add_window 0x200003 binding TFP texture...
+[2026-05-12 13:56:20.294746 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:256: compositor: add_window 0x200003 COMPLETE
+[2026-05-12 13:56:20.294786 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:313: compositor: add_window 0x200003 326x58 at (3002,982)
+[2026-05-12 13:56:20.397686 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 326x58) -> (3002,982 357x58)
+[2026-05-12 13:56:20.430950 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 357x58) -> (3002,982 295x58)
+[2026-05-12 13:56:20.712822 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 295x58) -> (3002,982 373x58)
+[2026-05-12 13:56:20.787620 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 373x58) -> (3002,982 360x58)
+[2026-05-12 13:56:20.948987 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 360x58) -> (3002,982 321x58)
+[2026-05-12 13:56:21.270815 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:436: compositor: remove_window 0x200003
+[2026-05-12 13:56:21.270986 +08:00] DEBUG [jwm::jwm::client] src/jwm/client.rs:1261: Unmap event for unmanaged window: 0Win(0x6)
+[2026-05-12 13:56:21.730993 +08:00] INFO [jwm::backend::x11::compositor] src/backend/x11/compositor/mod.rs:4631: [compositor::render_freq] 9.5 renders/sec (needs_render=true, focused=Some(33554437))
+[2026-05-12 13:56:24.709618 +08:00] INFO [jwm::backend::x11::compositor] src/backend/x11/compositor/mod.rs:4631: [compositor::render_freq] 1.0 renders/sec (needs_render=true, focused=Some(33554437))
+[2026-05-12 13:56:26.726398 +08:00] INFO [jwm::backend::x11::compositor] src/backend/x11/compositor/mod.rs:4631: [compositor::render_freq] 1.5 renders/sec (needs_render=true, focused=Some(33554437))
+[2026-05-12 13:56:29.706050 +08:00] INFO [jwm::backend::x11::compositor] src/backend/x11/compositor/mod.rs:4631: [compositor::render_freq] 1.3 renders/sec (needs_render=true, focused=Some(33554437))
+[2026-05-12 13:56:31.718766 +08:00] INFO [jwm::backend::x11::compositor] src/backend/x11/compositor/mod.rs:4631: [compositor::render_freq] 0.5 renders/sec (needs_render=true, focused=Some(33554437))
+[2026-05-12 13:56:34.717076 +08:00] INFO [jwm::backend::x11::compositor] src/backend/x11/compositor/mod.rs:4631: [compositor::render_freq] 1.0 renders/sec (needs_render=true, focused=Some(33554437))
+[2026-05-12 13:56:37.716609 +08:00] INFO [jwm::backend::x11::compositor] src/backend/x11/compositor/mod.rs:4631: [compositor::render_freq] 1.0 renders/sec (needs_render=true, focused=Some(33554437))
+[2026-05-12 13:56:39.729953 +08:00] INFO [jwm::backend::x11::compositor] src/backend/x11/compositor/mod.rs:4631: [compositor::render_freq] 0.5 renders/sec (needs_render=true, focused=Some(33554437))
+[2026-05-12 13:56:40.125764 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:67: compositor: add_window START 0x200003 293x58 at (3002,982)
+[2026-05-12 13:56:40.125976 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:130: compositor: win 0x200003 visual 0x9d -> per-visual FBConfig (rgba=true)
+[2026-05-12 13:56:40.125999 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:180: compositor: add_window 0x200003 depth=32 rgba=true pixmap=0x40053f, calling glXCreatePixmap...
+[2026-05-12 13:56:40.126157 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:199: compositor: glXCreatePixmap returned 0x600857
+[2026-05-12 13:56:40.126170 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:222: compositor: add_window 0x200003 binding TFP texture...
+[2026-05-12 13:56:40.126511 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:256: compositor: add_window 0x200003 COMPLETE
+[2026-05-12 13:56:40.126519 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:313: compositor: add_window 0x200003 293x58 at (3002,982)
+[2026-05-12 13:56:40.196436 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 293x58) -> (3002,982 340x58)
+[2026-05-12 13:56:40.225108 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 340x58) -> (3002,982 295x58)
+[2026-05-12 13:56:42.224296 +08:00] INFO [jwm::backend::x11::compositor] src/backend/x11/compositor/mod.rs:4631: [compositor::render_freq] 3.6 renders/sec (needs_render=true, focused=Some(33554437))
+[2026-05-12 13:56:44.701901 +08:00] INFO [jwm::backend::x11::compositor] src/backend/x11/compositor/mod.rs:4631: [compositor::render_freq] 1.2 renders/sec (needs_render=true, focused=Some(33554437))
+[2026-05-12 13:56:46.108534 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:436: compositor: remove_window 0x200003
+[2026-05-12 13:56:46.108596 +08:00] DEBUG [jwm::jwm::client] src/jwm/client.rs:1261: Unmap event for unmanaged window: 0Win(0x6)
+[2026-05-12 13:56:46.399020 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:67: compositor: add_window START 0x200003 315x58 at (3002,982)
+[2026-05-12 13:56:46.399167 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:130: compositor: win 0x200003 visual 0x9d -> per-visual FBConfig (rgba=true)
+[2026-05-12 13:56:46.399175 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:180: compositor: add_window 0x200003 depth=32 rgba=true pixmap=0x400543, calling glXCreatePixmap...
+[2026-05-12 13:56:46.399353 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:199: compositor: glXCreatePixmap returned 0x60085d
+[2026-05-12 13:56:46.399366 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:222: compositor: add_window 0x200003 binding TFP texture...
+[2026-05-12 13:56:46.399739 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:256: compositor: add_window 0x200003 COMPLETE
+[2026-05-12 13:56:46.399747 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:313: compositor: add_window 0x200003 315x58 at (3002,982)
+[2026-05-12 13:56:46.502989 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 315x58) -> (3002,982 370x58)
+[2026-05-12 13:56:46.554744 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 370x58) -> (3002,982 335x58)
+[2026-05-12 13:56:46.712027 +08:00] INFO [jwm::backend::x11::compositor] src/backend/x11/compositor/mod.rs:4631: [compositor::render_freq] 7.5 renders/sec (needs_render=true, focused=Some(33554437))
+[2026-05-12 13:56:46.717028 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 335x58) -> (3002,982 361x58)
+[2026-05-12 13:56:46.751266 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 361x58) -> (3002,982 295x58)
+[2026-05-12 13:56:46.935892 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 295x58) -> (3002,982 386x58)
+[2026-05-12 13:56:46.958356 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 386x58) -> (3002,982 347x58)
+[2026-05-12 13:56:47.118990 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 347x58) -> (3002,982 399x58)
+[2026-05-12 13:56:47.147253 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 399x58) -> (3002,982 347x58)
+[2026-05-12 13:56:47.549274 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:436: compositor: remove_window 0x200003
+[2026-05-12 13:56:47.549330 +08:00] DEBUG [jwm::jwm::client] src/jwm/client.rs:1261: Unmap event for unmanaged window: 0Win(0x6)
+[2026-05-12 13:56:48.138641 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:67: compositor: add_window START 0x200003 30x31 at (3002,1009)
+[2026-05-12 13:56:48.138935 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:130: compositor: win 0x200003 visual 0x9d -> per-visual FBConfig (rgba=true)
+[2026-05-12 13:56:48.138976 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:180: compositor: add_window 0x200003 depth=32 rgba=true pixmap=0x40054d, calling glXCreatePixmap...
+[2026-05-12 13:56:48.139369 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:199: compositor: glXCreatePixmap returned 0x60086f
+[2026-05-12 13:56:48.139413 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:222: compositor: add_window 0x200003 binding TFP texture...
+[2026-05-12 13:56:48.141693 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:256: compositor: add_window 0x200003 COMPLETE
+[2026-05-12 13:56:48.141747 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:313: compositor: add_window 0x200003 30x31 at (3002,1009)
+[2026-05-12 13:56:48.599033 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:436: compositor: remove_window 0x200003
+[2026-05-12 13:56:48.599108 +08:00] DEBUG [jwm::jwm::client] src/jwm/client.rs:1261: Unmap event for unmanaged window: 0Win(0x6)
+[2026-05-12 13:56:48.722799 +08:00] INFO [jwm::backend::x11::compositor] src/backend/x11/compositor/mod.rs:4631: [compositor::render_freq] 11.4 renders/sec (needs_render=true, focused=Some(33554437))
+[2026-05-12 13:56:49.099230 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:67: compositor: add_window START 0x200003 27x31 at (3002,1009)
+[2026-05-12 13:56:49.099758 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:130: compositor: win 0x200003 visual 0x9d -> per-visual FBConfig (rgba=true)
+[2026-05-12 13:56:49.099807 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:180: compositor: add_window 0x200003 depth=32 rgba=true pixmap=0x40054f, calling glXCreatePixmap...
+[2026-05-12 13:56:49.100486 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:199: compositor: glXCreatePixmap returned 0x600871
+[2026-05-12 13:56:49.100604 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:222: compositor: add_window 0x200003 binding TFP texture...
+[2026-05-12 13:56:49.104519 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:256: compositor: add_window 0x200003 COMPLETE
+[2026-05-12 13:56:49.104597 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:313: compositor: add_window 0x200003 27x31 at (3002,1009)
+[2026-05-12 13:56:49.218761 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,1009 27x31) -> (3002,1009 315x58)
+[2026-05-12 13:56:49.219411 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,1009 315x58) -> (3002,982 315x58)
+[2026-05-12 13:56:49.374344 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 315x58) -> (3002,982 298x58)
+[2026-05-12 13:56:49.432723 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 298x58) -> (3002,982 295x58)
+[2026-05-12 13:56:49.971985 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:436: compositor: remove_window 0x200003
+[2026-05-12 13:56:49.972094 +08:00] DEBUG [jwm::jwm::client] src/jwm/client.rs:1261: Unmap event for unmanaged window: 0Win(0x6)
+[2026-05-12 13:56:50.305924 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:67: compositor: add_window START 0x200003 315x58 at (3002,982)
+[2026-05-12 13:56:50.312238 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:130: compositor: win 0x200003 visual 0x9d -> per-visual FBConfig (rgba=true)
+[2026-05-12 13:56:50.312337 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:180: compositor: add_window 0x200003 depth=32 rgba=true pixmap=0x400554, calling glXCreatePixmap...
+[2026-05-12 13:56:50.312884 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:199: compositor: glXCreatePixmap returned 0x600879
+[2026-05-12 13:56:50.312940 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:222: compositor: add_window 0x200003 binding TFP texture...
+[2026-05-12 13:56:50.314221 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:256: compositor: add_window 0x200003 COMPLETE
+[2026-05-12 13:56:50.314310 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:313: compositor: add_window 0x200003 315x58 at (3002,982)
+[2026-05-12 13:56:50.361414 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 315x58) -> (3002,982 298x58)
+[2026-05-12 13:56:50.669869 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 298x58) -> (3002,982 350x58)
+[2026-05-12 13:56:50.760003 +08:00] INFO [jwm::backend::x11::compositor] src/backend/x11/compositor/mod.rs:4631: [compositor::render_freq] 13.3 renders/sec (needs_render=true, focused=Some(33554437))
+[2026-05-12 13:56:51.077257 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 350x58) -> (3002,982 298x58)
+[2026-05-12 13:56:51.646353 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 298x58) -> (3002,982 376x58)
+[2026-05-12 13:56:51.707240 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 376x58) -> (3002,982 341x58)
+[2026-05-12 13:56:51.933323 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:436: compositor: remove_window 0x200003
+[2026-05-12 13:56:51.933432 +08:00] DEBUG [jwm::jwm::client] src/jwm/client.rs:1261: Unmap event for unmanaged window: 0Win(0x6)
+[2026-05-12 13:56:52.241567 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:67: compositor: add_window START 0x200003 287x58 at (3002,982)
+[2026-05-12 13:56:52.251286 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:130: compositor: win 0x200003 visual 0x9d -> per-visual FBConfig (rgba=true)
+[2026-05-12 13:56:52.251383 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:180: compositor: add_window 0x200003 depth=32 rgba=true pixmap=0x40055b, calling glXCreatePixmap...
+[2026-05-12 13:56:52.255669 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:199: compositor: glXCreatePixmap returned 0x600885
+[2026-05-12 13:56:52.255794 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:222: compositor: add_window 0x200003 binding TFP texture...
+[2026-05-12 13:56:52.257502 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:256: compositor: add_window 0x200003 COMPLETE
+[2026-05-12 13:56:52.257571 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:313: compositor: add_window 0x200003 287x58 at (3002,982)
+[2026-05-12 13:56:52.302958 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 287x58) -> (3002,982 295x58)
+[2026-05-12 13:56:52.440625 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 295x58) -> (3002,982 386x58)
+[2026-05-12 13:56:52.667649 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 386x58) -> (3002,982 321x58)
+[2026-05-12 13:56:53.182660 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:436: compositor: remove_window 0x200003
+[2026-05-12 13:56:53.182786 +08:00] DEBUG [jwm::jwm::client] src/jwm/client.rs:1261: Unmap event for unmanaged window: 0Win(0x6)
+[2026-05-12 13:56:53.193036 +08:00] INFO [jwm::backend::x11::compositor] src/backend/x11/compositor/mod.rs:4631: [compositor::render_freq] 7.8 renders/sec (needs_render=true, focused=Some(33554437))
+[2026-05-12 13:56:53.431247 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:67: compositor: add_window START 0x200003 295x58 at (3002,982)
+[2026-05-12 13:56:53.438297 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:130: compositor: win 0x200003 visual 0x9d -> per-visual FBConfig (rgba=true)
+[2026-05-12 13:56:53.438504 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:180: compositor: add_window 0x200003 depth=32 rgba=true pixmap=0x400560, calling glXCreatePixmap...
+[2026-05-12 13:56:53.439360 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:199: compositor: glXCreatePixmap returned 0x60088d
+[2026-05-12 13:56:53.439448 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:222: compositor: add_window 0x200003 binding TFP texture...
+[2026-05-12 13:56:53.441744 +08:00] INFO [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:256: compositor: add_window 0x200003 COMPLETE
+[2026-05-12 13:56:53.441833 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:313: compositor: add_window 0x200003 295x58 at (3002,982)
+[2026-05-12 13:56:53.512517 +08:00] INFO [jwm::jwm::event_dispatcher] src/jwm/event_dispatcher.rs:104: [or_geom_update] win=Win(0x6) (3002,982 295x58) -> (3002,982 303x58)
+[2026-05-12 13:56:53.599194 +08:00] DEBUG [jwm::backend::x11::compositor::tfp] src/backend/x11/compositor/tfp.rs:436: compositor: remove_window 0x200003
+[2026-05-12 13:56:53.599330 +08:00] DEBUG [jwm::jwm::client] src/jwm/client.rs:1261: Unmap event for unmanaged window: 0Win(0x6)
+[2026-05-12 13:56:53.915000 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:95: Updated title for window Win(0xc2): '⠐ Debug high CPU usage in RSH process'
+[2026-05-12 13:56:53.915187 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:159: Title updated for selected window Win(0xc2), updating status bar
+[2026-05-12 13:56:53.915375 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:95: Updated title for window Win(0xc2): '⠐ Debug high CPU usage in RSH process'
+[2026-05-12 13:56:53.915396 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:159: Title updated for selected window Win(0xc2), updating status bar
+[2026-05-12 13:56:53.916476 +08:00] INFO [jwm::jwm::statusbar] src/jwm/statusbar.rs:51: [StatusBar] Tag masks - Occupied: 111, Urgent: 0
+[2026-05-12 13:56:54.923057 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:95: Updated title for window Win(0xc2): '⠂ Debug high CPU usage in RSH process'
+[2026-05-12 13:56:54.923294 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:159: Title updated for selected window Win(0xc2), updating status bar
+[2026-05-12 13:56:54.923570 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:95: Updated title for window Win(0xc2): '⠂ Debug high CPU usage in RSH process'
+[2026-05-12 13:56:54.923700 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:159: Title updated for selected window Win(0xc2), updating status bar
+[2026-05-12 13:56:54.940554 +08:00] INFO [jwm::jwm::statusbar] src/jwm/statusbar.rs:51: [StatusBar] Tag masks - Occupied: 111, Urgent: 0
+[2026-05-12 13:56:55.254786 +08:00] INFO [jwm::backend::x11::compositor] src/backend/x11/compositor/mod.rs:4631: [compositor::render_freq] 13.6 renders/sec (needs_render=true, focused=Some(33554437))
+[2026-05-12 13:56:55.491355 +08:00] INFO [jwm::backend::x11::compositor] src/backend/x11/compositor/mod.rs:4608: [compositor::render_frame] frame=70000 scene=6 tracked=7
+[2026-05-12 13:56:55.672226 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:95: Updated title for window Win(0xc2): '~/projects/rsh'
+[2026-05-12 13:56:55.672343 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:159: Title updated for selected window Win(0xc2), updating status bar
+[2026-05-12 13:56:55.672623 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:95: Updated title for window Win(0xc2): '~/projects/rsh'
+[2026-05-12 13:56:55.672666 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:159: Title updated for selected window Win(0xc2), updating status bar
+[2026-05-12 13:56:55.686635 +08:00] INFO [jwm::jwm::statusbar] src/jwm/statusbar.rs:51: [StatusBar] Tag masks - Occupied: 111, Urgent: 0
+[2026-05-12 13:56:55.908379 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:95: Updated title for window Win(0xc2): '~/projects/rsh'
+[2026-05-12 13:56:55.908516 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:159: Title updated for selected window Win(0xc2), updating status bar
+[2026-05-12 13:56:55.908701 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:95: Updated title for window Win(0xc2): '~/projects/rsh'
+[2026-05-12 13:56:55.908724 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:159: Title updated for selected window Win(0xc2), updating status bar
+[2026-05-12 13:56:55.928126 +08:00] INFO [jwm::jwm::statusbar] src/jwm/statusbar.rs:51: [StatusBar] Tag masks - Occupied: 111, Urgent: 0
+[2026-05-12 13:56:56.847820 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:95: Updated title for window Win(0xc2): '~/projects/rsh'
+[2026-05-12 13:56:56.848011 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:159: Title updated for selected window Win(0xc2), updating status bar
+[2026-05-12 13:56:56.848308 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:95: Updated title for window Win(0xc2): '~/projects/rsh'
+[2026-05-12 13:56:56.848344 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:159: Title updated for selected window Win(0xc2), updating status bar
+[2026-05-12 13:56:56.867369 +08:00] INFO [jwm::jwm::statusbar] src/jwm/statusbar.rs:51: [StatusBar] Tag masks - Occupied: 111, Urgent: 0
+[2026-05-12 13:56:57.276557 +08:00] INFO [jwm::backend::x11::compositor] src/backend/x11/compositor/mod.rs:4631: [compositor::render_freq] 12.4 renders/sec (needs_render=true, focused=Some(33554437))
+[2026-05-12 13:56:57.799561 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:95: Updated title for window Win(0xc2): '~/projects/rsh'
+[2026-05-12 13:56:57.799697 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:159: Title updated for selected window Win(0xc2), updating status bar
+[2026-05-12 13:56:57.800124 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:95: Updated title for window Win(0xc2): '~/projects/rsh'
+[2026-05-12 13:56:57.800227 +08:00] DEBUG [jwm::jwm::property_handler] src/jwm/property_handler.rs:159: Title updated for selected window Win(0xc2), updating status bar
+[2026-05-12 13:56:57.819151 +08:00] INFO [jwm::jwm::statusbar] src/jwm/statusbar.rs:51: [StatusBar] Tag masks - Occupied: 111, Urgent: 0

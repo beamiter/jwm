@@ -189,3 +189,190 @@ impl Clone for AdaptiveFrameRate {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_frame_rate_limiter_new() {
+        let limiter = FrameRateLimiter::new(60);
+        assert_eq!(limiter.target_fps(), 60);
+        assert!(limiter.vsync_enabled());
+    }
+
+    #[test]
+    fn test_frame_rate_limiter_default() {
+        let limiter = FrameRateLimiter::default();
+        assert_eq!(limiter.target_fps(), 60);
+        assert!(limiter.vsync_enabled());
+    }
+
+    #[test]
+    fn test_set_target_fps() {
+        let limiter = FrameRateLimiter::new(60);
+        limiter.set_target_fps(120);
+        assert_eq!(limiter.target_fps(), 120);
+
+        limiter.set_target_fps(30);
+        assert_eq!(limiter.target_fps(), 30);
+    }
+
+    #[test]
+    fn test_target_fps_clamping() {
+        let limiter = FrameRateLimiter::new(60);
+
+        limiter.set_target_fps(0);
+        assert_eq!(limiter.target_fps(), 1, "FPS should be clamped to minimum of 1");
+
+        limiter.set_target_fps(500);
+        assert_eq!(limiter.target_fps(), 300, "FPS should be clamped to maximum of 300");
+    }
+
+    #[test]
+    fn test_frame_budget_calculation() {
+        let limiter = FrameRateLimiter::new(60);
+        let budget = limiter.frame_budget();
+
+        let expected_nanos = 1_000_000_000u64 / 60;
+        assert!(
+            (budget.as_nanos() as u64).abs_diff(expected_nanos) < 1000,
+            "Frame budget for 60 FPS should be ~16.67ms"
+        );
+    }
+
+    #[test]
+    fn test_vsync_control() {
+        let limiter = FrameRateLimiter::new(60);
+        assert!(limiter.vsync_enabled());
+
+        limiter.set_vsync(false);
+        assert!(!limiter.vsync_enabled());
+
+        limiter.set_vsync(true);
+        assert!(limiter.vsync_enabled());
+    }
+
+    #[test]
+    fn test_should_render_with_vsync_disabled() {
+        let limiter = FrameRateLimiter::new(60);
+        limiter.set_vsync(false);
+        assert!(limiter.should_render(), "Should always render when VSync is disabled");
+    }
+
+    #[test]
+    fn test_mark_frame() {
+        let limiter = FrameRateLimiter::new(60);
+        limiter.mark_frame();
+
+        let time_since = limiter.time_since_last_frame();
+        assert!(time_since.as_millis() < 10, "Time since frame should be very small");
+    }
+
+    #[test]
+    fn test_reset() {
+        let limiter = FrameRateLimiter::new(60);
+        let _ = std::thread::sleep(Duration::from_millis(5));
+        limiter.reset();
+
+        let time_since = limiter.time_since_last_frame();
+        assert!(time_since.as_millis() < 10, "Time since reset should be small");
+    }
+
+    #[test]
+    fn test_frame_rate_limiter_clone() {
+        let limiter1 = FrameRateLimiter::new(60);
+        limiter1.set_target_fps(120);
+
+        let limiter2 = limiter1.clone();
+        assert_eq!(limiter2.target_fps(), 120, "Clone should share state");
+        assert_eq!(limiter1.target_fps(), limiter2.target_fps());
+    }
+
+    #[test]
+    fn test_adaptive_frame_rate_new() {
+        let adaptive = AdaptiveFrameRate::new(30, 120);
+        assert_eq!(adaptive.current_load(), 50);
+
+        let fps = adaptive.limiter().target_fps();
+        assert_eq!(fps, 75, "Initial FPS should be average of min and max");
+    }
+
+    #[test]
+    fn test_adaptive_frame_rate_high_load() {
+        let adaptive = AdaptiveFrameRate::new(30, 120);
+
+        adaptive.update_load(95);
+        assert_eq!(adaptive.current_load(), 95);
+        assert_eq!(
+            adaptive.limiter().target_fps(),
+            30,
+            "High load should reduce FPS to minimum"
+        );
+    }
+
+    #[test]
+    fn test_adaptive_frame_rate_medium_high_load() {
+        let adaptive = AdaptiveFrameRate::new(30, 120);
+
+        adaptive.update_load(80);
+        assert_eq!(adaptive.current_load(), 80);
+        let fps = adaptive.limiter().target_fps();
+        assert!(fps >= 30 && fps < 75, "Medium-high load should reduce FPS");
+    }
+
+    #[test]
+    fn test_adaptive_frame_rate_low_load() {
+        let adaptive = AdaptiveFrameRate::new(30, 120);
+
+        adaptive.update_load(10);
+        assert_eq!(adaptive.current_load(), 10);
+        assert_eq!(
+            adaptive.limiter().target_fps(),
+            120,
+            "Low load should maximize FPS"
+        );
+    }
+
+    #[test]
+    fn test_adaptive_frame_rate_medium_low_load() {
+        let adaptive = AdaptiveFrameRate::new(30, 120);
+
+        adaptive.update_load(40);
+        assert_eq!(adaptive.current_load(), 40);
+        let fps = adaptive.limiter().target_fps();
+        assert!(fps > 75, "Medium-low load should increase FPS towards maximum");
+    }
+
+    #[test]
+    fn test_adaptive_frame_rate_load_clamping() {
+        let adaptive = AdaptiveFrameRate::new(30, 120);
+
+        adaptive.update_load(150);
+        assert_eq!(adaptive.current_load(), 100, "Load should be clamped to 100");
+    }
+
+    #[test]
+    fn test_adaptive_frame_rate_clone() {
+        let adaptive1 = AdaptiveFrameRate::new(30, 120);
+        adaptive1.update_load(75);
+
+        let adaptive2 = adaptive1.clone();
+        assert_eq!(adaptive2.current_load(), 75, "Clone should share load state");
+    }
+
+    #[test]
+    fn test_frame_budget_different_fps() {
+        let limiter_60 = FrameRateLimiter::new(60);
+        let limiter_120 = FrameRateLimiter::new(120);
+
+        let budget_60 = limiter_60.frame_budget();
+        let budget_120 = limiter_120.frame_budget();
+
+        assert!(
+            budget_60 > budget_120,
+            "60 FPS should have larger frame budget than 120 FPS"
+        );
+        assert!(budget_60.as_nanos() > budget_120.as_nanos() * 1_900_000_000 / 1_000_000_000);
+    }
+}

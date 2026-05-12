@@ -124,3 +124,141 @@ impl Default for X11RequestBatcher {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct MockConnection {
+        flush_count: usize,
+    }
+
+    impl MockConnection {
+        fn new() -> Self {
+            Self { flush_count: 0 }
+        }
+
+        fn flush(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+            self.flush_count += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_batcher_creation() {
+        let batcher = X11RequestBatcher::new();
+        assert_eq!(batcher.pending_count(), 0);
+        assert_eq!(batcher.system_load(), 50);
+    }
+
+    #[test]
+    fn test_pending_ops_count() {
+        let batcher = X11RequestBatcher::new();
+        assert_eq!(batcher.pending_count(), 0);
+
+        batcher.pending_ops.fetch_add(5, Ordering::SeqCst);
+        assert_eq!(batcher.pending_count(), 5);
+    }
+
+    #[test]
+    fn test_load_adjustment_high_load() {
+        let batcher = X11RequestBatcher::new();
+
+        batcher.adjust_thresholds(85);
+        assert_eq!(batcher.system_load(), 85);
+        assert_eq!(
+            batcher.flush_op_threshold.load(Ordering::Acquire),
+            16,
+            "High load should increase operation threshold"
+        );
+        assert_eq!(
+            batcher.flush_time_threshold_ms.load(Ordering::Acquire),
+            16,
+            "High load should increase time threshold"
+        );
+    }
+
+    #[test]
+    fn test_load_adjustment_medium_load() {
+        let batcher = X11RequestBatcher::new();
+
+        batcher.adjust_thresholds(70);
+        assert_eq!(batcher.system_load(), 70);
+        assert_eq!(
+            batcher.flush_op_threshold.load(Ordering::Acquire),
+            12,
+            "Medium load should adjust operation threshold"
+        );
+        assert_eq!(
+            batcher.flush_time_threshold_ms.load(Ordering::Acquire),
+            12,
+            "Medium load should adjust time threshold"
+        );
+    }
+
+    #[test]
+    fn test_load_adjustment_low_load() {
+        let batcher = X11RequestBatcher::new();
+
+        batcher.adjust_thresholds(20);
+        assert_eq!(batcher.system_load(), 20);
+        assert_eq!(
+            batcher.flush_op_threshold.load(Ordering::Acquire),
+            4,
+            "Low load should decrease operation threshold"
+        );
+        assert_eq!(
+            batcher.flush_time_threshold_ms.load(Ordering::Acquire),
+            4,
+            "Low load should decrease time threshold"
+        );
+    }
+
+    #[test]
+    fn test_load_adjustment_clamping() {
+        let batcher = X11RequestBatcher::new();
+
+        batcher.adjust_thresholds(150);
+        assert_eq!(
+            batcher.system_load(),
+            100,
+            "Load should be clamped to 100"
+        );
+    }
+
+    #[test]
+    fn test_load_adjustment_normal_load() {
+        let batcher = X11RequestBatcher::new();
+
+        batcher.adjust_thresholds(50);
+        assert_eq!(batcher.system_load(), 50);
+        assert_eq!(
+            batcher.flush_op_threshold.load(Ordering::Acquire),
+            8,
+            "Normal load should use default thresholds"
+        );
+    }
+
+    #[test]
+    fn test_batcher_clone() {
+        let batcher = X11RequestBatcher::new();
+        batcher.pending_ops.fetch_add(3, Ordering::SeqCst);
+
+        let cloned = batcher.clone();
+        assert_eq!(cloned.pending_count(), 3, "Clone should share state");
+
+        cloned.pending_ops.fetch_add(2, Ordering::SeqCst);
+        assert_eq!(
+            batcher.pending_count(),
+            5,
+            "Both instances should see the same pending count"
+        );
+    }
+
+    #[test]
+    fn test_batcher_default() {
+        let batcher = X11RequestBatcher::default();
+        assert_eq!(batcher.pending_count(), 0);
+        assert_eq!(batcher.system_load(), 50);
+    }
+}
