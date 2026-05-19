@@ -253,6 +253,17 @@ pub struct BehaviorConfig {
     #[serde(default)]
     pub debug_hud: bool,
 
+    // --- Phase 2 Optimizations ---
+    /// Enable frame profiling (logs zone timing every 5s).
+    #[serde(default)]
+    pub profiling_enabled: bool,
+    /// Enable direct scanout for fullscreen windows (bypass compositor).
+    #[serde(default = "default_true")]
+    pub direct_scanout_enabled: bool,
+    /// Enable GL state tracking to avoid redundant state changes.
+    #[serde(default = "default_true")]
+    pub gl_state_tracking_enabled: bool,
+
     // --- Feature 13: Blur mask / frame extents ---
     /// Exclude window frame/title area from blur (use _NET_FRAME_EXTENTS).
     #[serde(default)]
@@ -889,6 +900,9 @@ impl Default for Config {
                     hdr_peak_nits: default_hdr_peak_nits(),
                     tone_mapping_method: default_tone_mapping_method(),
                     debug_hud: false,
+                    profiling_enabled: false,
+                    direct_scanout_enabled: default_true(),
+                    gl_state_tracking_enabled: default_true(),
                     blur_use_frame_extents: false,
                     shadow_bottom_extra: default_shadow_bottom_extra(),
                     transition_mode: default_transition_mode(),

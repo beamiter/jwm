@@ -68,6 +68,10 @@ pub struct DirtyRegionTracker {
     screen_w: u32,
     screen_h: u32,
     max_regions: usize,
+    /// Phase 3.2: Minimum rect size to track (filter noise)
+    min_rect_area: u64,
+    /// Phase 3.2: Merge threshold (merge rects closer than this distance)
+    merge_distance_threshold: i32,
 }
 
 impl DirtyRegionTracker {
@@ -78,11 +82,36 @@ impl DirtyRegionTracker {
             screen_w,
             screen_h,
             max_regions: 16,
+            min_rect_area: 100, // 10x10 pixels minimum
+            merge_distance_threshold: 50, // Merge rects within 50px of each other
+        }
+    }
+
+    /// Phase 3.2: Create with custom thresholds
+    pub fn with_thresholds(
+        screen_w: u32,
+        screen_h: u32,
+        min_area: u64,
+        merge_distance: i32,
+    ) -> Self {
+        Self {
+            regions: VecDeque::with_capacity(16),
+            merged_region: None,
+            screen_w,
+            screen_h,
+            max_regions: 16,
+            min_rect_area: min_area,
+            merge_distance_threshold: merge_distance,
         }
     }
 
     /// Mark a region as dirty
     pub fn mark_dirty(&mut self, rect: DirtyRect) {
+        // Phase 3.2: Filter out tiny rects (noise reduction)
+        if rect.area() < self.min_rect_area {
+            return;
+        }
+
         // Clamp to screen bounds
         let clamped = DirtyRect {
             x: rect.x.max(0) as i32,
@@ -91,7 +120,29 @@ impl DirtyRegionTracker {
             height: rect.height.min(self.screen_h),
         };
 
-        self.regions.push_back(clamped);
+        // Phase 3.2: Smart merge - check if close to existing rect
+        let mut merged_idx = None;
+        for (idx, existing) in self.regions.iter().enumerate() {
+            let dx = (clamped.x - existing.x).abs();
+            let dy = (clamped.y - existing.y).abs();
+
+            if dx <= self.merge_distance_threshold && dy <= self.merge_distance_threshold {
+                merged_idx = Some(idx);
+                break;
+            }
+            if clamped.intersects(existing) {
+                merged_idx = Some(idx);
+                break;
+            }
+        }
+
+        if let Some(idx) = merged_idx {
+            if let Some(existing) = self.regions.get_mut(idx) {
+                *existing = existing.union(&clamped);
+            }
+        } else {
+            self.regions.push_back(clamped);
+        }
 
         // Merge regions if we have too many
         if self.regions.len() > self.max_regions {
@@ -195,6 +246,20 @@ impl DirtyRegionTracker {
     /// Returns true if dirty area exceeds threshold
     pub fn should_redraw_full_screen(&mut self, threshold: f32) -> bool {
         self.dirty_fraction() > threshold
+    }
+
+    /// Phase 3.2: Check if two rects should be merged
+    fn should_merge(&self, r1: &DirtyRect, r2: &DirtyRect) -> bool {
+        // Check if rects are within merge distance
+        let dx = (r1.x - r2.x).abs();
+        let dy = (r1.y - r2.y).abs();
+
+        if dx > self.merge_distance_threshold || dy > self.merge_distance_threshold {
+            return false;
+        }
+
+        // Also merge if they intersect
+        r1.intersects(r2)
     }
 }
 

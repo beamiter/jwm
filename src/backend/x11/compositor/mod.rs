@@ -2807,8 +2807,16 @@ impl Compositor {
             subpixel_render_mgr: SubpixelRenderManager::new(),
 
             // Phase 2 Optimizations
-            direct_scanout_mgr: DirectScanoutManager::new(screen_w, screen_h),
-            frame_profiler: FrameProfiler::new(),
+            direct_scanout_mgr: {
+                let mut mgr = DirectScanoutManager::new(screen_w, screen_h);
+                mgr.set_enabled(behavior.direct_scanout_enabled);
+                mgr
+            },
+            frame_profiler: {
+                let mut profiler = FrameProfiler::new();
+                profiler.set_enabled(behavior.profiling_enabled);
+                profiler
+            },
             gl_state_tracker: GLStateTracker::new(),
         })
     }
@@ -4995,12 +5003,13 @@ impl Compositor {
                     || self.wallpaper_texture.is_some());
             if has_wallpaper {
                 unsafe {
-                    self.gl.use_program(Some(self.program));
+                    // Phase 2: Use state tracker to avoid redundant GL calls
+                    self.gl_state_tracker.use_program(&self.gl, Some(self.program));
                     self.gl.uniform_matrix_4_f32_slice(
                         self.win_uniforms.projection.as_ref(), false, &proj,
                     );
                     self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
-                    self.gl.bind_vertex_array(Some(self.quad_vao));
+                    self.gl_state_tracker.bind_vertex_array(&self.gl, Some(self.quad_vao));
                     self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
                     self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), 0.0);
                     self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
@@ -5048,7 +5057,7 @@ impl Compositor {
                             self.gl.uniform_2_f32(
                                 self.win_uniforms.size.as_ref(), rw, rh,
                             );
-                            self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                            self.gl_state_tracker.bind_texture(&self.gl, glow::TEXTURE_2D, Some(tex));
                             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                         }
                         self.gl.disable(glow::SCISSOR_TEST);
@@ -5067,7 +5076,7 @@ impl Compositor {
                         self.gl.uniform_2_f32(
                             self.win_uniforms.size.as_ref(), rw, rh,
                         );
-                        self.gl.bind_texture(glow::TEXTURE_2D, Some(wp_tex));
+                        self.gl_state_tracker.bind_texture(&self.gl, glow::TEXTURE_2D, Some(wp_tex));
                         self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                     }
 
@@ -5092,9 +5101,9 @@ impl Compositor {
                         }
                     }
 
-                    self.gl.bind_texture(glow::TEXTURE_2D, None);
-                    self.gl.bind_vertex_array(None);
-                    self.gl.use_program(None);
+                    self.gl_state_tracker.bind_texture(&self.gl, glow::TEXTURE_2D, None);
+                    self.gl_state_tracker.bind_vertex_array(&self.gl, None);
+                    self.gl_state_tracker.use_program(&self.gl, None);
 
                     // Restore damage-region scissor if it was active
                     if use_scissor {

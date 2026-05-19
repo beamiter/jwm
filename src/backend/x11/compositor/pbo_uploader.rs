@@ -240,6 +240,83 @@ impl PBOUploader {
             }
         }
     }
+
+    /// Phase 3.1: Batch upload multiple textures
+    ///
+    /// Uploads multiple textures in a batch, reducing GL call overhead
+    /// Returns number of successfully uploaded textures
+    pub unsafe fn batch_upload_textures(
+        &mut self,
+        gl: &glow::Context,
+        uploads: &[(glow::Texture, u32, u32, u32, &[u8])], // (texture, width, height, format, data)
+    ) -> usize {
+        let mut success_count = 0;
+
+        for &(texture, width, height, format, data) in uploads {
+            if unsafe { self.upload_texture(gl, texture, width, height, format, data) } {
+                success_count += 1;
+            }
+        }
+
+        success_count
+    }
+
+    /// Phase 3.1: Non-blocking upload attempt
+    ///
+    /// Attempts upload only if a PBO is immediately available (no waiting)
+    /// Returns true if upload started, false if would block
+    pub unsafe fn try_upload_nonblocking(
+        &mut self,
+        gl: &glow::Context,
+        texture: glow::Texture,
+        width: u32,
+        height: u32,
+        format: u32,
+        data: &[u8],
+    ) -> bool {
+        // Check if we have a ready PBO (fence signaled or no fence)
+        if let Some(mut pbo) = self.pool.pop_front() {
+            // Quick fence check (non-blocking)
+            if let Some(fence) = pbo.fence {
+                let status = unsafe {
+                    gl.get_sync_status(fence)
+                };
+                if status != glow::SIGNALED {
+                    // GPU still using this PBO, return it and fail
+                    self.pool.push_front(pbo);
+                    return false;
+                }
+                // Fence signaled, clear it
+                unsafe { gl.delete_sync(fence) };
+                pbo.fence = None;
+            }
+
+            // PBO is ready, perform upload
+            if unsafe { pbo.write_data(gl, data) } {
+                unsafe {
+                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(pbo.pbo));
+                    gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                    gl.tex_sub_image_2d(
+                        glow::TEXTURE_2D, 0, 0, 0,
+                        width as i32, height as i32,
+                        format, glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::BufferOffset(0),
+                    );
+                    gl.bind_texture(glow::TEXTURE_2D, None);
+                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
+                    pbo.insert_fence(gl);
+                }
+                self.return_pbo(gl, pbo);
+                return true;
+            } else {
+                self.return_pbo(gl, pbo);
+                return false;
+            }
+        }
+
+        // No PBO available
+        false
+    }
 }
 
 impl Drop for PBOUploader {
