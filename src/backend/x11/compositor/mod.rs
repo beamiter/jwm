@@ -30,6 +30,8 @@ pub mod optimization_manager;
 pub mod subpixel_render;
 pub mod subpixel_integration;
 pub mod profiler;
+pub mod render_batcher;
+pub mod direct_scanout;
 
 // Sync control modules
 pub mod oml_sync_control;
@@ -56,6 +58,8 @@ pub use oml_sync_control::OmlSyncControl;
 pub use subpixel_render::{SubpixelRenderManager, SubpixelMode, WindowType, SubpixelMetrics};
 pub use subpixel_integration::{SubpixelCompositorIntegration, SubpixelRenderParams};
 pub use profiler::{FrameProfiler, ProfileZone, ZoneStats};
+pub use render_batcher::{RenderBatcher, GLStateTracker, BatchKey, QuadInstance};
+pub use direct_scanout::{DirectScanoutManager, DirectScanoutStats, WindowScanoutInfo};
 
 use glow::HasContext;
 use std::collections::HashMap;
