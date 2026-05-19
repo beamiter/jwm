@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 /// Motion event for coalescing
@@ -18,6 +18,44 @@ pub struct GeometryEvent {
     pub height: u32,
 }
 
+/// Property change event for coalescing (per window + atom)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PropertyKey {
+    pub window: u64,
+    pub atom: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PropertyEvent {
+    pub window: u64,
+    pub atom: u32,
+    pub time: Instant,
+}
+
+/// Expose/damage region for coalescing
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExposeRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl ExposeRect {
+    pub fn merge(&self, other: &ExposeRect) -> ExposeRect {
+        let x1 = self.x.min(other.x);
+        let y1 = self.y.min(other.y);
+        let x2 = (self.x + self.width as i32).max(other.x + other.width as i32);
+        let y2 = (self.y + self.height as i32).max(other.y + other.height as i32);
+        ExposeRect {
+            x: x1,
+            y: y1,
+            width: (x2 - x1) as u32,
+            height: (y2 - y1) as u32,
+        }
+    }
+}
+
 /// Coalesces similar events to reduce event processing overhead
 pub struct EventCoalescer {
     last_motion: Option<MotionEvent>,
@@ -31,6 +69,12 @@ pub struct EventCoalescer {
     pending_geometry: Option<GeometryEvent>,
     last_geometry_emitted: Option<Instant>,
     geometry_time_threshold: Duration,
+    // Property change coalescing (per window+atom)
+    pending_properties: HashMap<PropertyKey, PropertyEvent>,
+    property_time_threshold: Duration,
+    // Expose event coalescing (per window, merged regions)
+    pending_exposes: HashMap<u64, ExposeRect>,
+    expose_time_threshold: Duration,
 }
 
 impl EventCoalescer {
@@ -46,6 +90,10 @@ impl EventCoalescer {
             pending_geometry: None,
             last_geometry_emitted: None,
             geometry_time_threshold: Duration::from_millis(32), // 30Hz for geometry updates
+            pending_properties: HashMap::new(),
+            property_time_threshold: Duration::from_millis(50), // 20Hz for property changes
+            pending_exposes: HashMap::new(),
+            expose_time_threshold: Duration::from_millis(16), // 60Hz for expose events
         }
     }
 
@@ -62,6 +110,10 @@ impl EventCoalescer {
             pending_geometry: None,
             last_geometry_emitted: None,
             geometry_time_threshold: Duration::from_millis(32),
+            pending_properties: HashMap::new(),
+            property_time_threshold: Duration::from_millis(50),
+            pending_exposes: HashMap::new(),
+            expose_time_threshold: Duration::from_millis(16),
         }
     }
 
@@ -170,11 +222,85 @@ impl EventCoalescer {
         self.last_emitted = None;
         self.pending = None;
         self.clear_geometry();
+        self.clear_properties();
+        self.clear_exposes();
     }
 
     /// Get queue size (for debugging)
     pub fn queue_size(&self) -> usize {
         self.motion_queue.len()
+    }
+
+    // ========== Property Event Coalescing ==========
+
+    /// Record a property change event
+    /// Returns Some if should be processed immediately, None if coalesced
+    pub fn coalesce_property(&mut self, window: u64, atom: u32) -> Option<PropertyEvent> {
+        let now = Instant::now();
+        let key = PropertyKey { window, atom };
+        let event = PropertyEvent { window, atom, time: now };
+
+        // Check if we have a recent pending event for this window+atom
+        if let Some(pending) = self.pending_properties.get(&key) {
+            let dt = now.duration_since(pending.time);
+            if dt < self.property_time_threshold {
+                // Update the pending event timestamp
+                self.pending_properties.insert(key, event);
+                return None;
+            }
+        }
+
+        // Emit this event and clear any pending
+        self.pending_properties.remove(&key);
+        Some(event)
+    }
+
+    /// Flush all pending property events
+    /// Returns iterator over (window, atom) pairs that need processing
+    pub fn flush_properties(&mut self) -> Vec<(u64, u32)> {
+        let result: Vec<(u64, u32)> = self
+            .pending_properties
+            .iter()
+            .map(|(k, _)| (k.window, k.atom))
+            .collect();
+        self.pending_properties.clear();
+        result
+    }
+
+    /// Clear all pending property events
+    pub fn clear_properties(&mut self) {
+        self.pending_properties.clear();
+    }
+
+    // ========== Expose Event Coalescing ==========
+
+    /// Record an expose/damage event
+    /// Returns Some(merged_rect) if should be processed immediately, None if coalesced
+    pub fn coalesce_expose(&mut self, window: u64, x: i32, y: i32, width: u32, height: u32) -> Option<ExposeRect> {
+        let rect = ExposeRect { x, y, width, height };
+
+        // Merge with pending expose for this window
+        let merged = if let Some(pending) = self.pending_exposes.get(&window) {
+            pending.merge(&rect)
+        } else {
+            rect
+        };
+
+        self.pending_exposes.insert(window, merged);
+
+        // Return None to indicate coalesced - caller should flush_exposes() later
+        None
+    }
+
+    /// Flush all pending expose events
+    /// Returns map of window -> merged expose rect
+    pub fn flush_exposes(&mut self) -> HashMap<u64, ExposeRect> {
+        std::mem::take(&mut self.pending_exposes)
+    }
+
+    /// Clear all pending expose events
+    pub fn clear_exposes(&mut self) {
+        self.pending_exposes.clear();
     }
 }
 

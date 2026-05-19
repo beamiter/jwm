@@ -29,6 +29,7 @@ pub mod dirty_region;
 pub mod optimization_manager;
 pub mod subpixel_render;
 pub mod subpixel_integration;
+pub mod profiler;
 
 // Sync control modules
 pub mod oml_sync_control;
@@ -54,6 +55,7 @@ pub use optimization_manager::{OptimizationManager, OptimizationStatus};
 pub use oml_sync_control::OmlSyncControl;
 pub use subpixel_render::{SubpixelRenderManager, SubpixelMode, WindowType, SubpixelMetrics};
 pub use subpixel_integration::{SubpixelCompositorIntegration, SubpixelRenderParams};
+pub use profiler::{FrameProfiler, ProfileZone, ZoneStats};
 
 use glow::HasContext;
 use std::collections::HashMap;
