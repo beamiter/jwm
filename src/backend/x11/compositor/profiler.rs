@@ -61,6 +61,20 @@ impl FrameProfiler {
         }
     }
 
+    /// Manual zone timing - start a zone
+    pub fn zone_start(&self, _zone_name: &'static str) -> Instant {
+        Instant::now()
+    }
+
+    /// Manual zone timing - end a zone and record duration
+    pub fn zone_end(&mut self, zone_name: &'static str, start: Instant) {
+        if !self.enabled {
+            return;
+        }
+        let duration = start.elapsed();
+        *self.current_frame.entry(zone_name).or_insert(Duration::ZERO) += duration;
+    }
+
     /// Record a zone duration (called automatically by ProfileZone drop)
     fn record_zone(&mut self, zone_name: &'static str, duration: Duration) {
         if !self.enabled {
