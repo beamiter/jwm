@@ -2211,7 +2211,7 @@ impl Compositor {
             gl.viewport(0, 0, screen_w as i32, screen_h as i32);
             gl.enable(glow::BLEND);
             gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
-            gl.clear_color(0.0, 0.0, 0.0, 1.0);
+            gl.clear_color(0.0, 0.0, 0.0, 0.0);
         }
 
         log::info!(
@@ -2914,6 +2914,7 @@ impl Compositor {
     fn upload_wallpaper_texture(
         gl: &glow::Context,
         data: &WallpaperImageData,
+        hdr_enabled: bool,
     ) -> Option<(glow::Texture, u32, u32)> {
         unsafe {
             let tex = match gl.create_texture() {
@@ -2924,17 +2925,21 @@ impl Compositor {
                 }
             };
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            // Use 10-bit internal format for HDR-ready pipeline
             const GL_RGB10_A2: u32 = 0x8059;
+            let internal_format = if hdr_enabled {
+                GL_RGB10_A2 as i32
+            } else {
+                glow::RGBA8 as i32
+            };
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
                 0,
-                GL_RGB10_A2 as i32,
+                internal_format,
                 data.width as i32,
                 data.height as i32,
                 0,
                 glow::RGBA,
-                glow::UNSIGNED_BYTE,  // Source data is still 8-bit, GPU converts to 10-bit
+                glow::UNSIGNED_BYTE,
                 glow::PixelUnpackData::Slice(Some(&data.rgba)),
             );
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
@@ -3786,10 +3791,12 @@ impl Compositor {
                 return false;
             }
         }
+        let explicit_translucency = wt.fade_opacity < 1.0
+            || wt.opacity_override.map_or(false, |o| o < 1.0);
+
         wt.is_frosted
-            || wt.has_rgba
-            || wt.fade_opacity < 1.0
-            || wt.opacity_override.map_or(false, |o| o < 1.0)
+            || explicit_translucency
+            || (wt.has_rgba && self.detect_client_opacity)
     }
 
     /// Look up per-window scale (feature 4).
@@ -4750,7 +4757,7 @@ impl Compositor {
         let mut wallpaper_just_loaded = false;
         if let Some(rx) = &self.pending_wallpaper {
             if let Ok(data) = rx.try_recv() {
-                if let Some((tex, w, h)) = Self::upload_wallpaper_texture(&self.gl, &data) {
+                if let Some((tex, w, h)) = Self::upload_wallpaper_texture(&self.gl, &data, self.hdr_enabled) {
                     self.wallpaper_texture = Some(tex);
                     self.wallpaper_img_w = w;
                     self.wallpaper_img_h = h;
@@ -4765,7 +4772,7 @@ impl Compositor {
         self.pending_monitor_wallpapers.retain_mut(|(idx, rx)| {
             if let Ok(data) = rx.try_recv() {
                 if let Some(mw) = self.monitor_wallpapers.get_mut(*idx) {
-                    if let Some((tex, w, h)) = Self::upload_wallpaper_texture(&self.gl, &data) {
+                    if let Some((tex, w, h)) = Self::upload_wallpaper_texture(&self.gl, &data, self.hdr_enabled) {
                         mw.texture = Some(tex);
                         mw.img_w = w;
                         mw.img_h = h;
@@ -4990,6 +4997,7 @@ impl Compositor {
         unsafe {
             self.gl
                 .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
             self.gl.clear(glow::COLOR_BUFFER_BIT);
         }
 
@@ -5012,13 +5020,12 @@ impl Compositor {
                     || self.wallpaper_texture.is_some());
             if has_wallpaper {
                 unsafe {
-                    // Phase 2: Use state tracker to avoid redundant GL calls
-                    self.gl_state_tracker.use_program(&self.gl, Some(self.program));
+                    self.gl.use_program(Some(self.program));
                     self.gl.uniform_matrix_4_f32_slice(
                         self.win_uniforms.projection.as_ref(), false, &proj,
                     );
                     self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
-                    self.gl_state_tracker.bind_vertex_array(&self.gl, Some(self.quad_vao));
+                    self.gl.bind_vertex_array(Some(self.quad_vao));
                     self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
                     self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), 0.0);
                     self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
@@ -5066,7 +5073,7 @@ impl Compositor {
                             self.gl.uniform_2_f32(
                                 self.win_uniforms.size.as_ref(), rw, rh,
                             );
-                            self.gl_state_tracker.bind_texture(&self.gl, glow::TEXTURE_2D, Some(tex));
+                            self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
                             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                         }
                         self.gl.disable(glow::SCISSOR_TEST);
@@ -5085,7 +5092,7 @@ impl Compositor {
                         self.gl.uniform_2_f32(
                             self.win_uniforms.size.as_ref(), rw, rh,
                         );
-                        self.gl_state_tracker.bind_texture(&self.gl, glow::TEXTURE_2D, Some(wp_tex));
+                        self.gl.bind_texture(glow::TEXTURE_2D, Some(wp_tex));
                         self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                     }
 
@@ -5110,9 +5117,9 @@ impl Compositor {
                         }
                     }
 
-                    self.gl_state_tracker.bind_texture(&self.gl, glow::TEXTURE_2D, None);
-                    self.gl_state_tracker.bind_vertex_array(&self.gl, None);
-                    self.gl_state_tracker.use_program(&self.gl, None);
+                    self.gl.bind_texture(glow::TEXTURE_2D, None);
+                    self.gl.bind_vertex_array(None);
+                    self.gl.use_program(None);
 
                     // Restore damage-region scissor if it was active
                     if use_scissor {
@@ -5333,8 +5340,10 @@ impl Compositor {
                     let opacity = if wt.has_rgba {
                         if self.detect_client_opacity {
                             -dim
+                        } else if has_explicit_transparency || fade < 1.0 {
+                            (rule_opacity * fade).clamp(0.0, 1.0)
                         } else {
-                            -1.0f32 * fade
+                            1.0f32
                         }
                     } else {
                         if has_explicit_transparency || fade < 1.0 {
