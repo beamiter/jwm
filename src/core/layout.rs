@@ -1099,3 +1099,300 @@ pub fn calculate_vstack<K: Copy>(
 
     results
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client(key: u32, factor: f32) -> LayoutClient<u32> {
+        LayoutClient { key, factor, border_w: 1 }
+    }
+
+    fn params(w: i32, h: i32) -> LayoutParams {
+        LayoutParams {
+            screen_area: Rect::new(0, 0, w, h),
+            n_master: 1,
+            m_fact: 0.55,
+            gap: 0,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // LayoutEnum
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_layout_enum_symbol_tile() {
+        assert_eq!(LayoutEnum::TILE.symbol(), "[]=");
+    }
+
+    #[test]
+    fn test_layout_enum_symbol_float() {
+        assert_eq!(LayoutEnum::FLOAT.symbol(), "><>");
+    }
+
+    #[test]
+    fn test_layout_enum_symbol_monocle() {
+        assert_eq!(LayoutEnum::MONOCLE.symbol(), "[M]");
+    }
+
+    #[test]
+    fn test_layout_enum_symbol_unknown() {
+        assert_eq!(LayoutEnum::ANY.symbol(), "");
+    }
+
+    #[test]
+    fn test_layout_enum_is_tile() {
+        assert!(LayoutEnum::TILE.is_tile());
+        assert!(LayoutEnum::FIBONACCI.is_tile());
+        assert!(LayoutEnum::GRID.is_tile());
+        assert!(!LayoutEnum::FLOAT.is_tile());
+        assert!(!LayoutEnum::MONOCLE.is_tile());
+    }
+
+    #[test]
+    fn test_layout_enum_is_float() {
+        assert!(LayoutEnum::FLOAT.is_float());
+        assert!(!LayoutEnum::TILE.is_float());
+    }
+
+    #[test]
+    fn test_layout_enum_is_monocle() {
+        assert!(LayoutEnum::MONOCLE.is_monocle());
+        assert!(LayoutEnum::FULLSCREEN.is_monocle());
+        assert!(!LayoutEnum::TILE.is_monocle());
+    }
+
+    #[test]
+    fn test_layout_enum_is_fullscreen_layout() {
+        assert!(LayoutEnum::FULLSCREEN.is_fullscreen_layout());
+        assert!(!LayoutEnum::MONOCLE.is_fullscreen_layout());
+    }
+
+    #[test]
+    fn test_layout_enum_cycle_next_wraps() {
+        // Float is the last in CYCLE; next should wrap to TILE
+        let next = LayoutEnum::FLOAT.cycle_next();
+        assert_eq!(next, &LayoutEnum::TILE);
+    }
+
+    #[test]
+    fn test_layout_enum_cycle_prev_wraps() {
+        // TILE is the first in CYCLE; prev should wrap to FLOAT
+        let prev = LayoutEnum::TILE.cycle_prev();
+        assert_eq!(prev, &LayoutEnum::FLOAT);
+    }
+
+    #[test]
+    fn test_layout_enum_cycle_next_from_tile() {
+        let next = LayoutEnum::TILE.cycle_next();
+        assert_eq!(next, &LayoutEnum::FIBONACCI);
+    }
+
+    #[test]
+    fn test_layout_enum_from_u32_known() {
+        assert_eq!(LayoutEnum::from(0), LayoutEnum::TILE);
+        assert_eq!(LayoutEnum::from(1), LayoutEnum::FLOAT);
+        assert_eq!(LayoutEnum::from(2), LayoutEnum::MONOCLE);
+        assert_eq!(LayoutEnum::from(6), LayoutEnum::GRID);
+    }
+
+    #[test]
+    fn test_layout_enum_from_u32_unknown() {
+        assert_eq!(LayoutEnum::from(99), LayoutEnum::ANY);
+    }
+
+    // -----------------------------------------------------------------------
+    // calculate_tile
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_tile_empty_clients() {
+        let p = params(1920, 1080);
+        let result = calculate_tile::<u32>(&p, &[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_tile_single_client_fills_screen() {
+        let p = params(1920, 1080);
+        let clients = [client(1, 1.0)];
+        let result = calculate_tile(&p, &clients);
+        assert_eq!(result.len(), 1);
+        let r = result[0].rect;
+        assert_eq!(r.x, 0);
+        assert_eq!(r.y, 0);
+        // width = screen_w - border2 (2*1=2)
+        assert_eq!(r.w, 1920 - 2);
+        assert_eq!(r.h, 1080 - 2);
+    }
+
+    #[test]
+    fn test_tile_master_and_stack() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 1920, 1080),
+            n_master: 1,
+            m_fact: 0.5,
+            gap: 0,
+        };
+        let clients = [client(1, 1.0), client(2, 1.0)];
+        let result = calculate_tile(&p, &clients);
+        assert_eq!(result.len(), 2);
+        let master = result[0].rect;
+        let stack = result[1].rect;
+        // master on the left, stack on the right
+        assert!(master.x < stack.x, "master should be left of stack");
+        // Both should have the same height (within rounding)
+        assert!((master.h - stack.h).abs() <= 2);
+    }
+
+    #[test]
+    fn test_tile_keys_preserved() {
+        let p = params(1920, 1080);
+        let clients = [client(42, 1.0), client(99, 1.0)];
+        let result = calculate_tile(&p, &clients);
+        assert_eq!(result[0].key, 42);
+        assert_eq!(result[1].key, 99);
+    }
+
+    #[test]
+    fn test_tile_no_overlap_between_master_and_stack() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 1920, 1080),
+            n_master: 1,
+            m_fact: 0.55,
+            gap: 4,
+        };
+        let clients = [client(1, 1.0), client(2, 1.0)];
+        let result = calculate_tile(&p, &clients);
+        let master = result[0].rect;
+        let stack = result[1].rect;
+        // Right edge of master must not exceed left edge of stack
+        let master_right = master.x + master.w + 2; // +border
+        assert!(master_right <= stack.x, "master and stack should not overlap");
+    }
+
+    // -----------------------------------------------------------------------
+    // calculate_monocle
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_monocle_empty() {
+        let p = params(1920, 1080);
+        assert!(calculate_monocle::<u32>(&p, &[]).is_empty());
+    }
+
+    #[test]
+    fn test_monocle_all_clients_same_rect() {
+        let p = params(1920, 1080);
+        let clients = [client(1, 1.0), client(2, 1.0), client(3, 1.0)];
+        let result = calculate_monocle(&p, &clients);
+        assert_eq!(result.len(), 3);
+        // All windows get the same rect in monocle
+        let r0 = result[0].rect;
+        for r in &result {
+            assert_eq!(r.rect, r0);
+        }
+    }
+
+    #[test]
+    fn test_monocle_fills_screen() {
+        let p = params(1920, 1080);
+        let clients = [client(7, 1.0)];
+        let result = calculate_monocle(&p, &clients);
+        let r = result[0].rect;
+        assert_eq!(r.x, 0);
+        assert_eq!(r.y, 0);
+        assert_eq!(r.w, 1920 - 2); // border2
+        assert_eq!(r.h, 1080 - 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // calculate_fibonacci
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fibonacci_empty() {
+        let p = params(1920, 1080);
+        assert!(calculate_fibonacci::<u32>(&p, &[]).is_empty());
+    }
+
+    #[test]
+    fn test_fibonacci_single_fills_screen() {
+        let p = params(1920, 1080);
+        let clients = [client(1, 1.0)];
+        let result = calculate_fibonacci(&p, &clients);
+        assert_eq!(result.len(), 1);
+        let r = result[0].rect;
+        assert_eq!(r.w, 1920 - 2);
+        assert_eq!(r.h, 1080 - 2);
+    }
+
+    #[test]
+    fn test_fibonacci_multiple_produces_correct_count() {
+        let p = params(1920, 1080);
+        let clients: Vec<_> = (0..4).map(|i| client(i, 1.0)).collect();
+        let result = calculate_fibonacci(&p, &clients);
+        assert_eq!(result.len(), 4);
+    }
+
+    #[test]
+    fn test_fibonacci_keys_preserved() {
+        let p = params(1920, 1080);
+        let clients = [client(10, 1.0), client(20, 1.0)];
+        let result = calculate_fibonacci(&p, &clients);
+        assert_eq!(result[0].key, 10);
+        assert_eq!(result[1].key, 20);
+    }
+
+    // -----------------------------------------------------------------------
+    // calculate_grid
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_grid_single_fills_screen() {
+        let p = params(1920, 1080);
+        let clients = [client(1, 1.0)];
+        let result = calculate_grid(&p, &clients);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_grid_four_clients_two_by_two() {
+        let p = params(1920, 1080);
+        let clients: Vec<_> = (0..4).map(|i| client(i, 1.0)).collect();
+        let result = calculate_grid(&p, &clients);
+        assert_eq!(result.len(), 4);
+        // All rects should be non-zero
+        for r in &result {
+            assert!(r.rect.w > 0 && r.rect.h > 0);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // calculate_vstack
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_vstack_single_fills_screen() {
+        let p = params(1920, 1080);
+        let clients = [client(1, 1.0)];
+        let result = calculate_vstack(&p, &clients);
+        assert_eq!(result.len(), 1);
+        let r = result[0].rect;
+        assert!(r.w > 0 && r.h > 0);
+    }
+
+    #[test]
+    fn test_vstack_two_stacks_vertically() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 1920, 1080),
+            n_master: 1,
+            m_fact: 0.5,
+            gap: 0,
+        };
+        let clients = [client(1, 1.0), client(2, 1.0)];
+        let result = calculate_vstack(&p, &clients);
+        assert_eq!(result.len(), 2);
+    }
+}

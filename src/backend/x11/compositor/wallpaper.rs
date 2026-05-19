@@ -238,3 +238,159 @@ impl Compositor {
     }
 
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // parse_wallpaper_mode
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_wallpaper_mode_fill_default() {
+        assert_eq!(Compositor::parse_wallpaper_mode("fill"), WallpaperMode::Fill);
+        assert_eq!(Compositor::parse_wallpaper_mode(""), WallpaperMode::Fill);
+        assert_eq!(Compositor::parse_wallpaper_mode("unknown"), WallpaperMode::Fill);
+    }
+
+    #[test]
+    fn test_parse_wallpaper_mode_fit() {
+        assert_eq!(Compositor::parse_wallpaper_mode("fit"), WallpaperMode::Fit);
+    }
+
+    #[test]
+    fn test_parse_wallpaper_mode_stretch() {
+        assert_eq!(Compositor::parse_wallpaper_mode("stretch"), WallpaperMode::Stretch);
+    }
+
+    #[test]
+    fn test_parse_wallpaper_mode_center() {
+        assert_eq!(Compositor::parse_wallpaper_mode("center"), WallpaperMode::Center);
+    }
+
+    // -----------------------------------------------------------------------
+    // compute_wallpaper_rect
+    // -----------------------------------------------------------------------
+
+    // Area: x=0, y=0, w=1920, h=1080
+    fn screen() -> (f32, f32, f32, f32) {
+        (0.0, 0.0, 1920.0, 1080.0)
+    }
+
+    #[test]
+    fn test_wallpaper_rect_stretch_fills_area() {
+        let (x, y, w, h) = Compositor::compute_wallpaper_rect(
+            WallpaperMode::Stretch, screen(), 800, 600,
+        );
+        assert!((x - 0.0).abs() < 1.0);
+        assert!((y - 0.0).abs() < 1.0);
+        assert!((w - 1920.0).abs() < 1.0);
+        assert!((h - 1080.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_wallpaper_rect_fill_wider_image_covers_area() {
+        // Image 3840x1080, area 1920x1080
+        // scale = max(1920/3840, 1080/1080) = max(0.5, 1.0) = 1.0
+        // dw = 3840, dh = 1080
+        let (_, _, w, h) = Compositor::compute_wallpaper_rect(
+            WallpaperMode::Fill, screen(), 3840, 1080,
+        );
+        // w and h should be >= area dimensions
+        assert!(w >= 1920.0 - 1.0);
+        assert!(h >= 1080.0 - 1.0);
+    }
+
+    #[test]
+    fn test_wallpaper_rect_fill_centered() {
+        // Uniform scale: image 960x540 (half of screen)
+        // scale = max(1920/960, 1080/540) = max(2.0, 2.0) = 2.0
+        // dw = 1920, dh = 1080 → dx = 0, dy = 0
+        let (x, y, w, h) = Compositor::compute_wallpaper_rect(
+            WallpaperMode::Fill, screen(), 960, 540,
+        );
+        assert!((w - 1920.0).abs() < 1.0);
+        assert!((h - 1080.0).abs() < 1.0);
+        assert!((x - 0.0).abs() < 1.0);
+        assert!((y - 0.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_wallpaper_rect_fit_smaller_than_area() {
+        // Image 960x540 (half screen), Fit mode
+        // scale = min(1920/960, 1080/540) = min(2.0, 2.0) = 2.0
+        // dw = 1920, dh = 1080 → fits exactly
+        let (_, _, w, h) = Compositor::compute_wallpaper_rect(
+            WallpaperMode::Fit, screen(), 960, 540,
+        );
+        assert!((w - 1920.0).abs() < 1.0);
+        assert!((h - 1080.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_wallpaper_rect_fit_aspect_ratio_preserved() {
+        // Wide image 1920x400 into 1920x1080
+        // scale = min(1920/1920, 1080/400) = min(1.0, 2.7) = 1.0
+        // dw = 1920, dh = 400 → fits horizontally, centered vertically
+        let (_, y, w, h) = Compositor::compute_wallpaper_rect(
+            WallpaperMode::Fit, screen(), 1920, 400,
+        );
+        assert!((w - 1920.0).abs() < 1.0);
+        assert!((h - 400.0).abs() < 1.0);
+        // Centered: dy = (1080 - 400) / 2 = 340
+        assert!((y - 340.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_wallpaper_rect_center_preserves_image_size() {
+        // Image 800x600 centered in 1920x1080
+        let (x, y, w, h) = Compositor::compute_wallpaper_rect(
+            WallpaperMode::Center, screen(), 800, 600,
+        );
+        assert!((w - 800.0).abs() < 1.0);
+        assert!((h - 600.0).abs() < 1.0);
+        // Centered: dx = (1920 - 800) / 2 = 560
+        assert!((x - 560.0).abs() < 1.0);
+        // dy = (1080 - 600) / 2 = 240
+        assert!((y - 240.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_wallpaper_rect_center_large_image_extends_beyond() {
+        // Image 2560x1440 centered in 1920x1080 → overflows
+        let (x, _, w, h) = Compositor::compute_wallpaper_rect(
+            WallpaperMode::Center, screen(), 2560, 1440,
+        );
+        assert!((w - 2560.0).abs() < 1.0);
+        assert!((h - 1440.0).abs() < 1.0);
+        // dx = (1920 - 2560) / 2 = -320 (negative → extends left)
+        assert!((x - (-320.0)).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_wallpaper_rect_zero_image_falls_back_to_area() {
+        // Zero-size image should return area unchanged
+        let area = (10.0, 20.0, 400.0, 300.0);
+        let (x, y, w, h) = Compositor::compute_wallpaper_rect(
+            WallpaperMode::Fill, area, 0, 0,
+        );
+        assert!((x - 10.0).abs() < 1.0);
+        assert!((y - 20.0).abs() < 1.0);
+        assert!((w - 400.0).abs() < 1.0);
+        assert!((h - 300.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_wallpaper_rect_non_zero_origin_area() {
+        // Monitor at (1920, 0, 1920, 1080) - second monitor
+        let area = (1920.0, 0.0, 1920.0, 1080.0);
+        let (x, y, w, h) = Compositor::compute_wallpaper_rect(
+            WallpaperMode::Stretch, area, 800, 600,
+        );
+        assert!((x - 1920.0).abs() < 1.0);
+        assert!((y - 0.0).abs() < 1.0);
+        assert!((w - 1920.0).abs() < 1.0);
+        assert!((h - 1080.0).abs() < 1.0);
+    }
+}

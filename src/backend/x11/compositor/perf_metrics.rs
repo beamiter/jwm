@@ -155,3 +155,206 @@ impl Default for PerfMetrics {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_metrics_are_empty() {
+        let m = PerfMetrics::new();
+        assert_eq!(m.frame_count(), 0);
+        assert_eq!(m.avg_fps(), 0.0);
+        assert_eq!(m.avg_frame_time(), Duration::ZERO);
+        assert_eq!(m.recent_fps(), 0.0);
+        assert_eq!(m.max_frame_time(), Duration::ZERO);
+        assert_eq!(m.min_frame_time(), Duration::ZERO);
+        assert_eq!(m.gpu_load(), 0);
+        assert_eq!(m.cpu_load(), 0);
+    }
+
+    #[test]
+    fn test_record_frame_increments_count() {
+        let m = PerfMetrics::new();
+        m.record_frame(Duration::from_millis(16));
+        m.record_frame(Duration::from_millis(16));
+        assert_eq!(m.frame_count(), 2);
+    }
+
+    #[test]
+    fn test_avg_frame_time_single() {
+        let m = PerfMetrics::new();
+        m.record_frame(Duration::from_millis(20));
+        assert_eq!(m.avg_frame_time(), Duration::from_millis(20));
+    }
+
+    #[test]
+    fn test_avg_frame_time_multiple() {
+        let m = PerfMetrics::new();
+        m.record_frame(Duration::from_millis(10));
+        m.record_frame(Duration::from_millis(30));
+        // avg = 20ms
+        assert_eq!(m.avg_frame_time(), Duration::from_millis(20));
+    }
+
+    #[test]
+    fn test_avg_fps_from_frame_times() {
+        let m = PerfMetrics::new();
+        // 16.666ms ≈ 60fps
+        m.record_frame(Duration::from_micros(16_667));
+        let fps = m.avg_fps();
+        assert!((fps - 60.0).abs() < 1.0, "expected ~60fps, got {fps}");
+    }
+
+    #[test]
+    fn test_recent_fps_requires_at_least_two_samples() {
+        let m = PerfMetrics::new();
+        // 0 samples
+        assert_eq!(m.recent_fps(), 0.0);
+        // 1 sample still returns 0
+        m.record_frame(Duration::from_millis(16));
+        assert_eq!(m.recent_fps(), 0.0);
+        // 2 samples → valid fps
+        m.record_frame(Duration::from_millis(16));
+        assert!(m.recent_fps() > 0.0);
+    }
+
+    #[test]
+    fn test_recent_fps_uses_last_30_frames() {
+        let m = PerfMetrics::new();
+        // 50 frames at 100ms → 10fps
+        for _ in 0..50 {
+            m.record_frame(Duration::from_millis(100));
+        }
+        let fps = m.recent_fps();
+        assert!((fps - 10.0).abs() < 1.0, "expected ~10fps, got {fps}");
+    }
+
+    #[test]
+    fn test_gpu_load_clamped_to_100() {
+        let m = PerfMetrics::new();
+        m.set_gpu_load(150);
+        assert_eq!(m.gpu_load(), 100);
+    }
+
+    #[test]
+    fn test_gpu_load_round_trip() {
+        let m = PerfMetrics::new();
+        m.set_gpu_load(75);
+        assert_eq!(m.gpu_load(), 75);
+    }
+
+    #[test]
+    fn test_cpu_load_clamped_to_100() {
+        let m = PerfMetrics::new();
+        m.set_cpu_load(999);
+        assert_eq!(m.cpu_load(), 100);
+    }
+
+    #[test]
+    fn test_cpu_load_round_trip() {
+        let m = PerfMetrics::new();
+        m.set_cpu_load(42);
+        assert_eq!(m.cpu_load(), 42);
+    }
+
+    #[test]
+    fn test_max_frame_time() {
+        let m = PerfMetrics::new();
+        m.record_frame(Duration::from_millis(10));
+        m.record_frame(Duration::from_millis(50));
+        m.record_frame(Duration::from_millis(20));
+        assert_eq!(m.max_frame_time(), Duration::from_millis(50));
+    }
+
+    #[test]
+    fn test_min_frame_time() {
+        let m = PerfMetrics::new();
+        m.record_frame(Duration::from_millis(10));
+        m.record_frame(Duration::from_millis(50));
+        m.record_frame(Duration::from_millis(20));
+        assert_eq!(m.min_frame_time(), Duration::from_millis(10));
+    }
+
+    #[test]
+    fn test_record_compositor_time() {
+        let m = PerfMetrics::new();
+        // should not panic
+        m.record_compositor(Duration::from_millis(5));
+        m.record_compositor(Duration::from_millis(8));
+    }
+
+    #[test]
+    fn test_estimate_gpu_load_at_60fps() {
+        let m = PerfMetrics::new();
+        // At 60fps target, a 16.67ms frame → 100% load
+        m.record_frame(Duration::from_micros(16_667));
+        let load = m.estimate_gpu_load(60.0);
+        assert!((load as i32 - 100).abs() <= 5, "expected ~100%, got {load}");
+    }
+
+    #[test]
+    fn test_estimate_gpu_load_half_target() {
+        let m = PerfMetrics::new();
+        // At 120fps target, a 16.67ms frame → 200%, clamped to 100%
+        m.record_frame(Duration::from_micros(16_667));
+        let load = m.estimate_gpu_load(120.0);
+        assert!(load <= 100);
+    }
+
+    #[test]
+    fn test_estimate_gpu_load_empty_returns_zero() {
+        let m = PerfMetrics::new();
+        assert_eq!(m.estimate_gpu_load(60.0), 0);
+    }
+
+    #[test]
+    fn test_clear_resets_frame_times() {
+        let m = PerfMetrics::new();
+        m.record_frame(Duration::from_millis(16));
+        m.record_compositor(Duration::from_millis(5));
+        m.clear();
+        assert_eq!(m.avg_frame_time(), Duration::ZERO);
+        assert_eq!(m.avg_fps(), 0.0);
+    }
+
+    #[test]
+    fn test_clear_does_not_reset_frame_count() {
+        // frame_count uses an atomic that is not cleared by clear()
+        let m = PerfMetrics::new();
+        m.record_frame(Duration::from_millis(16));
+        m.clear();
+        assert_eq!(m.frame_count(), 1);
+    }
+
+    #[test]
+    fn test_clone_shares_state() {
+        let m = PerfMetrics::new();
+        let m2 = m.clone();
+        m.record_frame(Duration::from_millis(16));
+        // clone shares Arc, so both see the update
+        assert_eq!(m2.frame_count(), 1);
+        assert_eq!(m2.avg_frame_time(), Duration::from_millis(16));
+    }
+
+    #[test]
+    fn test_history_capped_at_max() {
+        let m = PerfMetrics::new();
+        // max_history = 120; insert 200 frames
+        for _ in 0..200 {
+            m.record_frame(Duration::from_millis(16));
+        }
+        assert_eq!(m.frame_count(), 200);
+        // avg should still be ~16ms (all equal)
+        let avg = m.avg_frame_time();
+        assert!((avg.as_millis() as i64 - 16).abs() <= 1);
+    }
+
+    #[test]
+    fn test_default_equals_new() {
+        let m1 = PerfMetrics::new();
+        let m2 = PerfMetrics::default();
+        assert_eq!(m1.frame_count(), m2.frame_count());
+        assert_eq!(m1.gpu_load(), m2.gpu_load());
+    }
+}

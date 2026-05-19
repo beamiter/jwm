@@ -338,7 +338,7 @@ enum TransitionMode {
     Portal,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum WallpaperMode {
     Fill,
     Fit,

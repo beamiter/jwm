@@ -436,3 +436,387 @@ impl Default for ElasticScroll {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use slotmap::SlotMap;
+    use std::time::{Duration, Instant};
+
+    fn make_key() -> ClientKey {
+        let mut sm: SlotMap<ClientKey, ()> = SlotMap::new();
+        sm.insert(())
+    }
+
+    fn make_two_keys() -> (ClientKey, ClientKey) {
+        let mut sm: SlotMap<ClientKey, ()> = SlotMap::new();
+        let k1 = sm.insert(());
+        let k2 = sm.insert(());
+        (k1, k2)
+    }
+
+    fn rect(x: i32, y: i32, w: i32, h: i32) -> Rect {
+        Rect::new(x, y, w, h)
+    }
+
+    // -----------------------------------------------------------------------
+    // Easing::from_str
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_easing_from_str_variants() {
+        assert_eq!(Easing::from_str("linear"), Easing::Linear);
+        assert_eq!(Easing::from_str("ease-in-out"), Easing::EaseInOut);
+        assert_eq!(Easing::from_str("ease-in"), Easing::EaseIn);
+        assert_eq!(Easing::from_str("bounce"), Easing::Bounce);
+        assert_eq!(Easing::from_str("elastic"), Easing::Elastic);
+    }
+
+    #[test]
+    fn test_easing_from_str_default_is_ease_out() {
+        assert_eq!(Easing::from_str("unknown"), Easing::EaseOut);
+        assert_eq!(Easing::from_str(""), Easing::EaseOut);
+    }
+
+    // -----------------------------------------------------------------------
+    // Easing::apply — boundary invariants
+    // -----------------------------------------------------------------------
+
+    fn easing_boundaries(e: Easing) {
+        let at0 = e.apply(0.0);
+        let at1 = e.apply(1.0);
+        assert!(
+            at0.abs() < 1e-4,
+            "{e:?}.apply(0.0) = {at0}, expected ~0"
+        );
+        assert!(
+            (at1 - 1.0).abs() < 1e-4,
+            "{e:?}.apply(1.0) = {at1}, expected ~1"
+        );
+    }
+
+    #[test]
+    fn test_easing_boundaries_all_variants() {
+        for e in [
+            Easing::Linear,
+            Easing::EaseOut,
+            Easing::EaseInOut,
+            Easing::EaseIn,
+            Easing::Bounce,
+            Easing::Elastic,
+        ] {
+            easing_boundaries(e);
+        }
+    }
+
+    #[test]
+    fn test_easing_clamps_out_of_range() {
+        // Values outside [0,1] should be clamped
+        assert!((Easing::Linear.apply(-1.0) - 0.0).abs() < 1e-4);
+        assert!((Easing::Linear.apply(2.0) - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_easing_linear_midpoint() {
+        assert!((Easing::Linear.apply(0.5) - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_easing_ease_in_accelerates() {
+        // EaseIn: slow start → t³, so apply(0.25) < 0.25
+        let val = Easing::EaseIn.apply(0.25);
+        assert!(val < 0.25, "EaseIn at 0.25 should be < 0.25, got {val}");
+    }
+
+    #[test]
+    fn test_easing_ease_out_decelerates() {
+        // EaseOut: fast start, so apply(0.25) > 0.25
+        let val = Easing::EaseOut.apply(0.25);
+        assert!(val > 0.25, "EaseOut at 0.25 should be > 0.25, got {val}");
+    }
+
+    #[test]
+    fn test_easing_output_always_in_0_1_range() {
+        // For Bounce/Elastic, output may dip slightly but overall stays near [0,1]
+        for t in [0.0f32, 0.1, 0.2, 0.5, 0.8, 0.9, 1.0] {
+            for e in [Easing::Linear, Easing::EaseOut, Easing::EaseInOut, Easing::EaseIn] {
+                let v = e.apply(t);
+                assert!(v >= -0.01 && v <= 1.01, "{e:?}.apply({t}) = {v} out of range");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // AnimationSpeed
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_animation_speed_from_str() {
+        assert_eq!(AnimationSpeed::from_str("slow"), AnimationSpeed::Slow);
+        assert_eq!(AnimationSpeed::from_str("fast"), AnimationSpeed::Fast);
+        assert_eq!(AnimationSpeed::from_str("instant"), AnimationSpeed::Instant);
+        assert_eq!(AnimationSpeed::from_str("normal"), AnimationSpeed::Normal);
+        assert_eq!(AnimationSpeed::from_str("unknown"), AnimationSpeed::Normal);
+    }
+
+    #[test]
+    fn test_animation_speed_duration_multiplier() {
+        assert!((AnimationSpeed::Slow.duration_multiplier() - 2.0).abs() < 1e-4);
+        assert!((AnimationSpeed::Normal.duration_multiplier() - 1.0).abs() < 1e-4);
+        assert!((AnimationSpeed::Fast.duration_multiplier() - 0.5).abs() < 1e-4);
+        assert!((AnimationSpeed::Instant.duration_multiplier() - 0.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_animation_speed_apply_duration_instant_is_zero() {
+        assert_eq!(AnimationSpeed::Instant.apply_duration(300), 0);
+    }
+
+    #[test]
+    fn test_animation_speed_apply_duration_slow() {
+        assert_eq!(AnimationSpeed::Slow.apply_duration(150), 300);
+    }
+
+    #[test]
+    fn test_animation_speed_apply_duration_fast() {
+        assert_eq!(AnimationSpeed::Fast.apply_duration(200), 100);
+    }
+
+    #[test]
+    fn test_animation_speed_apply_fade_step_clamps_at_1() {
+        // Instant multiplier = 100.0, so 0.05 * 100.0 = 5.0 → clamped to 1.0
+        let step = AnimationSpeed::Instant.apply_fade_step(0.05);
+        assert!((step - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_animation_speed_apply_fade_step_normal() {
+        let step = AnimationSpeed::Normal.apply_fade_step(0.1);
+        assert!((step - 0.1).abs() < 1e-4);
+    }
+
+    // -----------------------------------------------------------------------
+    // AnimationManager
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_animation_manager_starts_empty() {
+        let mgr = AnimationManager::new();
+        assert!(!mgr.has_active());
+    }
+
+    #[test]
+    fn test_animation_manager_start_adds_animation() {
+        let mut mgr = AnimationManager::new();
+        let key = make_key();
+        mgr.start(
+            key,
+            rect(0, 0, 100, 100),
+            rect(200, 200, 100, 100),
+            Duration::from_millis(300),
+            Easing::EaseOut,
+            AnimationKind::Layout,
+        );
+        assert!(mgr.has_active());
+    }
+
+    #[test]
+    fn test_animation_manager_start_same_from_to_removes() {
+        let mut mgr = AnimationManager::new();
+        let key = make_key();
+        // Insert first
+        mgr.start(key, rect(0,0,100,100), rect(200,200,100,100),
+            Duration::from_millis(300), Easing::Linear, AnimationKind::Layout);
+        assert!(mgr.has_active());
+        // Same from == to → should remove
+        mgr.start(key, rect(200,200,100,100), rect(200,200,100,100),
+            Duration::from_millis(300), Easing::Linear, AnimationKind::Layout);
+        assert!(!mgr.has_active());
+    }
+
+    #[test]
+    fn test_animation_manager_remove() {
+        let mut mgr = AnimationManager::new();
+        let key = make_key();
+        mgr.start(key, rect(0,0,100,100), rect(200,0,100,100),
+            Duration::from_millis(200), Easing::Linear, AnimationKind::Layout);
+        mgr.remove(key);
+        assert!(!mgr.has_active());
+    }
+
+    #[test]
+    fn test_animation_manager_remove_if_hide_only_removes_hide() {
+        let mut mgr = AnimationManager::new();
+        let (k1, k2) = make_two_keys();
+        mgr.start(k1, rect(0,0,100,100), rect(200,0,100,100),
+            Duration::from_millis(200), Easing::Linear, AnimationKind::Layout);
+        mgr.start(k2, rect(0,0,100,100), rect(200,0,100,100),
+            Duration::from_millis(200), Easing::Linear, AnimationKind::Hide);
+        mgr.remove_if_hide(k1); // should NOT remove Layout
+        mgr.remove_if_hide(k2); // should remove Hide
+        assert!(mgr.active.contains_key(&k1), "Layout animation should remain");
+        assert!(!mgr.active.contains_key(&k2), "Hide animation should be removed");
+    }
+
+    #[test]
+    fn test_animation_manager_current_visual_rect_returns_none_without_anim() {
+        let mgr = AnimationManager::new();
+        let key = make_key();
+        assert!(mgr.current_visual_rect(key, Instant::now()).is_none());
+    }
+
+    #[test]
+    fn test_animation_manager_current_visual_rect_at_start() {
+        let mut mgr = AnimationManager::new();
+        let key = make_key();
+        let from = rect(0, 0, 100, 100);
+        let to = rect(200, 0, 100, 100);
+        mgr.start(key, from, to, Duration::from_millis(500), Easing::Linear, AnimationKind::Layout);
+        // Immediately after start, visual should be near `from`
+        let visual = mgr.current_visual_rect(key, Instant::now()).unwrap();
+        assert!((visual.x - from.x).abs() <= 5);
+    }
+
+    #[test]
+    fn test_client_animation_sample_at_end() {
+        let anim = ClientAnimation {
+            from: rect(0, 0, 100, 100),
+            to: rect(200, 0, 100, 100),
+            started_at: Instant::now() - Duration::from_secs(10),
+            duration: Duration::from_millis(300),
+            easing: Easing::Linear,
+            kind: AnimationKind::Layout,
+        };
+        let (r, done) = anim.sample(Instant::now());
+        assert!(done);
+        assert_eq!(r, rect(200, 0, 100, 100));
+    }
+
+    // -----------------------------------------------------------------------
+    // MagneticSnap
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_magnetic_snap_detect_snap_within_range() {
+        let snap = MagneticSnap::new(20.0);
+        let result = snap.detect_snap(5.0, 100.0, &[0.0, 200.0]);
+        assert!(result.is_some(), "Window edge at 5 should snap to 0");
+        let (edge, target) = result.unwrap();
+        assert_eq!(edge, SnapEdge::Left);
+        assert!((target - 0.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_magnetic_snap_detect_snap_outside_range() {
+        let snap = MagneticSnap::new(10.0);
+        let result = snap.detect_snap(50.0, 100.0, &[0.0]);
+        assert!(result.is_none(), "Window edge at 50 is outside snap range 10");
+    }
+
+    #[test]
+    fn test_magnetic_snap_detect_right_edge() {
+        let snap = MagneticSnap::new(20.0);
+        // window at x=181, w=100 → right edge at 281, target=300, dist=19 < 20
+        let result = snap.detect_snap(181.0, 100.0, &[300.0]);
+        assert!(result.is_some(), "Right edge at 281 should snap to 300 (dist=19 < 20)");
+        let (edge, _) = result.unwrap();
+        assert_eq!(edge, SnapEdge::Right);
+    }
+
+    #[test]
+    fn test_magnetic_snap_detect_no_targets() {
+        let snap = MagneticSnap::new(20.0);
+        let result = snap.detect_snap(0.0, 100.0, &[]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_magnetic_snap_cancel() {
+        let mut snap = MagneticSnap::new(20.0);
+        let key = make_key();
+        snap.start_snap(key, SnapEdge::Left, 0.0, 5.0);
+        assert!(snap.is_active());
+        snap.cancel(key);
+        assert!(!snap.is_active());
+    }
+
+    #[test]
+    fn test_magnetic_snap_tick_converges() {
+        let mut snap = MagneticSnap::new(20.0);
+        let key = make_key();
+        snap.start_snap(key, SnapEdge::Left, 0.0, 10.0);
+        // Tick many times until settled
+        for _ in 0..1000 {
+            let still_active = snap.tick(0.016);
+            if !still_active {
+                break;
+            }
+        }
+        assert!(!snap.is_active(), "Snap should have settled");
+    }
+
+    #[test]
+    fn test_magnetic_snap_snapped_position_before_tick() {
+        let mut snap = MagneticSnap::new(20.0);
+        let key = make_key();
+        snap.start_snap(key, SnapEdge::Left, 100.0, 110.0);
+        let pos = snap.snapped_position(key);
+        assert!(pos.is_some());
+        // Initial: target (100) + offset (10) = 110
+        assert!((pos.unwrap() - 110.0).abs() < 1e-3);
+    }
+
+    // -----------------------------------------------------------------------
+    // ElasticScroll
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_elastic_scroll_initial_state() {
+        let s = ElasticScroll::new();
+        assert!((s.current_offset() - 0.0).abs() < 1e-4);
+        assert!(!s.active);
+    }
+
+    #[test]
+    fn test_elastic_scroll_apply_scroll() {
+        let mut s = ElasticScroll::new();
+        let offset = s.apply_scroll(30.0);
+        assert!(offset > 0.0);
+        assert!(s.active);
+    }
+
+    #[test]
+    fn test_elastic_scroll_clamped_at_max() {
+        let mut s = ElasticScroll::new();
+        // max_overscroll = 100
+        s.apply_scroll(200.0);
+        assert!((s.current_offset() - 100.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_elastic_scroll_springs_back_to_zero() {
+        let mut s = ElasticScroll::new();
+        s.apply_scroll(50.0);
+        for _ in 0..2000 {
+            if !s.tick(0.016) {
+                break;
+            }
+        }
+        assert!(!s.active, "Elastic scroll should have settled");
+        assert!(s.current_offset().abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_elastic_scroll_tick_inactive_returns_false() {
+        let mut s = ElasticScroll::new();
+        assert!(!s.tick(0.016));
+    }
+
+    #[test]
+    fn test_elastic_scroll_default_equals_new() {
+        let s1 = ElasticScroll::new();
+        let s2 = ElasticScroll::default();
+        assert!((s1.offset - s2.offset).abs() < 1e-6);
+        assert_eq!(s1.active, s2.active);
+    }
+}

@@ -365,3 +365,274 @@ impl fmt::Display for WMMonitor {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::common_define::WindowId;
+
+    fn win(id: u64) -> WindowId {
+        WindowId::from_raw(id)
+    }
+
+    // -----------------------------------------------------------------------
+    // WMClient
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_wm_client_new_defaults() {
+        let c = WMClient::new(win(1));
+        assert_eq!(c.name, "");
+        assert_eq!(c.class, "");
+        assert_eq!(c.win, win(1));
+        assert!(c.mon.is_none());
+        assert_eq!(c.monitor_num, 1000);
+    }
+
+    #[test]
+    fn test_wm_client_total_width() {
+        let mut c = WMClient::new(win(1));
+        c.geometry.w = 800;
+        c.geometry.border_w = 2;
+        assert_eq!(c.total_width(), 804); // 800 + 2*2
+    }
+
+    #[test]
+    fn test_wm_client_total_height() {
+        let mut c = WMClient::new(win(1));
+        c.geometry.h = 600;
+        c.geometry.border_w = 3;
+        assert_eq!(c.total_height(), 606); // 600 + 2*3
+    }
+
+    #[test]
+    fn test_wm_client_total_dimensions_zero_border() {
+        let mut c = WMClient::new(win(1));
+        c.geometry.w = 1920;
+        c.geometry.h = 1080;
+        c.geometry.border_w = 0;
+        assert_eq!(c.total_width(), 1920);
+        assert_eq!(c.total_height(), 1080);
+    }
+
+    #[test]
+    fn test_wm_client_is_status_bar_by_name() {
+        let mut c = WMClient::new(win(1));
+        c.name = "mybar".to_string();
+        assert!(c.is_status_bar("mybar"));
+        assert!(!c.is_status_bar("other"));
+    }
+
+    #[test]
+    fn test_wm_client_is_status_bar_by_class() {
+        let mut c = WMClient::new(win(1));
+        c.class = "xbar".to_string();
+        assert!(c.is_status_bar("xbar"));
+    }
+
+    #[test]
+    fn test_wm_client_is_status_bar_by_instance() {
+        let mut c = WMClient::new(win(1));
+        c.instance = "polybar".to_string();
+        assert!(c.is_status_bar("polybar"));
+    }
+
+    #[test]
+    fn test_wm_client_is_not_status_bar() {
+        let c = WMClient::new(win(1));
+        assert!(!c.is_status_bar("xbar"));
+    }
+
+    #[test]
+    fn test_wm_client_rect() {
+        let mut c = WMClient::new(win(1));
+        c.geometry.x = 10;
+        c.geometry.y = 20;
+        c.geometry.w = 800;
+        c.geometry.h = 600;
+        assert_eq!(c.rect(), (10, 20, 800, 600));
+    }
+
+    #[test]
+    fn test_client_geometry_display() {
+        let mut g = ClientGeometry::default();
+        g.w = 1280;
+        g.h = 720;
+        g.x = 100;
+        g.y = 50;
+        let s = format!("{}", g);
+        assert!(s.contains("1280"), "expected width in display: {s}");
+        assert!(s.contains("720"), "expected height in display: {s}");
+        assert!(s.contains("100"), "expected x in display: {s}");
+        assert!(s.contains("50"), "expected y in display: {s}");
+    }
+
+    // -----------------------------------------------------------------------
+    // WMMonitor
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_wm_monitor_new_defaults() {
+        let m = WMMonitor::new();
+        assert_eq!(m.num, 0);
+        assert!(m.sel.is_none());
+        assert_eq!(m.sel_tags, 0);
+        assert_eq!(m.tag_set, [0u32; 2]);
+    }
+
+    #[test]
+    fn test_wm_monitor_get_active_tags_default() {
+        let m = WMMonitor::new();
+        // tag_set starts at [0, 0], sel_tags=0 → active tags = 0
+        assert_eq!(m.get_active_tags(), 0);
+    }
+
+    #[test]
+    fn test_wm_monitor_get_active_tags_safe_index() {
+        let mut m = WMMonitor::new();
+        m.tag_set[0] = 0b0001;
+        m.tag_set[1] = 0b0010;
+        m.sel_tags = 0;
+        assert_eq!(m.get_active_tags(), 0b0001);
+        m.sel_tags = 1;
+        assert_eq!(m.get_active_tags(), 0b0010);
+    }
+
+    #[test]
+    fn test_wm_monitor_get_active_tags_bad_sel_tags_clamped() {
+        let mut m = WMMonitor::new();
+        m.tag_set[0] = 0xFF;
+        m.tag_set[1] = 0x0F;
+        m.sel_tags = 100; // out of range — masked to 0 via & 1
+        // 100 & 1 = 0 → tag_set[0]
+        assert_eq!(m.get_active_tags(), 0xFF);
+    }
+
+    #[test]
+    fn test_wm_monitor_intersect_area_fully_inside() {
+        let mut m = WMMonitor::new();
+        m.geometry.w_x = 0;
+        m.geometry.w_y = 0;
+        m.geometry.w_w = 1920;
+        m.geometry.w_h = 1080;
+        // Window fully inside
+        let area = m.intersect_area(100, 100, 200, 200);
+        assert_eq!(area, 200 * 200);
+    }
+
+    #[test]
+    fn test_wm_monitor_intersect_area_no_overlap() {
+        let mut m = WMMonitor::new();
+        m.geometry.w_x = 0;
+        m.geometry.w_y = 0;
+        m.geometry.w_w = 1920;
+        m.geometry.w_h = 1080;
+        // Window completely to the right of monitor
+        let area = m.intersect_area(2000, 0, 100, 100);
+        assert_eq!(area, 0);
+    }
+
+    #[test]
+    fn test_wm_monitor_intersect_area_partial_overlap() {
+        let mut m = WMMonitor::new();
+        m.geometry.w_x = 0;
+        m.geometry.w_y = 0;
+        m.geometry.w_w = 100;
+        m.geometry.w_h = 100;
+        // Window overlaps the right half of the monitor
+        let area = m.intersect_area(50, 0, 100, 100);
+        assert_eq!(area, 50 * 100);
+    }
+
+    #[test]
+    fn test_wm_monitor_intersect_area_edge_touch() {
+        let mut m = WMMonitor::new();
+        m.geometry.w_x = 0;
+        m.geometry.w_y = 0;
+        m.geometry.w_w = 100;
+        m.geometry.w_h = 100;
+        // Window starts at the right edge → no overlap
+        let area = m.intersect_area(100, 0, 100, 100);
+        assert_eq!(area, 0);
+    }
+
+    #[test]
+    fn test_wm_monitor_view_tag_no_toggle() {
+        let mut m = WMMonitor::new();
+        m.tag_set[0] = 0b0001;
+        let new_tag = m.view_tag(0b0010, false);
+        // After view_tag, sel_tags flips (0→1)
+        let active = m.tag_set[m.sel_tags];
+        assert_eq!(active, 0b0010);
+        // Returns cur_tag (trailing zeros of 0b0010 = 1, +1 = 2)
+        assert_eq!(new_tag, 2);
+    }
+
+    #[test]
+    fn test_wm_monitor_view_tag_empty_mask_is_noop() {
+        let mut m = WMMonitor::new();
+        m.tag_set[0] = 0b0101;
+        let initial_sel = m.sel_tags;
+        m.view_tag(0, false);
+        // Empty mask (0) after no-toggle → same tag_set
+        assert_eq!(m.sel_tags, initial_sel);
+    }
+
+    #[test]
+    fn test_wm_monitor_update_current_tag_layout_params_no_pertag() {
+        let mut m = WMMonitor::new();
+        m.layout.m_fact = 0.7;
+        m.layout.n_master = 2;
+        // Without pertag, this should be a no-op (no panic)
+        m.update_current_tag_layout_params();
+    }
+
+    #[test]
+    fn test_wm_monitor_set_get_selected_client_no_pertag() {
+        let mut m = WMMonitor::new();
+        // Without pertag, set_selected_client_for_current_tag updates sel only
+        m.set_selected_client_for_current_tag(None);
+        assert!(m.get_selected_client_for_current_tag().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Pertag
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pertag_new_correct_length() {
+        let p = Pertag::new(true, 9); // 9 tags → len=10
+        assert_eq!(p.n_masters.len(), 10);
+        assert_eq!(p.m_facts.len(), 10);
+        assert_eq!(p.show_bars.len(), 10);
+        assert_eq!(p.sel.len(), 10);
+    }
+
+    #[test]
+    fn test_pertag_new_show_bar_propagated() {
+        let p = Pertag::new(true, 4);
+        assert!(p.show_bars.iter().all(|&b| b));
+        let p2 = Pertag::new(false, 4);
+        assert!(p2.show_bars.iter().all(|&b| !b));
+    }
+
+    #[test]
+    fn test_pertag_new_initial_values_zero() {
+        let p = Pertag::new(false, 4);
+        assert!(p.n_masters.iter().all(|&n| n == 0));
+        assert!(p.m_facts.iter().all(|&f| f == 0.0));
+        assert!(p.sel_lts.iter().all(|&s| s == 0));
+        assert!(p.sel.iter().all(|s| s.is_none()));
+    }
+
+    // -----------------------------------------------------------------------
+    // ScrollingState
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_scrolling_state_new() {
+        let s = ScrollingState::new();
+        assert!(s.columns.is_empty());
+        assert!((s.viewport_x - 0.0).abs() < 1e-6);
+    }
+}

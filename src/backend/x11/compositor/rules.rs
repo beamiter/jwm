@@ -771,3 +771,251 @@ impl Compositor {
     }
 
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // class_matches_exclude
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_class_matches_exclude_empty_name() {
+        let list = vec!["firefox".to_string()];
+        assert!(!Compositor::class_matches_exclude("", &list));
+    }
+
+    #[test]
+    fn test_class_matches_exclude_empty_list() {
+        assert!(!Compositor::class_matches_exclude("firefox", &[]));
+    }
+
+    #[test]
+    fn test_class_matches_exclude_exact_match() {
+        let list = vec!["firefox".to_string(), "chromium".to_string()];
+        assert!(Compositor::class_matches_exclude("firefox", &list));
+        assert!(Compositor::class_matches_exclude("chromium", &list));
+    }
+
+    #[test]
+    fn test_class_matches_exclude_case_insensitive() {
+        let list = vec!["Firefox".to_string()];
+        assert!(Compositor::class_matches_exclude("firefox", &list));
+        assert!(Compositor::class_matches_exclude("FIREFOX", &list));
+        assert!(Compositor::class_matches_exclude("FireFox", &list));
+    }
+
+    #[test]
+    fn test_class_matches_exclude_not_in_list() {
+        let list = vec!["firefox".to_string()];
+        assert!(!Compositor::class_matches_exclude("chromium", &list));
+    }
+
+    #[test]
+    fn test_class_matches_exclude_flameshot_hardcoded() {
+        // Flameshot is always excluded regardless of list
+        assert!(Compositor::class_matches_exclude("flameshot", &[]));
+        assert!(Compositor::class_matches_exclude("Flameshot", &[]));
+        assert!(Compositor::class_matches_exclude("FLAMESHOT", &[]));
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_blur_strength_by_hz
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_blur_strength_by_hz_empty() {
+        let result = Compositor::parse_blur_strength_by_hz("");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_blur_strength_by_hz_single() {
+        let result = Compositor::parse_blur_strength_by_hz("60:2");
+        assert_eq!(result, vec![(60, 2)]);
+    }
+
+    #[test]
+    fn test_parse_blur_strength_by_hz_multiple() {
+        let result = Compositor::parse_blur_strength_by_hz("60:2,75:2,144:3");
+        assert_eq!(result, vec![(60, 2), (75, 2), (144, 3)]);
+    }
+
+    #[test]
+    fn test_parse_blur_strength_by_hz_sorted_ascending() {
+        // Input out of order; output must be sorted by Hz
+        let result = Compositor::parse_blur_strength_by_hz("144:3,60:2,75:2");
+        assert_eq!(result[0].0, 60);
+        assert_eq!(result[1].0, 75);
+        assert_eq!(result[2].0, 144);
+    }
+
+    #[test]
+    fn test_parse_blur_strength_by_hz_float_strength_truncated() {
+        // f32 cast to u32 truncates
+        let result = Compositor::parse_blur_strength_by_hz("60:2.9");
+        assert_eq!(result, vec![(60, 2)]);
+    }
+
+    #[test]
+    fn test_parse_blur_strength_by_hz_invalid_entries_skipped() {
+        let result = Compositor::parse_blur_strength_by_hz("60:2,bad,144:3");
+        assert_eq!(result, vec![(60, 2), (144, 3)]);
+    }
+
+    #[test]
+    fn test_parse_blur_strength_by_hz_whitespace_trimmed() {
+        let result = Compositor::parse_blur_strength_by_hz(" 60 : 2 , 144 : 3 ");
+        assert_eq!(result, vec![(60, 2), (144, 3)]);
+    }
+
+    // -----------------------------------------------------------------------
+    // new_get_blur_strength_for_hz_static
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_blur_strength_for_hz_empty_returns_none() {
+        assert_eq!(Compositor::new_get_blur_strength_for_hz_static(&[], 60), None);
+    }
+
+    #[test]
+    fn test_blur_strength_for_hz_exact_match() {
+        let table = vec![(60, 2), (144, 4)];
+        assert_eq!(Compositor::new_get_blur_strength_for_hz_static(&table, 60), Some(2));
+        assert_eq!(Compositor::new_get_blur_strength_for_hz_static(&table, 144), Some(4));
+    }
+
+    #[test]
+    fn test_blur_strength_for_hz_closest_lower() {
+        let table = vec![(60, 2), (144, 4)];
+        // 75Hz: no exact match; closest lower is 60Hz → strength 2
+        assert_eq!(Compositor::new_get_blur_strength_for_hz_static(&table, 75), Some(2));
+    }
+
+    #[test]
+    fn test_blur_strength_for_hz_below_all_uses_first() {
+        let table = vec![(60, 2), (144, 4)];
+        // 30Hz: below all entries → use first (60Hz)
+        assert_eq!(Compositor::new_get_blur_strength_for_hz_static(&table, 30), Some(2));
+    }
+
+    #[test]
+    fn test_blur_strength_for_hz_above_all_uses_last() {
+        let table = vec![(60, 2), (144, 4)];
+        // 240Hz: above all → use last (144Hz)
+        assert_eq!(Compositor::new_get_blur_strength_for_hz_static(&table, 240), Some(4));
+    }
+
+    #[test]
+    fn test_blur_strength_for_hz_single_entry() {
+        let table = vec![(60, 3)];
+        assert_eq!(Compositor::new_get_blur_strength_for_hz_static(&table, 30), Some(3));
+        assert_eq!(Compositor::new_get_blur_strength_for_hz_static(&table, 60), Some(3));
+        assert_eq!(Compositor::new_get_blur_strength_for_hz_static(&table, 120), Some(3));
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_blur_quality_by_monitor
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_blur_quality_by_monitor_empty() {
+        let result = Compositor::parse_blur_quality_by_monitor("");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_blur_quality_by_monitor_primary() {
+        let result = Compositor::parse_blur_quality_by_monitor("primary:Full");
+        assert_eq!(result.get(&0), Some(&BlurQuality::Full));
+    }
+
+    #[test]
+    fn test_parse_blur_quality_by_monitor_secondary_reduced() {
+        let result = Compositor::parse_blur_quality_by_monitor("secondary:Reduced");
+        assert_eq!(result.get(&1), Some(&BlurQuality::Reduced));
+    }
+
+    #[test]
+    fn test_parse_blur_quality_by_monitor_all_variants() {
+        let result = Compositor::parse_blur_quality_by_monitor(
+            "primary:Full,secondary:Reduced,tertiary:Minimal",
+        );
+        assert_eq!(result.get(&0), Some(&BlurQuality::Full));
+        assert_eq!(result.get(&1), Some(&BlurQuality::Reduced));
+        assert_eq!(result.get(&2), Some(&BlurQuality::Minimal));
+    }
+
+    #[test]
+    fn test_parse_blur_quality_by_monitor_unknown_quality_skipped() {
+        let result = Compositor::parse_blur_quality_by_monitor("primary:Ultra");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_blur_quality_by_monitor_unknown_monitor_skipped() {
+        let result = Compositor::parse_blur_quality_by_monitor("sixth:Full");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_blur_quality_by_monitor_whitespace_trimmed() {
+        let result = Compositor::parse_blur_quality_by_monitor(" primary : Full ");
+        assert_eq!(result.get(&0), Some(&BlurQuality::Full));
+    }
+
+    // -----------------------------------------------------------------------
+    // compute_latency_stats
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_compute_latency_stats_empty() {
+        // We can't construct Compositor directly; test the math inline
+        // to mirror what compute_latency_stats does.
+        let samples: Vec<f32> = vec![];
+        let (avg, p50, p95, p99) = if samples.is_empty() {
+            (0.0f32, 0.0f32, 0.0f32, 0.0f32)
+        } else {
+            let mut sorted = samples.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let len = sorted.len();
+            let avg = sorted.iter().sum::<f32>() / len as f32;
+            (avg, sorted[len * 50 / 100], sorted[len * 95 / 100], sorted[len * 99 / 100])
+        };
+        assert_eq!(avg, 0.0);
+        assert_eq!(p50, 0.0);
+        assert_eq!(p95, 0.0);
+        assert_eq!(p99, 0.0);
+    }
+
+    #[test]
+    fn test_compute_latency_stats_uniform() {
+        // All samples equal → all percentiles equal the value
+        let samples: Vec<f32> = vec![20.0; 100];
+        let mut sorted = samples.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let len = sorted.len();
+        let avg = sorted.iter().sum::<f32>() / len as f32;
+        let p50 = sorted[(len * 50 / 100).min(len - 1)];
+        let p95 = sorted[(len * 95 / 100).min(len - 1)];
+        let p99 = sorted[(len * 99 / 100).min(len - 1)];
+        assert!((avg - 20.0).abs() < 0.001);
+        assert!((p50 - 20.0).abs() < 0.001);
+        assert!((p95 - 20.0).abs() < 0.001);
+        assert!((p99 - 20.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_compute_latency_stats_ordered() {
+        // p50 ≤ p95 ≤ p99
+        let mut samples: Vec<f32> = (1..=100).map(|i| i as f32).collect();
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let len = samples.len();
+        let p50 = samples[(len * 50 / 100).min(len - 1)];
+        let p95 = samples[(len * 95 / 100).min(len - 1)];
+        let p99 = samples[(len * 99 / 100).min(len - 1)];
+        assert!(p50 <= p95);
+        assert!(p95 <= p99);
+    }
+}
