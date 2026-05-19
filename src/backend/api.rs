@@ -39,6 +39,13 @@ pub struct CompositorMetrics {
     pub input_latency_p50_ms: f32,
     pub input_latency_p95_ms: f32,
     pub input_latency_p99_ms: f32,
+    // Phase 2-3: Optimization statistics
+    pub direct_scanout_active: bool,
+    pub direct_scanout_count: u64,
+    pub direct_scanout_bypass_time_ms: u64,
+    pub gl_state_changes_avoided: u32,
+    pub profiling_enabled: bool,
+    pub dirty_region_merge_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

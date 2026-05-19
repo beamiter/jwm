@@ -33,6 +33,7 @@ pub mod profiler;
 pub mod render_batcher;
 pub mod direct_scanout;
 pub mod integration_helpers;
+pub mod render_stats;
 
 // Sync control modules
 pub mod oml_sync_control;
@@ -61,6 +62,7 @@ pub use subpixel_integration::{SubpixelCompositorIntegration, SubpixelRenderPara
 pub use profiler::{FrameProfiler, ProfileZone, ZoneStats};
 pub use render_batcher::{RenderBatcher, GLStateTracker, BatchKey, QuadInstance};
 pub use direct_scanout::{DirectScanoutManager, DirectScanoutStats, WindowScanoutInfo};
+pub use render_stats::{RenderStats, PassStats, GLCallStats};
 
 use glow::HasContext;
 use std::collections::HashMap;
@@ -4450,6 +4452,13 @@ impl Compositor {
             input_latency_p50_ms: latency_stats.1,
             input_latency_p95_ms: latency_stats.2,
             input_latency_p99_ms: latency_stats.3,
+            // Phase 2-3: Optimization statistics
+            direct_scanout_active: self.direct_scanout_mgr.is_active(),
+            direct_scanout_count: self.direct_scanout_mgr.stats().scanout_count,
+            direct_scanout_bypass_time_ms: self.direct_scanout_mgr.stats().total_bypass_time_ms,
+            gl_state_changes_avoided: self.gl_state_tracker.redundant_changes_avoided(),
+            profiling_enabled: self.frame_profiler.is_enabled(),
+            dirty_region_merge_count: self.dirty_region_tracker.region_count(),
         }
     }
 
@@ -5133,11 +5142,12 @@ impl Compositor {
         // === Pass 1: Draw shadows (feature 14: improved shape) ===
         if self.shadow_enabled && self.shadow_radius > 0.0 {
             unsafe {
-                self.gl.use_program(Some(self.shadow_program));
+                // Phase 2: Use state tracker for shadow pass
+                self.gl_state_tracker.use_program(&self.gl, Some(self.shadow_program));
                 self.gl.uniform_matrix_4_f32_slice(
                     self.shadow_uniforms.projection.as_ref(), false, &proj,
                 );
-                self.gl.bind_vertex_array(Some(self.quad_vao));
+                self.gl_state_tracker.bind_vertex_array(&self.gl, Some(self.quad_vao));
 
                 let spread = self.shadow_radius;
                 let [ox, oy] = self.shadow_offset;
@@ -5264,14 +5274,15 @@ impl Compositor {
         let mut blur_below_dirty = false;
 
         unsafe {
-            self.gl.use_program(Some(self.program));
+            // Phase 2: Use state tracker for main window rendering pass
+            self.gl_state_tracker.use_program(&self.gl, Some(self.program));
             self.gl.uniform_matrix_4_f32_slice(
                 self.win_uniforms.projection.as_ref(), false, &proj,
             );
             self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
             self.gl.uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
             self.gl.uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
-            self.gl.bind_vertex_array(Some(self.quad_vao));
+            self.gl_state_tracker.bind_vertex_array(&self.gl, Some(self.quad_vao));
 
             // P5E: Load config once before loop (not per-window)
             let cfg_main = crate::config::CONFIG.load();
@@ -5429,13 +5440,14 @@ impl Compositor {
                                     self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                                 }
                                 self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
-                                self.gl.use_program(Some(self.program));
+                                // Phase 2: Restore state via tracker after blur
+                                self.gl_state_tracker.use_program(&self.gl, Some(self.program));
                                 self.gl.uniform_matrix_4_f32_slice(
                                     self.win_uniforms.projection.as_ref(), false, &proj,
                                 );
                                 self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
                                 self.gl.uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
-                                self.gl.bind_vertex_array(Some(self.quad_vao));
+                                self.gl_state_tracker.bind_vertex_array(&self.gl, Some(self.quad_vao));
                                 self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
 
                                 self.blur_cache_hash = blur_below_hash;

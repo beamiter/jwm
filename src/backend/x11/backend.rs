@@ -470,17 +470,46 @@ impl Backend for X11Backend {
                 primary_refresh_hz,
             ) {
                 Ok(mut compositor) => {
-                    // Register all existing managed windows with the new compositor
+                    // Phase 1.3: Use batched geometry requests for all windows (single round-trip!)
                     let overlay = compositor.overlay_window();
-                    for (x11w, wid) in self.ids.all_x11_windows() {
-                        if x11w == self.root_x11 || x11w == overlay {
-                            continue;
+                    let all_windows = self.ids.all_x11_windows();
+                    let windows: Vec<_> = all_windows
+                        .into_iter()
+                        .filter(|(x11w, _)| *x11w != self.root_x11 && *x11w != overlay)
+                        .collect();
+
+                    if !windows.is_empty() {
+                        use crate::backend::x11::batch::BatchedGeometryRequest;
+                        let mut batch = BatchedGeometryRequest::new(&*self.conn);
+
+                        for &(x11w, _) in &windows {
+                            batch.queue_geometry(x11w);
                         }
-                        if let Ok(geom) = self.window_ops.get_geometry(wid) {
-                            compositor.add_window(x11w, geom.x, geom.y, geom.w, geom.h);
+
+                        match batch.flush_and_collect() {
+                            Ok(geometries) => {
+                                for (x11w, _) in windows {
+                                    if let Some((x, y, w, h)) = geometries.get(&x11w) {
+                                        compositor.add_window(x11w, *x as i32, *y as i32, *w as u32, *h as u32);
+                                    }
+                                }
+                                log::info!("Compositor enabled at runtime (batched {} windows)", geometries.len());
+                            }
+                            Err(e) => {
+                                log::warn!("Batched geometry request failed: {:?}, falling back to individual queries", e);
+                                // Fallback to individual queries
+                                for (x11w, wid) in self.ids.all_x11_windows() {
+                                    if x11w == self.root_x11 || x11w == overlay {
+                                        continue;
+                                    }
+                                    if let Ok(geom) = self.window_ops.get_geometry(wid) {
+                                        compositor.add_window(x11w, geom.x, geom.y, geom.w, geom.h);
+                                    }
+                                }
+                            }
                         }
                     }
-                    log::info!("Compositor enabled at runtime");
+
                     self.compositor = Some(compositor);
                     Ok(true)
                 }
