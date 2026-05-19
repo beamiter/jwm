@@ -99,17 +99,24 @@ impl WMController for Jwm {
         // Keep the OR geometry cache up to date so build_compositor_scene
         // doesn't need a synchronous GetGeometry round-trip per frame.
         if self.override_redirect_windows.contains(&win) {
-            // Coalesce geometry updates to reduce high-frequency updates
-            if let Some(geom_event) = self.event_coalescer.coalesce_geometry(x, y, width, height) {
-                if let Some(&old) = self.or_window_geometries.get(&win) {
-                    if old != (geom_event.x, geom_event.y, geom_event.width, geom_event.height) {
-                        info!(
-                            "[or_geom_update] win={:?} ({},{} {}x{}) -> ({},{} {}x{})",
-                            win, old.0, old.1, old.2, old.3, geom_event.x, geom_event.y, geom_event.width, geom_event.height
-                        );
-                    }
+            // Always update the cache with the latest geometry
+            // This prevents flicker from stale geometry during coalescing window
+            let new_geom = (x, y, width, height);
+            if let Some(&old) = self.or_window_geometries.get(&win) {
+                if old != new_geom {
+                    info!(
+                        "[or_geom_update] win={:?} ({},{} {}x{}) -> ({},{} {}x{})",
+                        win, old.0, old.1, old.2, old.3, x, y, width, height
+                    );
                 }
-                self.or_window_geometries.insert(win, (geom_event.x, geom_event.y, geom_event.width, geom_event.height));
+            }
+            self.or_window_geometries.insert(win, new_geom);
+
+            // Use event coalescer to rate-limit downstream processing (configurenotify)
+            // but always update cache above to keep compositor in sync
+            if self.event_coalescer.coalesce_geometry(x, y, width, height).is_none() {
+                // Event was coalesced (rate-limited), skip downstream processing
+                return;
             }
         }
         if let Err(e) = self.configurenotify(backend, win, x, y, width, height) {
