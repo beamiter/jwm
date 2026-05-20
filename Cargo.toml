@@ -44,7 +44,6 @@ notify = "7.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.52.3", features = ["full"] }
-bincode = { version = "2.0.1", features = ["derive", "serde"] }
 shared_structures = { git = "https://github.com/beamiter/shared_structures.git", features = ["use-futex"] }
 chrono = "0.4.44"
 log = "0.4.29"
