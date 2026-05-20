@@ -143,7 +143,7 @@ impl Jwm {
 
     pub fn togglebar(
         &mut self,
-        _backend: &mut dyn Backend,
+        backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
         info!("[togglebar]");
@@ -172,6 +172,16 @@ impl Jwm {
 
         if let Some(mon_num) = monitor_num_opt {
             self.mark_bar_update_needed_if_visible(Some(mon_num));
+
+            // Reposition the status bar window (hide or show) and update its strut.
+            let bar_info = self.secondary_bars.get(&mon_num)
+                .and_then(|bar| bar.client_key.zip(bar.window));
+            if let Some((client_key, win)) = bar_info {
+                let _ = self.position_secondary_bar_on_monitor(backend, client_key, win, mon_num);
+            }
+
+            // Re-arrange all windows on this monitor to fill or vacate the bar space.
+            self.arrange(backend, Some(sel_mon_key));
         }
 
         Ok(())
