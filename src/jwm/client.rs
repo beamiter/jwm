@@ -745,11 +745,8 @@ impl Jwm {
             .unwrap_or(true);
 
         let cfg = CONFIG.load();
-        let bar_height = if show_bar {
-            cfg.status_bar_height()
-        } else {
-            0
-        };
+        let actual_bar_height = cfg.status_bar_height();
+        let bar_height = if show_bar { actual_bar_height } else { 0 };
 
         if let Some(client) = self.state.clients.get_mut(client_key) {
             if show_bar {
@@ -780,10 +777,10 @@ impl Jwm {
                 backend.window_ops().apply_window_changes(win, changes)?;
                 backend.compositor_force_full_redraw();
             } else {
-                // Hide bar
+                // Hide bar by moving it off-screen above the monitor
                 let changes = WindowChanges {
                     x: Some(monitor.geometry.m_x),
-                    y: Some(monitor.geometry.m_y - bar_height),
+                    y: Some(monitor.geometry.m_y - actual_bar_height),
                     ..Default::default()
                 };
                 backend.window_ops().apply_window_changes(win, changes)?;
