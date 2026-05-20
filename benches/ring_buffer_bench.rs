@@ -533,6 +533,202 @@ fn bench_availability_query(c: &mut Criterion) {
     let _ = std::fs::remove_file(&test_path);
 }
 
+// ── 跨策略对比 ──────────────────────────────────────────────────────────────
+// 以下 benchmark 在同一次 `cargo bench` 内直接对比三个同步后端的性能，
+// 无需重复执行三次。每个子组内策略为 BenchmarkId 的标签。
+
+use shared_structures::SyncStrategy;
+
+#[cfg(any(feature = "futex", feature = "semaphore", feature = "eventfd"))]
+fn enabled_strategies() -> Vec<(&'static str, SyncStrategy)> {
+    let mut v: Vec<(&'static str, SyncStrategy)> = Vec::new();
+    #[cfg(feature = "futex")]
+    v.push(("futex", SyncStrategy::Futex));
+    #[cfg(feature = "semaphore")]
+    v.push(("semaphore", SyncStrategy::Semaphore));
+    #[cfg(feature = "eventfd")]
+    v.push(("eventfd", SyncStrategy::EventFd));
+    v
+}
+
+// 1) 各策略单线程写吞吐
+#[cfg(any(feature = "futex", feature = "semaphore", feature = "eventfd"))]
+fn bench_strategy_write_throughput(c: &mut Criterion) {
+    let mut group = c.benchmark_group("strategy_write_throughput");
+    let msgs = prebuild_messages(1000, 70_000);
+
+    for (name, strategy) in enabled_strategies() {
+        group.throughput(Throughput::Elements(msgs.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("backend", name),
+            &strategy,
+            |b, &strategy| {
+                let path = mk_path(&format!("bench_strat_w_{}", name));
+                let _ = std::fs::remove_file(&path);
+                let buf = SharedRingBuffer::create(&path, strategy, Some(4096), Some(0)).unwrap();
+
+                b.iter(|| {
+                    drain_all(&buf);
+                    for m in &msgs {
+                        while !buf.try_write_message(black_box(m)).unwrap_or(false) {
+                            let _ = buf.try_read_next_message();
+                        }
+                    }
+                });
+
+                drop(buf);
+                let _ = std::fs::remove_file(&path);
+            },
+        );
+    }
+    group.finish();
+}
+
+// 2) 各策略单条往返延迟
+#[cfg(any(feature = "futex", feature = "semaphore", feature = "eventfd"))]
+fn bench_strategy_round_trip_latency(c: &mut Criterion) {
+    let mut group = c.benchmark_group("strategy_round_trip_latency");
+    let msg = create_test_message(0);
+
+    for (name, strategy) in enabled_strategies() {
+        group.bench_with_input(
+            BenchmarkId::new("backend", name),
+            &strategy,
+            |b, &strategy| {
+                let path = mk_path(&format!("bench_strat_rt_{}", name));
+                let _ = std::fs::remove_file(&path);
+                let buf = SharedRingBuffer::create(&path, strategy, Some(64), Some(0)).unwrap();
+
+                b.iter(|| {
+                    drain_all(&buf);
+                    let _ = buf.try_write_message(black_box(&msg));
+                    black_box(buf.try_read_next_message().unwrap());
+                });
+
+                drop(buf);
+                let _ = std::fs::remove_file(&path);
+            },
+        );
+    }
+    group.finish();
+}
+
+// 3) 各策略命令通道往返
+#[cfg(any(feature = "futex", feature = "semaphore", feature = "eventfd"))]
+fn bench_strategy_command_latency(c: &mut Criterion) {
+    let mut group = c.benchmark_group("strategy_command_latency");
+    let cmd = SharedCommand::view_tag(1 << 3, 0);
+
+    for (name, strategy) in enabled_strategies() {
+        group.bench_with_input(
+            BenchmarkId::new("backend", name),
+            &strategy,
+            |b, &strategy| {
+                let path = mk_path(&format!("bench_strat_cmd_{}", name));
+                let _ = std::fs::remove_file(&path);
+                let buf =
+                    SharedRingBuffer::create(&path, strategy, Some(1024), Some(1000)).unwrap();
+
+                b.iter(|| {
+                    while buf.receive_command().is_some() {}
+                    let _ = buf.send_command(black_box(cmd));
+                    black_box(buf.receive_command());
+                });
+
+                drop(buf);
+                let _ = std::fs::remove_file(&path);
+            },
+        );
+    }
+    group.finish();
+}
+
+// 4) 各策略 SPSC 生产者-消费者（跨线程）
+#[cfg(any(feature = "futex", feature = "semaphore", feature = "eventfd"))]
+fn bench_strategy_spsc_throughput(c: &mut Criterion) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let mut group = c.benchmark_group("strategy_spsc_throughput");
+    group.sample_size(10);
+
+    for (name, strategy) in enabled_strategies() {
+        group.bench_with_input(
+            BenchmarkId::new("backend", name),
+            &strategy,
+            |b, &strategy| {
+                b.iter_custom(|iters| {
+                    let path = mk_path(&format!("bench_strat_spsc_{}", name));
+                    let _ = std::fs::remove_file(&path);
+
+                    let producer = Arc::new(
+                        SharedRingBuffer::create(&path, strategy, Some(2048), Some(400)).unwrap(),
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                    let consumer = Arc::new(
+                        SharedRingBuffer::open(&path, strategy, Some(400)).unwrap(),
+                    );
+
+                    let per_round = 1000usize;
+                    let total = (iters as usize) * per_round;
+                    let msgs = Arc::new(prebuild_messages(per_round, 80_000));
+
+                    let sent = Arc::new(AtomicU64::new(0));
+                    let received = Arc::new(AtomicU64::new(0));
+                    let barrier = Arc::new(Barrier::new(2));
+
+                    let c2 = consumer.clone();
+                    let recv = received.clone();
+                    let bar_c = barrier.clone();
+                    let target = total as u64;
+                    let h_cons = thread::spawn(move || {
+                        bar_c.wait();
+                        while recv.load(Ordering::Acquire) < target {
+                            let _ = c2.wait_for_message(Some(Duration::from_millis(1)));
+                            while let Ok(Some(_)) = c2.try_read_next_message() {
+                                recv.fetch_add(1, Ordering::Release);
+                                if recv.load(Ordering::Acquire) >= target {
+                                    break;
+                                }
+                            }
+                        }
+                    });
+
+                    let p2 = producer.clone();
+                    let sent2 = sent.clone();
+                    let msgs2 = msgs.clone();
+                    let bar_p = barrier.clone();
+                    let h_prod = thread::spawn(move || {
+                        bar_p.wait();
+                        let mut idx = 0usize;
+                        while sent2.load(Ordering::Acquire) < target {
+                            while !p2.try_write_message(&msgs2[idx]).unwrap_or(false) {
+                                std::hint::spin_loop();
+                            }
+                            sent2.fetch_add(1, Ordering::Release);
+                            idx = (idx + 1) % msgs2.len();
+                        }
+                    });
+
+                    let t0 = Instant::now();
+                    let _ = h_prod.join();
+                    let _ = h_cons.join();
+                    let elapsed = t0.elapsed();
+
+                    drop(producer);
+                    drop(consumer);
+                    let _ = std::fs::remove_file(&path);
+
+                    elapsed
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_single_threaded_write,
@@ -548,5 +744,9 @@ criterion_group!(
     bench_create_destroy_cost,
     bench_small_buffer_wraparound,
     bench_availability_query,
+    bench_strategy_write_throughput,
+    bench_strategy_round_trip_latency,
+    bench_strategy_command_latency,
+    bench_strategy_spsc_throughput,
 );
 criterion_main!(benches);
