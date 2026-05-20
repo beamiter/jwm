@@ -1,5 +1,5 @@
 use serde::Serialize;
-use bincode::{Decode, Encode};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde_big_array::BigArray;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,7 +18,7 @@ fn now_millis() -> u64 {
 
 // 使用合理对齐
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Decode, Encode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct TagStatus {
     pub is_selected: bool,
     pub is_urg: bool,
@@ -50,7 +50,7 @@ impl TagStatus {
 
 // 使用更合理的对齐策略
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Decode, Encode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct MonitorInfo {
     pub monitor_num: i32,
     pub monitor_width: i32,
@@ -127,7 +127,7 @@ impl MonitorInfo {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Decode, Encode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct SharedMessage {
     pub timestamp: u64,
     pub monitor_info: MonitorInfo,
