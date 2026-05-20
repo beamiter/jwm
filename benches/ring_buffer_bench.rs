@@ -338,6 +338,201 @@ fn bench_burst_performance(c: &mut Criterion) {
     group.finish();
 }
 
+// 8) 单条消息写→读往返延迟
+fn bench_write_read_latency(c: &mut Criterion) {
+    let test_path = mk_path("bench_latency");
+    let _ = std::fs::remove_file(&test_path);
+
+    let buffer = SharedRingBuffer::create_aux(&test_path, Some(64), Some(0)).unwrap();
+    let msg = create_test_message(0);
+
+    c.bench_function("single_message_write_read_latency", |b| {
+        b.iter(|| {
+            drain_all(&buffer);
+            let _ = buffer.try_write_message(black_box(&msg));
+            black_box(buffer.try_read_next_message().unwrap());
+        })
+    });
+
+    drop(buffer);
+    let _ = std::fs::remove_file(&test_path);
+}
+
+// 9) read_next 与 read_latest 吞吐对比
+fn bench_read_latest_vs_next(c: &mut Criterion) {
+    let mut group = c.benchmark_group("read_mode");
+    let msgs = prebuild_messages(64, 60_000);
+
+    {
+        let test_path = mk_path("bench_read_next");
+        let _ = std::fs::remove_file(&test_path);
+        let buffer = SharedRingBuffer::create_aux(&test_path, Some(128), Some(0)).unwrap();
+
+        group.bench_function("read_next_message", |b| {
+            b.iter_batched(
+                || {
+                    drain_all(&buffer);
+                    for m in &msgs {
+                        while !buffer.try_write_message(m).unwrap_or(false) {
+                            let _ = buffer.try_read_next_message();
+                        }
+                    }
+                },
+                |_| {
+                    while let Ok(Some(_)) = buffer.try_read_next_message() {}
+                },
+                BatchSize::SmallInput,
+            )
+        });
+
+        drop(buffer);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    {
+        let test_path = mk_path("bench_read_latest");
+        let _ = std::fs::remove_file(&test_path);
+        let buffer = SharedRingBuffer::create_aux(&test_path, Some(128), Some(0)).unwrap();
+
+        group.bench_function("read_latest_message", |b| {
+            b.iter_batched(
+                || {
+                    drain_all(&buffer);
+                    for m in &msgs {
+                        while !buffer.try_write_message(m).unwrap_or(false) {
+                            let _ = buffer.try_read_next_message();
+                        }
+                    }
+                },
+                |_| {
+                    // try_read_latest 一次性将 read_idx 推进到 write_idx
+                    black_box(buffer.try_read_latest_message().unwrap());
+                },
+                BatchSize::SmallInput,
+            )
+        });
+
+        drop(buffer);
+        let _ = std::fs::remove_file(&test_path);
+    }
+
+    group.finish();
+}
+
+// 10) 命令通道单线程吞吐（不同命令数量）
+fn bench_command_throughput(c: &mut Criterion) {
+    let mut group = c.benchmark_group("command_throughput");
+
+    for &count in &[10usize, 100, 500, 1000] {
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_with_input(
+            BenchmarkId::new("send_receive_commands", count),
+            &count,
+            |b, &count| {
+                let test_path = mk_path(&format!("bench_cmd_tp_{}", count));
+                let _ = std::fs::remove_file(&test_path);
+                let buffer =
+                    SharedRingBuffer::create_aux(&test_path, Some(2048), Some(0)).unwrap();
+
+                b.iter(|| {
+                    while buffer.receive_command().is_some() {}
+                    for i in 0..count {
+                        let cmd = SharedCommand::view_tag(1 << (i % 9), (i % 4) as i32);
+                        while !buffer.send_command(black_box(cmd)).unwrap_or(false) {
+                            let _ = buffer.receive_command();
+                        }
+                    }
+                    while buffer.receive_command().is_some() {}
+                });
+
+                drop(buffer);
+                let _ = std::fs::remove_file(&test_path);
+            },
+        );
+    }
+    group.finish();
+}
+
+// 11) SharedRingBuffer 创建与销毁开销
+fn bench_create_destroy_cost(c: &mut Criterion) {
+    let mut counter = 0u64;
+    c.bench_function("create_destroy_ring_buffer", |b| {
+        b.iter(|| {
+            let path = format!(
+                "/tmp/bench_cd_{}_{}",
+                std::process::id(),
+                counter
+            );
+            counter += 1;
+            let _ = std::fs::remove_file(&path);
+            let buf = SharedRingBuffer::create_aux(&path, Some(64), Some(0)).unwrap();
+            black_box(buf.available_messages());
+            drop(buf);
+            let _ = std::fs::remove_file(&path);
+        });
+    });
+}
+
+// 12) 小容量缓冲区绕回压力（capacity = 1 / 2 / 4）
+fn bench_small_buffer_wraparound(c: &mut Criterion) {
+    let mut group = c.benchmark_group("small_buffer_wraparound");
+
+    for &size in &[1usize, 2, 4] {
+        group.bench_with_input(
+            BenchmarkId::new("capacity", size),
+            &size,
+            |b, &size| {
+                let test_path = mk_path(&format!("bench_small_{}", size));
+                let _ = std::fs::remove_file(&test_path);
+                let buffer =
+                    SharedRingBuffer::create_aux(&test_path, Some(size), Some(0)).unwrap();
+                let msg = create_test_message(77);
+
+                b.iter(|| {
+                    for _ in 0..50 {
+                        while !buffer.try_write_message(black_box(&msg)).unwrap_or(false) {
+                            let _ = buffer.try_read_next_message();
+                        }
+                        black_box(buffer.try_read_next_message().unwrap());
+                    }
+                });
+
+                drop(buffer);
+                let _ = std::fs::remove_file(&test_path);
+            },
+        );
+    }
+    group.finish();
+}
+
+// 13) available_messages / available_commands 查询开销
+fn bench_availability_query(c: &mut Criterion) {
+    let mut group = c.benchmark_group("availability_query");
+    let test_path = mk_path("bench_avail");
+    let _ = std::fs::remove_file(&test_path);
+    let buffer = SharedRingBuffer::create_aux(&test_path, Some(256), Some(0)).unwrap();
+
+    // 半满状态下查询
+    let msg = create_test_message(0);
+    for _ in 0..128 {
+        let _ = buffer.try_write_message(&msg);
+    }
+
+    group.bench_function("available_messages_half_full", |b| {
+        b.iter(|| black_box(buffer.available_messages()))
+    });
+    group.bench_function("available_commands_empty", |b| {
+        b.iter(|| black_box(buffer.available_commands()))
+    });
+    group.bench_function("has_message_true", |b| {
+        b.iter(|| black_box(buffer.has_message()))
+    });
+
+    group.finish();
+    drop(buffer);
+    let _ = std::fs::remove_file(&test_path);
+}
+
 criterion_group!(
     benches,
     bench_single_threaded_write,
@@ -347,5 +542,11 @@ criterion_group!(
     bench_command_latency,
     bench_memory_layout_efficiency,
     bench_burst_performance,
+    bench_write_read_latency,
+    bench_read_latest_vs_next,
+    bench_command_throughput,
+    bench_create_destroy_cost,
+    bench_small_buffer_wraparound,
+    bench_availability_query,
 );
 criterion_main!(benches);

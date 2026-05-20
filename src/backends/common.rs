@@ -217,3 +217,82 @@ impl SyncBackend for AnySyncBackend {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── SyncStrategy::backend_size ────────────────────────────────────────────
+
+    #[test]
+    #[cfg(feature = "futex")]
+    fn test_futex_backend_size_positive() {
+        assert!(SyncStrategy::Futex.backend_size() > 0);
+    }
+
+    #[test]
+    #[cfg(feature = "semaphore")]
+    fn test_semaphore_backend_size_positive() {
+        assert!(SyncStrategy::Semaphore.backend_size() > 0);
+    }
+
+    #[test]
+    #[cfg(feature = "eventfd")]
+    fn test_eventfd_backend_size_positive() {
+        assert!(SyncStrategy::EventFd.backend_size() > 0);
+    }
+
+    // ── SyncStrategy::backend_align ───────────────────────────────────────────
+
+    #[test]
+    #[cfg(feature = "futex")]
+    fn test_futex_backend_align_is_power_of_two() {
+        let align = SyncStrategy::Futex.backend_align();
+        assert!(align >= 1);
+        assert!(align.is_power_of_two());
+    }
+
+    #[test]
+    #[cfg(feature = "semaphore")]
+    fn test_semaphore_backend_align_is_power_of_two() {
+        let align = SyncStrategy::Semaphore.backend_align();
+        assert!(align >= 1);
+        assert!(align.is_power_of_two());
+    }
+
+    #[test]
+    #[cfg(feature = "eventfd")]
+    fn test_eventfd_backend_align_is_power_of_two() {
+        let align = SyncStrategy::EventFd.backend_align();
+        assert!(align >= 1);
+        assert!(align.is_power_of_two());
+    }
+
+    // ── backend_size >= backend_align（合理布局约束）──────────────────────────
+
+    #[test]
+    #[cfg(feature = "futex")]
+    fn test_futex_size_ge_align() {
+        assert!(SyncStrategy::Futex.backend_size() >= SyncStrategy::Futex.backend_align());
+    }
+
+    #[test]
+    #[cfg(feature = "semaphore")]
+    fn test_semaphore_size_ge_align() {
+        assert!(
+            SyncStrategy::Semaphore.backend_size() >= SyncStrategy::Semaphore.backend_align()
+        );
+    }
+
+    // ── 各策略 backend_size 互不相同（验证每个 match 分支各自生效）────────────
+
+    #[test]
+    #[cfg(all(feature = "futex", feature = "semaphore"))]
+    fn test_futex_and_semaphore_sizes_differ() {
+        // Futex header 与 Semaphore header 结构不同，大小应当不同
+        assert_ne!(
+            SyncStrategy::Futex.backend_size(),
+            SyncStrategy::Semaphore.backend_size()
+        );
+    }
+}

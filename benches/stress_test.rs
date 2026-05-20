@@ -440,12 +440,276 @@ fn bench_long_running_stability(c: &mut Criterion) {
     });
 }
 
+// 六、Ping-Pong 单消息往返延迟
+// 两个单向缓冲区模拟全双工：main → pong_thread → main
+fn bench_ping_pong_latency(c: &mut Criterion) {
+    c.bench_function("ping_pong_latency", |b| {
+        b.iter_custom(|iters| {
+            let path_a = mk_path("stress_ping");
+            let path_b = mk_path("stress_pong");
+            let _ = std::fs::remove_file(&path_a);
+            let _ = std::fs::remove_file(&path_b);
+
+            // 通道 A：main 写，pong 读
+            let ping_writer =
+                Arc::new(SharedRingBuffer::create_aux(&path_a, Some(4), Some(0)).unwrap());
+            thread::sleep(Duration::from_millis(2));
+            let ping_reader =
+                Arc::new(SharedRingBuffer::open_aux(&path_a, Some(0)).unwrap());
+
+            // 通道 B：pong 写，main 读
+            let pong_writer =
+                Arc::new(SharedRingBuffer::create_aux(&path_b, Some(4), Some(0)).unwrap());
+            thread::sleep(Duration::from_millis(2));
+            let pong_reader =
+                Arc::new(SharedRingBuffer::open_aux(&path_b, Some(0)).unwrap());
+
+            let stop = Arc::new(AtomicBool::new(false));
+            let stop_c = stop.clone();
+            let ping_r = ping_reader.clone();
+            let pong_w = pong_writer.clone();
+            let reply_msg = create_base_message(1);
+
+            // pong 线程：收到消息后立即回一条
+            let pong_thread = thread::spawn(move || {
+                while !stop_c.load(Ordering::Relaxed) {
+                    match ping_r.try_read_next_message() {
+                        Ok(Some(_)) => {
+                            while !pong_w.try_write_message(&reply_msg).unwrap_or(false) {
+                                std::hint::spin_loop();
+                            }
+                        }
+                        _ => std::hint::spin_loop(),
+                    }
+                }
+            });
+
+            let send_msg = create_base_message(0);
+            let mut total = Duration::ZERO;
+
+            for _ in 0..iters {
+                let t0 = Instant::now();
+                while !ping_writer.try_write_message(&send_msg).unwrap_or(false) {
+                    std::hint::spin_loop();
+                }
+                loop {
+                    if let Ok(Some(_)) = pong_reader.try_read_next_message() {
+                        break;
+                    }
+                    std::hint::spin_loop();
+                }
+                total += t0.elapsed();
+            }
+
+            stop.store(true, Ordering::Relaxed);
+            let _ = pong_thread.join();
+
+            drop(ping_writer);
+            drop(ping_reader);
+            drop(pong_writer);
+            drop(pong_reader);
+            let _ = std::fs::remove_file(&path_a);
+            let _ = std::fs::remove_file(&path_b);
+
+            total
+        });
+    });
+}
+
+// 七、混合消息+命令并发压力
+// 一个生产者交替发送消息和命令，一个消费者同时处理两种队列，测量完成吞吐。
+fn bench_mixed_message_command(c: &mut Criterion) {
+    c.bench_function("mixed_message_command_stress", |b| {
+        b.iter_custom(|iters| {
+            let test_path = mk_path("stress_mixed");
+            let _ = std::fs::remove_file(&test_path);
+
+            let writer = Arc::new(
+                SharedRingBuffer::create_aux(&test_path, Some(1024), Some(2000)).unwrap(),
+            );
+            thread::sleep(Duration::from_millis(5));
+            let reader =
+                Arc::new(SharedRingBuffer::open_aux(&test_path, Some(2000)).unwrap());
+
+            let stop = Arc::new(AtomicBool::new(false));
+            let msg_recv = Arc::new(AtomicUsize::new(0));
+            let cmd_recv = Arc::new(AtomicUsize::new(0));
+
+            let r = reader.clone();
+            let stop_c = stop.clone();
+            let msg_recv_c = msg_recv.clone();
+            let cmd_recv_c = cmd_recv.clone();
+
+            // 消费者：同时消费消息和命令
+            let consumer = thread::spawn(move || {
+                while !stop_c.load(Ordering::Acquire) {
+                    let _ = r.wait_for_message(Some(Duration::from_millis(1)));
+                    while let Ok(Some(_)) = r.try_read_next_message() {
+                        msg_recv_c.fetch_add(1, Ordering::Relaxed);
+                    }
+                    while r.receive_command().is_some() {
+                        cmd_recv_c.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                while let Ok(Some(_)) = r.try_read_next_message() {
+                    msg_recv_c.fetch_add(1, Ordering::Relaxed);
+                }
+                while r.receive_command().is_some() {
+                    cmd_recv_c.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+
+            let per_round = 500usize;
+            let mut total = Duration::ZERO;
+            let mut msg = create_base_message(0);
+
+            for round in 0..iters {
+                let start_msg = msg_recv.load(Ordering::Acquire);
+                let start_cmd = cmd_recv.load(Ordering::Acquire);
+                let target_msg = start_msg + per_round;
+                let target_cmd = start_cmd + per_round;
+
+                let t0 = Instant::now();
+                for i in 0..per_round {
+                    msg.get_monitor_info_mut().monitor_num =
+                        (round as usize * per_round + i) as i32;
+                    while !writer.try_write_message(&msg).unwrap_or(false) {
+                        std::hint::spin_loop();
+                    }
+                    let cmd = SharedCommand::view_tag(1 << (i % 9), 0);
+                    while !writer.send_command(cmd).unwrap_or(false) {
+                        std::hint::spin_loop();
+                    }
+                }
+
+                while msg_recv.load(Ordering::Acquire) < target_msg
+                    || cmd_recv.load(Ordering::Acquire) < target_cmd
+                {
+                    thread::yield_now();
+                }
+                total += t0.elapsed();
+            }
+
+            stop.store(true, Ordering::Release);
+            let _ = consumer.join();
+
+            drop(writer);
+            drop(reader);
+            let _ = std::fs::remove_file(&test_path);
+
+            total
+        });
+    });
+}
+
+// 八、背压处理：在不同填充率下写入的性能
+// 预填充至 ratio% 容量，再测量后续写入（满则读一条再写）的吞吐。
+fn bench_backpressure_handling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("backpressure");
+    group.sample_size(15);
+
+    for &fill_ratio in &[50usize, 75, 90, 100] {
+        group.bench_with_input(
+            BenchmarkId::new("fill_ratio_pct", fill_ratio),
+            &fill_ratio,
+            |b, &ratio| {
+                let test_path = mk_path(&format!("stress_backpressure_{}", ratio));
+                let _ = std::fs::remove_file(&test_path);
+
+                let cap = 256usize;
+                let buffer =
+                    SharedRingBuffer::create_aux(&test_path, Some(cap), Some(0)).unwrap();
+                let fill_count = cap * ratio / 100;
+                let msg = create_base_message(0);
+
+                b.iter(|| {
+                    drain_all(&buffer);
+                    for _ in 0..fill_count {
+                        if !buffer.try_write_message(&msg).unwrap_or(false) {
+                            break;
+                        }
+                    }
+                    // 缓冲区接近满：模拟写端遭遇背压
+                    for _ in 0..100usize {
+                        if !buffer.try_write_message(black_box(&msg)).unwrap_or(false) {
+                            let _ = buffer.try_read_next_message();
+                            let _ = buffer.try_write_message(&msg);
+                        }
+                    }
+                    drain_all(&buffer);
+                });
+
+                drop(buffer);
+                let _ = std::fs::remove_file(&test_path);
+            },
+        );
+    }
+    group.finish();
+}
+
+// 九、read_latest 在持续写入流下的跳跃读取效果
+// 生产者常驻写入，消费者只调用 read_latest，测量"始终获得最新值"的吞吐。
+fn bench_read_latest_under_load(c: &mut Criterion) {
+    c.bench_function("read_latest_under_continuous_write", |b| {
+        b.iter_custom(|iters| {
+            let test_path = mk_path("stress_read_latest");
+            let _ = std::fs::remove_file(&test_path);
+
+            let writer = Arc::new(
+                SharedRingBuffer::create_aux(&test_path, Some(256), Some(0)).unwrap(),
+            );
+            let reader = writer.clone();
+
+            let stop = Arc::new(AtomicBool::new(false));
+            let stop_c = stop.clone();
+            let w = writer.clone();
+
+            // 常驻写者线程：持续写入
+            let producer = thread::spawn(move || {
+                let mut msg = create_base_message(0);
+                let mut i = 0i32;
+                while !stop_c.load(Ordering::Relaxed) {
+                    msg.get_monitor_info_mut().monitor_num = i;
+                    i = i.wrapping_add(1);
+                    let _ = w.try_write_message(&msg);
+                    // 防止极端填满导致写者也阻塞
+                    if i % 64 == 0 {
+                        std::hint::spin_loop();
+                    }
+                }
+            });
+
+            // 预热
+            thread::sleep(Duration::from_millis(2));
+
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let t0 = Instant::now();
+                black_box(reader.try_read_latest_message().unwrap());
+                total += t0.elapsed();
+            }
+
+            stop.store(true, Ordering::Relaxed);
+            let _ = producer.join();
+
+            drop(writer);
+            let _ = std::fs::remove_file(&test_path);
+
+            total
+        });
+    });
+}
+
 criterion_group!(
     stress_tests,
     bench_high_frequency_updates,
     bench_concurrent_stress,
     bench_memory_pressure,
     bench_command_stress,
-    bench_long_running_stability
+    bench_long_running_stability,
+    bench_ping_pong_latency,
+    bench_mixed_message_command,
+    bench_backpressure_handling,
+    bench_read_latest_under_load,
 );
 criterion_main!(stress_tests);
