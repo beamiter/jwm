@@ -5,15 +5,31 @@ use super::common::SyncBackend;
 use libc::timespec;
 use std::hint;
 use std::io::{Error, Result};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use std::time::Duration;
 
-#[repr(C, align(8))]
+// ── 核心优化：将 seq 和 waiters 放在不同 cache line 上 ──────────────────────
+//
+// 修改前（16 字节，同一 cache line）:
+//   signal 路径读 waiters → 污染 waiter 频繁写入的同一 cache line
+//   waiter 路径写 waiters → 导致 signal 侧 cache miss
+//
+// 修改后（256 字节，每个字段独占 64 字节 cache line）:
+//   - seq（cache line 0）：只由 signal 写，waiter 读
+//   - waiters（cache line 1）：只由 waiter 写，signal 读
+//   两侧互相不写对方的 cache line → 消除 false sharing
+#[repr(C, align(64))]
+pub struct FutexChannel {
+    pub seq: AtomicU32,
+    _pad_seq: [u8; 60], // 64 − 4 = 60，seq 独占第一条 cache line
+    pub waiters: AtomicI32,
+    _pad_waiters: [u8; 60], // waiters 独占第二条 cache line
+}
+
+#[repr(C)]
 pub struct FutexHeader {
-    message_seq: AtomicU32,
-    message_waiters: AtomicU32,
-    command_seq: AtomicU32,
-    command_waiters: AtomicU32,
+    pub message: FutexChannel,
+    pub command: FutexChannel,
 }
 
 pub struct FutexBackend {
@@ -48,21 +64,26 @@ impl FutexBackend {
         }
 
         unsafe {
-            let (seq, waiters) = if is_message {
-                (&(*self.header).message_seq, &(*self.header).message_waiters)
+            let ch = if is_message {
+                &(*self.header).message
             } else {
-                (&(*self.header).command_seq, &(*self.header).command_waiters)
+                &(*self.header).command
             };
 
-            waiters.fetch_add(1, Ordering::AcqRel);
+            // 发布等待意图（Release：让 signal 侧看到最新 waiters 值）
+            ch.waiters.fetch_add(1, Ordering::Release);
+
+            // 进内核前再检查一次，避免 signal 先于 waiters++ 发生而被漏掉
             if has_data() {
-                waiters.fetch_sub(1, Ordering::AcqRel);
+                ch.waiters.fetch_sub(1, Ordering::Relaxed);
                 return Ok(true);
             }
 
-            let snapshot = seq.load(Ordering::Acquire);
-            let res = futex_wait(seq, snapshot, timeout);
-            waiters.fetch_sub(1, Ordering::AcqRel);
+            let snapshot = ch.seq.load(Ordering::Acquire);
+            let res = futex_wait(&ch.seq, snapshot as u32, timeout);
+
+            // Release：确保 signal 侧下次读到 waiters 已减少
+            ch.waiters.fetch_sub(1, Ordering::Release);
 
             res.map(|_| has_data()).or_else(|e| {
                 log::warn!("futex_wait error: {}. Fallback to check state", e);
@@ -77,12 +98,12 @@ impl SyncBackend for FutexBackend {
         self.header = backend_ptr as *mut FutexHeader;
         if is_creator {
             unsafe {
-                self.header.write(FutexHeader {
-                    message_seq: AtomicU32::new(0),
-                    message_waiters: AtomicU32::new(0),
-                    command_seq: AtomicU32::new(0),
-                    command_waiters: AtomicU32::new(0),
-                });
+                // 逐字段初始化，避免 write() 踩 padding 字节（UB）
+                let h = &mut *self.header;
+                h.message.seq.store(0, Ordering::Relaxed);
+                h.message.waiters.store(0, Ordering::Relaxed);
+                h.command.seq.store(0, Ordering::Relaxed);
+                h.command.waiters.store(0, Ordering::Relaxed);
             }
         }
         Ok(())
@@ -108,9 +129,11 @@ impl SyncBackend for FutexBackend {
 
     fn signal_message(&self) -> Result<()> {
         unsafe {
-            if (*self.header).message_waiters.load(Ordering::Acquire) > 0 {
-                (*self.header).message_seq.fetch_add(1, Ordering::Release);
-                let _ = futex_wake(&(*self.header).message_seq, 1);
+            let ch = &(*self.header).message;
+            // Acquire：读到最新的 waiters（与 waiter 的 Release fetch_add 配对）
+            if ch.waiters.load(Ordering::Acquire) > 0 {
+                ch.seq.fetch_add(1, Ordering::Release);
+                let _ = futex_wake(&ch.seq, 1);
             }
         }
         Ok(())
@@ -118,20 +141,28 @@ impl SyncBackend for FutexBackend {
 
     fn signal_command(&self) -> Result<()> {
         unsafe {
-            if (*self.header).command_waiters.load(Ordering::Acquire) > 0 {
-                (*self.header).command_seq.fetch_add(1, Ordering::Release);
-                let _ = futex_wake(&(*self.header).command_seq, 1);
+            let ch = &(*self.header).command;
+            if ch.waiters.load(Ordering::Acquire) > 0 {
+                ch.seq.fetch_add(1, Ordering::Release);
+                let _ = futex_wake(&ch.seq, 1);
             }
         }
         Ok(())
     }
 
     fn cleanup(&mut self, _is_creator: bool) {
+        // 修复：只在真正有等待者时才发出 FUTEX_WAKE syscall。
+        // 改动前：无论有没有等待者都调用 futex_wake（两次不必要的 syscall）。
         unsafe {
-            (*self.header).message_seq.fetch_add(1, Ordering::Release);
-            let _ = futex_wake(&(*self.header).message_seq, i32::MAX);
-            (*self.header).command_seq.fetch_add(1, Ordering::Release);
-            let _ = futex_wake(&(*self.header).command_seq, i32::MAX);
+            let h = &*self.header;
+            if h.message.waiters.load(Ordering::Acquire) > 0 {
+                h.message.seq.fetch_add(1, Ordering::Release);
+                let _ = futex_wake(&h.message.seq, i32::MAX);
+            }
+            if h.command.waiters.load(Ordering::Acquire) > 0 {
+                h.command.seq.fetch_add(1, Ordering::Release);
+                let _ = futex_wake(&h.command.seq, i32::MAX);
+            }
         }
     }
 }

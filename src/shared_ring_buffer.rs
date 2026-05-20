@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const RING_BUFFER_MAGIC: u64 = 0x52494E47_42554646;
-const RING_BUFFER_VERSION: u64 = 8; // 版本号因结构调整而递增
+const RING_BUFFER_VERSION: u64 = 9; // v9: FutexHeader cache-line split (256B), EventFdHeader waiter counts
 const DEFAULT_BUFFER_SIZE: usize = 16;
 const CMD_BUFFER_SIZE: usize = 16;
 const DEFAULT_ADAPTIVE_POLL_SPINS: u32 = 400;

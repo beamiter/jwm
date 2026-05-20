@@ -18,17 +18,29 @@ use std::io::{IoSlice, IoSliceMut};
 use std::os::fd::FromRawFd;
 use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 /// UNIX sockaddr_un 路径上限为 108 字节
 const UNIX_SOCK_MAX: usize = 108;
 
+// ── EventFdHeader ─────────────────────────────────────────────────────────────
+//
+// 核心优化：新增 message_waiters / command_waiters 计数器（位于共享内存中），
+// signal 路径在 waiters == 0 时跳过 write(eventfd) syscall。
+// 改动前：每次 try_write_message 都触发一次 write() 内核调用（≈200–500 ns）。
+// 改动后：只有对端真正在 poll() 等待时才发出 write()。
 #[repr(C, align(8))]
 pub struct EventFdHeader {
     // 创建者写入路径后，把 ready 置为 true，打开者据此读取路径
     is_ready: AtomicBool,
+    _pad0: [u8; 3],
+    /// 正在 poll() 等待消息 fd 的线程数（含本进程）
+    pub message_waiters: AtomicI32,
+    /// 正在 poll() 等待命令 fd 的线程数
+    pub command_waiters: AtomicI32,
+    _pad1: [u8; 4],
     // 以 0 结尾的 C 字节串，未用完则补 0
     sock_path: [u8; UNIX_SOCK_MAX],
 }
@@ -71,6 +83,7 @@ impl EventFdBackend {
     }
 
     fn drain_eventfd(fd: BorrowedFd<'_>) {
+        // fd 是 EFD_NONBLOCK，读不到数据时返回 EAGAIN，此处忽略即可
         let mut buf = [0u8; 8];
         let _ = unistd::read(fd, &mut buf);
     }
@@ -80,7 +93,6 @@ impl EventFdBackend {
         let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
         let pfd = PollFd::new(borrowed_fd, PollFlags::POLLIN);
         let to = timeout.map_or(PollTimeout::NONE, |d| {
-            // 尽量转换，否则用 NONE
             nix::poll::PollTimeout::try_from(d.as_millis()).unwrap_or(PollTimeout::NONE)
         });
         match poll(&mut [pfd], to) {
@@ -138,13 +150,11 @@ impl EventFdBackend {
     }
 
     fn create_eventfd_owned() -> Result<OwnedFd> {
-        // 用 libc 直接创建 eventfd，避免中间类型转换问题
         let flags = libc::EFD_NONBLOCK | libc::EFD_CLOEXEC;
         let fd = unsafe { libc::eventfd(0, flags) };
         if fd < 0 {
             return Err(Error::last_os_error());
         }
-        // SAFETY: 来自内核的有效 fd，交由 OwnedFd 接管
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 
@@ -154,7 +164,6 @@ impl EventFdBackend {
         cmd_fd: OwnedFd,
         stop: Arc<AtomicBool>,
     ) -> Result<()> {
-        // 删除残留
         if sock_path.exists() {
             let _ = std::fs::remove_file(&sock_path);
         }
@@ -162,7 +171,7 @@ impl EventFdBackend {
         let srv = socket(
             AddressFamily::Unix,
             SockType::Stream,
-            SockFlag::SOCK_CLOEXEC, // 监听 socket 本身 CLOEXEC 即可
+            SockFlag::SOCK_CLOEXEC,
             None,
         )
         .map_err(|e| Error::new(ErrorKind::Other, e))?;
@@ -171,15 +180,12 @@ impl EventFdBackend {
         bind(srv.as_raw_fd(), &addr).map_err(|e| Error::new(ErrorKind::Other, e))?;
         listen(&srv, Backlog::new(8)?).map_err(|e| Error::new(ErrorKind::Other, e))?;
 
-        // 监听 socket 非阻塞；CLOEXEC 应该通过 F_SETFD 设置，而非 F_SETFL
         let _ = fcntl(&srv, FcntlArg::F_SETFL(OFlag::O_NONBLOCK));
         let _ = fcntl(&srv, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC));
 
-        // 把 OwnedFd 移入线程闭包，保证其生命周期覆盖整个线程
         std::thread::Builder::new()
             .name("srb_eventfd_fdpass".to_string())
             .spawn(move || {
-                // 在闭包内部再取 raw fd
                 let msg_fd_raw = msg_fd.as_raw_fd();
                 let cmd_fd_raw = cmd_fd.as_raw_fd();
 
@@ -190,7 +196,6 @@ impl EventFdBackend {
                             let fds = [msg_fd_raw, cmd_fd_raw];
                             let cmsg = [ControlMessage::ScmRights(&fds)];
 
-                            // 检查返回值，记录错误，必要时可考虑重试一次
                             if let Err(e) = sendmsg::<nix::sys::socket::UnixAddr>(
                                 cli_fd,
                                 &iov,
@@ -200,11 +205,18 @@ impl EventFdBackend {
                             ) {
                                 log::warn!("sendmsg(SCM_RIGHTS) failed: {e}");
                             }
-
                             let _ = unistd::close(cli_fd);
                         }
                         Err(Errno::EAGAIN) => {
-                            std::thread::sleep(Duration::from_millis(10));
+                            // ── 优化：用 poll(1ms) 代替 sleep(10ms) ──────────────
+                            // 既能快速响应新连接（POLLIN），又给 stop 标志留出
+                            // 1ms 内的检查窗口，使 cleanup 的等待时间从 20ms→3ms。
+                            let borrowed = unsafe { BorrowedFd::borrow_raw(srv.as_raw_fd()) };
+                            let mut pfd = PollFd::new(borrowed, PollFlags::POLLIN);
+                            let _ = poll(
+                                std::slice::from_mut(&mut pfd),
+                                nix::poll::PollTimeout::from(1u8),
+                            );
                         }
                         Err(e) => {
                             log::warn!("eventfd listener accept error: {e}");
@@ -213,7 +225,6 @@ impl EventFdBackend {
                     }
                 }
 
-                // 退出时自动 drop srv 和 msg_fd/cmd_fd，并删除 socket 文件
                 let _ = std::fs::remove_file(&sock_path);
             })
             .map_err(|e| Error::new(ErrorKind::Other, e))?;
@@ -222,7 +233,6 @@ impl EventFdBackend {
     }
 
     fn receive_fds_from_server(sock_path: &Path) -> Result<(OwnedFd, OwnedFd)> {
-        // 连接重试：最多 200ms，避免 creator 刚发布路径但尚未 listen 的窗口
         let deadline = std::time::Instant::now() + Duration::from_millis(200);
         let cli = loop {
             match socket(
@@ -261,7 +271,6 @@ impl EventFdBackend {
         )
         .map_err(|e| Error::new(ErrorKind::Other, e))?;
 
-        // 校验：必须读到 1 字节 payload，且没有控制消息截断
         if msg.bytes == 0 {
             return Err(Error::new(
                 ErrorKind::UnexpectedEof,
@@ -290,7 +299,6 @@ impl EventFdBackend {
             ));
         }
 
-        // SAFETY: 来自 SCM_RIGHTS 的 fd 由本进程接管
         let owned_msg = unsafe { OwnedFd::from_raw_fd(fds[0]) };
         let owned_cmd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
         Ok((owned_msg, owned_cmd))
@@ -323,7 +331,27 @@ impl EventFdBackend {
             return Ok(has_data());
         };
 
-        match Self::poll_fd(ofd.as_raw_fd(), timeout) {
+        // ── 核心优化：发布等待意图，signal 侧据此决定是否触发 write(fd) ────────
+        let waiters = unsafe {
+            if is_message {
+                &(*self.header).message_waiters
+            } else {
+                &(*self.header).command_waiters
+            }
+        };
+        // Release：让 signal 侧读到最新的 waiters
+        waiters.fetch_add(1, Ordering::Release);
+
+        // 进内核前再检查一次（避免 signal 在 waiters++ 前就完成，导致漏唤醒）
+        if has_data() {
+            waiters.fetch_sub(1, Ordering::Relaxed);
+            // 可能有一个已经写入 fd 的事件，drain 掉避免下次 poll 误触发
+            let borrowed = unsafe { BorrowedFd::borrow_raw(ofd.as_raw_fd()) };
+            Self::drain_eventfd(borrowed);
+            return Ok(true);
+        }
+
+        let result = match Self::poll_fd(ofd.as_raw_fd(), timeout) {
             Ok(true) => {
                 let borrowed = unsafe { BorrowedFd::borrow_raw(ofd.as_raw_fd()) };
                 Self::drain_eventfd(borrowed);
@@ -334,7 +362,11 @@ impl EventFdBackend {
                 log::warn!("poll(eventfd) error: {e}. Fallback to check state.");
                 Ok(has_data())
             }
-        }
+        };
+
+        // Release：确保 signal 侧下次读到 waiters 已减少
+        waiters.fetch_sub(1, Ordering::Release);
+        result
     }
 }
 
@@ -345,17 +377,20 @@ impl SyncBackend for EventFdBackend {
 
         if is_creator {
             info!("is creator");
-            // 1) 创建一对 eventfd（本进程留用）
+            // 初始化共享内存中的 waiters 计数器
+            unsafe {
+                (*self.header).message_waiters.store(0, Ordering::Relaxed);
+                (*self.header).command_waiters.store(0, Ordering::Relaxed);
+            }
+
             let msg_fd = Self::create_eventfd_owned()?;
             let cmd_fd = Self::create_eventfd_owned()?;
 
-            // 2) 为“监听线程用于发送给对端”复制一份句柄（指向同一个内核对象）
             let msg_fd_for_send =
                 nix::unistd::dup(&msg_fd).map_err(|e| Error::new(ErrorKind::Other, e))?;
             let cmd_fd_for_send =
                 nix::unistd::dup(&cmd_fd).map_err(|e| Error::new(ErrorKind::Other, e))?;
 
-            // 3) 生成 socket 路径、写 header 并启动监听线程（用复制出来的那对句柄）
             let sock_path = Self::generate_socket_path();
             Self::set_header_sock_path(self.header, &sock_path)?;
             let stop = Arc::new(AtomicBool::new(false));
@@ -366,15 +401,12 @@ impl SyncBackend for EventFdBackend {
                 stop.clone(),
             )?;
 
-            // 4) 本进程继续使用原始的那对 eventfd
             self.local_message_fd = Some(msg_fd);
             self.local_command_fd = Some(cmd_fd);
             self.listener_stop = Some(stop);
             self.sock_path = Some(sock_path);
         } else {
             info!("is not creator");
-            // 打开者：等待路径 ready，再连接接收 2 个 fd
-            // 自旋等待 ready（通常很快）
             for _ in 0..10_000 {
                 unsafe {
                     if (*self.header).is_ready.load(Ordering::Acquire) {
@@ -415,34 +447,59 @@ impl SyncBackend for EventFdBackend {
     }
 
     fn signal_message(&self) -> Result<()> {
-        if let Some(fd) = &self.local_message_fd {
-            let borrowed = unsafe { BorrowedFd::borrow_raw(fd.as_raw_fd()) };
-            Self::write_u64(borrowed, 1)
-        } else {
-            Ok(())
+        unsafe {
+            // ── 核心优化：无等待者时跳过 write() syscall ────────────────────────
+            // Acquire：与 wait 侧的 Release fetch_add 配对，确保看到最新 waiters
+            if (*self.header).message_waiters.load(Ordering::Acquire) > 0 {
+                if let Some(fd) = &self.local_message_fd {
+                    let borrowed = BorrowedFd::borrow_raw(fd.as_raw_fd());
+                    Self::write_u64(borrowed, 1)?;
+                }
+            }
         }
+        Ok(())
     }
 
     fn signal_command(&self) -> Result<()> {
-        if let Some(fd) = &self.local_command_fd {
-            let borrowed = unsafe { BorrowedFd::borrow_raw(fd.as_raw_fd()) };
-            Self::write_u64(borrowed, 1)
-        } else {
-            Ok(())
+        unsafe {
+            if (*self.header).command_waiters.load(Ordering::Acquire) > 0 {
+                if let Some(fd) = &self.local_command_fd {
+                    let borrowed = BorrowedFd::borrow_raw(fd.as_raw_fd());
+                    Self::write_u64(borrowed, 1)?;
+                }
+            }
         }
+        Ok(())
     }
 
     fn cleanup(&mut self, is_creator: bool) {
         if is_creator {
             if let Some(stop) = &self.listener_stop {
                 stop.store(true, Ordering::Relaxed);
-                // 让监听线程尽快退出
-                std::thread::sleep(Duration::from_millis(20));
+
+                // ── 优化：主动连接 socket 唤醒监听线程，避免等满 poll 超时 ─────
+                // 监听线程 poll(1ms)，正常情况下 3ms 内必定退出。
+                // 改动前：sleep(20ms) 硬等。
+                if let Some(path) = &self.sock_path {
+                    if let Ok(addr) = UnixAddr::new(path.as_path()) {
+                        if let Ok(cli) = socket(
+                            AddressFamily::Unix,
+                            SockType::Stream,
+                            SockFlag::SOCK_CLOEXEC,
+                            None,
+                        ) {
+                            // 忽略结果：仅为唤醒，失败也无妨
+                            let _ = connect(cli.as_raw_fd(), &addr);
+                        }
+                    }
+                }
+                // 等待线程完成本轮 poll(1ms) 并退出（留 3ms 余量）
+                std::thread::sleep(Duration::from_millis(3));
             }
             if let Some(path) = &self.sock_path {
                 let _ = std::fs::remove_file(path);
             }
         }
-        // OwnedFd 会在 drop 时自动关闭
+        // OwnedFd 在 drop 时自动关闭
     }
 }
