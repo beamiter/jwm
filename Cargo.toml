@@ -6,17 +6,17 @@ edition = "2021"
 [dependencies]
 libc = { version = "0.2.186", optional = true }
 log = "0.4.29"
-nix = { version = "0.30.1", features = ["event", "fs", "poll", "socket", "uio"], optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 rkyv = "0.8"
 serde-big-array = "0.5.1"
 shared_memory = "0.12.4"
-criterion = "0.7.0"
+criterion = "0.8.2"
+nix = { version = "0.31.3", features = ["fs", "poll", "socket", "uio"] }
 
 [features]
 futex = ["dep:libc"]
 semaphore = ["dep:libc"]
-eventfd = ["dep:nix"]
+eventfd = []
 default = ["futex", "semaphore", "eventfd"]
 
 use-eventfd = []
