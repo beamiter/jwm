@@ -152,6 +152,14 @@ impl Jwm {
         // Tell the bar which monitor it belongs to (for bar's internal use)
         command.env("JWM_MONITOR_ID", monitor_id.to_string());
 
+        // The bar is a display-only widget and does not need input methods.
+        // With DBUS_SESSION_BUS_ADDRESS set, GTK4 hangs for 25+ seconds (or
+        // indefinitely) waiting for the IBus/fcitx5 D-Bus handshake before
+        // creating any window. Force IM off so the bar starts immediately.
+        command.env("GTK_IM_MODULE", "none");
+        command.env("QT_IM_MODULE", "none");
+        command.env("XMODIFIERS", "");
+
         // GTK4 bars may need cairo renderer
         if bar_name == "gtk_bar" {
             if std::env::var_os("GSK_RENDERER").is_none() {
