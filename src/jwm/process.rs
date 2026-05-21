@@ -51,6 +51,12 @@ impl Jwm {
             if let Ok(display) = std::env::var("DISPLAY") {
                 command.env("DISPLAY", &display);
             }
+            // GTK4 apps block indefinitely on IBus/fcitx5 D-Bus negotiation when
+            // DBUS_SESSION_BUS_ADDRESS is set and an IM daemon is reachable.
+            // Disable IM for all children; apps that need IM can override.
+            command.env("GTK_IM_MODULE", "none");
+            command.env("QT_IM_MODULE", "none");
+            command.env("XMODIFIERS", "");
         }
     }
 

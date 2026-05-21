@@ -1000,6 +1000,8 @@ impl WaylandWinitBackend {
             &display_handle,
             event_loop.handle(),
             pending_events.clone(),
+            flush_tx.clone(),
+            flush_pending.clone(),
             seat_name,
             true,
         )

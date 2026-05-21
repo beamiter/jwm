@@ -888,15 +888,31 @@ impl UdevBackend {
             &display_handle,
             event_loop.handle(),
             pending_events.clone(),
+            flush_tx.clone(),
+            flush_pending.clone(),
             seat_name.clone(),
             true,
         )
         .map_err(|e| BackendError::Message(format!("wayland init failed: {e}")))?;
 
         if let Some(name) = socket_name.as_deref() {
+            // Detect nested mode: if WAYLAND_DISPLAY was already set before we
+            // create our own socket, a parent compositor owns it.  In that case
+            // the inherited DBUS_SESSION_BUS_ADDRESS points to the parent session's
+            // bus.  Children (bar, terminals) would connect to that bus where
+            // GtkApplication may find conflicting existing registrations and either
+            // hang or delegate window creation back to the parent compositor.
+            // Clear D-Bus from our process env so that every subsequently spawned
+            // child starts without a pre-existing bus address and either skips
+            // D-Bus registration or starts its own session.
+            let nested = std::env::var_os("WAYLAND_DISPLAY").is_some();
             // SAFETY: JWM's backend is single-threaded and we set this once at startup.
             unsafe {
                 std::env::set_var("WAYLAND_DISPLAY", name);
+                if nested {
+                    log::info!("Nested Wayland session detected: clearing DBUS_SESSION_BUS_ADDRESS to isolate children from parent session bus");
+                    std::env::remove_var("DBUS_SESSION_BUS_ADDRESS");
+                }
             }
         }
         let mut state = Box::new(wayland_state);

@@ -3,6 +3,7 @@ use crate::backend::common_define::WindowId;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
@@ -25,6 +26,7 @@ use smithay::xwayland::{X11Wm, X11Surface, XwmHandler, XWaylandClientData, xwm::
 use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
 use smithay::input::keyboard::XkbConfig;
 use smithay::input::{Seat, SeatHandler, SeatState};
+use smithay::reexports::calloop::channel::Sender;
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason, ObjectId};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::protocol::wl_shm;
@@ -624,19 +626,26 @@ impl JwmWaylandState {
         dh: &DisplayHandle,
         handle: smithay::reexports::calloop::LoopHandle<'static, JwmWaylandState>,
         pending_events: Arc<Mutex<std::collections::VecDeque<BackendEvent>>>,
+        flush_tx: Sender<()>,
+        flush_pending: Arc<AtomicBool>,
         seat_name: String,
         listen_on_socket: bool,
     ) -> Result<(Self, Option<String>), Box<dyn std::error::Error + Send + Sync>> {
         let socket_name = if listen_on_socket {
             let source = ListeningSocketSource::new_auto()?;
             let socket_name = source.socket_name().to_string_lossy().into_owned();
-            handle.insert_source(source, |client_stream, _, data| {
+            let accept_flush_tx = flush_tx.clone();
+            let accept_flush_pending = flush_pending.clone();
+            handle.insert_source(source, move |client_stream, _, data| {
                 match data
                     .display_handle
                     .insert_client(client_stream, Arc::new(JwmClientState::default()))
                 {
-                    Ok(client_id) => {
-                        info!("[udev/wayland] client connected: {client_id:?}");
+                    Ok(client) => {
+                        info!("[udev/wayland] client connected: {client:?}");
+                        if !accept_flush_pending.swap(true, Ordering::SeqCst) {
+                            let _ = accept_flush_tx.send(());
+                        }
                     }
                     Err(e) => {
                         warn!("[udev/wayland] insert_client failed: {e:?}");

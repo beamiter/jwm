@@ -152,19 +152,24 @@ impl Jwm {
         // Tell the bar which monitor it belongs to (for bar's internal use)
         command.env("JWM_MONITOR_ID", monitor_id.to_string());
 
-        // The bar is a display-only widget and does not need input methods.
-        // With DBUS_SESSION_BUS_ADDRESS set, GTK4 hangs for 25+ seconds (or
-        // indefinitely) waiting for the IBus/fcitx5 D-Bus handshake before
-        // creating any window. Force IM off so the bar starts immediately.
+        // The bar is a display-only widget and does not need D-Bus at all.
+        // In nested sessions the parent session's DBUS_SESSION_BUS_ADDRESS is
+        // inherited; GtkApplication then tries to register on that bus, finds
+        // a conflicting registration from a prior run or parent session, and
+        // either hangs or delegates activation to it — the window is never
+        // created in JWM.  Remove D-Bus entirely so GTK4 skips all D-Bus
+        // initialisation (IM, a11y, GSettings, GApplication registration).
+        command.env_remove("DBUS_SESSION_BUS_ADDRESS");
         command.env("GTK_IM_MODULE", "none");
         command.env("QT_IM_MODULE", "none");
         command.env("XMODIFIERS", "");
+        command.env("GTK_A11Y", "none");
+        command.env("NO_AT_BRIDGE", "1");
 
-        // GTK4 bars may need cairo renderer
-        if bar_name == "gtk_bar" {
-            if std::env::var_os("GSK_RENDERER").is_none() {
-                command.env("GSK_RENDERER", "cairo");
-            }
+        // Force cairo renderer: avoids EGL/DMA-BUF initialization that can
+        // hang in nested sessions where the GPU context setup is unreliable.
+        if std::env::var_os("GSK_RENDERER").is_none() {
+            command.env("GSK_RENDERER", "cairo");
         }
 
         // Spawn the process
