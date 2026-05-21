@@ -152,25 +152,28 @@ impl Jwm {
         // Tell the bar which monitor it belongs to (for bar's internal use)
         command.env("JWM_MONITOR_ID", monitor_id.to_string());
 
-        // The bar is a display-only widget and does not need D-Bus at all.
-        // In nested sessions the parent session's DBUS_SESSION_BUS_ADDRESS is
-        // inherited; GtkApplication then tries to register on that bus, finds
-        // a conflicting registration from a prior run or parent session, and
-        // either hangs or delegates activation to it — the window is never
-        // created in JWM.  Remove D-Bus entirely so GTK4 skips all D-Bus
-        // initialisation (IM, a11y, GSettings, GApplication registration).
-        command.env_remove("DBUS_SESSION_BUS_ADDRESS");
+        // Set empty to prevent GLib auto-discovery of $XDG_RUNTIME_DIR/bus.
+        // env_remove is NOT sufficient: GIO falls back to the well-known
+        // systemd socket when the var is unset, and on exec-restart the old
+        // bar's GtkApplication name may still be registered — causing the new
+        // instance to hang in single-instance activation.
+        command.env("DBUS_SESSION_BUS_ADDRESS", "");
         command.env("GTK_IM_MODULE", "none");
         command.env("QT_IM_MODULE", "none");
         command.env("XMODIFIERS", "");
         command.env("GTK_A11Y", "none");
         command.env("NO_AT_BRIDGE", "1");
 
-        // Force cairo renderer: avoids EGL/DMA-BUF initialization that can
-        // hang in nested sessions where the GPU context setup is unreliable.
+        // Disable GPU paths in GDK and GSK.
+        // GSK_RENDERER=cairo prevents GTK4's widget pipeline from using GL.
+        // GDK_DISABLE=gl,vulkan,dmabuf prevents GDK from binding zwp_linux_dmabuf_v1
+        // and sending get_default_feedback() — a path independent of GL that hangs
+        // in unprivileged DRM sessions where the compositor can't provide valid
+        // dmabuf feedback without DRM master.  Forces pure wl_shm buffer allocation.
         if std::env::var_os("GSK_RENDERER").is_none() {
             command.env("GSK_RENDERER", "cairo");
         }
+        command.env("GDK_DISABLE", "gl,vulkan,dmabuf");
 
         // Spawn the process
         match command

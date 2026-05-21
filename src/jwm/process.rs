@@ -57,6 +57,12 @@ impl Jwm {
             command.env("GTK_IM_MODULE", "none");
             command.env("QT_IM_MODULE", "none");
             command.env("XMODIFIERS", "");
+            // In unprivileged DRM sessions GTK4's GDK Wayland backend binds
+            // zwp_linux_dmabuf_v1 and sends get_default_feedback() — a path
+            // independent of GL that hangs when the compositor can't respond
+            // with valid dmabuf feedback without DRM master.  Disabling gl,
+            // vulkan, and dmabuf forces pure wl_shm buffer allocation.
+            command.env("GDK_DISABLE", "gl,vulkan,dmabuf");
         }
     }
 

@@ -911,7 +911,7 @@ impl UdevBackend {
                 std::env::set_var("WAYLAND_DISPLAY", name);
                 if nested {
                     log::info!("Nested Wayland session detected: clearing DBUS_SESSION_BUS_ADDRESS to isolate children from parent session bus");
-                    std::env::remove_var("DBUS_SESSION_BUS_ADDRESS");
+                    std::env::set_var("DBUS_SESSION_BUS_ADDRESS", "");
                 }
             }
         }
