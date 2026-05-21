@@ -44,6 +44,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("[main] Detected exec restart, skipping autostart");
         unsafe { env::remove_var("JWM_RESTARTING") };
     }
+    ensure_dbus_session();
+
     jwm::miscellaneous::init_auto_command();
     jwm::miscellaneous::init_auto_start();
 
@@ -191,6 +193,58 @@ pub fn setup_locale() {
         } else {
             unsafe {
                 env::set_var("LC_CTYPE", "en_US.UTF-8");
+            }
+        }
+    }
+}
+
+/// Ensure a D-Bus session bus is available so that apps like gnome-terminal
+/// (which delegate window creation to a server process via D-Bus) can work.
+///
+/// Priority:
+/// 1. `DBUS_SESSION_BUS_ADDRESS` already set → nothing to do.
+/// 2. systemd user session socket at `$XDG_RUNTIME_DIR/bus` → point to it.
+/// 3. Fall back to `dbus-launch --sh-syntax` → parse and export the result.
+fn ensure_dbus_session() {
+    if env::var("DBUS_SESSION_BUS_ADDRESS").is_ok() {
+        info!("[dbus] session bus already configured");
+        return;
+    }
+
+    // Systemd places the user session socket here; covers most modern distros.
+    if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
+        let bus_path = std::path::PathBuf::from(&runtime_dir).join("bus");
+        if bus_path.exists() {
+            let addr = format!("unix:path={}", bus_path.display());
+            unsafe { env::set_var("DBUS_SESSION_BUS_ADDRESS", &addr) };
+            info!("[dbus] using systemd session bus: {}", addr);
+            return;
+        }
+    }
+
+    // No pre-existing socket — try spawning a private D-Bus daemon.
+    info!("[dbus] no session bus found, trying dbus-launch...");
+    let output = match Command::new("dbus-launch").arg("--sh-syntax").output() {
+        Ok(o) if o.status.success() => o,
+        Ok(o) => {
+            warn!("[dbus] dbus-launch exited {:?}", o.status);
+            return;
+        }
+        Err(e) => {
+            warn!("[dbus] dbus-launch not available: {e}");
+            return;
+        }
+    };
+
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        // Format: DBUS_SESSION_BUS_ADDRESS='unix:...'; export DBUS_SESSION_BUS_ADDRESS;
+        let stripped = line.trim().trim_end_matches(';').trim();
+        if let Some(eq) = stripped.find('=') {
+            let key = &stripped[..eq];
+            if key.starts_with("DBUS_") {
+                let val = stripped[eq + 1..].trim_matches('\'').trim_matches('"');
+                unsafe { env::set_var(key, val) };
+                info!("[dbus] set {}={}", key, val);
             }
         }
     }
