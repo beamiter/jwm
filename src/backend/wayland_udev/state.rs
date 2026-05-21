@@ -604,8 +604,15 @@ impl JwmWaylandState {
 
         if let Some(prev_win) = prev {
             if let Some(toplevel) = self.toplevels.get(&prev_win).cloned() {
+                let size = self.window_geometry.get(&prev_win).map(|g| (g.w as i32, g.h as i32).into());
                 toplevel.with_pending_state(|s| {
                     s.states.unset(xdg_toplevel::State::Activated);
+                    // Preserve the configured size. smithay clears s.size after each
+                    // send_configure, so omitting this sends configure(0,0) which tells
+                    // GTK4 to choose its own natural size — shrinking the status bar.
+                    if let Some(sz) = size {
+                        s.size = Some(sz);
+                    }
                 });
                 toplevel.send_configure();
             }
@@ -613,9 +620,13 @@ impl JwmWaylandState {
 
         self.active_toplevel = win;
         if let Some(new_win) = win {
+            let size = self.window_geometry.get(&new_win).map(|g| (g.w as i32, g.h as i32).into());
             if let Some(toplevel) = self.toplevels.get(&new_win).cloned() {
                 toplevel.with_pending_state(|s| {
                     s.states.set(xdg_toplevel::State::Activated);
+                    if let Some(sz) = size {
+                        s.size = Some(sz);
+                    }
                 });
                 toplevel.send_configure();
             }

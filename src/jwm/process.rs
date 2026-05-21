@@ -51,6 +51,12 @@ impl Jwm {
             if let Ok(display) = std::env::var("DISPLAY") {
                 command.env("DISPLAY", &display);
             }
+            // Set empty (not remove) to prevent GLib from auto-discovering
+            // $XDG_RUNTIME_DIR/bus.  gnome-terminal delegates window creation to
+            // gnome-terminal-server via D-Bus; if the parent session bus is
+            // reachable, the server in the parent compositor handles the request
+            // and the window appears there instead of here.
+            command.env("DBUS_SESSION_BUS_ADDRESS", "");
             // GTK4 apps block indefinitely on IBus/fcitx5 D-Bus negotiation when
             // DBUS_SESSION_BUS_ADDRESS is set and an IM daemon is reachable.
             // Disable IM for all children; apps that need IM can override.
