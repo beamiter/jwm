@@ -1548,8 +1548,9 @@ impl UdevBackend {
                             }
 
                             // JWM only uses press for shortcuts for now.
-                            if !handled_by_exclusive_layer
-                                && matches!(state_key, smithay::backend::input::KeyState::Pressed)
+                            // Always dispatch to WM regardless of exclusive layer (e.g. fcitx5
+                            // IME panel); the layer still receives the key via FilterResult above.
+                            if matches!(state_key, smithay::backend::input::KeyState::Pressed)
                             {
                                 // Smithay provides XKB/Wayland keycodes already (evdev + 8).
                                 let keycode_u32 = u32::from(keycode);

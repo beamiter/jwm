@@ -40,6 +40,12 @@ impl Jwm {
         backend: &mut dyn Backend,
         info: crate::backend::api::OutputInfo,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // Jwm::new() already calls add_monitor for every output returned by
+        // enumerate_outputs().  The udev backend then fires OutputAdded for
+        // the same outputs when the event loop starts.  Skip the duplicate.
+        if self.state.output_map.values().any(|&id| id == info.id) {
+            return Ok(());
+        }
         self.add_monitor(info);
 
         // Wayland clients can appear before outputs are fully initialized (early autostart).

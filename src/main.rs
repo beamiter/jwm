@@ -12,6 +12,26 @@ use jwm::backend::wayland_x11::backend::WaylandX11Backend;
 use jwm::backend::x11::backend::X11Backend;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Suppress verbose third-party crate spam unless the caller already set RUST_LOG.
+    if env::var("RUST_LOG").is_err() {
+        unsafe { env::set_var("RUST_LOG", "info,smithay=warn,libseat=warn,drm=warn") };
+    }
+
+    // --gen-config: back up the existing config and write a fresh default, then exit.
+    if env::args().any(|a| a == "--gen-config") {
+        let config_path = jwm::config::Config::get_default_config_path();
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if config_path.exists() {
+            let backup = jwm::config::Config::backup_config(&config_path)?;
+            println!("备份旧配置 -> {}", backup.display());
+        }
+        jwm::config::Config::generate_template(&config_path)?;
+        println!("配置已生成: {}", config_path.display());
+        return Ok(());
+    }
+
     // Use a generic shared memory path for logging (not used for bars anymore)
     initialize_logging("jwm", "/dev/shm/jwm_bar_global")?;
     install_panic_hook();

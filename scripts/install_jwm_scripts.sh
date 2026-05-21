@@ -69,7 +69,7 @@ ALL_BARS=(
 # 默认值
 # ============================================================
 BUILD_MODE="release"
-JWM_BAR_NAME="xcb_bar"
+JWM_BAR_NAME="relm_bar"
 JWM_BAR_SET_BY_ARGS=false
 SELECTED_BARS=(
     # egui_bar
@@ -315,6 +315,18 @@ build_and_install_jwm() {
 }
 
 # ============================================================
+# 重新生成 JWM 配置文件（覆盖旧配置，旧配置自动备份）
+# ============================================================
+regenerate_config() {
+    info "重新生成 JWM 配置文件..."
+    if /usr/local/bin/jwm --gen-config; then
+        ok "配置文件已重新生成"
+    else
+        warn "配置文件生成失败，请手动运行: /usr/local/bin/jwm --gen-config"
+    fi
+}
+
+# ============================================================
 # 显示 jwm-tool 帮助
 # ============================================================
 show_jwm_tool_help() {
@@ -368,6 +380,7 @@ fi
 # 2. 处理 jwm
 if [[ "$SKIP_JWM" == false ]]; then
     build_and_install_jwm
+    regenerate_config
     show_jwm_tool_help
 fi
 
