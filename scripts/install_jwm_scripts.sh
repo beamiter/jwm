@@ -88,6 +88,7 @@ SELECTED_BARS=(
 )
 SKIP_BAR=false
 SKIP_JWM=false
+REGEN_CONFIG=false
 JOBS=""
 BARS_TO_INSTALL=()
 
@@ -100,21 +101,24 @@ usage() {
 
 选项:
   -m, --mode <debug|release>  构建模式（默认: release）
-    -b, --bar <bar_name>        选择要编译安装的 status bar，可重复传入或使用逗号分隔；第一个显式传入的 bar 同时作为 jwm feature
+  -b, --bar <bar_name>        选择要编译安装的 status bar，可重复传入或使用逗号分隔；第一个显式传入的 bar 同时作为 jwm feature
   -l, --list-bars             列出所有可用的 bar
   -j, --jobs <N>              并行编译任务数（传给 cargo）
+  --gen-config                安装后重新生成默认配置（备份旧配置为 .toml.backup）
   --skip-bar                  跳过 bar 编译安装
   --skip-jwm                  跳过 jwm 编译安装（仅编译 bar）
   -h, --help                  显示此帮助信息
 
 示例:
-    $(basename "$0")                          # release 模式编译配置中的所有测试 bar，jwm 默认启用 $JWM_BAR_NAME
-  $(basename "$0") -m debug                 # debug 模式编译安装 jwm
-    $(basename "$0") -b xcb_bar              # release 模式编译安装 jwm + xcb_bar
-    $(basename "$0") -b xcb_bar -b egui_bar # release 模式依次编译安装多个 bar，jwm 仅启用 xcb_bar feature
-  $(basename "$0") -b xcb_bar,egui_bar    # 与上面等价，支持逗号分隔
-  $(basename "$0") -b xcb_bar --skip-jwm   # 仅编译安装 xcb_bar
-  $(basename "$0") -m debug -b egui_bar    # debug 模式编译安装 jwm + egui_bar
+  $(basename "$0")                           # release 模式编译安装，保留现有配置
+  $(basename "$0") --gen-config              # release 模式编译安装，并重新生成默认配置
+  $(basename "$0") -m debug                  # debug 模式编译安装 jwm
+  $(basename "$0") -b xcb_bar               # release 模式编译安装 jwm + xcb_bar
+  $(basename "$0") -b xcb_bar -b egui_bar   # release 模式依次编译安装多个 bar，jwm 仅启用 xcb_bar feature
+  $(basename "$0") -b xcb_bar,egui_bar      # 与上面等价，支持逗号分隔
+  $(basename "$0") -b xcb_bar --skip-jwm    # 仅编译安装 xcb_bar
+  $(basename "$0") -m debug -b egui_bar     # debug 模式编译安装 jwm + egui_bar
+  $(basename "$0") --gen-config --skip-bar  # 仅重新生成配置，不编译 bar
 EOF
     exit 0
 }
@@ -201,6 +205,10 @@ while [[ $# -gt 0 ]]; do
         -j|--jobs)
             JOBS="$2"
             shift 2
+            ;;
+        --gen-config)
+            REGEN_CONFIG=true
+            shift
             ;;
         --skip-bar)
             SKIP_BAR=true
@@ -366,6 +374,7 @@ info " JWM Feature Bar: $JWM_BAR_NAME"
 if [[ ${#BARS_TO_INSTALL[@]} -gt 0 ]]; then
     info " Status Bars: ${BARS_TO_INSTALL[*]}"
 fi
+info " 重新生成配置: $REGEN_CONFIG"
 info "========================================="
 echo ""
 
@@ -380,8 +389,12 @@ fi
 # 2. 处理 jwm
 if [[ "$SKIP_JWM" == false ]]; then
     build_and_install_jwm
-    regenerate_config
     show_jwm_tool_help
+fi
+
+# 3. 重新生成配置（可选）
+if [[ "$REGEN_CONFIG" == true ]]; then
+    regenerate_config
 fi
 
 echo ""
