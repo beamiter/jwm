@@ -51,18 +51,23 @@ impl Jwm {
             if let Ok(display) = std::env::var("DISPLAY") {
                 command.env("DISPLAY", &display);
             }
-            // Set empty (not remove) to prevent GLib from auto-discovering
-            // $XDG_RUNTIME_DIR/bus.  gnome-terminal delegates window creation to
-            // gnome-terminal-server via D-Bus; if the parent session bus is
-            // reachable, the server in the parent compositor handles the request
-            // and the window appears there instead of here.
-            command.env("DBUS_SESSION_BUS_ADDRESS", "");
-            // GTK4 apps block indefinitely on IBus/fcitx5 D-Bus negotiation when
-            // DBUS_SESSION_BUS_ADDRESS is set and an IM daemon is reachable.
-            // Disable IM for all children; apps that need IM can override.
-            command.env("GTK_IM_MODULE", "none");
-            command.env("QT_IM_MODULE", "none");
-            command.env("XMODIFIERS", "");
+            // In nested mode (JWM running inside another Wayland compositor),
+            // backend.rs already cleared DBUS_SESSION_BUS_ADDRESS from the process
+            // env so children don't reach the parent compositor's session bus
+            // (gnome-terminal-server in the parent would steal the window).
+            // In primary-session mode (launched from a login manager), the env
+            // var holds the real session bus address that children actually need.
+            // Propagate whatever the process env says: if empty, isolate; if set,
+            // let children use it (e.g. gnome-terminal-server activation).
+            let dbus_addr = std::env::var("DBUS_SESSION_BUS_ADDRESS").unwrap_or_default();
+            if dbus_addr.is_empty() {
+                command.env("DBUS_SESSION_BUS_ADDRESS", "");
+                // GTK4 apps block indefinitely on IBus/fcitx5 D-Bus negotiation
+                // when a bus is reachable. Only suppress IM in nested/no-bus mode.
+                command.env("GTK_IM_MODULE", "none");
+                command.env("QT_IM_MODULE", "none");
+                command.env("XMODIFIERS", "");
+            }
             // In unprivileged DRM sessions GTK4's GDK Wayland backend binds
             // zwp_linux_dmabuf_v1 and sends get_default_feedback() — a path
             // independent of GL that hangs when the compositor can't respond
@@ -104,10 +109,24 @@ impl Jwm {
 
             Self::setup_smithay_child_env(&mut command, _backend);
 
+            // Redirect child stderr to /tmp/jwm-{name}-stderr.log so Python
+            // exceptions and other error output survive when JWM runs as daemon.
+            let cmd_name = std::path::Path::new(&v[0])
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("child");
+            let stderr_path = format!("/tmp/jwm-{}-stderr.log", cmd_name);
+            let stderr_file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&stderr_path)
+                .map(std::process::Stdio::from)
+                .unwrap_or_else(|_| std::process::Stdio::inherit());
+
             command
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit());
+                .stderr(stderr_file);
 
             Self::apply_child_pre_exec(&mut command);
 

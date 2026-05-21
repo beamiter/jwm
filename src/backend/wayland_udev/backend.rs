@@ -276,7 +276,7 @@ impl WindowOps for WaylandWindowOps {
                     toplevel.with_pending_state(|s| {
                         s.size = Some((w as i32, h as i32).into());
                     });
-                    toplevel.send_configure();
+                    toplevel.send_pending_configure();
                 } else if let Some(x11) = state.x11_surfaces.get(&win) {
                     let _ = x11.configure(Some(smithay::utils::Rectangle::new(
                         (x + bw, y + bw).into(),

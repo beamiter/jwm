@@ -65,7 +65,9 @@ pub struct JwmClientState {
 
 impl ClientData for JwmClientState {
     fn initialized(&self, _client_id: ClientId) {}
-    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
+    fn disconnected(&self, client_id: ClientId, reason: DisconnectReason) {
+        log::info!("[udev/wayland] client disconnected: id={client_id:?} reason={reason:?}");
+    }
 }
 
 pub struct JwmWaylandState {
@@ -614,7 +616,7 @@ impl JwmWaylandState {
                         s.size = Some(sz);
                     }
                 });
-                toplevel.send_configure();
+                toplevel.send_pending_configure();
             }
         }
 
@@ -628,7 +630,7 @@ impl JwmWaylandState {
                         s.size = Some(sz);
                     }
                 });
-                toplevel.send_configure();
+                toplevel.send_pending_configure();
             }
         }
     }
@@ -1308,6 +1310,7 @@ impl CompositorHandler for JwmWaylandState {
         }
 
         if let Some(win) = self.surface_to_window.remove(&surface.id()) {
+            log::info!("[udev/wayland] surface_destroyed win={win:?} (client disconnected abruptly)");
             // If this surface is a layer-shell surface, ensure it is also removed from the layer map.
             for output in &self.outputs {
                 let map = layer_map_for_output(output);
