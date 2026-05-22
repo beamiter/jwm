@@ -5,6 +5,7 @@ use crate::backend::wayland::state::JwmWaylandState;
 #[path = "../udev_kms.rs"]
 mod kms;
 use self::kms::KmsState;
+use super::compositor::WaylandCompositor;
 use crate::backend::api::{
     Backend, BackendEvent, Capabilities, ColorAllocator, CursorProvider, EventHandler, HitTarget,
     InputOps, KeyOps, OutputInfo, OutputOps, PropertyOps, ResizeEdge, ScreenInfo, WindowOps,
@@ -25,6 +26,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use drm::control::{connector, Device as ControlDevice, ModeTypeFlags};
+
+use smithay::backend::renderer::gles::GlesTexture;
+use smithay::backend::renderer::utils::{import_surface_tree, RendererSurfaceStateUserData};
+use smithay::backend::renderer::Renderer;
+use smithay::wayland::compositor::with_states;
 
 use smithay::backend::input::{
     AbsolutePositionEvent, Event as InputEventExt, InputEvent, KeyboardKeyEvent, PointerButtonEvent,
@@ -612,6 +618,7 @@ pub struct UdevBackend {
     cursor_provider: Box<dyn CursorProvider>,
     color_allocator: Box<dyn ColorAllocator>,
 
+    compositor: Option<WaylandCompositor>,
     drag: Option<UdevDragState>,
 }
 
@@ -1092,6 +1099,15 @@ impl UdevBackend {
                                 let mut s = shared.lock().unwrap();
                                 s.pointer_x += delta.x;
                                 s.pointer_y += delta.y;
+                                // Clamp cursor to union bounding box of all outputs.
+                                if !s.outputs.is_empty() {
+                                    let min_x = s.outputs.iter().map(|o| o.x).min().unwrap_or(0) as f64;
+                                    let min_y = s.outputs.iter().map(|o| o.y).min().unwrap_or(0) as f64;
+                                    let max_x = s.outputs.iter().map(|o| o.x + o.width).max().unwrap_or(1920) as f64 - 1.0;
+                                    let max_y = s.outputs.iter().map(|o| o.y + o.height).max().unwrap_or(1080) as f64 - 1.0;
+                                    s.pointer_x = s.pointer_x.clamp(min_x, max_x);
+                                    s.pointer_y = s.pointer_y.clamp(min_y, max_y);
+                                }
                                 let x = s.pointer_x;
                                 let y = s.pointer_y;
                                 let output = s
@@ -1786,6 +1802,7 @@ impl UdevBackend {
             cursor_provider: Box::new(DummyCursorProvider),
             color_allocator: Box::new(DummyColorAllocator),
 
+            compositor: None,
             drag: None,
         })
     }
@@ -2036,6 +2053,286 @@ impl Backend for UdevBackend {
         }
     }
 
+    fn has_compositor(&self) -> bool {
+        self.compositor.is_some()
+    }
+
+    fn compositor_needs_render(&self) -> bool {
+        self.compositor.as_ref().map_or(false, |c| c.needs_render())
+    }
+
+    fn set_compositor_enabled(&mut self, enabled: bool) -> Result<bool, BackendError> {
+        if enabled && self.compositor.is_none() {
+            if let Some(kms) = &self.kms {
+                let mut kms_ref = kms.borrow_mut();
+                let (w, h) = kms_ref.primary_output_size();
+                match kms_ref.with_renderer(|gl| {
+                    unsafe { WaylandCompositor::new(gl, w, h) }
+                }) {
+                    Ok(Ok(compositor)) => {
+                        self.compositor = Some(compositor);
+                        return Ok(true);
+                    }
+                    Ok(Err(e)) => {
+                        log::error!("Failed to create wayland compositor: {}", e);
+                        return Ok(false);
+                    }
+                    Err(e) => {
+                        log::error!("Failed to access GL context: {:?}", e);
+                        return Ok(false);
+                    }
+                }
+            }
+            Ok(false)
+        } else if !enabled && self.compositor.is_some() {
+            self.compositor = None;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn compositor_render_frame(
+        &mut self,
+        scene: &[(u64, i32, i32, u32, u32)],
+        focused_window: Option<u64>,
+    ) -> Result<bool, BackendError> {
+        if self.compositor.is_none() || self.kms.is_none() {
+            return Ok(false);
+        }
+
+        // Phase 1: Import surface textures into GL cache (borrow kms only, no compositor borrow).
+        let mut tex_updates: Vec<(u64, u32, u32, u32)> = Vec::new();
+        if let Some(kms) = &self.kms {
+            let mut kms_ref = kms.borrow_mut();
+            for &(win_id, _, _, w, h) in scene {
+                let win = crate::backend::common_define::WindowId::from_raw(win_id);
+                if let Some(surface) = self.state.surface_for_window(win) {
+                    let tid = kms_ref.with_gles_renderer(|renderer| {
+                        let _ = import_surface_tree(renderer, &surface);
+                        let ctx_id = renderer.context_id();
+                        with_states(&surface, |states| {
+                            states
+                                .data_map
+                                .get::<RendererSurfaceStateUserData>()
+                                .and_then(|d| {
+                                    d.lock()
+                                        .unwrap()
+                                        .texture::<GlesTexture>(ctx_id)
+                                        .map(|t| t.tex_id())
+                                })
+                        })
+                    });
+                    if let Some(tid) = tid {
+                        tex_updates.push((win_id, tid, w, h));
+                    }
+                }
+            }
+        }
+
+        // Phase 2: Update compositor window textures then render into FBO.
+        if let (Some(compositor), Some(kms)) = (&mut self.compositor, &self.kms) {
+            for (win_id, tid, w, h) in tex_updates {
+                compositor.update_window_texture(win_id, tid, w, h, true, false);
+            }
+            let rendered = kms
+                .borrow_mut()
+                .with_renderer(|gl| compositor.render_frame(gl, scene, focused_window))
+                .unwrap_or(false);
+            if rendered {
+                kms.borrow_mut().request_render();
+            }
+            return Ok(rendered);
+        }
+        Ok(false)
+    }
+
+    fn compositor_apply_config(&mut self) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.apply_config();
+        }
+    }
+
+    fn compositor_set_color_temperature(&mut self, temp: f32) {
+        if let Some(c) = self.compositor.as_mut() { c.set_color_temperature(temp); }
+    }
+
+    fn compositor_set_saturation(&mut self, sat: f32) {
+        if let Some(c) = self.compositor.as_mut() { c.set_saturation(sat); }
+    }
+
+    fn compositor_set_brightness(&mut self, val: f32) {
+        if let Some(c) = self.compositor.as_mut() { c.set_brightness(val); }
+    }
+
+    fn compositor_set_contrast(&mut self, val: f32) {
+        if let Some(c) = self.compositor.as_mut() { c.set_contrast(val); }
+    }
+
+    fn compositor_set_invert_colors(&mut self, invert: bool) {
+        if let Some(c) = self.compositor.as_mut() { c.set_invert_colors(invert); }
+    }
+
+    fn compositor_set_grayscale(&mut self, gs: bool) {
+        if let Some(c) = self.compositor.as_mut() { c.set_grayscale(gs); }
+    }
+
+    fn compositor_set_debug_hud(&mut self, enabled: bool) {
+        if let Some(c) = self.compositor.as_mut() { c.set_debug_hud(enabled); }
+    }
+
+    fn compositor_set_transition_mode(&mut self, mode: &str) {
+        if let Some(c) = self.compositor.as_mut() { c.set_transition_mode(mode); }
+    }
+
+    fn compositor_fps(&self) -> f32 {
+        self.compositor.as_ref().map_or(0.0, |c| c.fps())
+    }
+
+    fn compositor_set_frame_extents(&mut self, window: WindowId, left: u32, right: u32, top: u32, bottom: u32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_frame_extents(window.raw(), left, right, top, bottom);
+        }
+    }
+
+    fn compositor_set_window_shaped(&mut self, window: WindowId, shaped: bool) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_window_shaped(window.raw(), shaped);
+        }
+    }
+
+    fn compositor_notify_tag_switch(&mut self, duration: Duration, direction: i32, exclude_top: u32, mon_rect: (i32, i32, u32, u32)) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.notify_tag_switch(duration, direction, exclude_top, mon_rect);
+        }
+    }
+
+    fn compositor_force_full_redraw(&mut self) {
+        if let Some(c) = self.compositor.as_mut() { c.force_full_redraw(); }
+    }
+
+    fn compositor_set_mouse_position(&mut self, x: f32, y: f32) {
+        if let Some(c) = self.compositor.as_mut() { c.set_mouse_position(x, y); }
+    }
+
+    fn compositor_deactivate_edge_glow(&mut self) {
+        if let Some(c) = self.compositor.as_mut() { c.deactivate_edge_glow(); }
+    }
+
+    fn compositor_unsuppress_edge_glow(&mut self) {
+        if let Some(c) = self.compositor.as_mut() { c.unsuppress_edge_glow(); }
+    }
+
+    fn compositor_set_window_urgent(&mut self, window: WindowId, urgent: bool) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_window_urgent(window.raw(), urgent);
+        }
+    }
+
+    fn compositor_set_window_pip(&mut self, window: WindowId, pip: bool) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_window_pip(window.raw(), pip);
+        }
+    }
+
+    fn compositor_set_magnifier(&mut self, enabled: bool) {
+        if let Some(c) = self.compositor.as_mut() { c.set_magnifier(enabled); }
+    }
+
+    fn compositor_set_overview_mode(&mut self, active: bool, windows: &[(WindowId, f32, f32, f32, f32, bool, String)]) {
+        if let Some(c) = self.compositor.as_mut() {
+            let entries: Vec<(u64, f32, f32, f32, f32, bool, String)> = windows.iter()
+                .map(|(id, x, y, w, h, focused, title)| (id.raw(), *x, *y, *w, *h, *focused, title.clone()))
+                .collect();
+            c.set_overview_mode(active, &entries);
+        }
+    }
+
+    fn compositor_set_overview_monitor(&mut self, x: i32, y: i32, w: u32, h: u32) {
+        if let Some(c) = self.compositor.as_mut() { c.set_overview_monitor(x, y, w, h); }
+    }
+
+    fn compositor_set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32)]) {
+        if let Some(c) = self.compositor.as_mut() { c.set_monitors(monitors); }
+    }
+
+    fn compositor_set_overview_selection(&mut self, window: WindowId) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_overview_selection(window.raw());
+        }
+    }
+
+    fn compositor_notify_window_move_start(&mut self, window: WindowId) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.notify_window_move_start(window.raw());
+        }
+    }
+
+    fn compositor_notify_window_move_delta(&mut self, window: WindowId, dx: f32, dy: f32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.notify_window_move_delta(window.raw(), dx, dy);
+        }
+    }
+
+    fn compositor_notify_window_move_end(&mut self, window: WindowId) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.notify_window_move_end(window.raw());
+        }
+    }
+
+    fn compositor_set_dock_position(&mut self, x: f32, y: f32) {
+        if let Some(c) = self.compositor.as_mut() { c.set_dock_position(x, y); }
+    }
+
+    fn compositor_set_expose_mode(&mut self, active: bool, windows: Vec<(WindowId, i32, i32, u32, u32)>) {
+        if let Some(c) = self.compositor.as_mut() {
+            let entries: Vec<(u64, i32, i32, u32, u32)> = windows.iter()
+                .map(|(id, x, y, w, h)| (id.raw(), *x, *y, *w, *h))
+                .collect();
+            c.set_expose_mode(active, entries);
+        }
+    }
+
+    fn compositor_set_snap_preview(&mut self, preview: Option<(f32, f32, f32, f32)>) {
+        if let Some(c) = self.compositor.as_mut() { c.set_snap_preview(preview); }
+    }
+
+    fn compositor_clear_snap_preview_immediate(&mut self) {
+        if let Some(c) = self.compositor.as_mut() { c.clear_snap_preview_immediate(); }
+    }
+
+    fn compositor_set_peek_mode(&mut self, active: bool) {
+        if let Some(c) = self.compositor.as_mut() { c.set_peek_mode(active); }
+    }
+
+    fn compositor_set_window_groups(&mut self, groups: Vec<(u32, Vec<(u32, String, bool)>)>) {
+        if let Some(c) = self.compositor.as_mut() { c.set_window_groups(groups); }
+    }
+
+    fn compositor_zoom_to_fit(&mut self, window: Option<u32>) {
+        if let Some(c) = self.compositor.as_mut() { c.zoom_to_fit(window); }
+    }
+
+    fn compositor_expose_click(&mut self, x: f32, y: f32) -> Option<WindowId> {
+        if let Some(c) = self.compositor.as_ref() {
+            c.expose_click(x, y).map(WindowId::from_raw)
+        } else {
+            None
+        }
+    }
+
+    fn compositor_set_colorblind_mode(&mut self, mode: &str) {
+        if let Some(c) = self.compositor.as_mut() { c.set_colorblind_mode(mode); }
+    }
+
+    fn compositor_set_annotation_mode(&mut self, active: bool) {
+        if let Some(c) = self.compositor.as_mut() { c.set_annotation_mode(active); }
+    }
+
+    fn compositor_annotation_add_point(&mut self, x: f32, y: f32) {
+        if let Some(c) = self.compositor.as_mut() { c.annotation_add_point(x, y); }
+    }
+
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError> {
         loop {
             let mut handled_any = false;
@@ -2076,7 +2373,7 @@ impl Backend for UdevBackend {
                     self.state.needs_redraw = false;
                 }
                 let cursor_kind = self.shared.lock().unwrap().cursor_kind;
-                kms.borrow_mut().render_if_needed(&*self.state, cursor_kind);
+                kms.borrow_mut().render_if_needed(&*self.state, cursor_kind, self.compositor.as_ref());
             }
 
             if handler.should_exit() {

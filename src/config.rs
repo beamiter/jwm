@@ -1443,22 +1443,22 @@ impl Config {
 
     fn get_default_rules() -> Vec<RuleConfig> {
         vec![
-            // RuleConfig {
-            //     name: "Feishu Meetings".to_string(),
-            //     class: "".to_string(),
-            //     instance: "".to_string(),
-            //     tags: 0,
-            //     is_floating: true,
-            //     monitor: -1,
-            // },
-            // RuleConfig {
-            //     name: "飞书会议".to_string(),
-            //     class: "".to_string(),
-            //     instance: "".to_string(),
-            //     tags: 0,
-            //     is_floating: true,
-            //     monitor: -1,
-            // },
+            RuleConfig {
+                class: "wofi".to_string(),
+                instance: "".to_string(),
+                name: "".to_string(),
+                tags: 0,
+                is_floating: true,
+                monitor: -1,
+            },
+            RuleConfig {
+                class: "fuzzel".to_string(),
+                instance: "".to_string(),
+                name: "".to_string(),
+                tags: 0,
+                is_floating: true,
+                monitor: -1,
+            },
         ]
     }
 

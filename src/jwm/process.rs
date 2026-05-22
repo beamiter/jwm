@@ -93,6 +93,22 @@ impl Jwm {
         }
     }
 
+    fn resolve_launcher(cmd: &str, backend: &dyn Backend) -> Vec<String> {
+        if cmd != "jwm-launcher" {
+            return vec![cmd.to_string()];
+        }
+        if Self::is_smithay_backend(backend) {
+            for (bin, args) in [("fuzzel", vec![]), ("wofi", vec!["--show", "run"])] {
+                if std::process::Command::new("which").arg(bin).output().map(|o| o.status.success()).unwrap_or(false) {
+                    let mut v = vec![bin.to_string()];
+                    v.extend(args.iter().map(|s| s.to_string()));
+                    return v;
+                }
+            }
+        }
+        vec!["dmenu_run".to_string()]
+    }
+
     pub(crate) fn spawn(
         &mut self,
         _backend: &mut dyn Backend,
@@ -102,6 +118,9 @@ impl Jwm {
 
         let mut mut_arg: WMArgEnum = arg.clone();
         if let WMArgEnum::StringVec(ref mut v) = mut_arg {
+            if v.first().map(|s| s.as_str()) == Some("jwm-launcher") {
+                *v = Self::resolve_launcher("jwm-launcher", _backend);
+            }
             info!("[spawn] spawning command: {:?}", v);
 
             let mut command = Command::new(&v[0]);

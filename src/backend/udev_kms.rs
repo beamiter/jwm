@@ -22,12 +22,14 @@ use smithay::backend::renderer::element::memory::{
 };
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
+use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::{AsRenderElements, Id, Kind};
-use smithay::backend::renderer::gles::GlesRenderer;
-use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
+use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
+use smithay::backend::renderer::gles::ffi as gl_ffi;
+use smithay::backend::renderer::utils::{RendererSurfaceStateUserData, import_surface_tree};
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::gles::GlesRenderbuffer;
-use smithay::backend::renderer::{Bind, ExportMem, ImportAll, ImportMem, Offscreen};
+use smithay::backend::renderer::{Bind, ExportMem, Offscreen, Renderer};
 use smithay::backend::session::Session;
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::utils::{Buffer as BufferCoord, Size};
@@ -55,10 +57,11 @@ use xcursor::{
 };
 
 smithay::backend::renderer::element::render_elements! {
-    pub KmsRenderElement<R> where R: ImportAll + ImportMem;
-    Surface=WaylandSurfaceRenderElement<R>,
+    pub KmsRenderElement<=GlesRenderer>;
+    Surface=WaylandSurfaceRenderElement<GlesRenderer>,
     Solid=SolidColorRenderElement,
-    Memory=MemoryRenderBufferRenderElement<R>,
+    Memory=MemoryRenderBufferRenderElement<GlesRenderer>,
+    Texture=TextureRenderElement<GlesTexture>,
 }
 
 pub(super) type KmsHandle = Rc<RefCell<KmsState>>;
@@ -278,7 +281,27 @@ impl KmsState {
         self.screencopy_pending = Some(queue);
     }
 
-    /// Schedule a screenshot to be captured on the next render pass.
+    /// Get the size of the primary (first) output
+    pub(super) fn primary_output_size(&self) -> (u32, u32) {
+        self.outputs.first().map(|o| (o.mode_size.0 as u32, o.mode_size.1 as u32)).unwrap_or((1920, 1080))
+    }
+
+    /// Run a closure with access to the raw GL context
+    pub(super) fn with_renderer<F, R>(&mut self, f: F) -> Result<R, smithay::backend::renderer::gles::GlesError>
+    where
+        F: FnOnce(&smithay::backend::renderer::gles::ffi::Gles2) -> R,
+    {
+        self.renderer.with_context(f)
+    }
+
+    /// Run a closure with access to the GlesRenderer (for surface texture imports, etc.)
+    pub(super) fn with_gles_renderer<F, R>(&mut self, f: F) -> R
+    where
+        F: FnOnce(&mut GlesRenderer) -> R,
+    {
+        f(&mut self.renderer)
+    }
+
     pub(super) fn request_screenshot(&mut self, path: std::path::PathBuf) {
         self.pending_screenshot = Some(path);
         self.needs_render = true;
@@ -304,7 +327,7 @@ impl KmsState {
         renderer: &mut GlesRenderer,
         width: i32,
         height: i32,
-        elements: &[KmsRenderElement<GlesRenderer>],
+        elements: &[KmsRenderElement],
         path: &std::path::Path,
     ) {
         let size: Size<i32, BufferCoord> = (width, height).into();
@@ -381,7 +404,7 @@ impl KmsState {
         renderer: &mut GlesRenderer,
         width: i32,
         height: i32,
-        elements: &[KmsRenderElement<GlesRenderer>],
+        elements: &[KmsRenderElement],
         path: &std::path::Path,
         rx: i32,
         ry: i32,
@@ -485,7 +508,7 @@ impl KmsState {
         output: &Output,
         width: i32,
         height: i32,
-        elements: &[KmsRenderElement<GlesRenderer>],
+        elements: &[KmsRenderElement],
         pending: &crate::backend::wayland_udev::screencopy::PendingScreencopyQueue,
     ) {
         use smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_frame_v1;
@@ -917,6 +940,7 @@ impl KmsState {
         &mut self,
         state: &crate::backend::wayland::state::JwmWaylandState,
         cursor_kind: StdCursorKind,
+        compositor: Option<&super::super::compositor::WaylandCompositor>,
     ) {
         if !self.needs_render {
             return;
@@ -942,7 +966,7 @@ impl KmsState {
 
             // DrmOutput::render_frame expects elements in front-to-back order.
             // So: cursor/top-most surfaces first, solid background last.
-            let mut elements: Vec<KmsRenderElement<GlesRenderer>> = Vec::new();
+            let mut elements: Vec<KmsRenderElement> = Vec::new();
 
             // Cursor will be pushed FIRST (front-most).
             let cursor_x = state.pointer_location.x.round() as i32;
@@ -1053,7 +1077,7 @@ impl KmsState {
 
                         let location: Point<i32, Physical> = (geo.loc.x, geo.loc.y).into();
                         let tree = SurfaceTree::from_surface(&surface);
-                        let layer_elements: Vec<KmsRenderElement<GlesRenderer>> =
+                        let layer_elements: Vec<KmsRenderElement> =
                             AsRenderElements::<GlesRenderer>::render_elements(
                                 &tree,
                                 &mut self.renderer,
@@ -1066,42 +1090,144 @@ impl KmsState {
                 }
             }
 
-            for win in state.window_stack.iter().rev() {
-                if !state.mapped_windows.contains(win) {
-                    continue;
+            if let Some(comp) = compositor {
+                // Compositor path: import surfaces for frame callbacks, then submit FBO texture.
+                for win in state.window_stack.iter().rev() {
+                    if !state.mapped_windows.contains(win) {
+                        continue;
+                    }
+                    let Some(surface) = state.surface_for_window(*win) else {
+                        continue;
+                    };
+                    let _ = import_surface_tree(&mut self.renderer, &surface);
+                    frame_roots.push(surface.clone());
+                    with_surface_tree_downward(
+                        &surface,
+                        (),
+                        |_, _, _| TraversalAction::DoChildren(()),
+                        |child_surface, child_states, _| {
+                            let data = child_states.data_map.get::<RendererSurfaceStateUserData>();
+                            let Some(data) = data else { return; };
+                            if data.lock().unwrap().view().is_some() {
+                                out.output.enter(child_surface);
+                                visible_surfaces.insert(child_surface.downgrade());
+                            }
+                        },
+                        |_, _, _| true,
+                    );
                 }
-                let Some(geo) = state.window_geometry.get(win) else {
-                    continue;
+                // Wrap the compositor's output FBO texture as a full-screen render element.
+                let (sw, sh) = comp.screen_size();
+                let tex_id = comp.output_texture_id();
+                let size: Size<i32, BufferCoord> = (sw as i32, sh as i32).into();
+                let output_tex = unsafe {
+                    GlesTexture::from_raw(&self.renderer, Some(gl_ffi::RGBA8), false, tex_id, size)
                 };
-                let Some(surface) = state.surface_for_window(*win) else {
-                    continue;
-                };
+                let context_id = self.renderer.context_id();
+                let elem = TextureRenderElement::from_static_texture(
+                    Id::new(),
+                    context_id,
+                    (0.0f64, 0.0f64),
+                    output_tex,
+                    1,
+                    Transform::Normal,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Kind::Unspecified,
+                );
+                elements.push(KmsRenderElement::Texture(elem));
+            } else {
+                for win in state.window_stack.iter().rev() {
+                    if !state.mapped_windows.contains(win) {
+                        continue;
+                    }
+                    let Some(geo) = state.window_geometry.get(win) else {
+                        continue;
+                    };
+                    let Some(surface) = state.surface_for_window(*win) else {
+                        continue;
+                    };
 
-                // Many toolkits set an xdg_surface window-geometry with a non-zero loc (e.g. to
-                // exclude client-side shadows). `state.window_geometry` tracks the window-geometry
-                // origin in global coords, but the wl_surface buffer origin must be shifted by
-                // -committed_geometry.loc to visually align.
-                let (toplevel_off_x, toplevel_off_y) = with_states(&surface, |states| {
-                    let mut cached = states.cached_state.get::<SurfaceCachedState>();
-                    cached
-                        .current()
-                        .geometry
-                        .map(|r| (r.loc.x, r.loc.y))
-                        .unwrap_or((0, 0))
-                });
+                    // Many toolkits set an xdg_surface window-geometry with a non-zero loc (e.g. to
+                    // exclude client-side shadows). `state.window_geometry` tracks the window-geometry
+                    // origin in global coords, but the wl_surface buffer origin must be shifted by
+                    // -committed_geometry.loc to visually align.
+                    let (toplevel_off_x, toplevel_off_y) = with_states(&surface, |states| {
+                        let mut cached = states.cached_state.get::<SurfaceCachedState>();
+                        cached
+                            .current()
+                            .geometry
+                            .map(|r| (r.loc.x, r.loc.y))
+                            .unwrap_or((0, 0))
+                    });
 
-                // Render any popups belonging to this toplevel above it (but below cursor).
-                // Popups are separate wl_surfaces, not subsurfaces, so they won't appear in the
-                // parent's SurfaceTree.
-                for (popup_surface, popup_rect) in state.popup_rects_for_toplevel(*win) {
-                    if !popup_rect.overlaps(output_rect_global) {
+                    // Render any popups belonging to this toplevel above it (but below cursor).
+                    // Popups are separate wl_surfaces, not subsurfaces, so they won't appear in the
+                    // parent's SurfaceTree.
+                    for (popup_surface, popup_rect) in state.popup_rects_for_toplevel(*win) {
+                        if !popup_rect.overlaps(output_rect_global) {
+                            continue;
+                        }
+
+                        frame_roots.push(popup_surface.clone());
+
+                        with_surface_tree_downward(
+                            &popup_surface,
+                            (),
+                            |_, _, _| TraversalAction::DoChildren(()),
+                            |child_surface, child_states, _| {
+                                let data = child_states.data_map.get::<RendererSurfaceStateUserData>();
+                                let Some(data) = data else {
+                                    return;
+                                };
+                                if data.lock().unwrap().view().is_some() {
+                                    out.output.enter(child_surface);
+                                    visible_surfaces.insert(child_surface.downgrade());
+                                }
+                            },
+                            |_, _, _| true,
+                        );
+
+                        let (popup_off_x, popup_off_y) = with_states(&popup_surface, |states| {
+                            let mut cached = states.cached_state.get::<SurfaceCachedState>();
+                            cached
+                                .current()
+                                .geometry
+                                .map(|r| (r.loc.x, r.loc.y))
+                                .unwrap_or((0, 0))
+                        });
+
+                        let location: Point<i32, Physical> = (
+                            popup_rect.loc.x - ox - popup_off_x,
+                            popup_rect.loc.y - oy - popup_off_y,
+                        )
+                            .into();
+                        let tree = SurfaceTree::from_surface(&popup_surface);
+                        let popup_elements: Vec<KmsRenderElement> =
+                            AsRenderElements::<GlesRenderer>::render_elements(
+                                &tree,
+                                &mut self.renderer,
+                                location,
+                                scale,
+                                1.0,
+                            );
+                        elements.extend(popup_elements);
+                    }
+
+                    let win_rect = Rectangle::<i32, smithay::utils::Logical>::new(
+                        (geo.x, geo.y).into(),
+                        (geo.w as i32, geo.h as i32).into(),
+                    );
+                    if !win_rect.overlaps(output_rect_global) {
                         continue;
                     }
 
-                    frame_roots.push(popup_surface.clone());
+                    frame_roots.push(surface.clone());
 
                     with_surface_tree_downward(
-                        &popup_surface,
+                        &surface,
                         (),
                         |_, _, _| TraversalAction::DoChildren(()),
                         |child_surface, child_states, _| {
@@ -1117,22 +1243,13 @@ impl KmsState {
                         |_, _, _| true,
                     );
 
-                    let (popup_off_x, popup_off_y) = with_states(&popup_surface, |states| {
-                        let mut cached = states.cached_state.get::<SurfaceCachedState>();
-                        cached
-                            .current()
-                            .geometry
-                            .map(|r| (r.loc.x, r.loc.y))
-                            .unwrap_or((0, 0))
-                    });
-
                     let location: Point<i32, Physical> = (
-                        popup_rect.loc.x - ox - popup_off_x,
-                        popup_rect.loc.y - oy - popup_off_y,
+                        geo.x - ox - toplevel_off_x,
+                        geo.y - oy - toplevel_off_y,
                     )
                         .into();
-                    let tree = SurfaceTree::from_surface(&popup_surface);
-                    let popup_elements: Vec<KmsRenderElement<GlesRenderer>> =
+                    let tree = SurfaceTree::from_surface(&surface);
+                    let window_elements: Vec<KmsRenderElement> =
                         AsRenderElements::<GlesRenderer>::render_elements(
                             &tree,
                             &mut self.renderer,
@@ -1140,134 +1257,94 @@ impl KmsState {
                             scale,
                             1.0,
                         );
-                    elements.extend(popup_elements);
-                }
+                    elements.extend(window_elements);
 
-                let win_rect = Rectangle::<i32, smithay::utils::Logical>::new(
-                    (geo.x, geo.y).into(),
-                    (geo.w as i32, geo.h as i32).into(),
-                );
-                if !win_rect.overlaps(output_rect_global) {
-                    continue;
-                }
-
-                frame_roots.push(surface.clone());
-
-                with_surface_tree_downward(
-                    &surface,
-                    (),
-                    |_, _, _| TraversalAction::DoChildren(()),
-                    |child_surface, child_states, _| {
-                        let data = child_states.data_map.get::<RendererSurfaceStateUserData>();
-                        let Some(data) = data else {
-                            return;
-                        };
-                        if data.lock().unwrap().view().is_some() {
-                            out.output.enter(child_surface);
-                            visible_surfaces.insert(child_surface.downgrade());
-                        }
-                    },
-                    |_, _, _| true,
-                );
-
-                let location: Point<i32, Physical> = (
-                    geo.x - ox - toplevel_off_x,
-                    geo.y - oy - toplevel_off_y,
-                )
-                    .into();
-                let tree = SurfaceTree::from_surface(&surface);
-                let window_elements: Vec<KmsRenderElement<GlesRenderer>> =
-                    AsRenderElements::<GlesRenderer>::render_elements(
-                        &tree,
-                        &mut self.renderer,
-                        location,
-                        scale,
-                        1.0,
-                    );
-                elements.extend(window_elements);
-
-                // Render window borders (server-side decorations for tiling WM).
-                // The geometry `geo` represents the client content area. Borders are drawn
-                // outside this area. The full window extent is
-                //   (x - border, y - border, w + 2*border, h + 2*border).
-                // Borders are rendered behind the window surface (after it in the front-to-back
-                // element list) so the surface covers the inner area naturally.
-                if geo.border > 0 {
-                    let bw = geo.border as i32;
-                    let [cr, cg, cb, ca] = state
-                        .window_border_color
-                        .get(win)
-                        .copied()
-                        .unwrap_or([0.3, 0.3, 0.35, 1.0]);
-                    let border_color = smithay::backend::renderer::Color32F::new(cr, cg, cb, ca);
-
-                    // Draw as a single solid rect the size of the full window (content + borders),
-                    // placed behind the surface. The surface (already in the element list above)
-                    // will overdraw the inner area, leaving only the border visible.
-                    let full_geo: Rectangle<i32, Physical> = Rectangle::new(
-                        (geo.x - ox - bw, geo.y - oy - bw).into(),
-                        (geo.w as i32 + 2 * bw, geo.h as i32 + 2 * bw).into(),
-                    );
-                    elements.push(KmsRenderElement::Solid(SolidColorRenderElement::new(
-                        Id::new(),
-                        full_geo,
-                        0usize,
-                        border_color,
-                        Kind::Unspecified,
-                    )));
-                }
-            }
-
-            // Layer surfaces below normal windows.
-            {
-                let map = layer_map_for_output(&out.output);
-                for layer in [WlrLayer::Bottom, WlrLayer::Background] {
-                    for ls in map.layers_on(layer) {
-                        let Some(geo) = map.layer_geometry(ls) else {
-                            continue;
-                        };
-                        let rect_global = Rectangle::<i32, smithay::utils::Logical>::new(
-                            (ox + geo.loc.x, oy + geo.loc.y).into(),
-                            geo.size,
+                    // Render window borders (server-side decorations for tiling WM).
+                    if geo.border > 0 {
+                        let bw = geo.border as i32;
+                        let [cr, cg, cb, ca] = state
+                            .window_border_color
+                            .get(win)
+                            .copied()
+                            .unwrap_or([0.3, 0.3, 0.35, 1.0]);
+                        let border_color = smithay::backend::renderer::Color32F::new(cr, cg, cb, ca);
+                        let full_geo: Rectangle<i32, Physical> = Rectangle::new(
+                            (geo.x - ox - bw, geo.y - oy - bw).into(),
+                            (geo.w as i32 + 2 * bw, geo.h as i32 + 2 * bw).into(),
                         );
-                        if !rect_global.overlaps(output_rect_global) {
-                            continue;
-                        }
-
-                        let surface = ls.wl_surface().clone();
-                        frame_roots.push(surface.clone());
-
-                        with_surface_tree_downward(
-                            &surface,
-                            (),
-                            |_, _, _| TraversalAction::DoChildren(()),
-                            |child_surface, child_states, _| {
-                                let data =
-                                    child_states.data_map.get::<RendererSurfaceStateUserData>();
-                                let Some(data) = data else {
-                                    return;
-                                };
-                                if data.lock().unwrap().view().is_some() {
-                                    out.output.enter(child_surface);
-                                    visible_surfaces.insert(child_surface.downgrade());
-                                }
-                            },
-                            |_, _, _| true,
-                        );
-
-                        let location: Point<i32, Physical> = (geo.loc.x, geo.loc.y).into();
-                        let tree = SurfaceTree::from_surface(&surface);
-                        let layer_elements: Vec<KmsRenderElement<GlesRenderer>> =
-                            AsRenderElements::<GlesRenderer>::render_elements(
-                                &tree,
-                                &mut self.renderer,
-                                location,
-                                scale,
-                                1.0,
-                            );
-                        elements.extend(layer_elements);
+                        elements.push(KmsRenderElement::Solid(SolidColorRenderElement::new(
+                            Id::new(),
+                            full_geo,
+                            0usize,
+                            border_color,
+                            Kind::Unspecified,
+                        )));
                     }
                 }
+
+                // Layer surfaces below normal windows.
+                {
+                    let map = layer_map_for_output(&out.output);
+                    for layer in [WlrLayer::Bottom, WlrLayer::Background] {
+                        for ls in map.layers_on(layer) {
+                            let Some(geo) = map.layer_geometry(ls) else {
+                                continue;
+                            };
+                            let rect_global = Rectangle::<i32, smithay::utils::Logical>::new(
+                                (ox + geo.loc.x, oy + geo.loc.y).into(),
+                                geo.size,
+                            );
+                            if !rect_global.overlaps(output_rect_global) {
+                                continue;
+                            }
+
+                            let surface = ls.wl_surface().clone();
+                            frame_roots.push(surface.clone());
+
+                            with_surface_tree_downward(
+                                &surface,
+                                (),
+                                |_, _, _| TraversalAction::DoChildren(()),
+                                |child_surface, child_states, _| {
+                                    let data =
+                                        child_states.data_map.get::<RendererSurfaceStateUserData>();
+                                    let Some(data) = data else {
+                                        return;
+                                    };
+                                    if data.lock().unwrap().view().is_some() {
+                                        out.output.enter(child_surface);
+                                        visible_surfaces.insert(child_surface.downgrade());
+                                    }
+                                },
+                                |_, _, _| true,
+                            );
+
+                            let location: Point<i32, Physical> = (geo.loc.x, geo.loc.y).into();
+                            let tree = SurfaceTree::from_surface(&surface);
+                            let layer_elements: Vec<KmsRenderElement> =
+                                AsRenderElements::<GlesRenderer>::render_elements(
+                                    &tree,
+                                    &mut self.renderer,
+                                    location,
+                                    scale,
+                                    1.0,
+                                );
+                            elements.extend(layer_elements);
+                        }
+                    }
+                }
+
+                // Solid background LAST (back-most). Keep it opaque so we don't leak the previous
+                // framebuffer contents on tty (which can look like a solid blue screen).
+                let bg_geo = Rectangle::<i32, Physical>::from_size((out_w, out_h).into());
+                let bg = SolidColorRenderElement::new(
+                    self.background_id.clone(),
+                    bg_geo,
+                    0usize,
+                    smithay::backend::renderer::Color32F::new(0.1, 0.15, 0.25, 1.0),
+                    Kind::Unspecified,
+                );
+                elements.push(KmsRenderElement::Solid(bg));
             }
 
             for gone in out.surfaces_on_output.difference(&visible_surfaces) {
@@ -1277,20 +1354,7 @@ impl KmsState {
             }
             out.surfaces_on_output = visible_surfaces.clone();
             // Drop the `out` borrow so we can access other `self` fields below.
-            // drop(out);
             let _ = out;
-
-            // Solid background LAST (back-most). Keep it opaque so we don't leak the previous
-            // framebuffer contents on tty (which can look like a solid blue screen).
-            let bg_geo = Rectangle::<i32, Physical>::from_size((out_w, out_h).into());
-            let bg = SolidColorRenderElement::new(
-                self.background_id.clone(),
-                bg_geo,
-                0usize,
-                smithay::backend::renderer::Color32F::new(0.1, 0.15, 0.25, 1.0),
-                Kind::Unspecified,
-            );
-            elements.push(KmsRenderElement::Solid(bg));
 
             // ── Screenshot capture (offscreen render) ───────────────────────
             if out_idx == 0 {
