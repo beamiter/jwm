@@ -33,8 +33,8 @@ use smithay::backend::renderer::Renderer;
 use smithay::wayland::compositor::with_states;
 
 use smithay::backend::input::{
-    AbsolutePositionEvent, Event as InputEventExt, InputEvent, KeyboardKeyEvent, PointerButtonEvent,
-    PointerMotionEvent,
+    AbsolutePositionEvent, Axis, Event as InputEventExt, InputEvent, KeyboardKeyEvent,
+    PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
 };
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::session::libseat::LibSeatSession;
@@ -50,7 +50,7 @@ use smithay::reexports::wayland_server::{Display, DisplayHandle};
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER as SCOUNTER};
 use smithay::input::keyboard::{FilterResult, ModifiersState};
-use smithay::input::pointer::{ButtonEvent, MotionEvent};
+use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::desktop::layer_map_for_output;
 use smithay::wayland::shell::wlr_layer::{KeyboardInteractivity, Layer as WlrLayer};
@@ -1649,6 +1649,26 @@ impl UdevBackend {
                                         }
                                     }
                                 }
+                            }
+                        }
+                        InputEvent::PointerAxis { event, .. } => {
+                            let time = InputEventExt::time_msec(&event);
+                            if let Some(pointer) = state.seat.get_pointer() {
+                                let mut frame = AxisFrame::new(time).source(event.source());
+                                for axis in [Axis::Horizontal, Axis::Vertical] {
+                                    if let Some(val) = event.amount(axis) {
+                                        frame = frame.value(axis, val);
+                                    }
+                                    if let Some(v120) = event.amount_v120(axis) {
+                                        frame = frame.v120(axis, v120 as i32);
+                                    }
+                                    frame = frame.relative_direction(
+                                        axis,
+                                        event.relative_direction(axis),
+                                    );
+                                }
+                                pointer.axis(state, frame);
+                                pointer.frame(state);
                             }
                         }
                         _ => {}
