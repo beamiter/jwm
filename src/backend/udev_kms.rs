@@ -286,6 +286,19 @@ impl KmsState {
         self.outputs.first().map(|o| (o.mode_size.0 as u32, o.mode_size.1 as u32)).unwrap_or((1920, 1080))
     }
 
+    /// Get the total bounding box size covering all outputs.
+    pub(super) fn total_screen_size(&self) -> (u32, u32) {
+        let w = self.outputs.iter()
+            .map(|o| (o.origin.0 + o.mode_size.0).max(0) as u32)
+            .max()
+            .unwrap_or(1920);
+        let h = self.outputs.iter()
+            .map(|o| (o.origin.1 + o.mode_size.1).max(0) as u32)
+            .max()
+            .unwrap_or(1080);
+        (w, h)
+    }
+
     /// Run a closure with access to the raw GL context
     pub(super) fn with_renderer<F, R>(&mut self, f: F) -> Result<R, smithay::backend::renderer::gles::GlesError>
     where
@@ -1123,14 +1136,19 @@ impl KmsState {
                 let output_tex = unsafe {
                     GlesTexture::from_raw(&self.renderer, Some(gl_ffi::RGBA8), false, tex_id, size)
                 };
+                // Keep Arc refcount permanently >0 so Smithay's Drop never calls glDeleteTextures
+                // on the compositor's owned FBO texture.
+                std::mem::forget(output_tex.clone());
                 let context_id = self.renderer.context_id();
+                // Position is output-relative: subtract the output's global origin so each
+                // output sees the correct slice of the single full-screen FBO.
                 let elem = TextureRenderElement::from_static_texture(
                     Id::new(),
                     context_id,
-                    (0.0f64, 0.0f64),
+                    ((-ox) as f64, (-oy) as f64),
                     output_tex,
                     1,
-                    Transform::Normal,
+                    Transform::Flipped180,
                     None,
                     None,
                     None,

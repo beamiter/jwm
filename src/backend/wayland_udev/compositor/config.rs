@@ -249,7 +249,7 @@ impl WaylandCompositor {
             y_inverted: false,
             fade_opacity: 0.0, // starts fading in
             fading_out: false,
-            anim_scale: 0.9,
+            anim_scale: 1.0,
             anim_scale_target: 1.0,
             wobbly: None,
             motion_trail: std::collections::VecDeque::new(),
@@ -263,7 +263,7 @@ impl WaylandCompositor {
             is_frosted: false,
             class_name: String::new(),
             ripple_progress: 0.0,
-            ripple_active: true, // ripple on open
+            ripple_active: false,
         });
         self.needs_render = true;
     }
@@ -280,15 +280,37 @@ impl WaylandCompositor {
         self.needs_render = true;
     }
 
-    /// Update window texture info
+    /// Update window texture info, auto-creating the entry if not yet present
     pub(crate) fn update_window_texture(&mut self, window_id: u64, tex_id: u32, w: u32, h: u32, has_alpha: bool, y_inverted: bool) {
-        if let Some(win) = self.windows.get_mut(&window_id) {
-            win.gl_texture = Some(tex_id);
-            win.width = w;
-            win.height = h;
-            win.has_alpha = has_alpha;
-            win.y_inverted = y_inverted;
-        }
+        let win = self.windows.entry(window_id).or_insert_with(|| WindowState {
+            gl_texture: None,
+            width: 0,
+            height: 0,
+            has_alpha: false,
+            y_inverted: false,
+            fade_opacity: 0.0,
+            fading_out: false,
+            anim_scale: 1.0,
+            anim_scale_target: 1.0,
+            wobbly: None,
+            motion_trail: std::collections::VecDeque::new(),
+            opacity_override: None,
+            corner_radius_override: None,
+            frame_extents: [0; 4],
+            is_shaped: false,
+            is_fullscreen: false,
+            is_urgent: false,
+            is_pip: false,
+            is_frosted: false,
+            class_name: String::new(),
+            ripple_progress: 0.0,
+            ripple_active: false,
+        });
+        win.gl_texture = Some(tex_id);
+        win.width = w;
+        win.height = h;
+        win.has_alpha = has_alpha;
+        win.y_inverted = y_inverted;
         self.needs_render = true;
     }
 

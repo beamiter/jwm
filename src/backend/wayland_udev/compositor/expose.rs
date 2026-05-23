@@ -72,7 +72,7 @@ impl WaylandCompositor {
                 gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
 
                 gl.ActiveTexture(ffi::TEXTURE0);
-                gl.BindTexture(ffi::TEXTURE_2D, tex);
+                self.bind_window_texture(gl, tex);
                 gl.Uniform1i(self.win_uniforms.texture, 0);
 
                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);

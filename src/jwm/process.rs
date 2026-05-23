@@ -68,12 +68,22 @@ impl Jwm {
                 command.env("QT_IM_MODULE", "none");
                 command.env("XMODIFIERS", "");
             }
-            // In unprivileged DRM sessions GTK4's GDK Wayland backend binds
-            // zwp_linux_dmabuf_v1 and sends get_default_feedback() — a path
-            // independent of GL that hangs when the compositor can't respond
-            // with valid dmabuf feedback without DRM master.  Disabling gl,
-            // vulkan, and dmabuf forces pure wl_shm buffer allocation.
-            command.env("GDK_DISABLE", "gl,vulkan,dmabuf");
+            // In unprivileged DRM sessions the GTK4 GSK GL renderer uses EGL
+            // to render into wl_egl_window buffers (DMA-buf or wl_drm), but
+            // jwm in nested/unprivileged mode can't complete the DMA-buf
+            // feedback exchange, so those buffers contain zero pixels (black).
+            // GSK_RENDERER=cairo forces CPU Cairo rendering into plain wl_shm
+            // buffers which always contain correct content regardless of DRM
+            // master status.  Disable vulkan+dmabuf to prevent feedback hangs.
+            // NOTE: GDK_DISABLE=gl was added in GTK 4.14; for GTK 4.6 the
+            // only reliable way to bypass the GL renderer is GSK_RENDERER=cairo.
+            command.env("GSK_RENDERER", "cairo");
+            command.env("GDK_DISABLE", "vulkan,dmabuf");
+            // GTK3 apps (e.g. terminator/VTE) may use GL via wl_egl_window which
+            // also produces DMA-buf buffers with zero pixels in unprivileged mode.
+            // GDK_GL=disable turns off the GL renderer in GTK3 so it falls back
+            // to Cairo wl_shm, which always has correct pixel content.
+            command.env("GDK_GL", "disable");
         }
     }
 

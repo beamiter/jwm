@@ -29,7 +29,7 @@ use drm::control::{connector, Device as ControlDevice, ModeTypeFlags};
 
 use smithay::backend::renderer::gles::GlesTexture;
 use smithay::backend::renderer::utils::{import_surface_tree, RendererSurfaceStateUserData};
-use smithay::backend::renderer::Renderer;
+use smithay::backend::renderer::{buffer_type, BufferType, Renderer};
 use smithay::wayland::compositor::with_states;
 
 use smithay::backend::input::{
@@ -2085,7 +2085,7 @@ impl Backend for UdevBackend {
         if enabled && self.compositor.is_none() {
             if let Some(kms) = &self.kms {
                 let mut kms_ref = kms.borrow_mut();
-                let (w, h) = kms_ref.primary_output_size();
+                let (w, h) = kms_ref.total_screen_size();
                 match kms_ref.with_renderer(|gl| {
                     unsafe { WaylandCompositor::new(gl, w, h) }
                 }) {
@@ -2122,43 +2122,90 @@ impl Backend for UdevBackend {
         }
 
         // Phase 1: Import surface textures into GL cache (borrow kms only, no compositor borrow).
-        let mut tex_updates: Vec<(u64, u32, u32, u32)> = Vec::new();
+        let mut tex_updates: Vec<(u64, u32, u32, u32, bool)> = Vec::new();
+        // Rate-limit diagnostic logging: log at most once per second.
+        static LAST_CRF_LOG: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        let crf_now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let crf_log_this = !scene.is_empty() && {
+            let prev = LAST_CRF_LOG.load(std::sync::atomic::Ordering::Relaxed);
+            if crf_now_secs > prev {
+                LAST_CRF_LOG.store(crf_now_secs, std::sync::atomic::Ordering::Relaxed);
+                true
+            } else {
+                false
+            }
+        };
+
         if let Some(kms) = &self.kms {
             let mut kms_ref = kms.borrow_mut();
             for &(win_id, _, _, w, h) in scene {
                 let win = crate::backend::common_define::WindowId::from_raw(win_id);
-                if let Some(surface) = self.state.surface_for_window(win) {
+                let surface_opt = self.state.surface_for_window(win);
+                if crf_log_this {
+                    log::info!("[crf] win={win_id:#x} surface={} size={w}x{h}", surface_opt.is_some());
+                }
+                if let Some(surface) = surface_opt {
                     let tid = kms_ref.with_gles_renderer(|renderer| {
-                        let _ = import_surface_tree(renderer, &surface);
+                        let import_result = import_surface_tree(renderer, &surface);
                         let ctx_id = renderer.context_id();
-                        with_states(&surface, |states| {
-                            states
-                                .data_map
-                                .get::<RendererSurfaceStateUserData>()
-                                .and_then(|d| {
-                                    d.lock()
-                                        .unwrap()
-                                        .texture::<GlesTexture>(ctx_id)
-                                        .map(|t| t.tex_id())
-                                })
-                        })
+                        let tex = with_states(&surface, |states| {
+                            let rsd = states.data_map.get::<RendererSurfaceStateUserData>();
+                            let (has_buf, buf_type_str) = rsd.as_ref().map(|d| {
+                                let locked = d.lock().unwrap();
+                                let buf = locked.buffer();
+                                let has_buf = buf.is_some();
+                                let type_str = buf.and_then(|b| buffer_type(&**b))
+                                    .map(|t| match t {
+                                        BufferType::Shm => "shm",
+                                        BufferType::Dma => "dma",
+                                        BufferType::Egl => "egl",
+                                        BufferType::SinglePixel => "single",
+                                        _ => "other",
+                                    })
+                                    .unwrap_or("unknown");
+                                (has_buf, type_str)
+                            }).unwrap_or((false, "no_rsd"));
+                            let tex_info = rsd.and_then(|d| {
+                                let locked = d.lock().unwrap();
+                                locked.texture::<GlesTexture>(ctx_id)
+                                    .map(|t| (t.tex_id(), t.is_y_inverted()))
+                            });
+                            if crf_log_this {
+                                log::info!("[crf] win={win_id:#x} import_ok={} has_buf={has_buf} buf={buf_type_str} tex={:?} y_inv={:?}",
+                                    import_result.is_ok(),
+                                    tex_info.map(|(id, _)| id),
+                                    tex_info.map(|(_, yi)| yi));
+                            }
+                            tex_info
+                        });
+                        tex
                     });
-                    if let Some(tid) = tid {
-                        tex_updates.push((win_id, tid, w, h));
+                    if let Some((tid, y_inverted)) = tid {
+                        tex_updates.push((win_id, tid, w, h, y_inverted));
                     }
                 }
             }
         }
+        if crf_log_this || (!scene.is_empty() && tex_updates.len() != scene.len()) {
+            log::info!("[crf] tex_updates={} scene={}", tex_updates.len(), scene.len());
+        }
 
         // Phase 2: Update compositor window textures then render into FBO.
         if let (Some(compositor), Some(kms)) = (&mut self.compositor, &self.kms) {
-            for (win_id, tid, w, h) in tex_updates {
-                compositor.update_window_texture(win_id, tid, w, h, true, false);
+            for (win_id, tid, w, h, y_inverted) in tex_updates {
+                compositor.update_window_texture(win_id, tid, w, h, true, y_inverted);
             }
             let rendered = kms
                 .borrow_mut()
                 .with_renderer(|gl| compositor.render_frame(gl, scene, focused_window))
                 .unwrap_or(false);
+            if crf_log_this {
+                log::info!("[crf] render_frame returned {rendered}");
+            }
             if rendered {
                 kms.borrow_mut().request_render();
             }
@@ -2354,6 +2401,18 @@ impl Backend for UdevBackend {
     }
 
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError> {
+        // Initialize compositor from config if KMS is ready and compositor not yet created.
+        if self.kms.is_some() && self.compositor.is_none() {
+            let wanted = crate::config::CONFIG.load().compositor_enabled();
+            if wanted {
+                match self.set_compositor_enabled(true) {
+                    Ok(true) => log::info!("[run] Compositor initialized from config"),
+                    Ok(false) => log::warn!("[run] Compositor wanted but set_compositor_enabled returned false (KMS not ready?)"),
+                    Err(e) => log::warn!("[run] Failed to initialize compositor: {e}"),
+                }
+            }
+        }
+
         loop {
             let mut handled_any = false;
             loop {
@@ -2365,10 +2424,6 @@ impl Backend for UdevBackend {
                     }
                     None => break,
                 }
-            }
-
-            if handled_any || handler.needs_tick() {
-                handler.update(self)?;
             }
 
             self.maybe_reinit_kms();
@@ -2383,6 +2438,19 @@ impl Backend for UdevBackend {
             if cursor_dirty {
                 self.state.needs_redraw = true;
                 self.request_flush();
+            }
+
+            // Mark compositor dirty BEFORE handler.update() so that
+            // tick_animations → compositor_render_frame sees needs_render = true.
+            let needs_redraw = self.state.needs_redraw;
+            if needs_redraw {
+                if let Some(c) = self.compositor.as_mut() {
+                    c.force_full_redraw();
+                }
+            }
+
+            if handled_any || handler.needs_tick() || needs_redraw {
+                handler.update(self)?;
             }
 
             let mut had_redraw = false;

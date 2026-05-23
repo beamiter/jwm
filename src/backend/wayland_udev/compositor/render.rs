@@ -14,6 +14,16 @@ impl WaylandCompositor {
         }
     }
 
+    pub(super) fn bind_window_texture(&self, gl: &ffi::Gles2, texture: u32) {
+        unsafe {
+            gl.BindTexture(ffi::TEXTURE_2D, texture);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_S, ffi::CLAMP_TO_EDGE as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_T, ffi::CLAMP_TO_EDGE as i32);
+        }
+    }
+
     // =========================================================================
     // Helper: set a vec4 uniform (u_rect, etc.)
     // =========================================================================
@@ -112,7 +122,37 @@ impl WaylandCompositor {
         if !self.needs_render && !force_render && !has_dirty {
             return false;
         }
-        self.needs_render = false;
+        // If animations are still running, keep the flag set so the next
+        // tick_animations call re-invokes compositor_render_frame automatically.
+        self.needs_render = any_animating || self.has_active_animations();
+
+        // Rate-limited diagnostic logging (once per second when scene is non-empty)
+        static LAST_RF_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let rf_log_this = !scene.is_empty() && {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let prev = LAST_RF_LOG.load(std::sync::atomic::Ordering::Relaxed);
+            if now > prev {
+                LAST_RF_LOG.store(now, std::sync::atomic::Ordering::Relaxed);
+                true
+            } else {
+                false
+            }
+        };
+        if rf_log_this {
+            log::info!("[rf] windows={} scene={} force={force_render} dirty={has_dirty}",
+                self.windows.len(), scene.len());
+            for &(win_id, x, y, w, h) in scene {
+                if let Some(ws) = self.windows.get(&win_id) {
+                    log::info!("[rf] win={win_id:#x} tex={:?} fade={:.3} pos=({x},{y}) size={w}x{h} y_inv={}",
+                        ws.gl_texture, ws.fade_opacity, ws.y_inverted);
+                } else {
+                    log::info!("[rf] win={win_id:#x} NOT in compositor.windows pos=({x},{y}) size={w}x{h}");
+                }
+            }
+        }
 
         // =================================================================
         // 3. Setup projection matrix
@@ -400,7 +440,7 @@ impl WaylandCompositor {
                     gl.Uniform1i(self.wobbly_uniforms.grid_n, grid_n);
 
                     gl.ActiveTexture(ffi::TEXTURE0);
-                    gl.BindTexture(ffi::TEXTURE_2D, texture);
+                    self.bind_window_texture(gl, texture);
                     // Grid: (grid_n-1)^2 quads, 6 verts each
                     let quads = grid_n - 1;
                     gl.DrawArrays(ffi::TRIANGLES, 0, quads * quads * 6);
@@ -444,7 +484,7 @@ impl WaylandCompositor {
                     gl.Uniform2f(self.tilt_uniforms.light_dir, 0.0, -1.0);
 
                     gl.ActiveTexture(ffi::TEXTURE0);
-                    gl.BindTexture(ffi::TEXTURE_2D, texture);
+                    self.bind_window_texture(gl, texture);
                     // Grid: grid^2 quads, 6 verts each
                     gl.DrawArrays(ffi::TRIANGLES, 0, grid * grid * 6);
 
@@ -481,7 +521,7 @@ impl WaylandCompositor {
                     }
 
                     gl.ActiveTexture(ffi::TEXTURE0);
-                    gl.BindTexture(ffi::TEXTURE_2D, texture);
+                    self.bind_window_texture(gl, texture);
                     gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
 
                     // Reset ripple
@@ -751,7 +791,32 @@ impl WaylandCompositor {
         }
 
         // =================================================================
-        // 19. Finalize - unbind FBO
+        // 19. Read back a sample pixel from each window to diagnose content
+        // =================================================================
+        if rf_log_this {
+            unsafe {
+                // FBO is still bound; read one pixel from the center of each window.
+                for &(win_id, x, y, w, h) in scene {
+                    let px = (x + w as i32 / 2).max(0).min(self.screen_w as i32 - 1);
+                    // GL FBO y=0 is at screen bottom; our proj has screen_y=0 at top.
+                    // Convert screen_y → GL FBO y: gl_y = screen_h - screen_y - 1
+                    let screen_cy = y + h as i32 / 2;
+                    let gl_py = (self.screen_h as i32 - screen_cy - 1).max(0);
+                    let mut pixel = [0u8; 4];
+                    gl.ReadPixels(
+                        px, gl_py, 1, 1,
+                        ffi::RGBA,
+                        ffi::UNSIGNED_BYTE,
+                        pixel.as_mut_ptr() as *mut _,
+                    );
+                    log::info!("[rf] pixel win={win_id:#x} screen=({px},{screen_cy}) fbo=({px},{gl_py}) rgba=({},{},{},{})",
+                        pixel[0], pixel[1], pixel[2], pixel[3]);
+                }
+            }
+        }
+
+        // =================================================================
+        // 20. Finalize - unbind FBO
         // =================================================================
         unsafe {
             gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
