@@ -105,7 +105,7 @@ pub(super) struct KmsState {
     gbm: GbmDevice<DrmDeviceFd>,
     renderer: GlesRenderer,
 
-    needs_render: bool,
+    pub(super) needs_render: bool,
     background_id: Id,
 
     cursor_theme: CursorTheme,
@@ -956,9 +956,11 @@ impl KmsState {
             return;
         }
 
+        let mut any_skipped = false;
         for out_idx in 0..self.outputs.len() {
             let frame_pending = self.outputs[out_idx].frame_pending;
             if frame_pending {
+                any_skipped = true;
                 continue;
             }
 
@@ -1461,7 +1463,9 @@ impl KmsState {
             }
         }
 
-        self.needs_render = false;
+        if !any_skipped {
+            self.needs_render = false;
+        }
 
         // Rendering can enqueue Wayland events (enter/leave, etc.).
         if !self.flush_pending.swap(true, Ordering::SeqCst) {

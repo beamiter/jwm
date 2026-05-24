@@ -778,34 +778,6 @@ impl WaylandCompositor {
         }
 
         // =================================================================
-        // 19. Read back a sample pixel from each window to diagnose content
-        // =================================================================
-        if rf_log_this {
-            unsafe {
-                // FBO is still bound; read one pixel from the center of each window.
-                for &(win_id, x, y, w, h) in scene {
-                    let px = (x + w as i32 / 2).max(0).min(self.screen_w as i32 - 1);
-                    // GL FBO y=0 is at screen bottom; our proj has screen_y=0 at top.
-                    // Convert screen_y → GL FBO y: gl_y = screen_h - screen_y - 1
-                    let screen_cy = y + h as i32 / 2;
-                    let gl_py = (self.screen_h as i32 - screen_cy - 1).max(0);
-                    let mut pixel = [0u8; 4];
-                    gl.ReadPixels(
-                        px,
-                        gl_py,
-                        1,
-                        1,
-                        ffi::RGBA,
-                        ffi::UNSIGNED_BYTE,
-                        pixel.as_mut_ptr() as *mut _,
-                    );
-                    log::info!("[rf] pixel win={win_id:#x} screen=({px},{screen_cy}) fbo=({px},{gl_py}) rgba=({},{},{},{})",
-                        pixel[0], pixel[1], pixel[2], pixel[3]);
-                }
-            }
-        }
-
-        // =================================================================
         // 20. Finalize - unbind FBO
         // =================================================================
         unsafe {

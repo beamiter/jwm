@@ -303,27 +303,11 @@ impl WindowOps for WaylandWindowOps {
                         border,
                     },
                 );
-                let in_flight = state.configure_in_flight.contains(&win);
-                let should_track = if let Some(toplevel) = state.try_lookup_toplevel(win) {
+                if let Some(toplevel) = state.try_lookup_toplevel(win) {
                     toplevel.with_pending_state(|s| {
                         s.size = Some((w as i32, h as i32).into());
                     });
-                    if in_flight {
-                        // A configure is already in-flight; just record the latest desired size.
-                        false
-                    } else {
-                        toplevel.send_pending_configure();
-                        true
-                    }
-                } else {
-                    false
-                };
-                // Borrow released — now safe to mutate configure_in_flight / pending_configure_size.
-                if in_flight {
-                    state.pending_configure_size.insert(win, (w, h));
-                } else if should_track {
-                    state.configure_in_flight.insert(win);
-                    state.pending_configure_size.remove(&win);
+                    toplevel.send_pending_configure();
                 }
                 if let Some(x11) = state.x11_surfaces.get(&win) {
                     let bw = border as i32;
@@ -2672,9 +2656,10 @@ impl Backend for UdevBackend {
             // allow queued calloop sources (notably Wayland flush) to run.
             let has_pending_events = !self.pending_events.lock().unwrap().is_empty();
             let needs_tick = handler.needs_tick();
+            let kms_pending = self.kms.as_ref().map_or(false, |k| k.borrow().needs_render);
             let timeout = if has_pending_events || handled_any || had_redraw {
                 Some(std::time::Duration::ZERO)
-            } else if needs_tick {
+            } else if needs_tick || kms_pending {
                 Some(std::time::Duration::from_millis(16))
             } else {
                 None

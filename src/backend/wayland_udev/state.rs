@@ -146,14 +146,6 @@ pub struct JwmWaylandState {
     /// Per-window border color (ARGB, used for server-side decoration in tiling WM).
     pub window_border_color: HashMap<WindowId, [f32; 4]>,
 
-    /// Toplevels that have received a configure but haven't committed a matching buffer yet.
-    /// Used to throttle configure floods during rapid resize operations (e.g. alt+j/k key repeat).
-    pub configure_in_flight: HashSet<WindowId>,
-
-    /// Latest desired size for a window whose configure is currently in-flight.
-    /// Sent to the client once it commits the current in-flight configure.
-    pub pending_configure_size: HashMap<WindowId, (u32, u32)>,
-
     /// Shared queue for pending wlr-screencopy copy requests (filled by screencopy Dispatch,
     /// drained during KMS render).
     pub screencopy_pending: Option<crate::backend::wayland_udev::screencopy::PendingScreencopyQueue>,
@@ -779,9 +771,6 @@ impl JwmWaylandState {
 
                 window_border_color: HashMap::new(),
 
-                configure_in_flight: HashSet::new(),
-                pending_configure_size: HashMap::new(),
-
                 screencopy_pending: Some(screencopy_pending),
             },
             socket_name,
@@ -1227,20 +1216,6 @@ impl CompositorHandler for JwmWaylandState {
 
                         self.push_event(BackendEvent::WindowMapped(win));
                     }
-                    // Client committed a new buffer — the in-flight configure has been
-                    // processed.  If a newer geometry arrived while it was in-flight,
-                    // send it now so the client reaches the final desired size.
-                    if self.configure_in_flight.remove(&win) {
-                        if let Some((pw, ph)) = self.pending_configure_size.remove(&win) {
-                            if let Some(toplevel) = self.toplevels.get(&win).cloned() {
-                                toplevel.with_pending_state(|s| {
-                                    s.size = Some((pw as i32, ph as i32).into());
-                                });
-                                toplevel.send_pending_configure();
-                                self.configure_in_flight.insert(win);
-                            }
-                        }
-                    }
                     self.needs_redraw = true;
                 }
                 BufferState::Removed => {
@@ -1361,8 +1336,6 @@ impl CompositorHandler for JwmWaylandState {
 
             self.toplevels.remove(&win);
             self.pending_initial_configure.remove(&win);
-            self.configure_in_flight.remove(&win);
-            self.pending_configure_size.remove(&win);
             self.window_geometry.remove(&win);
             self.window_stack.retain(|w| *w != win);
             self.mapped_windows.remove(&win);
