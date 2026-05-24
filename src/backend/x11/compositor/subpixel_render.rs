@@ -249,6 +249,7 @@ pub struct SubpixelRenderManager {
     /// Color fringing correction
     color_correction: Arc<std::sync::Mutex<ColorFringeCorrection>>,
     /// Global subpixel mode
+    #[allow(dead_code)]
     global_mode: SubpixelMode,
     /// Enable subpixel rendering
     enabled: Arc<AtomicBool>,
@@ -258,6 +259,7 @@ pub struct SubpixelRenderManager {
     /// Per-window blur strength tracking
     blur_strength: HashMap<u32, f32>,
     /// Last update time for statistics
+    #[allow(dead_code)]
     last_update_ns: u64,
 }
 

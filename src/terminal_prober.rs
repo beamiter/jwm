@@ -4,6 +4,107 @@ use std::env;
 use std::process::Command;
 use std::sync::RwLock;
 
+// ---------------------------------------------------------------------------
+// Session type detection
+// ---------------------------------------------------------------------------
+
+/// Returns true if running in a Wayland session (no X11 display available).
+/// Used by both terminal and launcher probers to pick the right tool set.
+pub fn is_wayland_session() -> bool {
+    let has_wayland = env::var("WAYLAND_DISPLAY").is_ok()
+        || env::var("XDG_SESSION_TYPE")
+            .map(|v| v.eq_ignore_ascii_case("wayland"))
+            .unwrap_or(false);
+    let has_display = env::var("DISPLAY").is_ok();
+    // Pure Wayland: WAYLAND_DISPLAY set and no X11 DISPLAY (or explicitly wayland type)
+    has_wayland && !has_display
+        || env::var("XDG_SESSION_TYPE")
+            .map(|v| v.eq_ignore_ascii_case("wayland"))
+            .unwrap_or(false)
+}
+
+// ---------------------------------------------------------------------------
+// Launcher prober (for Alt+r / dmenu-like spawn)
+// ---------------------------------------------------------------------------
+
+pub struct LauncherProber {
+    /// Ordered list of (binary, extra_args) to try in Wayland sessions.
+    wayland_candidates: Vec<(&'static str, Vec<&'static str>)>,
+    /// Ordered list of (binary, extra_args) to try in X11 sessions.
+    x11_candidates: Vec<(&'static str, Vec<&'static str>)>,
+    cache: RwLock<HashMap<String, bool>>,
+}
+
+impl LauncherProber {
+    fn new() -> Self {
+        Self {
+            wayland_candidates: vec![
+                ("fuzzel", vec![]),
+                ("wofi",   vec!["--show", "run"]),
+                ("tofi-run", vec![]),
+                ("tofi",   vec!["--prompt", "run: "]),
+                ("bemenu-run", vec![]),
+                // rofi with wayland backend works via -display-backend wayland
+                ("rofi",   vec!["-show", "run"]),
+                // last resort: dmenu_run via XWayland
+                ("dmenu_run", vec![]),
+            ],
+            x11_candidates: vec![
+                ("dmenu_run", vec![]),
+                ("rofi",      vec!["-show", "run"]),
+                ("gmrun",     vec![]),
+                ("xfce4-appfinder", vec!["--collapsed"]),
+                // Wayland-native launchers still work on X11 if installed
+                ("fuzzel",    vec![]),
+                ("wofi",      vec!["--show", "run"]),
+            ],
+            cache: RwLock::new(HashMap::new()),
+        }
+    }
+
+    fn is_command_available(&self, cmd: &str) -> bool {
+        {
+            let r = self.cache.read().unwrap();
+            if let Some(&v) = r.get(cmd) {
+                return v;
+            }
+        }
+        let result = Command::new("which")
+            .arg(cmd)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        self.cache.write().unwrap().insert(cmd.to_string(), result);
+        result
+    }
+
+    /// Probe for an available launcher and return it as a ready-to-spawn argv.
+    /// Falls back to `["dmenu_run"]` if nothing is found.
+    pub fn probe_launcher(&self) -> Vec<String> {
+        let candidates = if is_wayland_session() {
+            &self.wayland_candidates
+        } else {
+            &self.x11_candidates
+        };
+        for (bin, args) in candidates {
+            if self.is_command_available(bin) {
+                log::debug!("[LauncherProber] selected launcher: {}", bin);
+                let mut cmd = vec![bin.to_string()];
+                cmd.extend(args.iter().map(|a| a.to_string()));
+                return cmd;
+            }
+        }
+        log::warn!("[LauncherProber] no launcher found, falling back to dmenu_run");
+        vec!["dmenu_run".to_string()]
+    }
+
+    pub fn clear_cache(&self) {
+        self.cache.write().unwrap().clear();
+    }
+}
+
+pub static LAUNCHER_PROBER: Lazy<LauncherProber> = Lazy::new(LauncherProber::new);
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct TerminalConfig {
@@ -143,13 +244,7 @@ impl AdvancedTerminalProber {
         // Choose priority based on session hints.
         // - In udev/DRM (Wayland compositor) sessions, X11 terminals often won't show.
         // - In X11 sessions, Warp/Terminator/Gnome-terminal are usually fine.
-        let is_wayland = env::var("WAYLAND_DISPLAY").is_ok()
-            || env::var("XDG_SESSION_TYPE")
-                .map(|v| v.eq_ignore_ascii_case("wayland"))
-                .unwrap_or(false);
-        let has_display = env::var("DISPLAY").is_ok();
-
-        let priority_order = if is_wayland && !has_display {
+        let priority_order = if is_wayland_session() {
             vec![
                 "terminal_emulator".to_string(),
                 "jterm4".to_string(),

@@ -38,6 +38,7 @@ impl WindowFenceState {
         if let Some(fence) = self.fence {
             // Query fence status without blocking
             // GL_SIGNALED = 0x9119, GL_UNSIGNALED = 0x9118
+            #[allow(dead_code)]
             const GL_SIGNALED: u32 = 0x9119;
 
             // Use glGetSynciv to check status (non-blocking)

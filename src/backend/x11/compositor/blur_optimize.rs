@@ -48,7 +48,7 @@ impl AdaptiveBlur {
     }
 
     /// Get current blur quality
-    pub fn quality(&self) -> BlurQuality {
+    pub(crate) fn quality(&self) -> BlurQuality {
         self.quality
             .lock()
             .ok()
@@ -62,7 +62,7 @@ impl AdaptiveBlur {
     }
 
     /// Force a specific quality level
-    pub fn set_quality(&self, quality: BlurQuality) {
+    pub(crate) fn set_quality(&self, quality: BlurQuality) {
         if let Ok(mut q) = self.quality.lock() {
             if *q != quality {
                 log::info!(

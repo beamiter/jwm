@@ -49,6 +49,7 @@ impl WaylandCompositor {
     }
 
     /// Mark as needing render if there are active animations
+    #[allow(dead_code)]
     pub(crate) fn schedule_animation_frame(&mut self) {
         if self.has_active_animations() {
             self.needs_render = true;

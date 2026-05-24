@@ -8,6 +8,7 @@ impl WaylandCompositor {
     // Helper: draw a fullscreen quad (uses gl_VertexID in the vertex shader)
     // =========================================================================
 
+    #[allow(dead_code)]
     fn draw_quad(&self, gl: &ffi::Gles2) {
         unsafe {
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
@@ -19,8 +20,16 @@ impl WaylandCompositor {
             gl.BindTexture(ffi::TEXTURE_2D, texture);
             gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
             gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
-            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_S, ffi::CLAMP_TO_EDGE as i32);
-            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_T, ffi::CLAMP_TO_EDGE as i32);
+            gl.TexParameteri(
+                ffi::TEXTURE_2D,
+                ffi::TEXTURE_WRAP_S,
+                ffi::CLAMP_TO_EDGE as i32,
+            );
+            gl.TexParameteri(
+                ffi::TEXTURE_2D,
+                ffi::TEXTURE_WRAP_T,
+                ffi::CLAMP_TO_EDGE as i32,
+            );
         }
     }
 
@@ -109,7 +118,7 @@ impl WaylandCompositor {
         let force_render = any_animating
             || self.postprocess_active
             || self.debug_hud_enabled
-            || self.edge_glow_active;
+            || (self.edge_glow_enabled && self.edge_glow_active);
 
         // Check if any window texture has been updated
         let has_dirty = scene.iter().any(|&(win_id, _, _, _, _)| {
@@ -142,14 +151,19 @@ impl WaylandCompositor {
             }
         };
         if rf_log_this {
-            log::info!("[rf] windows={} scene={} force={force_render} dirty={has_dirty}",
-                self.windows.len(), scene.len());
+            log::info!(
+                "[rf] windows={} scene={} force={force_render} dirty={has_dirty}",
+                self.windows.len(),
+                scene.len()
+            );
             for &(win_id, x, y, w, h) in scene {
                 if let Some(ws) = self.windows.get(&win_id) {
                     log::info!("[rf] win={win_id:#x} tex={:?} fade={:.3} pos=({x},{y}) size={w}x{h} y_inv={}",
                         ws.gl_texture, ws.fade_opacity, ws.y_inverted);
                 } else {
-                    log::info!("[rf] win={win_id:#x} NOT in compositor.windows pos=({x},{y}) size={w}x{h}");
+                    log::info!(
+                        "[rf] win={win_id:#x} NOT in compositor.windows pos=({x},{y}) size={w}x{h}"
+                    );
                 }
             }
         }
@@ -186,10 +200,7 @@ impl WaylandCompositor {
             let sh = self.screen_h as i32;
             for i in (0..scene.len()).rev() {
                 let (win_id, x, y, w, h) = scene[i];
-                let is_alpha = self
-                    .windows
-                    .get(&win_id)
-                    .map_or(true, |ws| ws.has_alpha);
+                let is_alpha = self.windows.get(&win_id).map_or(true, |ws| ws.has_alpha);
                 let has_fade = self
                     .windows
                     .get(&win_id)
@@ -242,18 +253,10 @@ impl WaylandCompositor {
                         continue;
                     }
 
-                    gl.Uniform4f(
-                        self.shadow_uniforms.shadow_color,
-                        sr,
-                        sg,
-                        sb,
-                        sa_faded,
-                    );
+                    gl.Uniform4f(self.shadow_uniforms.shadow_color, sr, sg, sb, sa_faded);
 
                     // Per-window corner radius
-                    let win_radius = wt
-                        .corner_radius_override
-                        .unwrap_or(self.corner_radius);
+                    let win_radius = wt.corner_radius_override.unwrap_or(self.corner_radius);
                     gl.Uniform1f(self.shadow_uniforms.radius, win_radius);
 
                     // Shadow rect: expanded by spread + offset
@@ -277,9 +280,7 @@ impl WaylandCompositor {
         // 8. Blur pass (for frosted/translucent windows)
         // =================================================================
         let has_frosted = visible_scene.iter().any(|&(win_id, _, _, _, _)| {
-            self.windows
-                .get(&win_id)
-                .map_or(false, |ws| ws.is_frosted)
+            self.windows.get(&win_id).map_or(false, |ws| ws.is_frosted)
         });
 
         if self.blur_enabled && has_frosted && !self.blur_fbos.is_empty() {
@@ -337,10 +338,22 @@ impl WaylandCompositor {
                     self.inactive_opacity
                 };
                 let rule_opacity = wt.opacity_override.unwrap_or(base_opacity);
-                let opacity = (rule_opacity * fade).clamp(0.0, 1.0);
+                let has_explicit_transparency = wt.opacity_override.map_or(false, |o| o < 1.0);
 
                 // --- Compute dim factor ---
-                let dim = if is_focused { 1.0 } else { self.inactive_dim };
+                let inactive_dim_factor = if is_focused { 1.0 } else { self.inactive_dim };
+                let dim = if wt.has_alpha {
+                    (rule_opacity * fade * inactive_dim_factor).clamp(0.0, 1.0)
+                } else {
+                    inactive_dim_factor
+                };
+                let opacity = if wt.has_alpha {
+                    -1.0
+                } else if has_explicit_transparency || fade < 1.0 {
+                    (rule_opacity * fade).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
 
                 // --- Compute corner radius ---
                 let radius = if wt.is_shaped || wt.is_fullscreen {
@@ -405,11 +418,7 @@ impl WaylandCompositor {
                     // Wobbly windows: switch to wobbly program
                     let wobbly = wt.wobbly.as_ref().unwrap();
                     gl.UseProgram(self.wobbly_program);
-                    self.set_projection_uniform(
-                        gl,
-                        self.wobbly_uniforms.projection,
-                        &projection,
-                    );
+                    self.set_projection_uniform(gl, self.wobbly_uniforms.projection, &projection);
                     self.set_rect_uniform(
                         gl,
                         self.wobbly_uniforms.rect,
@@ -426,11 +435,7 @@ impl WaylandCompositor {
                     gl.Uniform4f(self.wobbly_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
 
                     // Upload grid offsets as flat vec2 array
-                    let flat: Vec<f32> = wobbly
-                        .offsets
-                        .iter()
-                        .flat_map(|o| [o[0], o[1]])
-                        .collect();
+                    let flat: Vec<f32> = wobbly.offsets.iter().flat_map(|o| [o[0], o[1]]).collect();
                     gl.Uniform2fv(
                         self.wobbly_uniforms.grid_offsets,
                         flat.len() as i32 / 2,
@@ -447,22 +452,14 @@ impl WaylandCompositor {
 
                     // Restore standard program
                     gl.UseProgram(self.program);
-                    self.set_projection_uniform(
-                        gl,
-                        self.win_uniforms.projection,
-                        &projection,
-                    );
+                    self.set_projection_uniform(gl, self.win_uniforms.projection, &projection);
                     gl.Uniform1i(self.win_uniforms.texture, 0);
                     gl.Uniform4f(self.win_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
                     gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
                 } else if is_focused && (self.tilt_x.abs() > 0.001 || self.tilt_y.abs() > 0.001) {
                     // Tilt: switch to tilt program for focused window
                     gl.UseProgram(self.tilt_program);
-                    self.set_projection_uniform(
-                        gl,
-                        self.tilt_uniforms.projection,
-                        &projection,
-                    );
+                    self.set_projection_uniform(gl, self.tilt_uniforms.projection, &projection);
                     self.set_rect_uniform(
                         gl,
                         self.tilt_uniforms.rect,
@@ -490,11 +487,7 @@ impl WaylandCompositor {
 
                     // Restore standard program
                     gl.UseProgram(self.program);
-                    self.set_projection_uniform(
-                        gl,
-                        self.win_uniforms.projection,
-                        &projection,
-                    );
+                    self.set_projection_uniform(gl, self.win_uniforms.projection, &projection);
                     gl.Uniform1i(self.win_uniforms.texture, 0);
                     gl.Uniform4f(self.win_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
                     gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
@@ -680,14 +673,10 @@ impl WaylandCompositor {
         // =================================================================
         // 17. Edge glow
         // =================================================================
-        if self.edge_glow_active && !self.edge_glow_suppressed {
+        if self.edge_glow_enabled && self.edge_glow_active && !self.edge_glow_suppressed {
             unsafe {
                 gl.UseProgram(self.edge_glow_program);
-                self.set_projection_uniform(
-                    gl,
-                    self.edge_glow_uniforms.projection,
-                    &projection,
-                );
+                self.set_projection_uniform(gl, self.edge_glow_uniforms.projection, &projection);
                 self.set_rect_uniform(
                     gl,
                     self.edge_glow_uniforms.rect,
@@ -696,13 +685,7 @@ impl WaylandCompositor {
                     self.screen_w as f32,
                     self.screen_h as f32,
                 );
-                gl.Uniform4f(
-                    self.edge_glow_uniforms.glow_color,
-                    0.3,
-                    0.6,
-                    1.0,
-                    0.6,
-                );
+                gl.Uniform4f(self.edge_glow_uniforms.glow_color, 0.3, 0.6, 1.0, 0.6);
                 gl.Uniform1f(self.edge_glow_uniforms.glow_width, 20.0);
                 gl.Uniform2f(self.edge_glow_uniforms.mouse, self.mouse_x, self.mouse_y);
                 gl.Uniform2f(
@@ -711,10 +694,7 @@ impl WaylandCompositor {
                     self.screen_h as f32,
                 );
                 // Use frame_count as a time proxy (at ~60fps, 1 frame = ~16.6ms)
-                gl.Uniform1f(
-                    self.edge_glow_uniforms.time,
-                    self.frame_count as f32 / 60.0,
-                );
+                gl.Uniform1f(self.edge_glow_uniforms.time, self.frame_count as f32 / 60.0);
                 gl.BindVertexArray(self.quad_vao);
                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
                 gl.BindVertexArray(0);
@@ -767,9 +747,15 @@ impl WaylandCompositor {
                         self.postprocess_uniforms.magnifier_radius,
                         self.magnifier_radius / self.screen_w as f32,
                     );
-                    gl.Uniform1f(self.postprocess_uniforms.magnifier_zoom, self.magnifier_zoom);
+                    gl.Uniform1f(
+                        self.postprocess_uniforms.magnifier_zoom,
+                        self.magnifier_zoom,
+                    );
                 }
-                gl.Uniform1i(self.postprocess_uniforms.colorblind_mode, self.colorblind_mode);
+                gl.Uniform1i(
+                    self.postprocess_uniforms.colorblind_mode,
+                    self.colorblind_mode,
+                );
                 gl.Uniform1i(
                     self.postprocess_uniforms.hdr_enabled,
                     if self.hdr_enabled { 1 } else { 0 },
@@ -804,7 +790,10 @@ impl WaylandCompositor {
                     let gl_py = (self.screen_h as i32 - screen_cy - 1).max(0);
                     let mut pixel = [0u8; 4];
                     gl.ReadPixels(
-                        px, gl_py, 1, 1,
+                        px,
+                        gl_py,
+                        1,
+                        1,
                         ffi::RGBA,
                         ffi::UNSIGNED_BYTE,
                         pixel.as_mut_ptr() as *mut _,

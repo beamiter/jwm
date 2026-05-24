@@ -5,6 +5,8 @@ use std::os::unix::process::CommandExt;
 use std::{env, process::Command, sync::atomic::Ordering};
 use xbar_core::initialize_logging;
 
+use jwm::config::{set_backend_family, BackendFamily};
+
 // 导入后端
 use jwm::backend::wayland_udev::backend::UdevBackend;
 use jwm::backend::wayland_winit::backend::WaylandWinitBackend;
@@ -17,18 +19,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         unsafe { env::set_var("RUST_LOG", "info,smithay=warn,libseat=warn,drm=warn") };
     }
 
-    // --gen-config: back up the existing config and write a fresh default, then exit.
+    // --gen-config: generate backend-specific config templates for both backends, then exit.
     if env::args().any(|a| a == "--gen-config") {
-        let config_path = jwm::config::Config::get_default_config_path();
-        if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent)?;
+        let jwm_dir = jwm::config::Config::get_config_path_for(BackendFamily::X11)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        std::fs::create_dir_all(&jwm_dir)?;
+
+        for family in [BackendFamily::X11, BackendFamily::Wayland] {
+            set_backend_family(family);
+            let path = jwm::config::Config::get_config_path_for(family);
+            if path.exists() {
+                let backup = jwm::config::Config::backup_config(&path)?;
+                println!("备份旧配置 -> {}", backup.display());
+            }
+            jwm::config::Config::generate_template(&path)?;
+            println!("配置已生成: {}", path.display());
         }
-        if config_path.exists() {
-            let backup = jwm::config::Config::backup_config(&config_path)?;
-            println!("备份旧配置 -> {}", backup.display());
-        }
-        jwm::config::Config::generate_template(&config_path)?;
-        println!("配置已生成: {}", config_path.display());
         return Ok(());
     }
 
@@ -152,21 +160,30 @@ fn select_backend() -> Result<Box<dyn jwm::backend::api::Backend>, Box<dyn std::
         BackendChoice::X11
     };
 
+    // Register backend family with the config system BEFORE CONFIG is first accessed.
+    let family = match resolved {
+        BackendChoice::X11 => BackendFamily::X11,
+        BackendChoice::WaylandUdev | BackendChoice::WaylandX11 | BackendChoice::WaylandWinit => {
+            BackendFamily::Wayland
+        }
+    };
+    set_backend_family(family);
+
     match resolved {
         BackendChoice::X11 => {
-            info!("Initializing X11 Backend");
+            info!("Initializing X11 Backend (config: config_x11.toml)");
             Ok(Box::new(X11Backend::new()?))
         }
         BackendChoice::WaylandUdev => {
-            info!("Initializing Wayland/Udev Backend (wayland-udev)");
+            info!("Initializing Wayland/Udev Backend (config: config_wayland.toml)");
             Ok(Box::new(UdevBackend::new()?))
         }
         BackendChoice::WaylandX11 => {
-            info!("Initializing Wayland-on-X11 Backend (Smithay windowed)");
+            info!("Initializing Wayland-on-X11 Backend (config: config_wayland.toml)");
             Ok(Box::new(WaylandX11Backend::new()?))
         }
         BackendChoice::WaylandWinit => {
-            info!("Initializing Wayland/Winit Backend (Smithay windowed)");
+            info!("Initializing Wayland/Winit Backend (config: config_wayland.toml)");
             Ok(Box::new(WaylandWinitBackend::new()?))
         }
     }

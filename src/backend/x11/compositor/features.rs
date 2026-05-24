@@ -112,6 +112,7 @@ impl Compositor {
     }
 
     /// Register a window for Present extension support
+    #[allow(dead_code)]
     pub(crate) fn register_window_present(&mut self, x11_win: u32) {
         if let Some(present_mgr) = &mut self.present_mgr {
             match present_mgr.register_window(x11_win) {
@@ -126,6 +127,7 @@ impl Compositor {
     }
 
     /// Present a window's pixmap at a specific MSC (for Present-enabled windows)
+    #[allow(dead_code)]
     pub(crate) fn present_pixmap(
         &self,
         x11_win: u32,

@@ -103,7 +103,7 @@ impl Compositor {
     }
 
     /// Check if currently focused window is a game
-    pub fn is_focused_window_game(&self, focused_win: Option<u32>) -> bool {
+    pub(crate) fn is_focused_window_game(&self, focused_win: Option<u32>) -> bool {
         match focused_win {
             Some(win) => self.is_game_window.get(&win).copied().unwrap_or(false),
             None => false,
@@ -111,7 +111,7 @@ impl Compositor {
     }
 
     /// Update VRR state based on focused window type
-    pub fn update_vrr_state(&mut self, focused_win: Option<u32>) {
+    pub(crate) fn update_vrr_state(&mut self, focused_win: Option<u32>) {
         let cfg = crate::config::CONFIG.load();
         let behavior = cfg.behavior();
 
@@ -135,7 +135,7 @@ impl Compositor {
     }
 
     /// Get current VRR refresh rate target (Hz)
-    pub fn get_vrr_refresh_rate(&self) -> u32 {
+    pub(crate) fn get_vrr_refresh_rate(&self) -> u32 {
         if self.vrr_active {
             let cfg = crate::config::CONFIG.load();
             let behavior = cfg.behavior();
@@ -146,7 +146,7 @@ impl Compositor {
     }
 
     /// Record input event for latency tracking (Task 8)
-    pub fn record_input_event(&mut self) {
+    pub(crate) fn record_input_event(&mut self) {
         self.frame_stats.last_input_time = Some(std::time::Instant::now());
     }
 
@@ -602,6 +602,7 @@ impl Compositor {
     /// When window positions are unchanged, we can mix current blur with previous blur for:
     /// - Higher visual stability (less flicker from blur recomputation)
     /// - Lower GPU cost (fewer blur samples needed for same quality)
+    #[allow(dead_code)]
     pub(super) fn apply_temporal_blur_mix(&mut self, current_blur_tex: glow::Texture) -> glow::Texture {
         if !self.temporal_blur_enabled {
             return current_blur_tex;
@@ -700,7 +701,7 @@ impl Compositor {
 
         // On first frame (no previous state), initialize prev_blur_fbo from scene_fbo
         if self.prev_window_positions_hash == 0 {
-            if let Some((_, scene_tex)) = &self.scene_fbo {
+            if let Some((_, _scene_tex)) = &self.scene_fbo {
                 if self.prev_blur_fbo.is_none() {
                     if let Ok((fbo, tex)) = unsafe { Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h) } {
                         self.prev_blur_fbo = Some((fbo, tex));

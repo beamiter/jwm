@@ -200,7 +200,7 @@ pub struct OptimizationStatus {
     pub avg_fps: f32,
     pub recent_fps: f32,
     pub frame_count: u64,
-    pub blur_quality: BlurQuality,
+    pub(crate) blur_quality: BlurQuality,
     pub target_fps: u32,
     pub vsync_enabled: bool,
     pub texture_pool_available: usize,

@@ -706,6 +706,7 @@ impl Compositor {
 
     /// Check if a click at (x, y) is on a tab bar and return the tab group and index.
     /// Returns Some((group_id, tab_index)) if click is on a tab, None otherwise.
+    #[allow(dead_code)]
     pub(super) fn check_tab_click(&self, x: f32, y: f32) -> Option<(u32, usize)> {
         if !self.window_tabs_enabled {
             return None;

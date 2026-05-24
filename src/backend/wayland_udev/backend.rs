@@ -1,6 +1,6 @@
+use crate::backend::wayland::state::JwmWaylandState;
 use crate::backend::wayland_dummy_ops::*;
 use crate::backend::wayland_key_ops::UdevKeyOps;
-use crate::backend::wayland::state::JwmWaylandState;
 
 #[path = "../udev_kms.rs"]
 mod kms;
@@ -21,15 +21,15 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use drm::control::{connector, Device as ControlDevice, ModeTypeFlags};
 
 use smithay::backend::renderer::gles::GlesTexture;
 use smithay::backend::renderer::utils::{import_surface_tree, RendererSurfaceStateUserData};
-use smithay::backend::renderer::{buffer_type, BufferType, Renderer};
+use smithay::backend::renderer::{buffer_has_alpha, buffer_type, BufferType, Renderer};
 use smithay::wayland::compositor::with_states;
 
 use smithay::backend::input::{
@@ -41,29 +41,23 @@ use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::Event as SessionEvent;
 use smithay::backend::session::Session;
 use smithay::backend::udev::{UdevBackend as SmithayUdevBackend, UdevEvent};
-use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
-use smithay::reexports::calloop::channel::{self, Sender};
-use smithay::reexports::calloop::generic::Generic;
-use smithay::reexports::calloop::timer::{Timer, TimeoutAction};
-use smithay::reexports::input::Libinput;
-use smithay::reexports::wayland_server::{Display, DisplayHandle};
-use smithay::reexports::wayland_server::Resource;
-use smithay::utils::{Logical, Point, SERIAL_COUNTER as SCOUNTER};
+use smithay::desktop::layer_map_for_output;
 use smithay::input::keyboard::{FilterResult, ModifiersState};
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
+use smithay::reexports::calloop::channel::{self, Sender};
+use smithay::reexports::calloop::generic::Generic;
+use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
+use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
+use smithay::reexports::input::Libinput;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
-use smithay::desktop::layer_map_for_output;
+use smithay::reexports::wayland_server::Resource;
+use smithay::reexports::wayland_server::{Display, DisplayHandle};
+use smithay::utils::{Logical, Point, SERIAL_COUNTER as SCOUNTER};
 use smithay::wayland::shell::wlr_layer::{KeyboardInteractivity, Layer as WlrLayer};
-use smithay::xwayland::{XWayland, XWaylandEvent, X11Wm};
+use smithay::xwayland::{X11Wm, XWayland, XWaylandEvent};
 
 fn allowed_shortcut_mods() -> Mods {
-    Mods::SHIFT
-        | Mods::CONTROL
-        | Mods::ALT
-        | Mods::SUPER
-        | Mods::MOD2
-        | Mods::MOD3
-        | Mods::MOD5
+    Mods::SHIFT | Mods::CONTROL | Mods::ALT | Mods::SUPER | Mods::MOD2 | Mods::MOD3 | Mods::MOD5
 }
 
 // libinput/evdev does not generate key repeat events for us (X11 does).
@@ -105,7 +99,10 @@ struct SharedState {
     cursor_kind: StdCursorKind,
     cursor_dirty: bool,
     /// Cached key bindings (mods, keysym) for key event suppression.
-    key_bindings: Vec<(crate::backend::common_define::Mods, crate::backend::common_define::KeySym)>,
+    key_bindings: Vec<(
+        crate::backend::common_define::Mods,
+        crate::backend::common_define::KeySym,
+    )>,
     /// xkb keycode (0..=255) -> base (unmodified) keysym.
     keysym_table: Vec<crate::backend::common_define::KeySym>,
     /// xkb keycodes that were intercepted on press and should be intercepted on release.
@@ -118,6 +115,10 @@ struct SharedState {
     device_paths: HashMap<u64, PathBuf>,
 
     kms_needs_reinit: bool,
+
+    /// True while the WM screenshot region-select grab is active.
+    /// Suppresses pointer/keyboard events from reaching Wayland clients.
+    screenshot_grab_active: bool,
 }
 
 impl Default for SharedState {
@@ -139,6 +140,7 @@ impl Default for SharedState {
             device_paths: HashMap::new(),
 
             kms_needs_reinit: false,
+            screenshot_grab_active: false,
         }
     }
 }
@@ -166,7 +168,10 @@ impl OutputOps for UdevOutputOps {
         if h == 0 {
             h = 1080;
         }
-        ScreenInfo { width: w, height: h }
+        ScreenInfo {
+            width: w,
+            height: h,
+        }
     }
 
     fn output_at(&self, x: i32, y: i32) -> Option<OutputId> {
@@ -184,7 +189,10 @@ struct UdevInputOps {
 }
 
 impl InputOps for UdevInputOps {
-    fn set_cursor(&self, kind: crate::backend::common_define::StdCursorKind) -> Result<(), BackendError> {
+    fn set_cursor(
+        &self,
+        kind: crate::backend::common_define::StdCursorKind,
+    ) -> Result<(), BackendError> {
         let mut shared = self.shared.lock().unwrap();
         if shared.cursor_kind != kind {
             shared.cursor_kind = kind;
@@ -198,11 +206,27 @@ impl InputOps for UdevInputOps {
         Ok((shared.pointer_x, shared.pointer_y))
     }
 
-    fn grab_pointer(&self, _mask: u32, _cursor: Option<u64>) -> Result<bool, BackendError> {
+    fn grab_pointer(&self, mask: u32, _cursor: Option<u64>) -> Result<bool, BackendError> {
+        if mask != 0 {
+            // Non-zero mask → screenshot region-select grab.
+            // Suppress events reaching Wayland clients and switch to crosshair cursor.
+            let mut shared = self.shared.lock().unwrap();
+            shared.screenshot_grab_active = true;
+            if shared.cursor_kind != StdCursorKind::Crosshair {
+                shared.cursor_kind = StdCursorKind::Crosshair;
+                shared.cursor_dirty = true;
+            }
+        }
         Ok(true)
     }
 
     fn ungrab_pointer(&self) -> Result<(), BackendError> {
+        let mut shared = self.shared.lock().unwrap();
+        shared.screenshot_grab_active = false;
+        if shared.cursor_kind != StdCursorKind::LeftPtr {
+            shared.cursor_kind = StdCursorKind::LeftPtr;
+            shared.cursor_dirty = true;
+        }
         Ok(())
     }
 
@@ -278,12 +302,30 @@ impl WindowOps for WaylandWindowOps {
                         border,
                     },
                 );
-                if let Some(toplevel) = state.try_lookup_toplevel(win) {
+                let in_flight = state.configure_in_flight.contains(&win);
+                let should_track = if let Some(toplevel) = state.try_lookup_toplevel(win) {
                     toplevel.with_pending_state(|s| {
                         s.size = Some((w as i32, h as i32).into());
                     });
-                    toplevel.send_pending_configure();
-                } else if let Some(x11) = state.x11_surfaces.get(&win) {
+                    if in_flight {
+                        // A configure is already in-flight; just record the latest desired size.
+                        false
+                    } else {
+                        toplevel.send_pending_configure();
+                        true
+                    }
+                } else {
+                    false
+                };
+                // Borrow released — now safe to mutate configure_in_flight / pending_configure_size.
+                if in_flight {
+                    state.pending_configure_size.insert(win, (w, h));
+                } else if should_track {
+                    state.configure_in_flight.insert(win);
+                    state.pending_configure_size.remove(&win);
+                }
+                if let Some(x11) = state.x11_surfaces.get(&win) {
+                    let bw = border as i32;
                     let _ = x11.configure(Some(smithay::utils::Rectangle::new(
                         (x + bw, y + bw).into(),
                         (w as i32, h as i32).into(),
@@ -338,7 +380,10 @@ impl WindowOps for WaylandWindowOps {
     fn unmap_window(&self, _win: WindowId) -> Result<(), BackendError> {
         Ok(())
     }
-    fn close_window(&self, _win: WindowId) -> Result<crate::backend::api::CloseResult, BackendError> {
+    fn close_window(
+        &self,
+        _win: WindowId,
+    ) -> Result<crate::backend::api::CloseResult, BackendError> {
         unsafe {
             self.with_state_mut(|state| {
                 if let Some(toplevel) = state.try_lookup_toplevel(_win) {
@@ -377,11 +422,18 @@ impl WindowOps for WaylandWindowOps {
         self.request_flush();
         Ok(())
     }
-    fn get_window_attributes(&self, _win: WindowId) -> Result<crate::backend::api::WindowAttributes, BackendError> {
+    fn get_window_attributes(
+        &self,
+        _win: WindowId,
+    ) -> Result<crate::backend::api::WindowAttributes, BackendError> {
         let (viewable, or) = unsafe {
             self.with_state_mut(|state| {
                 let viewable = state.mapped_windows.contains(&_win);
-                let or = state.x11_surfaces.get(&_win).map(|x| x.is_override_redirect()).unwrap_or(false);
+                let or = state
+                    .x11_surfaces
+                    .get(&_win)
+                    .map(|x| x.is_override_redirect())
+                    .unwrap_or(false);
                 (viewable, or)
             })
         };
@@ -495,7 +547,10 @@ impl PropertyOps for WaylandPropertyOps {
         vec![WindowType::Normal]
     }
 
-    fn get_layer_surface_info(&self, win: WindowId) -> Option<crate::backend::api::LayerSurfaceInfo> {
+    fn get_layer_surface_info(
+        &self,
+        win: WindowId,
+    ) -> Option<crate::backend::api::LayerSurfaceInfo> {
         unsafe { self.with_state_mut(|state| state.window_layer_info.get(&win).copied()) }
     }
 
@@ -725,7 +780,8 @@ impl UdevBackend {
                 // Wire screencopy pending queue to KMS state.
                 if let Some(ref screencopy_queue) = self.state.screencopy_pending {
                     if let Some(ref kms) = self.kms {
-                        kms.borrow_mut().set_screencopy_pending(screencopy_queue.clone());
+                        kms.borrow_mut()
+                            .set_screencopy_pending(screencopy_queue.clone());
                     }
                 }
                 self.request_flush();
@@ -791,7 +847,11 @@ impl UdevBackend {
                         Ok(PostAction::Continue)
                     },
                 )
-                .map_err(|e| BackendError::Message(format!("calloop insert_source(wayland display) failed: {e}")))?;
+                .map_err(|e| {
+                    BackendError::Message(format!(
+                        "calloop insert_source(wayland display) failed: {e}"
+                    ))
+                })?;
         }
 
         // Safety net: if the WM doesn't configure a new toplevel quickly enough, clients can stall
@@ -854,7 +914,8 @@ impl UdevBackend {
                             return TimeoutAction::ToDuration(KEY_REPEAT_TICK);
                         }
 
-                        let current_mods = Mods::from_bits_truncate(s.mods_state) & allowed_shortcut_mods();
+                        let current_mods =
+                            Mods::from_bits_truncate(s.mods_state) & allowed_shortcut_mods();
                         if !current_mods.contains(rep.required_mods) {
                             // Modifiers released; stop repeating.
                             s.repeat = None;
@@ -862,9 +923,9 @@ impl UdevBackend {
                         }
 
                         // Generate one repeat event per tick at most.
-                        rep.last_time = rep
-                            .last_time
-                            .saturating_add(KEY_REPEAT_INTERVAL.as_millis().min(u128::from(u32::MAX)) as u32);
+                        rep.last_time = rep.last_time.saturating_add(
+                            KEY_REPEAT_INTERVAL.as_millis().min(u128::from(u32::MAX)) as u32,
+                        );
                         rep.next_fire = now + KEY_REPEAT_INTERVAL;
                         rep.mods_raw = s.mods_state;
 
@@ -933,9 +994,9 @@ impl UdevBackend {
 
             let (xwayland, xwayland_client) = XWayland::spawn(
                 &display_handle,
-                None,              // auto-pick display number
+                None, // auto-pick display number
                 std::iter::empty::<(String, String)>(),
-                true,              // open abstract socket
+                true, // open abstract socket
                 Stdio::null(),
                 Stdio::null(),
                 |_| {},
@@ -952,15 +1013,10 @@ impl UdevBackend {
                             x11_socket,
                             display_number,
                         } => {
-                            log::info!(
-                                "[xwayland] ready on DISPLAY=:{display_number}"
-                            );
+                            log::info!("[xwayland] ready on DISPLAY=:{display_number}");
                             // SAFETY: single-threaded backend, set once.
                             unsafe {
-                                std::env::set_var(
-                                    "DISPLAY",
-                                    format!(":{display_number}"),
-                                );
+                                std::env::set_var("DISPLAY", format!(":{display_number}"));
                             }
                             // `start_wm` requires `D: XwmHandler + XWaylandShellHandler + SeatHandler`.
                             // Our `JwmWaylandState` implements all three.
@@ -974,9 +1030,7 @@ impl UdevBackend {
                                     wl_state.x11_wm = Some(wm);
                                 }
                                 Err(e) => {
-                                    log::error!(
-                                        "[xwayland] X11Wm::start_wm failed: {e:?}"
-                                    );
+                                    log::error!("[xwayland] X11Wm::start_wm failed: {e:?}");
                                 }
                             }
                         }
@@ -985,18 +1039,27 @@ impl UdevBackend {
                         }
                     }
                 })
-                .map_err(|e| BackendError::Message(format!("calloop insert_source(xwayland) failed: {e}")))?;
+                .map_err(|e| {
+                    BackendError::Message(format!("calloop insert_source(xwayland) failed: {e}"))
+                })?;
         }
 
-        let udev_backend = SmithayUdevBackend::new(&seat_name)
-            .map_err(|e| BackendError::Other(Box::new(io::Error::new(io::ErrorKind::Other, format!("udev init failed: {e:?}")))))?;
+        let udev_backend = SmithayUdevBackend::new(&seat_name).map_err(|e| {
+            BackendError::Other(Box::new(io::Error::new(
+                io::ErrorKind::Other,
+                format!("udev init failed: {e:?}"),
+            )))
+        })?;
 
-        let mut libinput_context = Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(
-            session.clone().into(),
-        );
-        libinput_context
-            .udev_assign_seat(&seat_name)
-            .map_err(|e| BackendError::Other(Box::new(io::Error::new(io::ErrorKind::Other, format!("libinput udev_assign_seat failed: {e:?}")))))?;
+        let mut libinput_context = Libinput::new_with_udev::<
+            LibinputSessionInterface<LibSeatSession>,
+        >(session.clone().into());
+        libinput_context.udev_assign_seat(&seat_name).map_err(|e| {
+            BackendError::Other(Box::new(io::Error::new(
+                io::ErrorKind::Other,
+                format!("libinput udev_assign_seat failed: {e:?}"),
+            )))
+        })?;
         let libinput_backend = LibinputInputBackend::new(libinput_context.clone());
 
         {
@@ -1015,7 +1078,9 @@ impl UdevBackend {
             state.output_rects = s
                 .outputs
                 .iter()
-                .map(|o| smithay::utils::Rectangle::new((o.x, o.y).into(), (o.width, o.height).into()))
+                .map(|o| {
+                    smithay::utils::Rectangle::new((o.x, o.y).into(), (o.width, o.height).into())
+                })
                 .collect();
         }
 
@@ -1079,7 +1144,8 @@ impl UdevBackend {
 
             // Wire screencopy pending queue to KMS state.
             if let Some(ref screencopy_queue) = state.screencopy_pending {
-                kms.borrow_mut().set_screencopy_pending(screencopy_queue.clone());
+                kms.borrow_mut()
+                    .set_screencopy_pending(screencopy_queue.clone());
             }
         }
 
@@ -1144,10 +1210,11 @@ impl UdevBackend {
                                 .and_then(|(win, _, _)| win.map(HitTarget::Surface));
                             let focus = under.map(|(_win, surface, origin)| (surface, origin));
 
+                            let in_screenshot = shared.lock().unwrap().screenshot_grab_active;
                             if let Some(pointer) = state.seat.get_pointer() {
                                 pointer.motion(
                                     state,
-                                    focus,
+                                    if in_screenshot { None } else { focus },
                                     &MotionEvent {
                                         location,
                                         serial: SCOUNTER.next_serial(),
@@ -1205,10 +1272,11 @@ impl UdevBackend {
                                 .and_then(|(win, _, _)| win.map(HitTarget::Surface));
                             let focus = under.map(|(_win, surface, origin)| (surface, origin));
 
+                            let in_screenshot = shared.lock().unwrap().screenshot_grab_active;
                             if let Some(pointer) = state.seat.get_pointer() {
                                 pointer.motion(
                                     state,
-                                    focus,
+                                    if in_screenshot { None } else { focus },
                                     &MotionEvent {
                                         location,
                                         serial: SCOUNTER.next_serial(),
@@ -1287,63 +1355,66 @@ impl UdevBackend {
                                 .and_then(|(win, _, _)| win.map(HitTarget::Surface));
                             let focus = under.map(|(_win, surface, origin)| (surface, origin));
 
-                            if let Some(pointer) = state.seat.get_pointer() {
-                                // Ensure focus is up-to-date before sending the button.
-                                pointer.motion(
-                                    state,
-                                    focus,
-                                    &MotionEvent {
-                                        location,
-                                        serial: SCOUNTER.next_serial(),
-                                        time,
-                                    },
-                                );
-
-                                pointer.button(
-                                    state,
-                                    &ButtonEvent {
-                                        serial: SCOUNTER.next_serial(),
-                                        time,
-                                        button: button_code,
-                                        state: if pressed {
-                                            smithay::backend::input::ButtonState::Pressed
-                                        } else {
-                                            smithay::backend::input::ButtonState::Released
+                            let in_screenshot = shared.lock().unwrap().screenshot_grab_active;
+                            if !in_screenshot {
+                                if let Some(pointer) = state.seat.get_pointer() {
+                                    // Ensure focus is up-to-date before sending the button.
+                                    pointer.motion(
+                                        state,
+                                        focus,
+                                        &MotionEvent {
+                                            location,
+                                            serial: SCOUNTER.next_serial(),
+                                            time,
                                         },
-                                    },
-                                );
-                                pointer.frame(state);
-                            }
+                                    );
 
-                            // Focus follows click: if the user clicks a normal surface, it should
-                            // receive keyboard focus. For layer-shell surfaces, only focus if it
-                            // requested keyboard interactivity (OnDemand/Exclusive), otherwise keep
-                            // the current focus (e.g. clicking a non-interactive panel shouldn't
-                            // steal focus from the active app).
-                            if pressed {
-                                if let Some(kbd) = state.seat.get_keyboard() {
-                                    if let Some((_win, surface, _origin)) = state.surface_under(location) {
-                                        let layer_interactivity = state
-                                            .layer_shell_state
-                                            .layer_surfaces()
-                                            .find(|l| l.wl_surface().id() == surface.id())
-                                            .map(|l| l.with_cached_state(|d| d.keyboard_interactivity));
+                                    pointer.button(
+                                        state,
+                                        &ButtonEvent {
+                                            serial: SCOUNTER.next_serial(),
+                                            time,
+                                            button: button_code,
+                                            state: if pressed {
+                                                smithay::backend::input::ButtonState::Pressed
+                                            } else {
+                                                smithay::backend::input::ButtonState::Released
+                                            },
+                                        },
+                                    );
+                                    pointer.frame(state);
+                                }
 
-                                        let should_focus = match layer_interactivity {
-                                            Some(KeyboardInteractivity::None) => false,
-                                            Some(KeyboardInteractivity::OnDemand) => true,
-                                            Some(KeyboardInteractivity::Exclusive) => true,
-                                            None => true,
-                                        };
+                                // Focus follows click: if the user clicks a normal surface, it should
+                                // receive keyboard focus. For layer-shell surfaces, only focus if it
+                                // requested keyboard interactivity (OnDemand/Exclusive), otherwise keep
+                                // the current focus (e.g. clicking a non-interactive panel shouldn't
+                                // steal focus from the active app).
+                                if pressed {
+                                    if let Some(kbd) = state.seat.get_keyboard() {
+                                        if let Some((_win, surface, _origin)) = state.surface_under(location) {
+                                            let layer_interactivity = state
+                                                .layer_shell_state
+                                                .layer_surfaces()
+                                                .find(|l| l.wl_surface().id() == surface.id())
+                                                .map(|l| l.with_cached_state(|d| d.keyboard_interactivity));
 
-                                        if should_focus {
-                                            let win = state.surface_to_window.get(&surface.id()).copied();
-                                            kbd.set_focus(
-                                                state,
-                                                Some(surface.clone()),
-                                                SCOUNTER.next_serial(),
-                                            );
-                                            state.set_active_toplevel(win);
+                                            let should_focus = match layer_interactivity {
+                                                Some(KeyboardInteractivity::None) => false,
+                                                Some(KeyboardInteractivity::OnDemand) => true,
+                                                Some(KeyboardInteractivity::Exclusive) => true,
+                                                None => true,
+                                            };
+
+                                            if should_focus {
+                                                let win = state.surface_to_window.get(&surface.id()).copied();
+                                                kbd.set_focus(
+                                                    state,
+                                                    Some(surface.clone()),
+                                                    SCOUNTER.next_serial(),
+                                                );
+                                                state.set_active_toplevel(win);
+                                            }
                                         }
                                     }
                                 }
@@ -1557,7 +1628,14 @@ impl UdevBackend {
                                         let should_suppress = s
                                             .key_bindings
                                             .iter()
-                                            .any(|(m, ks)| *ks == keysym && *m == clean_mods);
+                                            .any(|(m, ks)| *ks == keysym && *m == clean_mods)
+                                            || (s.screenshot_grab_active && matches!(
+                                                keysym,
+                                                crate::backend::common_define::keys::KEY_Escape
+                                                | crate::backend::common_define::keys::KEY_Return
+                                                | crate::backend::common_define::keys::KEY_s
+                                                | crate::backend::common_define::keys::KEY_c
+                                            ));
 
                                         if should_suppress {
                                             s.suppressed_keycodes.insert(xkb_keycode_u8);
@@ -1687,35 +1765,45 @@ impl UdevBackend {
             let pending_events = pending_events.clone();
             event_loop
                 .handle()
-                .insert_source(notifier, move |event, &mut (), _state| {
-                    match event {
-                        SessionEvent::PauseSession => {
-                            libinput_context.suspend();
-                            pending_events.lock().unwrap().push_back(BackendEvent::ScreenLayoutChanged);
-                        }
-                        SessionEvent::ActivateSession => {
-                            let _ = libinput_context.resume();
-                            pending_events.lock().unwrap().push_back(BackendEvent::ScreenLayoutChanged);
-                            let _ = rebuild_outputs(&shared, &pending_events);
-                            {
-                                let s = shared.lock().unwrap();
-                                _state.output_rects = s
-                                    .outputs
-                                    .iter()
-                                    .map(|o| smithay::utils::Rectangle::new(
+                .insert_source(notifier, move |event, &mut (), _state| match event {
+                    SessionEvent::PauseSession => {
+                        libinput_context.suspend();
+                        pending_events
+                            .lock()
+                            .unwrap()
+                            .push_back(BackendEvent::ScreenLayoutChanged);
+                    }
+                    SessionEvent::ActivateSession => {
+                        let _ = libinput_context.resume();
+                        pending_events
+                            .lock()
+                            .unwrap()
+                            .push_back(BackendEvent::ScreenLayoutChanged);
+                        let _ = rebuild_outputs(&shared, &pending_events);
+                        {
+                            let s = shared.lock().unwrap();
+                            _state.output_rects = s
+                                .outputs
+                                .iter()
+                                .map(|o| {
+                                    smithay::utils::Rectangle::new(
                                         (o.x, o.y).into(),
                                         (o.width, o.height).into(),
-                                    ))
-                                    .collect();
-                            }
-                            if let Some(grab_win) = _state.popup_grab_toplevel {
-                                _state.reconstrain_popups_for_toplevel(grab_win);
-                            }
-                            shared.lock().unwrap().kms_needs_reinit = true;
+                                    )
+                                })
+                                .collect();
                         }
+                        if let Some(grab_win) = _state.popup_grab_toplevel {
+                            _state.reconstrain_popups_for_toplevel(grab_win);
+                        }
+                        shared.lock().unwrap().kms_needs_reinit = true;
                     }
                 })
-                .map_err(|e| BackendError::Message(format!("calloop insert_source(libseat notifier) failed: {e}")))?;
+                .map_err(|e| {
+                    BackendError::Message(format!(
+                        "calloop insert_source(libseat notifier) failed: {e}"
+                    ))
+                })?;
         }
 
         {
@@ -1745,19 +1833,26 @@ impl UdevBackend {
                         _state.output_rects = s
                             .outputs
                             .iter()
-                            .map(|o| smithay::utils::Rectangle::new(
-                                (o.x, o.y).into(),
-                                (o.width, o.height).into(),
-                            ))
+                            .map(|o| {
+                                smithay::utils::Rectangle::new(
+                                    (o.x, o.y).into(),
+                                    (o.width, o.height).into(),
+                                )
+                            })
                             .collect();
                     }
                     if let Some(grab_win) = _state.popup_grab_toplevel {
                         _state.reconstrain_popups_for_toplevel(grab_win);
                     }
                     shared.lock().unwrap().kms_needs_reinit = true;
-                    pending_events.lock().unwrap().push_back(BackendEvent::ScreenLayoutChanged);
+                    pending_events
+                        .lock()
+                        .unwrap()
+                        .push_back(BackendEvent::ScreenLayoutChanged);
                 })
-                .map_err(|e| BackendError::Message(format!("calloop insert_source(udev) failed: {e}")))?;
+                .map_err(|e| {
+                    BackendError::Message(format!("calloop insert_source(udev) failed: {e}"))
+                })?;
         }
 
         let output_ops: Box<dyn OutputOps> = Box::new(UdevOutputOps {
@@ -2086,9 +2181,7 @@ impl Backend for UdevBackend {
             if let Some(kms) = &self.kms {
                 let mut kms_ref = kms.borrow_mut();
                 let (w, h) = kms_ref.total_screen_size();
-                match kms_ref.with_renderer(|gl| {
-                    unsafe { WaylandCompositor::new(gl, w, h) }
-                }) {
+                match kms_ref.with_renderer(|gl| unsafe { WaylandCompositor::new(gl, w, h) }) {
                     Ok(Ok(compositor)) => {
                         self.compositor = Some(compositor);
                         return Ok(true);
@@ -2122,10 +2215,9 @@ impl Backend for UdevBackend {
         }
 
         // Phase 1: Import surface textures into GL cache (borrow kms only, no compositor borrow).
-        let mut tex_updates: Vec<(u64, u32, u32, u32, bool)> = Vec::new();
+        let mut tex_updates: Vec<(u64, u32, u32, u32, bool, bool)> = Vec::new();
         // Rate-limit diagnostic logging: log at most once per second.
-        static LAST_CRF_LOG: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(0);
+        static LAST_CRF_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let crf_now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -2146,7 +2238,10 @@ impl Backend for UdevBackend {
                 let win = crate::backend::common_define::WindowId::from_raw(win_id);
                 let surface_opt = self.state.surface_for_window(win);
                 if crf_log_this {
-                    log::info!("[crf] win={win_id:#x} surface={} size={w}x{h}", surface_opt.is_some());
+                    log::info!(
+                        "[crf] win={win_id:#x} surface={} size={w}x{h}",
+                        surface_opt.is_some()
+                    );
                 }
                 if let Some(surface) = surface_opt {
                     let tid = kms_ref.with_gles_renderer(|renderer| {
@@ -2171,33 +2266,43 @@ impl Backend for UdevBackend {
                             }).unwrap_or((false, "no_rsd"));
                             let tex_info = rsd.and_then(|d| {
                                 let locked = d.lock().unwrap();
-                                locked.texture::<GlesTexture>(ctx_id)
-                                    .map(|t| (t.tex_id(), t.is_y_inverted()))
+                                locked.texture::<GlesTexture>(ctx_id).map(|t| {
+                                    let has_alpha = locked
+                                        .buffer()
+                                        .and_then(|b| buffer_has_alpha(&**b))
+                                        .unwrap_or(true);
+                                    (t.tex_id(), t.is_y_inverted(), has_alpha)
+                                })
                             });
                             if crf_log_this {
-                                log::info!("[crf] win={win_id:#x} import_ok={} has_buf={has_buf} buf={buf_type_str} tex={:?} y_inv={:?}",
+                                log::info!("[crf] win={win_id:#x} import_ok={} has_buf={has_buf} buf={buf_type_str} tex={:?} y_inv={:?} alpha={:?}",
                                     import_result.is_ok(),
-                                    tex_info.map(|(id, _)| id),
-                                    tex_info.map(|(_, yi)| yi));
+                                    tex_info.map(|(id, _, _)| id),
+                                    tex_info.map(|(_, yi, _)| yi),
+                                    tex_info.map(|(_, _, alpha)| alpha));
                             }
                             tex_info
                         });
                         tex
                     });
-                    if let Some((tid, y_inverted)) = tid {
-                        tex_updates.push((win_id, tid, w, h, y_inverted));
+                    if let Some((tid, y_inverted, has_alpha)) = tid {
+                        tex_updates.push((win_id, tid, w, h, has_alpha, y_inverted));
                     }
                 }
             }
         }
         if crf_log_this || (!scene.is_empty() && tex_updates.len() != scene.len()) {
-            log::info!("[crf] tex_updates={} scene={}", tex_updates.len(), scene.len());
+            log::info!(
+                "[crf] tex_updates={} scene={}",
+                tex_updates.len(),
+                scene.len()
+            );
         }
 
         // Phase 2: Update compositor window textures then render into FBO.
         if let (Some(compositor), Some(kms)) = (&mut self.compositor, &self.kms) {
-            for (win_id, tid, w, h, y_inverted) in tex_updates {
-                compositor.update_window_texture(win_id, tid, w, h, true, y_inverted);
+            for (win_id, tid, w, h, has_alpha, y_inverted) in tex_updates {
+                compositor.update_window_texture(win_id, tid, w, h, has_alpha, y_inverted);
             }
             let rendered = kms
                 .borrow_mut()
@@ -2221,42 +2326,65 @@ impl Backend for UdevBackend {
     }
 
     fn compositor_set_color_temperature(&mut self, temp: f32) {
-        if let Some(c) = self.compositor.as_mut() { c.set_color_temperature(temp); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_color_temperature(temp);
+        }
     }
 
     fn compositor_set_saturation(&mut self, sat: f32) {
-        if let Some(c) = self.compositor.as_mut() { c.set_saturation(sat); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_saturation(sat);
+        }
     }
 
     fn compositor_set_brightness(&mut self, val: f32) {
-        if let Some(c) = self.compositor.as_mut() { c.set_brightness(val); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_brightness(val);
+        }
     }
 
     fn compositor_set_contrast(&mut self, val: f32) {
-        if let Some(c) = self.compositor.as_mut() { c.set_contrast(val); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_contrast(val);
+        }
     }
 
     fn compositor_set_invert_colors(&mut self, invert: bool) {
-        if let Some(c) = self.compositor.as_mut() { c.set_invert_colors(invert); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_invert_colors(invert);
+        }
     }
 
     fn compositor_set_grayscale(&mut self, gs: bool) {
-        if let Some(c) = self.compositor.as_mut() { c.set_grayscale(gs); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_grayscale(gs);
+        }
     }
 
     fn compositor_set_debug_hud(&mut self, enabled: bool) {
-        if let Some(c) = self.compositor.as_mut() { c.set_debug_hud(enabled); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_debug_hud(enabled);
+        }
     }
 
     fn compositor_set_transition_mode(&mut self, mode: &str) {
-        if let Some(c) = self.compositor.as_mut() { c.set_transition_mode(mode); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_transition_mode(mode);
+        }
     }
 
     fn compositor_fps(&self) -> f32 {
         self.compositor.as_ref().map_or(0.0, |c| c.fps())
     }
 
-    fn compositor_set_frame_extents(&mut self, window: WindowId, left: u32, right: u32, top: u32, bottom: u32) {
+    fn compositor_set_frame_extents(
+        &mut self,
+        window: WindowId,
+        left: u32,
+        right: u32,
+        top: u32,
+        bottom: u32,
+    ) {
         if let Some(c) = self.compositor.as_mut() {
             c.set_frame_extents(window.raw(), left, right, top, bottom);
         }
@@ -2268,26 +2396,40 @@ impl Backend for UdevBackend {
         }
     }
 
-    fn compositor_notify_tag_switch(&mut self, duration: Duration, direction: i32, exclude_top: u32, mon_rect: (i32, i32, u32, u32)) {
+    fn compositor_notify_tag_switch(
+        &mut self,
+        duration: Duration,
+        direction: i32,
+        exclude_top: u32,
+        mon_rect: (i32, i32, u32, u32),
+    ) {
         if let Some(c) = self.compositor.as_mut() {
             c.notify_tag_switch(duration, direction, exclude_top, mon_rect);
         }
     }
 
     fn compositor_force_full_redraw(&mut self) {
-        if let Some(c) = self.compositor.as_mut() { c.force_full_redraw(); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.force_full_redraw();
+        }
     }
 
     fn compositor_set_mouse_position(&mut self, x: f32, y: f32) {
-        if let Some(c) = self.compositor.as_mut() { c.set_mouse_position(x, y); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_mouse_position(x, y);
+        }
     }
 
     fn compositor_deactivate_edge_glow(&mut self) {
-        if let Some(c) = self.compositor.as_mut() { c.deactivate_edge_glow(); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.deactivate_edge_glow();
+        }
     }
 
     fn compositor_unsuppress_edge_glow(&mut self) {
-        if let Some(c) = self.compositor.as_mut() { c.unsuppress_edge_glow(); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.unsuppress_edge_glow();
+        }
     }
 
     fn compositor_set_window_urgent(&mut self, window: WindowId, urgent: bool) {
@@ -2303,24 +2445,37 @@ impl Backend for UdevBackend {
     }
 
     fn compositor_set_magnifier(&mut self, enabled: bool) {
-        if let Some(c) = self.compositor.as_mut() { c.set_magnifier(enabled); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_magnifier(enabled);
+        }
     }
 
-    fn compositor_set_overview_mode(&mut self, active: bool, windows: &[(WindowId, f32, f32, f32, f32, bool, String)]) {
+    fn compositor_set_overview_mode(
+        &mut self,
+        active: bool,
+        windows: &[(WindowId, f32, f32, f32, f32, bool, String)],
+    ) {
         if let Some(c) = self.compositor.as_mut() {
-            let entries: Vec<(u64, f32, f32, f32, f32, bool, String)> = windows.iter()
-                .map(|(id, x, y, w, h, focused, title)| (id.raw(), *x, *y, *w, *h, *focused, title.clone()))
+            let entries: Vec<(u64, f32, f32, f32, f32, bool, String)> = windows
+                .iter()
+                .map(|(id, x, y, w, h, focused, title)| {
+                    (id.raw(), *x, *y, *w, *h, *focused, title.clone())
+                })
                 .collect();
             c.set_overview_mode(active, &entries);
         }
     }
 
     fn compositor_set_overview_monitor(&mut self, x: i32, y: i32, w: u32, h: u32) {
-        if let Some(c) = self.compositor.as_mut() { c.set_overview_monitor(x, y, w, h); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_overview_monitor(x, y, w, h);
+        }
     }
 
     fn compositor_set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32)]) {
-        if let Some(c) = self.compositor.as_mut() { c.set_monitors(monitors); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_monitors(monitors);
+        }
     }
 
     fn compositor_set_overview_selection(&mut self, window: WindowId) {
@@ -2348,12 +2503,19 @@ impl Backend for UdevBackend {
     }
 
     fn compositor_set_dock_position(&mut self, x: f32, y: f32) {
-        if let Some(c) = self.compositor.as_mut() { c.set_dock_position(x, y); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_dock_position(x, y);
+        }
     }
 
-    fn compositor_set_expose_mode(&mut self, active: bool, windows: Vec<(WindowId, i32, i32, u32, u32)>) {
+    fn compositor_set_expose_mode(
+        &mut self,
+        active: bool,
+        windows: Vec<(WindowId, i32, i32, u32, u32)>,
+    ) {
         if let Some(c) = self.compositor.as_mut() {
-            let entries: Vec<(u64, i32, i32, u32, u32)> = windows.iter()
+            let entries: Vec<(u64, i32, i32, u32, u32)> = windows
+                .iter()
                 .map(|(id, x, y, w, h)| (id.raw(), *x, *y, *w, *h))
                 .collect();
             c.set_expose_mode(active, entries);
@@ -2361,23 +2523,33 @@ impl Backend for UdevBackend {
     }
 
     fn compositor_set_snap_preview(&mut self, preview: Option<(f32, f32, f32, f32)>) {
-        if let Some(c) = self.compositor.as_mut() { c.set_snap_preview(preview); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_snap_preview(preview);
+        }
     }
 
     fn compositor_clear_snap_preview_immediate(&mut self) {
-        if let Some(c) = self.compositor.as_mut() { c.clear_snap_preview_immediate(); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.clear_snap_preview_immediate();
+        }
     }
 
     fn compositor_set_peek_mode(&mut self, active: bool) {
-        if let Some(c) = self.compositor.as_mut() { c.set_peek_mode(active); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_peek_mode(active);
+        }
     }
 
     fn compositor_set_window_groups(&mut self, groups: Vec<(u32, Vec<(u32, String, bool)>)>) {
-        if let Some(c) = self.compositor.as_mut() { c.set_window_groups(groups); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_window_groups(groups);
+        }
     }
 
     fn compositor_zoom_to_fit(&mut self, window: Option<u32>) {
-        if let Some(c) = self.compositor.as_mut() { c.zoom_to_fit(window); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.zoom_to_fit(window);
+        }
     }
 
     fn compositor_expose_click(&mut self, x: f32, y: f32) -> Option<WindowId> {
@@ -2389,15 +2561,21 @@ impl Backend for UdevBackend {
     }
 
     fn compositor_set_colorblind_mode(&mut self, mode: &str) {
-        if let Some(c) = self.compositor.as_mut() { c.set_colorblind_mode(mode); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_colorblind_mode(mode);
+        }
     }
 
     fn compositor_set_annotation_mode(&mut self, active: bool) {
-        if let Some(c) = self.compositor.as_mut() { c.set_annotation_mode(active); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_annotation_mode(active);
+        }
     }
 
     fn compositor_annotation_add_point(&mut self, x: f32, y: f32) {
-        if let Some(c) = self.compositor.as_mut() { c.annotation_add_point(x, y); }
+        if let Some(c) = self.compositor.as_mut() {
+            c.annotation_add_point(x, y);
+        }
     }
 
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError> {
@@ -2461,7 +2639,11 @@ impl Backend for UdevBackend {
                     self.state.needs_redraw = false;
                 }
                 let cursor_kind = self.shared.lock().unwrap().cursor_kind;
-                kms.borrow_mut().render_if_needed(&*self.state, cursor_kind, self.compositor.as_ref());
+                kms.borrow_mut().render_if_needed(
+                    &*self.state,
+                    cursor_kind,
+                    self.compositor.as_ref(),
+                );
             }
 
             if handler.should_exit() {
@@ -2590,15 +2772,21 @@ fn scan_drm_outputs(dev_id: u64, path: &Path) -> Result<Vec<(u64, OutputInfo)>, 
 
     let card = DrmCard(file);
 
-    let res = card
-        .resource_handles()
-        .map_err(|e| BackendError::Other(Box::new(io::Error::new(io::ErrorKind::Other, format!("drm resources failed: {e:?}")))))?;
+    let res = card.resource_handles().map_err(|e| {
+        BackendError::Other(Box::new(io::Error::new(
+            io::ErrorKind::Other,
+            format!("drm resources failed: {e:?}"),
+        )))
+    })?;
 
     let mut outputs = Vec::new();
     for conn_handle in res.connectors() {
-        let conn = card
-            .get_connector(*conn_handle, true)
-            .map_err(|e| BackendError::Other(Box::new(io::Error::new(io::ErrorKind::Other, format!("drm get_connector failed: {e:?}")))))?;
+        let conn = card.get_connector(*conn_handle, true).map_err(|e| {
+            BackendError::Other(Box::new(io::Error::new(
+                io::ErrorKind::Other,
+                format!("drm get_connector failed: {e:?}"),
+            )))
+        })?;
 
         if conn.state() != connector::State::Connected {
             continue;

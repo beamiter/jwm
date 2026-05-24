@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use std::fmt;
 use std::rc::Rc;
@@ -13,13 +14,38 @@ use crate::core::animation::{AnimationSpeed, Easing};
 use crate::core::layout::LayoutEnum;
 use crate::jwm::WMFuncType;
 use crate::jwm::{self, Jwm, WMButton, WMClickType, WMKey, WMRule};
-use crate::terminal_prober::ADVANCED_TERMINAL_PROBER;
+use crate::terminal_prober::{ADVANCED_TERMINAL_PROBER, LAUNCHER_PROBER};
 use std::time::Duration;
 
 use crate::backend::common_define::keys as k;
 use crate::backend::common_define::{KeySym, Mods, MouseButton};
 
 pub const LOAD_LOCAL_CONFIG: bool = true;
+
+// ---------------------------------------------------------------------------
+// Backend family — set once by main() before CONFIG is first accessed.
+// ---------------------------------------------------------------------------
+
+/// Which backend family is running.  All wayland variants (udev, x11, winit)
+/// map to `Wayland`; only the native X11 backend maps to `X11`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendFamily {
+    X11,
+    Wayland,
+}
+
+static ACTIVE_BACKEND: OnceLock<BackendFamily> = OnceLock::new();
+
+/// Called from main.rs immediately after the backend is resolved, before any
+/// CONFIG access.  Subsequent calls are silently ignored.
+pub fn set_backend_family(family: BackendFamily) {
+    let _ = ACTIVE_BACKEND.set(family);
+}
+
+/// Returns the active backend family, defaulting to X11 if not yet set.
+pub fn get_backend_family() -> BackendFamily {
+    *ACTIVE_BACKEND.get().unwrap_or(&BackendFamily::X11)
+}
 
 macro_rules! status_bar_config {
     ($($feature:literal => $name:literal),* $(,)?) => {
@@ -275,12 +301,12 @@ pub struct BehaviorConfig {
     pub shadow_bottom_extra: f32,
 
     // --- Tag-switch transition mode ---
-    /// Workspace switch transition mode: "slide" (default), "cube", "fade", "flip", "zoom", "stack", "blinds".
+    /// Workspace switch transition mode: "none" (default), "slide", "cube", "fade", "flip", "zoom", "stack", "blinds".
     #[serde(default = "default_transition_mode")]
     pub transition_mode: String,
 
     // --- Window open/close scale animation ---
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub window_animation: bool,
     #[serde(default = "default_window_animation_scale")]
     pub window_animation_scale: f32,
@@ -298,7 +324,7 @@ pub struct BehaviorConfig {
     pub edge_glow_width: f32,
 
     // --- Attention animation (urgent pulse) ---
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub attention_animation: bool,
     #[serde(default = "default_attention_color")]
     pub attention_color: [f32; 4],
@@ -561,7 +587,7 @@ fn default_shadow_bottom_extra() -> f32 {
     4.0
 }
 fn default_transition_mode() -> String {
-    "slide".to_string()
+    "none".to_string()
 }
 fn default_vsync_method() -> String {
     "global".to_string()
@@ -860,7 +886,7 @@ impl Default for Config {
                     shadow_color: default_shadow_color(),
                     inactive_opacity: default_inactive_opacity(),
                     active_opacity: default_active_opacity(),
-                    blur_enabled: true,
+                    blur_enabled: false,
                     blur_strength: default_blur_strength(),
                     blur_quality_auto: true,
                     blur_temporal_enabled: default_true(),
@@ -906,13 +932,13 @@ impl Default for Config {
                     blur_use_frame_extents: false,
                     shadow_bottom_extra: default_shadow_bottom_extra(),
                     transition_mode: default_transition_mode(),
-                    window_animation: default_true(),
+                    window_animation: false,
                     window_animation_scale: default_window_animation_scale(),
                     inactive_dim: default_one(),
                     edge_glow: false,
                     edge_glow_color: default_edge_glow_color(),
                     edge_glow_width: default_edge_glow_width(),
-                    attention_animation: default_true(),
+                    attention_animation: false,
                     attention_color: default_attention_color(),
                     pip_border_color: default_pip_border_color(),
                     pip_border_width: default_pip_border_width(),
@@ -1027,20 +1053,7 @@ impl Default for Config {
 #[allow(dead_code)]
 impl Config {
     fn get_default_keys() -> Vec<KeyConfig> {
-        let is_x11 = matches!(std::env::var("JWM_BACKEND").as_deref(), Err(_) | Ok("x11"));
-
-        let dmenu_cmd = if is_x11 {
-            vec!["dmenu_run".to_string()]
-        } else {
-            vec![
-                "fuzzel".to_string(),
-                "--font=SauceCodePro Nerd Font Regular:size=11".to_string(),
-                "--background=2e3440ff".to_string(),
-                "--text-color=d8dee9ff".to_string(),
-                "--selection-color=81a1c1ff".to_string(),
-                "--selection-text-color=eceff4ff".to_string(),
-            ]
-        };
+        let dmenu_cmd = LAUNCHER_PROBER.probe_launcher();
 
         vec![
             KeyConfig {
@@ -1469,13 +1482,7 @@ impl Config {
     }
 
     pub fn load_default() -> Self {
-        // 如果配置文件不存在，使用默认配置
-        let default_config_path = dirs::config_dir()
-            .unwrap_or_else(|| std::env::current_dir().unwrap())
-            .join("jwm")
-            .join("config.toml");
-
-        Self::load_from_file(&default_config_path).unwrap_or_else(|_| Self::default())
+        Self::load_from_file(Self::resolve_load_path()).unwrap_or_else(|_| Self::default())
     }
 
     pub fn key_configs(&self) -> &[KeyConfig] {
@@ -1605,14 +1612,7 @@ impl Config {
                 ArgumentConfig::StringVec(cmd) => Some(cmd.clone()),
                 _ => None,
             })
-            .unwrap_or_else(|| {
-                let is_x11 = matches!(std::env::var("JWM_BACKEND").as_deref(), Err(_) | Ok("x11"));
-                if is_x11 {
-                    vec!["dmenu_run".to_string()]
-                } else {
-                    vec!["fuzzel".to_string()]
-                }
-            })
+            .unwrap_or_else(|| LAUNCHER_PROBER.probe_launcher())
     }
 
     pub fn get_termcmd() -> Vec<String> {
@@ -1978,11 +1978,23 @@ impl Config {
         self.save_to_file(config_path)
     }
 
-    pub fn get_default_config_path() -> std::path::PathBuf {
+    pub fn get_config_path_for(family: BackendFamily) -> std::path::PathBuf {
+        let name = match family {
+            BackendFamily::X11 => "config_x11.toml",
+            BackendFamily::Wayland => "config_wayland.toml",
+        };
         dirs::config_dir()
             .unwrap_or_else(|| std::env::current_dir().unwrap())
             .join("jwm")
-            .join("config.toml")
+            .join(name)
+    }
+
+    pub fn get_default_config_path() -> std::path::PathBuf {
+        Self::get_config_path_for(get_backend_family())
+    }
+
+    fn resolve_load_path() -> std::path::PathBuf {
+        Self::get_default_config_path()
     }
 
     pub fn generate_template<P: AsRef<Path>>(path: P) -> Result<(), ConfigError> {
@@ -2032,7 +2044,7 @@ impl Config {
     }
 
     pub fn reload(&mut self) -> Result<(), ConfigError> {
-        let config_path = Self::get_default_config_path();
+        let config_path = Self::resolve_load_path();
         if config_path.exists() {
             let new_config = Self::load_from_file(&config_path)?;
             self.inner = new_config.inner;
@@ -2041,7 +2053,7 @@ impl Config {
     }
 
     pub fn config_exists() -> bool {
-        Self::get_default_config_path().exists()
+        Self::resolve_load_path().exists()
     }
 
     pub fn get_config_modified_time() -> Result<std::time::SystemTime, ConfigError> {
@@ -2101,14 +2113,18 @@ pub static CONFIG: Lazy<ArcSwap<Config>> = Lazy::new(|| {
         Config::default()
     } else {
         if !Config::config_exists() {
-            Config::generate_template(Config::get_default_config_path()).unwrap();
+            let path = Config::get_default_config_path();
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            Config::generate_template(&path).unwrap();
             println!(
-                "Generated default config file at: {:?}",
-                Config::get_default_config_path()
+                "Generated default config file at: {}",
+                path.display()
             );
         }
         let config = Config::load_default();
-        println!("Configuration loaded!");
+        println!("Configuration loaded from: {}", Config::resolve_load_path().display());
         config
     };
     ArcSwap::from_pointee(config)
@@ -2116,7 +2132,7 @@ pub static CONFIG: Lazy<ArcSwap<Config>> = Lazy::new(|| {
 
 /// Reload the global CONFIG from disk. Returns Ok on success.
 pub fn reload_global() -> Result<(), ConfigError> {
-    let new_config = Config::load_from_file(Config::get_default_config_path())?;
+    let new_config = Config::load_from_file(Config::resolve_load_path())?;
     CONFIG.store(Arc::new(new_config));
     Ok(())
 }

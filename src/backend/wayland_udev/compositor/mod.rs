@@ -182,6 +182,7 @@ pub(crate) struct PostprocessUniforms {
     pub tone_mapping_method: i32,
 }
 
+#[allow(dead_code)]
 pub(crate) struct TransitionUniforms {
     pub rect: i32,
     pub projection: i32,
@@ -190,6 +191,7 @@ pub(crate) struct TransitionUniforms {
     pub uv_rect: i32,
 }
 
+#[allow(dead_code)]
 pub(crate) struct CubeUniforms {
     pub mvp: i32,
     pub texture: i32,
@@ -198,6 +200,7 @@ pub(crate) struct CubeUniforms {
     pub aspect: i32,
 }
 
+#[allow(dead_code)]
 pub(crate) struct PortalUniforms {
     pub rect: i32,
     pub projection: i32,
@@ -208,6 +211,7 @@ pub(crate) struct PortalUniforms {
     pub uv_rect: i32,
 }
 
+#[allow(dead_code)]
 pub(crate) struct TiltUniforms {
     pub rect: i32,
     pub projection: i32,
@@ -236,6 +240,7 @@ pub(crate) struct WobblyUniforms {
     pub grid_n: i32,
 }
 
+#[allow(dead_code)]
 pub(crate) struct GenieUniforms {
     pub rect: i32,
     pub projection: i32,
@@ -287,6 +292,7 @@ pub(crate) struct WindowState {
     pub anim_scale: f32,
     pub anim_scale_target: f32,
     pub wobbly: Option<WobblyState>,
+    #[allow(dead_code)]
     pub motion_trail: VecDeque<(i32, i32)>,
     pub opacity_override: Option<f32>,
     pub corner_radius_override: Option<f32>,
@@ -296,6 +302,7 @@ pub(crate) struct WindowState {
     pub is_urgent: bool,
     pub is_pip: bool,
     pub is_frosted: bool,
+    #[allow(dead_code)]
     pub class_name: String,
     pub ripple_progress: f32,
     pub ripple_active: bool,
@@ -356,6 +363,7 @@ pub(crate) struct OverviewEntry {
     pub w: f32,
     pub h: f32,
     pub focused: bool,
+    #[allow(dead_code)]
     pub title: String,
 }
 
@@ -395,10 +403,13 @@ pub(crate) struct WaylandCompositor {
     edge_glow_program: u32,
     tilt_program: u32,
     wobbly_program: u32,
+    #[allow(dead_code)]
     genie_program: u32,
     particle_program: u32,
     overview_bg_program: u32,
+    #[allow(dead_code)]
     hud_program: u32,
+    #[allow(dead_code)]
     temporal_blur_mix_program: u32,
 
     // Uniform locations
@@ -412,6 +423,7 @@ pub(crate) struct WaylandCompositor {
     portal_uniforms: PortalUniforms,
     tilt_uniforms: TiltUniforms,
     wobbly_uniforms: WobblyUniforms,
+    #[allow(dead_code)]
     genie_uniforms: GenieUniforms,
     edge_glow_uniforms: EdgeGlowUniforms,
 
@@ -424,6 +436,7 @@ pub(crate) struct WaylandCompositor {
     blur_fbos: Vec<BlurFboLevel>,
     postprocess_fbo: u32,
     postprocess_texture: u32,
+    #[allow(dead_code)]
     transition_fbo: u32,
     transition_texture: u32,
     particle_vao: u32,
@@ -450,6 +463,19 @@ pub(crate) struct WaylandCompositor {
     blur_strength: u32,
     fade_in_step: f32,
     fade_out_step: f32,
+
+    // Animation feature flags (all default false; read from config.toml)
+    fading_enabled: bool,
+    window_animation_enabled: bool,
+    edge_glow_enabled: bool,
+    attention_animation_enabled: bool,
+    wobbly_enabled: bool,
+    motion_trail_enabled: bool,
+    genie_minimize_enabled: bool,
+    ripple_on_open_enabled: bool,
+    focus_highlight_enabled: bool,
+    particle_effects_enabled: bool,
+    window_tilt_enabled: bool,
 
     // Animation state
     transition_active: bool,
@@ -872,20 +898,33 @@ impl WaylandCompositor {
             // Per-window state
             windows: HashMap::new(),
 
-            // Config defaults
-            corner_radius: 8.0,
-            shadow_enabled: true,
-            shadow_radius: 12.0,
-            shadow_offset: [0.0, 4.0],
+            // Config defaults — intentionally conservative; apply_config() reads config.toml
+            corner_radius: 0.0,
+            shadow_enabled: false,
+            shadow_radius: 24.0,
+            shadow_offset: [4.0, 4.0],
             shadow_color: [0.0, 0.0, 0.0, 0.5],
             shadow_spread: 20.0,
             inactive_opacity: 1.0,
             active_opacity: 1.0,
-            inactive_dim: 0.85,
-            blur_enabled: true,
-            blur_strength: 5,
-            fade_in_step: 0.08,
-            fade_out_step: 0.06,
+            inactive_dim: 1.0,
+            blur_enabled: false,
+            blur_strength: 3,
+            fade_in_step: 0.03,
+            fade_out_step: 0.03,
+
+            // Animation feature flags — all off until config.toml enables them
+            fading_enabled: false,
+            window_animation_enabled: false,
+            edge_glow_enabled: false,
+            attention_animation_enabled: false,
+            wobbly_enabled: false,
+            motion_trail_enabled: false,
+            genie_minimize_enabled: false,
+            ripple_on_open_enabled: false,
+            focus_highlight_enabled: false,
+            particle_effects_enabled: false,
+            window_tilt_enabled: false,
 
             // Animation state
             transition_active: false,
@@ -1002,6 +1041,7 @@ impl WaylandCompositor {
     }
 
     /// Clear the needs_render flag after a frame has been rendered.
+    #[allow(dead_code)]
     pub(crate) fn clear_needs_render(&mut self) {
         self.needs_render = false;
     }
@@ -1024,6 +1064,7 @@ impl WaylandCompositor {
 
 impl WaylandCompositor {
     /// Recreate FBOs at the new screen dimensions.
+    #[allow(dead_code)]
     pub(crate) unsafe fn resize(&mut self, gl: &ffi::Gles2, w: u32, h: u32) {
         if w == self.screen_w && h == self.screen_h {
             return;

@@ -74,6 +74,7 @@ pub struct EventCoalescer {
     property_time_threshold: Duration,
     // Expose event coalescing (per window, merged regions)
     pending_exposes: HashMap<u64, ExposeRect>,
+    #[allow(dead_code)]
     expose_time_threshold: Duration,
 }
 

@@ -5,32 +5,45 @@ impl WaylandCompositor {
     /// Tick fade animations (fade-in on map, fade-out on unmap)
     pub(crate) fn tick_fades(&mut self, dt: f32) {
         for (_id, win) in self.windows.iter_mut() {
-            if win.fading_out {
-                win.fade_opacity -= self.fade_out_step * dt * 60.0;
-                if win.fade_opacity <= 0.0 {
-                    win.fade_opacity = 0.0;
+            if self.fading_enabled {
+                if win.fading_out {
+                    win.fade_opacity -= self.fade_out_step * dt * 60.0;
+                    if win.fade_opacity <= 0.0 {
+                        win.fade_opacity = 0.0;
+                    }
+                } else if win.fade_opacity < 1.0 {
+                    win.fade_opacity += self.fade_in_step * dt * 60.0;
+                    if win.fade_opacity > 1.0 {
+                        win.fade_opacity = 1.0;
+                    }
                 }
-            } else if win.fade_opacity < 1.0 {
-                win.fade_opacity += self.fade_in_step * dt * 60.0;
-                if win.fade_opacity > 1.0 {
-                    win.fade_opacity = 1.0;
-                }
+            } else {
+                // Snap immediately: no fade transition
+                win.fade_opacity = if win.fading_out { 0.0 } else { 1.0 };
             }
+
             // Scale animation
-            if win.anim_scale != win.anim_scale_target {
+            if self.window_animation_enabled && win.anim_scale != win.anim_scale_target {
                 let speed = 8.0 * dt;
                 win.anim_scale += (win.anim_scale_target - win.anim_scale) * speed;
                 if (win.anim_scale - win.anim_scale_target).abs() < 0.001 {
                     win.anim_scale = win.anim_scale_target;
                 }
+            } else if !self.window_animation_enabled {
+                win.anim_scale = 1.0;
+                win.anim_scale_target = 1.0;
             }
+
             // Ripple
-            if win.ripple_active {
+            if self.ripple_on_open_enabled && win.ripple_active {
                 win.ripple_progress += dt * 2.0;
                 if win.ripple_progress >= 1.0 {
                     win.ripple_active = false;
                     win.ripple_progress = 0.0;
                 }
+            } else if !self.ripple_on_open_enabled {
+                win.ripple_active = false;
+                win.ripple_progress = 0.0;
             }
         }
         // Remove fully faded-out windows
@@ -39,6 +52,12 @@ impl WaylandCompositor {
 
     /// Tick wobbly window physics (spring-mass grid)
     pub(crate) fn tick_wobbly(&mut self, dt: f32) {
+        if !self.wobbly_enabled {
+            for (_id, win) in self.windows.iter_mut() {
+                win.wobbly = None;
+            }
+            return;
+        }
         // Implementation: for each window with wobbly state, iterate 3 sub-steps:
         // For each node, compute spring forces from neighbors + restore force toward rest position
         // Apply velocity damping, integrate with symplectic euler
@@ -120,6 +139,10 @@ impl WaylandCompositor {
 
     /// Tick particle systems
     pub(crate) fn tick_particles(&mut self, dt: f32) {
+        if !self.particle_effects_enabled {
+            self.particle_systems.clear();
+            return;
+        }
         let gravity = 500.0f32;
         for system in self.particle_systems.iter_mut() {
             system.age += dt;
@@ -166,12 +189,20 @@ impl WaylandCompositor {
 
     /// Tick tilt interpolation
     pub(crate) fn tick_tilt(&mut self, dt: f32) {
+        if !self.window_tilt_enabled {
+            self.tilt_x = 0.0;
+            self.tilt_y = 0.0;
+            self.tilt_target_x = 0.0;
+            self.tilt_target_y = 0.0;
+            return;
+        }
         let speed = 8.0 * dt;
         self.tilt_x += (self.tilt_target_x - self.tilt_x) * speed;
         self.tilt_y += (self.tilt_target_y - self.tilt_y) * speed;
     }
 
     /// Spawn particles for a closing window
+    #[allow(dead_code)]
     pub(crate) fn spawn_particles_for_window(&mut self, x: i32, y: i32, w: u32, h: u32) {
         let mut particles = Vec::with_capacity(60);
         let cx = x as f32 + w as f32 * 0.5;

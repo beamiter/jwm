@@ -3,13 +3,13 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
-use smithay::backend::allocator::Fourcc;
-use smithay::backend::allocator::Format as DmabufFormat;
 use smithay::backend::allocator::format::FormatSet;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
+use smithay::backend::allocator::Format as DmabufFormat;
+use smithay::backend::allocator::Fourcc;
 use smithay::backend::drm::compositor::FrameFlags;
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::exporter::gbm::NodeFilter;
@@ -17,6 +17,7 @@ use smithay::backend::drm::output::{DrmOutput, DrmOutputManager, DrmOutputRender
 use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmEvent, DrmEventMetadata};
 use smithay::backend::egl::context::ContextPriority;
 use smithay::backend::egl::{EGLContext, EGLDisplay};
+use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::memory::{
     MemoryRenderBuffer, MemoryRenderBufferRenderElement,
 };
@@ -24,30 +25,29 @@ use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::{AsRenderElements, Id, Kind};
-use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::gles::ffi as gl_ffi;
-use smithay::backend::renderer::utils::{RendererSurfaceStateUserData, import_surface_tree};
-use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::gles::GlesRenderbuffer;
+use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
+use smithay::backend::renderer::utils::{import_surface_tree, RendererSurfaceStateUserData};
 use smithay::backend::renderer::{Bind, ExportMem, Offscreen, Renderer};
-use smithay::backend::session::Session;
 use smithay::backend::session::libseat::LibSeatSession;
-use smithay::utils::{Buffer as BufferCoord, Size};
+use smithay::backend::session::Session;
 use smithay::desktop::layer_map_for_output;
 use smithay::desktop::space::SurfaceTree;
 use smithay::desktop::utils::send_frames_surface_tree;
 use smithay::output::{Mode as WlMode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::channel::Sender;
 use smithay::reexports::calloop::{LoopHandle, RegistrationToken};
-use smithay::reexports::drm::control::{Device as ControlDevice, ModeTypeFlags, connector, crtc};
+use smithay::reexports::drm::control::{connector, crtc, Device as ControlDevice, ModeTypeFlags};
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server;
-use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::reexports::wayland_server::Resource;
+use smithay::utils::{Buffer as BufferCoord, Size};
 use smithay::utils::{DeviceFd, Physical, Point, Rectangle, Scale, Transform};
-use smithay::wayland::compositor::{TraversalAction, with_states, with_surface_tree_downward};
-use smithay::wayland::shell::xdg::SurfaceCachedState;
+use smithay::wayland::compositor::{with_states, with_surface_tree_downward, TraversalAction};
 use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
+use smithay::wayland::shell::xdg::SurfaceCachedState;
 
 use crate::backend::common_define::StdCursorKind;
 
@@ -277,22 +277,33 @@ impl KmsState {
     }
 
     /// Set the shared pending screencopy queue (called once after initialization).
-    pub(super) fn set_screencopy_pending(&mut self, queue: crate::backend::wayland_udev::screencopy::PendingScreencopyQueue) {
+    pub(super) fn set_screencopy_pending(
+        &mut self,
+        queue: crate::backend::wayland_udev::screencopy::PendingScreencopyQueue,
+    ) {
         self.screencopy_pending = Some(queue);
     }
 
     /// Get the size of the primary (first) output
+    #[allow(dead_code)]
     pub(super) fn primary_output_size(&self) -> (u32, u32) {
-        self.outputs.first().map(|o| (o.mode_size.0 as u32, o.mode_size.1 as u32)).unwrap_or((1920, 1080))
+        self.outputs
+            .first()
+            .map(|o| (o.mode_size.0 as u32, o.mode_size.1 as u32))
+            .unwrap_or((1920, 1080))
     }
 
     /// Get the total bounding box size covering all outputs.
     pub(super) fn total_screen_size(&self) -> (u32, u32) {
-        let w = self.outputs.iter()
+        let w = self
+            .outputs
+            .iter()
             .map(|o| (o.origin.0 + o.mode_size.0).max(0) as u32)
             .max()
             .unwrap_or(1920);
-        let h = self.outputs.iter()
+        let h = self
+            .outputs
+            .iter()
             .map(|o| (o.origin.1 + o.mode_size.1).max(0) as u32)
             .max()
             .unwrap_or(1080);
@@ -300,7 +311,10 @@ impl KmsState {
     }
 
     /// Run a closure with access to the raw GL context
-    pub(super) fn with_renderer<F, R>(&mut self, f: F) -> Result<R, smithay::backend::renderer::gles::GlesError>
+    pub(super) fn with_renderer<F, R>(
+        &mut self,
+        f: F,
+    ) -> Result<R, smithay::backend::renderer::gles::GlesError>
     where
         F: FnOnce(&smithay::backend::renderer::gles::ffi::Gles2) -> R,
     {
@@ -346,17 +360,14 @@ impl KmsState {
         let size: Size<i32, BufferCoord> = (width, height).into();
 
         // 1. Create offscreen renderbuffer
-        let mut renderbuffer: GlesRenderbuffer = match Offscreen::create_buffer(
-            renderer,
-            Fourcc::Abgr8888,
-            size,
-        ) {
-            Ok(rb) => rb,
-            Err(e) => {
-                log::error!("[screenshot] create offscreen buffer failed: {e:?}");
-                return;
-            }
-        };
+        let mut renderbuffer: GlesRenderbuffer =
+            match Offscreen::create_buffer(renderer, Fourcc::Abgr8888, size) {
+                Ok(rb) => rb,
+                Err(e) => {
+                    log::error!("[screenshot] create offscreen buffer failed: {e:?}");
+                    return;
+                }
+            };
 
         // 2. Bind the offscreen renderbuffer
         let mut target = match renderer.bind(&mut renderbuffer) {
@@ -369,11 +380,8 @@ impl KmsState {
 
         // 3. Render all elements using OutputDamageTracker
         let phys_size: smithay::utils::Size<i32, Physical> = (width, height).into();
-        let mut damage_tracker = OutputDamageTracker::new(
-            phys_size,
-            Scale::from(1.0f64),
-            Transform::Normal,
-        );
+        let mut damage_tracker =
+            OutputDamageTracker::new(phys_size, Scale::from(1.0f64), Transform::Normal);
         let clear_color = smithay::backend::renderer::Color32F::new(0.1, 0.15, 0.25, 1.0);
         if let Err(e) = damage_tracker.render_output(
             renderer,
@@ -426,17 +434,14 @@ impl KmsState {
     ) {
         let size: Size<i32, BufferCoord> = (width, height).into();
 
-        let mut renderbuffer: GlesRenderbuffer = match Offscreen::create_buffer(
-            renderer,
-            Fourcc::Abgr8888,
-            size,
-        ) {
-            Ok(rb) => rb,
-            Err(e) => {
-                log::error!("[screenshot-region] create offscreen buffer failed: {e:?}");
-                return;
-            }
-        };
+        let mut renderbuffer: GlesRenderbuffer =
+            match Offscreen::create_buffer(renderer, Fourcc::Abgr8888, size) {
+                Ok(rb) => rb,
+                Err(e) => {
+                    log::error!("[screenshot-region] create offscreen buffer failed: {e:?}");
+                    return;
+                }
+            };
 
         let mut target = match renderer.bind(&mut renderbuffer) {
             Ok(t) => t,
@@ -447,19 +452,12 @@ impl KmsState {
         };
 
         let phys_size: smithay::utils::Size<i32, Physical> = (width, height).into();
-        let mut damage_tracker = OutputDamageTracker::new(
-            phys_size,
-            Scale::from(1.0f64),
-            Transform::Normal,
-        );
+        let mut damage_tracker =
+            OutputDamageTracker::new(phys_size, Scale::from(1.0f64), Transform::Normal);
         let clear_color = smithay::backend::renderer::Color32F::new(0.1, 0.15, 0.25, 1.0);
-        if let Err(e) = damage_tracker.render_output(
-            renderer,
-            &mut target,
-            0,
-            elements,
-            clear_color,
-        ) {
+        if let Err(e) =
+            damage_tracker.render_output(renderer, &mut target, 0, elements, clear_color)
+        {
             log::error!("[screenshot-region] render_output failed: {e:?}");
             return;
         }
@@ -481,7 +479,8 @@ impl KmsState {
             }
         };
 
-        // Crop the region from the full pixel buffer
+        // Crop the region from the full pixel buffer.
+        // Pixels are in top-to-bottom order (smithay flips Y in projection).
         let x = rx.max(0) as u32;
         let y = ry.max(0) as u32;
         let cw = rw.min((width as u32).saturating_sub(x));
@@ -506,7 +505,11 @@ impl KmsState {
         } else {
             log::info!(
                 "[screenshot-region] saved to {} ({}x{} at {},{})",
-                path.display(), cw, ch, x, y
+                path.display(),
+                cw,
+                ch,
+                x,
+                y
             );
         }
     }
@@ -555,20 +558,17 @@ impl KmsState {
 
         // Render to offscreen buffer (same approach as screenshot capture).
         let size: Size<i32, BufferCoord> = (width, height).into();
-        let mut renderbuffer: GlesRenderbuffer = match Offscreen::create_buffer(
-            renderer,
-            Fourcc::Abgr8888,
-            size,
-        ) {
-            Ok(rb) => rb,
-            Err(e) => {
-                log::error!("[screencopy] create offscreen buffer failed: {e:?}");
-                for f in &frames {
-                    f.frame.failed();
+        let mut renderbuffer: GlesRenderbuffer =
+            match Offscreen::create_buffer(renderer, Fourcc::Abgr8888, size) {
+                Ok(rb) => rb,
+                Err(e) => {
+                    log::error!("[screencopy] create offscreen buffer failed: {e:?}");
+                    for f in &frames {
+                        f.frame.failed();
+                    }
+                    return;
                 }
-                return;
-            }
-        };
+            };
 
         let mut target = match renderer.bind(&mut renderbuffer) {
             Ok(t) => t,
@@ -582,19 +582,12 @@ impl KmsState {
         };
 
         let phys_size: smithay::utils::Size<i32, Physical> = (width, height).into();
-        let mut damage_tracker = OutputDamageTracker::new(
-            phys_size,
-            Scale::from(1.0f64),
-            Transform::Normal,
-        );
+        let mut damage_tracker =
+            OutputDamageTracker::new(phys_size, Scale::from(1.0f64), Transform::Normal);
         let clear_color = smithay::backend::renderer::Color32F::new(0.1, 0.15, 0.25, 1.0);
-        if let Err(e) = damage_tracker.render_output(
-            renderer,
-            &mut target,
-            0,
-            elements,
-            clear_color,
-        ) {
+        if let Err(e) =
+            damage_tracker.render_output(renderer, &mut target, 0, elements, clear_color)
+        {
             log::error!("[screencopy] render_output failed: {e:?}");
             for f in &frames {
                 f.frame.failed();
@@ -632,56 +625,60 @@ impl KmsState {
         // We need to convert RGBA → BGRA (swap R and B channels).
 
         for frame_info in frames.drain(..) {
-            let copy_result = with_buffer_contents_mut(&frame_info.buffer, |ptr, pool_len, buf_data| {
-                let buf_offset = buf_data.offset as usize;
-                let buf_stride = buf_data.stride as usize;
-                let buf_h = buf_data.height as usize;
-                let buf_w = buf_data.width as usize;
+            let copy_result =
+                with_buffer_contents_mut(&frame_info.buffer, |ptr, pool_len, buf_data| {
+                    let buf_offset = buf_data.offset as usize;
+                    let buf_stride = buf_data.stride as usize;
+                    let buf_h = buf_data.height as usize;
+                    let buf_w = buf_data.width as usize;
 
-                // Source region
-                let (src_x, src_y, src_w, src_h) = if let Some((rx, ry, rw, rh)) = frame_info.region {
-                    (rx as usize, ry as usize, rw as usize, rh as usize)
-                } else {
-                    (0usize, 0usize, width as usize, height as usize)
-                };
+                    // Source region
+                    let (src_x, src_y, src_w, src_h) =
+                        if let Some((rx, ry, rw, rh)) = frame_info.region {
+                            (rx as usize, ry as usize, rw as usize, rh as usize)
+                        } else {
+                            (0usize, 0usize, width as usize, height as usize)
+                        };
 
-                let copy_h = src_h.min(buf_h);
-                let copy_w = src_w.min(buf_w);
-                let src_stride = width as usize * 4;
+                    let copy_h = src_h.min(buf_h);
+                    let copy_w = src_w.min(buf_w);
+                    let src_stride = width as usize * 4;
 
-                for row in 0..copy_h {
-                    let src_row = src_y + row;
-                    if src_row >= height as usize {
-                        break;
-                    }
-                    let src_row_start = src_row * src_stride + src_x * 4;
-                    let dst_row_start = buf_offset + row * buf_stride;
-
-                    if dst_row_start + copy_w * 4 > pool_len {
-                        break;
-                    }
-
-                    for col in 0..copy_w {
-                        let si = src_row_start + col * 4;
-                        let di = dst_row_start + col * 4;
-                        if si + 3 >= pixels.len() {
+                    for row in 0..copy_h {
+                        let src_row = src_y + row;
+                        if src_row >= height as usize {
                             break;
                         }
-                        // ABGR (GL) = [R, G, B, A] in memory → ARGB8888 (shm) = [B, G, R, A] in memory
-                        unsafe {
-                            *ptr.add(di) = pixels[si + 2]; // B
-                            *ptr.add(di + 1) = pixels[si + 1]; // G
-                            *ptr.add(di + 2) = pixels[si]; // R
-                            *ptr.add(di + 3) = pixels[si + 3]; // A
+                        let src_row_start = src_row * src_stride + src_x * 4;
+                        let dst_row_start = buf_offset + row * buf_stride;
+
+                        if dst_row_start + copy_w * 4 > pool_len {
+                            break;
+                        }
+
+                        for col in 0..copy_w {
+                            let si = src_row_start + col * 4;
+                            let di = dst_row_start + col * 4;
+                            if si + 3 >= pixels.len() {
+                                break;
+                            }
+                            // ABGR (GL) = [R, G, B, A] in memory → ARGB8888 (shm) = [B, G, R, A] in memory
+                            unsafe {
+                                *ptr.add(di) = pixels[si + 2]; // B
+                                *ptr.add(di + 1) = pixels[si + 1]; // G
+                                *ptr.add(di + 2) = pixels[si]; // R
+                                *ptr.add(di + 3) = pixels[si + 3]; // A
+                            }
                         }
                     }
-                }
-            });
+                });
 
             match copy_result {
                 Ok(()) => {
                     // Send flags (no y-invert) then ready.
-                    frame_info.frame.flags(zwlr_screencopy_frame_v1::Flags::empty());
+                    frame_info
+                        .frame
+                        .flags(zwlr_screencopy_frame_v1::Flags::empty());
                     // Timestamp: use current time.
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -994,11 +991,8 @@ impl KmsState {
                 let cursor_bitmap = self.cursor_bitmap(cursor_kind, cursor_scale);
 
                 if let Some(bitmap) = cursor_bitmap.as_ref() {
-                    let loc: Point<i32, Physical> = (
-                        (cursor_x - ox) - bitmap.xhot,
-                        (cursor_y - oy) - bitmap.yhot,
-                    )
-                        .into();
+                    let loc: Point<i32, Physical> =
+                        ((cursor_x - ox) - bitmap.xhot, (cursor_y - oy) - bitmap.yhot).into();
                     if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(
                         &mut self.renderer,
                         loc.to_f64(),
@@ -1016,10 +1010,8 @@ impl KmsState {
                     let base_y = cursor_y - oy;
 
                     for (idx, (rx, ry, rw, rh)) in CURSOR_RECTS.iter().copied().enumerate() {
-                        let geo: Rectangle<i32, Physical> = Rectangle::new(
-                            (base_x + rx, base_y + ry).into(),
-                            (rw, rh).into(),
-                        );
+                        let geo: Rectangle<i32, Physical> =
+                            Rectangle::new((base_x + rx, base_y + ry).into(), (rw, rh).into());
                         let body = SolidColorRenderElement::new(
                             self.cursor_fallback_body_ids[idx].clone(),
                             geo,
@@ -1120,7 +1112,9 @@ impl KmsState {
                         |_, _, _| TraversalAction::DoChildren(()),
                         |child_surface, child_states, _| {
                             let data = child_states.data_map.get::<RendererSurfaceStateUserData>();
-                            let Some(data) = data else { return; };
+                            let Some(data) = data else {
+                                return;
+                            };
                             if data.lock().unwrap().view().is_some() {
                                 out.output.enter(child_surface);
                                 visible_surfaces.insert(child_surface.downgrade());
@@ -1196,7 +1190,8 @@ impl KmsState {
                             (),
                             |_, _, _| TraversalAction::DoChildren(()),
                             |child_surface, child_states, _| {
-                                let data = child_states.data_map.get::<RendererSurfaceStateUserData>();
+                                let data =
+                                    child_states.data_map.get::<RendererSurfaceStateUserData>();
                                 let Some(data) = data else {
                                     return;
                                 };
@@ -1261,11 +1256,8 @@ impl KmsState {
                         |_, _, _| true,
                     );
 
-                    let location: Point<i32, Physical> = (
-                        geo.x - ox - toplevel_off_x,
-                        geo.y - oy - toplevel_off_y,
-                    )
-                        .into();
+                    let location: Point<i32, Physical> =
+                        (geo.x - ox - toplevel_off_x, geo.y - oy - toplevel_off_y).into();
                     let tree = SurfaceTree::from_surface(&surface);
                     let window_elements: Vec<KmsRenderElement> =
                         AsRenderElements::<GlesRenderer>::render_elements(
@@ -1285,7 +1277,8 @@ impl KmsState {
                             .get(win)
                             .copied()
                             .unwrap_or([0.3, 0.3, 0.35, 1.0]);
-                        let border_color = smithay::backend::renderer::Color32F::new(cr, cg, cb, ca);
+                        let border_color =
+                            smithay::backend::renderer::Color32F::new(cr, cg, cb, ca);
                         let full_geo: Rectangle<i32, Physical> = Rectangle::new(
                             (geo.x - ox - bw, geo.y - oy - bw).into(),
                             (geo.w as i32 + 2 * bw, geo.h as i32 + 2 * bw).into(),
@@ -1556,8 +1549,8 @@ fn pick_crtc(
 
 /// Save raw RGBA pixel data as a PNG file.
 ///
-/// OpenGL `glReadPixels` with `GL_RGBA` returns rows bottom-to-top, so we flip
-/// the rows before encoding.
+/// Smithay's `OutputDamageTracker::render_output` flips Y in its projection matrix,
+/// so `copy_framebuffer` already returns rows in top-to-bottom (scanout) order.
 fn save_rgba_png(
     path: &std::path::Path,
     width: u32,
@@ -1577,14 +1570,6 @@ fn save_rgba_png(
     encoder.set_depth(png::BitDepth::Eight);
     let mut writer = encoder.write_header()?;
 
-    let stride = (width * 4) as usize;
-    // Flip vertically (GL origin is bottom-left, PNG is top-left)
-    let mut flipped = Vec::with_capacity(pixels.len());
-    for row in (0..height as usize).rev() {
-        let start = row * stride;
-        flipped.extend_from_slice(&pixels[start..start + stride]);
-    }
-
-    writer.write_image_data(&flipped)?;
+    writer.write_image_data(pixels)?;
     Ok(())
 }

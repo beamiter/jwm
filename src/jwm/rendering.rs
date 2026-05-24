@@ -3,13 +3,14 @@ use crate::backend::common_define::{SchemeType, WindowId};
 use crate::core::models::ClientKey;
 use crate::core::types::Rect;
 use crate::config::CONFIG;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use log::info;
 
 use super::Jwm;
 
 impl Jwm {
+    #[allow(dead_code)]
     pub(super) fn render_compositor_immediate(&mut self, backend: &mut dyn Backend) {
         if !backend.has_compositor() {
             return;
@@ -149,6 +150,7 @@ impl Jwm {
 
     /// Build window tab groups: one group per monitor, containing visible tiled windows.
     /// The focused window is marked as active tab.
+    #[allow(dead_code)]
     pub(super) fn build_window_groups(&self) -> Vec<(u32, Vec<(u32, String, bool)>)> {
         let mut groups = Vec::new();
         let focused_ck = self.get_selected_client_key();
@@ -233,7 +235,22 @@ impl Jwm {
                     Vec::new()
                 };
 
+            // Collect secondary bar window IDs so we can skip them in the stacking loop —
+            // they are added explicitly at the end (on top), so including them here would
+            // render each bar twice per frame.
+            let secondary_bar_wins: HashSet<WindowId> = self
+                .secondary_bars
+                .values()
+                .filter_map(|bar_instance| {
+                    let bar_key = bar_instance.client_key?;
+                    Some(self.state.clients.get(bar_key)?.win)
+                })
+                .collect();
+
             for &win_id in &stacking_source {
+                if secondary_bar_wins.contains(&win_id) {
+                    continue;
+                }
                 // Find the client key for this window
                 if let Some(&ck) = self.state.win_to_client.get(&win_id) {
                     if let Some(client) = self.state.clients.get(ck) {

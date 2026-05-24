@@ -80,6 +80,7 @@ impl WaylandCompositor {
     }
 
     /// Capture the current output FBO content into the scene FBO for blur source
+    #[allow(dead_code)]
     pub(crate) fn capture_scene_for_blur(&self, gl: &ffi::Gles2) {
         unsafe {
             gl.BindFramebuffer(ffi::READ_FRAMEBUFFER, self.output_fbo);
@@ -94,6 +95,7 @@ impl WaylandCompositor {
     }
 
     /// Get the blurred texture result (first blur level after passes)
+    #[allow(dead_code)]
     pub(crate) fn blur_result_texture(&self) -> u32 {
         self.blur_fbos.first().map(|l| l.texture).unwrap_or(0)
     }

@@ -4,6 +4,7 @@ use smithay::backend::renderer::gles::ffi;
 impl WaylandCompositor {
     /// Run the post-processing pass. Called from render_frame when postprocess_active is true.
     /// Copies the output FBO to postprocess FBO, applies effects, writes back to output FBO.
+    #[allow(dead_code)]
     pub(crate) fn render_postprocess(&self, gl: &ffi::Gles2) {
         unsafe {
             // Copy output to postprocess FBO as source
@@ -70,6 +71,7 @@ impl WaylandCompositor {
     }
 
     /// Capture screenshot of the composited output to a PNG file.
+    #[allow(dead_code)]
     pub(crate) fn capture_screenshot(&self, gl: &ffi::Gles2, path: &std::path::Path) -> bool {
         unsafe {
             let w = self.screen_w;
@@ -108,6 +110,7 @@ impl WaylandCompositor {
     }
 
     /// Capture a region screenshot
+    #[allow(dead_code)]
     pub(crate) fn capture_screenshot_region(&self, gl: &ffi::Gles2, path: &std::path::Path, x: i32, y: i32, w: u32, h: u32) -> bool {
         unsafe {
             let mut pixels = vec![0u8; (w * h * 4) as usize];
@@ -145,6 +148,7 @@ impl WaylandCompositor {
     }
 
     /// Capture a window thumbnail (downsized to max_size)
+    #[allow(dead_code)]
     pub(crate) fn capture_window_thumbnail(&self, gl: &ffi::Gles2, window: u64, max_size: u32) -> Option<(Vec<u8>, u32, u32)> {
         let win = self.windows.get(&window)?;
         let tex = win.gl_texture?;

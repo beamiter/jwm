@@ -21,6 +21,7 @@ use smithay::delegate_text_input_manager;
 use smithay::delegate_input_method_manager;
 use smithay::delegate_virtual_keyboard_manager;
 use smithay::delegate_xdg_activation;
+use smithay::delegate_xdg_decoration;
 use smithay::delegate_xwayland_shell;
 use smithay::xwayland::{X11Wm, X11Surface, XwmHandler, XWaylandClientData, xwm::{Reorder, ResizeEdge as XwmResizeEdge, XwmId, WmWindowProperty}};
 use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
@@ -44,6 +45,8 @@ use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportN
 use smithay::wayland::output::OutputManagerState;
 use smithay::wayland::shell::wlr_layer::{Anchor, Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData, WlrLayerShellHandler, WlrLayerShellState};
 use smithay::wayland::shell::xdg::{PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface, XdgShellHandler, XdgShellState};
+use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
+use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
 use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::wayland::shm::{ShmHandler, ShmState};
@@ -86,6 +89,7 @@ pub struct JwmWaylandState {
     pub seat_state: SeatState<JwmWaylandState>,
     pub seat: Seat<JwmWaylandState>,
     pub xdg_shell_state: XdgShellState,
+    pub xdg_decoration_state: XdgDecorationState,
     pub viewporter_state: ViewporterState,
 
     pub dmabuf_state: DmabufState,
@@ -141,6 +145,14 @@ pub struct JwmWaylandState {
 
     /// Per-window border color (ARGB, used for server-side decoration in tiling WM).
     pub window_border_color: HashMap<WindowId, [f32; 4]>,
+
+    /// Toplevels that have received a configure but haven't committed a matching buffer yet.
+    /// Used to throttle configure floods during rapid resize operations (e.g. alt+j/k key repeat).
+    pub configure_in_flight: HashSet<WindowId>,
+
+    /// Latest desired size for a window whose configure is currently in-flight.
+    /// Sent to the client once it commits the current in-flight configure.
+    pub pending_configure_size: HashMap<WindowId, (u32, u32)>,
 
     /// Shared queue for pending wlr-screencopy copy requests (filled by screencopy Dispatch,
     /// drained during KMS render).
@@ -223,6 +235,8 @@ delegate_input_method_manager!(JwmWaylandState);
 delegate_virtual_keyboard_manager!(JwmWaylandState);
 
 delegate_xdg_activation!(JwmWaylandState);
+
+delegate_xdg_decoration!(JwmWaylandState);
 
 delegate_xwayland_shell!(JwmWaylandState);
 
@@ -681,6 +695,7 @@ impl JwmWaylandState {
         let data_device_state = DataDeviceState::new::<JwmWaylandState>(dh);
         let primary_selection_state = PrimarySelectionState::new::<JwmWaylandState>(dh);
         let xdg_shell_state = XdgShellState::new::<JwmWaylandState>(dh);
+        let xdg_decoration_state = XdgDecorationState::new::<JwmWaylandState>(dh);
         let viewporter_state = ViewporterState::new::<JwmWaylandState>(dh);
 
         let dmabuf_state = DmabufState::new();
@@ -722,6 +737,7 @@ impl JwmWaylandState {
                 seat_state,
                 seat,
                 xdg_shell_state,
+                xdg_decoration_state,
                 viewporter_state,
 
                 dmabuf_state,
@@ -762,6 +778,9 @@ impl JwmWaylandState {
                 window_layer_info: HashMap::new(),
 
                 window_border_color: HashMap::new(),
+
+                configure_in_flight: HashSet::new(),
+                pending_configure_size: HashMap::new(),
 
                 screencopy_pending: Some(screencopy_pending),
             },
@@ -1208,6 +1227,20 @@ impl CompositorHandler for JwmWaylandState {
 
                         self.push_event(BackendEvent::WindowMapped(win));
                     }
+                    // Client committed a new buffer — the in-flight configure has been
+                    // processed.  If a newer geometry arrived while it was in-flight,
+                    // send it now so the client reaches the final desired size.
+                    if self.configure_in_flight.remove(&win) {
+                        if let Some((pw, ph)) = self.pending_configure_size.remove(&win) {
+                            if let Some(toplevel) = self.toplevels.get(&win).cloned() {
+                                toplevel.with_pending_state(|s| {
+                                    s.size = Some((pw as i32, ph as i32).into());
+                                });
+                                toplevel.send_pending_configure();
+                                self.configure_in_flight.insert(win);
+                            }
+                        }
+                    }
                     self.needs_redraw = true;
                 }
                 BufferState::Removed => {
@@ -1328,6 +1361,8 @@ impl CompositorHandler for JwmWaylandState {
 
             self.toplevels.remove(&win);
             self.pending_initial_configure.remove(&win);
+            self.configure_in_flight.remove(&win);
+            self.pending_configure_size.remove(&win);
             self.window_geometry.remove(&win);
             self.window_stack.retain(|w| *w != win);
             self.mapped_windows.remove(&win);
@@ -1419,6 +1454,43 @@ impl ServerDndGrabHandler for JwmWaylandState {}
 impl PrimarySelectionHandler for JwmWaylandState {
     fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
         &mut self.primary_selection_state
+    }
+}
+
+// ---------------------------------------------------------------------------
+// XDG Decoration Handler – always prefer server-side decorations so GTK apps
+// (terminator, gnome-terminal, …) don't draw a CSD titlebar inside the window.
+// ---------------------------------------------------------------------------
+impl XdgDecorationHandler for JwmWaylandState {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        // Set ServerSide decoration mode in pending state.  If the WM hasn't
+        // sent its initial configure yet, the mode will be included when the
+        // WM calls WindowOps::configure (which calls send_pending_configure).
+        //
+        // If the initial configure was already sent before new_decoration fired
+        // (e.g. the client creates the decoration object in a separate commit
+        // after the WM already processed WindowCreated), smithay's server_pending
+        // is re-initialised from current_server_state() — which carries the last
+        // configured size — so send_pending_configure() delivers the correct size
+        // together with the ServerSide mode without any size=None problem.
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(Mode::ServerSide);
+        });
+        if toplevel.is_initial_configure_sent() {
+            toplevel.send_pending_configure();
+        }
+    }
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: Mode) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(Mode::ServerSide);
+        });
+        toplevel.send_pending_configure();
+    }
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(Mode::ServerSide);
+        });
+        toplevel.send_pending_configure();
     }
 }
 

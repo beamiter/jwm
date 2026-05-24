@@ -137,6 +137,7 @@ impl Default for VsyncMethod {
 /// Explicit state machine for window texture lifecycle.
 /// Replaces scattered bool flags (dirty, needs_pixmap_refresh, fading_out).
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum WindowTextureState {
     /// Window just mapped, pixmap being created
     Initializing,
@@ -161,16 +162,19 @@ enum WindowTextureState {
 
 impl WindowTextureState {
     /// Check if texture is ready for rendering
+    #[allow(dead_code)]
     fn is_renderable(&self) -> bool {
         matches!(self, WindowTextureState::Active { .. } | WindowTextureState::FadingOut { .. } | WindowTextureState::Animating { .. })
     }
 
     /// Check if TFP refresh is needed
+    #[allow(dead_code)]
     fn needs_tfp_refresh(&self) -> bool {
         matches!(self, WindowTextureState::Active { dirty: true })
     }
 
     /// Mark texture as dirty (needs TFP refresh)
+    #[allow(dead_code)]
     fn mark_dirty(&mut self) {
         if let WindowTextureState::Active { dirty } = self {
             *dirty = true;
@@ -178,6 +182,7 @@ impl WindowTextureState {
     }
 
     /// Mark texture clean (TFP refresh complete)
+    #[allow(dead_code)]
     fn mark_clean(&mut self) {
         if let WindowTextureState::Active { dirty } = self {
             *dirty = false;
@@ -625,6 +630,7 @@ impl DamageTracker {
     }
 
     /// Calculate dynamic threshold based on scene complexity
+    #[allow(dead_code)]
     fn dynamic_threshold(&self) -> f32 {
         // Animations need more precision (smaller threshold = more likely to use scissor)
         if self.animating {
@@ -672,6 +678,7 @@ impl DamageTracker {
 
     /// Returns the bounding rectangle of all dirty tiles, or None if nothing is dirty.
     /// Uses dynamic threshold based on scene complexity.
+    #[allow(dead_code)]
     fn dirty_bounds(&self) -> Option<(i32, i32, u32, u32)> {
         let threshold = self.dynamic_threshold();
         if self.dirty_fraction() > threshold {
@@ -721,7 +728,7 @@ impl DamageTracker {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd)]
-enum BlurQuality {
+pub(crate) enum BlurQuality {
     Full,     // All blur levels
     Reduced,  // Half blur levels
     Minimal,  // 1 blur level
@@ -782,6 +789,7 @@ pub(super) struct Compositor {
     /// fallback produces garbled textures for mismatched visuals.
     tfp_visual_configs: HashMap<u32, (x11::glx::GLXFBConfig, bool)>,
     /// 10-bit TFP FBConfig map (for HDR source windows): visual_id -> (FBConfig, is_rgba)
+    #[allow(dead_code)]
     tfp_visual_configs_10bit: HashMap<u32, (x11::glx::GLXFBConfig, bool)>,
     overlay_window: u32,
     /// Window that owns the _NET_WM_CM_Sn selection, advertising this
@@ -789,13 +797,16 @@ pub(super) struct Compositor {
     cm_selection_owner: u32,
     glx_drawable: x11::glx::GLXDrawable,
     gl: glow::Context,
+    #[allow(dead_code)]
     shader_cache: ShaderCache,
     program: glow::Program,
     shadow_program: glow::Program,
     blur_down_program: glow::Program,
     blur_up_program: glow::Program,
     // P4: Temporal blur mix program
+    #[allow(dead_code)]
     temporal_blur_mix_program: glow::Program,
+    #[allow(dead_code)]
     temporal_blur_mix_uniforms: BlurUniforms,
     win_uniforms: WindowUniforms,
     shadow_uniforms: ShadowUniforms,
@@ -1177,6 +1188,7 @@ pub(super) struct Compositor {
     /// Temporal blur: previous frame window positions hash (to detect movement)
     prev_window_positions_hash: u64,
     /// Temporal blur: mix ratio (0.0 = all new, 1.0 = all previous)
+    #[allow(dead_code)]
     temporal_blur_mix_ratio: f32,
     /// Temporal blur: is enabled
     temporal_blur_enabled: bool,
@@ -1195,28 +1207,34 @@ pub(super) struct Compositor {
 
     // --- P6A: Async X11 communication ---
     /// Priority-aware event queue (separates event processing from rendering)
+    #[allow(dead_code)]
     priority_event_queue: PriorityEventQueue,
     /// Deferred X11 operations (NameWindowPixmap, etc.)
     deferred_ops_queue: DeferredOpQueue,
 
     // --- P6D: Async blur computation ---
     /// Blur computation pipeline (async thread or compute shader)
+    #[allow(dead_code)]
     blur_compute_pipeline: BlurComputePipeline,
 
     // --- P7A: Predictive rendering ---
     /// Predictive render manager for adaptive FPS and power saving
+    #[allow(dead_code)]
     predictive_render_mgr: PredictiveRenderManager,
 
     // --- P7C: Smart cache warmup ---
     /// Cache warmup manager for predictive pre-loading
+    #[allow(dead_code)]
     cache_warmup_mgr: CacheWarmupManager,
 
     // --- P7D: Power saving mode ---
     /// Power saving manager for battery-aware optimization
+    #[allow(dead_code)]
     power_saving_mgr: PowerSavingManager,
 
     // --- P7B: Subpixel rendering optimization ---
     /// Subpixel rendering manager for improved text quality
+    #[allow(dead_code)]
     subpixel_render_mgr: SubpixelRenderManager,
 
     // --- Phase 2 Optimizations ---

@@ -224,6 +224,7 @@ impl WaylandCompositor {
     }
 
     /// Capture current frame to transition FBO (called before tag switch)
+    #[allow(dead_code)]
     pub(crate) fn capture_transition_snapshot(&self, gl: &ffi::Gles2) {
         unsafe {
             gl.BindFramebuffer(ffi::READ_FRAMEBUFFER, self.output_fbo);

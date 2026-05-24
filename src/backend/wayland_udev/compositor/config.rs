@@ -1,8 +1,49 @@
 use super::*;
+use crate::config::CONFIG;
 
 impl WaylandCompositor {
     pub(crate) fn apply_config(&mut self) {
-        // Determine if post-processing is active
+        let cfg = CONFIG.load();
+        let b = cfg.behavior();
+
+        // --- Static visual settings ---
+        self.corner_radius = b.corner_radius;
+        self.shadow_enabled = b.shadow_enabled;
+        self.shadow_radius = b.shadow_radius;
+        self.shadow_offset = b.shadow_offset;
+        self.shadow_color = b.shadow_color;
+        self.blur_enabled = b.blur_enabled;
+        self.blur_strength = b.blur_strength;
+        self.inactive_opacity = b.inactive_opacity;
+        self.active_opacity = b.active_opacity;
+        self.inactive_dim = b.inactive_dim;
+        self.fade_in_step = b.fade_in_step;
+        self.fade_out_step = b.fade_out_step;
+
+        // --- Post-processing pipeline ---
+        self.color_temperature = b.color_temperature;
+        self.saturation = b.saturation;
+        self.brightness = b.brightness;
+        self.contrast = b.contrast;
+        self.invert_colors = b.invert_colors;
+        self.grayscale = b.grayscale;
+        self.magnifier_enabled = b.magnifier_enabled;
+        self.magnifier_zoom = b.magnifier_zoom;
+        self.magnifier_radius = b.magnifier_radius;
+        self.hdr_enabled = b.hdr_enabled;
+        self.hdr_peak_nits = b.hdr_peak_nits;
+        self.tone_mapping_method = match b.tone_mapping_method.as_str() {
+            "reinhard" => 1,
+            "aces" => 2,
+            _ => 0,
+        };
+        self.colorblind_mode = match b.colorblind_mode.as_str() {
+            "deuteranopia" => 1,
+            "protanopia" => 2,
+            "tritanopia" => 3,
+            _ => 0,
+        };
+
         self.postprocess_active = self.color_temperature != 0.0
             || self.saturation != 1.0
             || self.brightness != 1.0
@@ -12,6 +53,35 @@ impl WaylandCompositor {
             || self.magnifier_enabled
             || self.colorblind_mode != 0
             || self.hdr_enabled;
+
+        // --- Animation feature flags ---
+        self.fading_enabled = b.fading;
+        self.window_animation_enabled = b.window_animation;
+        self.edge_glow_enabled = b.edge_glow;
+        self.attention_animation_enabled = b.attention_animation;
+        self.wobbly_enabled = b.wobbly_windows;
+        self.motion_trail_enabled = b.motion_trail;
+        self.genie_minimize_enabled = b.genie_minimize;
+        self.ripple_on_open_enabled = b.ripple_on_open;
+        self.focus_highlight_enabled = b.focus_highlight;
+        self.particle_effects_enabled = b.particle_effects;
+        self.window_tilt_enabled = b.window_tilt;
+
+        // --- Transition mode ---
+        self.transition_mode = match b.transition_mode.as_str() {
+            "slide" => TransitionMode::Slide,
+            "cube" => TransitionMode::Cube,
+            "flip" => TransitionMode::Flip,
+            "fade" => TransitionMode::Fade,
+            "zoom" => TransitionMode::Zoom,
+            "stack" => TransitionMode::Stack,
+            "blinds" => TransitionMode::Blinds,
+            "coverflow" => TransitionMode::CoverFlow,
+            "helix" => TransitionMode::Helix,
+            "portal" => TransitionMode::Portal,
+            _ => TransitionMode::None,
+        };
+
         self.needs_render = true;
     }
 
@@ -172,6 +242,9 @@ impl WaylandCompositor {
     }
 
     pub(crate) fn notify_window_move_start(&mut self, window: u64) {
+        if !self.wobbly_enabled {
+            return;
+        }
         if let Some(win) = self.windows.get_mut(&window) {
             let grid_n = 9;
             win.wobbly = Some(WobblyState {
@@ -209,8 +282,10 @@ impl WaylandCompositor {
 
     pub(crate) fn unsuppress_edge_glow(&mut self) {
         self.edge_glow_suppressed = false;
-        self.edge_glow_active = true;
-        self.needs_render = true;
+        if self.edge_glow_enabled {
+            self.edge_glow_active = true;
+            self.needs_render = true;
+        }
     }
 
     pub(crate) fn set_annotation_mode(&mut self, active: bool) {
@@ -240,6 +315,7 @@ impl WaylandCompositor {
     }
 
     /// Add a window to the compositor
+    #[allow(dead_code)]
     pub(crate) fn add_window(&mut self, window_id: u64) {
         self.windows.entry(window_id).or_insert_with(|| WindowState {
             gl_texture: None,
@@ -269,6 +345,7 @@ impl WaylandCompositor {
     }
 
     /// Remove a window (start fade-out)
+    #[allow(dead_code)]
     pub(crate) fn remove_window(&mut self, window_id: u64) {
         if let Some(win) = self.windows.get_mut(&window_id) {
             win.fading_out = true;

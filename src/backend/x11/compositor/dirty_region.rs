@@ -249,6 +249,7 @@ impl DirtyRegionTracker {
     }
 
     /// Phase 3.2: Check if two rects should be merged
+    #[allow(dead_code)]
     fn should_merge(&self, r1: &DirtyRect, r2: &DirtyRect) -> bool {
         // Check if rects are within merge distance
         let dx = (r1.x - r2.x).abs();
