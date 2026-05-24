@@ -28,7 +28,7 @@ use smithay::backend::renderer::element::{AsRenderElements, Id, Kind};
 use smithay::backend::renderer::gles::ffi as gl_ffi;
 use smithay::backend::renderer::gles::GlesRenderbuffer;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
-use smithay::backend::renderer::utils::{import_surface_tree, RendererSurfaceStateUserData};
+use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
 use smithay::backend::renderer::{Bind, ExportMem, Offscreen, Renderer};
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::Session;
@@ -106,6 +106,7 @@ pub(super) struct KmsState {
     renderer: GlesRenderer,
 
     pub(super) needs_render: bool,
+    compositor_texture_cache: Option<(u32, GlesTexture)>,
     background_id: Id,
 
     cursor_theme: CursorTheme,
@@ -274,6 +275,10 @@ impl KmsState {
 
     pub(super) fn request_render(&mut self) {
         self.needs_render = true;
+    }
+
+    pub(super) fn any_frame_pending(&self) -> bool {
+        self.outputs.iter().any(|o| o.frame_pending)
     }
 
     /// Set the shared pending screencopy queue (called once after initialization).
@@ -912,6 +917,7 @@ impl KmsState {
             gbm,
             renderer,
             needs_render: true,
+            compositor_texture_cache: None,
             background_id: Id::new(),
 
             cursor_theme,
@@ -1098,7 +1104,8 @@ impl KmsState {
             }
 
             if let Some(comp) = compositor {
-                // Compositor path: import surfaces for frame callbacks, then submit FBO texture.
+                // Compositor path: surfaces already imported in compositor_render_frame;
+                // just collect frame_roots for callback delivery.
                 for win in state.window_stack.iter().rev() {
                     if !state.mapped_windows.contains(win) {
                         continue;
@@ -1106,7 +1113,6 @@ impl KmsState {
                     let Some(surface) = state.surface_for_window(*win) else {
                         continue;
                     };
-                    let _ = import_surface_tree(&mut self.renderer, &surface);
                     frame_roots.push(surface.clone());
                     with_surface_tree_downward(
                         &surface,
@@ -1128,13 +1134,26 @@ impl KmsState {
                 // Wrap the compositor's output FBO texture as a full-screen render element.
                 let (sw, sh) = comp.screen_size();
                 let tex_id = comp.output_texture_id();
-                let size: Size<i32, BufferCoord> = (sw as i32, sh as i32).into();
-                let output_tex = unsafe {
-                    GlesTexture::from_raw(&self.renderer, Some(gl_ffi::RGBA8), false, tex_id, size)
+                let output_tex = match &self.compositor_texture_cache {
+                    Some((cached_id, cached_tex)) if *cached_id == tex_id => cached_tex.clone(),
+                    _ => {
+                        let size: Size<i32, BufferCoord> = (sw as i32, sh as i32).into();
+                        let tex = unsafe {
+                            GlesTexture::from_raw(
+                                &self.renderer,
+                                Some(gl_ffi::RGBA8),
+                                false,
+                                tex_id,
+                                size,
+                            )
+                        };
+                        // Leak once to prevent Smithay's Drop from calling glDeleteTextures
+                        // on the compositor's owned FBO texture.
+                        std::mem::forget(tex.clone());
+                        self.compositor_texture_cache = Some((tex_id, tex.clone()));
+                        tex
+                    }
                 };
-                // Keep Arc refcount permanently >0 so Smithay's Drop never calls glDeleteTextures
-                // on the compositor's owned FBO texture.
-                std::mem::forget(output_tex.clone());
                 let context_id = self.renderer.context_id();
                 // Position is output-relative: subtract the output's global origin so each
                 // output sees the correct slice of the single full-screen FBO.

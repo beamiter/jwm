@@ -2620,46 +2620,54 @@ impl Backend for UdevBackend {
                 self.request_flush();
             }
 
-            // Mark compositor dirty BEFORE handler.update() so that
-            // tick_animations → compositor_render_frame sees needs_render = true.
+            // Only run compositor + animation work when KMS can actually
+            // accept a new frame. This prevents the GPU from doing expensive
+            // rendering that will be discarded because the previous page-flip
+            // hasn't completed yet.
+            let can_present = self.kms.as_ref().map_or(true, |k| {
+                !k.borrow().any_frame_pending()
+            });
+
             let needs_redraw = self.state.needs_redraw;
-            if needs_redraw {
+            if needs_redraw && can_present {
                 if let Some(c) = self.compositor.as_mut() {
                     c.force_full_redraw();
                 }
             }
 
-            if handled_any || handler.needs_tick() || needs_redraw {
+            if (handled_any || handler.needs_tick() || needs_redraw) && can_present {
                 handler.update(self)?;
             }
 
-            let mut had_redraw = false;
             if let Some(kms) = &self.kms {
-                if self.state.needs_redraw {
-                    had_redraw = true;
+                if self.state.needs_redraw && can_present {
                     kms.borrow_mut().request_render();
                     self.state.needs_redraw = false;
                 }
-                let cursor_kind = self.shared.lock().unwrap().cursor_kind;
-                kms.borrow_mut().render_if_needed(
-                    &*self.state,
-                    cursor_kind,
-                    self.compositor.as_ref(),
-                );
+                if can_present {
+                    let cursor_kind = self.shared.lock().unwrap().cursor_kind;
+                    kms.borrow_mut().render_if_needed(
+                        &*self.state,
+                        cursor_kind,
+                        self.compositor.as_ref(),
+                    );
+                }
             }
 
             if handler.should_exit() {
                 break;
             }
 
-            // Block only when there's no pending work; otherwise, poll once to
-            // allow queued calloop sources (notably Wayland flush) to run.
+            // Determine calloop timeout:
+            // - Zero-poll only for queued Wayland events that need draining
+            // - 16ms when animations need ticking (capped at vsync rate)
+            // - Block otherwise (vblank DRM event will wake us)
             let has_pending_events = !self.pending_events.lock().unwrap().is_empty();
             let needs_tick = handler.needs_tick();
             let kms_pending = self.kms.as_ref().map_or(false, |k| k.borrow().needs_render);
-            let timeout = if has_pending_events || handled_any || had_redraw {
+            let timeout = if has_pending_events {
                 Some(std::time::Duration::ZERO)
-            } else if needs_tick || kms_pending {
+            } else if needs_tick || kms_pending || self.state.needs_redraw {
                 Some(std::time::Duration::from_millis(16))
             } else {
                 None
