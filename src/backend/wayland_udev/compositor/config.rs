@@ -340,6 +340,7 @@ impl WaylandCompositor {
             class_name: String::new(),
             ripple_progress: 0.0,
             ripple_active: false,
+            content_uv: [0.0, 0.0, 1.0, 1.0],
         });
         self.needs_render = true;
     }
@@ -358,7 +359,7 @@ impl WaylandCompositor {
     }
 
     /// Update window texture info, auto-creating the entry if not yet present
-    pub(crate) fn update_window_texture(&mut self, window_id: u64, tex_id: u32, w: u32, h: u32, has_alpha: bool, y_inverted: bool) {
+    pub(crate) fn update_window_texture(&mut self, window_id: u64, tex_id: u32, w: u32, h: u32, has_alpha: bool, y_inverted: bool, content_uv: [f32; 4]) {
         let win = self.windows.entry(window_id).or_insert_with(|| WindowState {
             gl_texture: None,
             width: 0,
@@ -382,12 +383,14 @@ impl WaylandCompositor {
             class_name: String::new(),
             ripple_progress: 0.0,
             ripple_active: false,
+            content_uv: [0.0, 0.0, 1.0, 1.0],
         });
         win.gl_texture = Some(tex_id);
         win.width = w;
         win.height = h;
         win.has_alpha = has_alpha;
         win.y_inverted = y_inverted;
+        win.content_uv = content_uv;
         self.needs_render = true;
     }
 

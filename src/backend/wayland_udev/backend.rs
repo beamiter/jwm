@@ -29,8 +29,9 @@ use drm::control::{connector, Device as ControlDevice, ModeTypeFlags};
 
 use smithay::backend::renderer::gles::GlesTexture;
 use smithay::backend::renderer::utils::{import_surface_tree, RendererSurfaceStateUserData};
-use smithay::backend::renderer::{buffer_has_alpha, buffer_type, BufferType, Renderer};
+use smithay::backend::renderer::{buffer_has_alpha, buffer_type, BufferType, Renderer, Texture};
 use smithay::wayland::compositor::with_states;
+use smithay::wayland::shell::xdg::SurfaceCachedState;
 
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, Event as InputEventExt, InputEvent, KeyboardKeyEvent,
@@ -2215,7 +2216,7 @@ impl Backend for UdevBackend {
         }
 
         // Phase 1: Import surface textures into GL cache (borrow kms only, no compositor borrow).
-        let mut tex_updates: Vec<(u64, u32, u32, u32, bool, bool)> = Vec::new();
+        let mut tex_updates: Vec<(u64, u32, u32, u32, bool, bool, [f32; 4])> = Vec::new();
         // Rate-limit diagnostic logging: log at most once per second.
         static LAST_CRF_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let crf_now_secs = std::time::SystemTime::now()
@@ -2271,22 +2272,39 @@ impl Backend for UdevBackend {
                                         .buffer()
                                         .and_then(|b| buffer_has_alpha(&**b))
                                         .unwrap_or(true);
-                                    (t.tex_id(), t.is_y_inverted(), has_alpha)
+                                    let tex_size = t.size();
+                                    (t.tex_id(), t.is_y_inverted(), has_alpha, tex_size)
                                 })
                             });
                             if crf_log_this {
                                 log::info!("[crf] win={win_id:#x} import_ok={} has_buf={has_buf} buf={buf_type_str} tex={:?} y_inv={:?} alpha={:?}",
                                     import_result.is_ok(),
-                                    tex_info.map(|(id, _, _)| id),
-                                    tex_info.map(|(_, yi, _)| yi),
-                                    tex_info.map(|(_, _, alpha)| alpha));
+                                    tex_info.map(|(id, _, _, _)| id),
+                                    tex_info.map(|(_, yi, _, _)| yi),
+                                    tex_info.map(|(_, _, alpha, _)| alpha));
                             }
                             tex_info
                         });
                         tex
                     });
-                    if let Some((tid, y_inverted, has_alpha)) = tid {
-                        tex_updates.push((win_id, tid, w, h, has_alpha, y_inverted));
+                    if let Some((tid, y_inverted, has_alpha, tex_size)) = tid {
+                        // Compute content UV sub-rect from xdg geometry offset and texture size
+                        let geo_offset = with_states(&surface, |states| {
+                            let mut cached = states.cached_state.get::<SurfaceCachedState>();
+                            cached.current().geometry.map(|r| (r.loc.x, r.loc.y)).unwrap_or((0, 0))
+                        });
+                        let tex_w = tex_size.w as f32;
+                        let tex_h = tex_size.h as f32;
+                        let content_uv = if tex_w > 0.0 && tex_h > 0.0 {
+                            let u = geo_offset.0 as f32 / tex_w;
+                            let v = geo_offset.1 as f32 / tex_h;
+                            let uw = w as f32 / tex_w;
+                            let uh = h as f32 / tex_h;
+                            [u, v, uw.min(1.0 - u), uh.min(1.0 - v)]
+                        } else {
+                            [0.0, 0.0, 1.0, 1.0]
+                        };
+                        tex_updates.push((win_id, tid, w, h, has_alpha, y_inverted, content_uv));
                     }
                 }
             }
@@ -2301,8 +2319,8 @@ impl Backend for UdevBackend {
 
         // Phase 2: Update compositor window textures then render into FBO.
         if let (Some(compositor), Some(kms)) = (&mut self.compositor, &self.kms) {
-            for (win_id, tid, w, h, has_alpha, y_inverted) in tex_updates {
-                compositor.update_window_texture(win_id, tid, w, h, has_alpha, y_inverted);
+            for (win_id, tid, w, h, has_alpha, y_inverted, content_uv) in tex_updates {
+                compositor.update_window_texture(win_id, tid, w, h, has_alpha, y_inverted, content_uv);
             }
             let rendered = kms
                 .borrow_mut()

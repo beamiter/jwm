@@ -374,11 +374,12 @@ impl WaylandCompositor {
                     (x as f32, y as f32, w as f32, h as f32)
                 };
 
-                // --- UV rect: normal or Y-inverted ---
+                // --- UV rect: use content_uv (accounts for CSD geometry offset) ---
+                let [cu, cv, cw, ch] = wt.content_uv;
                 let (uv_x, uv_y, uv_w, uv_h) = if wt.y_inverted {
-                    (0.0f32, 1.0f32, 1.0f32, -1.0f32)
+                    (cu, cv + ch, cw, -ch)
                 } else {
-                    (0.0f32, 0.0f32, 1.0f32, 1.0f32)
+                    (cu, cv, cw, ch)
                 };
 
                 // --- Draw blur behind frosted window ---

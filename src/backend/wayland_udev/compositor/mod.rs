@@ -306,6 +306,10 @@ pub(crate) struct WindowState {
     pub class_name: String,
     pub ripple_progress: f32,
     pub ripple_active: bool,
+    /// UV sub-rect for content within the buffer: [u, v, w, h].
+    /// Accounts for CSD geometry offset (shadows/decorations outside window geometry).
+    /// Default [0,0,1,1] means full texture = content.
+    pub content_uv: [f32; 4],
 }
 
 // ---------------------------------------------------------------------------
