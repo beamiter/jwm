@@ -829,6 +829,40 @@ impl WaylandX11Backend {
             }
         }
 
+        // IME popup surfaces (candidate windows) above normal windows.
+        for (im_surface, abs_x, abs_y) in self.state.im_popup_positions() {
+            frame_roots.push(im_surface.clone());
+            with_surface_tree_downward(
+                &im_surface,
+                (),
+                |_, _, _| TraversalAction::DoChildren(()),
+                |child_surface, child_states, _| {
+                    let data = child_states
+                        .data_map
+                        .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>();
+                    let Some(data) = data else {
+                        return;
+                    };
+                    if data.lock().unwrap().view().is_some() {
+                        self.output.enter(child_surface);
+                        visible_surfaces.insert(child_surface.downgrade());
+                    }
+                },
+                |_, _, _| true,
+            );
+            let location: Point<i32, Physical> = (abs_x - ox, abs_y - oy).into();
+            let tree = SurfaceTree::from_surface(&im_surface);
+            let im_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                AsRenderElements::<GlesRenderer>::render_elements(
+                    &tree,
+                    &mut self.renderer,
+                    location,
+                    scale,
+                    1.0,
+                );
+            elements.extend(im_elements.into_iter().map(X11RenderElement::Surface));
+        }
+
         // Layer surfaces below normal windows.
         {
             let map = layer_map_for_output(&self.output);

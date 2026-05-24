@@ -2484,6 +2484,42 @@ impl Backend for UdevBackend {
             );
         }
 
+        // Phase 1b: Import IME popup surface textures and append to scene.
+        let im_popups = self.state.im_popup_positions();
+        let mut full_scene: Vec<(u64, i32, i32, u32, u32)> = scene.to_vec();
+        if let Some(kms) = &self.kms {
+            let mut kms_ref = kms.borrow_mut();
+            for (im_surface, abs_x, abs_y) in &im_popups {
+                let im_win_id = 0xFF00_0000_0000_0000u64 | (im_surface.id().protocol_id() as u64);
+                let tid = kms_ref.with_gles_renderer(|renderer| {
+                    let _ = import_surface_tree(renderer, im_surface);
+                    let ctx_id = renderer.context_id();
+                    with_states(im_surface, |states| {
+                        let rsd = states.data_map.get::<RendererSurfaceStateUserData>();
+                        rsd.and_then(|d| {
+                            let locked = d.lock().unwrap();
+                            locked.texture::<GlesTexture>(ctx_id).map(|t| {
+                                let has_alpha = locked
+                                    .buffer()
+                                    .and_then(|b| buffer_has_alpha(&**b))
+                                    .unwrap_or(true);
+                                let tex_size = t.size();
+                                (t.tex_id(), t.is_y_inverted(), has_alpha, tex_size)
+                            })
+                        })
+                    })
+                });
+                if let Some((tid, y_inverted, has_alpha, tex_size)) = tid {
+                    let w = tex_size.w as u32;
+                    let h = tex_size.h as u32;
+                    if w > 0 && h > 0 {
+                        tex_updates.push((im_win_id, tid, w, h, has_alpha, y_inverted, [0.0, 0.0, 1.0, 1.0]));
+                        full_scene.push((im_win_id, *abs_x, *abs_y, w, h));
+                    }
+                }
+            }
+        }
+
         // Phase 2: Update compositor window textures then render into FBO.
         if let (Some(compositor), Some(kms)) = (&mut self.compositor, &self.kms) {
             for (win_id, tid, w, h, has_alpha, y_inverted, content_uv) in tex_updates {
@@ -2491,7 +2527,7 @@ impl Backend for UdevBackend {
             }
             let rendered = kms
                 .borrow_mut()
-                .with_renderer(|gl| compositor.render_frame(gl, scene, focused_window))
+                .with_renderer(|gl| compositor.render_frame(gl, &full_scene, focused_window))
                 .unwrap_or(false);
             if crf_log_this {
                 log::info!("[crf] render_frame returned {rendered}");

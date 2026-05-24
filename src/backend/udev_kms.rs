@@ -1173,6 +1173,30 @@ impl KmsState {
                         |_, _, _| true,
                     );
                 }
+                // Include IME popup surfaces for frame callbacks.
+                for popup in &state.im_popups {
+                    if !popup.alive() {
+                        continue;
+                    }
+                    let im_surface = popup.wl_surface().clone();
+                    frame_roots.push(im_surface.clone());
+                    with_surface_tree_downward(
+                        &im_surface,
+                        (),
+                        |_, _, _| TraversalAction::DoChildren(()),
+                        |child_surface, child_states, _| {
+                            let data = child_states.data_map.get::<RendererSurfaceStateUserData>();
+                            let Some(data) = data else {
+                                return;
+                            };
+                            if data.lock().unwrap().view().is_some() {
+                                out.output.enter(child_surface);
+                                visible_surfaces.insert(child_surface.downgrade());
+                            }
+                        },
+                        |_, _, _| true,
+                    );
+                }
                 // Wrap the compositor's output FBO texture as a full-screen render element.
                 let (sw, sh) = comp.screen_size();
                 let tex_id = comp.output_texture_id();
@@ -1354,6 +1378,38 @@ impl KmsState {
                             Kind::Unspecified,
                         )));
                     }
+                }
+
+                // IME popup surfaces (candidate windows) above normal windows.
+                for (im_surface, abs_x, abs_y) in state.im_popup_positions() {
+                    frame_roots.push(im_surface.clone());
+                    with_surface_tree_downward(
+                        &im_surface,
+                        (),
+                        |_, _, _| TraversalAction::DoChildren(()),
+                        |child_surface, child_states, _| {
+                            let data = child_states.data_map.get::<RendererSurfaceStateUserData>();
+                            let Some(data) = data else {
+                                return;
+                            };
+                            if data.lock().unwrap().view().is_some() {
+                                out.output.enter(child_surface);
+                                visible_surfaces.insert(child_surface.downgrade());
+                            }
+                        },
+                        |_, _, _| true,
+                    );
+                    let location: Point<i32, Physical> = (abs_x - ox, abs_y - oy).into();
+                    let tree = SurfaceTree::from_surface(&im_surface);
+                    let im_elements: Vec<KmsRenderElement> =
+                        AsRenderElements::<GlesRenderer>::render_elements(
+                            &tree,
+                            &mut self.renderer,
+                            location,
+                            scale,
+                            1.0,
+                        );
+                    elements.extend(im_elements);
                 }
 
                 // Layer surfaces below normal windows.

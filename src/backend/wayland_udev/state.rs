@@ -186,6 +186,8 @@ pub struct JwmWaylandState {
     pub popups: HashMap<ObjectId, PopupSurface>,
     pub popup_order: Vec<ObjectId>,
 
+    pub im_popups: Vec<ImPopupSurface>,
+
     pub active_toplevel: Option<WindowId>,
     pub popup_grab_toplevel: Option<WindowId>,
     pub popup_grab_prev_kbd_focus: Option<WlSurface>,
@@ -1011,6 +1013,8 @@ impl JwmWaylandState {
                 popups: HashMap::new(),
                 popup_order: Vec::new(),
 
+                im_popups: Vec::new(),
+
                 popup_grab_toplevel: None,
                 popup_grab_prev_kbd_focus: None,
 
@@ -1397,6 +1401,35 @@ impl JwmWaylandState {
         self.surface_under(location)
             .and_then(|(win, surface, origin)| win.map(|w| (w, surface, origin)))
     }
+
+    /// Returns active IME popup surfaces with their absolute (global) position.
+    /// Each entry is (wl_surface, x, y).
+    pub fn im_popup_positions(&self) -> Vec<(WlSurface, i32, i32)> {
+        let mut result = Vec::new();
+        for popup in &self.im_popups {
+            if !popup.alive() {
+                continue;
+            }
+            let loc = popup.location();
+            let cursor_rect = popup.text_input_rectangle();
+            let parent = match popup.get_parent() {
+                Some(p) => p,
+                None => continue,
+            };
+            let parent_win = match self.surface_to_window.get(&parent.surface.id()) {
+                Some(&w) => w,
+                None => continue,
+            };
+            let geo = match self.window_geometry.get(&parent_win) {
+                Some(g) => g,
+                None => continue,
+            };
+            let abs_x = geo.x + loc.x;
+            let abs_y = geo.y + loc.y + cursor_rect.size.h;
+            result.push((popup.wl_surface().clone(), abs_x, abs_y));
+        }
+        result
+    }
 }
 
 impl OutputHandler for JwmWaylandState {}
@@ -1647,13 +1680,19 @@ impl SeatHandler for JwmWaylandState {
 }
 
 impl InputMethodHandler for JwmWaylandState {
-    fn new_popup(&mut self, _surface: ImPopupSurface) {
-        // IME popup surfaces (candidate window) – currently not rendered by JWM.
+    fn new_popup(&mut self, surface: ImPopupSurface) {
+        self.im_popups.push(surface);
+        self.needs_redraw = true;
     }
 
-    fn dismiss_popup(&mut self, _surface: ImPopupSurface) {}
+    fn dismiss_popup(&mut self, surface: ImPopupSurface) {
+        self.im_popups.retain(|p| p != &surface);
+        self.needs_redraw = true;
+    }
 
-    fn popup_repositioned(&mut self, _surface: ImPopupSurface) {}
+    fn popup_repositioned(&mut self, _surface: ImPopupSurface) {
+        self.needs_redraw = true;
+    }
 
     fn parent_geometry(&self, parent: &WlSurface) -> Rectangle<i32, Logical> {
         // Return the geometry of the toplevel that owns this surface so the IME
