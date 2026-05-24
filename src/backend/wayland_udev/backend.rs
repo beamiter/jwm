@@ -36,6 +36,11 @@ use smithay::wayland::shell::xdg::SurfaceCachedState;
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, Event as InputEventExt, InputEvent, KeyboardKeyEvent,
     PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
+    TouchEvent as TouchEventTrait,
+    GestureBeginEvent as GestureBeginEventTrait,
+    GestureEndEvent as GestureEndEventTrait,
+    GestureSwipeUpdateEvent as GestureSwipeUpdateEventTrait,
+    GesturePinchUpdateEvent as GesturePinchUpdateEventTrait,
 };
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::session::libseat::LibSeatSession;
@@ -44,7 +49,7 @@ use smithay::backend::session::Session;
 use smithay::backend::udev::{UdevBackend as SmithayUdevBackend, UdevEvent};
 use smithay::desktop::layer_map_for_output;
 use smithay::input::keyboard::{FilterResult, ModifiersState};
-use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
+use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent, RelativeMotionEvent};
 use smithay::reexports::calloop::channel::{self, Sender};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
@@ -1142,6 +1147,9 @@ impl UdevBackend {
             event_loop
                 .handle()
                 .insert_source(libinput_backend, move |event, _, state| {
+                    // Notify idle tracker on any input activity
+                    state.idle_notifier_state.notify_activity(&state.seat);
+
                     match event {
                         InputEvent::PointerMotion { event, .. } => {
                             let delta = event.delta();
@@ -1197,6 +1205,15 @@ impl UdevBackend {
 
                             let in_screenshot = shared.lock().unwrap().screenshot_grab_active;
                             if let Some(pointer) = state.seat.get_pointer() {
+                                pointer.relative_motion(
+                                    state,
+                                    if in_screenshot { None } else { focus.clone() },
+                                    &RelativeMotionEvent {
+                                        delta,
+                                        delta_unaccel: event.delta_unaccel(),
+                                        utime: (time as u64) * 1000,
+                                    },
+                                );
                                 pointer.motion(
                                     state,
                                     if in_screenshot { None } else { focus },
@@ -1732,6 +1749,172 @@ impl UdevBackend {
                                 }
                                 pointer.axis(state, frame);
                                 pointer.frame(state);
+                            }
+                        }
+                        InputEvent::TouchDown { event, .. } => {
+                            let time = event.time_msec();
+                            let slot = event.slot();
+                            let (w, h) = {
+                                let s = shared.lock().unwrap();
+                                if let Some(first) = s.outputs.first() {
+                                    (first.width.max(1) as i32, first.height.max(1) as i32)
+                                } else {
+                                    (1920, 1080)
+                                }
+                            };
+                            let pos = event.position_transformed(smithay::utils::Size::from((w, h)));
+                            let focus = state.surface_under(pos).map(|(_win, surface, origin)| (surface, origin));
+                            if let Some(touch) = state.seat.get_touch() {
+                                touch.down(
+                                    state,
+                                    focus,
+                                    &smithay::input::touch::DownEvent {
+                                        slot,
+                                        location: pos,
+                                        serial: SCOUNTER.next_serial(),
+                                        time,
+                                    },
+                                );
+                            }
+                        }
+                        InputEvent::TouchMotion { event, .. } => {
+                            let time = event.time_msec();
+                            let slot = event.slot();
+                            let (w, h) = {
+                                let s = shared.lock().unwrap();
+                                if let Some(first) = s.outputs.first() {
+                                    (first.width.max(1) as i32, first.height.max(1) as i32)
+                                } else {
+                                    (1920, 1080)
+                                }
+                            };
+                            let pos = event.position_transformed(smithay::utils::Size::from((w, h)));
+                            let focus = state.surface_under(pos).map(|(_win, surface, origin)| (surface, origin));
+                            if let Some(touch) = state.seat.get_touch() {
+                                touch.motion(
+                                    state,
+                                    focus,
+                                    &smithay::input::touch::MotionEvent {
+                                        slot,
+                                        location: pos,
+                                        time,
+                                    },
+                                );
+                            }
+                        }
+                        InputEvent::TouchUp { event, .. } => {
+                            let time = event.time_msec();
+                            let slot = event.slot();
+                            if let Some(touch) = state.seat.get_touch() {
+                                touch.up(
+                                    state,
+                                    &smithay::input::touch::UpEvent {
+                                        slot,
+                                        serial: SCOUNTER.next_serial(),
+                                        time,
+                                    },
+                                );
+                            }
+                        }
+                        InputEvent::TouchFrame { .. } => {
+                            if let Some(touch) = state.seat.get_touch() {
+                                touch.frame(state);
+                            }
+                        }
+                        InputEvent::GestureSwipeBegin { event, .. } => {
+                            if let Some(pointer) = state.seat.get_pointer() {
+                                pointer.gesture_swipe_begin(
+                                    state,
+                                    &smithay::input::pointer::GestureSwipeBeginEvent {
+                                        serial: SCOUNTER.next_serial(),
+                                        time: event.time_msec(),
+                                        fingers: event.fingers(),
+                                    },
+                                );
+                            }
+                        }
+                        InputEvent::GestureSwipeUpdate { event, .. } => {
+                            if let Some(pointer) = state.seat.get_pointer() {
+                                pointer.gesture_swipe_update(
+                                    state,
+                                    &smithay::input::pointer::GestureSwipeUpdateEvent {
+                                        time: event.time_msec(),
+                                        delta: event.delta(),
+                                    },
+                                );
+                            }
+                        }
+                        InputEvent::GestureSwipeEnd { event, .. } => {
+                            if let Some(pointer) = state.seat.get_pointer() {
+                                pointer.gesture_swipe_end(
+                                    state,
+                                    &smithay::input::pointer::GestureSwipeEndEvent {
+                                        serial: SCOUNTER.next_serial(),
+                                        time: event.time_msec(),
+                                        cancelled: event.cancelled(),
+                                    },
+                                );
+                            }
+                        }
+                        InputEvent::GesturePinchBegin { event, .. } => {
+                            if let Some(pointer) = state.seat.get_pointer() {
+                                pointer.gesture_pinch_begin(
+                                    state,
+                                    &smithay::input::pointer::GesturePinchBeginEvent {
+                                        serial: SCOUNTER.next_serial(),
+                                        time: event.time_msec(),
+                                        fingers: event.fingers(),
+                                    },
+                                );
+                            }
+                        }
+                        InputEvent::GesturePinchUpdate { event, .. } => {
+                            if let Some(pointer) = state.seat.get_pointer() {
+                                pointer.gesture_pinch_update(
+                                    state,
+                                    &smithay::input::pointer::GesturePinchUpdateEvent {
+                                        time: event.time_msec(),
+                                        delta: event.delta(),
+                                        scale: event.scale(),
+                                        rotation: event.rotation(),
+                                    },
+                                );
+                            }
+                        }
+                        InputEvent::GesturePinchEnd { event, .. } => {
+                            if let Some(pointer) = state.seat.get_pointer() {
+                                pointer.gesture_pinch_end(
+                                    state,
+                                    &smithay::input::pointer::GesturePinchEndEvent {
+                                        serial: SCOUNTER.next_serial(),
+                                        time: event.time_msec(),
+                                        cancelled: event.cancelled(),
+                                    },
+                                );
+                            }
+                        }
+                        InputEvent::GestureHoldBegin { event, .. } => {
+                            if let Some(pointer) = state.seat.get_pointer() {
+                                pointer.gesture_hold_begin(
+                                    state,
+                                    &smithay::input::pointer::GestureHoldBeginEvent {
+                                        serial: SCOUNTER.next_serial(),
+                                        time: event.time_msec(),
+                                        fingers: event.fingers(),
+                                    },
+                                );
+                            }
+                        }
+                        InputEvent::GestureHoldEnd { event, .. } => {
+                            if let Some(pointer) = state.seat.get_pointer() {
+                                pointer.gesture_hold_end(
+                                    state,
+                                    &smithay::input::pointer::GestureHoldEndEvent {
+                                        serial: SCOUNTER.next_serial(),
+                                        time: event.time_msec(),
+                                        cancelled: event.cancelled(),
+                                    },
+                                );
                             }
                         }
                         _ => {}

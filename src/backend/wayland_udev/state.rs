@@ -23,6 +23,23 @@ use smithay::delegate_virtual_keyboard_manager;
 use smithay::delegate_xdg_activation;
 use smithay::delegate_xdg_decoration;
 use smithay::delegate_xwayland_shell;
+use smithay::delegate_pointer_constraints;
+use smithay::delegate_relative_pointer;
+use smithay::delegate_session_lock;
+use smithay::delegate_idle_inhibit;
+use smithay::delegate_idle_notify;
+use smithay::delegate_fractional_scale;
+use smithay::delegate_cursor_shape;
+use smithay::delegate_presentation;
+use smithay::delegate_pointer_gestures;
+use smithay::delegate_single_pixel_buffer;
+use smithay::delegate_content_type;
+use smithay::delegate_alpha_modifier;
+use smithay::delegate_foreign_toplevel_list;
+use smithay::delegate_tablet_manager;
+use smithay::delegate_fifo;
+use smithay::delegate_keyboard_shortcuts_inhibit;
+use smithay::delegate_security_context;
 use smithay::xwayland::{X11Wm, X11Surface, XwmHandler, XWaylandClientData, xwm::{Reorder, ResizeEdge as XwmResizeEdge, XwmId, WmWindowProperty}};
 use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
 use smithay::input::keyboard::XkbConfig;
@@ -60,6 +77,24 @@ use smithay::wayland::text_input::TextInputManagerState;
 use smithay::wayland::input_method::{InputMethodHandler, InputMethodManagerState, PopupSurface as ImPopupSurface};
 use smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState;
 use smithay::wayland::xdg_activation::{XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData};
+use smithay::wayland::pointer_constraints::{PointerConstraintsHandler, PointerConstraintsState, with_pointer_constraint};
+use smithay::wayland::relative_pointer::RelativePointerManagerState;
+use smithay::wayland::session_lock::{SessionLockHandler, SessionLockManagerState, SessionLocker, LockSurface};
+use smithay::wayland::idle_inhibit::{IdleInhibitHandler, IdleInhibitManagerState};
+use smithay::wayland::idle_notify::IdleNotifierState;
+use smithay::wayland::fractional_scale::{FractionalScaleHandler, FractionalScaleManagerState};
+use smithay::wayland::cursor_shape::CursorShapeManagerState;
+use smithay::wayland::presentation::PresentationState;
+use smithay::wayland::pointer_gestures::PointerGesturesState;
+use smithay::wayland::single_pixel_buffer::SinglePixelBufferState;
+use smithay::wayland::content_type::ContentTypeState;
+use smithay::wayland::alpha_modifier::AlphaModifierState;
+use smithay::wayland::foreign_toplevel_list::{ForeignToplevelListState, ForeignToplevelListHandler, ForeignToplevelHandle};
+use smithay::wayland::tablet_manager::TabletManagerState;
+use smithay::wayland::fifo::FifoManagerState;
+use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitState;
+use smithay::wayland::security_context::SecurityContextState;
+use smithay::input::pointer::PointerHandle;
 
 #[derive(Debug, Default)]
 pub struct JwmClientState {
@@ -98,6 +133,29 @@ pub struct JwmWaylandState {
     pub layer_shell_state: WlrLayerShellState,
 
     pub xdg_activation_state: XdgActivationState,
+
+    // --- SOTA protocol state ---
+    pub pointer_constraints_state: PointerConstraintsState,
+    pub relative_pointer_state: RelativePointerManagerState,
+    pub session_lock_state: SessionLockManagerState,
+    pub idle_inhibit_state: IdleInhibitManagerState,
+    pub idle_notifier_state: IdleNotifierState<JwmWaylandState>,
+    pub fractional_scale_state: FractionalScaleManagerState,
+    pub cursor_shape_state: CursorShapeManagerState,
+    pub presentation_state: PresentationState,
+    pub pointer_gestures_state: PointerGesturesState,
+    pub single_pixel_buffer_state: SinglePixelBufferState,
+    pub content_type_state: ContentTypeState,
+    pub alpha_modifier_state: AlphaModifierState,
+    pub foreign_toplevel_list_state: ForeignToplevelListState,
+    pub tablet_manager_state: TabletManagerState,
+    pub fifo_state: FifoManagerState,
+    pub keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
+    pub security_context_state: SecurityContextState,
+
+    pub idle_inhibiting_surfaces: HashSet<ObjectId>,
+    pub session_locked: bool,
+    pub foreign_toplevel_handles: HashMap<WindowId, ForeignToplevelHandle>,
 
     /// XWayland shell state (for associating X11 windows with wl_surfaces).
     pub xwayland_shell_state: XWaylandShellState,
@@ -233,6 +291,162 @@ delegate_xdg_decoration!(JwmWaylandState);
 delegate_xwayland_shell!(JwmWaylandState);
 
 smithay::delegate_dmabuf!(JwmWaylandState);
+
+delegate_pointer_constraints!(JwmWaylandState);
+delegate_relative_pointer!(JwmWaylandState);
+delegate_session_lock!(JwmWaylandState);
+delegate_idle_inhibit!(JwmWaylandState);
+delegate_idle_notify!(JwmWaylandState);
+delegate_fractional_scale!(JwmWaylandState);
+delegate_cursor_shape!(JwmWaylandState);
+delegate_presentation!(JwmWaylandState);
+delegate_pointer_gestures!(JwmWaylandState);
+delegate_single_pixel_buffer!(JwmWaylandState);
+delegate_content_type!(JwmWaylandState);
+delegate_alpha_modifier!(JwmWaylandState);
+delegate_foreign_toplevel_list!(JwmWaylandState);
+delegate_tablet_manager!(JwmWaylandState);
+delegate_fifo!(JwmWaylandState);
+delegate_keyboard_shortcuts_inhibit!(JwmWaylandState);
+delegate_security_context!(JwmWaylandState);
+
+// ---------------------------------------------------------------------------
+// Pointer Constraints Handler – pointer lock/confine for games
+// ---------------------------------------------------------------------------
+impl PointerConstraintsHandler for JwmWaylandState {
+    fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
+        if let Some(win) = self.surface_to_window.get(&surface.id()).copied() {
+            if self.active_toplevel == Some(win) {
+                with_pointer_constraint(surface, pointer, |constraint| {
+                    if let Some(constraint) = constraint {
+                        if !constraint.is_active() {
+                            constraint.activate();
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    fn cursor_position_hint(
+        &mut self,
+        surface: &WlSurface,
+        _pointer: &PointerHandle<Self>,
+        location: Point<f64, Logical>,
+    ) {
+        if let Some(win) = self.surface_to_window.get(&surface.id()).copied() {
+            if let Some(geo) = self.window_geometry.get(&win) {
+                self.pointer_location = (geo.x as f64 + location.x, geo.y as f64 + location.y).into();
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session Lock Handler – screen locker support
+// ---------------------------------------------------------------------------
+impl SessionLockHandler for JwmWaylandState {
+    fn lock_state(&mut self) -> &mut SessionLockManagerState {
+        &mut self.session_lock_state
+    }
+
+    fn lock(&mut self, confirmation: SessionLocker) {
+        info!("[udev/wayland] session lock requested");
+        confirmation.lock();
+        self.session_locked = true;
+        self.needs_redraw = true;
+    }
+
+    fn unlock(&mut self) {
+        info!("[udev/wayland] session unlocked");
+        self.session_locked = false;
+        self.needs_redraw = true;
+    }
+
+    fn new_surface(&mut self, _surface: LockSurface, _output: WlOutput) {
+        self.needs_redraw = true;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Idle Inhibit Handler – video players prevent idle/screensaver
+// ---------------------------------------------------------------------------
+impl IdleInhibitHandler for JwmWaylandState {
+    fn inhibit(&mut self, surface: WlSurface) {
+        debug!("[udev/wayland] idle inhibit activated");
+        self.idle_inhibiting_surfaces.insert(surface.id());
+        self.idle_notifier_state.set_is_inhibited(true);
+    }
+
+    fn uninhibit(&mut self, surface: WlSurface) {
+        debug!("[udev/wayland] idle inhibit released");
+        self.idle_inhibiting_surfaces.remove(&surface.id());
+        if self.idle_inhibiting_surfaces.is_empty() {
+            self.idle_notifier_state.set_is_inhibited(false);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fractional Scale Handler
+// ---------------------------------------------------------------------------
+impl FractionalScaleHandler for JwmWaylandState {
+    fn new_fractional_scale(&mut self, _surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface) {
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Foreign Toplevel List Handler – taskbar/dock integration
+// ---------------------------------------------------------------------------
+impl ForeignToplevelListHandler for JwmWaylandState {
+    fn foreign_toplevel_list_state(&mut self) -> &mut ForeignToplevelListState {
+        &mut self.foreign_toplevel_list_state
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Idle Notifier Handler
+// ---------------------------------------------------------------------------
+impl smithay::wayland::idle_notify::IdleNotifierHandler for JwmWaylandState {
+    fn idle_notifier_state(&mut self) -> &mut IdleNotifierState<JwmWaylandState> {
+        &mut self.idle_notifier_state
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard Shortcuts Inhibit Handler
+// ---------------------------------------------------------------------------
+impl smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitHandler for JwmWaylandState {
+    fn keyboard_shortcuts_inhibit_state(&mut self) -> &mut KeyboardShortcutsInhibitState {
+        &mut self.keyboard_shortcuts_inhibit_state
+    }
+
+    fn new_inhibitor(&mut self, _inhibitor: smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitor) {
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tablet Seat Handler – drawing tablet support
+// ---------------------------------------------------------------------------
+impl smithay::wayland::tablet_manager::TabletSeatHandler for JwmWaylandState {
+    fn tablet_tool_image(&mut self, _tool: &smithay::backend::input::TabletToolDescriptor, _image: smithay::input::pointer::CursorImageStatus) {
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Security Context Handler – sandboxed app isolation (Flatpak)
+// ---------------------------------------------------------------------------
+impl smithay::wayland::security_context::SecurityContextHandler for JwmWaylandState {
+    fn context_created(
+        &mut self,
+        source: smithay::wayland::security_context::SecurityContextListenerSource,
+        security_context: smithay::wayland::security_context::SecurityContext,
+    ) {
+        // TODO: integrate with calloop to accept clients from sandboxed contexts
+        let _ = source;
+        let _ = security_context;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // XDG Activation Handler – allows clients to request surface activation
@@ -708,10 +922,30 @@ impl JwmWaylandState {
         InputMethodManagerState::new::<JwmWaylandState, _>(dh, |_client| true);
         VirtualKeyboardManagerState::new::<JwmWaylandState, _>(dh, |_client| true);
 
+        // --- SOTA protocols ---
+        let pointer_constraints_state = PointerConstraintsState::new::<JwmWaylandState>(dh);
+        let relative_pointer_state = RelativePointerManagerState::new::<JwmWaylandState>(dh);
+        let session_lock_state = SessionLockManagerState::new::<JwmWaylandState, _>(dh, |_client| true);
+        let idle_inhibit_state = IdleInhibitManagerState::new::<JwmWaylandState>(dh);
+        let idle_notifier_state = IdleNotifierState::<JwmWaylandState>::new(&dh, handle.clone());
+        let fractional_scale_state = FractionalScaleManagerState::new::<JwmWaylandState>(dh);
+        let cursor_shape_state = CursorShapeManagerState::new::<JwmWaylandState>(dh);
+        let presentation_state = PresentationState::new::<JwmWaylandState>(dh, libc::CLOCK_MONOTONIC as u32);
+        let pointer_gestures_state = PointerGesturesState::new::<JwmWaylandState>(dh);
+        let single_pixel_buffer_state = SinglePixelBufferState::new::<JwmWaylandState>(dh);
+        let content_type_state = ContentTypeState::new::<JwmWaylandState>(dh);
+        let alpha_modifier_state = AlphaModifierState::new::<JwmWaylandState>(dh);
+        let foreign_toplevel_list_state = ForeignToplevelListState::new::<JwmWaylandState>(dh);
+        let tablet_manager_state = TabletManagerState::new::<JwmWaylandState>(dh);
+        let fifo_state = FifoManagerState::new::<JwmWaylandState>(dh);
+        let keyboard_shortcuts_inhibit_state = KeyboardShortcutsInhibitState::new::<JwmWaylandState>(dh);
+        let security_context_state = SecurityContextState::new::<JwmWaylandState, _>(dh, |_client| true);
+
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(dh, seat_name);
         seat.add_pointer();
         seat.add_keyboard(XkbConfig::default(), 200, 25)?;
+        seat.add_touch();
 
         Ok((
             Self {
@@ -737,6 +971,29 @@ impl JwmWaylandState {
 
                 layer_shell_state,
                 xdg_activation_state,
+
+                pointer_constraints_state,
+                relative_pointer_state,
+                session_lock_state,
+                idle_inhibit_state,
+                idle_notifier_state,
+                fractional_scale_state,
+                cursor_shape_state,
+                presentation_state,
+                pointer_gestures_state,
+                single_pixel_buffer_state,
+                content_type_state,
+                alpha_modifier_state,
+                foreign_toplevel_list_state,
+                tablet_manager_state,
+                fifo_state,
+                keyboard_shortcuts_inhibit_state,
+                security_context_state,
+
+                idle_inhibiting_surfaces: HashSet::new(),
+                session_locked: false,
+                foreign_toplevel_handles: HashMap::new(),
+
                 xwayland_shell_state,
                 x11_wm: None,
                 x11_surface_to_window: HashMap::new(),

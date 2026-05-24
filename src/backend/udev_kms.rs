@@ -48,6 +48,7 @@ use smithay::utils::{DeviceFd, Physical, Point, Rectangle, Scale, Transform};
 use smithay::wayland::compositor::{with_states, with_surface_tree_downward, TraversalAction};
 use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
+use smithay::wayland::presentation::{PresentationFeedbackCachedState, Refresh};
 
 use crate::backend::common_define::StdCursorKind;
 
@@ -83,6 +84,9 @@ struct KmsOutputState {
     frame_callback_visible: HashSet<wayland_server::Weak<WlSurface>>,
 
     surfaces_on_output: HashSet<wayland_server::Weak<WlSurface>>,
+
+    last_vblank: Option<std::time::Duration>,
+    refresh_interval: std::time::Duration,
 }
 
 pub(super) struct KmsState {
@@ -880,6 +884,28 @@ impl KmsState {
                 )
                 .map_err(|e| KmsInitError::InitializeOutput(format!("{e}")))?;
 
+            // Enable VRR (Variable Refresh Rate / FreeSync / Adaptive Sync) on the CRTC if supported.
+            {
+                let mgr = drm_output_manager.lock();
+                let dev = mgr.device();
+                if let Ok(props) = dev.get_properties(p.crtc) {
+                    let (handles, _values) = props.as_props_and_values();
+                    for &prop_handle in handles {
+                        if let Ok(info) = dev.get_property(prop_handle) {
+                            if info.name().to_str() == Ok("VRR_ENABLED") {
+                                if let Err(e) = dev.set_property(p.crtc, prop_handle, 1) {
+                                    log::debug!("[kms] failed to enable VRR on crtc {:?}: {e:?}", p.crtc);
+                                } else {
+                                    log::info!("[kms] VRR enabled on crtc {:?}", p.crtc);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            let refresh_interval = p.frame_callback_throttle.unwrap_or(std::time::Duration::from_millis(16));
             outputs.push(KmsOutputState {
                 crtc: p.crtc,
                 mode_size: p.mode_size,
@@ -892,6 +918,8 @@ impl KmsState {
                 frame_callback_throttle: p.frame_callback_throttle,
                 frame_callback_visible: HashSet::new(),
                 surfaces_on_output: HashSet::new(),
+                last_vblank: None,
+                refresh_interval,
             });
         }
 
@@ -1103,7 +1131,21 @@ impl KmsState {
                 }
             }
 
-            if let Some(comp) = compositor {
+            // Direct scanout detection: if there's a single fullscreen window and no
+            // top/overlay layer surfaces, bypass the compositor FBO and let DRM attempt
+            // direct scanout via the primary plane (zero-copy, no GPU composition).
+            let direct_scanout_eligible = compositor.is_some()
+                && elements.is_empty()  // no cursor on this output, no overlay layers
+                && state.window_stack.len() == 1
+                && state.window_stack.first().map_or(false, |win| {
+                    state.window_is_fullscreen.get(win).copied().unwrap_or(false)
+                        && state.mapped_windows.contains(win)
+                });
+
+            let use_compositor = compositor.is_some() && !direct_scanout_eligible;
+
+            if use_compositor {
+                let comp = compositor.unwrap();
                 // Compositor path: surfaces already imported in compositor_render_frame;
                 // just collect frame_roots for callback delivery.
                 for win in state.window_stack.iter().rev() {
@@ -1495,7 +1537,7 @@ impl KmsState {
     pub(super) fn on_vblank(
         &mut self,
         crtc: crtc::Handle,
-        _metadata: &mut Option<DrmEventMetadata>,
+        metadata: &mut Option<DrmEventMetadata>,
     ) {
         let Some(out) = self.outputs.iter_mut().find(|o| o.crtc == crtc) else {
             return;
@@ -1506,6 +1548,18 @@ impl KmsState {
         }
         out.frame_pending = false;
 
+        // Extract precise flip timestamp from DRM metadata for presentation feedback
+        let presentation_time = metadata
+            .as_ref()
+            .and_then(|m| match m.time {
+                smithay::backend::drm::DrmEventTime::Monotonic(t) => Some(t),
+                smithay::backend::drm::DrmEventTime::Realtime(_) => None,
+            });
+
+        if let Some(vblank_time) = presentation_time {
+            out.last_vblank = Some(vblank_time);
+        }
+
         if out.send_frame_callbacks {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1514,8 +1568,33 @@ impl KmsState {
             let throttle = out.frame_callback_throttle;
             let output = out.output.clone();
             let visible = out.frame_callback_visible.clone();
+            let refresh = out.refresh_interval;
 
             for root in &out.frame_callback_roots {
+                // Send presentation feedback for wp_presentation protocol
+                if let Some(vblank_time) = presentation_time {
+                    with_surface_tree_downward(
+                        root,
+                        (),
+                        |_, _, _| TraversalAction::DoChildren(()),
+                        |_surface, states, _| {
+                            let mut cached = states.cached_state.get::<PresentationFeedbackCachedState>();
+                            let feedback = cached.current();
+                            for cb in feedback.callbacks.drain(..) {
+                                cb.presented(
+                                    &output,
+                                    vblank_time,
+                                    Refresh::fixed(refresh),
+                                    0,
+                                    smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync
+                                    | smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwClock,
+                                );
+                            }
+                        },
+                        |_, _, _| true,
+                    );
+                }
+
                 send_frames_surface_tree(root, &output, now, throttle, |surface, states| {
                     let data = states.data_map.get::<RendererSurfaceStateUserData>();
                     let Some(data) = data else {
