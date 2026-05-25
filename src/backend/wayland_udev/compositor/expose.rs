@@ -3,9 +3,9 @@ use smithay::backend::renderer::gles::ffi;
 
 impl WaylandCompositor {
     /// Render the expose (mission control) mode overlay.
-    /// Shows all windows arranged in a grid layout.
+    /// Shows all windows arranged in a grid layout with animation.
     pub(crate) fn render_expose(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
-        if self.expose_entries.is_empty() {
+        if self.expose_entries.is_empty() || self.expose_opacity <= 0.0 {
             return;
         }
 
@@ -23,13 +23,13 @@ impl WaylandCompositor {
                 gl.UniformMatrix4fv(proj_loc, 1, ffi::FALSE as u8, projection.as_ptr());
             }
             if opacity_loc >= 0 {
-                gl.Uniform1f(opacity_loc, 0.85);
+                gl.Uniform1f(opacity_loc, self.expose_opacity * 0.85);
             }
 
             gl.BindVertexArray(self.quad_vao);
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
 
-            // Draw each expose window at its target position
+            // Draw each expose window at its current animated position
             gl.UseProgram(self.program);
             gl.UniformMatrix4fv(self.win_uniforms.projection, 1, ffi::FALSE as u8, projection.as_ptr());
 
@@ -43,17 +43,17 @@ impl WaylandCompositor {
                     None => continue,
                 };
 
-                let x = entry.x as f32;
-                let y = entry.y as f32;
-                let w = entry.w as f32;
-                let h = entry.h as f32;
+                let x = entry.current_x;
+                let y = entry.current_y;
+                let w = entry.current_w;
+                let h = entry.current_h;
 
                 // Draw shadow behind each window
                 gl.UseProgram(self.shadow_program);
                 gl.UniformMatrix4fv(self.shadow_uniforms.projection, 1, ffi::FALSE as u8, projection.as_ptr());
                 let spread = 15.0f32;
                 gl.Uniform4f(self.shadow_uniforms.rect, x - spread, y - spread, w + spread * 2.0, h + spread * 2.0);
-                gl.Uniform4f(self.shadow_uniforms.shadow_color, 0.0, 0.0, 0.0, 0.5);
+                gl.Uniform4f(self.shadow_uniforms.shadow_color, 0.0, 0.0, 0.0, 0.5 * self.expose_opacity);
                 gl.Uniform2f(self.shadow_uniforms.size, w, h);
                 gl.Uniform1f(self.shadow_uniforms.radius, 6.0);
                 gl.Uniform1f(self.shadow_uniforms.spread, spread);
@@ -63,11 +63,25 @@ impl WaylandCompositor {
                 gl.UseProgram(self.program);
                 gl.UniformMatrix4fv(self.win_uniforms.projection, 1, ffi::FALSE as u8, projection.as_ptr());
                 gl.Uniform4f(self.win_uniforms.rect, x, y, w, h);
-                gl.Uniform1f(self.win_uniforms.opacity, 1.0);
+
+                let opacity = if self.expose_active {
+                    self.expose_opacity
+                } else {
+                    1.0
+                };
+                gl.Uniform1f(self.win_uniforms.opacity, opacity);
                 gl.Uniform1f(self.win_uniforms.radius, 6.0);
                 gl.Uniform2f(self.win_uniforms.size, w, h);
                 gl.Uniform1f(self.win_uniforms.dim, 1.0);
-                gl.Uniform4f(self.win_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
+
+                // Use content_uv to crop out CSD shadows/decorations
+                let [cu, cv, cw, ch] = win.content_uv;
+                let (uv_x, uv_y, uv_w, uv_h) = if win.y_inverted {
+                    (cu, cv + ch, cw, -ch)
+                } else {
+                    (cu, cv, cw, ch)
+                };
+                gl.Uniform4f(self.win_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
                 gl.Uniform1f(self.win_uniforms.ripple_progress, -1.0);
                 gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
 
@@ -76,6 +90,22 @@ impl WaylandCompositor {
                 gl.Uniform1i(self.win_uniforms.texture, 0);
 
                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+
+                // Highlight border if hovered
+                if entry.is_hovered {
+                    gl.UseProgram(self.border_program);
+                    gl.UniformMatrix4fv(self.border_uniforms.projection, 1, ffi::FALSE as u8, projection.as_ptr());
+                    gl.Uniform1f(self.border_uniforms.border_width, 3.0);
+                    gl.Uniform4f(self.border_uniforms.border_color, 0.4, 0.6, 1.0, opacity);
+                    gl.Uniform1f(self.border_uniforms.radius, 6.0);
+                    gl.Uniform2f(self.border_uniforms.size, w, h);
+                    gl.Uniform4f(self.border_uniforms.rect, x, y, w, h);
+                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+
+                    // Restore window program
+                    gl.UseProgram(self.program);
+                    gl.UniformMatrix4fv(self.win_uniforms.projection, 1, ffi::FALSE as u8, projection.as_ptr());
+                }
             }
         }
     }

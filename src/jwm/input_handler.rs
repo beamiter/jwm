@@ -183,8 +183,8 @@ impl Jwm {
         if self.features.expose_active {
             let (rx, ry) = self.last_mouse_root;
             if let Some(wid) = backend.compositor_expose_click(rx as f32, ry as f32) {
-                // Compositor handled the click and already deactivated expose animation
                 self.features.expose_active = false;
+                backend.compositor_set_expose_mode(false, vec![]);
                 let _ = backend.key_ops().ungrab_keyboard();
                 let _ = backend.input_ops().ungrab_pointer();
                 if let Some(ck) = self.wintoclient(wid) {

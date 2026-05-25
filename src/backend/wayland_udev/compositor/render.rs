@@ -108,11 +108,13 @@ impl WaylandCompositor {
         self.tick_snap_preview(dt);
         self.tick_overview(dt);
         self.tick_tilt(dt);
+        self.tick_expose(dt);
 
         // Determine if anything needs rendering
         let any_animating = self.has_active_animations()
             || self.transition_active
             || self.expose_active
+            || !self.expose_entries.is_empty()
             || self.overview_active;
 
         let force_render = any_animating
@@ -660,7 +662,7 @@ impl WaylandCompositor {
         // =================================================================
         // 15. Expose overlay
         // =================================================================
-        if self.expose_active && !self.expose_entries.is_empty() {
+        if !self.expose_entries.is_empty() && self.expose_opacity > 0.0 {
             self.render_expose(gl, &projection);
         }
 

@@ -350,10 +350,19 @@ pub(crate) enum TransitionMode {
 
 pub(crate) struct ExposeEntry {
     pub window_id: u64,
-    pub x: i32,
-    pub y: i32,
-    pub w: u32,
-    pub h: u32,
+    pub orig_x: f32,
+    pub orig_y: f32,
+    pub orig_w: f32,
+    pub orig_h: f32,
+    pub target_x: f32,
+    pub target_y: f32,
+    pub target_w: f32,
+    pub target_h: f32,
+    pub current_x: f32,
+    pub current_y: f32,
+    pub current_w: f32,
+    pub current_h: f32,
+    pub is_hovered: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -497,6 +506,7 @@ pub(crate) struct WaylandCompositor {
 
     // Expose
     expose_active: bool,
+    expose_opacity: f32,
     expose_entries: Vec<ExposeEntry>,
 
     // Snap preview
@@ -946,6 +956,7 @@ impl WaylandCompositor {
 
             // Expose
             expose_active: false,
+            expose_opacity: 0.0,
             expose_entries: Vec::new(),
 
             // Snap preview
