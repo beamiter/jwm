@@ -151,6 +151,59 @@ impl WaylandCompositor {
         self.perf_metrics.record_frame(std::time::Duration::from_secs_f32(dt));
 
         // =================================================================
+        // 1b. Dirty region tracking: compare current scene vs previous frame
+        // =================================================================
+        {
+            use std::collections::HashSet;
+            let prev_ids: HashSet<u64> = self.prev_scene.iter().map(|&(id, _, _, _, _)| id).collect();
+            let curr_ids: HashSet<u64> = scene.iter().map(|&(id, _, _, _, _)| id).collect();
+
+            // Windows that disappeared — mark their old rect dirty
+            for &(id, x, y, w, h) in &self.prev_scene {
+                if !curr_ids.contains(&id) {
+                    self.dirty_region_tracker.mark_dirty(
+                        dirty_region::DirtyRect::new(x as f32, y as f32, w as f32, h as f32),
+                    );
+                }
+            }
+
+            // Windows that appeared or moved/resized
+            for &(id, x, y, w, h) in scene {
+                if !prev_ids.contains(&id) {
+                    // New window
+                    self.dirty_region_tracker.mark_dirty(
+                        dirty_region::DirtyRect::new(x as f32, y as f32, w as f32, h as f32),
+                    );
+                } else if let Some(&(_, px, py, pw, ph)) = self.prev_scene.iter().find(|&&(pid, _, _, _, _)| pid == id) {
+                    if x != px || y != py || w != pw || h != ph {
+                        // Moved or resized — mark both old and new rects
+                        self.dirty_region_tracker.mark_dirty(
+                            dirty_region::DirtyRect::new(px as f32, py as f32, pw as f32, ph as f32),
+                        );
+                        self.dirty_region_tracker.mark_dirty(
+                            dirty_region::DirtyRect::new(x as f32, y as f32, w as f32, h as f32),
+                        );
+                    }
+                }
+            }
+
+            self.prev_scene.clear();
+            self.prev_scene.extend_from_slice(scene);
+        }
+
+        // Feed dirty regions to per-monitor renderer
+        {
+            let regions: Vec<dirty_region::DirtyRect> = self.dirty_region_tracker.regions().iter().copied().collect();
+            if regions.is_empty() {
+                // No tracked dirty regions yet — mark all monitors dirty (full redraw)
+                self.per_monitor_renderer.mark_all_dirty();
+            } else {
+                self.per_monitor_renderer.mark_dirty_from_regions(&regions);
+            }
+            self.per_monitor_renderer.next_frame();
+        }
+
+        // =================================================================
         // 2. Animation ticks
         // =================================================================
         self.tick_fades(dt);
@@ -365,36 +418,55 @@ impl WaylandCompositor {
             })
         });
 
-        if self.blur_enabled && has_frosted && !self.blur_fbos.is_empty() {
-            // Capture current scene to scene_fbo
-            self.blit_fbo(
-                gl,
-                self.output_fbo,
-                self.scene_fbo,
-                self.screen_w,
-                self.screen_h,
-            );
+        let blur_result_tex = if self.blur_enabled && has_frosted && !self.blur_fbos.is_empty() {
+            self.temporal_blur_total_count += 1;
 
-            // Run blur downsample/upsample passes
-            self.run_blur_passes(gl, self.scene_texture, &projection);
+            let current_hash = self.compute_window_positions_hash();
+            let can_reuse = self.temporal_blur_enabled
+                && current_hash == self.prev_window_positions_hash
+                && self.prev_blur_fbo.is_some();
 
-            // Record blur operation for cache warmup statistics
-            self.cache_warmup_mgr.record_blur_operation(self.screen_w, self.screen_h);
+            let tex = if can_reuse {
+                self.temporal_blur_reuse_count += 1;
+                self.prev_blur_fbo.unwrap().1
+            } else {
+                // Capture current scene to scene_fbo
+                self.blit_fbo(
+                    gl,
+                    self.output_fbo,
+                    self.scene_fbo,
+                    self.screen_w,
+                    self.screen_h,
+                );
 
-            // Temporal blur: reuse previous frame's blur when scene is static
-            if self.temporal_blur_enabled && !self.blur_fbos.is_empty() {
-                let current_blur_tex = self.blur_fbos[0].texture;
-                unsafe {
-                    let _result_tex = self.apply_temporal_blur_mix(gl, current_blur_tex);
+                // Run blur downsample/upsample passes
+                self.run_blur_passes(gl, self.scene_texture, &projection);
+
+                // Record blur operation for cache warmup statistics
+                self.cache_warmup_mgr.record_blur_operation(self.screen_w, self.screen_h);
+
+                let result = self.blur_fbos[0].texture;
+
+                // Cache result for temporal reuse
+                if self.temporal_blur_enabled {
+                    unsafe {
+                        self.copy_blur_to_prev_fbo(gl, result);
+                    }
                 }
-            }
+
+                self.prev_window_positions_hash = current_hash;
+                result
+            };
 
             // Re-bind output FBO for further drawing
             unsafe {
                 gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
                 gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
             }
-        }
+            Some(tex)
+        } else {
+            None
+        };
 
         self.frame_profiler.zone_end();
 
@@ -490,9 +562,8 @@ impl WaylandCompositor {
                 };
 
                 // --- Draw blur behind frosted window ---
-                if wt.is_frosted && self.blur_enabled && !self.blur_fbos.is_empty() {
-                    // Draw the blurred texture behind this window
-                    let blur_tex = self.blur_fbos[0].texture;
+                if wt.is_frosted && self.blur_enabled && blur_result_tex.is_some() {
+                    let blur_tex = blur_result_tex.unwrap();
                     gl.ActiveTexture(ffi::TEXTURE0);
                     gl.BindTexture(ffi::TEXTURE_2D, blur_tex);
 
@@ -502,8 +573,11 @@ impl WaylandCompositor {
                     let uv_sw = draw_w / self.screen_w as f32;
                     let uv_sh = draw_h / self.screen_h as f32;
 
+                    // Per-window frosted strength modulates blur opacity
+                    let blur_opacity = fade * wt.frosted_strength.max(0.1);
+
                     gl.Uniform4f(self.win_uniforms.uv_rect, uv_sx, uv_sy, uv_sw, uv_sh);
-                    gl.Uniform1f(self.win_uniforms.opacity, fade);
+                    gl.Uniform1f(self.win_uniforms.opacity, blur_opacity);
                     gl.Uniform1f(self.win_uniforms.dim, 1.0);
                     gl.Uniform1f(self.win_uniforms.radius, radius);
                     gl.Uniform2f(self.win_uniforms.size, draw_w, draw_h);
@@ -902,6 +976,16 @@ impl WaylandCompositor {
         }
 
         // =================================================================
+        // 19c. Annotations overlay
+        // =================================================================
+        if self.annotation_active && !self.annotation_strokes.is_empty() {
+            unsafe {
+                gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
+                self.render_annotations(gl, &projection);
+            }
+        }
+
+        // =================================================================
         // 20. Finalize - unbind FBO
         // =================================================================
         unsafe {
@@ -911,9 +995,22 @@ impl WaylandCompositor {
         // =================================================================
         // 21. Recording capture (async PBO readback to ffmpeg)
         // =================================================================
+        if let Some(path) = self.pending_recording_start.take() {
+            unsafe {
+                if let Err(e) = self.recording.start(gl, self.screen_w, self.screen_h, &path, 30) {
+                    log::error!("[compositor] Failed to start recording: {}", e);
+                }
+            }
+        }
         if self.recording.is_active() {
             unsafe {
                 self.recording.capture_frame(gl, self.output_fbo);
+            }
+        }
+        if self.pending_recording_stop {
+            self.pending_recording_stop = false;
+            unsafe {
+                self.recording.stop(gl);
             }
         }
 
@@ -1114,5 +1211,65 @@ impl WaylandCompositor {
     ) {
         self.pending_screenshot_region = Some((path, x, y, w, h));
         self.needs_render = true;
+    }
+
+    /// Render annotation strokes as GL_LINES using the line shader.
+    unsafe fn render_annotations(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+        unsafe {
+            gl.UseProgram(self.line_program);
+            gl.UniformMatrix4fv(
+                self.line_uniform_projection,
+                1,
+                ffi::FALSE as u8,
+                projection.as_ptr(),
+            );
+            gl.Enable(ffi::BLEND);
+            gl.BlendFunc(ffi::SRC_ALPHA, ffi::ONE_MINUS_SRC_ALPHA);
+
+            for stroke in &self.annotation_strokes {
+                if stroke.points.len() < 2 {
+                    continue;
+                }
+
+                gl.LineWidth(stroke.width);
+                gl.Uniform4f(
+                    self.line_uniform_color,
+                    stroke.color[0],
+                    stroke.color[1],
+                    stroke.color[2],
+                    stroke.color[3],
+                );
+
+                // Build vertex data for GL_LINES (pairs of adjacent points)
+                let mut vertices: Vec<f32> = Vec::with_capacity((stroke.points.len() - 1) * 4);
+                for i in 0..stroke.points.len() - 1 {
+                    let (x0, y0) = stroke.points[i];
+                    let (x1, y1) = stroke.points[i + 1];
+                    vertices.extend_from_slice(&[x0, y0, x1, y1]);
+                }
+
+                let mut vbo = 0u32;
+                gl.GenBuffers(1, &mut vbo);
+                gl.BindBuffer(ffi::ARRAY_BUFFER, vbo);
+                gl.BufferData(
+                    ffi::ARRAY_BUFFER,
+                    (vertices.len() * std::mem::size_of::<f32>()) as isize,
+                    vertices.as_ptr() as *const _,
+                    ffi::STREAM_DRAW,
+                );
+
+                gl.EnableVertexAttribArray(0);
+                gl.VertexAttribPointer(0, 2, ffi::FLOAT, ffi::FALSE as u8, 8, std::ptr::null());
+
+                let num_verts = ((stroke.points.len() - 1) * 2) as i32;
+                gl.DrawArrays(ffi::LINES, 0, num_verts);
+
+                gl.DisableVertexAttribArray(0);
+                gl.DeleteBuffers(1, &vbo);
+            }
+
+            gl.LineWidth(1.0);
+            gl.UseProgram(0);
+        }
     }
 }

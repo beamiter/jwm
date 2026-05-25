@@ -97,15 +97,34 @@ impl WaylandCompositor {
     // Frosted glass rules
     // -----------------------------------------------------------------------
 
-    /// Check if `class_name` is in the frosted glass rules list (case-insensitive).
-    pub(crate) fn lookup_frosted_glass_rule(&self, class_name: &str) -> bool {
+    /// Check if `class_name` matches a frosted glass rule.
+    /// Returns the strength (0.0-1.0) if matched, None otherwise.
+    pub(crate) fn lookup_frosted_glass_rule(&self, class_name: &str) -> Option<f32> {
         let lower = class_name.to_lowercase();
-        for pattern in &self.frosted_glass_rules {
+        for (pattern, strength) in &self.frosted_glass_rules {
             if lower.contains(&pattern.to_lowercase()) {
-                return true;
+                return Some(*strength);
             }
         }
-        false
+        None
+    }
+
+    /// Parse frosted glass rules. Supports:
+    /// - `"class_name"` → strength 1.0
+    /// - `"0.7:class_name"` → strength 0.7
+    pub(crate) fn parse_frosted_glass_rules(rules: &[String]) -> Vec<(String, f32)> {
+        let mut result = Vec::with_capacity(rules.len());
+        for rule in rules {
+            if let Some((strength_str, class)) = rule.split_once(':') {
+                if let Ok(strength) = strength_str.trim().parse::<f32>() {
+                    result.push((class.trim().to_string(), strength.clamp(0.0, 1.0)));
+                    continue;
+                }
+            }
+            // No colon or unparseable strength: treat entire string as class, strength=1.0
+            result.push((rule.trim().to_string(), 1.0));
+        }
+        result
     }
 
     // -----------------------------------------------------------------------
@@ -263,28 +282,24 @@ impl WaylandCompositor {
 
         let mut hash = FNV_OFFSET;
 
-        // Sort by window id for deterministic ordering.
-        let mut ids: Vec<u64> = self
-            .windows
-            .iter()
-            .filter(|(_, ws)| !ws.fading_out)
-            .map(|(&id, _)| id)
-            .collect();
-        ids.sort_unstable();
+        // Use prev_scene which captures the actual rendered layout (id, x, y, w, h).
+        for &(id, x, y, w, h) in &self.prev_scene {
+            hash ^= id;
+            hash = hash.wrapping_mul(FNV_PRIME);
+            hash ^= x as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+            hash ^= y as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+            hash ^= w as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+            hash ^= h as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
 
-        for id in ids {
+        // Also mix in opacity for fading windows.
+        for &(id, _, _, _, _) in &self.prev_scene {
             if let Some(ws) = self.windows.get(&id) {
-                // Mix in window dimensions.
-                let w_bits = ws.width as u64;
-                let h_bits = ws.height as u64;
                 let opacity_bits = (ws.fade_opacity * 1000.0) as u64;
-
-                hash ^= w_bits;
-                hash = hash.wrapping_mul(FNV_PRIME);
-                hash ^= h_bits;
-                hash = hash.wrapping_mul(FNV_PRIME);
-                hash ^= id;
-                hash = hash.wrapping_mul(FNV_PRIME);
                 hash ^= opacity_bits;
                 hash = hash.wrapping_mul(FNV_PRIME);
             }
@@ -294,40 +309,20 @@ impl WaylandCompositor {
     }
 
     /// Apply temporal blur mixing: if window positions have not changed since the
-    /// previous frame, reuse the previous blur texture. Otherwise, copy the current
-    /// blur texture into the previous-frame FBO for next-frame reuse.
-    ///
-    /// Returns the texture ID to sample for blur (either current or cached).
+    /// Copy a blur texture into the prev_blur_fbo cache for temporal reuse.
+    /// Allocates the FBO on first call.
     ///
     /// # Safety
     /// Caller must ensure `gl` is valid and `current_blur_tex` is a valid texture.
-    pub(crate) unsafe fn apply_temporal_blur_mix(
+    pub(crate) unsafe fn copy_blur_to_prev_fbo(
         &mut self,
         gl: &ffi::Gles2,
         current_blur_tex: u32,
-    ) -> u32 {
-        self.temporal_blur_total_count += 1;
-
-        if !self.temporal_blur_enabled {
-            return current_blur_tex;
-        }
-
-        let current_hash = self.compute_window_positions_hash();
-
-        // If positions unchanged, reuse previous frame's blur.
-        if current_hash == self.prev_window_positions_hash {
-            if let Some((_fbo, tex)) = self.prev_blur_fbo {
-                self.temporal_blur_reuse_count += 1;
-                return tex;
-            }
-        }
-
-        // Positions changed or no previous FBO: copy current to prev.
+    ) {
         unsafe {
-            let (prev_fbo, prev_tex) = match self.prev_blur_fbo {
-                Some((fbo, tex)) => (fbo, tex),
+            let prev_fbo = match self.prev_blur_fbo {
+                Some((fbo, _tex)) => fbo,
                 None => {
-                    // Allocate prev blur FBO on first use.
                     let mut tex = 0u32;
                     gl.GenTextures(1, &mut tex);
                     gl.BindTexture(ffi::TEXTURE_2D, tex);
@@ -375,12 +370,10 @@ impl WaylandCompositor {
                     );
 
                     self.prev_blur_fbo = Some((fbo, tex));
-                    (fbo, tex)
+                    fbo
                 }
             };
 
-            // Blit current blur texture into the prev FBO.
-            // Create a temporary FBO to read from current_blur_tex.
             let mut src_fbo = 0u32;
             gl.GenFramebuffers(1, &mut src_fbo);
             gl.BindFramebuffer(ffi::READ_FRAMEBUFFER, src_fbo);
@@ -406,17 +399,9 @@ impl WaylandCompositor {
                 ffi::NEAREST,
             );
 
-            // Clean up temporary source FBO.
             gl.DeleteFramebuffers(1, &src_fbo);
-
-            // Restore framebuffer binding.
             gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
-
-            self.prev_window_positions_hash = current_hash;
-            let _ = prev_tex; // suppress unused warning in non-reuse path
         }
-
-        current_blur_tex
     }
 
     // -----------------------------------------------------------------------

@@ -2349,7 +2349,8 @@ impl Backend for UdevBackend {
             if let Some(kms) = &self.kms {
                 let mut kms_ref = kms.borrow_mut();
                 let (w, h) = kms_ref.total_screen_size();
-                match kms_ref.with_renderer(|gl| unsafe { WaylandCompositor::new(gl, w, h) }) {
+                let hdr_10bit = kms_ref.supports_10bit();
+                match kms_ref.with_renderer(|gl| unsafe { WaylandCompositor::new(gl, w, h, hdr_10bit) }) {
                     Ok(Ok(compositor)) => {
                         self.compositor = Some(compositor);
                         return Ok(true);
@@ -2524,6 +2525,19 @@ impl Backend for UdevBackend {
         if let (Some(compositor), Some(kms)) = (&mut self.compositor, &self.kms) {
             for (win_id, tid, w, h, has_alpha, y_inverted, content_uv) in tex_updates {
                 compositor.update_window_texture(win_id, tid, w, h, has_alpha, y_inverted, content_uv);
+            }
+            // Sync window class/app_id for per-class rules (frosted glass strength, etc.)
+            for &(win_id, _, _, _, _) in &full_scene {
+                let wid = WindowId::from_raw(win_id);
+                if let Some(app_id) = self.state.window_app_id.get(&wid) {
+                    if !app_id.is_empty() {
+                        compositor.set_window_class(win_id, app_id);
+                    }
+                }
+            }
+            // Feed vblank presentation time for frame pacing
+            if let Some(presented_at) = kms.borrow_mut().take_presentation_time() {
+                compositor.on_vblank_presented(presented_at);
             }
             let rendered = kms
                 .borrow_mut()
@@ -2797,6 +2811,63 @@ impl Backend for UdevBackend {
         if let Some(c) = self.compositor.as_mut() {
             c.annotation_add_point(x, y);
         }
+    }
+
+    fn compositor_start_recording(&mut self, path: &str) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.start_recording(path);
+        }
+    }
+
+    fn compositor_stop_recording(&mut self) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.stop_recording();
+        }
+    }
+
+    fn compositor_notify_audio_timing(&mut self, window: WindowId, fps: f32, buffer_latency_ms: u32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.notify_audio_timing(window.raw(), fps, buffer_latency_ms);
+        }
+    }
+
+    fn compositor_get_metrics(&self) -> Option<crate::backend::api::CompositorMetrics> {
+        self.compositor.as_ref().map(|c| c.get_metrics())
+    }
+
+    fn compositor_capture_thumbnail(&self, window: WindowId, max_size: u32) -> Option<(Vec<u8>, u32, u32)> {
+        let compositor = self.compositor.as_ref()?;
+        let kms = self.kms.as_ref()?;
+        kms.borrow_mut()
+            .with_renderer(|gl| unsafe { compositor.capture_thumbnail(gl, window.raw(), max_size) })
+            .ok()?
+    }
+
+    fn compositor_request_live_thumbnail(&mut self, window: u32, max_size: u32) -> Option<(Vec<u8>, u32, u32)> {
+        let compositor = self.compositor.as_ref()?;
+        let kms = self.kms.as_ref()?;
+        kms.borrow_mut()
+            .with_renderer(|gl| unsafe { compositor.capture_thumbnail(gl, window as u64, max_size) })
+            .ok()?
+    }
+
+    fn query_vrr_capabilities(&self, output: OutputId) -> Option<crate::backend::api::VrrCapabilities> {
+        let kms = self.kms.as_ref()?;
+        let shared = self.shared.lock().unwrap();
+        let output_idx = shared.outputs.iter().position(|o| o.id == output)?;
+        drop(shared);
+        kms.borrow_mut().query_vrr_for_output(output_idx)
+    }
+
+    fn set_vrr_enabled(&mut self, output: OutputId, enabled: bool) -> Result<(), BackendError> {
+        let kms = self.kms.as_ref().ok_or(BackendError::Unsupported("no KMS"))?;
+        let shared = self.shared.lock().unwrap();
+        let output_idx = shared.outputs.iter().position(|o| o.id == output)
+            .ok_or(BackendError::NotFound("output not found"))?;
+        drop(shared);
+        kms.borrow_mut()
+            .set_vrr_for_output(output_idx, enabled)
+            .map_err(|e| BackendError::Message(e))
     }
 
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError> {

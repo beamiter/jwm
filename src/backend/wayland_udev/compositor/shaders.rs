@@ -941,3 +941,30 @@ void main() {
     frag_color = mix(current, previous, u_temporal_mix);
 }
 "#;
+
+// ---------------------------------------------------------------------------
+// Annotation line shaders
+// ---------------------------------------------------------------------------
+
+pub const LINE_VERTEX_SHADER: &str = r#"#version 300 es
+
+uniform mat4 u_projection;
+
+layout(location = 0) in vec2 a_position;
+
+void main() {
+    gl_Position = u_projection * vec4(a_position, 0.0, 1.0);
+}
+"#;
+
+pub const LINE_FRAGMENT_SHADER: &str = r#"#version 300 es
+precision highp float;
+
+uniform vec4 u_color;
+
+out vec4 frag_color;
+
+void main() {
+    frag_color = u_color;
+}
+"#;

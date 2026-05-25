@@ -128,6 +128,9 @@ pub(super) struct KmsState {
     screencopy_pending: Option<crate::backend::wayland_udev::screencopy::PendingScreencopyQueue>,
 
     outputs: Vec<KmsOutputState>,
+
+    /// Latest vblank presentation timestamp (monotonic) for frame pacing feedback.
+    last_presentation_time: Option<std::time::Instant>,
 }
 
 #[derive(Clone)]
@@ -354,6 +357,70 @@ impl KmsState {
         self.pending_screenshot_region = Some((path, x, y, w, h));
         self.needs_render = true;
     }
+
+    /// Take the latest presentation time (returns None if not updated since last take).
+    pub(super) fn take_presentation_time(&mut self) -> Option<std::time::Instant> {
+        self.last_presentation_time.take()
+    }
+
+    /// Check if 10-bit rendering formats are available.
+    pub(super) fn supports_10bit(&self) -> bool {
+        self.dmabuf_render_formats().iter().any(|f| {
+            f.code == Fourcc::Argb2101010 || f.code == Fourcc::Xrgb2101010
+        })
+    }
+
+    /// Query VRR capabilities for a given output (by index into self.outputs).
+    pub(super) fn query_vrr_for_output(&mut self, output_idx: usize) -> Option<crate::backend::api::VrrCapabilities> {
+        let output = self.outputs.get(output_idx)?;
+        let crtc = output.crtc;
+        let mgr = self.drm_output_manager.lock();
+        let dev = mgr.device();
+        let mut supported = false;
+        let mut current_enabled = false;
+        if let Ok(props) = dev.get_properties(crtc) {
+            let (handles, values) = props.as_props_and_values();
+            for (i, &prop_handle) in handles.iter().enumerate() {
+                if let Ok(info) = dev.get_property(prop_handle) {
+                    let name = info.name().to_str().unwrap_or("");
+                    if name == "VRR_ENABLED" {
+                        supported = true;
+                        current_enabled = values[i] != 0;
+                    }
+                }
+            }
+        }
+        let cfg = crate::config::CONFIG.load();
+        let b = cfg.behavior();
+        Some(crate::backend::api::VrrCapabilities {
+            supported,
+            current_enabled,
+            min_refresh_hz: b.vrr_min_fps,
+            max_refresh_hz: b.vrr_max_fps,
+        })
+    }
+
+    /// Set VRR enabled/disabled for a given output (by index into self.outputs).
+    pub(super) fn set_vrr_for_output(&mut self, output_idx: usize, enabled: bool) -> Result<(), String> {
+        let output = self.outputs.get(output_idx).ok_or("output index out of range")?;
+        let crtc = output.crtc;
+        let mgr = self.drm_output_manager.lock();
+        let dev = mgr.device();
+        if let Ok(props) = dev.get_properties(crtc) {
+            let (handles, _values) = props.as_props_and_values();
+            for &prop_handle in handles {
+                if let Ok(info) = dev.get_property(prop_handle) {
+                    if info.name().to_str() == Ok("VRR_ENABLED") {
+                        dev.set_property(crtc, prop_handle, if enabled { 1 } else { 0 })
+                            .map_err(|e| format!("DRM set_property failed: {e:?}"))?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        Err("VRR_ENABLED property not found on CRTC".to_string())
+    }
+
 
     /// Render all elements to an offscreen buffer and save as PNG.
     /// Split out as a free-standing function so it can borrow `self.renderer`
@@ -761,8 +828,13 @@ impl KmsState {
             .copied()
             .collect();
 
-        // Keep it simple and widely supported.
-        let color_formats = [Fourcc::Argb8888, Fourcc::Xrgb8888];
+        // Try 10-bit first (for HDR), then fall back to 8-bit.
+        let color_formats = [
+            Fourcc::Argb2101010,
+            Fourcc::Xrgb2101010,
+            Fourcc::Argb8888,
+            Fourcc::Xrgb8888,
+        ];
 
         let mut drm_output_manager = DrmOutputManager::new(
             drm,
@@ -961,6 +1033,7 @@ impl KmsState {
             screencopy_pending: None,
 
             outputs,
+            last_presentation_time: None,
         }));
 
         let handle_clone = handle.clone();
@@ -1614,6 +1687,7 @@ impl KmsState {
 
         if let Some(vblank_time) = presentation_time {
             out.last_vblank = Some(vblank_time);
+            self.last_presentation_time = Some(std::time::Instant::now());
         }
 
         if out.send_frame_callbacks {

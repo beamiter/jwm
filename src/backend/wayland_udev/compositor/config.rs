@@ -104,11 +104,14 @@ impl WaylandCompositor {
         self.blur_quality_by_monitor =
             Self::parse_blur_quality_by_monitor(&b.blur_quality_by_monitor);
 
+        // --- Subpixel rendering ---
+        self.subpixel_mgr.set_enabled(b.blur_enabled);
+
         // --- Per-window rules ---
         self.opacity_rules = Self::parse_opacity_rules(&b.opacity_rules);
         self.corner_radius_rules = Self::parse_corner_radius_rules(&b.corner_radius_rules);
         self.scale_rules = Self::parse_scale_rules(&b.scale_rules);
-        self.frosted_glass_rules = b.frosted_glass_rules.clone();
+        self.frosted_glass_rules = Self::parse_frosted_glass_rules(&b.frosted_glass_rules);
         self.shadow_exclude = b.shadow_exclude.clone();
         self.blur_exclude = b.blur_exclude.clone();
         self.rounded_corners_exclude = b.rounded_corners_exclude.clone();
@@ -379,6 +382,7 @@ impl WaylandCompositor {
 
     pub(crate) fn set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32)]) {
         self.monitors = monitors.to_vec();
+        self.per_monitor_renderer.set_monitors(monitors);
     }
 
     pub(crate) fn notify_window_move_start(&mut self, window: u64) {
@@ -431,14 +435,45 @@ impl WaylandCompositor {
     pub(crate) fn set_annotation_mode(&mut self, active: bool) {
         self.annotation_active = active;
         if !active {
-            self.annotation_points.clear();
+            self.annotation_strokes.clear();
         }
         self.needs_render = true;
     }
 
     pub(crate) fn annotation_add_point(&mut self, x: f32, y: f32) {
-        self.annotation_points.push((x, y));
+        if !self.annotation_active {
+            return;
+        }
+        if self.annotation_strokes.is_empty() {
+            self.annotation_strokes.push(super::AnnotationStroke {
+                points: Vec::new(),
+                color: self.annotation_color,
+                width: self.annotation_line_width,
+            });
+        }
+        if let Some(stroke) = self.annotation_strokes.last_mut() {
+            stroke.points.push((x, y));
+        }
         self.needs_render = true;
+    }
+
+    pub(crate) fn annotation_new_stroke(&mut self) {
+        if !self.annotation_active {
+            return;
+        }
+        self.annotation_strokes.push(super::AnnotationStroke {
+            points: Vec::new(),
+            color: self.annotation_color,
+            width: self.annotation_line_width,
+        });
+    }
+
+    pub(crate) fn set_annotation_color(&mut self, r: f32, g: f32, b: f32, a: f32) {
+        self.annotation_color = [r, g, b, a];
+    }
+
+    pub(crate) fn set_annotation_line_width(&mut self, width: f32) {
+        self.annotation_line_width = width.max(1.0);
     }
 
     pub(crate) fn zoom_to_fit(&mut self, window: Option<u32>) {
@@ -477,6 +512,7 @@ impl WaylandCompositor {
             is_urgent: false,
             is_pip: false,
             is_frosted: false,
+            frosted_strength: 0.0,
             class_name: String::new(),
             scale: 1.0,
             audio_sync_target: None,
@@ -520,6 +556,7 @@ impl WaylandCompositor {
             is_urgent: false,
             is_pip: false,
             is_frosted: false,
+            frosted_strength: 0.0,
             class_name: String::new(),
             scale: 1.0,
             audio_sync_target: None,
@@ -537,6 +574,29 @@ impl WaylandCompositor {
 
         // Feed performance infrastructure
         self.predictive_render_mgr.record_window_damage(window_id);
+    }
+
+    /// Set window class/app_id and apply per-class rules (frosted glass, opacity, etc.)
+    pub(crate) fn set_window_class(&mut self, window_id: u64, class_name: &str) {
+        let frosted = self.lookup_frosted_glass_rule(class_name);
+        let opacity_override = self.lookup_opacity_rule(class_name);
+        let corner_radius_override = self.lookup_corner_radius_rule(class_name);
+        let scale = self.lookup_scale_rule(class_name);
+
+        if let Some(win) = self.windows.get_mut(&window_id) {
+            if win.class_name != class_name {
+                win.class_name = class_name.to_string();
+                win.is_frosted = frosted.is_some();
+                win.frosted_strength = frosted.unwrap_or(0.0);
+                win.opacity_override = opacity_override;
+                win.corner_radius_override = corner_radius_override;
+                if let Some(s) = scale {
+                    win.scale = s;
+                }
+                self.subpixel_mgr.register_window(window_id, class_name);
+                self.needs_render = true;
+            }
+        }
     }
 
     /// Notify a tag/workspace switch for transition animation

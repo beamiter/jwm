@@ -17,8 +17,8 @@ mod rules;
 mod font;
 mod texture_pool;
 mod render_stats;
-#[allow(dead_code, unreachable_pub)]
 mod dirty_region;
+mod per_monitor;
 #[allow(dead_code, unreachable_pub)]
 mod frame_rate;
 #[allow(dead_code, unreachable_pub)]
@@ -358,6 +358,16 @@ pub(crate) enum BlurQuality {
 }
 
 // ---------------------------------------------------------------------------
+// Annotation types
+// ---------------------------------------------------------------------------
+
+pub(crate) struct AnnotationStroke {
+    pub points: Vec<(f32, f32)>,
+    pub color: [f32; 4],
+    pub width: f32,
+}
+
+// ---------------------------------------------------------------------------
 // Per-window state
 // ---------------------------------------------------------------------------
 
@@ -382,6 +392,7 @@ pub(crate) struct WindowState {
     pub is_urgent: bool,
     pub is_pip: bool,
     pub is_frosted: bool,
+    pub frosted_strength: f32,
     pub class_name: String,
     pub scale: f32,
     #[allow(dead_code)]
@@ -640,6 +651,9 @@ pub(crate) struct WaylandCompositor {
     frame_count: u64,
     fps: f32,
 
+    // Previous frame scene for dirty tracking
+    prev_scene: Vec<(u64, i32, i32, u32, u32)>,
+
     // Dock position (for genie)
     dock_x: f32,
     dock_y: f32,
@@ -655,10 +669,16 @@ pub(crate) struct WaylandCompositor {
 
     // Annotations
     annotation_active: bool,
-    annotation_points: Vec<(f32, f32)>,
+    annotation_strokes: Vec<AnnotationStroke>,
+    annotation_color: [f32; 4],
+    annotation_line_width: f32,
+    line_program: u32,
+    line_uniform_projection: i32,
+    line_uniform_color: i32,
 
     // Performance infrastructure
     dirty_region_tracker: dirty_region::DirtyRegionTracker,
+    per_monitor_renderer: per_monitor::PerMonitorRenderer,
     frame_rate_limiter: frame_rate::FrameRateLimiter,
     adaptive_frame_rate: frame_rate::AdaptiveFrameRate,
     power_saving_mgr: power_saving::PowerSavingManager,
@@ -699,7 +719,7 @@ pub(crate) struct WaylandCompositor {
     opacity_rules: Vec<(f32, String)>,
     corner_radius_rules: Vec<(f32, String)>,
     scale_rules: Vec<(f32, String)>,
-    frosted_glass_rules: Vec<String>,
+    frosted_glass_rules: Vec<(String, f32)>,
     shadow_exclude: Vec<String>,
     blur_exclude: Vec<String>,
     rounded_corners_exclude: Vec<String>,
@@ -747,6 +767,10 @@ pub(crate) struct WaylandCompositor {
     // --- Screenshot ---
     pending_screenshot: Option<std::path::PathBuf>,
     pending_screenshot_region: Option<(std::path::PathBuf, i32, i32, u32, u32)>,
+
+    // --- Recording control ---
+    pending_recording_start: Option<String>,
+    pending_recording_stop: bool,
 
     // --- Debug HUD extended ---
     debug_hud_extended: bool,
@@ -813,7 +837,17 @@ unsafe fn get_uniform_loc(gl: &ffi::Gles2, program: u32, name: &str) -> i32 {
 // Helper: create a texture + FBO pair at given dimensions
 // ---------------------------------------------------------------------------
 
+const GL_RGB10_A2: u32 = 0x8059;
+
 unsafe fn create_fbo_texture(gl: &ffi::Gles2, w: u32, h: u32) -> (u32, u32) {
+    unsafe { create_fbo_texture_fmt(gl, w, h, ffi::RGBA8) }
+}
+
+unsafe fn create_fbo_texture_10bit(gl: &ffi::Gles2, w: u32, h: u32) -> (u32, u32) {
+    unsafe { create_fbo_texture_fmt(gl, w, h, GL_RGB10_A2) }
+}
+
+unsafe fn create_fbo_texture_fmt(gl: &ffi::Gles2, w: u32, h: u32, internal_format: u32) -> (u32, u32) {
     unsafe {
         let mut tex = 0u32;
         gl.GenTextures(1, &mut tex);
@@ -821,7 +855,7 @@ unsafe fn create_fbo_texture(gl: &ffi::Gles2, w: u32, h: u32) -> (u32, u32) {
         gl.TexImage2D(
             ffi::TEXTURE_2D,
             0,
-            ffi::RGBA8 as i32,
+            internal_format as i32,
             w as i32,
             h as i32,
             0,
@@ -858,6 +892,7 @@ impl WaylandCompositor {
         gl: &ffi::Gles2,
         screen_w: u32,
         screen_h: u32,
+        hdr_10bit: bool,
     ) -> Result<Self, String> {
         unsafe {
         let program = create_program(gl, shaders::VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
@@ -893,6 +928,10 @@ impl WaylandCompositor {
             create_program(gl, shaders::VERTEX_SHADER, shaders::HUD_FRAGMENT_SHADER)?;
         let temporal_blur_mix_program =
             create_program(gl, shaders::TEMPORAL_BLUR_MIX_VERTEX, shaders::TEMPORAL_BLUR_MIX_FRAGMENT)?;
+        let line_program =
+            create_program(gl, shaders::LINE_VERTEX_SHADER, shaders::LINE_FRAGMENT_SHADER)?;
+        let line_uniform_projection = get_uniform_loc(gl, line_program, "u_projection");
+        let line_uniform_color = get_uniform_loc(gl, line_program, "u_color");
 
         // ----- Get uniform locations -----
         let win_uniforms = WindowUniforms {
@@ -1034,7 +1073,11 @@ impl WaylandCompositor {
         gl.GenVertexArrays(1, &mut quad_vao);
 
         // ----- Create output FBO + texture -----
-        let (output_fbo, output_texture) = create_fbo_texture(gl, screen_w, screen_h);
+        let (output_fbo, output_texture) = if hdr_10bit {
+            create_fbo_texture_10bit(gl, screen_w, screen_h)
+        } else {
+            create_fbo_texture(gl, screen_w, screen_h)
+        };
 
         // ----- Create scene FBO + texture -----
         let (scene_fbo, scene_texture) = create_fbo_texture(gl, screen_w, screen_h);
@@ -1220,7 +1263,7 @@ impl WaylandCompositor {
             magnifier_zoom: 2.0,
             magnifier_radius: 100.0,
             colorblind_mode: 0,
-            hdr_enabled: false,
+            hdr_enabled: hdr_10bit,
             hdr_peak_nits: 1000.0,
             tone_mapping_method: 0,
 
@@ -1232,6 +1275,7 @@ impl WaylandCompositor {
             last_frame_time: now,
             frame_count: 0,
             fps: 0.0,
+            prev_scene: Vec::new(),
 
             // Dock position
             dock_x: 0.0,
@@ -1248,10 +1292,16 @@ impl WaylandCompositor {
 
             // Annotations
             annotation_active: false,
-            annotation_points: Vec::new(),
+            annotation_strokes: Vec::new(),
+            annotation_color: [1.0, 0.0, 0.0, 1.0],
+            annotation_line_width: 3.0,
+            line_program,
+            line_uniform_projection,
+            line_uniform_color,
 
             // Performance infrastructure
             dirty_region_tracker: dirty_region::DirtyRegionTracker::new(screen_w, screen_h),
+            per_monitor_renderer: per_monitor::PerMonitorRenderer::new(),
             frame_rate_limiter: frame_rate::FrameRateLimiter::new(60),
             adaptive_frame_rate: frame_rate::AdaptiveFrameRate::new(15, 60),
             power_saving_mgr: power_saving::PowerSavingManager::new(
@@ -1342,6 +1392,10 @@ impl WaylandCompositor {
             // Screenshot
             pending_screenshot: None,
             pending_screenshot_region: None,
+
+            // Recording control
+            pending_recording_start: None,
+            pending_recording_stop: false,
 
             // Debug HUD extended
             debug_hud_extended: false,
@@ -1438,6 +1492,173 @@ impl WaylandCompositor {
         (self.screen_w, self.screen_h)
     }
 
+    /// Feed a vblank presentation timestamp for frame pacing.
+    pub(crate) fn on_vblank_presented(&mut self, presented_at: std::time::Instant) {
+        let was_late = presented_at.elapsed() > std::time::Duration::from_millis(2);
+        self.adaptive_scheduler.on_frame_presented(was_late);
+    }
+
+    /// Request recording start — deferred until next render_frame when GL is active.
+    pub(crate) fn start_recording(&mut self, path: &str) {
+        self.pending_recording_start = Some(path.to_string());
+    }
+
+    /// Request recording stop — deferred until next render_frame when GL is active.
+    pub(crate) fn stop_recording(&mut self) {
+        self.pending_recording_stop = true;
+    }
+
+    /// Notify audio timing for a window (feeds AudioSyncManager).
+    pub(crate) fn notify_audio_timing(&mut self, window_id: u64, fps: f32, buffer_latency_ms: u32) {
+        self.audio_sync_mgr.register_stream(window_id, fps, buffer_latency_ms);
+    }
+
+    /// Capture a scaled-down thumbnail of a window's texture.
+    /// Returns (RGBA pixels, width, height) or None if the window has no texture.
+    pub(crate) unsafe fn capture_thumbnail(
+        &self,
+        gl: &ffi::Gles2,
+        window_id: u64,
+        max_size: u32,
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        let ws = self.windows.get(&window_id)?;
+        let tex = ws.gl_texture?;
+        if ws.width == 0 || ws.height == 0 {
+            return None;
+        }
+
+        let (tw, th) = if ws.width > ws.height {
+            let tw = max_size.min(ws.width);
+            let th = (ws.height as f32 * tw as f32 / ws.width as f32) as u32;
+            (tw.max(1), th.max(1))
+        } else {
+            let th = max_size.min(ws.height);
+            let tw = (ws.width as f32 * th as f32 / ws.height as f32) as u32;
+            (tw.max(1), th.max(1))
+        };
+
+        unsafe {
+            let mut tmp_tex = 0u32;
+            gl.GenTextures(1, &mut tmp_tex);
+            gl.BindTexture(ffi::TEXTURE_2D, tmp_tex);
+            gl.TexImage2D(
+                ffi::TEXTURE_2D, 0, ffi::RGBA8 as i32,
+                tw as i32, th as i32, 0,
+                ffi::RGBA, ffi::UNSIGNED_BYTE, std::ptr::null(),
+            );
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
+
+            let mut tmp_fbo = 0u32;
+            gl.GenFramebuffers(1, &mut tmp_fbo);
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, tmp_fbo);
+            gl.FramebufferTexture2D(
+                ffi::FRAMEBUFFER, ffi::COLOR_ATTACHMENT0, ffi::TEXTURE_2D, tmp_tex, 0,
+            );
+
+            gl.Viewport(0, 0, tw as i32, th as i32);
+            gl.ClearColor(0.0, 0.0, 0.0, 0.0);
+            gl.Clear(ffi::COLOR_BUFFER_BIT);
+
+            gl.UseProgram(self.program);
+            let projection = ortho(0.0, tw as f32, th as f32, 0.0);
+            gl.UniformMatrix4fv(self.win_uniforms.projection, 1, ffi::FALSE as u8, projection.as_ptr());
+            gl.Uniform1i(self.win_uniforms.texture, 0);
+            gl.Uniform1f(self.win_uniforms.opacity, 1.0);
+            gl.Uniform1f(self.win_uniforms.dim, 1.0);
+            gl.Uniform1f(self.win_uniforms.radius, 0.0);
+            gl.Uniform2f(self.win_uniforms.size, tw as f32, th as f32);
+            gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
+
+            let [cu, cv, cuw, cuh] = ws.content_uv;
+            if ws.y_inverted {
+                gl.Uniform4f(self.win_uniforms.uv_rect, cu, cv + cuh, cuw, -cuh);
+            } else {
+                gl.Uniform4f(self.win_uniforms.uv_rect, cu, cv, cuw, cuh);
+            }
+
+            gl.Uniform4f(self.win_uniforms.rect, 0.0, 0.0, tw as f32, th as f32);
+
+            gl.ActiveTexture(ffi::TEXTURE0);
+            gl.BindTexture(ffi::TEXTURE_2D, tex);
+            gl.BindVertexArray(self.quad_vao);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+
+            let buffer_size = (tw * th * 4) as usize;
+            let mut pixels = vec![0u8; buffer_size];
+            gl.ReadPixels(
+                0, 0, tw as i32, th as i32,
+                ffi::RGBA, ffi::UNSIGNED_BYTE,
+                pixels.as_mut_ptr() as *mut _,
+            );
+
+            // Flip vertically (OpenGL reads bottom-up)
+            let row_bytes = (tw * 4) as usize;
+            for row in 0..(th as usize / 2) {
+                let top = row * row_bytes;
+                let bot = ((th as usize) - 1 - row) * row_bytes;
+                for i in 0..row_bytes {
+                    pixels.swap(top + i, bot + i);
+                }
+            }
+
+            // Restore state
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+            gl.DeleteFramebuffers(1, &tmp_fbo);
+            gl.DeleteTextures(1, &tmp_tex);
+            gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+
+            Some((pixels, tw, th))
+        }
+    }
+
+    /// Collect compositor metrics from all subsystems.
+    pub(crate) fn get_metrics(&self) -> crate::backend::api::CompositorMetrics {
+        let avg = self.perf_metrics.avg_frame_time().as_secs_f32() * 1000.0;
+        let max = self.perf_metrics.max_frame_time().as_secs_f32() * 1000.0;
+        let min = self.perf_metrics.min_frame_time().as_secs_f32() * 1000.0;
+        let temporal_rate = if self.temporal_blur_total_count > 0 {
+            100.0 * self.temporal_blur_reuse_count as f32 / self.temporal_blur_total_count as f32
+        } else {
+            0.0
+        };
+        let ds_stats = self.direct_scanout_mgr.stats();
+        crate::backend::api::CompositorMetrics {
+            fps: self.fps,
+            frame_count: self.frame_count,
+            avg_frame_time_ms: avg,
+            max_frame_time_ms: max,
+            min_frame_time_ms: min,
+            gpu_load_percent: self.perf_metrics.gpu_load(),
+            cpu_load_percent: self.perf_metrics.cpu_load(),
+            draw_calls: 0,
+            texture_memory_bytes: 0,
+            blur_cache_hits: 0,
+            blur_cache_misses: 0,
+            blur_cache_hit_rate: 0.0,
+            temporal_blur_reuse_count: self.temporal_blur_reuse_count,
+            temporal_blur_total_count: self.temporal_blur_total_count,
+            temporal_blur_reuse_rate: temporal_rate,
+            dirty_regions_count: self.dirty_region_tracker.region_count(),
+            dirty_fraction_percent: 0.0,
+            window_count: self.windows.len(),
+            blur_quality: format!("{:?}", self.blur_quality),
+            vrr_enabled: self.vrr_active,
+            vrr_active: self.vrr_active,
+            current_refresh_rate: 0,
+            input_latency_avg_ms: 0.0,
+            input_latency_p50_ms: 0.0,
+            input_latency_p95_ms: 0.0,
+            input_latency_p99_ms: 0.0,
+            direct_scanout_active: self.direct_scanout_mgr.is_active(),
+            direct_scanout_count: ds_stats.scanout_count,
+            direct_scanout_bypass_time_ms: ds_stats.bypass_time_ms,
+            gl_state_changes_avoided: 0,
+            profiling_enabled: self.frame_profiler.is_enabled(),
+            dirty_region_merge_count: 0,
+        }
+    }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -1470,7 +1691,11 @@ impl WaylandCompositor {
                 gl.DeleteTextures(1, &level.texture);
             }
 
-            let (output_fbo, output_texture) = create_fbo_texture(gl, w, h);
+            let (output_fbo, output_texture) = if self.hdr_enabled {
+                create_fbo_texture_10bit(gl, w, h)
+            } else {
+                create_fbo_texture(gl, w, h)
+            };
             self.output_fbo = output_fbo;
             self.output_texture = output_texture;
 
