@@ -205,14 +205,17 @@ impl WaylandCompositor {
         if let Some(ref rx) = self.pending_wallpaper {
             match rx.try_recv() {
                 Ok(data) => {
-                    // Crossfade: save old texture before replacing
-                    if self.wallpaper_crossfade {
+                    // Crossfade: save old texture and its geometry before replacing
+                    if self.wallpaper_crossfade && self.wallpaper_texture.is_some() {
                         if let Some(old) = self.old_wallpaper_texture.take() {
                             unsafe {
                                 gl.DeleteTextures(1, &old);
                             }
                         }
                         self.old_wallpaper_texture = self.wallpaper_texture.take();
+                        self.old_wallpaper_img_w = self.wallpaper_img_w;
+                        self.old_wallpaper_img_h = self.wallpaper_img_h;
+                        self.old_wallpaper_mode = self.wallpaper_mode;
                         self.wallpaper_transition_start = Some(Instant::now());
                     } else {
                         // No crossfade: just delete old texture
@@ -295,7 +298,7 @@ impl WaylandCompositor {
     ///
     /// If crossfade is active (transition_start is set), draws the old wallpaper
     /// first at decreasing alpha, then the new wallpaper at increasing alpha.
-    pub(crate) unsafe fn render_wallpaper(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+    pub(crate) unsafe fn render_wallpaper(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
         // Determine crossfade progress (0.0 = just started, 1.0 = complete)
         let crossfade_alpha = if let Some(start) = self.wallpaper_transition_start {
             let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -305,6 +308,16 @@ impl WaylandCompositor {
         } else {
             1.0
         };
+
+        // Terminate crossfade when complete: free old texture and clear state
+        if crossfade_alpha >= 1.0 && self.wallpaper_transition_start.is_some() {
+            self.wallpaper_transition_start = None;
+            if let Some(old) = self.old_wallpaper_texture.take() {
+                unsafe {
+                    gl.DeleteTextures(1, &old);
+                }
+            }
+        }
 
         unsafe {
             gl.UseProgram(self.program);
@@ -322,7 +335,7 @@ impl WaylandCompositor {
 
             // No corner radius, no dim, no ripple for wallpaper
             gl.Uniform1f(self.win_uniforms.radius, 0.0);
-            gl.Uniform1f(self.win_uniforms.dim, 0.0);
+            gl.Uniform1f(self.win_uniforms.dim, 1.0);
             gl.Uniform1f(self.win_uniforms.ripple_progress, 0.0);
             gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
             // Full UV rect (use entire texture)
@@ -359,12 +372,11 @@ impl WaylandCompositor {
                 // --- Draw old wallpaper (crossfade out) ---
                 if crossfade_alpha < 1.0 {
                     if let Some(old_tex) = self.old_wallpaper_texture {
-                        // Compute rect for old wallpaper using same area
                         let (orx, ory, orw, orh) = Self::compute_wallpaper_rect(
-                            self.wallpaper_mode,
+                            self.old_wallpaper_mode,
                             area,
-                            self.wallpaper_img_w,
-                            self.wallpaper_img_h,
+                            self.old_wallpaper_img_w,
+                            self.old_wallpaper_img_h,
                         );
                         gl.Uniform4f(self.win_uniforms.rect, orx, ory, orw, orh);
                         gl.Uniform2f(self.win_uniforms.size, orw, orh);
@@ -404,10 +416,10 @@ impl WaylandCompositor {
                         if crossfade_alpha < 1.0 {
                             if let Some(old_tex) = self.old_wallpaper_texture {
                                 let (orx, ory, orw, orh) = Self::compute_wallpaper_rect(
-                                    self.wallpaper_mode,
+                                    self.old_wallpaper_mode,
                                     area,
-                                    self.wallpaper_img_w,
-                                    self.wallpaper_img_h,
+                                    self.old_wallpaper_img_w,
+                                    self.old_wallpaper_img_h,
                                 );
                                 gl.Uniform4f(self.win_uniforms.rect, orx, ory, orw, orh);
                                 gl.Uniform2f(self.win_uniforms.size, orw, orh);

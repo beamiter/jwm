@@ -45,6 +45,17 @@ impl WaylandCompositor {
         if self.snap_preview.is_none() && self.snap_preview_opacity > 0.0 {
             return true;
         }
+        // Wallpaper crossfade in progress
+        if self.wallpaper_transition_start.is_some() {
+            return true;
+        }
+        // Pending wallpaper loads need polling
+        if self.pending_wallpaper.is_some() {
+            return true;
+        }
+        if !self.pending_monitor_wallpapers.is_empty() {
+            return true;
+        }
         false
     }
 

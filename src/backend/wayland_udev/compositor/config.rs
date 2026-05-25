@@ -383,6 +383,47 @@ impl WaylandCompositor {
     pub(crate) fn set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32)]) {
         self.monitors = monitors.to_vec();
         self.per_monitor_renderer.set_monitors(monitors);
+
+        // Rebuild per-monitor wallpapers (matching X11 backend behavior)
+        self.monitor_wallpapers.clear();
+        self.pending_monitor_wallpapers.clear();
+
+        let cfg = CONFIG.load();
+        let behavior = cfg.behavior();
+
+        for &(idx, x, y, w, h) in monitors {
+            let per_mon = behavior.wallpaper_monitors.iter().find(|wm| wm.monitor == idx);
+
+            let (path, mode_str) = if let Some(pm) = per_mon {
+                (
+                    if pm.path.is_empty() { &behavior.wallpaper } else { &pm.path },
+                    if pm.mode.is_empty() { &behavior.wallpaper_mode } else { &pm.mode },
+                )
+            } else {
+                (&behavior.wallpaper, &behavior.wallpaper_mode)
+            };
+
+            let mode = Self::parse_wallpaper_mode(mode_str);
+            let mon_idx = self.monitor_wallpapers.len();
+
+            if !path.is_empty() {
+                let rx = Self::load_wallpaper_async(path, w, h, mode);
+                self.pending_monitor_wallpapers.push((mon_idx, rx));
+            }
+
+            self.monitor_wallpapers.push(MonitorWallpaper {
+                mon_x: x,
+                mon_y: y,
+                mon_w: w,
+                mon_h: h,
+                texture: None,
+                mode,
+                img_w: 0,
+                img_h: 0,
+            });
+        }
+
+        self.needs_render = true;
     }
 
     pub(crate) fn notify_window_move_start(&mut self, window: u64) {

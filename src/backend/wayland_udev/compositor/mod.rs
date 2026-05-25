@@ -713,6 +713,9 @@ pub(crate) struct WaylandCompositor {
     wallpaper_crossfade: bool,
     wallpaper_crossfade_duration_ms: u64,
     old_wallpaper_texture: Option<u32>,
+    old_wallpaper_img_w: u32,
+    old_wallpaper_img_h: u32,
+    old_wallpaper_mode: WallpaperMode,
     wallpaper_transition_start: Option<Instant>,
 
     // --- Per-window rules ---
@@ -1344,6 +1347,9 @@ impl WaylandCompositor {
             wallpaper_crossfade: true,
             wallpaper_crossfade_duration_ms: 500,
             old_wallpaper_texture: None,
+            old_wallpaper_img_w: 0,
+            old_wallpaper_img_h: 0,
+            old_wallpaper_mode: WallpaperMode::Fill,
             wallpaper_transition_start: None,
 
             // Per-window rules
