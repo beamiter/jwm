@@ -838,6 +838,7 @@ unsafe fn get_uniform_loc(gl: &ffi::Gles2, program: u32, name: &str) -> i32 {
 // ---------------------------------------------------------------------------
 
 const GL_RGB10_A2: u32 = 0x8059;
+const GL_UNSIGNED_INT_2_10_10_10_REV: u32 = 0x8368;
 
 unsafe fn create_fbo_texture(gl: &ffi::Gles2, w: u32, h: u32) -> (u32, u32) {
     unsafe { create_fbo_texture_fmt(gl, w, h, ffi::RGBA8) }
@@ -852,6 +853,11 @@ unsafe fn create_fbo_texture_fmt(gl: &ffi::Gles2, w: u32, h: u32, internal_forma
         let mut tex = 0u32;
         gl.GenTextures(1, &mut tex);
         gl.BindTexture(ffi::TEXTURE_2D, tex);
+        let pixel_type = if internal_format == GL_RGB10_A2 {
+            GL_UNSIGNED_INT_2_10_10_10_REV
+        } else {
+            ffi::UNSIGNED_BYTE
+        };
         gl.TexImage2D(
             ffi::TEXTURE_2D,
             0,
@@ -860,7 +866,7 @@ unsafe fn create_fbo_texture_fmt(gl: &ffi::Gles2, w: u32, h: u32, internal_forma
             h as i32,
             0,
             ffi::RGBA,
-            ffi::UNSIGNED_BYTE,
+            pixel_type,
             std::ptr::null(),
         );
         gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
