@@ -5,7 +5,7 @@ impl WaylandCompositor {
     /// Run dual-Kawase blur passes on the source texture.
     /// Downsamples through blur_fbos levels then upsamples back.
     /// Result texture is blur_fbos[0].texture.
-    pub(crate) fn run_blur_passes(&self, gl: &ffi::Gles2, source_texture: u32, projection: &[f32; 16]) {
+    pub(crate) fn run_blur_passes(&self, gl: &ffi::Gles2, source_texture: u32, _projection: &[f32; 16]) {
         if self.blur_fbos.is_empty() {
             return;
         }

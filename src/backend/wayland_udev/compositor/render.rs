@@ -87,17 +87,68 @@ impl WaylandCompositor {
         focused: Option<u64>,
     ) -> bool {
         // =================================================================
+        // 0. Performance infrastructure - frame start
+        // =================================================================
+        self.frame_profiler.begin_frame();
+        self.gl_state_tracker.reset();
+
+        // GPU fence sync: poll pending fences, cleanup old ones
+        unsafe {
+            self.gpu_fence_sync_mgr.update_fence_states(gl);
+            self.gpu_fence_sync_mgr.cleanup_old_fences(gl);
+        }
+
+        // Power saving: periodic update (every 5s)
+        if self.power_saving_mgr.update() {
+            let recs = self.power_saving_mgr.get_recommendations();
+            self.adaptive_frame_rate.limiter_mut().set_target_fps(recs.fps_limit);
+        }
+
+        // Shader hot-reload: check for modified shader files
+        let reloaded_shaders = self.shader_hot_reload.poll();
+        if !reloaded_shaders.is_empty() {
+            log::info!("[compositor] Shader hot-reload: {} shaders changed", reloaded_shaders.len());
+        }
+
+        // Direct scanout: check if we can bypass composition entirely
+        if !self.transition_active && !self.overview_active && !self.expose_active && !self.postprocess_active {
+            let scanout_windows: Vec<(u64, direct_scanout::WindowScanoutInfo)> = scene
+                .iter()
+                .filter_map(|&(win_id, x, y, w, h)| {
+                    self.windows.get(&win_id).map(|ws| {
+                        (win_id, direct_scanout::WindowScanoutInfo {
+                            x, y, width: w, height: h,
+                            is_fullscreen: ws.is_fullscreen,
+                            has_alpha: ws.has_alpha,
+                            has_blur: ws.is_frosted,
+                            has_shadow: self.shadow_enabled,
+                            corner_radius: ws.corner_radius_override.unwrap_or(self.corner_radius),
+                            opacity: ws.fade_opacity,
+                        })
+                    })
+                })
+                .collect();
+            let (can_scanout, _scanout_win) = self.direct_scanout_mgr.check_scene(&scanout_windows, focused);
+            if can_scanout && self.fullscreen_unredirect {
+                self.frame_profiler.end_frame();
+                self.frame_rate_limiter.mark_frame();
+                return true;
+            }
+        }
+
+        // =================================================================
         // 1. Frame timing
         // =================================================================
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame_time).as_secs_f32();
         self.last_frame_time = now;
 
-        // Update FPS counter
+        // Update FPS counter and perf metrics
         self.frame_count += 1;
         if self.frame_count % 60 == 0 {
             self.fps = if dt > 0.0 { 1.0 / dt } else { 0.0 };
         }
+        self.perf_metrics.record_frame(std::time::Duration::from_secs_f32(dt));
 
         // =================================================================
         // 2. Animation ticks
@@ -107,6 +158,7 @@ impl WaylandCompositor {
         self.tick_particles(dt);
         self.tick_snap_preview(dt);
         self.tick_overview(dt);
+        self.tick_overview_prism(dt);
         self.tick_tilt(dt);
         self.tick_expose(dt);
 
@@ -186,12 +238,25 @@ impl WaylandCompositor {
         }
 
         // =================================================================
-        // 5. Draw background (dark blue-grey)
+        // 5. Draw background (dark blue-grey) + wallpaper
         // =================================================================
         unsafe {
             gl.ClearColor(0.1, 0.15, 0.25, 1.0);
             gl.Clear(ffi::COLOR_BUFFER_BIT);
         }
+
+        // Poll pending wallpaper loads and render wallpaper if set
+        unsafe {
+            self.poll_pending_wallpapers(gl);
+        }
+        if self.wallpaper_texture.is_some() || !self.monitor_wallpapers.is_empty() {
+            unsafe {
+                self.render_wallpaper(gl, &projection);
+            }
+        }
+
+        // VRR: update state based on focused window
+        self.update_vrr_state(focused);
 
         // =================================================================
         // 6. Occlusion culling - find lowest fully-opaque window covering screen
@@ -225,6 +290,7 @@ impl WaylandCompositor {
         // =================================================================
         // 7. Draw shadows
         // =================================================================
+        self.frame_profiler.zone_start("shadows");
         if self.shadow_enabled && self.shadow_radius > 0.0 {
             unsafe {
                 gl.UseProgram(self.shadow_program);
@@ -245,6 +311,13 @@ impl WaylandCompositor {
 
                     // Skip shaped / fullscreen windows
                     if wt.is_shaped || wt.is_fullscreen {
+                        continue;
+                    }
+
+                    // Skip windows in shadow_exclude list
+                    if !wt.class_name.is_empty()
+                        && Self::class_matches_exclude(&wt.class_name, &self.shadow_exclude)
+                    {
                         continue;
                     }
 
@@ -278,11 +351,18 @@ impl WaylandCompositor {
             }
         }
 
+        self.frame_profiler.zone_end();
+
         // =================================================================
         // 8. Blur pass (for frosted/translucent windows)
         // =================================================================
+        self.frame_profiler.zone_start("blur");
         let has_frosted = visible_scene.iter().any(|&(win_id, _, _, _, _)| {
-            self.windows.get(&win_id).map_or(false, |ws| ws.is_frosted)
+            self.windows.get(&win_id).map_or(false, |ws| {
+                ws.is_frosted
+                    && (ws.class_name.is_empty()
+                        || !Self::class_matches_exclude(&ws.class_name, &self.blur_exclude))
+            })
         });
 
         if self.blur_enabled && has_frosted && !self.blur_fbos.is_empty() {
@@ -298,6 +378,17 @@ impl WaylandCompositor {
             // Run blur downsample/upsample passes
             self.run_blur_passes(gl, self.scene_texture, &projection);
 
+            // Record blur operation for cache warmup statistics
+            self.cache_warmup_mgr.record_blur_operation(self.screen_w, self.screen_h);
+
+            // Temporal blur: reuse previous frame's blur when scene is static
+            if self.temporal_blur_enabled && !self.blur_fbos.is_empty() {
+                let current_blur_tex = self.blur_fbos[0].texture;
+                unsafe {
+                    let _result_tex = self.apply_temporal_blur_mix(gl, current_blur_tex);
+                }
+            }
+
             // Re-bind output FBO for further drawing
             unsafe {
                 gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
@@ -305,9 +396,12 @@ impl WaylandCompositor {
             }
         }
 
+        self.frame_profiler.zone_end();
+
         // =================================================================
         // 9. Draw windows (back-to-front)
         // =================================================================
+        self.frame_profiler.zone_start("windows");
         unsafe {
             gl.UseProgram(self.program);
             self.set_projection_uniform(gl, self.win_uniforms.projection, &projection);
@@ -333,14 +427,16 @@ impl WaylandCompositor {
                     continue;
                 }
 
-                // --- Compute effective opacity ---
+                // --- Compute effective opacity (per-window rules override) ---
                 let base_opacity = if is_focused {
                     self.active_opacity
                 } else {
                     self.inactive_opacity
                 };
-                let rule_opacity = wt.opacity_override.unwrap_or(base_opacity);
-                let has_explicit_transparency = wt.opacity_override.map_or(false, |o| o < 1.0);
+                let rule_opacity = wt.opacity_override
+                    .or_else(|| self.lookup_opacity_rule(&wt.class_name))
+                    .unwrap_or(base_opacity);
+                let has_explicit_transparency = rule_opacity < 1.0;
 
                 // --- Compute dim factor ---
                 let inactive_dim_factor = if is_focused { 1.0 } else { self.inactive_dim };
@@ -357,11 +453,20 @@ impl WaylandCompositor {
                     1.0
                 };
 
-                // --- Compute corner radius ---
+                // --- Compute corner radius (per-window rules override) ---
                 let radius = if wt.is_shaped || wt.is_fullscreen {
                     0.0
+                } else if !wt.class_name.is_empty()
+                    && Self::class_matches_exclude(
+                        &wt.class_name,
+                        &self.rounded_corners_exclude,
+                    )
+                {
+                    0.0
                 } else {
-                    wt.corner_radius_override.unwrap_or(self.corner_radius)
+                    wt.corner_radius_override
+                        .or_else(|| self.lookup_corner_radius_rule(&wt.class_name))
+                        .unwrap_or(self.corner_radius)
                 };
 
                 // --- Compute scale from animation ---
@@ -531,9 +636,13 @@ impl WaylandCompositor {
             gl.UseProgram(0);
         }
 
+        self.frame_profiler.zone_end();
+
         // =================================================================
         // 10. Draw borders (focused and urgent windows)
         // =================================================================
+        self.frame_profiler.zone_start("borders");
+        if self.border_enabled {
         unsafe {
             gl.UseProgram(self.border_program);
             self.set_projection_uniform(gl, self.border_uniforms.projection, &projection);
@@ -572,13 +681,14 @@ impl WaylandCompositor {
                     (x as f32, y as f32, w as f32, h as f32)
                 };
 
-                // Border color: urgent gets red pulse, focused gets accent
+                // Border color: urgent gets red pulse, focused gets config color
                 let border_color = if wt.is_urgent {
                     [1.0f32, 0.2, 0.2, 0.9 * fade]
                 } else {
-                    [0.3f32, 0.6, 1.0, 0.8 * fade]
+                    let c = self.border_color_focused;
+                    [c[0], c[1], c[2], c[3] * fade]
                 };
-                let border_width = 2.0f32;
+                let border_width = self.border_width;
 
                 let bdr_x = draw_x - border_width;
                 let bdr_y = draw_y - border_width;
@@ -603,10 +713,13 @@ impl WaylandCompositor {
             gl.BindVertexArray(0);
             gl.UseProgram(0);
         }
+        } // border_enabled
+        self.frame_profiler.zone_end();
 
         // =================================================================
         // 11. Genie animations
         // =================================================================
+        self.frame_profiler.zone_start("effects");
         // Genie minimize/unminimize animations are rendered by the effects
         // module via render_genie_animations() if any are active. That method
         // is defined in effects.rs.
@@ -622,35 +735,7 @@ impl WaylandCompositor {
         // =================================================================
         // 13. Snap preview overlay
         // =================================================================
-        if let Some((sp_x, sp_y, sp_w, sp_h)) = self.snap_preview {
-            let snap_opacity = self.snap_preview_opacity;
-            if snap_opacity > 0.0 {
-                unsafe {
-                    gl.UseProgram(self.program);
-                    self.set_projection_uniform(gl, self.win_uniforms.projection, &projection);
-                    gl.BindVertexArray(self.quad_vao);
-
-                    // Semi-transparent blue overlay
-                    gl.Uniform1f(self.win_uniforms.opacity, snap_opacity * 0.3);
-                    gl.Uniform1f(self.win_uniforms.dim, 1.0);
-                    gl.Uniform1f(self.win_uniforms.radius, 8.0);
-                    gl.Uniform2f(self.win_uniforms.size, sp_w, sp_h);
-                    self.set_rect_uniform(gl, self.win_uniforms.rect, sp_x, sp_y, sp_w, sp_h);
-                    gl.Uniform4f(self.win_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
-                    gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
-
-                    // Use a 1x1 white pixel texture (or just draw with no tex)
-                    // For simplicity, bind 0 and rely on shader alpha behavior
-                    gl.Uniform1i(self.win_uniforms.texture, 0);
-                    gl.ActiveTexture(ffi::TEXTURE0);
-                    gl.BindTexture(ffi::TEXTURE_2D, 0);
-                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
-
-                    gl.BindVertexArray(0);
-                    gl.UseProgram(0);
-                }
-            }
-        }
+        self.render_snap_preview(gl, &projection);
 
         // =================================================================
         // 14. Overview overlay
@@ -664,6 +749,20 @@ impl WaylandCompositor {
         // =================================================================
         if !self.expose_entries.is_empty() && self.expose_opacity > 0.0 {
             self.render_expose(gl, &projection);
+        }
+
+        // =================================================================
+        // 15b. Peek mode (fade out non-focused windows)
+        // =================================================================
+        if self.peek_active {
+            self.render_peek_mode(gl, &projection, focused, scene);
+        }
+
+        // =================================================================
+        // 15c. Tab bar for window groups
+        // =================================================================
+        if !self.window_groups.is_empty() {
+            self.render_tab_bar(gl, &projection);
         }
 
         // =================================================================
@@ -688,8 +787,9 @@ impl WaylandCompositor {
                     self.screen_w as f32,
                     self.screen_h as f32,
                 );
-                gl.Uniform4f(self.edge_glow_uniforms.glow_color, 0.3, 0.6, 1.0, 0.6);
-                gl.Uniform1f(self.edge_glow_uniforms.glow_width, 20.0);
+                let egc = self.edge_glow_color;
+                gl.Uniform4f(self.edge_glow_uniforms.glow_color, egc[0], egc[1], egc[2], egc[3]);
+                gl.Uniform1f(self.edge_glow_uniforms.glow_width, self.edge_glow_width);
                 gl.Uniform2f(self.edge_glow_uniforms.mouse, self.mouse_x, self.mouse_y);
                 gl.Uniform2f(
                     self.edge_glow_uniforms.screen_size,
@@ -779,6 +879,28 @@ impl WaylandCompositor {
             }
         }
 
+        self.frame_profiler.zone_end();
+
+        // =================================================================
+        // 19. Screenshot capture (region or full)
+        // =================================================================
+        if self.pending_screenshot.is_some() || self.pending_screenshot_region.is_some() {
+            unsafe {
+                gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
+                self.capture_pending_screenshots(gl);
+            }
+        }
+
+        // =================================================================
+        // 19b. Extended Debug HUD
+        // =================================================================
+        if self.debug_hud_enabled && self.debug_hud_extended {
+            unsafe {
+                gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
+                self.render_debug_hud(gl, &projection);
+            }
+        }
+
         // =================================================================
         // 20. Finalize - unbind FBO
         // =================================================================
@@ -786,15 +908,211 @@ impl WaylandCompositor {
             gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
         }
 
+        // =================================================================
+        // 21. Recording capture (async PBO readback to ffmpeg)
+        // =================================================================
+        if self.recording.is_active() {
+            unsafe {
+                self.recording.capture_frame(gl, self.output_fbo);
+            }
+        }
+
+        // =================================================================
+        // 22. Performance infrastructure - frame end
+        // =================================================================
+        let frame_ms = self.frame_profiler.end_frame();
+        self.perf_metrics.record_compositor(std::time::Duration::from_secs_f32(frame_ms / 1000.0));
+        self.adaptive_scheduler.on_frame_completed(std::time::Duration::from_secs_f32(frame_ms / 1000.0));
+        self.dirty_region_tracker.clear();
+
+        // Predictive render: update scene activity periodically
+        self.predictive_render_mgr.update_scene_activity();
+
         // Schedule next render if animations are still active
         if any_animating {
             self.needs_render = true;
         }
+
+        // Mark frame for rate limiter
+        self.frame_rate_limiter.mark_frame();
 
         true
     }
 
     fn render_genie_animations(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
         let _ = (gl, projection);
+    }
+
+    unsafe fn capture_pending_screenshots(&mut self, gl: &ffi::Gles2) {
+        unsafe {
+            // Full screenshot
+            if let Some(path) = self.pending_screenshot.take() {
+                let w = self.screen_w;
+                let h = self.screen_h;
+                let mut pixels = vec![0u8; (w * h * 4) as usize];
+                gl.ReadPixels(
+                    0,
+                    0,
+                    w as i32,
+                    h as i32,
+                    ffi::RGBA,
+                    ffi::UNSIGNED_BYTE,
+                    pixels.as_mut_ptr() as *mut _,
+                );
+                // Flip vertically (OpenGL reads bottom-to-top)
+                let row_bytes = (w * 4) as usize;
+                let mut temp = vec![0u8; row_bytes];
+                for y in 0..(h as usize / 2) {
+                    let top = y * row_bytes;
+                    let bot = ((h as usize) - 1 - y) * row_bytes;
+                    temp.copy_from_slice(&pixels[top..top + row_bytes]);
+                    pixels.copy_within(bot..bot + row_bytes, top);
+                    pixels[bot..bot + row_bytes].copy_from_slice(&temp);
+                }
+                // Save in background thread
+                std::thread::spawn(move || {
+                    if let Err(e) = image::save_buffer(&path, &pixels, w, h, image::ColorType::Rgba8)
+                    {
+                        log::warn!("[compositor] screenshot failed: {}", e);
+                    } else {
+                        log::info!("[compositor] screenshot saved to {:?}", path);
+                    }
+                });
+            }
+
+            // Region screenshot
+            if let Some((path, rx, ry, rw, rh)) = self.pending_screenshot_region.take() {
+                let mut pixels = vec![0u8; (rw * rh * 4) as usize];
+                gl.ReadPixels(
+                    rx,
+                    (self.screen_h as i32) - ry - (rh as i32),
+                    rw as i32,
+                    rh as i32,
+                    ffi::RGBA,
+                    ffi::UNSIGNED_BYTE,
+                    pixels.as_mut_ptr() as *mut _,
+                );
+                // Flip vertically
+                let row_bytes = (rw * 4) as usize;
+                let mut temp = vec![0u8; row_bytes];
+                for y in 0..(rh as usize / 2) {
+                    let top = y * row_bytes;
+                    let bot = ((rh as usize) - 1 - y) * row_bytes;
+                    temp.copy_from_slice(&pixels[top..top + row_bytes]);
+                    pixels.copy_within(bot..bot + row_bytes, top);
+                    pixels[bot..bot + row_bytes].copy_from_slice(&temp);
+                }
+                std::thread::spawn(move || {
+                    if let Err(e) =
+                        image::save_buffer(&path, &pixels, rw, rh, image::ColorType::Rgba8)
+                    {
+                        log::warn!("[compositor] region screenshot failed: {}", e);
+                    } else {
+                        log::info!("[compositor] region screenshot saved to {:?}", path);
+                    }
+                });
+            }
+        }
+    }
+
+    unsafe fn render_debug_hud(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+        let uptime = self.compositor_start_time.elapsed().as_secs();
+        let hud_text = format!(
+            "FPS: {:.0}\nFrame: {}\nWindows: {}\nUptime: {}s\nBlur reuse: {}/{}\nVRR: {}",
+            self.fps,
+            self.frame_count,
+            self.windows.len(),
+            uptime,
+            self.temporal_blur_reuse_count,
+            self.temporal_blur_total_count,
+            if self.vrr_active { "ON" } else { "off" },
+        );
+
+        if hud_text != self.hud_text_cache {
+            let (pixels, w, h) =
+                font::render_text_to_rgba(&hud_text, 2, [255, 255, 255, 220]);
+            if w > 0 && h > 0 {
+                unsafe {
+                    // Delete old texture
+                    if let Some(old) = self.hud_text_texture.take() {
+                        gl.DeleteTextures(1, &old);
+                    }
+                    // Create and upload new texture
+                    let mut tex = 0u32;
+                    gl.GenTextures(1, &mut tex);
+                    gl.BindTexture(ffi::TEXTURE_2D, tex);
+                    gl.TexImage2D(
+                        ffi::TEXTURE_2D,
+                        0,
+                        ffi::RGBA as i32,
+                        w as i32,
+                        h as i32,
+                        0,
+                        ffi::RGBA,
+                        ffi::UNSIGNED_BYTE,
+                        pixels.as_ptr() as *const _,
+                    );
+                    gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+                    gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
+                    self.hud_text_texture = Some(tex);
+                    self.hud_text_width = w;
+                    self.hud_text_height = h;
+                }
+            }
+            self.hud_text_cache = hud_text;
+        }
+
+        // Draw the HUD texture in the top-left corner
+        if let Some(tex) = self.hud_text_texture {
+            unsafe {
+                gl.UseProgram(self.program);
+                self.set_projection_uniform(gl, self.win_uniforms.projection, projection);
+                gl.Uniform1i(self.win_uniforms.texture, 0);
+                gl.Uniform1f(self.win_uniforms.opacity, 0.85);
+                gl.Uniform1f(self.win_uniforms.dim, 1.0);
+                gl.Uniform1f(self.win_uniforms.radius, 4.0);
+                gl.Uniform2f(
+                    self.win_uniforms.size,
+                    self.hud_text_width as f32,
+                    self.hud_text_height as f32,
+                );
+                self.set_rect_uniform(
+                    gl,
+                    self.win_uniforms.rect,
+                    10.0,
+                    10.0,
+                    self.hud_text_width as f32,
+                    self.hud_text_height as f32,
+                );
+                gl.Uniform4f(self.win_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
+                gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
+
+                gl.ActiveTexture(ffi::TEXTURE0);
+                gl.BindTexture(ffi::TEXTURE_2D, tex);
+                gl.BindVertexArray(self.quad_vao);
+                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                gl.BindVertexArray(0);
+                gl.UseProgram(0);
+            }
+        }
+    }
+
+    /// Public API: request a full screenshot
+    pub(crate) fn request_screenshot(&mut self, path: PathBuf) {
+        self.pending_screenshot = Some(path);
+        self.needs_render = true;
+    }
+
+    /// Public API: request a region screenshot
+    pub(crate) fn request_screenshot_region(
+        &mut self,
+        path: PathBuf,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+    ) {
+        self.pending_screenshot_region = Some((path, x, y, w, h));
+        self.needs_render = true;
     }
 }

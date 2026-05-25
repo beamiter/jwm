@@ -1,0 +1,626 @@
+// ---------------------------------------------------------------------------
+// Per-window rule engine for the Wayland udev backend compositor.
+// Handles opacity rules, corner radius rules, scale rules, frosted glass,
+// exclusion lists, VRR detection, temporal blur reuse, and adaptive blur quality.
+// ---------------------------------------------------------------------------
+
+use super::*;
+use crate::config::CONFIG;
+
+// BlurQuality is defined in super (mod.rs)
+
+// ---------------------------------------------------------------------------
+// Exclusion and rule matching
+// ---------------------------------------------------------------------------
+
+impl WaylandCompositor {
+    /// Check if `class_name` matches any pattern in `list` (case-insensitive substring).
+    /// Always returns true for "flameshot" regardless of the list contents.
+    pub(crate) fn class_matches_exclude(class_name: &str, list: &[String]) -> bool {
+        let lower = class_name.to_lowercase();
+
+        // Always exclude flameshot (screenshot tool overlays).
+        if lower.contains("flameshot") {
+            return true;
+        }
+
+        for pattern in list {
+            if lower.contains(&pattern.to_lowercase()) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    // -----------------------------------------------------------------------
+    // Opacity rules
+    // -----------------------------------------------------------------------
+
+    /// Lookup the first matching opacity rule for the given window class.
+    /// Returns the opacity as a fraction 0.0..1.0 (rules are stored as 0..100 percent).
+    pub(crate) fn lookup_opacity_rule(&self, class_name: &str) -> Option<f32> {
+        let lower = class_name.to_lowercase();
+        for (opacity, pattern) in &self.opacity_rules {
+            if lower.contains(&pattern.to_lowercase()) {
+                return Some(*opacity);
+            }
+        }
+        None
+    }
+
+    /// Parse opacity rules from config format: ["85:firefox", "90:Alacritty"].
+    /// Returns Vec<(opacity_fraction, class_pattern)>.
+    pub(crate) fn parse_opacity_rules(rules: &[String]) -> Vec<(f32, String)> {
+        let mut result = Vec::with_capacity(rules.len());
+        for rule in rules {
+            if let Some((pct_str, class)) = rule.split_once(':') {
+                if let Ok(pct) = pct_str.trim().parse::<f32>() {
+                    let opacity = (pct / 100.0).clamp(0.0, 1.0);
+                    result.push((opacity, class.trim().to_string()));
+                }
+            }
+        }
+        result
+    }
+
+    // -----------------------------------------------------------------------
+    // Corner radius rules
+    // -----------------------------------------------------------------------
+
+    /// Lookup the first matching corner radius rule for the given window class.
+    pub(crate) fn lookup_corner_radius_rule(&self, class_name: &str) -> Option<f32> {
+        let lower = class_name.to_lowercase();
+        for (radius, pattern) in &self.corner_radius_rules {
+            if lower.contains(&pattern.to_lowercase()) {
+                return Some(*radius);
+            }
+        }
+        None
+    }
+
+    /// Parse corner radius rules from config format: ["12.0:kitty", "0:Alacritty"].
+    /// Returns Vec<(radius_px, class_pattern)>.
+    pub(crate) fn parse_corner_radius_rules(rules: &[String]) -> Vec<(f32, String)> {
+        let mut result = Vec::with_capacity(rules.len());
+        for rule in rules {
+            if let Some((radius_str, class)) = rule.split_once(':') {
+                if let Ok(radius) = radius_str.trim().parse::<f32>() {
+                    result.push((radius.max(0.0), class.trim().to_string()));
+                }
+            }
+        }
+        result
+    }
+
+    // -----------------------------------------------------------------------
+    // Frosted glass rules
+    // -----------------------------------------------------------------------
+
+    /// Check if `class_name` is in the frosted glass rules list (case-insensitive).
+    pub(crate) fn lookup_frosted_glass_rule(&self, class_name: &str) -> bool {
+        let lower = class_name.to_lowercase();
+        for pattern in &self.frosted_glass_rules {
+            if lower.contains(&pattern.to_lowercase()) {
+                return true;
+            }
+        }
+        false
+    }
+
+    // -----------------------------------------------------------------------
+    // Scale rules
+    // -----------------------------------------------------------------------
+
+    /// Lookup the first matching scale rule for the given window class.
+    /// Returns the scale as a fraction (e.g. 0.9 for 90%).
+    pub(crate) fn lookup_scale_rule(&self, class_name: &str) -> Option<f32> {
+        let lower = class_name.to_lowercase();
+        for (scale, pattern) in &self.scale_rules {
+            if lower.contains(&pattern.to_lowercase()) {
+                return Some(*scale);
+            }
+        }
+        None
+    }
+
+    /// Parse scale rules from config format: ["90:obs", "75:mpv"].
+    /// Returns Vec<(scale_fraction, class_pattern)>.
+    pub(crate) fn parse_scale_rules(rules: &[String]) -> Vec<(f32, String)> {
+        let mut result = Vec::with_capacity(rules.len());
+        for rule in rules {
+            if let Some((pct_str, class)) = rule.split_once(':') {
+                if let Ok(pct) = pct_str.trim().parse::<f32>() {
+                    let scale = (pct / 100.0).clamp(0.01, 10.0);
+                    result.push((scale, class.trim().to_string()));
+                }
+            }
+        }
+        result
+    }
+
+    // -----------------------------------------------------------------------
+    // Game window detection (for VRR)
+    // -----------------------------------------------------------------------
+
+    /// Built-in set of known game/emulator window classes.
+    const BUILTIN_GAME_CLASSES: &'static [&'static str] = &[
+        "steam",
+        "gamescope",
+        "proton",
+        "dxvk",
+        "lutris",
+        "wine",
+        "minecraft",
+        "dosbox",
+        "mgba",
+        "pcsx2",
+        "yuzu",
+        "dolphin-emu",
+        "retroarch",
+        "citra",
+        "rpcs3",
+    ];
+
+    /// Detect whether the given window class belongs to a game or emulator.
+    /// Checks against both the built-in set and user-configured game_classes.
+    pub(crate) fn detect_game_window(class_name: &str) -> bool {
+        let lower = class_name.to_lowercase();
+
+        // Check built-in list.
+        for &game_class in Self::BUILTIN_GAME_CLASSES {
+            if lower.contains(game_class) {
+                return true;
+            }
+        }
+
+        // Check user-configured game classes from CONFIG.
+        let cfg = CONFIG.load();
+        let b = cfg.behavior();
+        for user_class in &b.game_classes {
+            if lower.contains(&user_class.to_lowercase()) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    // -----------------------------------------------------------------------
+    // VRR (Variable Refresh Rate) state management
+    // -----------------------------------------------------------------------
+
+    /// Update VRR active state based on the currently focused window.
+    /// Gated by a 1-second cooldown to avoid excessive polling.
+    pub(crate) fn update_vrr_state(&mut self, focused: Option<u64>) {
+        let now = Instant::now();
+        if now.duration_since(self.vrr_last_check) < Duration::from_secs(1) {
+            return;
+        }
+        self.vrr_last_check = now;
+
+        let cfg = CONFIG.load();
+        let b = cfg.behavior();
+
+        if !b.vrr_enabled {
+            if self.vrr_active {
+                log::debug!("VRR disabled by config, deactivating");
+                self.vrr_active = false;
+            }
+            return;
+        }
+
+        let is_game = if let Some(wid) = focused {
+            // Check cache first.
+            if let Some(&cached) = self.is_game_window.get(&wid) {
+                cached
+            } else {
+                // Lookup class name from window state.
+                let detected = self
+                    .windows
+                    .get(&wid)
+                    .map(|ws| Self::detect_game_window(&ws.class_name))
+                    .unwrap_or(false);
+                self.is_game_window.insert(wid, detected);
+                detected
+            }
+        } else {
+            false
+        };
+
+        if is_game != self.vrr_active {
+            log::debug!(
+                "VRR state changed: {} -> {} (focused: {:?})",
+                self.vrr_active,
+                is_game,
+                focused
+            );
+            self.vrr_active = is_game;
+        }
+    }
+
+    /// Get the target refresh rate based on VRR state.
+    /// Returns vrr_max_fps when VRR is active (game focused), else 60 Hz.
+    pub(crate) fn get_vrr_refresh_rate(&self) -> u32 {
+        if self.vrr_active {
+            let cfg = CONFIG.load();
+            let b = cfg.behavior();
+            b.vrr_max_fps
+        } else {
+            60
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Temporal blur reuse
+    // -----------------------------------------------------------------------
+
+    /// Compute a hash of all visible (non-fading-out) window positions and opacities.
+    /// Uses FNV-1a inspired hash for speed and reasonable distribution.
+    pub(crate) fn compute_window_positions_hash(&self) -> u64 {
+        const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+        const FNV_PRIME: u64 = 0x100000001b3;
+
+        let mut hash = FNV_OFFSET;
+
+        // Sort by window id for deterministic ordering.
+        let mut ids: Vec<u64> = self
+            .windows
+            .iter()
+            .filter(|(_, ws)| !ws.fading_out)
+            .map(|(&id, _)| id)
+            .collect();
+        ids.sort_unstable();
+
+        for id in ids {
+            if let Some(ws) = self.windows.get(&id) {
+                // Mix in window dimensions.
+                let w_bits = ws.width as u64;
+                let h_bits = ws.height as u64;
+                let opacity_bits = (ws.fade_opacity * 1000.0) as u64;
+
+                hash ^= w_bits;
+                hash = hash.wrapping_mul(FNV_PRIME);
+                hash ^= h_bits;
+                hash = hash.wrapping_mul(FNV_PRIME);
+                hash ^= id;
+                hash = hash.wrapping_mul(FNV_PRIME);
+                hash ^= opacity_bits;
+                hash = hash.wrapping_mul(FNV_PRIME);
+            }
+        }
+
+        hash
+    }
+
+    /// Apply temporal blur mixing: if window positions have not changed since the
+    /// previous frame, reuse the previous blur texture. Otherwise, copy the current
+    /// blur texture into the previous-frame FBO for next-frame reuse.
+    ///
+    /// Returns the texture ID to sample for blur (either current or cached).
+    ///
+    /// # Safety
+    /// Caller must ensure `gl` is valid and `current_blur_tex` is a valid texture.
+    pub(crate) unsafe fn apply_temporal_blur_mix(
+        &mut self,
+        gl: &ffi::Gles2,
+        current_blur_tex: u32,
+    ) -> u32 {
+        self.temporal_blur_total_count += 1;
+
+        if !self.temporal_blur_enabled {
+            return current_blur_tex;
+        }
+
+        let current_hash = self.compute_window_positions_hash();
+
+        // If positions unchanged, reuse previous frame's blur.
+        if current_hash == self.prev_window_positions_hash {
+            if let Some((_fbo, tex)) = self.prev_blur_fbo {
+                self.temporal_blur_reuse_count += 1;
+                return tex;
+            }
+        }
+
+        // Positions changed or no previous FBO: copy current to prev.
+        unsafe {
+            let (prev_fbo, prev_tex) = match self.prev_blur_fbo {
+                Some((fbo, tex)) => (fbo, tex),
+                None => {
+                    // Allocate prev blur FBO on first use.
+                    let mut tex = 0u32;
+                    gl.GenTextures(1, &mut tex);
+                    gl.BindTexture(ffi::TEXTURE_2D, tex);
+                    gl.TexImage2D(
+                        ffi::TEXTURE_2D,
+                        0,
+                        ffi::RGBA8 as i32,
+                        self.screen_w as i32,
+                        self.screen_h as i32,
+                        0,
+                        ffi::RGBA,
+                        ffi::UNSIGNED_BYTE,
+                        std::ptr::null(),
+                    );
+                    gl.TexParameteri(
+                        ffi::TEXTURE_2D,
+                        ffi::TEXTURE_MIN_FILTER,
+                        ffi::LINEAR as i32,
+                    );
+                    gl.TexParameteri(
+                        ffi::TEXTURE_2D,
+                        ffi::TEXTURE_MAG_FILTER,
+                        ffi::LINEAR as i32,
+                    );
+                    gl.TexParameteri(
+                        ffi::TEXTURE_2D,
+                        ffi::TEXTURE_WRAP_S,
+                        ffi::CLAMP_TO_EDGE as i32,
+                    );
+                    gl.TexParameteri(
+                        ffi::TEXTURE_2D,
+                        ffi::TEXTURE_WRAP_T,
+                        ffi::CLAMP_TO_EDGE as i32,
+                    );
+
+                    let mut fbo = 0u32;
+                    gl.GenFramebuffers(1, &mut fbo);
+                    gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
+                    gl.FramebufferTexture2D(
+                        ffi::FRAMEBUFFER,
+                        ffi::COLOR_ATTACHMENT0,
+                        ffi::TEXTURE_2D,
+                        tex,
+                        0,
+                    );
+
+                    self.prev_blur_fbo = Some((fbo, tex));
+                    (fbo, tex)
+                }
+            };
+
+            // Blit current blur texture into the prev FBO.
+            // Create a temporary FBO to read from current_blur_tex.
+            let mut src_fbo = 0u32;
+            gl.GenFramebuffers(1, &mut src_fbo);
+            gl.BindFramebuffer(ffi::READ_FRAMEBUFFER, src_fbo);
+            gl.FramebufferTexture2D(
+                ffi::READ_FRAMEBUFFER,
+                ffi::COLOR_ATTACHMENT0,
+                ffi::TEXTURE_2D,
+                current_blur_tex,
+                0,
+            );
+
+            gl.BindFramebuffer(ffi::DRAW_FRAMEBUFFER, prev_fbo);
+            gl.BlitFramebuffer(
+                0,
+                0,
+                self.screen_w as i32,
+                self.screen_h as i32,
+                0,
+                0,
+                self.screen_w as i32,
+                self.screen_h as i32,
+                ffi::COLOR_BUFFER_BIT,
+                ffi::NEAREST,
+            );
+
+            // Clean up temporary source FBO.
+            gl.DeleteFramebuffers(1, &src_fbo);
+
+            // Restore framebuffer binding.
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+
+            self.prev_window_positions_hash = current_hash;
+            let _ = prev_tex; // suppress unused warning in non-reuse path
+        }
+
+        current_blur_tex
+    }
+
+    // -----------------------------------------------------------------------
+    // Adaptive blur quality
+    // -----------------------------------------------------------------------
+
+    /// Compute the blur quality level for a given window, based on:
+    /// - Whether adaptive quality is enabled (`blur_quality_auto`)
+    /// - Per-monitor quality overrides
+    /// - Estimated GPU load from frame times
+    /// - Whether the window is the focused window (always Full for focused)
+    pub(crate) fn compute_window_blur_quality(
+        &self,
+        window_id: u64,
+        focused: Option<u64>,
+    ) -> BlurQuality {
+        // If auto-quality is disabled, return the global setting.
+        if !self.blur_quality_auto {
+            return self.blur_quality;
+        }
+
+        // Check per-monitor override: find which monitor contains this window.
+        if let Some(ws) = self.windows.get(&window_id) {
+            let win_cx = ws.width / 2;
+            let win_cy = ws.height / 2;
+
+            for &(mon_id, mx, my, mw, mh) in &self.monitors {
+                let contains_x =
+                    (win_cx as i32) >= mx && (win_cx as i32) < mx + mw as i32;
+                let contains_y =
+                    (win_cy as i32) >= my && (win_cy as i32) < my + mh as i32;
+                if contains_x && contains_y {
+                    if let Some(&quality) = self.blur_quality_by_monitor.get(&mon_id) {
+                        return quality;
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Focused window always gets full quality.
+        if focused == Some(window_id) {
+            return BlurQuality::Full;
+        }
+
+        // Adaptive: estimate GPU load from frame times.
+        // last_gpu_load is a percentage 0..100.
+        if self.last_gpu_load >= 80 {
+            BlurQuality::Minimal
+        } else if self.last_gpu_load >= 70 {
+            BlurQuality::Reduced
+        } else {
+            BlurQuality::Full
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Parsing helpers for blur quality/strength configuration
+    // -----------------------------------------------------------------------
+
+    /// Parse per-monitor blur quality from config string.
+    /// Format: "primary:Full,secondary:Reduced,tertiary:Minimal"
+    /// Monitor names map to indices: primary=0, secondary=1, tertiary=2, etc.
+    pub(crate) fn parse_blur_quality_by_monitor(s: &str) -> HashMap<u32, BlurQuality> {
+        let mut map = HashMap::new();
+
+        if s.is_empty() {
+            return map;
+        }
+
+        for entry in s.split(',') {
+            let entry = entry.trim();
+            if let Some((name, quality_str)) = entry.split_once(':') {
+                let mon_id = match name.trim().to_lowercase().as_str() {
+                    "primary" => 0u32,
+                    "secondary" => 1,
+                    "tertiary" => 2,
+                    "quaternary" => 3,
+                    other => other.parse::<u32>().unwrap_or(0),
+                };
+
+                let quality = match quality_str.trim().to_lowercase().as_str() {
+                    "full" => BlurQuality::Full,
+                    "reduced" => BlurQuality::Reduced,
+                    "minimal" => BlurQuality::Minimal,
+                    _ => BlurQuality::Full,
+                };
+
+                map.insert(mon_id, quality);
+            }
+        }
+
+        map
+    }
+
+    /// Parse dynamic blur strength by monitor Hz from config string.
+    /// Format: "60:2,144:3,240:4"
+    /// Returns Vec<(hz, strength)> sorted by Hz ascending.
+    pub(crate) fn parse_blur_strength_by_hz(s: &str) -> Vec<(u32, u32)> {
+        let mut result = Vec::new();
+
+        if s.is_empty() {
+            return result;
+        }
+
+        for entry in s.split(',') {
+            let entry = entry.trim();
+            if let Some((hz_str, strength_str)) = entry.split_once(':') {
+                if let (Ok(hz), Ok(strength)) = (
+                    hz_str.trim().parse::<u32>(),
+                    strength_str.trim().parse::<u32>(),
+                ) {
+                    result.push((hz, strength));
+                }
+            }
+        }
+
+        result.sort_by_key(|&(hz, _)| hz);
+        result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_class_matches_exclude_basic() {
+        let list = vec!["firefox".to_string(), "chrome".to_string()];
+        assert!(WaylandCompositor::class_matches_exclude("Firefox", &list));
+        assert!(WaylandCompositor::class_matches_exclude("Google-Chrome", &list));
+        assert!(!WaylandCompositor::class_matches_exclude("Alacritty", &list));
+    }
+
+    #[test]
+    fn test_class_matches_exclude_flameshot() {
+        let list: Vec<String> = vec![];
+        assert!(WaylandCompositor::class_matches_exclude("flameshot", &list));
+        assert!(WaylandCompositor::class_matches_exclude("Flameshot", &list));
+    }
+
+    #[test]
+    fn test_parse_opacity_rules() {
+        let rules = vec!["85:firefox".to_string(), "90:Alacritty".to_string()];
+        let parsed = WaylandCompositor::parse_opacity_rules(&rules);
+        assert_eq!(parsed.len(), 2);
+        assert!((parsed[0].0 - 0.85).abs() < 0.001);
+        assert_eq!(parsed[0].1, "firefox");
+        assert!((parsed[1].0 - 0.90).abs() < 0.001);
+        assert_eq!(parsed[1].1, "Alacritty");
+    }
+
+    #[test]
+    fn test_parse_corner_radius_rules() {
+        let rules = vec!["12.0:kitty".to_string(), "0:mpv".to_string()];
+        let parsed = WaylandCompositor::parse_corner_radius_rules(&rules);
+        assert_eq!(parsed.len(), 2);
+        assert!((parsed[0].0 - 12.0).abs() < 0.001);
+        assert_eq!(parsed[0].1, "kitty");
+        assert!((parsed[1].0 - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_parse_scale_rules() {
+        let rules = vec!["90:obs".to_string(), "50:pip".to_string()];
+        let parsed = WaylandCompositor::parse_scale_rules(&rules);
+        assert_eq!(parsed.len(), 2);
+        assert!((parsed[0].0 - 0.9).abs() < 0.001);
+        assert!((parsed[1].0 - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_parse_blur_quality_by_monitor() {
+        let s = "primary:Full,secondary:Reduced,tertiary:Minimal";
+        let map = WaylandCompositor::parse_blur_quality_by_monitor(s);
+        assert_eq!(map.get(&0), Some(&BlurQuality::Full));
+        assert_eq!(map.get(&1), Some(&BlurQuality::Reduced));
+        assert_eq!(map.get(&2), Some(&BlurQuality::Minimal));
+    }
+
+    #[test]
+    fn test_parse_blur_strength_by_hz() {
+        let s = "60:2,144:3,240:4";
+        let parsed = WaylandCompositor::parse_blur_strength_by_hz(s);
+        assert_eq!(parsed, vec![(60, 2), (144, 3), (240, 4)]);
+    }
+
+    #[test]
+    fn test_parse_blur_strength_by_hz_empty() {
+        let parsed = WaylandCompositor::parse_blur_strength_by_hz("");
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn test_detect_game_window_builtin() {
+        assert!(WaylandCompositor::detect_game_window("Steam"));
+        assert!(WaylandCompositor::detect_game_window("gamescope"));
+        assert!(WaylandCompositor::detect_game_window("RetroArch"));
+        assert!(WaylandCompositor::detect_game_window("dolphin-emu"));
+        assert!(!WaylandCompositor::detect_game_window("firefox"));
+        assert!(!WaylandCompositor::detect_game_window("Alacritty"));
+    }
+}

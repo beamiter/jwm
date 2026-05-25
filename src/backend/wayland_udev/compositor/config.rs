@@ -82,6 +82,85 @@ impl WaylandCompositor {
             _ => TransitionMode::None,
         };
 
+        // --- Border config ---
+        self.border_enabled = b.border_enabled;
+        self.border_width = b.border_width;
+        self.border_color_focused = b.border_color_focused;
+        self.border_color_unfocused = b.border_color_unfocused;
+
+        // --- Fullscreen unredirect ---
+        self.fullscreen_unredirect = b.fullscreen_unredirect;
+
+        // --- VRR ---
+        // vrr_active is managed by update_vrr_state(), we just note config is read
+
+        // --- Temporal blur ---
+        self.temporal_blur_enabled = b.blur_temporal_enabled;
+        self.temporal_blur_mix_ratio = b.blur_temporal_mix_ratio;
+
+        // --- Blur quality ---
+        self.blur_quality_auto = b.blur_quality_auto;
+        self.blur_strength_by_hz = Self::parse_blur_strength_by_hz(&b.blur_strength_by_hz);
+        self.blur_quality_by_monitor =
+            Self::parse_blur_quality_by_monitor(&b.blur_quality_by_monitor);
+
+        // --- Per-window rules ---
+        self.opacity_rules = Self::parse_opacity_rules(&b.opacity_rules);
+        self.corner_radius_rules = Self::parse_corner_radius_rules(&b.corner_radius_rules);
+        self.scale_rules = Self::parse_scale_rules(&b.scale_rules);
+        self.frosted_glass_rules = b.frosted_glass_rules.clone();
+        self.shadow_exclude = b.shadow_exclude.clone();
+        self.blur_exclude = b.blur_exclude.clone();
+        self.rounded_corners_exclude = b.rounded_corners_exclude.clone();
+        self.detect_client_opacity = b.detect_client_opacity;
+        self.blur_use_frame_extents = b.blur_use_frame_extents;
+        self.shadow_bottom_extra = b.shadow_bottom_extra;
+
+        // --- Window tabs ---
+        self.window_tabs_enabled = b.window_tabs;
+        self.tab_bar_height = b.tab_bar_height;
+        self.tab_bar_color = b.tab_bar_color;
+        self.tab_active_color = b.tab_active_color;
+
+        // --- Debug HUD extended ---
+        self.debug_hud_extended = b.debug_hud_extended;
+        self.frame_profiler.set_enabled(self.debug_hud_extended);
+
+        // --- Animation parameters ---
+        self.edge_glow_color = b.edge_glow_color;
+        self.edge_glow_width = b.edge_glow_width;
+        self.attention_color = b.attention_color;
+        self.snap_preview_color = b.snap_preview_color;
+        self.snap_animation_duration_ms = b.snap_animation_duration_ms;
+        self.peek_exclude = b.peek_exclude.clone();
+        self.expose_gap = b.expose_gap;
+        self.particle_count = b.particle_count;
+        self.particle_lifetime = b.particle_lifetime;
+        self.particle_gravity = b.particle_gravity;
+        self.motion_trail_frames = b.motion_trail_frames;
+        self.motion_trail_opacity = b.motion_trail_opacity;
+        self.tilt_speed = b.tilt_speed;
+        self.tilt_grid = b.tilt_grid;
+        self.wobbly_stiffness = b.wobbly_stiffness;
+        self.wobbly_damping = b.wobbly_damping;
+        self.wobbly_restore_stiffness = b.wobbly_restore_stiffness;
+        self.wobbly_grid_size = b.wobbly_grid_size;
+        self.genie_duration_ms = b.genie_duration_ms;
+        self.ripple_duration = b.ripple_duration;
+        self.ripple_amplitude = b.ripple_amplitude;
+        self.focus_highlight_color = b.focus_highlight_color;
+        self.focus_highlight_duration_ms = b.focus_highlight_duration_ms;
+        self.pip_border_color = b.pip_border_color;
+        self.pip_border_width = b.pip_border_width;
+        self.window_animation_scale = b.window_animation_scale;
+
+        // --- Wallpaper ---
+        self.wallpaper_crossfade = b.wallpaper_crossfade;
+        self.wallpaper_crossfade_duration_ms = b.wallpaper_crossfade_duration_ms;
+        if !b.wallpaper.is_empty() && b.wallpaper != self.wallpaper_path {
+            self.set_wallpaper(&b.wallpaper.clone(), &b.wallpaper_mode.clone());
+        }
+
         self.needs_render = true;
     }
 
@@ -399,10 +478,13 @@ impl WaylandCompositor {
             is_pip: false,
             is_frosted: false,
             class_name: String::new(),
+            scale: 1.0,
+            audio_sync_target: None,
             ripple_progress: 0.0,
             ripple_active: false,
             content_uv: [0.0, 0.0, 1.0, 1.0],
         });
+        self.predictive_render_mgr.register_window(window_id);
         self.needs_render = true;
     }
 
@@ -411,11 +493,8 @@ impl WaylandCompositor {
     pub(crate) fn remove_window(&mut self, window_id: u64) {
         if let Some(win) = self.windows.get_mut(&window_id) {
             win.fading_out = true;
-            // Optionally spawn particles
-            if win.width > 0 && win.height > 0 {
-                // particles disabled by default, can be enabled via config
-            }
         }
+        self.predictive_render_mgr.remove_window(window_id);
         self.needs_render = true;
     }
 
@@ -442,6 +521,8 @@ impl WaylandCompositor {
             is_pip: false,
             is_frosted: false,
             class_name: String::new(),
+            scale: 1.0,
+            audio_sync_target: None,
             ripple_progress: 0.0,
             ripple_active: false,
             content_uv: [0.0, 0.0, 1.0, 1.0],
@@ -453,6 +534,9 @@ impl WaylandCompositor {
         win.y_inverted = y_inverted;
         win.content_uv = content_uv;
         self.needs_render = true;
+
+        // Feed performance infrastructure
+        self.predictive_render_mgr.record_window_damage(window_id);
     }
 
     /// Notify a tag/workspace switch for transition animation

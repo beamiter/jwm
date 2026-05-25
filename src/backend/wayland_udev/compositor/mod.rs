@@ -12,14 +12,54 @@ mod overview;
 mod expose;
 mod config;
 mod damage;
+mod wallpaper;
+mod rules;
+mod font;
+mod texture_pool;
+mod render_stats;
+#[allow(dead_code, unreachable_pub)]
+mod dirty_region;
+#[allow(dead_code, unreachable_pub)]
+mod frame_rate;
+#[allow(dead_code, unreachable_pub)]
+mod power_saving;
+#[allow(dead_code, unreachable_pub)]
+mod predictive_render;
+#[allow(dead_code, unreachable_pub)]
+mod pixel_buffer_pool;
+#[allow(dead_code, unreachable_pub)]
+mod profiler;
+#[allow(dead_code, unreachable_pub)]
+mod perf_metrics;
+#[allow(dead_code, unreachable_pub)]
+mod cache_warmup;
+#[allow(dead_code, unreachable_pub)]
+mod direct_scanout;
+#[allow(dead_code, unreachable_pub)]
+mod gpu_fence_sync;
+#[allow(dead_code, unreachable_pub)]
+mod pbo_uploader;
+#[allow(dead_code, unreachable_pub)]
+mod render_batcher;
+#[allow(dead_code, unreachable_pub)]
+mod shader_cache;
+#[allow(dead_code, unreachable_pub)]
+mod recording;
+#[allow(dead_code, unreachable_pub)]
+mod shader_hot_reload;
+#[allow(dead_code, unreachable_pub)]
+mod audio_sync;
+#[allow(dead_code, unreachable_pub)]
+mod subpixel_render;
+#[allow(dead_code, unreachable_pub)]
+mod presentation_timing;
 
 use smithay::backend::renderer::gles::ffi;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::ffi::CString;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
-
-use crate::backend::common_define::WindowId;
 
 // ---------------------------------------------------------------------------
 // Matrix math
@@ -277,6 +317,47 @@ pub(crate) struct BlurFboLevel {
 }
 
 // ---------------------------------------------------------------------------
+// Wallpaper types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum WallpaperMode {
+    Fill,
+    Fit,
+    Stretch,
+    Center,
+}
+
+pub(crate) struct WallpaperImageData {
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub mode: WallpaperMode,
+}
+
+pub(crate) struct MonitorWallpaper {
+    pub mon_x: i32,
+    pub mon_y: i32,
+    pub mon_w: u32,
+    pub mon_h: u32,
+    pub texture: Option<u32>,
+    pub mode: WallpaperMode,
+    pub img_w: u32,
+    pub img_h: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Blur quality
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlurQuality {
+    Full,
+    Reduced,
+    Minimal,
+}
+
+// ---------------------------------------------------------------------------
 // Per-window state
 // ---------------------------------------------------------------------------
 
@@ -292,7 +373,6 @@ pub(crate) struct WindowState {
     pub anim_scale: f32,
     pub anim_scale_target: f32,
     pub wobbly: Option<WobblyState>,
-    #[allow(dead_code)]
     pub motion_trail: VecDeque<(i32, i32)>,
     pub opacity_override: Option<f32>,
     pub corner_radius_override: Option<f32>,
@@ -302,8 +382,10 @@ pub(crate) struct WindowState {
     pub is_urgent: bool,
     pub is_pip: bool,
     pub is_frosted: bool,
-    #[allow(dead_code)]
     pub class_name: String,
+    pub scale: f32,
+    #[allow(dead_code)]
+    pub audio_sync_target: Option<f32>,
     pub ripple_progress: f32,
     pub ripple_active: bool,
     /// UV sub-rect for content within the buffer: [u, v, w, h].
@@ -416,13 +498,10 @@ pub(crate) struct WaylandCompositor {
     edge_glow_program: u32,
     tilt_program: u32,
     wobbly_program: u32,
-    #[allow(dead_code)]
     genie_program: u32,
     particle_program: u32,
     overview_bg_program: u32,
-    #[allow(dead_code)]
     hud_program: u32,
-    #[allow(dead_code)]
     temporal_blur_mix_program: u32,
 
     // Uniform locations
@@ -497,12 +576,15 @@ pub(crate) struct WaylandCompositor {
     transition_mode: TransitionMode,
     transition_direction: i32,
 
-    // Overview
+    // Overview (3D prism carousel)
     overview_active: bool,
     overview_opacity: f32,
     overview_entries: Vec<OverviewEntry>,
     overview_selection: Option<u64>,
     overview_monitor: (i32, i32, u32, u32),
+    overview_rotation: f32,
+    overview_target_rotation: f32,
+    overview_title_textures: Vec<u32>,
 
     // Expose
     expose_active: bool,
@@ -574,6 +656,146 @@ pub(crate) struct WaylandCompositor {
     // Annotations
     annotation_active: bool,
     annotation_points: Vec<(f32, f32)>,
+
+    // Performance infrastructure
+    dirty_region_tracker: dirty_region::DirtyRegionTracker,
+    frame_rate_limiter: frame_rate::FrameRateLimiter,
+    adaptive_frame_rate: frame_rate::AdaptiveFrameRate,
+    power_saving_mgr: power_saving::PowerSavingManager,
+    predictive_render_mgr: predictive_render::PredictiveRenderManager,
+    pixel_buffer_pool: pixel_buffer_pool::PixelBufferPool,
+    frame_profiler: profiler::FrameProfiler,
+    perf_metrics: perf_metrics::PerfMetrics,
+    cache_warmup_mgr: cache_warmup::CacheWarmupManager,
+    direct_scanout_mgr: direct_scanout::DirectScanoutManager,
+    gpu_fence_sync_mgr: gpu_fence_sync::GpuFenceSyncManager,
+    pbo_uploader: pbo_uploader::PBOUploader,
+    gl_state_tracker: render_batcher::GLStateTracker,
+    render_batcher: render_batcher::RenderBatcher,
+    presentation_timing_mgr: presentation_timing::PresentationTimingManager,
+    adaptive_scheduler: presentation_timing::AdaptiveFrameScheduler,
+
+    // Feature modules
+    recording: recording::RecordingState,
+    shader_hot_reload: shader_hot_reload::ShaderHotReload,
+    audio_sync_mgr: audio_sync::AudioSyncManager,
+    subpixel_mgr: subpixel_render::SubpixelRenderManager,
+
+    // --- Wallpaper ---
+    wallpaper_texture: Option<u32>,
+    wallpaper_mode: WallpaperMode,
+    wallpaper_path: String,
+    wallpaper_img_w: u32,
+    wallpaper_img_h: u32,
+    monitor_wallpapers: Vec<MonitorWallpaper>,
+    pending_wallpaper: Option<std::sync::mpsc::Receiver<WallpaperImageData>>,
+    pending_monitor_wallpapers: Vec<(usize, std::sync::mpsc::Receiver<WallpaperImageData>)>,
+    wallpaper_crossfade: bool,
+    wallpaper_crossfade_duration_ms: u64,
+    old_wallpaper_texture: Option<u32>,
+    wallpaper_transition_start: Option<Instant>,
+
+    // --- Per-window rules ---
+    opacity_rules: Vec<(f32, String)>,
+    corner_radius_rules: Vec<(f32, String)>,
+    scale_rules: Vec<(f32, String)>,
+    frosted_glass_rules: Vec<String>,
+    shadow_exclude: Vec<String>,
+    blur_exclude: Vec<String>,
+    rounded_corners_exclude: Vec<String>,
+    detect_client_opacity: bool,
+    blur_use_frame_extents: bool,
+
+    // --- Fullscreen unredirect ---
+    fullscreen_unredirect: bool,
+    unredirected_window: Option<u64>,
+
+    // --- VRR ---
+    is_game_window: HashMap<u64, bool>,
+    vrr_active: bool,
+    vrr_last_check: Instant,
+
+    // --- Temporal blur ---
+    temporal_blur_enabled: bool,
+    temporal_blur_mix_ratio: f32,
+    prev_blur_fbo: Option<(u32, u32)>,
+    prev_window_positions_hash: u64,
+    temporal_blur_reuse_count: u64,
+    temporal_blur_total_count: u64,
+
+    // --- Blur quality ---
+    blur_quality: BlurQuality,
+    blur_quality_auto: bool,
+    blur_quality_by_monitor: HashMap<u32, BlurQuality>,
+    blur_strength_by_hz: Vec<(u32, u32)>,
+    monitor_refresh_rates: HashMap<u32, u32>,
+    last_gpu_load: u32,
+    last_gpu_load_update: Instant,
+
+    // --- Window tabs config ---
+    window_tabs_enabled: bool,
+    tab_bar_height: f32,
+    tab_bar_color: [f32; 4],
+    tab_active_color: [f32; 4],
+
+    // --- Border config ---
+    border_enabled: bool,
+    border_width: f32,
+    border_color_focused: [f32; 4],
+    border_color_unfocused: [f32; 4],
+
+    // --- Screenshot ---
+    pending_screenshot: Option<std::path::PathBuf>,
+    pending_screenshot_region: Option<(std::path::PathBuf, i32, i32, u32, u32)>,
+
+    // --- Debug HUD extended ---
+    debug_hud_extended: bool,
+    hud_text_texture: Option<u32>,
+    hud_text_width: u32,
+    hud_text_height: u32,
+    hud_text_cache: String,
+    compositor_start_time: Instant,
+
+    // --- Animation parameters ---
+    shadow_bottom_extra: f32,
+    edge_glow_color: [f32; 4],
+    edge_glow_width: f32,
+    attention_color: [f32; 4],
+    snap_preview_color: [f32; 4],
+    snap_animation_duration_ms: u64,
+    peek_exclude: Vec<String>,
+    peek_opacity: f32,
+    peek_start: Option<Instant>,
+    expose_gap: f32,
+    expose_start: Option<Instant>,
+    particle_count: u32,
+    particle_lifetime: f32,
+    particle_gravity: f32,
+    motion_trail_frames: u32,
+    motion_trail_opacity: f32,
+    tilt_speed: f32,
+    tilt_grid: u32,
+    wobbly_stiffness: f32,
+    wobbly_damping: f32,
+    wobbly_restore_stiffness: f32,
+    wobbly_grid_size: u32,
+    genie_duration_ms: u64,
+    ripple_duration: f32,
+    ripple_amplitude: f32,
+    focus_highlight_color: [f32; 4],
+    focus_highlight_duration_ms: u64,
+    focus_highlight_start: Option<(u64, Instant)>,
+    last_focused_window: Option<u64>,
+    pip_border_color: [f32; 4],
+    pip_border_width: f32,
+    window_animation_scale: f32,
+
+    // --- Transition per-monitor ---
+    transition_mon: Option<(i32, i32, u32, u32)>,
+
+    // --- Render stats ---
+    render_stats: render_stats::RenderStats,
+    texture_pool: texture_pool::TexturePool,
 }
 
 // ---------------------------------------------------------------------------
@@ -953,6 +1175,9 @@ impl WaylandCompositor {
             overview_entries: Vec::new(),
             overview_selection: None,
             overview_monitor: (0, 0, screen_w, screen_h),
+            overview_rotation: 0.0,
+            overview_target_rotation: 0.0,
+            overview_title_textures: Vec::new(),
 
             // Expose
             expose_active: false,
@@ -1024,6 +1249,148 @@ impl WaylandCompositor {
             // Annotations
             annotation_active: false,
             annotation_points: Vec::new(),
+
+            // Performance infrastructure
+            dirty_region_tracker: dirty_region::DirtyRegionTracker::new(screen_w, screen_h),
+            frame_rate_limiter: frame_rate::FrameRateLimiter::new(60),
+            adaptive_frame_rate: frame_rate::AdaptiveFrameRate::new(15, 60),
+            power_saving_mgr: power_saving::PowerSavingManager::new(
+                power_saving::PowerSavingConfig::default(),
+            ),
+            predictive_render_mgr: predictive_render::PredictiveRenderManager::new(),
+            pixel_buffer_pool: pixel_buffer_pool::PixelBufferPool::new(),
+            frame_profiler: profiler::FrameProfiler::new(),
+            perf_metrics: perf_metrics::PerfMetrics::new(),
+            cache_warmup_mgr: cache_warmup::CacheWarmupManager::new(),
+            direct_scanout_mgr: direct_scanout::DirectScanoutManager::new(screen_w, screen_h),
+            gpu_fence_sync_mgr: gpu_fence_sync::GpuFenceSyncManager::new(),
+            pbo_uploader: pbo_uploader::PBOUploader::new(4 * 1024 * 1024, 4),
+            gl_state_tracker: render_batcher::GLStateTracker::new(),
+            render_batcher: render_batcher::RenderBatcher::new(),
+            presentation_timing_mgr: presentation_timing::PresentationTimingManager::new(),
+            adaptive_scheduler: presentation_timing::AdaptiveFrameScheduler::new(60),
+
+            // Feature modules
+            recording: recording::RecordingState::new(),
+            shader_hot_reload: shader_hot_reload::ShaderHotReload::new(),
+            audio_sync_mgr: audio_sync::AudioSyncManager::new(),
+            subpixel_mgr: subpixel_render::SubpixelRenderManager::new(),
+
+            // Wallpaper
+            wallpaper_texture: None,
+            wallpaper_mode: WallpaperMode::Fill,
+            wallpaper_path: String::new(),
+            wallpaper_img_w: 0,
+            wallpaper_img_h: 0,
+            monitor_wallpapers: Vec::new(),
+            pending_wallpaper: None,
+            pending_monitor_wallpapers: Vec::new(),
+            wallpaper_crossfade: true,
+            wallpaper_crossfade_duration_ms: 500,
+            old_wallpaper_texture: None,
+            wallpaper_transition_start: None,
+
+            // Per-window rules
+            opacity_rules: Vec::new(),
+            corner_radius_rules: Vec::new(),
+            scale_rules: Vec::new(),
+            frosted_glass_rules: Vec::new(),
+            shadow_exclude: Vec::new(),
+            blur_exclude: Vec::new(),
+            rounded_corners_exclude: Vec::new(),
+            detect_client_opacity: false,
+            blur_use_frame_extents: false,
+
+            // Fullscreen unredirect
+            fullscreen_unredirect: false,
+            unredirected_window: None,
+
+            // VRR
+            is_game_window: HashMap::new(),
+            vrr_active: false,
+            vrr_last_check: now,
+
+            // Temporal blur
+            temporal_blur_enabled: false,
+            temporal_blur_mix_ratio: 0.8,
+            prev_blur_fbo: None,
+            prev_window_positions_hash: 0,
+            temporal_blur_reuse_count: 0,
+            temporal_blur_total_count: 0,
+
+            // Blur quality
+            blur_quality: BlurQuality::Full,
+            blur_quality_auto: false,
+            blur_quality_by_monitor: HashMap::new(),
+            blur_strength_by_hz: Vec::new(),
+            monitor_refresh_rates: HashMap::new(),
+            last_gpu_load: 0,
+            last_gpu_load_update: now,
+
+            // Window tabs
+            window_tabs_enabled: false,
+            tab_bar_height: 24.0,
+            tab_bar_color: [0.2, 0.2, 0.2, 0.9],
+            tab_active_color: [0.3, 0.5, 0.8, 1.0],
+
+            // Border config
+            border_enabled: true,
+            border_width: 2.0,
+            border_color_focused: [0.3, 0.6, 1.0, 0.8],
+            border_color_unfocused: [0.3, 0.3, 0.3, 0.5],
+
+            // Screenshot
+            pending_screenshot: None,
+            pending_screenshot_region: None,
+
+            // Debug HUD extended
+            debug_hud_extended: false,
+            hud_text_texture: None,
+            hud_text_width: 0,
+            hud_text_height: 0,
+            hud_text_cache: String::new(),
+            compositor_start_time: now,
+
+            // Animation parameters
+            shadow_bottom_extra: 0.0,
+            edge_glow_color: [0.3, 0.6, 1.0, 0.6],
+            edge_glow_width: 20.0,
+            attention_color: [1.0, 0.5, 0.0, 0.8],
+            snap_preview_color: [0.3, 0.6, 1.0, 0.3],
+            snap_animation_duration_ms: 200,
+            peek_exclude: Vec::new(),
+            peek_opacity: 0.0,
+            peek_start: None,
+            expose_gap: 20.0,
+            expose_start: None,
+            particle_count: 30,
+            particle_lifetime: 1.0,
+            particle_gravity: 400.0,
+            motion_trail_frames: 5,
+            motion_trail_opacity: 0.3,
+            tilt_speed: 8.0,
+            tilt_grid: 12,
+            wobbly_stiffness: 600.0,
+            wobbly_damping: 30.0,
+            wobbly_restore_stiffness: 200.0,
+            wobbly_grid_size: 6,
+            genie_duration_ms: 300,
+            ripple_duration: 0.4,
+            ripple_amplitude: 0.03,
+            focus_highlight_color: [0.3, 0.6, 1.0, 0.8],
+            focus_highlight_duration_ms: 300,
+            focus_highlight_start: None,
+            last_focused_window: None,
+            pip_border_color: [1.0, 0.8, 0.0, 0.9],
+            pip_border_width: 3.0,
+            window_animation_scale: 0.92,
+
+            // Transition per-monitor
+            transition_mon: None,
+
+            // Render stats & texture pool
+            render_stats: render_stats::RenderStats::new(),
+            texture_pool: texture_pool::TexturePool::new(),
         })
         }
     }
