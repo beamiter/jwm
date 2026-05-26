@@ -103,6 +103,19 @@ fn run_jwm() -> Result<(), Box<dyn std::error::Error>> {
         // Auto-resume recording if state file exists (from a restart)
         jwm.resume_recording_if_needed(&mut *backend);
 
+        // JWM_BENCHMARK=N: auto-start benchmark collecting N frames then exit with JSON
+        if let Ok(val) = env::var("JWM_BENCHMARK") {
+            if let Ok(frames) = val.parse::<u32>() {
+                let warmup = env::var("JWM_BENCHMARK_WARMUP")
+                    .ok()
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .unwrap_or(60);
+                backend.compositor_benchmark_start(frames, warmup);
+                backend.compositor_benchmark_set_auto_exit(true);
+                info!("Benchmark mode: collecting {} frames (warmup={})", frames, warmup);
+            }
+        }
+
         jwm.run(&mut *backend)?;
         jwm.cleanup(&mut *backend)?;
 

@@ -394,6 +394,13 @@ impl Compositor {
         scene: &[(u32, i32, i32, u32, u32)],
         focused: Option<u32>,
     ) -> bool {
+        let bench_frame_start = std::time::Instant::now();
+
+        // Auto-enable profiler when benchmark is running
+        if self.benchmark.is_running() && !self.frame_profiler.is_enabled() {
+            self.frame_profiler.set_enabled(true);
+        }
+
         // Phase 2: Begin frame profiling
         self.frame_profiler.begin_frame();
 
@@ -1199,6 +1206,12 @@ impl Compositor {
                             let mut blur_tex = if cache_hit {
                                 Some(self.blur_fbos[0].texture)
                             } else {
+                                let blur_bench_start = if self.benchmark.is_running() {
+                                    Some(std::time::Instant::now())
+                                } else {
+                                    None
+                                };
+
                                 // Temporarily break out of the window shader to run blur passes.
                                 // Capture the current framebuffer (which includes all windows
                                 // drawn so far) and produce a blurred texture from it.
@@ -1236,6 +1249,17 @@ impl Compositor {
                                     },
                                     blur_levels,
                                 );
+
+                                if let Some(start) = blur_bench_start {
+                                    let pixel_count: u64 = self.blur_fbos.iter()
+                                        .take(blur_levels)
+                                        .map(|l| l.w as u64 * l.h as u64)
+                                        .sum();
+                                    self.benchmark.record_blur_cost(
+                                        pixel_count,
+                                        start.elapsed().as_secs_f32() * 1000.0,
+                                    );
+                                }
 
                                 // Restore state for window drawing
                                 if use_scissor {
@@ -1644,6 +1668,8 @@ impl Compositor {
                 self.gl.uniform_1_i32(self.postprocess_uniforms.hdr_enabled.as_ref(), if self.hdr_enabled { 1 } else { 0 });
                 self.gl.uniform_1_f32(self.postprocess_uniforms.hdr_peak_nits.as_ref(), self.hdr_peak_nits);
                 self.gl.uniform_1_i32(self.postprocess_uniforms.tone_mapping_method.as_ref(), self.tone_mapping_method);
+                self.gl.uniform_1_i32(self.postprocess_uniforms.eotf_mode.as_ref(), self.eotf_mode);
+                self.gl.uniform_1_i32(self.postprocess_uniforms.output_colorspace.as_ref(), self.output_colorspace);
 
                 // Magnifier uniforms
                 self.gl.uniform_1_i32(self.magnifier_uniforms.magnifier_enabled.as_ref(), if self.magnifier_enabled { 1 } else { 0 });
@@ -1681,14 +1707,12 @@ impl Compositor {
             }
         }
 
-        // === Pass 5: Debug HUD (feature 11) ===
-        if self.debug_hud {
-            // Update frame stats
+        // === Always update frame stats (decoupled from HUD rendering) ===
+        {
             let now = std::time::Instant::now();
             let dt = now.duration_since(self.frame_stats.last_frame_time).as_secs_f32();
             self.frame_stats.last_frame_time = now;
             self.frame_stats.frame_count += 1;
-            // P5F.3: VecDeque push_back + pop_front (O(1) instead of O(n) remove(0))
             self.frame_stats.frame_times.push_back(dt);
             if self.frame_stats.frame_times.len() > 120 {
                 self.frame_stats.frame_times.pop_front();
@@ -1699,10 +1723,11 @@ impl Compositor {
                 self.frame_stats.frame_times.clear();
                 self.frame_stats.last_fps_update = now;
             }
-
-            // Record input→display latency sample if we had input this frame
             self.record_latency_sample();
+        }
 
+        // === Pass 5: Debug HUD (feature 11) ===
+        if self.debug_hud {
             // Format HUD text
             let avg_dt = if self.frame_stats.frame_times.is_empty() { 0.0 }
                 else { self.frame_stats.frame_times.iter().sum::<f32>() / self.frame_stats.frame_times.len() as f32 };
@@ -2211,6 +2236,33 @@ impl Compositor {
 
         // Phase 2: End frame profiling
         let frame_time_ms = self.frame_profiler.end_frame();
+
+        // Benchmark: record frame data
+        if self.benchmark.is_running() {
+            let frame_us = bench_frame_start.elapsed().as_micros() as u64;
+            self.benchmark.record_frame(frame_us);
+
+            // Feed latest input latency
+            if let Some(&last_latency) = self.frame_stats.latency_samples.last() {
+                self.benchmark.record_input_latency(last_latency);
+            }
+
+            // Feed zone stats from profiler
+            for (zone, zs) in self.frame_profiler.all_zone_stats() {
+                self.benchmark.record_zone(zone, zs.avg_ms);
+            }
+
+            // Feed GL stats
+            self.benchmark.record_gl_stats(
+                self.frame_stats.draw_calls,
+                0, // state changes tracked elsewhere
+                0, // texture binds tracked elsewhere
+            );
+
+            // Feed blur cache stats
+            self.benchmark.blur_cache_hits = self.frame_stats.blur_cache_hits;
+            self.benchmark.blur_cache_misses = self.frame_stats.blur_cache_misses;
+        }
 
         // Log profiler stats every 300 frames (~5s at 60fps)
         if self.frame_stats.frame_count % 300 == 0 && self.frame_profiler.is_enabled() {

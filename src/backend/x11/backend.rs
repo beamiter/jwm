@@ -72,6 +72,8 @@ pub struct X11Backend {
     interaction: Option<X11Interaction>,
 
     compositor: Option<super::compositor::Compositor>,
+
+    benchmark_auto_exit: bool,
 }
 
 struct X11Interaction {
@@ -247,7 +249,7 @@ impl X11Backend {
             ids.clone(),
         );
 
-        Ok(Self {
+        let mut backend = Self {
             conn,
             screen,
             root,
@@ -266,7 +268,11 @@ impl X11Backend {
             _init_event_source: Some(event_source),
             interaction: None,
             compositor,
-        })
+            benchmark_auto_exit: false,
+        };
+
+        backend.compositor_auto_configure_hdr();
+        Ok(backend)
     }
 
     fn compositor_handle_event(&mut self, event: &BackendEvent) {
@@ -423,6 +429,118 @@ impl X11Backend {
         // Fallback: return 60Hz
         log::warn!("backend: no output with refresh rate found, defaulting to 60Hz");
         60
+    }
+
+    fn compositor_auto_configure_hdr(&mut self) {
+        let cfg = crate::config::CONFIG.load();
+        let behavior = cfg.behavior();
+        if !behavior.hdr_enabled {
+            return;
+        }
+
+        if let Some(output_id) = self.query_primary_randr_output() {
+            if let Some(caps) = super::edid::query_edid_hdr(&self.conn, output_id) {
+                log::info!(
+                    "HDR EDID: max={:.0} nits, min={:.2} nits, PQ={}, HLG={}, BT.2020={}",
+                    caps.max_luminance_nits, caps.min_luminance_nits,
+                    caps.supports_pq, caps.supports_hlg, caps.supports_bt2020
+                );
+
+                if let Some(c) = self.compositor.as_mut() {
+                    if caps.max_luminance_nits > 0.0 {
+                        c.set_hdr_peak_nits(caps.max_luminance_nits);
+                    }
+                    if caps.supports_pq {
+                        c.set_eotf_mode(1);
+                    } else if caps.supports_hlg {
+                        c.set_eotf_mode(2);
+                    }
+                    if caps.supports_bt2020 {
+                        c.set_output_colorspace(1);
+                    }
+                    c.set_hdr_output_10bit(true);
+                }
+
+                self.set_output_hdr_properties(output_id, true);
+            } else {
+                log::info!("HDR enabled but display EDID has no HDR metadata; using SDR EOTF");
+            }
+        }
+    }
+
+    fn set_output_hdr_properties(&self, output: u32, enable: bool) {
+        use x11rb::protocol::xproto::ConnectionExt as _;
+        use x11rb::protocol::xproto::PropMode;
+
+        if enable {
+            if let Ok(atom_cookie) = self.conn.intern_atom(false, b"max_bpc") {
+                if let Ok(atom_reply) = atom_cookie.reply() {
+                    let max_bpc_atom = atom_reply.atom;
+                    let value: u32 = 10;
+                    let _ = self.conn.randr_change_output_property(
+                        output,
+                        max_bpc_atom,
+                        x11rb::protocol::xproto::AtomEnum::INTEGER.into(),
+                        32,
+                        PropMode::REPLACE,
+                        1,
+                        &value.to_le_bytes(),
+                    );
+                    log::info!("HDR: set max_bpc=10 on output 0x{:x}", output);
+                }
+            }
+
+            if let Ok(cs_atom_cookie) = self.conn.intern_atom(false, b"Colorspace") {
+                if let Ok(cs_atom_reply) = cs_atom_cookie.reply() {
+                    let cs_atom = cs_atom_reply.atom;
+                    if let Ok(val_cookie) = self.conn.intern_atom(false, b"BT2020_RGB") {
+                        if let Ok(val_reply) = val_cookie.reply() {
+                            let val_atom = val_reply.atom;
+                            let _ = self.conn.randr_change_output_property(
+                                output,
+                                cs_atom,
+                                x11rb::protocol::xproto::AtomEnum::ATOM.into(),
+                                32,
+                                PropMode::REPLACE,
+                                1,
+                                &val_atom.to_le_bytes(),
+                            );
+                            log::info!("HDR: set Colorspace=BT2020_RGB on output 0x{:x}", output);
+                        }
+                    }
+                }
+            }
+        } else {
+            if let Ok(atom_cookie) = self.conn.intern_atom(false, b"max_bpc") {
+                if let Ok(atom_reply) = atom_cookie.reply() {
+                    let max_bpc_atom = atom_reply.atom;
+                    let value: u32 = 8;
+                    let _ = self.conn.randr_change_output_property(
+                        output,
+                        max_bpc_atom,
+                        x11rb::protocol::xproto::AtomEnum::INTEGER.into(),
+                        32,
+                        PropMode::REPLACE,
+                        1,
+                        &value.to_le_bytes(),
+                    );
+                    log::info!("HDR: restored max_bpc=8 on output 0x{:x}", output);
+                }
+            }
+        }
+
+        let _ = self.conn.flush();
+    }
+
+    fn query_primary_randr_output(&self) -> Option<u32> {
+        let resources = self.conn.randr_get_screen_resources(self.root_x11).ok()?.reply().ok()?;
+        for &output in resources.outputs.iter() {
+            let oi = self.conn.randr_get_output_info(output, 0).ok()?.reply().ok()?;
+            if oi.crtc != 0 && oi.connection == x11rb::protocol::randr::Connection::CONNECTED {
+                return Some(output);
+            }
+        }
+        None
     }
 }
 
@@ -664,6 +782,31 @@ impl Backend for X11Backend {
     }
     fn compositor_get_metrics(&self) -> Option<crate::backend::api::CompositorMetrics> {
         self.compositor.as_ref().map(|c| c.get_metrics())
+    }
+
+    fn compositor_benchmark_start(&mut self, frames: u32, warmup: u32) -> bool {
+        if let Some(c) = self.compositor.as_mut() {
+            c.benchmark_start(frames, warmup);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn compositor_benchmark_stop(&mut self) -> Option<String> {
+        self.compositor.as_mut().and_then(|c| c.benchmark_stop())
+    }
+
+    fn compositor_benchmark_report(&self) -> Option<String> {
+        self.compositor.as_ref().and_then(|c| c.benchmark_report())
+    }
+
+    fn compositor_benchmark_is_complete(&self) -> bool {
+        self.compositor.as_ref().map_or(false, |c| c.benchmark_is_complete())
+    }
+
+    fn compositor_benchmark_set_auto_exit(&mut self, enabled: bool) {
+        self.benchmark_auto_exit = enabled;
     }
 
     fn query_vrr_capabilities(&self, output: crate::backend::common_define::OutputId) -> Option<VrrCapabilities> {
@@ -1416,6 +1559,16 @@ impl Backend for X11Backend {
                 loop_data
                     .handler
                     .render_compositor_immediate(loop_data.backend);
+            }
+
+            // Benchmark auto-exit: check if benchmark completed
+            if loop_data.backend.benchmark_auto_exit {
+                if loop_data.backend.compositor_benchmark_is_complete() {
+                    if let Some(report) = loop_data.backend.compositor_benchmark_report() {
+                        println!("{}", report);
+                    }
+                    loop_data.should_exit = true;
+                }
             }
 
             if loop_data.should_exit {

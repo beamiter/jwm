@@ -440,6 +440,14 @@ impl Compositor {
             }
         }
 
+        // --- HDR / tone mapping (hot-reload safe fields only) ---
+        self.hdr_peak_nits = behavior.hdr_peak_nits;
+        self.tone_mapping_method = match behavior.tone_mapping_method.as_str() {
+            "reinhard" => 1,
+            "aces" => 2,
+            _ => 0,
+        };
+
         // --- Shader hot-reload ---
         if behavior.shader_hot_reload && !behavior.shader_dir.is_empty() {
             self.enable_shader_hot_reload(&behavior.shader_dir);
@@ -451,4 +459,55 @@ impl Compositor {
         self.needs_render = true;
     }
 
+    // =====================================================================
+    // Benchmark API
+    // =====================================================================
+
+    pub(crate) fn benchmark_start(&mut self, frames: u32, warmup: u32) {
+        self.benchmark.system_info = super::benchmark::SystemInfo {
+            gpu: String::new(),
+            driver: String::new(),
+            resolution: format!("{}x{}", self.screen_w, self.screen_h),
+        };
+        self.benchmark.bench_config = super::benchmark::BenchmarkConfig {
+            blur_enabled: self.blur_enabled,
+            blur_strength: self.blur_strength,
+            window_count: self.windows.len(),
+            hdr_enabled: self.hdr_enabled,
+            vrr_active: self.vrr_active,
+        };
+        self.benchmark.start(frames, warmup);
+    }
+
+    pub(crate) fn benchmark_stop(&mut self) -> Option<String> {
+        self.benchmark.stop().map(|r| serde_json::to_string_pretty(&r).unwrap_or_default())
+    }
+
+    pub(crate) fn benchmark_report(&self) -> Option<String> {
+        if self.benchmark.is_complete() {
+            Some(serde_json::to_string_pretty(&self.benchmark.generate_report()).unwrap_or_default())
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn benchmark_is_complete(&self) -> bool {
+        self.benchmark.is_complete()
+    }
+
+    pub(crate) fn set_hdr_peak_nits(&mut self, nits: f32) {
+        self.hdr_peak_nits = nits;
+    }
+
+    pub(crate) fn set_eotf_mode(&mut self, mode: i32) {
+        self.eotf_mode = mode;
+    }
+
+    pub(crate) fn set_output_colorspace(&mut self, cs: i32) {
+        self.output_colorspace = cs;
+    }
+
+    pub(crate) fn set_hdr_output_10bit(&mut self, enabled: bool) {
+        self.hdr_output_10bit = enabled;
+    }
 }

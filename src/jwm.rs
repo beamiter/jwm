@@ -174,6 +174,7 @@ pub struct Jwm {
 
     /// Event coalescer for reducing high-frequency updates
     pub event_coalescer: crate::backend::x11::event_coalescer::EventCoalescer,
+
 }
 
 

@@ -481,6 +481,8 @@ uniform int   u_colorblind_mode;   // 0=none, 1=deuteranopia, 2=protanopia, 3=tr
 uniform int   u_hdr_enabled;           // 0=off, 1=on
 uniform float u_hdr_peak_nits;         // Target display peak luminance (400-1000 nits)
 uniform int   u_tone_mapping_method;   // 0=none, 1=Reinhard, 2=ACES
+uniform int   u_eotf_mode;            // 0=sRGB gamma, 1=PQ (ST2084), 2=HLG
+uniform int   u_output_colorspace;    // 0=BT.709/sRGB, 1=BT.2020
 in vec2 v_uv;
 out vec4 frag_color;
 
@@ -566,27 +568,66 @@ void main() {
         c.rgb = clamp(c.rgb, 0.0, 1.0);
     }
 
-    // HDR tone mapping (SDR→HDR expansion)
+    // HDR pipeline: linearize → nits → tone map → gamut → encode EOTF
     if (u_hdr_enabled == 1) {
-        // Expand SDR content (assumed 0-80 nits) to HDR range (0-peak_nits)
-        float sdr_white_nits = 80.0;
-        float scale = u_hdr_peak_nits / sdr_white_nits;
-        c.rgb *= scale;
+        // Step 1: Linearize from sRGB gamma (SDR source content)
+        c.rgb = pow(c.rgb, vec3(2.2));
 
-        // Apply tone mapping curve to prevent clipping
+        // Step 2: Scale to absolute nits (SDR white = 80 nits)
+        c.rgb *= 80.0;
+
+        // Step 3: Tone mapping to display peak luminance
         if (u_tone_mapping_method == 1) {
-            // Reinhard tone mapping: x / (1 + x)
-            c.rgb = c.rgb / (vec3(1.0) + c.rgb);
+            // Reinhard per-channel, normalized to peak nits
+            c.rgb = c.rgb * (1.0 + c.rgb / (u_hdr_peak_nits * u_hdr_peak_nits))
+                  / (1.0 + c.rgb / u_hdr_peak_nits);
         } else if (u_tone_mapping_method == 2) {
-            // ACES filmic tone mapping (simplified Narkowicz 2015)
+            // ACES filmic (Narkowicz 2015), input/output in [0,1] range
+            vec3 x = c.rgb / u_hdr_peak_nits;
             const float a = 2.51;
             const float b = 0.03;
-            const float c_coef = 2.43;
+            const float cc = 2.43;
             const float d = 0.59;
             const float e = 0.14;
-            c.rgb = clamp((c.rgb * (a * c.rgb + b)) / (c.rgb * (c_coef * c.rgb + d) + e), 0.0, 1.0);
+            c.rgb = clamp((x * (a * x + b)) / (x * (cc * x + d) + e), 0.0, 1.0) * u_hdr_peak_nits;
         }
-        // else: u_tone_mapping_method == 0, no tone curve (linear expansion)
+        // else: method 0 = no tone mapping, pass through
+
+        // Step 4: BT.2020 gamut conversion (from BT.709 linear)
+        if (u_output_colorspace == 1) {
+            const mat3 bt709_to_bt2020 = mat3(
+                0.6274, 0.0691, 0.0164,
+                0.3293, 0.9195, 0.0880,
+                0.0433, 0.0113, 0.8956
+            );
+            c.rgb = bt709_to_bt2020 * c.rgb;
+        }
+
+        // Step 5: Encode with output EOTF
+        if (u_eotf_mode == 1) {
+            // PQ (ST2084) OETF: linear nits → PQ [0,1]
+            const float m1 = 0.1593017578125;
+            const float m2 = 78.84375;
+            const float c1 = 0.8359375;
+            const float c2 = 18.8515625;
+            const float c3 = 18.6875;
+            vec3 Y = clamp(c.rgb / 10000.0, 0.0, 1.0);
+            vec3 Ym1 = pow(Y, vec3(m1));
+            c.rgb = pow((c1 + c2 * Ym1) / (1.0 + c3 * Ym1), vec3(m2));
+        } else if (u_eotf_mode == 2) {
+            // HLG OETF (BT.2100)
+            vec3 nrm = c.rgb / 1000.0; // normalize to [0,1] for 1000-nit reference
+            vec3 lo = sqrt(3.0 * nrm);
+            const float a = 0.17883277;
+            const float b_hlg = 0.28466892;
+            const float c_hlg = 0.55991073;
+            vec3 hi = a * log(12.0 * nrm - b_hlg) + c_hlg;
+            c.rgb = mix(lo, hi, step(vec3(1.0/12.0), nrm));
+        } else {
+            // sRGB gamma encode (SDR display, reduced banding from 10-bit internal)
+            c.rgb = clamp(c.rgb / u_hdr_peak_nits, 0.0, 1.0);
+            c.rgb = pow(c.rgb, vec3(1.0 / 2.2));
+        }
     }
 
     // Magnifier border ring

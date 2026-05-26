@@ -124,9 +124,26 @@ impl Compositor {
             .map(|g| g.depth)
             .unwrap_or(24);
 
-        let (fbconfig, use_rgba) = if let Some(&(cfg, is_rgba)) =
-            self.tfp_visual_configs.get(&win_visual)
-        {
+        let (fbconfig, use_rgba) = if self.hdr_enabled {
+            // HDR mode: prefer 10-bit TFP configs when available
+            if let Some(&(cfg, is_rgba)) = self.tfp_visual_configs_10bit.get(&win_visual) {
+                log::debug!(
+                    "compositor: win 0x{:x} visual 0x{:x} -> 10-bit TFP FBConfig (rgba={})",
+                    x11_win, win_visual, is_rgba
+                );
+                (cfg, is_rgba)
+            } else if let Some(&(cfg, is_rgba)) = self.tfp_visual_configs.get(&win_visual) {
+                log::debug!(
+                    "compositor: win 0x{:x} visual 0x{:x} -> 8-bit TFP FBConfig (rgba={}, HDR fallback)",
+                    x11_win, win_visual, is_rgba
+                );
+                (cfg, is_rgba)
+            } else {
+                let rgba = win_depth == 32 && !self.fbconfig_rgba.is_null();
+                let cfg = if rgba { self.fbconfig_rgba } else { self.fbconfig_rgb };
+                (cfg, rgba)
+            }
+        } else if let Some(&(cfg, is_rgba)) = self.tfp_visual_configs.get(&win_visual) {
             log::debug!(
                 "compositor: win 0x{:x} visual 0x{:x} -> per-visual FBConfig (rgba={})",
                 x11_win,

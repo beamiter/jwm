@@ -40,6 +40,9 @@ pub mod oml_sync_control;
 pub mod audio_sync;
 pub mod present;
 
+// Benchmark
+pub mod benchmark;
+
 mod init;
 mod wallpaper;
 mod rules;
@@ -418,6 +421,8 @@ struct PostprocessUniforms {
     hdr_enabled: Option<glow::UniformLocation>,
     hdr_peak_nits: Option<glow::UniformLocation>,
     tone_mapping_method: Option<glow::UniformLocation>,
+    eotf_mode: Option<glow::UniformLocation>,
+    output_colorspace: Option<glow::UniformLocation>,
 }
 
 // --- Feature 11: HUD uniforms ---
@@ -1244,6 +1249,14 @@ pub(super) struct Compositor {
     frame_profiler: FrameProfiler,
     /// GL state tracker to avoid redundant state changes
     gl_state_tracker: GLStateTracker<glow::Program, glow::Texture, glow::VertexArray, glow::Framebuffer>,
+
+    // --- Benchmark harness ---
+    benchmark: benchmark::BenchmarkHarness,
+
+    // --- HDR output control ---
+    eotf_mode: i32,           // 0=sRGB gamma, 1=PQ (ST2084), 2=HLG
+    output_colorspace: i32,   // 0=BT.709, 1=BT.2020
+    hdr_output_10bit: bool,   // true if GLX context is actually 10-bit
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.

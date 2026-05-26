@@ -244,9 +244,35 @@ impl Compositor {
                 &mut n_configs,
             )
         };
-        if configs.is_null() || n_configs == 0 {
+
+        // H10: Graceful 10-bit fallback — if HDR requested 10-bit but got no configs,
+        // retry with 8-bit attributes
+        let mut hdr_got_10bit = false;
+        let (configs, n_configs) = if (configs.is_null() || n_configs == 0) && hdr_enabled {
+            log::warn!("compositor: 10-bit FBConfig unavailable, falling back to 8-bit for HDR");
+            let fallback_attrs: Vec<i32> = vec![
+                x11::glx::GLX_RENDER_TYPE, x11::glx::GLX_RGBA_BIT,
+                x11::glx::GLX_DRAWABLE_TYPE, x11::glx::GLX_WINDOW_BIT,
+                x11::glx::GLX_DOUBLEBUFFER, 1,
+                x11::glx::GLX_RED_SIZE, 8,
+                x11::glx::GLX_GREEN_SIZE, 8,
+                x11::glx::GLX_BLUE_SIZE, 8,
+                0,
+            ];
+            let mut n2: i32 = 0;
+            let c2 = unsafe {
+                x11::glx::glXChooseFBConfig(xlib_display, screen_num, fallback_attrs.as_ptr(), &mut n2)
+            };
+            if c2.is_null() || n2 == 0 {
+                return Err("No suitable GLX FBConfig found (tried 10-bit and 8-bit)".into());
+            }
+            (c2, n2)
+        } else if configs.is_null() || n_configs == 0 {
             return Err("No suitable GLX FBConfig found".into());
-        }
+        } else {
+            if hdr_enabled { hdr_got_10bit = true; }
+            (configs, n_configs)
+        };
 
         // Pick the first FBConfig whose visual matches the overlay window.
         let mut ctx_fbconfig: x11::glx::GLXFBConfig = std::ptr::null_mut();
@@ -287,10 +313,17 @@ impl Compositor {
             }
         };
         if hdr_enabled {
-            log::info!(
-                "compositor: HDR output requested, selected FBConfig visual depth={}",
-                visual_depth
-            );
+            if hdr_got_10bit {
+                log::info!(
+                    "compositor: HDR 10-bit output active, FBConfig visual depth={}",
+                    visual_depth
+                );
+            } else {
+                log::warn!(
+                    "compositor: HDR enabled but using 8-bit output (10-bit unavailable), depth={}",
+                    visual_depth
+                );
+            }
         } else {
             log::info!("compositor: HDR disabled, using standard 8-bit visual depth={}", visual_depth);
         }
@@ -722,6 +755,8 @@ impl Compositor {
                 hdr_enabled: gl.get_uniform_location(postprocess_program, "u_hdr_enabled"),
                 hdr_peak_nits: gl.get_uniform_location(postprocess_program, "u_hdr_peak_nits"),
                 tone_mapping_method: gl.get_uniform_location(postprocess_program, "u_tone_mapping_method"),
+                eotf_mode: gl.get_uniform_location(postprocess_program, "u_eotf_mode"),
+                output_colorspace: gl.get_uniform_location(postprocess_program, "u_output_colorspace"),
             }
         };
 
@@ -1525,6 +1560,14 @@ impl Compositor {
                 profiler
             },
             gl_state_tracker: GLStateTracker::new(),
+
+            // Benchmark harness
+            benchmark: benchmark::BenchmarkHarness::new(),
+
+            // HDR output control
+            eotf_mode: 0,
+            output_colorspace: 0,
+            hdr_output_10bit: hdr_got_10bit,
         })
     }
 

@@ -773,6 +773,21 @@ pub trait Backend: Send {
     /// Get detailed compositor performance metrics.
     fn compositor_get_metrics(&self) -> Option<CompositorMetrics> { None }
 
+    /// Start compositor benchmark (collect N frames after warmup).
+    fn compositor_benchmark_start(&mut self, _frames: u32, _warmup: u32) -> bool { false }
+
+    /// Stop benchmark early and return JSON report.
+    fn compositor_benchmark_stop(&mut self) -> Option<String> { None }
+
+    /// Get benchmark report JSON (only available when complete).
+    fn compositor_benchmark_report(&self) -> Option<String> { None }
+
+    /// Check if benchmark has completed.
+    fn compositor_benchmark_is_complete(&self) -> bool { false }
+
+    /// Enable auto-exit mode: exits with JSON report when benchmark completes.
+    fn compositor_benchmark_set_auto_exit(&mut self, _enabled: bool) {}
+
     /// Query VRR capabilities of an output.
     fn query_vrr_capabilities(&self, _output: OutputId) -> Option<VrrCapabilities> { None }
 

@@ -59,6 +59,11 @@ impl Jwm {
             return self.do_config_reload(backend);
         }
 
+        // Special command: benchmark (requires mutable backend)
+        if name == "benchmark" {
+            return self.handle_benchmark_command(backend, args);
+        }
+
         match ipc::dispatch_command(name, args) {
             Ok((func, arg)) => match func(self, backend, &arg) {
                 Ok(()) => IpcResponse::ok(None),
@@ -119,7 +124,41 @@ impl Jwm {
                     })))
                 }
             }
+            "benchmark_report" => {
+                if let Some(report) = backend.compositor_benchmark_report() {
+                    IpcResponse::ok(Some(serde_json::from_str(&report).unwrap_or_default()))
+                } else {
+                    IpcResponse::err("benchmark not complete or not running".to_string())
+                }
+            }
             _ => IpcResponse::err(format!("unknown query: {name}")),
+        }
+    }
+
+    fn handle_benchmark_command(
+        &self,
+        backend: &mut dyn Backend,
+        args: &serde_json::Value,
+    ) -> IpcResponse {
+        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        match action {
+            "start" => {
+                let frames = args.get("frames").and_then(|v| v.as_u64()).unwrap_or(600) as u32;
+                let warmup = args.get("warmup").and_then(|v| v.as_u64()).unwrap_or(60) as u32;
+                if backend.compositor_benchmark_start(frames, warmup) {
+                    IpcResponse::ok(Some(serde_json::json!({"status": "started", "frames": frames, "warmup": warmup})))
+                } else {
+                    IpcResponse::err("compositor not available".to_string())
+                }
+            }
+            "stop" => {
+                if let Some(report) = backend.compositor_benchmark_stop() {
+                    IpcResponse::ok(Some(serde_json::from_str(&report).unwrap_or_default()))
+                } else {
+                    IpcResponse::err("benchmark not running".to_string())
+                }
+            }
+            _ => IpcResponse::err(format!("unknown benchmark action: {action}")),
         }
     }
 
