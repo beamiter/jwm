@@ -101,6 +101,8 @@ use smithay::wayland::xdg_system_bell::{XdgSystemBellState, XdgSystemBellHandler
 use smithay::wayland::pointer_warp::{PointerWarpManager, PointerWarpHandler};
 use smithay::wayland::xwayland_keyboard_grab::{XWaylandKeyboardGrabState, XWaylandKeyboardGrabHandler};
 use smithay::wayland::drm_syncobj::{DrmSyncobjState, DrmSyncobjHandler};
+use smithay::wayland::xdg_toplevel_icon::{XdgToplevelIconManager, XdgToplevelIconHandler};
+use smithay::wayland::xdg_toplevel_tag::{XdgToplevelTagManager, XdgToplevelTagHandler};
 use smithay::input::pointer::PointerHandle;
 
 #[derive(Debug, Default)]
@@ -390,6 +392,8 @@ smithay::delegate_xdg_system_bell!(JwmWaylandState);
 smithay::delegate_pointer_warp!(JwmWaylandState);
 smithay::delegate_xwayland_keyboard_grab!(JwmWaylandState);
 smithay::delegate_drm_syncobj!(JwmWaylandState);
+smithay::delegate_xdg_toplevel_icon!(JwmWaylandState);
+smithay::delegate_xdg_toplevel_tag!(JwmWaylandState);
 
 // ---------------------------------------------------------------------------
 // Pointer Constraints Handler – pointer lock/confine for games
@@ -597,6 +601,10 @@ impl DrmSyncobjHandler for JwmWaylandState {
         self.drm_syncobj_state.as_mut()
     }
 }
+
+impl XdgToplevelIconHandler for JwmWaylandState {}
+
+impl XdgToplevelTagHandler for JwmWaylandState {}
 
 // ---------------------------------------------------------------------------
 // XDG Activation Handler – allows clients to request surface activation
@@ -1111,6 +1119,8 @@ impl JwmWaylandState {
         let xdg_system_bell_state = XdgSystemBellState::new::<JwmWaylandState>(dh);
         let pointer_warp_state = PointerWarpManager::new::<JwmWaylandState>(dh);
         let xwayland_keyboard_grab_state = XWaylandKeyboardGrabState::new::<JwmWaylandState>(dh);
+        XdgToplevelIconManager::new::<JwmWaylandState>(dh);
+        XdgToplevelTagManager::new::<JwmWaylandState>(dh);
 
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(dh, seat_name);
