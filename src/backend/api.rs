@@ -322,6 +322,13 @@ pub enum BackendEvent {
         ramp: Vec<u16>,
     },
 
+    // === Foreign toplevel management (taskbar window control) ===
+    ForeignToplevelActivate(WindowId),
+    ForeignToplevelClose(WindowId),
+    ForeignToplevelSetMaximized(WindowId, bool),
+    ForeignToplevelSetMinimized(WindowId, bool),
+    ForeignToplevelSetFullscreen(WindowId, bool),
+
     // === Present extension events ===
     PresentComplete {
         window: WindowId,

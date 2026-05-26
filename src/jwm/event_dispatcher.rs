@@ -761,6 +761,18 @@ impl EventHandler for Jwm {
             // Gamma LUT handled at backend level (DRM property)
             BackendEvent::GammaSet { .. } => {}
 
+            // Foreign toplevel management actions (taskbar → WM)
+            BackendEvent::ForeignToplevelActivate(win) => {
+                let _ = self.focusin(backend, win);
+            }
+            BackendEvent::ForeignToplevelClose(_win) => {
+                use crate::jwm::types::WMArgEnum;
+                let _ = self.killclient(backend, &WMArgEnum::Int(0));
+            }
+            BackendEvent::ForeignToplevelSetMaximized(_win, _maximized) => {}
+            BackendEvent::ForeignToplevelSetMinimized(_win, _minimized) => {}
+            BackendEvent::ForeignToplevelSetFullscreen(_win, _fullscreen) => {}
+
             // 忽略或不需要显式处理的事件
             BackendEvent::ClientMessage { .. } => { /* ClientMessage Generic */ }
         }

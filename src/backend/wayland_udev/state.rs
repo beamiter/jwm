@@ -244,6 +244,9 @@ pub struct JwmWaylandState {
 
     /// Pending ext-image-copy-capture frames (drained during render, like screencopy).
     pub image_capture_pending: Option<crate::backend::wayland_udev::image_copy_capture::PendingImageCaptureQueue>,
+
+    /// wlr-foreign-toplevel-management state (taskbar window list + control).
+    pub foreign_toplevel_mgmt: Option<crate::backend::wayland_udev::foreign_toplevel_management::ForeignToplevelMgmtState>,
 }
 
 impl JwmWaylandState {
@@ -1121,6 +1124,9 @@ impl JwmWaylandState {
         // wlr-gamma-control-unstable-v1 – night light (gammastep/wlsunset).
         crate::backend::wayland_udev::gamma_control::init_gamma_control(dh);
 
+        // wlr-foreign-toplevel-management-unstable-v1 – taskbar window control.
+        let foreign_toplevel_mgmt = crate::backend::wayland_udev::foreign_toplevel_management::init_foreign_toplevel_management(dh);
+
         // Optional but very useful for toolkit compatibility.
         let output_manager_state = OutputManagerState::new_with_xdg_output::<JwmWaylandState>(dh);
 
@@ -1268,6 +1274,8 @@ impl JwmWaylandState {
                 workspace_state: Some(workspace_state),
 
                 image_capture_pending: Some(image_capture_pending),
+
+                foreign_toplevel_mgmt: Some(foreign_toplevel_mgmt),
             },
             socket_name,
         ))
