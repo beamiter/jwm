@@ -15,3 +15,5 @@ pub mod state;
 pub mod workspace_protocol;
 
 pub mod image_copy_capture;
+
+pub mod gamma_control;

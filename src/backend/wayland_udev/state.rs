@@ -108,6 +108,8 @@ use smithay::wayland::selection::ext_data_control::{
     DataControlState as ExtDataControlState,
     DataControlHandler as ExtDataControlHandler,
 };
+use smithay::wayland::shell::kde::decoration::{KdeDecorationHandler, KdeDecorationState};
+use smithay::reexports::wayland_protocols_misc::server_decoration::server::org_kde_kwin_server_decoration_manager::Mode as KdeMode;
 use smithay::input::pointer::PointerHandle;
 
 #[derive(Debug, Default)]
@@ -175,6 +177,7 @@ pub struct JwmWaylandState {
     pub drm_syncobj_state: Option<DrmSyncobjState>,
     pub data_control_state: DataControlState,
     pub ext_data_control_state: ExtDataControlState,
+    pub kde_decoration_state: KdeDecorationState,
 
     pub idle_inhibiting_surfaces: HashSet<ObjectId>,
     pub session_locked: bool,
@@ -403,6 +406,7 @@ smithay::delegate_xdg_toplevel_icon!(JwmWaylandState);
 smithay::delegate_xdg_toplevel_tag!(JwmWaylandState);
 smithay::delegate_data_control!(JwmWaylandState);
 smithay::delegate_ext_data_control!(JwmWaylandState);
+smithay::delegate_kde_decoration!(JwmWaylandState);
 
 // ---------------------------------------------------------------------------
 // Pointer Constraints Handler – pointer lock/confine for games
@@ -624,6 +628,12 @@ impl DataControlHandler for JwmWaylandState {
 impl ExtDataControlHandler for JwmWaylandState {
     fn data_control_state(&mut self) -> &mut ExtDataControlState {
         &mut self.ext_data_control_state
+    }
+}
+
+impl KdeDecorationHandler for JwmWaylandState {
+    fn kde_decoration_state(&self) -> &KdeDecorationState {
+        &self.kde_decoration_state
     }
 }
 
@@ -1108,6 +1118,9 @@ impl JwmWaylandState {
         // ext-image-copy-capture-v1 – modern screen capture (replaces wlr-screencopy).
         let image_capture_pending = crate::backend::wayland_udev::image_copy_capture::init_image_copy_capture(dh);
 
+        // wlr-gamma-control-unstable-v1 – night light (gammastep/wlsunset).
+        crate::backend::wayland_udev::gamma_control::init_gamma_control(dh);
+
         // Optional but very useful for toolkit compatibility.
         let output_manager_state = OutputManagerState::new_with_xdg_output::<JwmWaylandState>(dh);
 
@@ -1148,6 +1161,7 @@ impl JwmWaylandState {
         let ext_data_control_state = ExtDataControlState::new::<JwmWaylandState, _>(
             dh, Some(&primary_selection_state), |_client| true,
         );
+        let kde_decoration_state = KdeDecorationState::new::<JwmWaylandState>(dh, KdeMode::Server);
 
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(dh, seat_name);
@@ -1206,6 +1220,7 @@ impl JwmWaylandState {
                 drm_syncobj_state: None,
                 data_control_state,
                 ext_data_control_state,
+                kde_decoration_state,
 
                 idle_inhibiting_surfaces: HashSet::new(),
                 session_locked: false,
