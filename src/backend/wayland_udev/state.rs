@@ -1877,6 +1877,14 @@ impl CompositorHandler for JwmWaylandState {
             self.window_is_fullscreen.remove(&win);
             self.window_layer_info.remove(&win);
             self.window_border_color.remove(&win);
+
+            if let Some(handle) = self.foreign_toplevel_handles.remove(&win) {
+                handle.send_closed();
+            }
+            if let Some(ref ftm) = self.foreign_toplevel_mgmt {
+                ftm.remove_window(win);
+            }
+
             self.push_event(BackendEvent::WindowDestroyed(win));
             self.needs_redraw = true;
         }
@@ -2038,6 +2046,10 @@ impl XdgShellHandler for JwmWaylandState {
         self.window_app_id.insert(win, String::new());
         self.window_is_fullscreen.insert(win, false);
 
+        // Announce to ext-foreign-toplevel-list clients.
+        let handle = self.foreign_toplevel_list_state.new_toplevel::<JwmWaylandState>("", "");
+        self.foreign_toplevel_handles.insert(win, handle);
+
         // Track windows that still need their initial configure. Normally the WM triggers this via
         // `WindowOps::configure`, but we keep a timeout-based fallback to avoid clients stalling
         // indefinitely if the WM doesn't configure quickly enough.
@@ -2162,7 +2174,13 @@ impl XdgShellHandler for JwmWaylandState {
 
         info!("[udev/wayland] app_id_changed win={win:?} app_id={}", app_id);
 
-        self.window_app_id.insert(win, app_id);
+        self.window_app_id.insert(win, app_id.clone());
+
+        if let Some(handle) = self.foreign_toplevel_handles.get(&win) {
+            handle.send_app_id(&app_id);
+            handle.send_done();
+        }
+
         self.push_event(BackendEvent::PropertyChanged {
             window: win,
             kind: PropertyKind::Class,
@@ -2192,7 +2210,13 @@ impl XdgShellHandler for JwmWaylandState {
 
         info!("[udev/wayland] title_changed win={win:?} title={}", title);
 
-        self.window_title.insert(win, title);
+        self.window_title.insert(win, title.clone());
+
+        if let Some(handle) = self.foreign_toplevel_handles.get(&win) {
+            handle.send_title(&title);
+            handle.send_done();
+        }
+
         self.push_event(BackendEvent::PropertyChanged {
             window: win,
             kind: PropertyKind::Title,
