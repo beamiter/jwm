@@ -226,6 +226,12 @@ pub struct JwmWaylandState {
 
     /// Per-surface tearing hint map (from wp-tearing-control-v1).
     pub tearing_hints: Option<crate::backend::wayland_udev::tearing_control::TearingHintMap>,
+
+    /// ext-workspace-v1 state for taskbar integration.
+    pub workspace_state: Option<crate::backend::wayland_udev::workspace_protocol::WorkspaceState>,
+
+    /// Pending ext-image-copy-capture frames (drained during render, like screencopy).
+    pub image_capture_pending: Option<crate::backend::wayland_udev::image_copy_capture::PendingImageCaptureQueue>,
 }
 
 impl JwmWaylandState {
@@ -1067,6 +1073,12 @@ impl JwmWaylandState {
         // wlr-output-power-management-unstable-v1 – DPMS for swayidle.
         crate::backend::wayland_udev::output_power::init_output_power_management(dh);
 
+        // ext-workspace-v1 – workspace/tag state for taskbars (Waybar etc.).
+        let workspace_state = crate::backend::wayland_udev::workspace_protocol::init_workspace_protocol(dh, 9);
+
+        // ext-image-copy-capture-v1 – modern screen capture (replaces wlr-screencopy).
+        let image_capture_pending = crate::backend::wayland_udev::image_copy_capture::init_image_copy_capture(dh);
+
         // Optional but very useful for toolkit compatibility.
         let output_manager_state = OutputManagerState::new_with_xdg_output::<JwmWaylandState>(dh);
 
@@ -1198,6 +1210,10 @@ impl JwmWaylandState {
 
                 screencopy_pending: Some(screencopy_pending),
                 tearing_hints: Some(tearing_hints),
+
+                workspace_state: Some(workspace_state),
+
+                image_capture_pending: Some(image_capture_pending),
             },
             socket_name,
         ))

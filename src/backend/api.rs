@@ -303,6 +303,12 @@ pub enum BackendEvent {
     MappingNotify,
     DamageNotify { drawable: WindowId },
 
+    // === Workspace protocol events ===
+    WorkspaceActivate {
+        monitor: usize,
+        tag_mask: u32,
+    },
+
     // === Present extension events ===
     PresentComplete {
         window: WindowId,

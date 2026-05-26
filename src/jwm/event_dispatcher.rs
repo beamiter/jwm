@@ -749,6 +749,12 @@ impl EventHandler for Jwm {
             BackendEvent::PresentComplete { .. } => {}
             BackendEvent::PresentIdle { .. } => {}
 
+            // Workspace protocol: client requests tag switch
+            BackendEvent::WorkspaceActivate { monitor: _, tag_mask } => {
+                use crate::jwm::types::WMArgEnum;
+                let _ = self.view(backend, &WMArgEnum::UInt(tag_mask));
+            }
+
             // 忽略或不需要显式处理的事件
             BackendEvent::ClientMessage { .. } => { /* ClientMessage Generic */ }
         }

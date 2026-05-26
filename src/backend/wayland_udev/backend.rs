@@ -967,6 +967,8 @@ impl UdevBackend {
             // SAFETY: JWM's backend is single-threaded and we set this once at startup.
             unsafe {
                 std::env::set_var("WAYLAND_DISPLAY", name);
+                std::env::set_var("XDG_CURRENT_DESKTOP", "jwm");
+                std::env::set_var("XDG_SESSION_TYPE", "wayland");
                 if nested {
                     log::info!("Nested Wayland session detected: clearing DBUS_SESSION_BUS_ADDRESS to isolate children from parent session bus");
                     std::env::set_var("DBUS_SESSION_BUS_ADDRESS", "");

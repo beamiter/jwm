@@ -11,3 +11,7 @@ pub mod screencopy;
 pub mod tearing_control;
 
 pub mod state;
+
+pub mod workspace_protocol;
+
+pub mod image_copy_capture;
