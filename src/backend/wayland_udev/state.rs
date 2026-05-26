@@ -103,6 +103,11 @@ use smithay::wayland::xwayland_keyboard_grab::{XWaylandKeyboardGrabState, XWayla
 use smithay::wayland::drm_syncobj::{DrmSyncobjState, DrmSyncobjHandler};
 use smithay::wayland::xdg_toplevel_icon::{XdgToplevelIconManager, XdgToplevelIconHandler};
 use smithay::wayland::xdg_toplevel_tag::{XdgToplevelTagManager, XdgToplevelTagHandler};
+use smithay::wayland::selection::wlr_data_control::{DataControlState, DataControlHandler};
+use smithay::wayland::selection::ext_data_control::{
+    DataControlState as ExtDataControlState,
+    DataControlHandler as ExtDataControlHandler,
+};
 use smithay::input::pointer::PointerHandle;
 
 #[derive(Debug, Default)]
@@ -168,6 +173,8 @@ pub struct JwmWaylandState {
     pub pointer_warp_state: PointerWarpManager,
     pub xwayland_keyboard_grab_state: XWaylandKeyboardGrabState,
     pub drm_syncobj_state: Option<DrmSyncobjState>,
+    pub data_control_state: DataControlState,
+    pub ext_data_control_state: ExtDataControlState,
 
     pub idle_inhibiting_surfaces: HashSet<ObjectId>,
     pub session_locked: bool,
@@ -394,6 +401,8 @@ smithay::delegate_xwayland_keyboard_grab!(JwmWaylandState);
 smithay::delegate_drm_syncobj!(JwmWaylandState);
 smithay::delegate_xdg_toplevel_icon!(JwmWaylandState);
 smithay::delegate_xdg_toplevel_tag!(JwmWaylandState);
+smithay::delegate_data_control!(JwmWaylandState);
+smithay::delegate_ext_data_control!(JwmWaylandState);
 
 // ---------------------------------------------------------------------------
 // Pointer Constraints Handler – pointer lock/confine for games
@@ -605,6 +614,18 @@ impl DrmSyncobjHandler for JwmWaylandState {
 impl XdgToplevelIconHandler for JwmWaylandState {}
 
 impl XdgToplevelTagHandler for JwmWaylandState {}
+
+impl DataControlHandler for JwmWaylandState {
+    fn data_control_state(&mut self) -> &mut DataControlState {
+        &mut self.data_control_state
+    }
+}
+
+impl ExtDataControlHandler for JwmWaylandState {
+    fn data_control_state(&mut self) -> &mut ExtDataControlState {
+        &mut self.ext_data_control_state
+    }
+}
 
 // ---------------------------------------------------------------------------
 // XDG Activation Handler – allows clients to request surface activation
@@ -1121,6 +1142,12 @@ impl JwmWaylandState {
         let xwayland_keyboard_grab_state = XWaylandKeyboardGrabState::new::<JwmWaylandState>(dh);
         XdgToplevelIconManager::new::<JwmWaylandState>(dh);
         XdgToplevelTagManager::new::<JwmWaylandState>(dh);
+        let data_control_state = DataControlState::new::<JwmWaylandState, _>(
+            dh, Some(&primary_selection_state), |_client| true,
+        );
+        let ext_data_control_state = ExtDataControlState::new::<JwmWaylandState, _>(
+            dh, Some(&primary_selection_state), |_client| true,
+        );
 
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(dh, seat_name);
@@ -1177,6 +1204,8 @@ impl JwmWaylandState {
                 pointer_warp_state,
                 xwayland_keyboard_grab_state,
                 drm_syncobj_state: None,
+                data_control_state,
+                ext_data_control_state,
 
                 idle_inhibiting_surfaces: HashSet::new(),
                 session_locked: false,
