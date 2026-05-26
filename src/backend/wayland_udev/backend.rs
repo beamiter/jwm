@@ -2917,6 +2917,18 @@ impl Backend for UdevBackend {
             loop {
                 let next = { self.pending_events.lock().unwrap().pop_front() };
                 match next {
+                    Some(BackendEvent::OutputPowerSet { ref output_name, on }) => {
+                        handled_any = true;
+                        if let Some(ref kms) = self.kms {
+                            let mut kms = kms.borrow_mut();
+                            let idx = kms.output_index_by_name(output_name);
+                            if let Some(idx) = idx {
+                                if let Err(e) = kms.set_dpms_for_output(idx, on) {
+                                    log::warn!("[dpms] set_dpms_for_output failed: {e}");
+                                }
+                            }
+                        }
+                    }
                     Some(ev) => {
                         handled_any = true;
                         handler.handle_event(self, ev)?;

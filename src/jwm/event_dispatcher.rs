@@ -755,6 +755,9 @@ impl EventHandler for Jwm {
                 let _ = self.view(backend, &WMArgEnum::UInt(tag_mask));
             }
 
+            // Output power (DPMS) handled at backend level
+            BackendEvent::OutputPowerSet { .. } => {}
+
             // 忽略或不需要显式处理的事件
             BackendEvent::ClientMessage { .. } => { /* ClientMessage Generic */ }
         }

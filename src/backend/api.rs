@@ -309,6 +309,12 @@ pub enum BackendEvent {
         tag_mask: u32,
     },
 
+    // === Output power (DPMS) ===
+    OutputPowerSet {
+        output_name: String,
+        on: bool,
+    },
+
     // === Present extension events ===
     PresentComplete {
         window: WindowId,

@@ -69,6 +69,7 @@ pub(super) type KmsHandle = Rc<RefCell<KmsState>>;
 
 struct KmsOutputState {
     crtc: crtc::Handle,
+    connector: connector::Handle,
     mode_size: (i32, i32),
     origin: (i32, i32),
 
@@ -422,6 +423,30 @@ impl KmsState {
         Err("VRR_ENABLED property not found on CRTC".to_string())
     }
 
+    pub(super) fn output_index_by_name(&self, name: &str) -> Option<usize> {
+        self.outputs.iter().position(|o| o.output.name() == name)
+    }
+
+    pub(super) fn set_dpms_for_output(&mut self, output_idx: usize, on: bool) -> Result<(), String> {
+        let output = self.outputs.get(output_idx).ok_or("output index out of range")?;
+        let conn_handle = output.connector;
+        let mgr = self.drm_output_manager.lock();
+        let dev = mgr.device();
+        if let Ok(props) = dev.get_properties(conn_handle) {
+            let (handles, _values) = props.as_props_and_values();
+            for &prop_handle in handles {
+                if let Ok(info) = dev.get_property(prop_handle) {
+                    if info.name().to_str() == Ok("DPMS") {
+                        let val = if on { 0 } else { 3 }; // 0=On, 3=Off
+                        dev.set_property(conn_handle, prop_handle, val)
+                            .map_err(|e| format!("DRM set_property DPMS failed: {e:?}"))?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        Err("DPMS property not found on connector".to_string())
+    }
 
     /// Render all elements to an offscreen buffer and save as PNG.
     /// Split out as a free-standing function so it can borrow `self.renderer`
@@ -989,6 +1014,7 @@ impl KmsState {
             let refresh_interval = p.frame_callback_throttle.unwrap_or(std::time::Duration::from_millis(16));
             outputs.push(KmsOutputState {
                 crtc: p.crtc,
+                connector: p.connector,
                 mode_size: p.mode_size,
                 origin: p.origin,
                 output: p.output,
