@@ -3,6 +3,9 @@
 /// Allows color temperature tools like gammastep and wlsunset to adjust
 /// display gamma ramps for night light functionality.
 
+use std::io::Read;
+use std::os::unix::io::{AsRawFd, FromRawFd};
+
 use log::{info, warn};
 
 use smithay::output::Output;
@@ -14,6 +17,7 @@ use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New,
 };
 
+use crate::backend::api::BackendEvent;
 use crate::backend::wayland::state::JwmWaylandState;
 
 pub struct GammaControlManagerData;
@@ -71,7 +75,6 @@ impl Dispatch<ZwlrGammaControlManagerV1, GammaControlManagerData> for JwmWayland
                     }
                 };
 
-                // Default gamma table size: 256 entries per channel (R, G, B).
                 let gamma_size = 256u32;
 
                 let ctrl = data_init.init(
@@ -94,7 +97,7 @@ impl Dispatch<ZwlrGammaControlManagerV1, GammaControlManagerData> for JwmWayland
 
 impl Dispatch<ZwlrGammaControlV1, GammaControlData> for JwmWaylandState {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
         _resource: &ZwlrGammaControlV1,
         request: zwlr_gamma_control_v1::Request,
@@ -104,14 +107,37 @@ impl Dispatch<ZwlrGammaControlV1, GammaControlData> for JwmWaylandState {
     ) {
         match request {
             zwlr_gamma_control_v1::Request::SetGamma { fd } => {
-                info!(
-                    "[gamma] set_gamma for output={} (size={})",
-                    data.output.name(),
-                    data.gamma_size
-                );
-                // TODO: Read gamma table from fd and apply via DRM GAMMA_LUT property.
-                // The fd contains gamma_size * 3 * sizeof(u16) bytes (R, G, B ramps).
-                let _ = fd;
+                let expected_bytes = (data.gamma_size as usize) * 3 * std::mem::size_of::<u16>();
+                let mut buf = vec![0u8; expected_bytes];
+
+                let raw_fd = fd.as_raw_fd();
+                let mut file = unsafe { std::fs::File::from_raw_fd(raw_fd) };
+                match file.read_exact(&mut buf) {
+                    Ok(()) => {
+                        // Convert bytes to u16 values (little-endian)
+                        let ramp: Vec<u16> = buf
+                            .chunks_exact(2)
+                            .map(|c| u16::from_ne_bytes([c[0], c[1]]))
+                            .collect();
+
+                        info!(
+                            "[gamma] set_gamma for output={} (size={})",
+                            data.output.name(),
+                            data.gamma_size
+                        );
+
+                        state.push_event(BackendEvent::GammaSet {
+                            output_name: data.output.name(),
+                            gamma_size: data.gamma_size,
+                            ramp,
+                        });
+                    }
+                    Err(e) => {
+                        warn!("[gamma] failed to read gamma table from fd: {e}");
+                    }
+                }
+                // Intentionally leak the File to avoid closing the OwnedFd
+                std::mem::forget(file);
             }
             zwlr_gamma_control_v1::Request::Destroy => {}
             _ => {}

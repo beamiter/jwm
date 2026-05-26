@@ -448,6 +448,26 @@ impl KmsState {
         Err("DPMS property not found on connector".to_string())
     }
 
+    pub(super) fn set_gamma_for_output(&mut self, output_idx: usize, gamma_size: u32, ramp: &[u16]) -> Result<(), String> {
+        let output = self.outputs.get(output_idx).ok_or("output index out of range")?;
+        let crtc = output.crtc;
+        let mgr = self.drm_output_manager.lock();
+        let dev = mgr.device();
+
+        let sz = gamma_size as usize;
+        let expected_len = sz * 3;
+        if ramp.len() != expected_len {
+            return Err(format!("gamma ramp length mismatch: got {} expected {}", ramp.len(), expected_len));
+        }
+
+        let red = &ramp[..sz];
+        let green = &ramp[sz..2 * sz];
+        let blue = &ramp[2 * sz..3 * sz];
+
+        dev.set_gamma(crtc, red, green, blue)
+            .map_err(|e| format!("DRM set_gamma failed: {e:?}"))
+    }
+
     /// Render all elements to an offscreen buffer and save as PNG.
     /// Split out as a free-standing function so it can borrow `self.renderer`
     /// without conflicting with the mutable borrow on `self.outputs`.

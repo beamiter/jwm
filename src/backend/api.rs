@@ -315,6 +315,13 @@ pub enum BackendEvent {
         on: bool,
     },
 
+    // === Gamma LUT (night light) ===
+    GammaSet {
+        output_name: String,
+        gamma_size: u32,
+        ramp: Vec<u16>,
+    },
+
     // === Present extension events ===
     PresentComplete {
         window: WindowId,

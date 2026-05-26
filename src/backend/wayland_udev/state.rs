@@ -1612,7 +1612,7 @@ impl JwmWaylandState {
         id
     }
 
-    fn push_event(&mut self, ev: BackendEvent) {
+    pub(crate) fn push_event(&mut self, ev: BackendEvent) {
         self.pending_events.lock().unwrap().push_back(ev);
     }
 

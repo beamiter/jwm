@@ -758,6 +758,9 @@ impl EventHandler for Jwm {
             // Output power (DPMS) handled at backend level
             BackendEvent::OutputPowerSet { .. } => {}
 
+            // Gamma LUT handled at backend level (DRM property)
+            BackendEvent::GammaSet { .. } => {}
+
             // 忽略或不需要显式处理的事件
             BackendEvent::ClientMessage { .. } => { /* ClientMessage Generic */ }
         }
