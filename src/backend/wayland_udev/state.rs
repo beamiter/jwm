@@ -1127,6 +1127,9 @@ impl JwmWaylandState {
         // wlr-foreign-toplevel-management-unstable-v1 – taskbar window control.
         let foreign_toplevel_mgmt = crate::backend::wayland_udev::foreign_toplevel_management::init_foreign_toplevel_management(dh);
 
+        // wlr-virtual-pointer-unstable-v1 – remote desktop pointer injection.
+        crate::backend::wayland_udev::virtual_pointer::init_virtual_pointer_manager(dh);
+
         // Optional but very useful for toolkit compatibility.
         let output_manager_state = OutputManagerState::new_with_xdg_output::<JwmWaylandState>(dh);
 

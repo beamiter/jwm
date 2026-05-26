@@ -19,3 +19,5 @@ pub mod image_copy_capture;
 pub mod gamma_control;
 
 pub mod foreign_toplevel_management;
+
+pub mod virtual_pointer;
