@@ -2050,6 +2050,13 @@ impl XdgShellHandler for JwmWaylandState {
         let handle = self.foreign_toplevel_list_state.new_toplevel::<JwmWaylandState>("", "");
         self.foreign_toplevel_handles.insert(win, handle);
 
+        // Announce to wlr-foreign-toplevel-management clients.
+        if let Some(ref ftm) = self.foreign_toplevel_mgmt {
+            crate::backend::wayland_udev::foreign_toplevel_management::announce_new_toplevel(
+                &self.display_handle, ftm, win, "", "",
+            );
+        }
+
         // Track windows that still need their initial configure. Normally the WM triggers this via
         // `WindowOps::configure`, but we keep a timeout-based fallback to avoid clients stalling
         // indefinitely if the WM doesn't configure quickly enough.
@@ -2180,6 +2187,9 @@ impl XdgShellHandler for JwmWaylandState {
             handle.send_app_id(&app_id);
             handle.send_done();
         }
+        if let Some(ref ftm) = self.foreign_toplevel_mgmt {
+            ftm.update_app_id(win, &app_id);
+        }
 
         self.push_event(BackendEvent::PropertyChanged {
             window: win,
@@ -2215,6 +2225,9 @@ impl XdgShellHandler for JwmWaylandState {
         if let Some(handle) = self.foreign_toplevel_handles.get(&win) {
             handle.send_title(&title);
             handle.send_done();
+        }
+        if let Some(ref ftm) = self.foreign_toplevel_mgmt {
+            ftm.update_title(win, &title);
         }
 
         self.push_event(BackendEvent::PropertyChanged {

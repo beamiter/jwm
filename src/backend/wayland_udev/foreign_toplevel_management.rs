@@ -13,7 +13,7 @@ use smithay::reexports::wayland_protocols_wlr::foreign_toplevel::v1::server::{
     zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
 };
 use smithay::reexports::wayland_server::{
-    Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New,
+    Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
 
 use crate::backend::api::BackendEvent;
@@ -119,18 +119,71 @@ pub fn init_foreign_toplevel_management(dh: &DisplayHandle) -> ForeignToplevelMg
     ForeignToplevelMgmtState::new()
 }
 
+/// Announce a new toplevel to all bound managers.
+pub fn announce_new_toplevel(
+    dh: &DisplayHandle,
+    ftm: &ForeignToplevelMgmtState,
+    win_id: WindowId,
+    title: &str,
+    app_id: &str,
+) {
+    let managers = ftm.managers();
+    for mgr in &managers {
+        let Some(client) = mgr.client() else { continue };
+        let Ok(handle) = client.create_resource::<ZwlrForeignToplevelHandleV1, _, JwmWaylandState>(
+            dh,
+            mgr.version(),
+            ForeignToplevelHandleData { window_id: win_id },
+        ) else {
+            continue;
+        };
+
+        mgr.toplevel(&handle);
+        handle.title(title.to_string());
+        handle.app_id(app_id.to_string());
+        handle.state(Vec::new());
+        handle.done();
+
+        ftm.add_handle(win_id, handle);
+    }
+}
+
 // --- GlobalDispatch for the manager ---
 
 impl GlobalDispatch<ZwlrForeignToplevelManagerV1, ForeignToplevelManagerData> for JwmWaylandState {
     fn bind(
         state: &mut Self,
-        _handle: &DisplayHandle,
-        _client: &Client,
+        dh: &DisplayHandle,
+        client: &Client,
         resource: New<ZwlrForeignToplevelManagerV1>,
         _global_data: &ForeignToplevelManagerData,
         data_init: &mut DataInit<'_, Self>,
     ) {
         let mgr = data_init.init(resource, ForeignToplevelManagerData);
+
+        // Send existing windows to the newly-bound manager.
+        for (&win_id, _) in &state.toplevels {
+            let title = state.window_title.get(&win_id).cloned().unwrap_or_default();
+            let app_id = state.window_app_id.get(&win_id).cloned().unwrap_or_default();
+
+            let Ok(handle) = client.create_resource::<ZwlrForeignToplevelHandleV1, _, Self>(
+                dh,
+                mgr.version(),
+                ForeignToplevelHandleData { window_id: win_id },
+            ) else {
+                continue;
+            };
+
+            mgr.toplevel(&handle);
+            handle.title(title);
+            handle.app_id(app_id);
+            handle.state(Vec::new());
+            handle.done();
+
+            if let Some(ref ftm) = state.foreign_toplevel_mgmt {
+                ftm.add_handle(win_id, handle);
+            }
+        }
 
         if let Some(ref ftm) = state.foreign_toplevel_mgmt {
             ftm.add_manager(mgr);
