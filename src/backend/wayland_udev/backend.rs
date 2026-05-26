@@ -1126,11 +1126,38 @@ impl UdevBackend {
         if let Some(kms) = &kms {
             state.outputs = kms.borrow().outputs();
 
-            // Advertise linux-dmabuf formats supported by our renderer.
-            // Without this, many GPU-accelerated Wayland clients (e.g. Electron/Qt) will never
-            // attach a buffer and appear as "no window".
-            let formats = kms.borrow().dmabuf_render_formats();
-            state.ensure_dmabuf_global(&display_handle, formats);
+            // Advertise linux-dmabuf formats with scanout preference tranches.
+            // This tells clients which formats can bypass the compositor (direct scanout).
+            {
+                let kms_ref = kms.borrow();
+                let render_formats = kms_ref.dmabuf_render_formats();
+                let scanout_formats = kms_ref.dmabuf_render_formats();
+                let main_device = kms_ref.dev_t();
+                drop(kms_ref);
+                state.ensure_dmabuf_global_with_feedback(
+                    &display_handle,
+                    render_formats,
+                    scanout_formats,
+                    main_device,
+                );
+            }
+
+            // wp-linux-drm-syncobj-v1 (explicit sync) – required for NVIDIA
+            {
+                use smithay::wayland::drm_syncobj::{DrmSyncobjState, supports_syncobj_eventfd};
+                let drm_fd = kms.borrow().drm_device_fd.clone();
+                if supports_syncobj_eventfd(&drm_fd) {
+                    state.drm_syncobj_state = Some(
+                        DrmSyncobjState::new::<crate::backend::wayland::state::JwmWaylandState>(
+                            &display_handle,
+                            drm_fd,
+                        ),
+                    );
+                    log::info!("[udev/wayland] wp-linux-drm-syncobj-v1 (explicit sync) enabled");
+                } else {
+                    log::info!("[udev/wayland] DRM syncobj eventfd not supported, explicit sync disabled");
+                }
+            }
 
             // Wire screencopy pending queue to KMS state.
             if let Some(ref screencopy_queue) = state.screencopy_pending {

@@ -94,6 +94,13 @@ use smithay::wayland::tablet_manager::TabletManagerState;
 use smithay::wayland::fifo::FifoManagerState;
 use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitState;
 use smithay::wayland::security_context::SecurityContextState;
+use smithay::wayland::commit_timing::CommitTimingManagerState;
+use smithay::wayland::shell::xdg::dialog::{XdgDialogState, XdgDialogHandler};
+use smithay::wayland::xdg_foreign::{XdgForeignState, XdgForeignHandler};
+use smithay::wayland::xdg_system_bell::{XdgSystemBellState, XdgSystemBellHandler};
+use smithay::wayland::pointer_warp::{PointerWarpManager, PointerWarpHandler};
+use smithay::wayland::xwayland_keyboard_grab::{XWaylandKeyboardGrabState, XWaylandKeyboardGrabHandler};
+use smithay::wayland::drm_syncobj::{DrmSyncobjState, DrmSyncobjHandler};
 use smithay::input::pointer::PointerHandle;
 
 #[derive(Debug, Default)]
@@ -152,6 +159,13 @@ pub struct JwmWaylandState {
     pub fifo_state: FifoManagerState,
     pub keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
     pub security_context_state: SecurityContextState,
+    pub commit_timing_state: CommitTimingManagerState,
+    pub xdg_dialog_state: XdgDialogState,
+    pub xdg_foreign_state: XdgForeignState,
+    pub xdg_system_bell_state: XdgSystemBellState,
+    pub pointer_warp_state: PointerWarpManager,
+    pub xwayland_keyboard_grab_state: XWaylandKeyboardGrabState,
+    pub drm_syncobj_state: Option<DrmSyncobjState>,
 
     pub idle_inhibiting_surfaces: HashSet<ObjectId>,
     pub session_locked: bool,
@@ -209,6 +223,9 @@ pub struct JwmWaylandState {
     /// Shared queue for pending wlr-screencopy copy requests (filled by screencopy Dispatch,
     /// drained during KMS render).
     pub screencopy_pending: Option<crate::backend::wayland_udev::screencopy::PendingScreencopyQueue>,
+
+    /// Per-surface tearing hint map (from wp-tearing-control-v1).
+    pub tearing_hints: Option<crate::backend::wayland_udev::tearing_control::TearingHintMap>,
 }
 
 impl JwmWaylandState {
@@ -259,6 +276,55 @@ impl JwmWaylandState {
             .create_global::<JwmWaylandState>(display_handle, formats);
         self.dmabuf_global = Some(global);
         info!("[udev/wayland] linux-dmabuf global created");
+    }
+
+    pub fn ensure_dmabuf_global_with_feedback(
+        &mut self,
+        display_handle: &DisplayHandle,
+        render_formats: impl IntoIterator<Item = DmabufFormat>,
+        scanout_formats: impl IntoIterator<Item = DmabufFormat>,
+        main_device: libc::dev_t,
+    ) {
+        use smithay::wayland::dmabuf::DmabufFeedbackBuilder;
+        use smithay::reexports::wayland_protocols::wp::linux_dmabuf::zv1::server::zwp_linux_dmabuf_feedback_v1::TrancheFlags;
+
+        if self.dmabuf_global.is_some() {
+            return;
+        }
+
+        let render_fmts: Vec<DmabufFormat> = render_formats.into_iter().collect();
+        let scanout_fmts: Vec<DmabufFormat> = scanout_formats.into_iter().collect();
+
+        match DmabufFeedbackBuilder::new(main_device, render_fmts.iter().copied())
+            .add_preference_tranche(
+                main_device,
+                Some(TrancheFlags::Scanout),
+                scanout_fmts.iter().copied(),
+            )
+            .build()
+        {
+            Ok(default_feedback) => {
+                let global = self
+                    .dmabuf_state
+                    .create_global_with_default_feedback::<JwmWaylandState>(
+                        display_handle,
+                        &default_feedback,
+                    );
+                self.dmabuf_global = Some(global);
+                info!(
+                    "[udev/wayland] linux-dmabuf global created with feedback (render={}, scanout={})",
+                    render_fmts.len(),
+                    scanout_fmts.len()
+                );
+            }
+            Err(e) => {
+                warn!("[udev/wayland] dmabuf feedback build failed: {e:?}, falling back to basic global");
+                let global = self
+                    .dmabuf_state
+                    .create_global::<JwmWaylandState>(display_handle, render_fmts);
+                self.dmabuf_global = Some(global);
+            }
+        }
     }
 }
 
@@ -311,6 +377,13 @@ delegate_tablet_manager!(JwmWaylandState);
 delegate_fifo!(JwmWaylandState);
 delegate_keyboard_shortcuts_inhibit!(JwmWaylandState);
 delegate_security_context!(JwmWaylandState);
+smithay::delegate_commit_timing!(JwmWaylandState);
+smithay::delegate_xdg_dialog!(JwmWaylandState);
+smithay::delegate_xdg_foreign!(JwmWaylandState);
+smithay::delegate_xdg_system_bell!(JwmWaylandState);
+smithay::delegate_pointer_warp!(JwmWaylandState);
+smithay::delegate_xwayland_keyboard_grab!(JwmWaylandState);
+smithay::delegate_drm_syncobj!(JwmWaylandState);
 
 // ---------------------------------------------------------------------------
 // Pointer Constraints Handler – pointer lock/confine for games
@@ -447,6 +520,75 @@ impl smithay::wayland::security_context::SecurityContextHandler for JwmWaylandSt
         // TODO: integrate with calloop to accept clients from sandboxed contexts
         let _ = source;
         let _ = security_context;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// wp-commit-timing-v1 – frame-perfect scheduling
+// ---------------------------------------------------------------------------
+// No handler trait needed – CommitTimingManagerState is purely passive.
+
+// ---------------------------------------------------------------------------
+// xdg-dialog-v1 – modal dialog hints
+// ---------------------------------------------------------------------------
+impl XdgDialogHandler for JwmWaylandState {
+    fn modal_changed(&mut self, _toplevel: ToplevelSurface, _is_modal: bool) {
+        self.needs_redraw = true;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// xdg-foreign-v2 – cross-client parent/child relationships
+// ---------------------------------------------------------------------------
+impl XdgForeignHandler for JwmWaylandState {
+    fn xdg_foreign_state(&mut self) -> &mut XdgForeignState {
+        &mut self.xdg_foreign_state
+    }
+}
+
+// ---------------------------------------------------------------------------
+// xdg-system-bell – audible bell notification
+// ---------------------------------------------------------------------------
+impl XdgSystemBellHandler for JwmWaylandState {
+    fn ring(&mut self, _surface: Option<WlSurface>) {
+        // Could trigger a visual bell or system beep
+    }
+}
+
+// ---------------------------------------------------------------------------
+// pointer-warp – programmatic pointer movement
+// ---------------------------------------------------------------------------
+impl PointerWarpHandler for JwmWaylandState {
+    fn warp_pointer(
+        &mut self,
+        _surface: WlSurface,
+        _pointer: smithay::reexports::wayland_server::protocol::wl_pointer::WlPointer,
+        _pos: Point<f64, Logical>,
+        _serial: Serial,
+    ) {
+    }
+}
+
+// ---------------------------------------------------------------------------
+// xwayland-keyboard-grab – better XWayland keyboard handling
+// ---------------------------------------------------------------------------
+impl XWaylandKeyboardGrabHandler for JwmWaylandState {
+    fn keyboard_focus_for_xsurface(
+        &self,
+        surface: &WlSurface,
+    ) -> Option<<Self as SeatHandler>::KeyboardFocus> {
+        self.surface_to_window.get(&surface.id()).and_then(|win| {
+            self.toplevels.get(win).map(|t| t.wl_surface().clone())
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// wp-linux-drm-syncobj-v1 – explicit sync for NVIDIA
+// ---------------------------------------------------------------------------
+impl DrmSyncobjHandler for JwmWaylandState {
+    fn drm_syncobj_state(&mut self) -> Option<&mut DrmSyncobjState> {
+        self.drm_syncobj_state.as_mut()
     }
 }
 
@@ -916,6 +1058,15 @@ impl JwmWaylandState {
         // wlr-screencopy-unstable-v1 – allows grim and similar tools to capture screen content.
         let screencopy_pending = crate::backend::wayland_udev::screencopy::init_screencopy_manager(dh);
 
+        // wp-tearing-control-v1 – allows games to opt into async page flips.
+        let tearing_hints = crate::backend::wayland_udev::tearing_control::init_tearing_control_manager(dh);
+
+        // wlr-output-management-unstable-v1 – output config for kanshi/wlr-randr.
+        crate::backend::wayland_udev::output_management::init_output_management(dh);
+
+        // wlr-output-power-management-unstable-v1 – DPMS for swayidle.
+        crate::backend::wayland_udev::output_power::init_output_power_management(dh);
+
         // Optional but very useful for toolkit compatibility.
         let output_manager_state = OutputManagerState::new_with_xdg_output::<JwmWaylandState>(dh);
 
@@ -942,6 +1093,12 @@ impl JwmWaylandState {
         let fifo_state = FifoManagerState::new::<JwmWaylandState>(dh);
         let keyboard_shortcuts_inhibit_state = KeyboardShortcutsInhibitState::new::<JwmWaylandState>(dh);
         let security_context_state = SecurityContextState::new::<JwmWaylandState, _>(dh, |_client| true);
+        let commit_timing_state = CommitTimingManagerState::new::<JwmWaylandState>(dh);
+        let xdg_dialog_state = XdgDialogState::new::<JwmWaylandState>(dh);
+        let xdg_foreign_state = XdgForeignState::new::<JwmWaylandState>(dh);
+        let xdg_system_bell_state = XdgSystemBellState::new::<JwmWaylandState>(dh);
+        let pointer_warp_state = PointerWarpManager::new::<JwmWaylandState>(dh);
+        let xwayland_keyboard_grab_state = XWaylandKeyboardGrabState::new::<JwmWaylandState>(dh);
 
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(dh, seat_name);
@@ -991,6 +1148,13 @@ impl JwmWaylandState {
                 fifo_state,
                 keyboard_shortcuts_inhibit_state,
                 security_context_state,
+                commit_timing_state,
+                xdg_dialog_state,
+                xdg_foreign_state,
+                xdg_system_bell_state,
+                pointer_warp_state,
+                xwayland_keyboard_grab_state,
+                drm_syncobj_state: None,
 
                 idle_inhibiting_surfaces: HashSet::new(),
                 session_locked: false,
@@ -1033,6 +1197,7 @@ impl JwmWaylandState {
                 window_border_color: HashMap::new(),
 
                 screencopy_pending: Some(screencopy_pending),
+                tearing_hints: Some(tearing_hints),
             },
             socket_name,
         ))

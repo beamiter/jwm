@@ -92,6 +92,7 @@ struct KmsOutputState {
 pub(super) struct KmsState {
     #[allow(dead_code)]
     dev_path: std::path::PathBuf,
+    pub(super) drm_device_fd: DrmDeviceFd,
 
     pub registration_token: Option<RegistrationToken>,
 
@@ -789,6 +790,14 @@ impl KmsState {
             .collect()
     }
 
+    pub(super) fn dev_t(&self) -> libc::dev_t {
+        use std::os::unix::io::AsRawFd;
+        let raw_fd = self.drm_device_fd.as_raw_fd();
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        unsafe { libc::fstat(raw_fd, &mut stat) };
+        stat.st_rdev
+    }
+
     pub(super) fn new(
         session: &mut LibSeatSession,
         dev_path: &Path,
@@ -1010,6 +1019,7 @@ impl KmsState {
 
         let handle: KmsHandle = Rc::new(RefCell::new(KmsState {
             dev_path: dev_path.to_path_buf(),
+            drm_device_fd: fd.clone(),
             registration_token: None,
             flush_tx,
             flush_pending,
