@@ -755,7 +755,7 @@ impl Compositor {
 
         wt.is_frosted
             || explicit_translucency
-            || (wt.has_rgba && self.detect_client_opacity)
+            || wt.has_rgba
     }
 
     /// Look up per-window scale (feature 4).

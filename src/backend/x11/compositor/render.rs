@@ -993,6 +993,10 @@ impl Compositor {
                     if wt.is_shaped {
                         continue;
                     }
+                    // Skip compositor shadow for RGBA windows — they manage their own shadow
+                    if wt.has_rgba {
+                        continue;
+                    }
                     // Fade: modulate shadow alpha
                     let fade = wt.fade_opacity;
                     let sa_faded = sa * fade;
@@ -1117,13 +1121,19 @@ impl Compositor {
                     let peek_mul = self.peek_opacity_for(&wt.class_name);
 
                     // Feature 3: Per-window corner radius
-                    let radius = wt.corner_radius_override.unwrap_or(
-                        if Self::class_matches_exclude(&wt.class_name, &self.rounded_corners_exclude) {
-                            0.0
-                        } else {
-                            self.corner_radius
-                        }
-                    );
+                    // Skip compositor rounding for override-redirect RGBA windows
+                    // (popups, menus, tooltips) — they manage their own shape.
+                    let radius = if wt.is_override_redirect && wt.has_rgba {
+                        0.0
+                    } else {
+                        wt.corner_radius_override.unwrap_or(
+                            if Self::class_matches_exclude(&wt.class_name, &self.rounded_corners_exclude) {
+                                0.0
+                            } else {
+                                self.corner_radius
+                            }
+                        )
+                    };
                     self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
 
                     // Compute effective opacity
@@ -1132,7 +1142,7 @@ impl Compositor {
                     let base_opacity = if is_statusbar { 1.0 } else if is_focused { self.active_opacity } else { self.inactive_opacity };
                     let rule_opacity = wt.opacity_override.unwrap_or(base_opacity);
                     let has_explicit_transparency = wt.opacity_override.map_or(false, |o| o < 1.0);
-                    let inactive_dim_factor = if is_statusbar || is_focused { 1.0 } else { self.inactive_dim };
+                    let inactive_dim_factor = if is_statusbar || is_focused || wt.is_override_redirect { 1.0 } else { self.inactive_dim };
                     let dim = if wt.has_rgba {
                         rule_opacity * fade * inactive_dim_factor
                     } else {
@@ -1143,8 +1153,10 @@ impl Compositor {
                     // For RGB windows, keep fully opaque by default, but allow explicit
                     // per-window opacity overrides (and fade animations) to output real
                     // alpha so translucent windows can reveal realtime blurred backdrop.
+                    // Override-redirect RGBA windows (popups, menus, tooltips) always
+                    // use their own alpha — they render their own shadows/borders.
                     let opacity = if wt.has_rgba {
-                        if self.detect_client_opacity {
+                        if self.detect_client_opacity || wt.is_override_redirect {
                             -dim
                         } else if has_explicit_transparency || fade < 1.0 {
                             (rule_opacity * fade).clamp(0.0, 1.0)
@@ -1314,7 +1326,8 @@ impl Compositor {
 
                             if let Some(blur_tex) = blur_tex {
                                 // Feature 13: If blur_use_frame_extents, crop blur to client area
-                                let (bx, by, bw, bh) = if self.blur_use_frame_extents {
+                                // For RGBA windows, always use full rect so transparent areas show blur
+                                let (bx, by, bw, bh) = if self.blur_use_frame_extents && !wt.has_rgba {
                                     let [fl, fr, ft, fb] = wt.frame_extents;
                                     let bx = draw_x + fl as f32;
                                     let by = draw_y + ft as f32;
@@ -1486,7 +1499,7 @@ impl Compositor {
                         }
                     }
 
-                    if !is_statusbar && ((effective_border_enabled && base_border_width > 0.0) || has_special_border) {
+                    if !is_statusbar && !wt.is_override_redirect && ((effective_border_enabled && base_border_width > 0.0) || has_special_border) {
                         let color = if focus_highlight_active_for_win {
                             let elapsed_ms = self.focus_highlight_start.unwrap().1.elapsed().as_millis() as f32;
                             let dur = self.focus_highlight_duration_ms as f32;
