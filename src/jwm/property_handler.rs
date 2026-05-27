@@ -2,7 +2,7 @@
 //!
 //! 这个模块包含所有窗口属性变化的处理函数
 
-use crate::backend::api::Backend;
+use crate::backend::api::{AllowedAction, Backend};
 use crate::backend::common_define::WindowId;
 use crate::core::models::ClientKey;
 use crate::jwm::types::STEXT_MAX_LEN;
@@ -203,5 +203,156 @@ impl Jwm {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn handle_motif_hints_change(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let win = self
+            .state
+            .clients
+            .get(client_key)
+            .map(|c| c.win)
+            .ok_or("Client not found")?;
+
+        if let Some(motif) = backend.property_ops().get_motif_hints(win) {
+            if let Some(client) = self.state.clients.get_mut(client_key) {
+                client.state.no_decorations = motif.decorations_none();
+                if client.state.no_decorations {
+                    client.geometry.border_w = 0;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn handle_gtk_frame_extents_change(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let win = self
+            .state
+            .clients
+            .get(client_key)
+            .map(|c| c.win)
+            .ok_or("Client not found")?;
+
+        if let Some(_extents) = backend.property_ops().get_gtk_frame_extents(win) {
+            if let Some(client) = self.state.clients.get_mut(client_key) {
+                client.state.no_decorations = true;
+                client.geometry.border_w = 0;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn handle_bypass_compositor_change(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let win = self
+            .state
+            .clients
+            .get(client_key)
+            .map(|c| c.win)
+            .ok_or("Client not found")?;
+
+        let _bypass = backend.property_ops().get_bypass_compositor(win);
+        Ok(())
+    }
+
+    pub(crate) fn apply_motif_hints(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+    ) {
+        let win = match self.state.clients.get(client_key) {
+            Some(c) => c.win,
+            None => return,
+        };
+        if let Some(motif) = backend.property_ops().get_motif_hints(win) {
+            if let Some(client) = self.state.clients.get_mut(client_key) {
+                if motif.decorations_none() {
+                    client.state.no_decorations = true;
+                    client.geometry.border_w = 0;
+                }
+            }
+        }
+    }
+
+    pub(crate) fn apply_gtk_frame_extents(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+    ) {
+        let win = match self.state.clients.get(client_key) {
+            Some(c) => c.win,
+            None => return,
+        };
+        if backend.property_ops().get_gtk_frame_extents(win).is_some() {
+            if let Some(client) = self.state.clients.get_mut(client_key) {
+                client.state.no_decorations = true;
+                client.geometry.border_w = 0;
+            }
+        }
+    }
+
+    pub(crate) fn set_initial_frame_extents(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+    ) {
+        let (win, bw) = match self.state.clients.get(client_key) {
+            Some(c) => (c.win, c.geometry.border_w),
+            None => return,
+        };
+        let _ = backend
+            .property_ops()
+            .set_frame_extents(win, bw as u32, bw as u32, bw as u32, bw as u32);
+    }
+
+    pub(crate) fn set_initial_allowed_actions(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+    ) {
+        let win = match self.state.clients.get(client_key) {
+            Some(c) => c.win,
+            None => return,
+        };
+        let actions = [
+            AllowedAction::Move,
+            AllowedAction::Resize,
+            AllowedAction::Minimize,
+            AllowedAction::MaximizeHorz,
+            AllowedAction::MaximizeVert,
+            AllowedAction::Fullscreen,
+            AllowedAction::Close,
+            AllowedAction::Stick,
+            AllowedAction::Above,
+            AllowedAction::Below,
+        ];
+        let _ = backend.property_ops().set_allowed_actions(win, &actions);
+    }
+
+    pub(crate) fn read_sync_counter(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+    ) {
+        let win = match self.state.clients.get(client_key) {
+            Some(c) => c.win,
+            None => return,
+        };
+        if let Some(counter) = backend.property_ops().get_sync_counter(win) {
+            if let Some(client) = self.state.clients.get_mut(client_key) {
+                client.state.sync_counter = Some(counter);
+                client.state.sync_value = 0;
+            }
+        }
     }
 }

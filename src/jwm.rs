@@ -175,6 +175,14 @@ pub struct Jwm {
     /// Event coalescer for reducing high-frequency updates
     pub event_coalescer: crate::backend::x11::event_coalescer::EventCoalescer,
 
+    /// _NET_WM_PING: pending pings awaiting pong response
+    pub pending_pings: HashMap<WindowId, std::time::Instant>,
+    /// Windows that failed to respond to ping within timeout
+    pub unresponsive_windows: HashSet<WindowId>,
+    /// Last time we sent pings to visible windows
+    pub last_ping_time: Option<std::time::Instant>,
+    /// Last user interaction timestamp (for _NET_WM_USER_TIME focus-steal prevention)
+    pub last_user_activity_time: u32,
 }
 
 
@@ -460,6 +468,10 @@ impl Jwm {
             last_night_light_update: None,
             features: FeatureStates::new(),
             event_coalescer: crate::backend::x11::event_coalescer::EventCoalescer::new(),
+            pending_pings: HashMap::new(),
+            unresponsive_windows: HashSet::new(),
+            last_ping_time: None,
+            last_user_activity_time: 0,
         };
         if let Ok((x, y)) = backend.input_ops().get_pointer_position() {
             jwm.last_mouse_root = (x, y);

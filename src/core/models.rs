@@ -95,6 +95,17 @@ pub struct ClientState {
     pub is_sticky: bool,
     pub is_pip: bool,
     pub is_dock: bool,
+    pub is_maximized_vert: bool,
+    pub is_maximized_horz: bool,
+    pub is_hidden: bool,
+    pub is_above: bool,
+    pub is_below: bool,
+    pub demands_attention: bool,
+    pub skip_taskbar: bool,
+    pub skip_pager: bool,
+    pub no_decorations: bool,
+    pub sync_counter: Option<u32>,
+    pub sync_value: u64,
 
     pub dock_layer_info: Option<LayerSurfaceInfo>,
 }

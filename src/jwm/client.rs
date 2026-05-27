@@ -442,6 +442,11 @@ impl Jwm {
         self.updatewindowtype(backend, client_key);
         self.updatesizehints(backend, client_key)?;
         self.updatewmhints(backend, client_key);
+        self.apply_motif_hints(backend, client_key);
+        self.apply_gtk_frame_extents(backend, client_key);
+        self.set_initial_frame_extents(backend, client_key);
+        self.set_initial_allowed_actions(backend, client_key);
+        self.read_sync_counter(backend, client_key);
 
         self.attach_back(client_key);
         self.attachstack(client_key);
@@ -666,6 +671,10 @@ impl Jwm {
             | EventMaskBits::POINTER_MOTION)
             .bits();
         backend.window_ops().change_event_mask(win, mask)?;
+        let _ = backend.window_ops().shape_select_input(win);
+        if backend.window_ops().get_window_shaped(win) {
+            backend.compositor_set_window_shaped(win, true);
+        }
         info!(
             "[register_client_events] Events registered for window {:?}",
             win

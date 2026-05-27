@@ -5,6 +5,7 @@ use crate::backend::api::EventHandler;
 use crate::backend::api::EwmhFeature;
 use crate::backend::api::Geometry;
 use crate::backend::api::HitTarget;
+use crate::backend::api::PropertyKind;
 use crate::backend::api::ResizeEdge;
 use crate::backend::common_define::EventMaskBits;
 use crate::backend::common_define::StdCursorKind;
@@ -50,6 +51,7 @@ pub struct X11LoopData<'a> {
 pub struct X11Backend {
     conn: Arc<RustConnection>,
     screen: Screen,
+    screen_num: usize,
     root: WindowId,
     root_x11: u32,
     ids: X11IdRegistry,
@@ -73,6 +75,8 @@ pub struct X11Backend {
 
     compositor: Option<super::compositor::Compositor>,
 
+    systray: Option<super::systray::SystemTray<RustConnection>>,
+
     benchmark_auto_exit: bool,
 }
 
@@ -94,6 +98,56 @@ impl X11Backend {
         env::var("JWM_DEBUG_DRAG")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(true)
+    }
+
+    fn systray_handle_event(&mut self, ev: &BackendEvent) -> bool {
+        let systray = match self.systray.as_mut() {
+            Some(s) => s,
+            None => return false,
+        };
+        match ev {
+            BackendEvent::ClientMessage { window: _, type_, data, .. } => {
+                if *type_ == u32::from(self.atoms._NET_SYSTEM_TRAY_OPCODE) {
+                    return systray.handle_client_message(self.root_x11, data);
+                }
+                false
+            }
+            BackendEvent::WindowDestroyed(win) => {
+                let x11w = self.ids.x11(*win).unwrap_or(0);
+                if systray.is_tray_icon(x11w) {
+                    systray.handle_destroy(x11w);
+                    return true;
+                }
+                false
+            }
+            BackendEvent::WindowUnmapped(win) => {
+                let x11w = self.ids.x11(*win).unwrap_or(0);
+                if systray.is_tray_icon(x11w) {
+                    systray.handle_unmap(x11w);
+                    return true;
+                }
+                false
+            }
+            BackendEvent::WindowMapped(win) => {
+                let x11w = self.ids.x11(*win).unwrap_or(0);
+                if systray.is_tray_icon(x11w) {
+                    systray.handle_map(x11w);
+                    return true;
+                }
+                false
+            }
+            BackendEvent::PropertyChanged { window, kind } => {
+                if matches!(kind, PropertyKind::Other) {
+                    let x11w = self.ids.x11(*window).unwrap_or(0);
+                    if systray.is_tray_icon(x11w) {
+                        systray.handle_xembed_info_change(x11w);
+                        return true;
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
     }
 
     fn enrich_event_with_output(&self, mut ev: BackendEvent) -> BackendEvent {
@@ -252,6 +306,7 @@ impl X11Backend {
         let mut backend = Self {
             conn,
             screen,
+            screen_num,
             root,
             root_x11,
             ids,
@@ -268,8 +323,36 @@ impl X11Backend {
             _init_event_source: Some(event_source),
             interaction: None,
             compositor,
+            systray: None,
             benchmark_auto_exit: false,
         };
+
+        // Initialize system tray
+        let screen_num = backend.screen_num;
+        match super::systray::SystemTray::new(
+            Arc::clone(&backend.conn),
+            backend.atoms,
+            backend.root_x11,
+            screen_num,
+        ) {
+            Ok(mut tray) => {
+                match tray.acquire_selection() {
+                    Ok(true) => {
+                        log::info!("[systray] Acquired system tray selection");
+                        backend.systray = Some(tray);
+                    }
+                    Ok(false) => {
+                        log::info!("[systray] Another tray owner exists, skipping");
+                    }
+                    Err(e) => {
+                        log::warn!("[systray] Failed to acquire selection: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("[systray] Failed to create system tray: {}", e);
+            }
+        }
 
         backend.compositor_auto_configure_hdr();
         Ok(backend)
@@ -1134,6 +1217,15 @@ impl Backend for X11Backend {
                 EwmhFeature::WmState,
                 EwmhFeature::SupportingWmCheck,
                 EwmhFeature::WmStateFullscreen,
+                EwmhFeature::WmStateMaximizedVert,
+                EwmhFeature::WmStateMaximizedHorz,
+                EwmhFeature::WmStateHidden,
+                EwmhFeature::WmStateAbove,
+                EwmhFeature::WmStateBelow,
+                EwmhFeature::WmStateDemandsAttention,
+                EwmhFeature::WmStateSticky,
+                EwmhFeature::WmStateSkipTaskbar,
+                EwmhFeature::WmStateSkipPager,
                 EwmhFeature::ClientList,
                 EwmhFeature::ClientInfo,
                 EwmhFeature::WmWindowType,
@@ -1143,6 +1235,16 @@ impl Backend for X11Backend {
                 EwmhFeature::DesktopNames,
                 EwmhFeature::DesktopViewport,
                 EwmhFeature::WmMoveResize,
+                EwmhFeature::FrameExtents,
+                EwmhFeature::WmAllowedActions,
+                EwmhFeature::Workarea,
+                EwmhFeature::CloseWindow,
+                EwmhFeature::RestackWindow,
+                EwmhFeature::WmPing,
+                EwmhFeature::WmUserTime,
+                EwmhFeature::WmIcon,
+                EwmhFeature::WmBypassCompositor,
+                EwmhFeature::WmOpaqueRegion,
             ];
             facade.declare_supported(&supported)?;
         }
@@ -1152,6 +1254,12 @@ impl Backend for X11Backend {
     fn cleanup(&mut self) -> Result<(), BackendError> {
         // Drop compositor before other X11 resources
         self.compositor.take();
+
+        // Clean up system tray
+        if let Some(ref tray) = self.systray {
+            tray.cleanup();
+        }
+        self.systray.take();
 
         // Free X11 resources
         let _ = self.color_allocator.free_all_theme_pixels();
@@ -1429,6 +1537,10 @@ impl Backend for X11Backend {
             .insert_source(x11_source, |event, _, data| {
                 // Compositor hooks: track window lifecycle and damage
                 data.backend.compositor_handle_event(&event);
+                // Systray intercept: handle tray-related events internally
+                if data.backend.systray_handle_event(&event) {
+                    return;
+                }
                 let event = data.backend.enrich_event_with_output(event);
                 if let Err(e) = data.handler.handle_event(data.backend, event) {
                     log::error!("Error handling X11 event: {:?}", e);
@@ -2374,6 +2486,18 @@ mod event_source {
                 PropertyKind::Protocols
             } else if atom == self.atoms._NET_WM_STRUT || atom == self.atoms._NET_WM_STRUT_PARTIAL {
                 PropertyKind::Strut
+            } else if atom == self.atoms._MOTIF_WM_HINTS {
+                PropertyKind::MotifHints
+            } else if atom == self.atoms._GTK_FRAME_EXTENTS {
+                PropertyKind::GtkFrameExtents
+            } else if atom == self.atoms._NET_WM_BYPASS_COMPOSITOR {
+                PropertyKind::BypassCompositor
+            } else if atom == self.atoms._NET_WM_OPAQUE_REGION {
+                PropertyKind::OpaqueRegion
+            } else if atom == self.atoms._NET_WM_ICON {
+                PropertyKind::NetWmIcon
+            } else if atom == self.atoms._NET_WM_USER_TIME {
+                PropertyKind::UserTime
             } else {
                 PropertyKind::Other
             }
@@ -2385,6 +2509,32 @@ mod event_source {
                 1 => Some(NetWmAction::Add),
                 2 => Some(NetWmAction::Toggle),
                 _ => None,
+            }
+        }
+
+        fn atom_to_net_wm_state(&self, atom: u32) -> Option<NetWmState> {
+            if atom == self.atoms._NET_WM_STATE_FULLSCREEN {
+                Some(NetWmState::Fullscreen)
+            } else if atom == self.atoms._NET_WM_STATE_MAXIMIZED_VERT {
+                Some(NetWmState::MaximizedVert)
+            } else if atom == self.atoms._NET_WM_STATE_MAXIMIZED_HORZ {
+                Some(NetWmState::MaximizedHorz)
+            } else if atom == self.atoms._NET_WM_STATE_HIDDEN {
+                Some(NetWmState::Hidden)
+            } else if atom == self.atoms._NET_WM_STATE_ABOVE {
+                Some(NetWmState::Above)
+            } else if atom == self.atoms._NET_WM_STATE_BELOW {
+                Some(NetWmState::Below)
+            } else if atom == self.atoms._NET_WM_STATE_DEMANDS_ATTENTION {
+                Some(NetWmState::DemandsAttention)
+            } else if atom == self.atoms._NET_WM_STATE_STICKY {
+                Some(NetWmState::Sticky)
+            } else if atom == self.atoms._NET_WM_STATE_SKIP_TASKBAR {
+                Some(NetWmState::SkipTaskbar)
+            } else if atom == self.atoms._NET_WM_STATE_SKIP_PAGER {
+                Some(NetWmState::SkipPager)
+            } else {
+                None
             }
         }
 
@@ -2554,17 +2704,22 @@ mod event_source {
                         let window = self.ids.intern(e.window);
                         if let Some(action) = Self::map_net_wm_action(data32[0]) {
                             for &atom in &[data32[1], data32[2]] {
-                                if atom == self.atoms._NET_WM_STATE_FULLSCREEN {
+                                if let Some(state) = self.atom_to_net_wm_state(atom) {
                                     return Some(BackendEvent::WindowStateRequest {
                                         window,
                                         action,
-                                        state: NetWmState::Fullscreen,
+                                        state,
                                     });
                                 }
                             }
                         }
                     }
                     if e.type_ == self.atoms._NET_ACTIVE_WINDOW {
+                        return Some(BackendEvent::ActiveWindowMessage {
+                            window: self.ids.intern(e.window),
+                        });
+                    }
+                    if e.type_ == self.atoms._NET_CLOSE_WINDOW {
                         return Some(BackendEvent::ActiveWindowMessage {
                             window: self.ids.intern(e.window),
                         });
@@ -2577,6 +2732,14 @@ mod event_source {
                             direction,
                             button,
                         });
+                    }
+                    // Detect _NET_WM_PING pong response (sent to root)
+                    if e.type_ == self.atoms.WM_PROTOCOLS && e.format == 32 {
+                        if data32[0] == self.atoms._NET_WM_PING {
+                            return Some(BackendEvent::PingResponse {
+                                window: self.ids.intern(data32[2]),
+                            });
+                        }
                     }
                     Some(BackendEvent::ClientMessage {
                         window: self.ids.intern(e.window),
@@ -2608,6 +2771,10 @@ mod event_source {
                     window: self.ids.intern(e.window),
                     serial: e.serial,
                     pixmap: e.pixmap,
+                }),
+                XEvent::ShapeNotify(e) => Some(BackendEvent::ShapeChanged {
+                    window: self.ids.intern(e.affected_window),
+                    shaped: e.shaped,
                 }),
                 XEvent::Unknown(_) => None,
                 _ => None,
@@ -2746,6 +2913,15 @@ mod ewmh_facade {
                 EwmhFeature::WmState => self.atoms._NET_WM_STATE,
                 EwmhFeature::SupportingWmCheck => self.atoms._NET_SUPPORTING_WM_CHECK,
                 EwmhFeature::WmStateFullscreen => self.atoms._NET_WM_STATE_FULLSCREEN,
+                EwmhFeature::WmStateMaximizedVert => self.atoms._NET_WM_STATE_MAXIMIZED_VERT,
+                EwmhFeature::WmStateMaximizedHorz => self.atoms._NET_WM_STATE_MAXIMIZED_HORZ,
+                EwmhFeature::WmStateHidden => self.atoms._NET_WM_STATE_HIDDEN,
+                EwmhFeature::WmStateAbove => self.atoms._NET_WM_STATE_ABOVE,
+                EwmhFeature::WmStateBelow => self.atoms._NET_WM_STATE_BELOW,
+                EwmhFeature::WmStateDemandsAttention => self.atoms._NET_WM_STATE_DEMANDS_ATTENTION,
+                EwmhFeature::WmStateSticky => self.atoms._NET_WM_STATE_STICKY,
+                EwmhFeature::WmStateSkipTaskbar => self.atoms._NET_WM_STATE_SKIP_TASKBAR,
+                EwmhFeature::WmStateSkipPager => self.atoms._NET_WM_STATE_SKIP_PAGER,
                 EwmhFeature::ClientList => self.atoms._NET_CLIENT_LIST,
                 EwmhFeature::ClientInfo => self.atoms._NET_CLIENT_INFO,
                 EwmhFeature::WmWindowType => self.atoms._NET_WM_WINDOW_TYPE,
@@ -2755,6 +2931,16 @@ mod ewmh_facade {
                 EwmhFeature::DesktopNames => self.atoms._NET_DESKTOP_NAMES,
                 EwmhFeature::DesktopViewport => self.atoms._NET_DESKTOP_VIEWPORT,
                 EwmhFeature::WmMoveResize => self.atoms._NET_WM_MOVERESIZE,
+                EwmhFeature::FrameExtents => self.atoms._NET_FRAME_EXTENTS,
+                EwmhFeature::WmAllowedActions => self.atoms._NET_WM_ALLOWED_ACTIONS,
+                EwmhFeature::Workarea => self.atoms._NET_WORKAREA,
+                EwmhFeature::CloseWindow => self.atoms._NET_CLOSE_WINDOW,
+                EwmhFeature::RestackWindow => self.atoms._NET_RESTACK_WINDOW,
+                EwmhFeature::WmPing => self.atoms._NET_WM_PING,
+                EwmhFeature::WmUserTime => self.atoms._NET_WM_USER_TIME,
+                EwmhFeature::WmIcon => self.atoms._NET_WM_ICON,
+                EwmhFeature::WmBypassCompositor => self.atoms._NET_WM_BYPASS_COMPOSITOR,
+                EwmhFeature::WmOpaqueRegion => self.atoms._NET_WM_OPAQUE_REGION,
             }
         }
     }
@@ -2935,6 +3121,22 @@ mod ewmh_facade {
                 &viewports,
             )?;
 
+            Ok(())
+        }
+
+        fn set_workarea(&self, areas: &[(i32, i32, u32, u32)]) -> Result<(), BackendError> {
+            let r = self.ids.x11(self.root)?;
+            let data: Vec<u32> = areas
+                .iter()
+                .flat_map(|&(x, y, w, h)| [x as u32, y as u32, w, h])
+                .collect();
+            self.conn.change_property32(
+                PropMode::REPLACE,
+                r,
+                self.atoms._NET_WORKAREA,
+                AtomEnum::CARDINAL,
+                &data,
+            )?;
             Ok(())
         }
     }
@@ -3643,6 +3845,63 @@ mod output_ops {
         fn invalidate_output_cache(&self) {
             self.invalidate_cache();
         }
+
+        fn set_gamma_ramp(
+            &self,
+            output: OutputId,
+            red: &[u16],
+            green: &[u16],
+            blue: &[u16],
+        ) -> Result<(), crate::backend::error::BackendError> {
+            let crtc = self.output_to_crtc(output.0 as u32);
+            if let Some(crtc_id) = crtc {
+                self.conn
+                    .randr_set_crtc_gamma(crtc_id, red, green, blue)
+                    .map_err(|e| {
+                        crate::backend::error::BackendError::Message(e.to_string())
+                    })?;
+                self.conn.flush().map_err(|e| {
+                    crate::backend::error::BackendError::Message(e.to_string())
+                })?;
+            }
+            Ok(())
+        }
+
+        fn get_gamma_ramp(
+            &self,
+            output: OutputId,
+        ) -> Option<(Vec<u16>, Vec<u16>, Vec<u16>)> {
+            let crtc = self.output_to_crtc(output.0 as u32)?;
+            let gamma_size = self
+                .conn
+                .randr_get_crtc_gamma_size(crtc)
+                .ok()?
+                .reply()
+                .ok()?;
+            let reply = self
+                .conn
+                .randr_get_crtc_gamma(crtc)
+                .ok()?
+                .reply()
+                .ok()?;
+            let _ = gamma_size;
+            Some((reply.red.to_vec(), reply.green.to_vec(), reply.blue.to_vec()))
+        }
+    }
+
+    impl<C: Connection + Send + Sync + 'static> X11OutputOps<C> {
+        fn output_to_crtc(&self, output_id: u32) -> Option<u32> {
+            let resources = self.conn.randr_get_screen_resources(self.root).ok()?.reply().ok()?;
+            for &output in &resources.outputs {
+                if output == output_id {
+                    let info = self.conn.randr_get_output_info(output, 0).ok()?.reply().ok()?;
+                    if info.crtc != 0 {
+                        return Some(info.crtc);
+                    }
+                }
+            }
+            None
+        }
     }
 }
 
@@ -3651,7 +3910,10 @@ mod property_ops {
     use crate::backend::api::NormalHints;
     use crate::backend::api::StrutPartial;
     use crate::backend::api::WmHints;
-    use crate::backend::api::{PropertyOps as PropertyOpsTrait, WindowType};
+    use crate::backend::api::{
+        AllowedAction, IconData, MotifWmHints, NetWmState, PropertyOps as PropertyOpsTrait,
+        WindowType,
+    };
     use crate::backend::common_define::WindowId;
     use crate::backend::error::BackendError;
     use crate::backend::x11::Atoms;
@@ -3659,6 +3921,7 @@ mod property_ops {
     use x11rb::connection::Connection;
     use x11rb::properties::WmSizeHints;
     use x11rb::protocol::xproto::*;
+    use x11rb::x11_utils::Serialize;
     use x11rb::wrapper::ConnectionExt as _;
 
     pub(super) struct X11PropertyOps<C: Connection> {
@@ -4180,6 +4443,333 @@ mod property_ops {
                 None
             }
         }
+
+        fn set_net_wm_state_flag(
+            &self,
+            win: WindowId,
+            state: NetWmState,
+            on: bool,
+        ) -> Result<(), BackendError> {
+            let atom = self.net_wm_state_to_atom(state);
+            if on {
+                self.add_net_wm_state_atom(win, atom)
+            } else {
+                self.remove_net_wm_state_atom(win, atom)
+            }
+        }
+
+        fn set_frame_extents(
+            &self,
+            win: WindowId,
+            left: u32,
+            right: u32,
+            top: u32,
+            bottom: u32,
+        ) -> Result<(), BackendError> {
+            let w = self.ids.x11(win)?;
+            self.conn.change_property32(
+                PropMode::REPLACE,
+                w,
+                self.atoms._NET_FRAME_EXTENTS,
+                AtomEnum::CARDINAL,
+                &[left, right, top, bottom],
+            )?;
+            Ok(())
+        }
+
+        fn set_allowed_actions(
+            &self,
+            win: WindowId,
+            actions: &[AllowedAction],
+        ) -> Result<(), BackendError> {
+            let w = self.ids.x11(win)?;
+            let atoms: Vec<u32> = actions
+                .iter()
+                .map(|a| self.allowed_action_to_atom(*a))
+                .collect();
+            self.conn.change_property32(
+                PropMode::REPLACE,
+                w,
+                self.atoms._NET_WM_ALLOWED_ACTIONS,
+                AtomEnum::ATOM,
+                &atoms,
+            )?;
+            Ok(())
+        }
+
+        fn send_ping(&self, win: WindowId, timestamp: u32) -> Result<bool, BackendError> {
+            let w = self.ids.x11(win)?;
+            let reply = self
+                .conn
+                .get_property(false, w, self.atoms.WM_PROTOCOLS, AtomEnum::ATOM, 0, 1024)?
+                .reply()?;
+            let supports_ping = reply
+                .value32()
+                .into_iter()
+                .flatten()
+                .any(|a| a == self.atoms._NET_WM_PING);
+            if supports_ping {
+                let event = ClientMessageEvent::new(
+                    32,
+                    w,
+                    self.atoms.WM_PROTOCOLS,
+                    [self.atoms._NET_WM_PING, timestamp, w, 0, 0],
+                );
+                self.conn
+                    .send_event(false, w, EventMask::NO_EVENT, event.serialize())?;
+                self.conn.flush()?;
+                return Ok(true);
+            }
+            Ok(false)
+        }
+
+        fn get_user_time(&self, win: WindowId) -> Option<u32> {
+            let w = self.ids.x11(win).ok()?;
+            let reply = self
+                .conn
+                .get_property(false, w, self.atoms._NET_WM_USER_TIME, AtomEnum::CARDINAL, 0, 1)
+                .ok()?
+                .reply()
+                .ok()?;
+            if reply.format == 32 {
+                reply.value32()?.next()
+            } else {
+                None
+            }
+        }
+
+        fn get_net_wm_icon(&self, win: WindowId) -> Option<Vec<IconData>> {
+            let w = self.ids.x11(win).ok()?;
+            let reply = self
+                .conn
+                .get_property(
+                    false,
+                    w,
+                    self.atoms._NET_WM_ICON,
+                    AtomEnum::CARDINAL,
+                    0,
+                    u32::MAX,
+                )
+                .ok()?
+                .reply()
+                .ok()?;
+            if reply.format != 32 {
+                return None;
+            }
+            let data: Vec<u32> = reply.value32()?.collect();
+            let mut icons = Vec::new();
+            let mut offset = 0;
+            while offset + 2 < data.len() {
+                let width = data[offset];
+                let height = data[offset + 1];
+                let pixel_count = (width as usize) * (height as usize);
+                offset += 2;
+                if offset + pixel_count > data.len() {
+                    break;
+                }
+                let mut rgba = Vec::with_capacity(pixel_count * 4);
+                for &argb in &data[offset..offset + pixel_count] {
+                    let a = ((argb >> 24) & 0xFF) as u8;
+                    let r = ((argb >> 16) & 0xFF) as u8;
+                    let g = ((argb >> 8) & 0xFF) as u8;
+                    let b = (argb & 0xFF) as u8;
+                    rgba.extend_from_slice(&[r, g, b, a]);
+                }
+                icons.push(IconData {
+                    width,
+                    height,
+                    data: rgba,
+                });
+                offset += pixel_count;
+            }
+            if icons.is_empty() {
+                None
+            } else {
+                Some(icons)
+            }
+        }
+
+        fn get_bypass_compositor(&self, win: WindowId) -> Option<u32> {
+            let w = self.ids.x11(win).ok()?;
+            let reply = self
+                .conn
+                .get_property(
+                    false,
+                    w,
+                    self.atoms._NET_WM_BYPASS_COMPOSITOR,
+                    AtomEnum::CARDINAL,
+                    0,
+                    1,
+                )
+                .ok()?
+                .reply()
+                .ok()?;
+            if reply.format == 32 {
+                reply.value32()?.next()
+            } else {
+                None
+            }
+        }
+
+        fn get_opaque_region(&self, win: WindowId) -> Option<Vec<(i32, i32, u32, u32)>> {
+            let w = self.ids.x11(win).ok()?;
+            let reply = self
+                .conn
+                .get_property(
+                    false,
+                    w,
+                    self.atoms._NET_WM_OPAQUE_REGION,
+                    AtomEnum::CARDINAL,
+                    0,
+                    u32::MAX,
+                )
+                .ok()?
+                .reply()
+                .ok()?;
+            if reply.format != 32 {
+                return None;
+            }
+            let data: Vec<u32> = reply.value32()?.collect();
+            if data.len() < 4 || data.len() % 4 != 0 {
+                return None;
+            }
+            let rects: Vec<(i32, i32, u32, u32)> = data
+                .chunks_exact(4)
+                .map(|c| (c[0] as i32, c[1] as i32, c[2], c[3]))
+                .collect();
+            Some(rects)
+        }
+
+        fn get_motif_hints(&self, win: WindowId) -> Option<MotifWmHints> {
+            let w = self.ids.x11(win).ok()?;
+            let reply = self
+                .conn
+                .get_property(
+                    false,
+                    w,
+                    self.atoms._MOTIF_WM_HINTS,
+                    AtomEnum::ANY,
+                    0,
+                    5,
+                )
+                .ok()?
+                .reply()
+                .ok()?;
+            if reply.format != 32 {
+                return None;
+            }
+            let data: Vec<u32> = reply.value32()?.collect();
+            if data.len() < 5 {
+                return None;
+            }
+            Some(MotifWmHints {
+                flags: data[0],
+                functions: data[1],
+                decorations: data[2],
+                input_mode: data[3] as i32,
+                status: data[4],
+            })
+        }
+
+        fn get_gtk_frame_extents(&self, win: WindowId) -> Option<[u32; 4]> {
+            let w = self.ids.x11(win).ok()?;
+            let reply = self
+                .conn
+                .get_property(
+                    false,
+                    w,
+                    self.atoms._GTK_FRAME_EXTENTS,
+                    AtomEnum::CARDINAL,
+                    0,
+                    4,
+                )
+                .ok()?
+                .reply()
+                .ok()?;
+            if reply.format != 32 {
+                return None;
+            }
+            let data: Vec<u32> = reply.value32()?.collect();
+            if data.len() < 4 {
+                return None;
+            }
+            Some([data[0], data[1], data[2], data[3]])
+        }
+
+        fn get_sync_counter(&self, win: WindowId) -> Option<u32> {
+            let w = self.ids.x11(win).ok()?;
+            let reply = self
+                .conn
+                .get_property(
+                    false,
+                    w,
+                    self.atoms._NET_WM_SYNC_REQUEST_COUNTER,
+                    AtomEnum::CARDINAL,
+                    0,
+                    1,
+                )
+                .ok()?
+                .reply()
+                .ok()?;
+            if reply.format != 32 {
+                return None;
+            }
+            let data: Vec<u32> = reply.value32()?.collect();
+            data.first().copied()
+        }
+
+        fn send_sync_request(&self, win: WindowId, counter: u32, value: u64) -> Result<(), BackendError> {
+            let w = self.ids.x11(win)?;
+            let lo = (value & 0xFFFF_FFFF) as u32;
+            let hi = (value >> 32) as u32;
+            let event = ClientMessageEvent::new(
+                32,
+                w,
+                self.atoms.WM_PROTOCOLS,
+                [
+                    self.atoms._NET_WM_SYNC_REQUEST,
+                    x11rb::CURRENT_TIME,
+                    lo,
+                    hi,
+                    0,
+                ],
+            );
+            self.conn.send_event(false, w, EventMask::NO_EVENT, event.serialize())?;
+            self.conn.flush()?;
+            Ok(())
+        }
+    }
+
+    impl<C: Connection + Send + Sync + 'static> X11PropertyOps<C> {
+        fn net_wm_state_to_atom(&self, state: NetWmState) -> u32 {
+            match state {
+                NetWmState::Fullscreen => self.atoms._NET_WM_STATE_FULLSCREEN,
+                NetWmState::MaximizedVert => self.atoms._NET_WM_STATE_MAXIMIZED_VERT,
+                NetWmState::MaximizedHorz => self.atoms._NET_WM_STATE_MAXIMIZED_HORZ,
+                NetWmState::Hidden => self.atoms._NET_WM_STATE_HIDDEN,
+                NetWmState::Above => self.atoms._NET_WM_STATE_ABOVE,
+                NetWmState::Below => self.atoms._NET_WM_STATE_BELOW,
+                NetWmState::DemandsAttention => self.atoms._NET_WM_STATE_DEMANDS_ATTENTION,
+                NetWmState::Sticky => self.atoms._NET_WM_STATE_STICKY,
+                NetWmState::SkipTaskbar => self.atoms._NET_WM_STATE_SKIP_TASKBAR,
+                NetWmState::SkipPager => self.atoms._NET_WM_STATE_SKIP_PAGER,
+            }
+        }
+
+        fn allowed_action_to_atom(&self, action: AllowedAction) -> u32 {
+            match action {
+                AllowedAction::Move => self.atoms._NET_WM_ACTION_MOVE,
+                AllowedAction::Resize => self.atoms._NET_WM_ACTION_RESIZE,
+                AllowedAction::Minimize => self.atoms._NET_WM_ACTION_MINIMIZE,
+                AllowedAction::MaximizeHorz => self.atoms._NET_WM_ACTION_MAXIMIZE_HORZ,
+                AllowedAction::MaximizeVert => self.atoms._NET_WM_ACTION_MAXIMIZE_VERT,
+                AllowedAction::Fullscreen => self.atoms._NET_WM_ACTION_FULLSCREEN,
+                AllowedAction::Close => self.atoms._NET_WM_ACTION_CLOSE,
+                AllowedAction::Stick => self.atoms._NET_WM_ACTION_STICK,
+                AllowedAction::Above => self.atoms._NET_WM_ACTION_ABOVE,
+                AllowedAction::Below => self.atoms._NET_WM_ACTION_BELOW,
+            }
+        }
     }
 }
 
@@ -4616,6 +5206,28 @@ mod window_ops {
             self.conn
                 .ungrab_button(ButtonIndex::ANY, w, ModMask::ANY.into())?;
             Ok(())
+        }
+
+        fn shape_select_input(&self, win: WindowId) -> Result<(), BackendError> {
+            use x11rb::protocol::shape;
+            let w = self.ids.x11(win)?;
+            shape::select_input(&*self.conn, w, true)?;
+            Ok(())
+        }
+
+        fn get_window_shaped(&self, win: WindowId) -> bool {
+            use x11rb::protocol::shape;
+            let w = match self.ids.x11(win) {
+                Ok(w) => w,
+                Err(_) => return false,
+            };
+            match shape::query_extents(&*self.conn, w) {
+                Ok(cookie) => match cookie.reply() {
+                    Ok(reply) => reply.bounding_shaped,
+                    Err(_) => false,
+                },
+                Err(_) => false,
+            }
         }
     }
 }

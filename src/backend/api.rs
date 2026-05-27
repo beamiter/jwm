@@ -90,6 +90,15 @@ pub struct Capabilities {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetWmState {
     Fullscreen,
+    MaximizedVert,
+    MaximizedHorz,
+    Hidden,
+    Above,
+    Below,
+    DemandsAttention,
+    Sticky,
+    SkipTaskbar,
+    SkipPager,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +169,12 @@ pub enum PropertyKind {
     WindowType,
     Protocols,
     Strut,
+    MotifHints,
+    GtkFrameExtents,
+    BypassCompositor,
+    OpaqueRegion,
+    NetWmIcon,
+    UserTime,
     Other,
 }
 
@@ -289,6 +304,13 @@ pub enum BackendEvent {
     ActiveWindowMessage {
         window: WindowId,
     },
+    PingResponse {
+        window: WindowId,
+    },
+    ShapeChanged {
+        window: WindowId,
+        shaped: bool,
+    },
     ClientMessage {
         window: WindowId,
         type_: u32,
@@ -417,6 +439,14 @@ pub trait WindowOps: Send {
         }
         Ok(())
     }
+
+    fn shape_select_input(&self, _win: WindowId) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    fn get_window_shaped(&self, _win: WindowId) -> bool {
+        false
+    }
 }
 
 pub trait InputOps: Send {
@@ -508,6 +538,72 @@ pub trait PropertyOps: Send {
     fn get_window_pid(&self, _win: WindowId) -> Option<u32> {
         None
     }
+
+    // --- Phase 1: EWMH compliance ---
+
+    fn set_net_wm_state_flag(
+        &self,
+        _win: WindowId,
+        _state: NetWmState,
+        _on: bool,
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    fn set_frame_extents(
+        &self,
+        _win: WindowId,
+        _left: u32,
+        _right: u32,
+        _top: u32,
+        _bottom: u32,
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    fn set_allowed_actions(
+        &self,
+        _win: WindowId,
+        _actions: &[AllowedAction],
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    fn send_ping(&self, _win: WindowId, _timestamp: u32) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
+    fn get_user_time(&self, _win: WindowId) -> Option<u32> {
+        None
+    }
+
+    fn get_net_wm_icon(&self, _win: WindowId) -> Option<Vec<IconData>> {
+        None
+    }
+
+    fn get_bypass_compositor(&self, _win: WindowId) -> Option<u32> {
+        None
+    }
+
+    fn get_opaque_region(&self, _win: WindowId) -> Option<Vec<(i32, i32, u32, u32)>> {
+        None
+    }
+
+    fn get_motif_hints(&self, _win: WindowId) -> Option<MotifWmHints> {
+        None
+    }
+
+    fn get_gtk_frame_extents(&self, _win: WindowId) -> Option<[u32; 4]> {
+        None
+    }
+
+    fn get_sync_counter(&self, _win: WindowId) -> Option<u32> {
+        None
+    }
+
+    fn send_sync_request(&self, _win: WindowId, _counter: u32, _value: u64) -> Result<(), BackendError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -545,6 +641,45 @@ pub struct NormalHints {
     pub max_aspect: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AllowedAction {
+    Move,
+    Resize,
+    Minimize,
+    MaximizeHorz,
+    MaximizeVert,
+    Fullscreen,
+    Close,
+    Stick,
+    Above,
+    Below,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MotifWmHints {
+    pub flags: u32,
+    pub functions: u32,
+    pub decorations: u32,
+    pub input_mode: i32,
+    pub status: u32,
+}
+
+impl MotifWmHints {
+    pub fn has_decorations_hint(&self) -> bool {
+        self.flags & 0x2 != 0
+    }
+    pub fn decorations_none(&self) -> bool {
+        self.has_decorations_hint() && self.decorations == 0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct IconData {
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<u8>,
+}
+
 pub trait OutputOps: Send {
     /// 获取当前所有连接的输出设备
     fn enumerate_outputs(&self) -> Vec<OutputInfo>;
@@ -555,6 +690,25 @@ pub trait OutputOps: Send {
 
     /// Invalidate cached output layout (no-op for backends that don't cache)
     fn invalidate_output_cache(&self) {}
+
+    /// Set hardware gamma ramp for an output (XRandR CRTC gamma)
+    fn set_gamma_ramp(
+        &self,
+        _output: OutputId,
+        _red: &[u16],
+        _green: &[u16],
+        _blue: &[u16],
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    /// Get current gamma ramp for an output
+    fn get_gamma_ramp(
+        &self,
+        _output: OutputId,
+    ) -> Option<(Vec<u16>, Vec<u16>, Vec<u16>)> {
+        None
+    }
 }
 
 pub trait KeyOps: Send {
@@ -583,6 +737,9 @@ pub trait EwmhFacade: Send {
     fn declare_supported(&self, features: &[EwmhFeature]) -> Result<(), BackendError>;
     fn reset_root_properties(&self) -> Result<(), BackendError>;
     fn set_desktop_info(&self, current: u32, total: u32, names: &[&str]) -> Result<(), BackendError>;
+    fn set_workarea(&self, _areas: &[(i32, i32, u32, u32)]) -> Result<(), BackendError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -593,6 +750,15 @@ pub enum EwmhFeature {
     WmState,
     SupportingWmCheck,
     WmStateFullscreen,
+    WmStateMaximizedVert,
+    WmStateMaximizedHorz,
+    WmStateHidden,
+    WmStateAbove,
+    WmStateBelow,
+    WmStateDemandsAttention,
+    WmStateSticky,
+    WmStateSkipTaskbar,
+    WmStateSkipPager,
     ClientList,
     ClientInfo,
     WmWindowType,
@@ -602,6 +768,16 @@ pub enum EwmhFeature {
     DesktopNames,
     DesktopViewport,
     WmMoveResize,
+    FrameExtents,
+    WmAllowedActions,
+    Workarea,
+    CloseWindow,
+    RestackWindow,
+    WmPing,
+    WmUserTime,
+    WmIcon,
+    WmBypassCompositor,
+    WmOpaqueRegion,
 }
 
 pub trait ColorAllocator: Send {

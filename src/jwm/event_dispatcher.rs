@@ -484,6 +484,13 @@ impl WMController for Jwm {
                 PropertyKind::Title => self.handle_title_change(backend, client_key),
                 PropertyKind::Class => self.handle_class_change(backend, client_key),
                 PropertyKind::WindowType => self.handle_window_type_change(backend, client_key),
+                PropertyKind::MotifHints => self.handle_motif_hints_change(backend, client_key),
+                PropertyKind::GtkFrameExtents => {
+                    self.handle_gtk_frame_extents_change(backend, client_key)
+                }
+                PropertyKind::BypassCompositor => {
+                    self.handle_bypass_compositor_change(backend, client_key)
+                }
                 _ => Ok(()),
             };
             if let Err(e) = res {
@@ -523,21 +530,166 @@ impl WMController for Jwm {
         action: NetWmAction,
         state: NetWmState,
     ) {
-        if matches!(state, NetWmState::Fullscreen) {
-            if let Some(ck) = self.wintoclient(win) {
-                let is_fullscreen = self
-                    .state
-                    .clients
-                    .get(ck)
-                    .map(|c| c.state.is_fullscreen)
-                    .unwrap_or(false);
-                let fullscreen = match action {
-                    NetWmAction::Add => true,
-                    NetWmAction::Remove => false,
-                    NetWmAction::Toggle => !is_fullscreen,
-                };
-                if let Err(e) = self.setfullscreen(backend, ck, fullscreen) {
-                    error!("Error handling WindowStateRequest: {:?}", e);
+        if let Some(ck) = self.wintoclient(win) {
+            match state {
+                NetWmState::Fullscreen => {
+                    let is_fullscreen = self
+                        .state
+                        .clients
+                        .get(ck)
+                        .map(|c| c.state.is_fullscreen)
+                        .unwrap_or(false);
+                    let fullscreen = match action {
+                        NetWmAction::Add => true,
+                        NetWmAction::Remove => false,
+                        NetWmAction::Toggle => !is_fullscreen,
+                    };
+                    if let Err(e) = self.setfullscreen(backend, ck, fullscreen) {
+                        error!("Error handling WindowStateRequest: {:?}", e);
+                    }
+                }
+                NetWmState::DemandsAttention => {
+                    if let Some(c) = self.state.clients.get_mut(ck) {
+                        let on = match action {
+                            NetWmAction::Add => true,
+                            NetWmAction::Remove => false,
+                            NetWmAction::Toggle => !c.state.demands_attention,
+                        };
+                        c.state.demands_attention = on;
+                        c.state.is_urgent = on;
+                        let _ = backend.property_ops().set_net_wm_state_flag(
+                            win,
+                            NetWmState::DemandsAttention,
+                            on,
+                        );
+                    }
+                }
+                NetWmState::Above => {
+                    if let Some(c) = self.state.clients.get_mut(ck) {
+                        let on = match action {
+                            NetWmAction::Add => true,
+                            NetWmAction::Remove => false,
+                            NetWmAction::Toggle => !c.state.is_above,
+                        };
+                        c.state.is_above = on;
+                        if on {
+                            c.state.is_below = false;
+                            let _ = backend.property_ops().set_net_wm_state_flag(
+                                win,
+                                NetWmState::Below,
+                                false,
+                            );
+                        }
+                        let _ =
+                            backend
+                                .property_ops()
+                                .set_net_wm_state_flag(win, NetWmState::Above, on);
+                    }
+                }
+                NetWmState::Below => {
+                    if let Some(c) = self.state.clients.get_mut(ck) {
+                        let on = match action {
+                            NetWmAction::Add => true,
+                            NetWmAction::Remove => false,
+                            NetWmAction::Toggle => !c.state.is_below,
+                        };
+                        c.state.is_below = on;
+                        if on {
+                            c.state.is_above = false;
+                            let _ = backend.property_ops().set_net_wm_state_flag(
+                                win,
+                                NetWmState::Above,
+                                false,
+                            );
+                        }
+                        let _ =
+                            backend
+                                .property_ops()
+                                .set_net_wm_state_flag(win, NetWmState::Below, on);
+                    }
+                }
+                NetWmState::Sticky => {
+                    if let Some(c) = self.state.clients.get_mut(ck) {
+                        let on = match action {
+                            NetWmAction::Add => true,
+                            NetWmAction::Remove => false,
+                            NetWmAction::Toggle => !c.state.is_sticky,
+                        };
+                        c.state.is_sticky = on;
+                        let _ = backend.property_ops().set_net_wm_state_flag(
+                            win,
+                            NetWmState::Sticky,
+                            on,
+                        );
+                    }
+                }
+                NetWmState::SkipTaskbar => {
+                    if let Some(c) = self.state.clients.get_mut(ck) {
+                        let on = match action {
+                            NetWmAction::Add => true,
+                            NetWmAction::Remove => false,
+                            NetWmAction::Toggle => !c.state.skip_taskbar,
+                        };
+                        c.state.skip_taskbar = on;
+                        let _ = backend.property_ops().set_net_wm_state_flag(
+                            win,
+                            NetWmState::SkipTaskbar,
+                            on,
+                        );
+                    }
+                }
+                NetWmState::SkipPager => {
+                    if let Some(c) = self.state.clients.get_mut(ck) {
+                        let on = match action {
+                            NetWmAction::Add => true,
+                            NetWmAction::Remove => false,
+                            NetWmAction::Toggle => !c.state.skip_pager,
+                        };
+                        c.state.skip_pager = on;
+                        let _ = backend.property_ops().set_net_wm_state_flag(
+                            win,
+                            NetWmState::SkipPager,
+                            on,
+                        );
+                    }
+                }
+                NetWmState::Hidden => {
+                    if let Some(c) = self.state.clients.get_mut(ck) {
+                        let on = match action {
+                            NetWmAction::Add => true,
+                            NetWmAction::Remove => false,
+                            NetWmAction::Toggle => !c.state.is_hidden,
+                        };
+                        c.state.is_hidden = on;
+                        let _ = backend.property_ops().set_net_wm_state_flag(
+                            win,
+                            NetWmState::Hidden,
+                            on,
+                        );
+                    }
+                }
+                NetWmState::MaximizedVert | NetWmState::MaximizedHorz => {
+                    if let Some(c) = self.state.clients.get_mut(ck) {
+                        let is_max = match state {
+                            NetWmState::MaximizedVert => c.state.is_maximized_vert,
+                            NetWmState::MaximizedHorz => c.state.is_maximized_horz,
+                            _ => false,
+                        };
+                        let on = match action {
+                            NetWmAction::Add => true,
+                            NetWmAction::Remove => false,
+                            NetWmAction::Toggle => !is_max,
+                        };
+                        match state {
+                            NetWmState::MaximizedVert => c.state.is_maximized_vert = on,
+                            NetWmState::MaximizedHorz => c.state.is_maximized_horz = on,
+                            _ => {}
+                        }
+                        let _ =
+                            backend
+                                .property_ops()
+                                .set_net_wm_state_flag(win, state, on);
+                    }
                 }
             }
         }
@@ -685,7 +837,10 @@ impl EventHandler for Jwm {
                 detail,
                 time,
                 ..
-            } => self.on_button_press(backend, target, state, detail, time),
+            } => {
+                self.last_user_activity_time = time;
+                self.on_button_press(backend, target, state, detail, time);
+            }
             BackendEvent::ButtonRelease { target, time } => {
                 self.on_button_release(backend, target, time)
             }
@@ -699,7 +854,10 @@ impl EventHandler for Jwm {
                 keycode,
                 state,
                 time,
-            } => self.on_key_press(backend, keycode, state, time),
+            } => {
+                self.last_user_activity_time = time;
+                self.on_key_press(backend, keycode, state, time);
+            }
             BackendEvent::KeyRelease {
                 keycode,
                 state,
@@ -773,8 +931,14 @@ impl EventHandler for Jwm {
             BackendEvent::ForeignToplevelSetMinimized(_win, _minimized) => {}
             BackendEvent::ForeignToplevelSetFullscreen(_win, _fullscreen) => {}
 
-            // 忽略或不需要显式处理的事件
-            BackendEvent::ClientMessage { .. } => { /* ClientMessage Generic */ }
+            BackendEvent::PingResponse { window } => {
+                self.handle_ping_response(window);
+            }
+            BackendEvent::ShapeChanged { window, shaped } => {
+                backend.compositor_set_window_shaped(window, shaped);
+            }
+            BackendEvent::ClientMessage { .. } => {}
+
         }
 
         backend.request_render();
@@ -792,6 +956,9 @@ impl EventHandler for Jwm {
         // self.check_config_reload(backend);
         self.flush_pending_bar_updates();
         self.tick_animations(backend);
+
+        // _NET_WM_PING: send pings every 2 seconds, check for timeouts
+        self.tick_ping_check(backend, now);
 
         // Poll pointer position when magnifier is active.  X11 MotionNotify
         // events are only delivered to the deepest window that selects
@@ -815,5 +982,50 @@ impl EventHandler for Jwm {
 
     fn needs_tick(&self) -> bool {
         self.animations.has_active() || self.features.overview.active || self.features.expose_active
+    }
+}
+
+impl Jwm {
+    fn tick_ping_check(&mut self, backend: &mut dyn Backend, now: std::time::Instant) {
+        const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+        const PING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+        let timed_out: Vec<_> = self
+            .pending_pings
+            .iter()
+            .filter(|(_, sent_at)| now.duration_since(**sent_at) > PING_TIMEOUT)
+            .map(|(win, _)| *win)
+            .collect();
+        for win in timed_out {
+            self.pending_pings.remove(&win);
+            self.unresponsive_windows.insert(win);
+        }
+
+        let should_ping = self
+            .last_ping_time
+            .map(|t| now.duration_since(t) > PING_INTERVAL)
+            .unwrap_or(true);
+        if !should_ping {
+            return;
+        }
+        self.last_ping_time = Some(now);
+
+        if let Some(sel) = self.get_selected_client_key() {
+            let win = match self.state.clients.get(sel) {
+                Some(c) => c.win,
+                None => return,
+            };
+            if !self.pending_pings.contains_key(&win) {
+                let ts = now.elapsed().subsec_millis();
+                if let Ok(true) = backend.property_ops().send_ping(win, ts) {
+                    self.pending_pings.insert(win, now);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn handle_ping_response(&mut self, window: WindowId) {
+        self.pending_pings.remove(&window);
+        self.unresponsive_windows.remove(&window);
     }
 }
