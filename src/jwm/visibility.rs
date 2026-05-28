@@ -30,6 +30,21 @@ impl Jwm {
         client_key: ClientKey,
         mon_key: MonitorKey,
     ) {
+        // Dock windows manage their own visibility via togglebar /
+        // position_secondary_bar_on_monitor.  Letting show_client run on them
+        // causes an infinite loop: move_window sends ConfigureWindow with the
+        // hidden position, then resize_client's constrain_to_monitor clamps it
+        // by 1 px, generating a ConfigureNotify that re-triggers arrange.
+        if self
+            .state
+            .clients
+            .get(client_key)
+            .map(|c| c.state.is_dock)
+            .unwrap_or(false)
+        {
+            return;
+        }
+
         let is_visible = self.is_client_visible_on_monitor(client_key, mon_key);
 
         if is_visible {

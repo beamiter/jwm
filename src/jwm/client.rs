@@ -787,9 +787,15 @@ impl Jwm {
                 backend.compositor_force_full_redraw();
             } else {
                 // Hide bar by moving it off-screen above the monitor
+                let hidden_x = monitor.geometry.m_x;
+                let hidden_y = monitor.geometry.m_y - actual_bar_height;
+                if let Some(client) = self.state.clients.get_mut(client_key) {
+                    client.geometry.x = hidden_x;
+                    client.geometry.y = hidden_y;
+                }
                 let changes = WindowChanges {
-                    x: Some(monitor.geometry.m_x),
-                    y: Some(monitor.geometry.m_y - actual_bar_height),
+                    x: Some(hidden_x),
+                    y: Some(hidden_y),
                     ..Default::default()
                 };
                 backend.window_ops().apply_window_changes(win, changes)?;
