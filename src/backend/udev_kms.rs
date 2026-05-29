@@ -1302,6 +1302,27 @@ impl KmsState {
                         |_, _, _| true,
                     );
                 }
+                // Include xdg_popup surfaces for frame callbacks.
+                for popup in state.popups.values() {
+                    let popup_surface = popup.wl_surface().clone();
+                    frame_roots.push(popup_surface.clone());
+                    with_surface_tree_downward(
+                        &popup_surface,
+                        (),
+                        |_, _, _| TraversalAction::DoChildren(()),
+                        |child_surface, child_states, _| {
+                            let data = child_states.data_map.get::<RendererSurfaceStateUserData>();
+                            let Some(data) = data else {
+                                return;
+                            };
+                            if data.lock().unwrap().view().is_some() {
+                                out.output.enter(child_surface);
+                                visible_surfaces.insert(child_surface.downgrade());
+                            }
+                        },
+                        |_, _, _| true,
+                    );
+                }
                 // Include IME popup surfaces for frame callbacks.
                 for popup in &state.im_popups {
                     if !popup.alive() {

@@ -1650,6 +1650,27 @@ impl JwmWaylandState {
 
     /// Returns active IME popup surfaces with their absolute (global) position.
     /// Each entry is (wl_surface, x, y).
+    pub fn xdg_popup_positions(&self) -> Vec<(WlSurface, i32, i32, u32, u32)> {
+        let mut result = Vec::new();
+        for id in &self.popup_order {
+            let Some(popup) = self.popups.get(id) else {
+                continue;
+            };
+            let Some(geo) = Self::popup_committed_geometry(popup) else {
+                continue;
+            };
+            let Some(origin) = self.popup_global_origin(popup, 0) else {
+                continue;
+            };
+            let w = geo.size.w as u32;
+            let h = geo.size.h as u32;
+            if w > 0 && h > 0 {
+                result.push((popup.wl_surface().clone(), origin.x, origin.y, w, h));
+            }
+        }
+        result
+    }
+
     pub fn im_popup_positions(&self) -> Vec<(WlSurface, i32, i32)> {
         let mut result = Vec::new();
         for popup in &self.im_popups {

@@ -2514,9 +2514,59 @@ impl Backend for UdevBackend {
             );
         }
 
-        // Phase 1b: Import IME popup surface textures and append to scene.
-        let im_popups = self.state.im_popup_positions();
+        // Phase 1b: Import xdg_popup surface textures and append to scene.
+        let xdg_popups = self.state.xdg_popup_positions();
         let mut full_scene: Vec<(u64, i32, i32, u32, u32)> = scene.to_vec();
+        if let Some(kms) = &self.kms {
+            let mut kms_ref = kms.borrow_mut();
+            for (popup_surface, abs_x, abs_y, pw, ph) in &xdg_popups {
+                let popup_win_id = 0xFE00_0000_0000_0000u64 | (popup_surface.id().protocol_id() as u64);
+                let tid = kms_ref.with_gles_renderer(|renderer| {
+                    let _ = import_surface_tree(renderer, popup_surface);
+                    let ctx_id = renderer.context_id();
+                    with_states(popup_surface, |states| {
+                        let rsd = states.data_map.get::<RendererSurfaceStateUserData>();
+                        rsd.and_then(|d| {
+                            let locked = d.lock().unwrap();
+                            locked.texture::<GlesTexture>(ctx_id).map(|t| {
+                                let has_alpha = locked
+                                    .buffer()
+                                    .and_then(|b| buffer_has_alpha(&**b))
+                                    .unwrap_or(true);
+                                let tex_size = t.size();
+                                (t.tex_id(), t.is_y_inverted(), has_alpha, tex_size)
+                            })
+                        })
+                    })
+                });
+                if let Some((tid, y_inverted, has_alpha, tex_size)) = tid {
+                    let w = tex_size.w as u32;
+                    let h = tex_size.h as u32;
+                    if w > 0 && h > 0 {
+                        let geo_offset = with_states(popup_surface, |states| {
+                            let mut cached = states.cached_state.get::<SurfaceCachedState>();
+                            cached.current().geometry.map(|r| (r.loc.x, r.loc.y)).unwrap_or((0, 0))
+                        });
+                        let tex_w = tex_size.w as f32;
+                        let tex_h = tex_size.h as f32;
+                        let content_uv = if tex_w > 0.0 && tex_h > 0.0 {
+                            let u = geo_offset.0 as f32 / tex_w;
+                            let v = geo_offset.1 as f32 / tex_h;
+                            let uw = *pw as f32 / tex_w;
+                            let uh = *ph as f32 / tex_h;
+                            [u, v, uw.min(1.0 - u), uh.min(1.0 - v)]
+                        } else {
+                            [0.0, 0.0, 1.0, 1.0]
+                        };
+                        tex_updates.push((popup_win_id, tid, w, h, has_alpha, y_inverted, content_uv));
+                        full_scene.push((popup_win_id, *abs_x, *abs_y, *pw, *ph));
+                    }
+                }
+            }
+        }
+
+        // Phase 1c: Import IME popup surface textures and append to scene.
+        let im_popups = self.state.im_popup_positions();
         if let Some(kms) = &self.kms {
             let mut kms_ref = kms.borrow_mut();
             for (im_surface, abs_x, abs_y) in &im_popups {
