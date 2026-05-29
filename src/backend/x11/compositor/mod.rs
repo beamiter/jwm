@@ -76,16 +76,11 @@ pub use render_stats::{RenderStats, PassStats, GLCallStats};
 
 use glow::HasContext;
 use std::collections::HashMap;
-use std::ffi::CString;
 use std::sync::Arc;
 use std::sync::mpsc;
-use x11rb::connection::{Connection, RequestConnection};
-use x11rb::wrapper::ConnectionExt as WrapperExt;
+use x11rb::connection::Connection;
 use x11rb::protocol::composite::ConnectionExt as CompositeExt;
-use x11rb::protocol::damage::{self, ConnectionExt as DamageExt};
-use x11rb::protocol::xfixes::ConnectionExt as XFixesExt;
-use x11rb::protocol::xproto::{self, ConnectionExt as XProtoExt};
-use x11rb::protocol::randr::ConnectionExt as RandrExt;
+use x11rb::protocol::xproto::ConnectionExt as XProtoExt;
 use x11rb::rust_connection::RustConnection;
 
 use math::ortho;

@@ -405,8 +405,7 @@ impl WaylandCompositor {
         }
     }
 
-    /// Hit-test the expose grid layout.
-    /// Returns the window_id of the entry under the given screen coordinates, or None.
+    #[allow(dead_code)]
     pub(crate) fn expose_hit_test(&self, x: f32, y: f32) -> Option<u64> {
         for entry in &self.expose_entries {
             if x >= entry.current_x
@@ -420,9 +419,7 @@ impl WaylandCompositor {
         None
     }
 
-    /// Update hover state for expose entries based on cursor position.
-    /// Clears all hover flags, then sets is_hovered on the entry under (x, y).
-    /// Sets needs_render if the hover state changed.
+    #[allow(dead_code)]
     pub(crate) fn set_expose_hover(&mut self, x: f32, y: f32) {
         let hit_id = self.expose_hit_test(x, y);
         let mut changed = false;

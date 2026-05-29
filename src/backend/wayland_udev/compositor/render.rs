@@ -1194,13 +1194,13 @@ impl WaylandCompositor {
         }
     }
 
-    /// Public API: request a full screenshot
+    #[allow(dead_code)]
     pub(crate) fn request_screenshot(&mut self, path: PathBuf) {
         self.pending_screenshot = Some(path);
         self.needs_render = true;
     }
 
-    /// Public API: request a region screenshot
+    #[allow(dead_code)]
     pub(crate) fn request_screenshot_region(
         &mut self,
         path: PathBuf,

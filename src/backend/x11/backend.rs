@@ -907,7 +907,7 @@ impl Backend for X11Backend {
         }
 
         // Try to get the actual RandR output ID for property queries
-        if let Some(o) = outputs.iter().find(|o| o.id == output) {
+        if let Some(_o) = outputs.iter().find(|o| o.id == output) {
             // o.connector_type can tell us if it's DisplayPort, HDMI, etc.
             // For now, assume VRR is supported if the output exists
             // In production, would query "vrr_capable" property more explicitly
@@ -4718,7 +4718,7 @@ mod property_ops {
             data.first().copied()
         }
 
-        fn send_sync_request(&self, win: WindowId, counter: u32, value: u64) -> Result<(), BackendError> {
+        fn send_sync_request(&self, win: WindowId, _counter: u32, value: u64) -> Result<(), BackendError> {
             let w = self.ids.x11(win)?;
             let lo = (value & 0xFFFF_FFFF) as u32;
             let hi = (value >> 32) as u32;

@@ -39,71 +39,40 @@ pub use geometry::GeometryConstraints;
 pub use rules::{RuleApplication, RuleMatcher};
 pub use statusbar::{StatusBarBuilder, StatusBarUpdateManager};
 
-use libc::{SIG_DFL, SIGCHLD, setsid, sigaction, sigemptyset};
-
 use log::info;
 use log::warn;
 use log::{debug, error};
 
-use nix::sys::signal::{self, Signal};
-use nix::sys::wait::WaitPidFlag;
-use nix::sys::wait::WaitStatus;
-use nix::sys::wait::waitpid;
-use nix::unistd::Pid;
-
-use crate::backend::api::EventHandler;
-use crate::backend::api::HitTarget;
-use crate::backend::api::ResizeEdge;
-use crate::backend::common_define::OutputId;
 use crate::backend::common_define::WindowId;
-use crate::backend::error::BackendError;
-use crate::core::controller::WMController;
-use crate::core::models::MonitorGeometry;
 use crate::core::state::WMState;
 use slotmap::SecondaryMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::env;
 use std::process::Command;
-use std::process::Stdio;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
-use std::usize;
 
-use crate::backend::api::AllowMode;
 use crate::backend::api::Backend;
-use crate::backend::api::BackendEvent;
-use crate::backend::api::Geometry;
-use crate::backend::api::NetWmAction;
-use crate::backend::api::NetWmState;
-use crate::backend::api::PropertyKind;
-use crate::backend::api::StackMode;
 use crate::backend::api::StrutPartial;
 use crate::backend::api::WindowChanges;
 use crate::backend::api::WindowType;
 use crate::backend::common_define::ArgbColor;
 use crate::backend::common_define::ColorScheme;
-use crate::backend::common_define::ConfigWindowBits;
 use crate::backend::common_define::EventMaskBits;
 use crate::backend::common_define::SchemeType;
-use crate::backend::common_define::keys;
-use crate::backend::common_define::{KeySym, Mods, MouseButton, StdCursorKind};
+use crate::backend::common_define::{KeySym, Mods};
 use crate::config::CONFIG;
 use crate::core::layout::LayoutEnum;
 use crate::core::models::{
-    ClientKey, MonitorKey, Pertag, ScrollingState, SizeHints, WMClient, WMMonitor,
+    ClientKey, MonitorKey, ScrollingState, WMClient, WMMonitor,
 };
-use crate::ipc::{
-    self, IpcEvent, IpcResponse, MonitorInfoIpc, TreeNode, WindowInfo, WorkspaceInfo,
-};
-use crate::ipc_server::{IncomingIpc, IpcServer};
+use crate::ipc_server::IpcServer;
 
-use crate::core::animation::{AnimationKind, AnimationManager};
-use crate::core::types::Rect;
+use crate::core::animation::AnimationManager;
 use shared_structures::CommandType;
 use shared_structures::SharedCommand;
-use shared_structures::{MonitorInfo, SharedMessage, SharedRingBuffer, TagStatus};
+use shared_structures::{MonitorInfo, SharedMessage, TagStatus};
 
 lazy_static::lazy_static! {
     pub static ref BUTTONMASK: EventMaskBits  = EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE;

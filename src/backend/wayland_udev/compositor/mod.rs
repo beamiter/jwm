@@ -15,9 +15,13 @@ mod damage;
 mod wallpaper;
 mod rules;
 mod font;
+#[allow(dead_code, unreachable_pub)]
 mod texture_pool;
+#[allow(dead_code, unreachable_pub)]
 mod render_stats;
+#[allow(dead_code, unreachable_pub)]
 mod dirty_region;
+#[allow(dead_code, unreachable_pub)]
 mod per_monitor;
 #[allow(dead_code, unreachable_pub)]
 mod frame_rate;
@@ -371,6 +375,7 @@ pub(crate) struct AnnotationStroke {
 // Per-window state
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 pub(crate) struct WindowState {
     /// Raw GL texture imported from the Wayland surface.
     pub gl_texture: Option<u32>,
@@ -462,6 +467,7 @@ pub(crate) struct ExposeEntry {
 // Overview entry
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 pub(crate) struct OverviewEntry {
     pub window_id: u64,
     pub x: f32,
@@ -495,6 +501,7 @@ pub(crate) struct ParticleSystem {
 // Main compositor struct
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 pub(crate) struct WaylandCompositor {
     // Shader programs
     program: u32,

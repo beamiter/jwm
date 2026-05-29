@@ -22,23 +22,22 @@ impl StreamingPBO {
     ///
     /// Uses GL_STREAM_DRAW hint for optimal driver behavior
     unsafe fn new(gl: &glow::Context, capacity: usize) -> Option<Self> {
-        let pbo = gl.create_buffer().ok()?;
         unsafe {
+            let pbo = gl.create_buffer().ok()?;
             gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(pbo));
-            // Pre-allocate with GL_STREAM_DRAW (optimal for write-once, draw-once pattern)
             gl.buffer_data_size(
                 glow::PIXEL_UNPACK_BUFFER,
                 capacity as i32,
                 glow::STREAM_DRAW,
             );
             gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
-        }
 
-        Some(Self {
-            pbo,
-            capacity,
-            fence: None,
-        })
+            Some(Self {
+                pbo,
+                capacity,
+                fence: None,
+            })
+        }
     }
 
     /// Wait for GPU to finish using this PBO (blocking)

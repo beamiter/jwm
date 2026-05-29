@@ -7,7 +7,7 @@
 ///
 /// Performance: Reduces 10-15ms input latency by avoiding event loop blocking
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// X11 event wrapper for async processing

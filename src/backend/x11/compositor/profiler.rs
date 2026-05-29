@@ -53,7 +53,7 @@ impl FrameProfiler {
     }
 
     /// Enter a profiling zone, returns a guard that records timing on drop
-    pub fn enter(&mut self, zone_name: &'static str) -> ProfileZone {
+    pub fn enter(&mut self, zone_name: &'static str) -> ProfileZone<'_> {
         ProfileZone {
             profiler: self,
             zone_name,

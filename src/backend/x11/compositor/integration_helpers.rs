@@ -4,7 +4,7 @@
 /// Full integration into the existing render_frame is deferred to avoid disrupting
 /// the stable 7000+ line rendering pipeline.
 
-use super::{GLStateTracker, RenderBatcher, BatchKey, QuadInstance};
+use super::{GLStateTracker, RenderBatcher, QuadInstance};
 use glow::HasContext;
 
 /// Example: Batched window rendering with state tracking
@@ -45,13 +45,11 @@ pub fn render_batched_windows_example<C: HasContext>(
     // gl.draw_arrays_instanced(glow::TRIANGLE_STRIP, 0, 4, windows.len() as i32);
 
     // Current approach for compatibility:
-    for window in windows {
-        unsafe {
-            // Set per-window uniforms
-            // gl.uniform_4_f32(rect_loc, window.x, window.y, window.width, window.height);
-            // gl.uniform_1_f32(opacity_loc, window.opacity);
-            // gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-        }
+    for _window in windows {
+        // Set per-window uniforms
+        // gl.uniform_4_f32(rect_loc, window.x, window.y, window.width, window.height);
+        // gl.uniform_1_f32(opacity_loc, window.opacity);
+        // gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
     }
 
     batcher.clear_batch();
@@ -124,8 +122,6 @@ pub fn log_optimization_stats(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_integration_helpers_compile() {
         // Just verify the module compiles

@@ -40,8 +40,63 @@ impl PBOUploader {
         format: u32,
         data: &[u8],
     ) -> bool {
-        if data.len() > self.pbo_size {
-            // Data too large for PBO, fall back to direct upload
+        unsafe {
+            if data.len() > self.pbo_size {
+                gl.BindTexture(ffi::TEXTURE_2D, texture);
+                gl.TexSubImage2D(
+                    ffi::TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    width as i32,
+                    height as i32,
+                    format,
+                    ffi::UNSIGNED_BYTE,
+                    data.as_ptr() as *const _,
+                );
+                self.fallback_count += 1;
+                return false;
+            }
+
+            let pbo = self.acquire_pbo(gl);
+
+            gl.BindBuffer(ffi::PIXEL_UNPACK_BUFFER, pbo.buffer);
+            gl.BufferData(
+                ffi::PIXEL_UNPACK_BUFFER,
+                self.pbo_size as isize,
+                std::ptr::null(),
+                ffi::STREAM_DRAW,
+            );
+
+            let ptr = gl.MapBufferRange(
+                ffi::PIXEL_UNPACK_BUFFER,
+                0,
+                data.len() as isize,
+                ffi::MAP_WRITE_BIT | ffi::MAP_INVALIDATE_BUFFER_BIT,
+            );
+
+            if ptr.is_null() {
+                gl.BindBuffer(ffi::PIXEL_UNPACK_BUFFER, 0);
+                gl.BindTexture(ffi::TEXTURE_2D, texture);
+                gl.TexSubImage2D(
+                    ffi::TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    width as i32,
+                    height as i32,
+                    format,
+                    ffi::UNSIGNED_BYTE,
+                    data.as_ptr() as *const _,
+                );
+                self.pool.push_back(pbo);
+                self.fallback_count += 1;
+                return false;
+            }
+
+            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+            gl.UnmapBuffer(ffi::PIXEL_UNPACK_BUFFER);
+
             gl.BindTexture(ffi::TEXTURE_2D, texture);
             gl.TexSubImage2D(
                 ffi::TEXTURE_2D,
@@ -52,94 +107,32 @@ impl PBOUploader {
                 height as i32,
                 format,
                 ffi::UNSIGNED_BYTE,
-                data.as_ptr() as *const _,
+                std::ptr::null(),
             );
-            self.fallback_count += 1;
-            return false;
-        }
 
-        // Acquire a PBO from the pool or create a new one
-        let pbo = self.acquire_pbo(gl);
-
-        // Bind PBO and upload data
-        gl.BindBuffer(ffi::PIXEL_UNPACK_BUFFER, pbo.buffer);
-        gl.BufferData(
-            ffi::PIXEL_UNPACK_BUFFER,
-            self.pbo_size as isize,
-            std::ptr::null(),
-            ffi::STREAM_DRAW,
-        );
-
-        // Map buffer and copy data
-        let ptr = gl.MapBufferRange(
-            ffi::PIXEL_UNPACK_BUFFER,
-            0,
-            data.len() as isize,
-            ffi::MAP_WRITE_BIT | ffi::MAP_INVALIDATE_BUFFER_BIT,
-        );
-
-        if ptr.is_null() {
-            // Map failed, fall back to direct upload
             gl.BindBuffer(ffi::PIXEL_UNPACK_BUFFER, 0);
-            gl.BindTexture(ffi::TEXTURE_2D, texture);
-            gl.TexSubImage2D(
-                ffi::TEXTURE_2D,
-                0,
-                0,
-                0,
-                width as i32,
-                height as i32,
-                format,
-                ffi::UNSIGNED_BYTE,
-                data.as_ptr() as *const _,
-            );
-            // Return PBO to pool
+
+            let fence = gl.FenceSync(ffi::SYNC_GPU_COMMANDS_COMPLETE, 0);
+            let mut pbo = pbo;
+            pbo.fence = if fence.is_null() { None } else { Some(fence) };
+            pbo.last_use = Instant::now();
+
             self.pool.push_back(pbo);
-            self.fallback_count += 1;
-            return false;
+            self.uploads_count += 1;
+
+            true
         }
-
-        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
-        gl.UnmapBuffer(ffi::PIXEL_UNPACK_BUFFER);
-
-        // Upload from PBO to texture (offset 0 in the bound PBO)
-        gl.BindTexture(ffi::TEXTURE_2D, texture);
-        gl.TexSubImage2D(
-            ffi::TEXTURE_2D,
-            0,
-            0,
-            0,
-            width as i32,
-            height as i32,
-            format,
-            ffi::UNSIGNED_BYTE,
-            std::ptr::null(),
-        );
-
-        // Unbind PBO
-        gl.BindBuffer(ffi::PIXEL_UNPACK_BUFFER, 0);
-
-        // Register fence for this PBO
-        let fence = gl.FenceSync(ffi::SYNC_GPU_COMMANDS_COMPLETE, 0);
-        let mut pbo = pbo;
-        pbo.fence = if fence.is_null() { None } else { Some(fence) };
-        pbo.last_use = Instant::now();
-
-        // Return PBO to pool
-        self.pool.push_back(pbo);
-        self.uploads_count += 1;
-
-        true
     }
 
-    /// Try to reclaim PBOs whose fences have signaled.
     pub(crate) unsafe fn try_reclaim(&mut self, gl: &ffi::Gles2) {
-        for pbo in self.pool.iter_mut() {
-            if let Some(fence) = pbo.fence {
-                let result = gl.ClientWaitSync(fence, 0, 0);
-                if result == ffi::ALREADY_SIGNALED || result == ffi::CONDITION_SATISFIED {
-                    gl.DeleteSync(fence);
-                    pbo.fence = None;
+        unsafe {
+            for pbo in self.pool.iter_mut() {
+                if let Some(fence) = pbo.fence {
+                    let result = gl.ClientWaitSync(fence, 0, 0);
+                    if result == ffi::ALREADY_SIGNALED || result == ffi::CONDITION_SATISFIED {
+                        gl.DeleteSync(fence);
+                        pbo.fence = None;
+                    }
                 }
             }
         }
@@ -150,52 +143,50 @@ impl PBOUploader {
         (self.uploads_count, self.fallback_count, self.pool.len())
     }
 
-    /// Delete all PBO buffers and fences.
     pub(crate) unsafe fn clear(&mut self, gl: &ffi::Gles2) {
-        while let Some(pbo) = self.pool.pop_front() {
-            if let Some(fence) = pbo.fence {
-                gl.DeleteSync(fence);
+        unsafe {
+            while let Some(pbo) = self.pool.pop_front() {
+                if let Some(fence) = pbo.fence {
+                    gl.DeleteSync(fence);
+                }
+                gl.DeleteBuffers(1, &pbo.buffer);
             }
-            gl.DeleteBuffers(1, &pbo.buffer);
+            self.uploads_count = 0;
+            self.fallback_count = 0;
         }
-        self.uploads_count = 0;
-        self.fallback_count = 0;
     }
 
-    /// Acquire a PBO from the pool (one without a pending fence) or create a new one.
     unsafe fn acquire_pbo(&mut self, gl: &ffi::Gles2) -> StreamingPBO {
-        // Try to find a PBO without a pending fence
-        let mut found_idx = None;
-        for (i, pbo) in self.pool.iter().enumerate() {
-            if pbo.fence.is_none() {
-                found_idx = Some(i);
-                break;
+        unsafe {
+            let mut found_idx = None;
+            for (i, pbo) in self.pool.iter().enumerate() {
+                if pbo.fence.is_none() {
+                    found_idx = Some(i);
+                    break;
+                }
             }
-        }
 
-        if let Some(idx) = found_idx {
-            return self.pool.remove(idx).unwrap();
-        }
-
-        // If pool is at capacity, wait on the oldest PBO's fence
-        if self.pool.len() >= self.max_pool_size {
-            let mut pbo = self.pool.pop_front().unwrap();
-            if let Some(fence) = pbo.fence.take() {
-                // Blocking wait with 16ms timeout
-                gl.ClientWaitSync(fence, ffi::SYNC_FLUSH_COMMANDS_BIT, 16_000_000);
-                gl.DeleteSync(fence);
+            if let Some(idx) = found_idx {
+                return self.pool.remove(idx).unwrap();
             }
-            return pbo;
-        }
 
-        // Create a new PBO
-        let mut buffer = 0u32;
-        gl.GenBuffers(1, &mut buffer);
-        StreamingPBO {
-            buffer,
-            capacity: self.pbo_size,
-            fence: None,
-            last_use: Instant::now(),
+            if self.pool.len() >= self.max_pool_size {
+                let mut pbo = self.pool.pop_front().unwrap();
+                if let Some(fence) = pbo.fence.take() {
+                    gl.ClientWaitSync(fence, ffi::SYNC_FLUSH_COMMANDS_BIT, 16_000_000);
+                    gl.DeleteSync(fence);
+                }
+                return pbo;
+            }
+
+            let mut buffer = 0u32;
+            gl.GenBuffers(1, &mut buffer);
+            StreamingPBO {
+                buffer,
+                capacity: self.pbo_size,
+                fence: None,
+                last_use: Instant::now(),
+            }
         }
     }
 }

@@ -1,4 +1,3 @@
-use crate::backend::api::Backend;
 use crate::backend::common_define::WindowId;
 use crate::config::CONFIG;
 use crate::core::models::{ClientKey, MonitorKey, WMMonitor};

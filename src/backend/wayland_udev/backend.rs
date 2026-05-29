@@ -391,6 +391,13 @@ impl WindowOps for WaylandWindowOps {
             self.with_state_mut(|state| {
                 let serial = SCOUNTER.next_serial();
                 if let Some(surface) = state.surface_for_window(_win) {
+                    // Don't focus surfaces belonging to the IME client — doing so
+                    // triggers deactivate_input_method and kills the candidate popup.
+                    if let Some(ref im_id) = state.im_client_id {
+                        if surface.id().same_client_as(im_id) {
+                            return;
+                        }
+                    }
                     if let Some(kbd) = state.seat.get_keyboard() {
                         kbd.set_focus(state, Some(surface), serial);
                     }
@@ -1574,6 +1581,11 @@ impl UdevBackend {
                                     });
 
                                 if let Some(surface) = exclusive_surface {
+                                    let is_ime = state.im_client_id.as_ref().map_or(false, |im_id| {
+                                        surface.id().same_client_as(im_id)
+                                    });
+
+                                    if !is_ime {
                                     handled_by_exclusive_layer = true;
 
                                     if debug_keys && pressed {
@@ -1602,6 +1614,7 @@ impl UdevBackend {
                                     let mods_bits = mods_from_smithay(&kbd.modifier_state()).bits();
                                     if let Some(mut s) = shared.lock().ok() {
                                         s.mods_state = mods_bits;
+                                    }
                                     }
                                 }
 

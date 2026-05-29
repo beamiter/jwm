@@ -73,7 +73,7 @@ impl AsyncBlurCompute {
         // Spawn worker thread for blur computation
         let worker_thread = thread::spawn(move || {
             while let Ok(request) = request_rx.recv() {
-                let compute_start = Instant::now();
+                let _compute_start = Instant::now();
 
                 // Simulate blur computation (in real implementation, this would use GPU)
                 // For now, just a placeholder that represents the work
@@ -216,7 +216,7 @@ impl ComputeShaderBlur {
     }
 
     /// Dispatch blur computation on GPU
-    pub fn dispatch_blur(&self, width: u32, height: u32, strength: u32) -> bool {
+    pub fn dispatch_blur(&self, _width: u32, _height: u32, _strength: u32) -> bool {
         if !self.available || self.compute_program.is_none() {
             return false;
         }

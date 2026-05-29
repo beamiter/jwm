@@ -108,26 +108,22 @@ impl Default for SubpixelCompositorIntegration {
 
 impl SubpixelRenderIntegration for SubpixelCompositorIntegration {
     fn on_window_created(&mut self, window_id: u32, class_name: &str) {
-        // Register with manager
-        let mut mgr = &mut self.manager;
+        let mgr = &mut self.manager;
         mgr.register_window(window_id, class_name);
 
-        // Track window state
         let state = SubpixelWindowState::new(window_id, class_name.to_string());
         self.window_states.insert(window_id, state);
     }
 
     fn on_window_destroyed(&mut self, window_id: u32) {
-        // Unregister from manager
-        let mut mgr = &mut self.manager;
+        let mgr = &mut self.manager;
         mgr.remove_window(window_id);
 
-        // Remove tracked state
         self.window_states.remove(&window_id);
     }
 
     fn update_window_blur_strength(&mut self, window_id: u32, strength: f32) {
-        let mut mgr = &mut self.manager;
+        let mgr = &mut self.manager;
         mgr.set_window_blur_strength(window_id, strength);
 
         // Update tracked state

@@ -498,6 +498,7 @@ impl WaylandCompositor {
         self.needs_render = true;
     }
 
+    #[allow(dead_code)]
     pub(crate) fn annotation_new_stroke(&mut self) {
         if !self.annotation_active {
             return;
@@ -509,10 +510,12 @@ impl WaylandCompositor {
         });
     }
 
+    #[allow(dead_code)]
     pub(crate) fn set_annotation_color(&mut self, r: f32, g: f32, b: f32, a: f32) {
         self.annotation_color = [r, g, b, a];
     }
 
+    #[allow(dead_code)]
     pub(crate) fn set_annotation_line_width(&mut self, width: f32) {
         self.annotation_line_width = width.max(1.0);
     }

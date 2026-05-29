@@ -258,8 +258,7 @@ impl WaylandCompositor {
         }
     }
 
-    /// Get the target refresh rate based on VRR state.
-    /// Returns vrr_max_fps when VRR is active (game focused), else 60 Hz.
+    #[allow(dead_code)]
     pub(crate) fn get_vrr_refresh_rate(&self) -> u32 {
         if self.vrr_active {
             let cfg = CONFIG.load();
@@ -411,8 +410,7 @@ impl WaylandCompositor {
     /// Compute the blur quality level for a given window, based on:
     /// - Whether adaptive quality is enabled (`blur_quality_auto`)
     /// - Per-monitor quality overrides
-    /// - Estimated GPU load from frame times
-    /// - Whether the window is the focused window (always Full for focused)
+    #[allow(dead_code)]
     pub(crate) fn compute_window_blur_quality(
         &self,
         window_id: u64,

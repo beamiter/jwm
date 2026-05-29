@@ -5,7 +5,6 @@ use crate::core::types::Rect;
 use crate::core::animation::AnimationKind;
 use crate::config::CONFIG;
 use std::time::Instant;
-use log::info;
 
 use super::Jwm;
 

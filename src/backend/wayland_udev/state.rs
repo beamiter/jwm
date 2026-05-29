@@ -213,6 +213,7 @@ pub struct JwmWaylandState {
     pub popup_order: Vec<ObjectId>,
 
     pub im_popups: Vec<ImPopupSurface>,
+    pub im_client_id: Option<ObjectId>,
 
     pub active_toplevel: Option<WindowId>,
     pub popup_grab_toplevel: Option<WindowId>,
@@ -1253,6 +1254,7 @@ impl JwmWaylandState {
                 popup_order: Vec::new(),
 
                 im_popups: Vec::new(),
+                im_client_id: None,
 
                 popup_grab_toplevel: None,
                 popup_grab_prev_kbd_focus: None,
@@ -1675,17 +1677,24 @@ impl JwmWaylandState {
         let mut result = Vec::new();
         for popup in &self.im_popups {
             if !popup.alive() {
+                log::warn!("[ime-pos] not alive");
                 continue;
             }
             let loc = popup.location();
             let cursor_rect = popup.text_input_rectangle();
             let parent = match popup.get_parent() {
                 Some(p) => p,
-                None => continue,
+                None => {
+                    log::warn!("[ime-pos] no parent");
+                    continue;
+                }
             };
             let parent_win = match self.surface_to_window.get(&parent.surface.id()) {
                 Some(&w) => w,
-                None => continue,
+                None => {
+                    log::warn!("[ime-pos] parent {:?} not in surface_to_window", parent.surface.id());
+                    continue;
+                }
             };
             let geo = match self.window_geometry.get(&parent_win) {
                 Some(g) => g,
@@ -1956,6 +1965,7 @@ impl SeatHandler for JwmWaylandState {
 
 impl InputMethodHandler for JwmWaylandState {
     fn new_popup(&mut self, surface: ImPopupSurface) {
+        self.im_client_id = Some(surface.wl_surface().id());
         self.im_popups.push(surface);
         self.needs_redraw = true;
     }
@@ -2047,7 +2057,13 @@ impl XdgShellHandler for JwmWaylandState {
         let win = self.alloc_window_id();
         let obj_id = surface.wl_surface().id();
 
-        info!("[udev/wayland] new_toplevel win={win:?} surface_id={obj_id:?}");
+        // Don't let IME client toplevels be managed by the WM — managing them
+        // triggers focus changes that kill the input method popup.
+        let is_ime_client = self.im_client_id.as_ref().map_or(false, |im_id| {
+            obj_id.same_client_as(im_id)
+        });
+
+        info!("[udev/wayland] new_toplevel win={win:?} surface_id={obj_id:?} ime={is_ime_client}");
 
         self.surface_to_window.insert(obj_id, win);
         self.toplevels.insert(win, surface);
@@ -2057,8 +2073,6 @@ impl XdgShellHandler for JwmWaylandState {
             Geometry {
                 x: 0,
                 y: 0,
-                // Placeholder size until the WM configures the window.
-                // Clients will typically wait for the initial configure before attaching a buffer.
                 w: 800,
                 h: 600,
                 border: 0,
@@ -2069,6 +2083,11 @@ impl XdgShellHandler for JwmWaylandState {
         self.window_title.insert(win, String::new());
         self.window_app_id.insert(win, String::new());
         self.window_is_fullscreen.insert(win, false);
+
+        if is_ime_client {
+            self.needs_redraw = true;
+            return;
+        }
 
         // Announce to ext-foreign-toplevel-list clients.
         let handle = self.foreign_toplevel_list_state.new_toplevel::<JwmWaylandState>("", "");
