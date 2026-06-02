@@ -500,7 +500,7 @@ impl Jwm {
         if visible_count > 0 {
             let formatted_string = format!("[{}]", visible_count);
             if let Some(monitor) = self.state.monitors.get_mut(mon_key) {
-                monitor.lt_symbol = formatted_string.clone();
+                monitor.lt_symbol.clone_from(&formatted_string);
             }
             info!(
                 "[monocle] formatted_string: {}, monitor_num: {}",

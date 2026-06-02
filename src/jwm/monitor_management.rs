@@ -68,7 +68,7 @@ impl Jwm {
     pub(super) fn ensure_secondary_bars_running(&mut self, now: Instant) {
         // Get all monitor IDs sorted
         let mut all_mon_ids: Vec<i32> = self.state.monitors.values().map(|m| m.num).collect();
-        all_mon_ids.sort();
+        all_mon_ids.sort_unstable();
 
         // Sequential creation: only create the next bar if all previous bars are managed
         for &mon_id in &all_mon_ids {

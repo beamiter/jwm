@@ -1632,7 +1632,7 @@ impl KmsState {
                     out.output.leave(&surf);
                 }
             }
-            out.surfaces_on_output = visible_surfaces.clone();
+            out.surfaces_on_output.clone_from(&visible_surfaces);
             // Drop the `out` borrow so we can access other `self` fields below.
             let _ = out;
 

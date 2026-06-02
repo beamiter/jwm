@@ -86,8 +86,8 @@ impl FrameProfiler {
         let sample_count = samples.len() as u32;
         let sum: f32 = samples.iter().sum();
         let avg_ms = sum / sample_count as f32;
-        let min_ms = samples.iter().cloned().fold(f32::INFINITY, f32::min);
-        let max_ms = samples.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let min_ms = samples.iter().copied().fold(f32::INFINITY, f32::min);
+        let max_ms = samples.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         Some(ZoneStats {
             avg_ms,
             min_ms,
@@ -105,8 +105,8 @@ impl FrameProfiler {
             let sample_count = samples.len() as u32;
             let sum: f32 = samples.iter().sum();
             let avg_ms = sum / sample_count as f32;
-            let min_ms = samples.iter().cloned().fold(f32::INFINITY, f32::min);
-            let max_ms = samples.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let min_ms = samples.iter().copied().fold(f32::INFINITY, f32::min);
+            let max_ms = samples.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             stats.push((
                 name,
                 ZoneStats {

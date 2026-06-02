@@ -696,14 +696,17 @@ impl WMController for Jwm {
     }
 
     fn on_wm_keyboard_shortcut(&mut self, backend: &mut dyn Backend, keysym: KeySym, mods: Mods) {
-        for key_config in self.key_bindings.to_vec().iter() {
-            if keysym == key_config.key_sym && mods == key_config.mask {
-                if let Some(func) = key_config.func_opt {
-                    if let Err(e) = func(self, backend, &key_config.arg) {
-                        error!("Error executing keyboard shortcut: {:?}", e);
-                    }
-                }
-                break;
+        // Find the first matching binding by immutable borrow, then extract the
+        // (Copy) fn pointer and clone only the matched arg. Avoids cloning the
+        // whole key_bindings Vec on every keystroke.
+        let matched = self
+            .key_bindings
+            .iter()
+            .find(|kc| keysym == kc.key_sym && mods == kc.mask)
+            .and_then(|kc| kc.func_opt.map(|func| (func, kc.arg.clone())));
+        if let Some((func, arg)) = matched {
+            if let Err(e) = func(self, backend, &arg) {
+                error!("Error executing keyboard shortcut: {:?}", e);
             }
         }
     }

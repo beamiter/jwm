@@ -112,9 +112,10 @@ impl WaylandCompositor {
         self.corner_radius_rules = Self::parse_corner_radius_rules(&b.corner_radius_rules);
         self.scale_rules = Self::parse_scale_rules(&b.scale_rules);
         self.frosted_glass_rules = Self::parse_frosted_glass_rules(&b.frosted_glass_rules);
-        self.shadow_exclude = b.shadow_exclude.clone();
-        self.blur_exclude = b.blur_exclude.clone();
-        self.rounded_corners_exclude = b.rounded_corners_exclude.clone();
+        self.shadow_exclude.clone_from(&b.shadow_exclude);
+        self.blur_exclude.clone_from(&b.blur_exclude);
+        self.rounded_corners_exclude
+            .clone_from(&b.rounded_corners_exclude);
         self.detect_client_opacity = b.detect_client_opacity;
         self.blur_use_frame_extents = b.blur_use_frame_extents;
         self.shadow_bottom_extra = b.shadow_bottom_extra;
@@ -135,7 +136,7 @@ impl WaylandCompositor {
         self.attention_color = b.attention_color;
         self.snap_preview_color = b.snap_preview_color;
         self.snap_animation_duration_ms = b.snap_animation_duration_ms;
-        self.peek_exclude = b.peek_exclude.clone();
+        self.peek_exclude.clone_from(&b.peek_exclude);
         self.expose_gap = b.expose_gap;
         self.particle_count = b.particle_count;
         self.particle_lifetime = b.particle_lifetime;

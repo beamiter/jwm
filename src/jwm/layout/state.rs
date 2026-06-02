@@ -283,7 +283,7 @@ impl Jwm {
                 .state
                 .monitor_clients
                 .get(mon_key)
-                .map(|keys| keys.iter().copied().collect())
+                .map(|keys| keys.to_vec())
                 .unwrap_or_default();
 
             for ck in client_keys {

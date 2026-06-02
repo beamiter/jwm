@@ -4000,7 +4000,7 @@ mod property_ops {
 
         fn add_net_wm_state_atom(&self, win: WindowId, atom: u32) -> Result<(), BackendError> {
             let mut states = self.get_net_wm_state_atoms(win)?;
-            if !states.iter().any(|&a| a == atom) {
+            if !states.contains(&atom) {
                 states.push(atom);
                 self.set_net_wm_state_atoms(win, &states)?;
             }
@@ -4132,9 +4132,7 @@ mod property_ops {
 
         fn is_fullscreen(&self, win: WindowId) -> bool {
             let states = self.get_net_wm_state_atoms(win).unwrap_or_default();
-            states
-                .iter()
-                .any(|&a| a == self.atoms._NET_WM_STATE_FULLSCREEN)
+            states.contains(&self.atoms._NET_WM_STATE_FULLSCREEN)
         }
 
         fn set_fullscreen_state(&self, win: WindowId, on: bool) -> Result<(), BackendError> {

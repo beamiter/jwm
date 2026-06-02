@@ -257,9 +257,10 @@ impl Compositor {
         }
 
         // --- Per-window rules (re-parse from strings) ---
-        self.shadow_exclude = behavior.shadow_exclude.clone();
-        self.blur_exclude = behavior.blur_exclude.clone();
-        self.rounded_corners_exclude = behavior.rounded_corners_exclude.clone();
+        self.shadow_exclude.clone_from(&behavior.shadow_exclude);
+        self.blur_exclude.clone_from(&behavior.blur_exclude);
+        self.rounded_corners_exclude
+            .clone_from(&behavior.rounded_corners_exclude);
 
         self.opacity_rules = behavior.opacity_rules.iter().filter_map(|rule| {
             let parts: Vec<&str> = rule.splitn(2, ':').collect();
@@ -356,7 +357,8 @@ impl Compositor {
         self.tilt_grid = behavior.tilt_grid.max(1);
 
         // --- Frosted glass ---
-        self.frosted_glass_rules = behavior.frosted_glass_rules.clone();
+        self.frosted_glass_rules
+            .clone_from(&behavior.frosted_glass_rules);
         self.frosted_glass_strength = behavior.frosted_glass_strength;
 
         // --- Wobbly windows ---
@@ -377,7 +379,7 @@ impl Compositor {
 
         // --- Peek ---
         self.peek_enabled = behavior.peek_enabled;
-        self.peek_exclude = behavior.peek_exclude.clone();
+        self.peek_exclude.clone_from(&behavior.peek_exclude);
 
         // --- Window tabs ---
         self.window_tabs_enabled = behavior.window_tabs;
@@ -420,16 +422,19 @@ impl Compositor {
 
         // --- Recording ---
         self.recording_fps = behavior.recording_fps;
-        self.recording_bitrate = behavior.recording_bitrate.clone();
+        self.recording_bitrate
+            .clone_from(&behavior.recording_bitrate);
         self.recording_quality = behavior.recording_quality;
-        self.recording_encoder = behavior.recording_encoder.clone();
-        self.recording_output_dir = behavior.recording_output_dir.clone();
+        self.recording_encoder
+            .clone_from(&behavior.recording_encoder);
+        self.recording_output_dir
+            .clone_from(&behavior.recording_output_dir);
 
         // --- Wallpaper (trigger async reload if path or mode changed) ---
         let new_mode = Self::parse_wallpaper_mode(&behavior.wallpaper_mode);
         if behavior.wallpaper != self.wallpaper_path || new_mode != self.wallpaper_mode {
             self.wallpaper_mode = new_mode;
-            self.wallpaper_path = behavior.wallpaper.clone();
+            self.wallpaper_path.clone_from(&behavior.wallpaper);
             if !self.wallpaper_path.is_empty() {
                 self.pending_wallpaper = Some(Self::load_wallpaper_async(
                     &self.wallpaper_path,

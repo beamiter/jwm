@@ -86,8 +86,8 @@ impl RenderStats {
             let call_count = samples.len() as u32;
             let total_time_ms: f32 = samples.iter().sum();
             let avg_time_ms = total_time_ms / call_count as f32;
-            let min_time_ms = samples.iter().cloned().fold(f32::INFINITY, f32::min);
-            let max_time_ms = samples.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let min_time_ms = samples.iter().copied().fold(f32::INFINITY, f32::min);
+            let max_time_ms = samples.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             Some(PassStats {
                 call_count,
                 total_time_ms,

@@ -177,7 +177,7 @@ impl CacheWarmupManager {
             (1280, 720),
             (3840, 2160),
         ];
-        self.prewarmed_blur_sizes = common_blur_sizes.clone();
+        self.prewarmed_blur_sizes.clone_from(&common_blur_sizes);
 
         // Call warmup function (provided by compositor)
         for class in &self.prewarmed_shaders {

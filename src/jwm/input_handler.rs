@@ -110,34 +110,37 @@ impl Jwm {
             return Ok(());
         }
 
-        let mut matched = false;
-        for key_config in self.key_bindings.to_vec().iter() {
-            let kc_mask = key_config.mask
-                & (Mods::SHIFT
-                    | Mods::CONTROL
-                    | Mods::ALT
-                    | Mods::SUPER
-                    | Mods::MOD2
-                    | Mods::MOD3
-                    | Mods::MOD5);
-            if keysym == key_config.key_sym && kc_mask == clean_state {
-                matched = true;
-                if debug_keys {
-                    let func_name = key_config.func_opt.map(Self::func_name).unwrap_or("<none>");
-                    info!(
-                        "[key] matched keysym=0x{:x} mods=0x{:x} func={} arg={:?}",
-                        keysym,
-                        clean_state.bits(),
-                        func_name,
-                        key_config.arg
-                    );
-                }
-                if let Some(func) = key_config.func_opt {
-                    if let Err(e) = func(self, backend, &key_config.arg) {
-                        error!("Error executing keyboard shortcut: {:?}", e);
-                    }
-                }
-                break;
+        // Find the first matching binding by immutable borrow; extract the
+        // (Copy) fn pointer and clone only the matched arg instead of cloning
+        // the whole key_bindings Vec on every keystroke.
+        let key_mods = Mods::SHIFT
+            | Mods::CONTROL
+            | Mods::ALT
+            | Mods::SUPER
+            | Mods::MOD2
+            | Mods::MOD3
+            | Mods::MOD5;
+        let found = self
+            .key_bindings
+            .iter()
+            .find(|kc| keysym == kc.key_sym && (kc.mask & key_mods) == clean_state);
+        let matched = found.is_some();
+        let call = found.and_then(|kc| {
+            if debug_keys {
+                let func_name = kc.func_opt.map(Self::func_name).unwrap_or("<none>");
+                info!(
+                    "[key] matched keysym=0x{:x} mods=0x{:x} func={} arg={:?}",
+                    keysym,
+                    clean_state.bits(),
+                    func_name,
+                    kc.arg
+                );
+            }
+            kc.func_opt.map(|func| (func, kc.arg.clone()))
+        });
+        if let Some((func, arg)) = call {
+            if let Err(e) = func(self, backend, &arg) {
+                error!("Error executing keyboard shortcut: {:?}", e);
             }
         }
 

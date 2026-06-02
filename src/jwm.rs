@@ -1113,25 +1113,18 @@ impl Jwm {
 
         // 添加 tag 快捷键说明
         let tags_len = cfg.tags_length();
+        lines.push(format!("{:<28} view tag 1-{}", "Mod1+[1-9]", tags_len));
         lines.push(format!(
-            "{:<28} {}",
-            "Mod1+[1-9]",
-            format!("view tag 1-{}", tags_len)
+            "{:<28} move to tag 1-{}",
+            "Mod1+Shift+[1-9]", tags_len
         ));
         lines.push(format!(
-            "{:<28} {}",
-            "Mod1+Shift+[1-9]",
-            format!("move to tag 1-{}", tags_len)
+            "{:<28} toggle view tag 1-{}",
+            "Mod1+Ctrl+[1-9]", tags_len
         ));
         lines.push(format!(
-            "{:<28} {}",
-            "Mod1+Ctrl+[1-9]",
-            format!("toggle view tag 1-{}", tags_len)
-        ));
-        lines.push(format!(
-            "{:<28} {}",
-            "Mod1+Ctrl+Shift+[1-9]",
-            format!("toggle tag 1-{}", tags_len)
+            "{:<28} toggle tag 1-{}",
+            "Mod1+Ctrl+Shift+[1-9]", tags_len
         ));
         lines.push(format!("{:<28} {}", "Mod1+0", "view all tags"));
 

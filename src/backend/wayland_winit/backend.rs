@@ -853,7 +853,7 @@ impl WaylandWinitBackend {
                 self.output.leave(&surf);
             }
         }
-        self.surfaces_on_output = visible_surfaces.clone();
+        self.surfaces_on_output.clone_from(&visible_surfaces);
 
         // Solid background LAST (back-most).
         let bg_geo = Rectangle::<i32, Physical>::from_size((out_w, out_h).into());

@@ -30,8 +30,6 @@ path = "tools/jwm_tool.rs"
 [dependencies]
 clap = { version = "4.6.1", features = ["derive", "env"] }
 dirs = "6.0.0"
-dirs-next = "2.0.0"
-fastrand = "2.4.1"
 glob = "0.3.3"
 signal-hook = "0.3.18"
 slotmap = { version = "1.1.1", features = ["serde"] }
@@ -43,7 +41,6 @@ libc = "0.2.186"
 notify = "7.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1.52.3", features = ["full"] }
 shared_structures = { git = "https://github.com/beamiter/shared_structures.git", features = ["use-futex"] }
 chrono = "0.4.44"
 log = "0.4.29"
@@ -76,8 +73,6 @@ smithay = { git = "https://github.com/Smithay/smithay.git", rev = "b252c0fa64422
 calloop = { version = "0.14.4", features = ["signals"] }
 glow = "0.16"
 winit = "0.30.13"
-crossbeam-channel = "0.5.15"
-downcast-rs = "2.0.2"
 png = "0.17"
 image = "0.25"
 xcursor = "0.3.10"
@@ -87,10 +82,18 @@ libseat = "0.2.4"
 gbm = "0.18.0"
 egl = "0.2.7"
 
-[build-dependencies]
-bindgen = "0.72.1"
-pkg-config = "0.3"
-
 [[bench]]
 name = "wm_benchmark"
 harness = false
+
+# Maximize runtime performance for the shipped compositor.
+# panic="unwind" kept intentionally: jwm spawns worker threads (async blur,
+# wallpaper loaders); unwind isolates a thread panic instead of aborting the
+# whole compositor.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "unwind"
+strip = "symbols"
+incremental = false

@@ -611,8 +611,8 @@ impl Jwm {
                 class = cls;
 
                 if let Some(client) = self.state.clients.get_mut(client_key) {
-                    client.instance = instance.clone();
-                    client.class = class.clone();
+                    client.instance.clone_from(&instance);
+                    client.class.clone_from(&class);
                 }
             }
         }
