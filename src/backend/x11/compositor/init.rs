@@ -1301,7 +1301,7 @@ impl Compositor {
                 blur_cache_hits: 0,
                 blur_cache_misses: 0,
                 last_input_time: None,
-                latency_samples: Vec::with_capacity(300),
+                latency_samples: std::collections::VecDeque::with_capacity(300),
             },
             // Feature 12: screenshot
             pending_screenshot: None,
@@ -1568,6 +1568,9 @@ impl Compositor {
             eotf_mode: 0,
             output_colorspace: 0,
             hdr_output_10bit: hdr_got_10bit,
+            scratch_scene_info: Vec::new(),
+            scratch_blur_dirty: Vec::new(),
+            scratch_tfp_order: Vec::new(),
         })
     }
 

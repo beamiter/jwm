@@ -78,6 +78,10 @@ pub struct X11Backend {
     systray: Option<super::systray::SystemTray<RustConnection>>,
 
     benchmark_auto_exit: bool,
+
+    /// Reused per-frame scratch buffer for the WindowId→x11 scene translation
+    /// in `compositor_render_frame`, avoiding a Vec allocation every frame.
+    scratch_x11_scene: Vec<(u32, i32, i32, u32, u32)>,
 }
 
 struct X11Interaction {
@@ -95,9 +99,14 @@ struct X11Interaction {
 
 impl X11Backend {
     fn debug_drag_enabled() -> bool {
-        env::var("JWM_DEBUG_DRAG")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(true)
+        // Cached: this is read on every MotionNotify during a drag, so the
+        // env lookup (process-wide env lock + alloc) must not run per-event.
+        static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *CACHE.get_or_init(|| {
+            env::var("JWM_DEBUG_DRAG")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(true)
+        })
     }
 
     fn systray_handle_event(&mut self, ev: &BackendEvent) -> bool {
@@ -325,6 +334,7 @@ impl X11Backend {
             compositor,
             systray: None,
             benchmark_auto_exit: false,
+            scratch_x11_scene: Vec::new(),
         };
 
         // Initialize system tray
@@ -743,22 +753,23 @@ impl Backend for X11Backend {
         scene: &[(u64, i32, i32, u32, u32)],
         focused_window: Option<u64>,
     ) -> Result<bool, BackendError> {
-        let compositor = match self.compositor.as_mut() {
-            Some(c) => c,
-            None => return Ok(false),
-        };
-        // Convert WindowId raw u64 to x11 window u32 via ids registry
-        let x11_scene: Vec<(u32, i32, i32, u32, u32)> = scene
-            .iter()
-            .filter_map(|&(wid_raw, x, y, w, h)| {
-                let wid = WindowId::from_raw(wid_raw);
-                self.ids.x11(wid).ok().map(|x11w| (x11w, x, y, w, h))
-            })
-            .collect();
+        if self.compositor.is_none() {
+            return Ok(false);
+        }
+        // Convert WindowId raw u64 to x11 window u32 via ids registry.
+        // Reuse a persistent scratch Vec (detached via take) so this runs
+        // allocation-free every frame.
+        let mut x11_scene = std::mem::take(&mut self.scratch_x11_scene);
+        x11_scene.clear();
+        x11_scene.extend(scene.iter().filter_map(|&(wid_raw, x, y, w, h)| {
+            let wid = WindowId::from_raw(wid_raw);
+            self.ids.x11(wid).ok().map(|x11w| (x11w, x, y, w, h))
+        }));
         let focused_x11 = focused_window.and_then(|raw| {
             let wid = WindowId::from_raw(raw);
             self.ids.x11(wid).ok()
         });
+        let compositor = self.compositor.as_mut().unwrap();
         if !scene.is_empty() && x11_scene.is_empty() {
             log::warn!(
                 "[compositor] scene has {} entries but x11_scene is empty (ID lookup failed)",
@@ -785,6 +796,8 @@ impl Backend for X11Backend {
         let _ = self.conn.flush();
         let rendered = compositor.render_frame(&x11_scene, focused_x11);
         compositor.clear_needs_render();
+        // Return the buffer to its home for reuse next frame.
+        self.scratch_x11_scene = x11_scene;
         Ok(rendered)
     }
 
@@ -4799,9 +4812,13 @@ mod window_ops {
 
     impl<C: Connection> X11WindowOps<C> {
         fn debug_drag_enabled() -> bool {
-            env::var("JWM_DEBUG_DRAG")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(true)
+            // Cached: read per MotionNotify during a drag (see X11Backend copy).
+            static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *CACHE.get_or_init(|| {
+                env::var("JWM_DEBUG_DRAG")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(true)
+            })
         }
 
         pub(super) fn new(

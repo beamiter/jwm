@@ -451,9 +451,6 @@ impl Compositor {
             0
         };
 
-        // Feature 11: Frame timing start
-        let _frame_start = std::time::Instant::now();
-
         // Periodic diagnostic logging
         static RENDER_LOG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let count = RENDER_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -466,10 +463,12 @@ impl Compositor {
             );
         }
 
-        // Track render frequency for flicker diagnosis
+        // Track render frequency for flicker diagnosis (info-level only — the
+        // SystemTime/realtime-clock read and counter churn are skipped entirely
+        // when info logging is off, which is the normal case).
         static RENDER_FREQ_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         static RENDER_FREQ_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        {
+        if log::log_enabled!(log::Level::Info) {
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -493,28 +492,28 @@ impl Compositor {
         // Phase 2.3: Direct scanout check - bypass compositor for eligible fullscreen windows
         // This provides -8-12ms latency reduction for fullscreen games/video
         {
-            let scene_info: Vec<(u32, WindowScanoutInfo)> = scene
-                .iter()
-                .filter_map(|&(win, x, y, w, h)| {
-                    self.windows.get(&win).map(|wt| {
-                        let corner_radius = wt.corner_radius_override.unwrap_or(self.corner_radius);
-                        (win, WindowScanoutInfo {
-                            x,
-                            y,
-                            width: w,
-                            height: h,
-                            is_fullscreen: wt.is_fullscreen,
-                            has_alpha: wt.has_rgba,
-                            has_blur: wt.is_frosted,
-                            has_shadow: self.shadow_enabled,
-                            has_corner_radius: corner_radius > 0.0,
-                            opacity: wt.fade_opacity,
-                        })
+            let mut scene_info = std::mem::take(&mut self.scratch_scene_info);
+            scene_info.clear();
+            scene_info.extend(scene.iter().filter_map(|&(win, x, y, w, h)| {
+                self.windows.get(&win).map(|wt| {
+                    let corner_radius = wt.corner_radius_override.unwrap_or(self.corner_radius);
+                    (win, WindowScanoutInfo {
+                        x,
+                        y,
+                        width: w,
+                        height: h,
+                        is_fullscreen: wt.is_fullscreen,
+                        has_alpha: wt.has_rgba,
+                        has_blur: wt.is_frosted,
+                        has_shadow: self.shadow_enabled,
+                        has_corner_radius: corner_radius > 0.0,
+                        opacity: wt.fade_opacity,
                     })
                 })
-                .collect();
+            }));
 
             let (should_scanout, _scanout_win) = self.direct_scanout_mgr.check_scene(&scene_info, focused);
+            self.scratch_scene_info = scene_info;
             if should_scanout {
                 // Direct scanout active - bypass compositor rendering
                 return false;
@@ -614,6 +613,11 @@ impl Compositor {
         }
         self.last_scene_hash = hash;
 
+        // Snapshot config once for the whole frame. status_bar_name / border_px
+        // were previously loaded 4× per frame from separate ArcSwap guards.
+        let frame_cfg = crate::config::CONFIG.load();
+        let frame_status_bar_name = frame_cfg.status_bar_name();
+
         // P5C Phase 2: Mark dirty windows' rectangles for precise tracking
         for &(win, _, _, _, _) in scene.iter() {
             if let Some(wt) = self.windows.get(&win) {
@@ -657,11 +661,11 @@ impl Compositor {
         // Collect which windows are dirty this frame (before TFP refresh clears
         // the flags).  Used by the blur cache to skip expensive blur passes when
         // only the frosted window itself updated (e.g. fcitx candidate list).
-        let blur_dirty_wins: Vec<u32> = scene.iter()
-            .filter_map(|&(win, _, _, _, _)| {
-                self.windows.get(&win).and_then(|wt| if wt.dirty { Some(win) } else { None })
-            })
-            .collect();
+        let mut blur_dirty_wins = std::mem::take(&mut self.scratch_blur_dirty);
+        blur_dirty_wins.clear();
+        blur_dirty_wins.extend(scene.iter().filter_map(|&(win, _, _, _, _)| {
+            self.windows.get(&win).and_then(|wt| if wt.dirty { Some(win) } else { None })
+        }));
 
         // Refresh TFP textures for dirty windows with per-frame time budget.
         // Focused window always updates; others update within 3ms budget.
@@ -671,7 +675,8 @@ impl Compositor {
         let tfp_start = std::time::Instant::now();
 
         // Build priority-ordered window list: focused first, then rest of scene
-        let mut tfp_order: Vec<u32> = Vec::with_capacity(scene.len());
+        let mut tfp_order = std::mem::take(&mut self.scratch_tfp_order);
+        tfp_order.clear();
         if let Some(fw) = focused {
             if scene.iter().any(|&(w, _, _, _, _)| w == fw) {
                 tfp_order.push(fw);
@@ -971,9 +976,7 @@ impl Compositor {
                     self.shadow_uniforms.spread.as_ref(), spread,
                 );
 
-                // P5E: Load config once before loop (not per-window)
-                let cfg = crate::config::CONFIG.load();
-                let status_bar_name = cfg.status_bar_name();
+                let status_bar_name = frame_status_bar_name;
 
                 for &(win, x, y, w, h) in visible_scene {
                     if overview_skip(x, y, w, h) { continue; }
@@ -1070,17 +1073,15 @@ impl Compositor {
             && self.scene_fbo.is_some();
 
         // === Pass 2: Draw window textures ===
-        let wm_border_px = crate::config::CONFIG.load().border_px() as f32;
+        let wm_border_px = frame_cfg.border_px() as f32;
 
         // Count actual client windows (excluding statusbar) to apply smart borders
-        let cfg = crate::config::CONFIG.load();
-        let status_bar_name = cfg.status_bar_name();
+        let status_bar_name = frame_status_bar_name;
         let client_window_count = visible_scene.iter().filter(|&&(win, _, _, _, _)| {
             self.windows.get(&win)
                 .map(|wt| !(wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name)))
                 .unwrap_or(false)
         }).count();
-        drop(cfg);
 
         let effective_border_enabled = (self.border_enabled || wm_border_px > 0.0) && client_window_count > 1;
         let base_border_width = if self.border_enabled { self.border_width } else { wm_border_px };
@@ -1101,9 +1102,7 @@ impl Compositor {
             self.gl.uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
             self.gl_state_tracker.bind_vertex_array(&self.gl, Some(self.quad_vao));
 
-            // P5E: Load config once before loop (not per-window)
-            let cfg_main = crate::config::CONFIG.load();
-            let status_bar_name_main = cfg_main.status_bar_name();
+            let status_bar_name_main = frame_status_bar_name;
 
             for &(win, x, y, w, h) in visible_scene {
                 if overview_skip(x, y, w, h) { continue; }
@@ -2256,7 +2255,7 @@ impl Compositor {
             self.benchmark.record_frame(frame_us);
 
             // Feed latest input latency
-            if let Some(&last_latency) = self.frame_stats.latency_samples.last() {
+            if let Some(&last_latency) = self.frame_stats.latency_samples.back() {
                 self.benchmark.record_input_latency(last_latency);
             }
 
@@ -2290,6 +2289,10 @@ impl Compositor {
                 }
             }
         }
+
+        // Return the per-frame scratch buffers to their fields for reuse.
+        self.scratch_blur_dirty = blur_dirty_wins;
+        self.scratch_tfp_order = tfp_order;
 
         true
     }

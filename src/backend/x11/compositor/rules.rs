@@ -176,10 +176,11 @@ impl Compositor {
 
             let total_latency_ms = input_to_render_ms + gpu_to_display_ms;
 
-            self.frame_stats.latency_samples.push(total_latency_ms);
-            // Ring buffer: keep最多 300 samples (~5 seconds at 60fps)
+            self.frame_stats.latency_samples.push_back(total_latency_ms);
+            // Ring buffer: keep最多 300 samples (~5 seconds at 60fps).
+            // VecDeque::pop_front is O(1); Vec::remove(0) was an O(N) memmove.
             if self.frame_stats.latency_samples.len() > 300 {
-                self.frame_stats.latency_samples.remove(0);
+                self.frame_stats.latency_samples.pop_front();
             }
 
             // Diagnostic logging for high latency
@@ -206,7 +207,7 @@ impl Compositor {
             return (0.0, 0.0, 0.0, 0.0);
         }
 
-        let mut sorted = self.frame_stats.latency_samples.clone();
+        let mut sorted: Vec<f32> = self.frame_stats.latency_samples.iter().copied().collect();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let len = sorted.len();

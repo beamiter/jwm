@@ -449,7 +449,7 @@ struct FrameStats {
     blur_cache_misses: u64,
     // Task 8: Input latency tracking
     last_input_time: Option<std::time::Instant>,
-    latency_samples: Vec<f32>,  // in ms, ring buffer up to 300 samples
+    latency_samples: std::collections::VecDeque<f32>,  // in ms, ring buffer up to 300 samples
 }
 
 /// Per-window wobbly animation state (grid spring-mass system).
@@ -1252,6 +1252,13 @@ pub(super) struct Compositor {
     eotf_mode: i32,           // 0=sRGB gamma, 1=PQ (ST2084), 2=HLG
     output_colorspace: i32,   // 0=BT.709, 1=BT.2020
     hdr_output_10bit: bool,   // true if GLX context is actually 10-bit
+
+    // --- Reusable per-frame scratch buffers (render_frame) ---
+    // Detached via mem::take during the frame, refilled, then restored, so the
+    // hot render path runs without per-frame heap allocation.
+    scratch_scene_info: Vec<(u32, WindowScanoutInfo)>,
+    scratch_blur_dirty: Vec<u32>,
+    scratch_tfp_order: Vec<u32>,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
