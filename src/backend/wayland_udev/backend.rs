@@ -672,6 +672,11 @@ pub struct UdevBackend {
 
     compositor: Option<WaylandCompositor>,
     drag: Option<UdevDragState>,
+
+    // Reusable per-frame scratch buffers (cleared+refilled each frame) to avoid
+    // two heap allocations per frame in compositor_render_frame.
+    scratch_tex_updates: Vec<(u64, u32, u32, u32, bool, bool, [f32; 4])>,
+    scratch_full_scene: Vec<(u64, i32, i32, u32, u32)>,
 }
 
 // NOTE: smithay state + calloop handle types are not thread-safe.
@@ -2129,6 +2134,8 @@ impl UdevBackend {
 
             compositor: None,
             drag: None,
+            scratch_tex_updates: Vec::new(),
+            scratch_full_scene: Vec::new(),
         })
     }
 }
@@ -2426,7 +2433,10 @@ impl Backend for UdevBackend {
         }
 
         // Phase 1: Import surface textures into GL cache (borrow kms only, no compositor borrow).
-        let mut tex_updates: Vec<(u64, u32, u32, u32, bool, bool, [f32; 4])> = Vec::new();
+        // Reuse a persistent scratch buffer (taken out so we can freely borrow
+        // other self fields below) instead of allocating one each frame.
+        let mut tex_updates = std::mem::take(&mut self.scratch_tex_updates);
+        tex_updates.clear();
         // Rate-limit diagnostic logging: log at most once per second.
         static LAST_CRF_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let crf_now_secs = std::time::SystemTime::now()
@@ -2460,21 +2470,6 @@ impl Backend for UdevBackend {
                         let ctx_id = renderer.context_id();
                         let tex = with_states(&surface, |states| {
                             let rsd = states.data_map.get::<RendererSurfaceStateUserData>();
-                            let (has_buf, buf_type_str) = rsd.as_ref().map(|d| {
-                                let locked = d.lock().unwrap();
-                                let buf = locked.buffer();
-                                let has_buf = buf.is_some();
-                                let type_str = buf.and_then(|b| buffer_type(&**b))
-                                    .map(|t| match t {
-                                        BufferType::Shm => "shm",
-                                        BufferType::Dma => "dma",
-                                        BufferType::Egl => "egl",
-                                        BufferType::SinglePixel => "single",
-                                        _ => "other",
-                                    })
-                                    .unwrap_or("unknown");
-                                (has_buf, type_str)
-                            }).unwrap_or((false, "no_rsd"));
                             let tex_info = rsd.and_then(|d| {
                                 let locked = d.lock().unwrap();
                                 locked.texture::<GlesTexture>(ctx_id).map(|t| {
@@ -2486,7 +2481,26 @@ impl Backend for UdevBackend {
                                     (t.tex_id(), t.is_y_inverted(), has_alpha, tex_size)
                                 })
                             });
+                            // The buffer-type diagnostic acquires the surface
+                            // state lock a second time and is only consumed by
+                            // the rate-limited log below, so keep it fully
+                            // behind the logging gate (hot path: one lock).
                             if crf_log_this {
+                                let (has_buf, buf_type_str) = rsd.as_ref().map(|d| {
+                                    let locked = d.lock().unwrap();
+                                    let buf = locked.buffer();
+                                    let has_buf = buf.is_some();
+                                    let type_str = buf.and_then(|b| buffer_type(&**b))
+                                        .map(|t| match t {
+                                            BufferType::Shm => "shm",
+                                            BufferType::Dma => "dma",
+                                            BufferType::Egl => "egl",
+                                            BufferType::SinglePixel => "single",
+                                            _ => "other",
+                                        })
+                                        .unwrap_or("unknown");
+                                    (has_buf, type_str)
+                                }).unwrap_or((false, "no_rsd"));
                                 log::info!("[crf] win={win_id:#x} import_ok={} has_buf={has_buf} buf={buf_type_str} tex={:?} y_inv={:?} alpha={:?}",
                                     import_result.is_ok(),
                                     tex_info.map(|(id, _, _, _)| id),
@@ -2529,7 +2543,9 @@ impl Backend for UdevBackend {
 
         // Phase 1b: Import xdg_popup surface textures and append to scene.
         let xdg_popups = self.state.xdg_popup_positions();
-        let mut full_scene: Vec<(u64, i32, i32, u32, u32)> = scene.to_vec();
+        let mut full_scene = std::mem::take(&mut self.scratch_full_scene);
+        full_scene.clear();
+        full_scene.extend_from_slice(scene);
         if let Some(kms) = &self.kms {
             let mut kms_ref = kms.borrow_mut();
             for (popup_surface, abs_x, abs_y, pw, ph) in &xdg_popups {
@@ -2614,8 +2630,8 @@ impl Backend for UdevBackend {
         }
 
         // Phase 2: Update compositor window textures then render into FBO.
-        if let (Some(compositor), Some(kms)) = (&mut self.compositor, &self.kms) {
-            for (win_id, tid, w, h, has_alpha, y_inverted, content_uv) in tex_updates {
+        let result = if let (Some(compositor), Some(kms)) = (&mut self.compositor, &self.kms) {
+            for &(win_id, tid, w, h, has_alpha, y_inverted, content_uv) in &tex_updates {
                 compositor.update_window_texture(win_id, tid, w, h, has_alpha, y_inverted, content_uv);
             }
             // Sync window class/app_id for per-class rules (frosted glass strength, etc.)
@@ -2641,9 +2657,15 @@ impl Backend for UdevBackend {
             if rendered {
                 kms.borrow_mut().request_render();
             }
-            return Ok(rendered);
-        }
-        Ok(false)
+            rendered
+        } else {
+            false
+        };
+
+        // Return the scratch buffers for reuse on the next frame.
+        self.scratch_tex_updates = tex_updates;
+        self.scratch_full_scene = full_scene;
+        Ok(result)
     }
 
     fn compositor_apply_config(&mut self) {
@@ -3015,11 +3037,13 @@ impl Backend for UdevBackend {
             self.maybe_reinit_kms();
 
             // Make cursor changes visible even if nothing else requests a redraw.
-            let cursor_dirty = {
+            // Read cursor_kind in the same lock scope so the render path below
+            // doesn't have to re-acquire the shared lock every frame.
+            let (cursor_dirty, cursor_kind) = {
                 let mut shared = self.shared.lock().unwrap();
                 let dirty = shared.cursor_dirty;
                 shared.cursor_dirty = false;
-                dirty
+                (dirty, shared.cursor_kind)
             };
             if cursor_dirty {
                 self.state.needs_redraw = true;
@@ -3051,7 +3075,6 @@ impl Backend for UdevBackend {
                     self.state.needs_redraw = false;
                 }
                 if can_present {
-                    let cursor_kind = self.shared.lock().unwrap().cursor_kind;
                     kms.borrow_mut().render_if_needed(
                         &*self.state,
                         cursor_kind,

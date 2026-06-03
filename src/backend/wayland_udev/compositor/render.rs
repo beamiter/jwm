@@ -112,23 +112,25 @@ impl WaylandCompositor {
 
         // Direct scanout: check if we can bypass composition entirely
         if !self.transition_active && !self.overview_active && !self.expose_active && !self.postprocess_active {
-            let scanout_windows: Vec<(u64, direct_scanout::WindowScanoutInfo)> = scene
-                .iter()
-                .filter_map(|&(win_id, x, y, w, h)| {
-                    self.windows.get(&win_id).map(|ws| {
-                        (win_id, direct_scanout::WindowScanoutInfo {
-                            x, y, width: w, height: h,
-                            is_fullscreen: ws.is_fullscreen,
-                            has_alpha: ws.has_alpha,
-                            has_blur: ws.is_frosted,
-                            has_shadow: self.shadow_enabled,
-                            corner_radius: ws.corner_radius_override.unwrap_or(self.corner_radius),
-                            opacity: ws.fade_opacity,
-                        })
-                    })
-                })
-                .collect();
+            // Reuse a persistent scratch Vec (taken out so we can borrow other
+            // self fields while filling it) instead of allocating every frame.
+            let mut scanout_windows = std::mem::take(&mut self.scratch_scanout);
+            scanout_windows.clear();
+            for &(win_id, x, y, w, h) in scene {
+                if let Some(ws) = self.windows.get(&win_id) {
+                    scanout_windows.push((win_id, direct_scanout::WindowScanoutInfo {
+                        x, y, width: w, height: h,
+                        is_fullscreen: ws.is_fullscreen,
+                        has_alpha: ws.has_alpha,
+                        has_blur: ws.is_frosted,
+                        has_shadow: self.shadow_enabled,
+                        corner_radius: ws.corner_radius_override.unwrap_or(self.corner_radius),
+                        opacity: ws.fade_opacity,
+                    }));
+                }
+            }
             let (can_scanout, _scanout_win) = self.direct_scanout_mgr.check_scene(&scanout_windows, focused);
+            self.scratch_scanout = scanout_windows;
             if can_scanout && self.fullscreen_unredirect {
                 self.frame_profiler.end_frame();
                 self.frame_rate_limiter.mark_frame();
@@ -154,13 +156,20 @@ impl WaylandCompositor {
         // 1b. Dirty region tracking: compare current scene vs previous frame
         // =================================================================
         {
-            use std::collections::HashSet;
-            let prev_ids: HashSet<u64> = self.prev_scene.iter().map(|&(id, _, _, _, _)| id).collect();
-            let curr_ids: HashSet<u64> = scene.iter().map(|&(id, _, _, _, _)| id).collect();
+            // Reuse persistent scratch buffers: current-frame id set + previous
+            // geometry-by-id map. Avoids two per-frame HashSet allocations and
+            // turns the move/resize lookup from O(N^2) linear scan into O(N).
+            self.scratch_curr_ids.clear();
+            self.scratch_curr_ids.extend(scene.iter().map(|&(id, _, _, _, _)| id));
+
+            self.scratch_prev_geom.clear();
+            for &(id, x, y, w, h) in &self.prev_scene {
+                self.scratch_prev_geom.insert(id, (x, y, w, h));
+            }
 
             // Windows that disappeared — mark their old rect dirty
             for &(id, x, y, w, h) in &self.prev_scene {
-                if !curr_ids.contains(&id) {
+                if !self.scratch_curr_ids.contains(&id) {
                     self.dirty_region_tracker.mark_dirty(
                         dirty_region::DirtyRect::new(x as f32, y as f32, w as f32, h as f32),
                     );
@@ -169,20 +178,23 @@ impl WaylandCompositor {
 
             // Windows that appeared or moved/resized
             for &(id, x, y, w, h) in scene {
-                if !prev_ids.contains(&id) {
-                    // New window
-                    self.dirty_region_tracker.mark_dirty(
-                        dirty_region::DirtyRect::new(x as f32, y as f32, w as f32, h as f32),
-                    );
-                } else if let Some(&(_, px, py, pw, ph)) = self.prev_scene.iter().find(|&&(pid, _, _, _, _)| pid == id) {
-                    if x != px || y != py || w != pw || h != ph {
-                        // Moved or resized — mark both old and new rects
-                        self.dirty_region_tracker.mark_dirty(
-                            dirty_region::DirtyRect::new(px as f32, py as f32, pw as f32, ph as f32),
-                        );
+                match self.scratch_prev_geom.get(&id) {
+                    None => {
+                        // New window
                         self.dirty_region_tracker.mark_dirty(
                             dirty_region::DirtyRect::new(x as f32, y as f32, w as f32, h as f32),
                         );
+                    }
+                    Some(&(px, py, pw, ph)) => {
+                        if x != px || y != py || w != pw || h != ph {
+                            // Moved or resized — mark both old and new rects
+                            self.dirty_region_tracker.mark_dirty(
+                                dirty_region::DirtyRect::new(px as f32, py as f32, pw as f32, ph as f32),
+                            );
+                            self.dirty_region_tracker.mark_dirty(
+                                dirty_region::DirtyRect::new(x as f32, y as f32, w as f32, h as f32),
+                            );
+                        }
                     }
                 }
             }
@@ -193,12 +205,19 @@ impl WaylandCompositor {
 
         // Feed dirty regions to per-monitor renderer
         {
-            let regions: Vec<dirty_region::DirtyRect> = self.dirty_region_tracker.regions().iter().copied().collect();
+            // Borrow the tracker's deque directly instead of collecting into a
+            // fresh Vec every frame. VecDeque exposes its (up to two) contiguous
+            // slices; marking from each is equivalent to one combined call.
+            let regions = self.dirty_region_tracker.regions();
             if regions.is_empty() {
                 // No tracked dirty regions yet — mark all monitors dirty (full redraw)
                 self.per_monitor_renderer.mark_all_dirty();
             } else {
-                self.per_monitor_renderer.mark_dirty_from_regions(&regions);
+                let (front, back) = regions.as_slices();
+                self.per_monitor_renderer.mark_dirty_from_regions(front);
+                if !back.is_empty() {
+                    self.per_monitor_renderer.mark_dirty_from_regions(back);
+                }
             }
             self.per_monitor_renderer.next_frame();
         }
@@ -616,8 +635,15 @@ impl WaylandCompositor {
                     gl.Uniform1f(self.wobbly_uniforms.dim, dim);
                     gl.Uniform4f(self.wobbly_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
 
-                    // Upload grid offsets as flat vec2 array
-                    let flat: Vec<f32> = wobbly.offsets.iter().flat_map(|o| [o[0], o[1]]).collect();
+                    // Upload grid offsets as flat vec2 array, reusing a
+                    // persistent scratch buffer instead of allocating per frame.
+                    let flat = &mut self.scratch_wobbly_flat;
+                    flat.clear();
+                    flat.reserve(wobbly.offsets.len() * 2);
+                    for o in &wobbly.offsets {
+                        flat.push(o[0]);
+                        flat.push(o[1]);
+                    }
                     gl.Uniform2fv(
                         self.wobbly_uniforms.grid_offsets,
                         flat.len() as i32 / 2,

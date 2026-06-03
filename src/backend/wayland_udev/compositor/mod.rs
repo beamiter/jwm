@@ -60,6 +60,7 @@ mod presentation_timing;
 
 use smithay::backend::renderer::gles::ffi;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::ffi::CString;
 use std::path::PathBuf;
@@ -660,6 +661,13 @@ pub(crate) struct WaylandCompositor {
 
     // Previous frame scene for dirty tracking
     prev_scene: Vec<(u64, i32, i32, u32, u32)>,
+
+    // Reusable per-frame scratch buffers (cleared+refilled each frame to avoid
+    // per-frame heap allocation in the render hot path).
+    scratch_curr_ids: HashSet<u64>,
+    scratch_prev_geom: HashMap<u64, (i32, i32, u32, u32)>,
+    scratch_scanout: Vec<(u64, direct_scanout::WindowScanoutInfo)>,
+    scratch_wobbly_flat: Vec<f32>,
 
     // Dock position (for genie)
     dock_x: f32,
@@ -1292,6 +1300,10 @@ impl WaylandCompositor {
             frame_count: 0,
             fps: 0.0,
             prev_scene: Vec::new(),
+            scratch_curr_ids: HashSet::new(),
+            scratch_prev_geom: HashMap::new(),
+            scratch_scanout: Vec::new(),
+            scratch_wobbly_flat: Vec::new(),
 
             // Dock position
             dock_x: 0.0,

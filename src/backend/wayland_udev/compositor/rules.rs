@@ -9,6 +9,38 @@ use crate::config::CONFIG;
 
 // BlurQuality is defined in super (mod.rs)
 
+/// ASCII case-insensitive substring test that performs no heap allocation.
+///
+/// Window class names / app_ids are ASCII identifiers in practice, so ASCII
+/// case folding is sufficient and avoids the per-call `String` allocation that
+/// `haystack.to_lowercase().contains(&needle.to_lowercase())` incurs. This runs
+/// per-window per-frame in the render loop, so the allocations mattered.
+pub(crate) fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
+    let n = needle.len();
+    if n == 0 {
+        return true;
+    }
+    let h = haystack.as_bytes();
+    let ne = needle.as_bytes();
+    if h.len() < n {
+        return false;
+    }
+    let first = ne[0].to_ascii_lowercase();
+    for start in 0..=h.len() - n {
+        if h[start].to_ascii_lowercase() != first {
+            continue;
+        }
+        if h[start..start + n]
+            .iter()
+            .zip(ne)
+            .all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase())
+        {
+            return true;
+        }
+    }
+    false
+}
+
 // ---------------------------------------------------------------------------
 // Exclusion and rule matching
 // ---------------------------------------------------------------------------
@@ -17,20 +49,13 @@ impl WaylandCompositor {
     /// Check if `class_name` matches any pattern in `list` (case-insensitive substring).
     /// Always returns true for "flameshot" regardless of the list contents.
     pub(crate) fn class_matches_exclude(class_name: &str, list: &[String]) -> bool {
-        let lower = class_name.to_lowercase();
-
         // Always exclude flameshot (screenshot tool overlays).
-        if lower.contains("flameshot") {
+        if contains_ignore_case(class_name, "flameshot") {
             return true;
         }
 
-        for pattern in list {
-            if lower.contains(&pattern.to_lowercase()) {
-                return true;
-            }
-        }
-
-        false
+        list.iter()
+            .any(|pattern| contains_ignore_case(class_name, pattern))
     }
 
     // -----------------------------------------------------------------------
@@ -40,9 +65,8 @@ impl WaylandCompositor {
     /// Lookup the first matching opacity rule for the given window class.
     /// Returns the opacity as a fraction 0.0..1.0 (rules are stored as 0..100 percent).
     pub(crate) fn lookup_opacity_rule(&self, class_name: &str) -> Option<f32> {
-        let lower = class_name.to_lowercase();
         for (opacity, pattern) in &self.opacity_rules {
-            if lower.contains(&pattern.to_lowercase()) {
+            if contains_ignore_case(class_name, pattern) {
                 return Some(*opacity);
             }
         }
@@ -70,9 +94,8 @@ impl WaylandCompositor {
 
     /// Lookup the first matching corner radius rule for the given window class.
     pub(crate) fn lookup_corner_radius_rule(&self, class_name: &str) -> Option<f32> {
-        let lower = class_name.to_lowercase();
         for (radius, pattern) in &self.corner_radius_rules {
-            if lower.contains(&pattern.to_lowercase()) {
+            if contains_ignore_case(class_name, pattern) {
                 return Some(*radius);
             }
         }
@@ -100,9 +123,8 @@ impl WaylandCompositor {
     /// Check if `class_name` matches a frosted glass rule.
     /// Returns the strength (0.0-1.0) if matched, None otherwise.
     pub(crate) fn lookup_frosted_glass_rule(&self, class_name: &str) -> Option<f32> {
-        let lower = class_name.to_lowercase();
         for (pattern, strength) in &self.frosted_glass_rules {
-            if lower.contains(&pattern.to_lowercase()) {
+            if contains_ignore_case(class_name, pattern) {
                 return Some(*strength);
             }
         }
@@ -134,9 +156,8 @@ impl WaylandCompositor {
     /// Lookup the first matching scale rule for the given window class.
     /// Returns the scale as a fraction (e.g. 0.9 for 90%).
     pub(crate) fn lookup_scale_rule(&self, class_name: &str) -> Option<f32> {
-        let lower = class_name.to_lowercase();
         for (scale, pattern) in &self.scale_rules {
-            if lower.contains(&pattern.to_lowercase()) {
+            if contains_ignore_case(class_name, pattern) {
                 return Some(*scale);
             }
         }
@@ -184,11 +205,9 @@ impl WaylandCompositor {
     /// Detect whether the given window class belongs to a game or emulator.
     /// Checks against both the built-in set and user-configured game_classes.
     pub(crate) fn detect_game_window(class_name: &str) -> bool {
-        let lower = class_name.to_lowercase();
-
         // Check built-in list.
         for &game_class in Self::BUILTIN_GAME_CLASSES {
-            if lower.contains(game_class) {
+            if contains_ignore_case(class_name, game_class) {
                 return true;
             }
         }
@@ -196,13 +215,9 @@ impl WaylandCompositor {
         // Check user-configured game classes from CONFIG.
         let cfg = CONFIG.load();
         let b = cfg.behavior();
-        for user_class in &b.game_classes {
-            if lower.contains(&user_class.to_lowercase()) {
-                return true;
-            }
-        }
-
-        false
+        b.game_classes
+            .iter()
+            .any(|user_class| contains_ignore_case(class_name, user_class))
     }
 
     // -----------------------------------------------------------------------

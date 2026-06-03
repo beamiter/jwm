@@ -622,25 +622,35 @@ impl WaylandCompositor {
     }
 
     /// Set window class/app_id and apply per-class rules (frosted glass, opacity, etc.)
+    ///
+    /// Called once per window every frame from the render dispatch, so the
+    /// class-unchanged fast path must do zero work: the (allocating) rule
+    /// lookups only run when the class actually changes, which is essentially
+    /// only at window map time.
     pub(crate) fn set_window_class(&mut self, window_id: u64, class_name: &str) {
+        // Fast path: bail before any rule lookups if nothing changed.
+        match self.windows.get(&window_id) {
+            Some(win) if win.class_name == class_name => return,
+            None => return,
+            _ => {}
+        }
+
         let frosted = self.lookup_frosted_glass_rule(class_name);
         let opacity_override = self.lookup_opacity_rule(class_name);
         let corner_radius_override = self.lookup_corner_radius_rule(class_name);
         let scale = self.lookup_scale_rule(class_name);
 
         if let Some(win) = self.windows.get_mut(&window_id) {
-            if win.class_name != class_name {
-                win.class_name = class_name.to_string();
-                win.is_frosted = frosted.is_some();
-                win.frosted_strength = frosted.unwrap_or(0.0);
-                win.opacity_override = opacity_override;
-                win.corner_radius_override = corner_radius_override;
-                if let Some(s) = scale {
-                    win.scale = s;
-                }
-                self.subpixel_mgr.register_window(window_id, class_name);
-                self.needs_render = true;
+            win.class_name = class_name.to_string();
+            win.is_frosted = frosted.is_some();
+            win.frosted_strength = frosted.unwrap_or(0.0);
+            win.opacity_override = opacity_override;
+            win.corner_radius_override = corner_radius_override;
+            if let Some(s) = scale {
+                win.scale = s;
             }
+            self.subpixel_mgr.register_window(window_id, class_name);
+            self.needs_render = true;
         }
     }
 
