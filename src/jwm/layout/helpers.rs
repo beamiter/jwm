@@ -58,16 +58,22 @@ impl Jwm {
 
     /// Apply smart borders: single tiled window gets no border/gap;
     /// multiple tiled windows get the configured border and gap.
-    pub(crate) fn apply_smart_borders(&mut self, clients: &[(ClientKey, f32, i32)]) -> (i32, i32) {
+    pub(crate) fn apply_smart_borders(
+        &mut self,
+        mon_key: MonitorKey,
+        clients: &[(ClientKey, f32, i32)],
+    ) -> (i32, i32) {
         let is_single = clients.len() == 1;
         let cfg = CONFIG.load();
         let default_border = cfg.border_px() as i32;
+        let monitor_gap = self
+            .state
+            .monitors
+            .get(mon_key)
+            .map(|m| m.layout.gap)
+            .unwrap_or_else(|| cfg.gap_px() as i32);
         let effective_border = if is_single { 0 } else { default_border };
-        let effective_gap = if is_single {
-            0
-        } else {
-            cfg.gap_px() as i32
-        };
+        let effective_gap = if is_single { 0 } else { monitor_gap };
         for &(key, _, _) in clients {
             if let Some(client) = self.state.clients.get_mut(key) {
                 client.geometry.border_w = effective_border;

@@ -1093,6 +1093,18 @@ impl Config {
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Shift".to_string()],
+                key: "b".to_string(),
+                function: "setgaps".to_string(),
+                argument: ArgumentConfig::Int(5),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
+                key: "b".to_string(),
+                function: "setgaps".to_string(),
+                argument: ArgumentConfig::Int(-5),
+            },
+            KeyConfig {
                 modifier: vec!["Mod1".to_string()],
                 key: "j".to_string(),
                 function: "focusstack".to_string(),
@@ -1692,6 +1704,7 @@ impl Config {
             "togglefloating" => Some(Jwm::togglefloating),
             "togglebar" => Some(Jwm::togglebar),
             "setmfact" => Some(Jwm::setmfact),
+            "setgaps" => Some(Jwm::setgaps),
             "setcfact" => Some(Jwm::setcfact),
             "incnmaster" => Some(Jwm::incnmaster),
             "movestack" => Some(Jwm::movestack),

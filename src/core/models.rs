@@ -182,6 +182,7 @@ pub struct WMMonitor {
 pub struct MonitorLayout {
     pub m_fact: f32,
     pub n_master: u32,
+    pub gap: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -202,6 +203,7 @@ pub struct Pertag {
     pub prev_tag: usize,
     pub n_masters: Vec<u32>,
     pub m_facts: Vec<f32>,
+    pub gaps: Vec<i32>,
     pub sel_lts: Vec<usize>,
     pub lt_idxs: Vec<Vec<Option<Rc<LayoutEnum>>>>,
     pub show_bars: Vec<bool>,
@@ -216,6 +218,7 @@ impl Pertag {
             prev_tag: 0,
             n_masters: vec![0; len],
             m_facts: vec![0.; len],
+            gaps: vec![0; len],
             sel_lts: vec![0; len],
             lt_idxs: vec![vec![None; 2]; len],
             show_bars: vec![show_bar; len],
@@ -229,6 +232,7 @@ impl Default for MonitorLayout {
         Self {
             m_fact: 0.55, // 默认主区域比例
             n_master: 1,  // 默认主窗口数量
+            gap: 0,       // 默认间距，createmon 时从配置覆盖
         }
     }
 }
@@ -241,6 +245,7 @@ impl WMMonitor {
             layout: MonitorLayout {
                 m_fact: 0.55,
                 n_master: 1,
+                gap: 0,
             },
             geometry: MonitorGeometry::default(),
             sel_tags: 0,
@@ -311,6 +316,7 @@ impl WMMonitor {
             // 从 Pertag 恢复布局状态到 Monitor
             self.layout.n_master = pertag.n_masters[new_tag_idx];
             self.layout.m_fact = pertag.m_facts[new_tag_idx];
+            self.layout.gap = pertag.gaps[new_tag_idx];
             self.sel_lt = pertag.sel_lts[new_tag_idx];
 
             if let Some(l0) = &pertag.lt_idxs[new_tag_idx][0] {
@@ -330,6 +336,7 @@ impl WMMonitor {
             let cur = pertag.cur_tag;
             pertag.n_masters[cur] = self.layout.n_master;
             pertag.m_facts[cur] = self.layout.m_fact;
+            pertag.gaps[cur] = self.layout.gap;
         }
     }
 

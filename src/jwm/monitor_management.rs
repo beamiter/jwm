@@ -20,6 +20,7 @@ impl Jwm {
         m.tag_set[1] = 1;
         m.layout.m_fact = cfg.m_fact();
         m.layout.n_master = cfg.n_master();
+        m.layout.gap = cfg.gap_px() as i32;
         m.lt[0] = Rc::new(LayoutEnum::FIBONACCI);
         m.lt[1] = Rc::new(LayoutEnum::TILE);
         m.lt_symbol = m.lt[0].symbol().to_string();
@@ -33,6 +34,7 @@ impl Jwm {
         for i in 0..=cfg.tags_length() {
             ref_pertag.n_masters[i] = m.layout.n_master;
             ref_pertag.m_facts[i] = m.layout.m_fact;
+            ref_pertag.gaps[i] = m.layout.gap;
 
             ref_pertag.lt_idxs[i][0] = Some(default_layout_0.clone());
             ref_pertag.lt_idxs[i][1] = Some(default_layout_1.clone());

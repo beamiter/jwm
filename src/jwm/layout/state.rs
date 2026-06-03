@@ -96,6 +96,27 @@ impl Jwm {
         Ok(())
     }
 
+    /// 调整平铺窗口之间的间距 (gap)，per-monitor + per-tag 保存
+    pub(crate) fn setgaps(
+        &mut self,
+        backend: &mut dyn Backend,
+        arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let WMArgEnum::Int(delta) = *arg {
+            let sel_mon_key = self.state.sel_mon.ok_or("No monitor selected")?;
+            if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
+                let new_gap = (monitor.layout.gap + delta).clamp(0, 100);
+                if new_gap != monitor.layout.gap {
+                    monitor.layout.gap = new_gap;
+                    monitor.update_current_tag_layout_params();
+                    info!("[setgaps] Updated gap to {}", new_gap);
+                }
+            }
+            self.arrange(backend, Some(sel_mon_key));
+        }
+        Ok(())
+    }
+
     /// 退出当前 monitor 上所有全屏窗口的全屏状态
     fn exit_fullscreen_on_monitor(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
         let fs_clients: Vec<ClientKey> = self

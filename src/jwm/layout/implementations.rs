@@ -30,7 +30,7 @@ impl Jwm {
             return;
         }
 
-        let (_effective_border, effective_gap) = self.apply_smart_borders(&raw_clients);
+        let (_effective_border, effective_gap) = self.apply_smart_borders(mon_key, &raw_clients);
         let default_border = CONFIG.load().border_px() as i32;
 
         // 转换为 LayoutClient 结构
@@ -87,7 +87,7 @@ impl Jwm {
             return;
         }
 
-        let (_effective_border, effective_gap) = self.apply_smart_borders(&raw_clients);
+        let (_effective_border, effective_gap) = self.apply_smart_borders(mon_key, &raw_clients);
         let default_border = CONFIG.load().border_px() as i32;
 
         let layout_clients: Vec<LayoutClient<ClientKey>> = raw_clients
@@ -165,7 +165,7 @@ impl Jwm {
             return;
         }
 
-        let (_effective_border, effective_gap) = self.apply_smart_borders(&raw_clients);
+        let (_effective_border, effective_gap) = self.apply_smart_borders(mon_key, &raw_clients);
         let default_border = cfg.border_px() as i32;
 
         // Reorder: move the focused client (monitor.sel) to clients[0]
@@ -264,7 +264,7 @@ impl Jwm {
             return;
         }
 
-        let (_effective_border, effective_gap) = self.apply_smart_borders(&raw_clients);
+        let (_effective_border, effective_gap) = self.apply_smart_borders(mon_key, &raw_clients);
         let default_border = CONFIG.load().border_px() as i32;
 
         let visible_keys: Vec<ClientKey> = raw_clients.iter().map(|&(k, _, _)| k).collect();
@@ -422,7 +422,7 @@ impl Jwm {
             return;
         }
 
-        let (_effective_border, effective_gap) = self.apply_smart_borders(&raw_clients);
+        let (_effective_border, effective_gap) = self.apply_smart_borders(mon_key, &raw_clients);
         let default_border = CONFIG.load().border_px() as i32;
 
         // 转换为纯数据结构 LayoutClient
