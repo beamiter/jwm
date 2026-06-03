@@ -90,10 +90,19 @@ harness = false
 # panic="unwind" kept intentionally: jwm spawns worker threads (async blur,
 # wallpaper loaders); unwind isolates a thread panic instead of aborting the
 # whole compositor.
+# lto="thin": ~90% of fat's size win at a fraction of the build time, chosen to
+# keep iteration fast. Switch back to "fat" if shaving the last few % matters.
 [profile.release]
 opt-level = 3
-lto = "fat"
+lto = "thin"
 codegen-units = 1
 panic = "unwind"
 strip = "symbols"
 incremental = false
+
+# Profiling build: release-grade codegen but keeps symbols and skips strip so
+# samply/perf can resolve frames. Use: cargo build --profile profiling
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = "none"

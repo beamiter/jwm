@@ -1195,7 +1195,7 @@ impl UdevBackend {
                         InputEvent::PointerMotion { event, .. } => {
                             let delta = event.delta();
                             let time = event.time_msec();
-                            let (x, y, output) = {
+                            let (x, y, output, in_screenshot) = {
                                 let mut s = shared.lock().unwrap();
                                 s.pointer_x += delta.x;
                                 s.pointer_y += delta.y;
@@ -1215,7 +1215,7 @@ impl UdevBackend {
                                     .iter()
                                     .find(|o| (x as i32) >= o.x && (y as i32) >= o.y && (x as i32) < (o.x + o.width) && (y as i32) < (o.y + o.height))
                                     .map(|o| o.id);
-                                (x, y, output)
+                                (x, y, output, s.screenshot_grab_active)
                             };
 
                             let location: Point<f64, Logical> = (x, y).into();
@@ -1244,7 +1244,6 @@ impl UdevBackend {
                                 .and_then(|(win, _, _)| win.map(HitTarget::Surface));
                             let focus = under.map(|(_win, surface, origin)| (surface, origin));
 
-                            let in_screenshot = shared.lock().unwrap().screenshot_grab_active;
                             if let Some(pointer) = state.seat.get_pointer() {
                                 pointer.relative_motion(
                                     state,
@@ -1276,7 +1275,7 @@ impl UdevBackend {
                         }
                         InputEvent::PointerMotionAbsolute { event, .. } => {
                             let time = event.time_msec();
-                            let (x, y, output) = {
+                            let (x, y, output, in_screenshot) = {
                                 let mut s = shared.lock().unwrap();
                                 let (w, h, origin_x, origin_y, output) = if let Some(first) = s.outputs.first() {
                                     (first.width.max(1) as i32, first.height.max(1) as i32, first.x, first.y, Some(first.id))
@@ -1286,7 +1285,7 @@ impl UdevBackend {
                                 let pos = event.position_transformed(smithay::utils::Size::from((w, h)));
                                 s.pointer_x = origin_x as f64 + pos.x;
                                 s.pointer_y = origin_y as f64 + pos.y;
-                                (s.pointer_x, s.pointer_y, output)
+                                (s.pointer_x, s.pointer_y, output, s.screenshot_grab_active)
                             };
 
                             let location: Point<f64, Logical> = (x, y).into();
@@ -1315,7 +1314,6 @@ impl UdevBackend {
                                 .and_then(|(win, _, _)| win.map(HitTarget::Surface));
                             let focus = under.map(|(_win, surface, origin)| (surface, origin));
 
-                            let in_screenshot = shared.lock().unwrap().screenshot_grab_active;
                             if let Some(pointer) = state.seat.get_pointer() {
                                 pointer.motion(
                                     state,
@@ -1352,7 +1350,7 @@ impl UdevBackend {
                                 276 => 9, // BTN_EXTRA
                                 _ => (button_code & 0xFF) as u8,
                             };
-                            let (x, y, output) = {
+                            let (x, y, output, in_screenshot) = {
                                 let s = shared.lock().unwrap();
                                 let x = s.pointer_x;
                                 let y = s.pointer_y;
@@ -1362,7 +1360,7 @@ impl UdevBackend {
                                     .iter()
                                     .find(|o| (x as i32) >= o.x && (y as i32) >= o.y && (x as i32) < (o.x + o.width) && (y as i32) < (o.y + o.height))
                                     .map(|o| o.id);
-                                (x, y, output)
+                                (x, y, output, s.screenshot_grab_active)
                             };
 
                             let location: Point<f64, Logical> = (x, y).into();
@@ -1398,7 +1396,6 @@ impl UdevBackend {
                                 .and_then(|(win, _, _)| win.map(HitTarget::Surface));
                             let focus = under.map(|(_win, surface, origin)| (surface, origin));
 
-                            let in_screenshot = shared.lock().unwrap().screenshot_grab_active;
                             if !in_screenshot {
                                 if let Some(pointer) = state.seat.get_pointer() {
                                     // Ensure focus is up-to-date before sending the button.

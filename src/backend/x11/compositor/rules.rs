@@ -30,6 +30,36 @@ use x11rb::rust_connection::RustConnection;
 #[allow(unused_imports)]
 use super::math::ortho;
 
+/// ASCII case-insensitive substring test that performs no heap allocation.
+/// Window class names are ASCII identifiers in practice, so ASCII case folding
+/// is sufficient and avoids the per-call `String` allocs that
+/// `haystack.to_lowercase().contains(&needle.to_lowercase())` incurs.
+fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
+    let n = needle.len();
+    if n == 0 {
+        return true;
+    }
+    let h = haystack.as_bytes();
+    let ne = needle.as_bytes();
+    if h.len() < n {
+        return false;
+    }
+    let first = ne[0].to_ascii_lowercase();
+    for start in 0..=h.len() - n {
+        if h[start].to_ascii_lowercase() != first {
+            continue;
+        }
+        if h[start..start + n]
+            .iter()
+            .zip(ne)
+            .all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase())
+        {
+            return true;
+        }
+    }
+    false
+}
+
 impl Compositor {
     /// Check if a window class matches any entry in an exclude list.
     pub(super) fn class_matches_exclude(class_name: &str, exclude_list: &[String]) -> bool {
@@ -86,20 +116,22 @@ impl Compositor {
         }
         let cfg = crate::config::CONFIG.load();
         let behavior = cfg.behavior();
-        let lower_class = class_name.to_lowercase();
 
-        // Check user's game_classes list
+        // Check user's game_classes list (substring match).
         for game_class in &behavior.game_classes {
-            if lower_class.contains(&game_class.to_lowercase()) {
+            if contains_ignore_case(class_name, game_class) {
                 return true;
             }
         }
 
-        // Built-in game/emulator detection
-        matches!(lower_class.as_str(),
-            "steam" | "steamapps" | "proton" | "dxvk" | "lutris" | "wine"
-            | "minecraft" | "dosbox" | "mgba" | "pcsx2" | "yuzu" | "dolphin"
-        )
+        // Built-in game/emulator detection (exact match).
+        const BUILTIN_GAME_CLASSES: &[&str] = &[
+            "steam", "steamapps", "proton", "dxvk", "lutris", "wine",
+            "minecraft", "dosbox", "mgba", "pcsx2", "yuzu", "dolphin",
+        ];
+        BUILTIN_GAME_CLASSES
+            .iter()
+            .any(|g| class_name.eq_ignore_ascii_case(g))
     }
 
     /// Check if currently focused window is a game
