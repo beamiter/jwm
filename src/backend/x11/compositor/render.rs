@@ -1199,7 +1199,7 @@ impl Compositor {
                     // Feature 13: Draw blurred background behind translucent windows (with frame extents mask)
                     // Blur is captured per-window so it includes all windows drawn below.
                     if blur_available {
-                        if self.needs_backdrop_blur(wt) {
+                        if self.needs_backdrop_blur(wt, status_bar_name_main) {
                             // Blur cache: if no window below this one was dirty and
                             // the below-scene structure hasn't changed, the previous
                             // blur result stored in blur_fbos[0] is still valid.
@@ -1636,12 +1636,7 @@ impl Compositor {
         if self.window_tabs_enabled && !self.window_groups.is_empty() {
             for &(win, x, y, w, _h) in visible_scene {
                 if let Some((_gid, tabs)) = self.find_window_group(win) {
-                    let tabs_owned: Vec<WindowTab> = tabs.iter().map(|t| WindowTab {
-                        x11_win: t.x11_win,
-                        title: t.title.clone(),
-                        is_active: t.is_active,
-                    }).collect();
-                    self.render_tab_bar(&proj, x as f32, y as f32, w as f32, &tabs_owned);
+                    self.render_tab_bar(&proj, x as f32, y as f32, w as f32, tabs);
                 }
             }
         }

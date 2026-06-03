@@ -293,7 +293,11 @@ impl Compositor {
         let blur_active = self.blur_enabled
             && self.scene_fbo.is_some()
             && !self.blur_fbos.is_empty()
-            && self.windows.values().any(|wt| self.needs_backdrop_blur(wt));
+            && {
+                let cfg = crate::config::CONFIG.load();
+                let status_bar_name = cfg.status_bar_name();
+                self.windows.values().any(|wt| self.needs_backdrop_blur(wt, status_bar_name))
+            };
         if blur_active {
             self.damage_tracker.mark_all_dirty();
             self.dirty_region_tracker.mark_all_dirty();  // P5C: Sync rect tracker

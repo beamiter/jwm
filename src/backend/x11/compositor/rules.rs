@@ -726,10 +726,8 @@ impl Compositor {
     }
 
     /// Whether a window should receive per-frame backdrop blur compositing.
-    pub(super) fn needs_backdrop_blur(&self, wt: &WindowTexture) -> bool {
+    pub(super) fn needs_backdrop_blur(&self, wt: &WindowTexture, status_bar_name: &str) -> bool {
         // Skip backdrop blur for statusbar
-        let cfg = crate::config::CONFIG.load();
-        let status_bar_name = cfg.status_bar_name();
         if wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name) {
             return false;
         }
