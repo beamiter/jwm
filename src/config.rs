@@ -1105,6 +1105,12 @@ impl Config {
                 argument: ArgumentConfig::Int(-5),
             },
             KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Shift".to_string()],
+                key: "x".to_string(),
+                function: "togglecompositor".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
                 modifier: vec!["Mod1".to_string()],
                 key: "j".to_string(),
                 function: "focusstack".to_string(),

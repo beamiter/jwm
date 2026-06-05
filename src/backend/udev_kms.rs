@@ -1208,6 +1208,45 @@ impl KmsState {
             let mut visible_surfaces: HashSet<wayland_server::Weak<WlSurface>> = HashSet::new();
             let mut frame_roots: Vec<WlSurface> = Vec::new();
 
+            // DnD drag icon: rendered just below the cursor, in front of all windows.
+            // Placed before the compositor/element branch split so it overlays both
+            // render paths identically.
+            if let Some(icon) = state.dnd_icon.as_ref() {
+                let surface = icon.surface.clone();
+                frame_roots.push(surface.clone());
+                with_surface_tree_downward(
+                    &surface,
+                    (),
+                    |_, _, _| TraversalAction::DoChildren(()),
+                    |child_surface, child_states, _| {
+                        let data = child_states.data_map.get::<RendererSurfaceStateUserData>();
+                        let Some(data) = data else {
+                            return;
+                        };
+                        if data.lock().unwrap().view().is_some() {
+                            out.output.enter(child_surface);
+                            visible_surfaces.insert(child_surface.downgrade());
+                        }
+                    },
+                    |_, _, _| true,
+                );
+                let loc: Point<i32, Physical> = (
+                    (cursor_x - ox) + icon.offset.x,
+                    (cursor_y - oy) + icon.offset.y,
+                )
+                    .into();
+                let tree = SurfaceTree::from_surface(&surface);
+                let icon_elements: Vec<KmsRenderElement> =
+                    AsRenderElements::<GlesRenderer>::render_elements(
+                        &tree,
+                        &mut self.renderer,
+                        loc,
+                        scale,
+                        1.0,
+                    );
+                elements.extend(icon_elements);
+            }
+
             // Layer surfaces above normal windows.
             {
                 let map = layer_map_for_output(&out.output);

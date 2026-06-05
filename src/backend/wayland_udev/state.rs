@@ -38,11 +38,19 @@ use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::socket::ListeningSocketSource;
 use smithay::wayland::output::OutputHandler;
-use smithay::wayland::selection::SelectionHandler;
-use smithay::wayland::selection::data_device::{DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler};
-use smithay::input::dnd::{DnDGrab, DndGrabHandler, GrabType, Source};
+use smithay::wayland::selection::{SelectionHandler, SelectionTarget, SelectionSource};
+use smithay::wayland::selection::data_device::{
+    DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
+    clear_data_device_selection, current_data_device_selection_userdata,
+    request_data_device_client_selection, set_data_device_selection,
+};
+use smithay::input::dnd::{DnDGrab, DndGrabHandler, GrabType, Source, DndTarget};
 use smithay::input::pointer::Focus;
-use smithay::wayland::selection::primary_selection::{PrimarySelectionHandler, PrimarySelectionState};
+use smithay::wayland::selection::primary_selection::{
+    PrimarySelectionHandler, PrimarySelectionState,
+    clear_primary_selection, current_primary_selection_userdata,
+    request_primary_client_selection, set_primary_selection,
+};
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::text_input::TextInputManagerState;
 use smithay::wayland::input_method::{InputMethodHandler, InputMethodManagerState, PopupSurface as ImPopupSurface};
@@ -60,6 +68,7 @@ use smithay::wayland::pointer_gestures::PointerGesturesState;
 use smithay::wayland::single_pixel_buffer::SinglePixelBufferState;
 use smithay::wayland::content_type::ContentTypeState;
 use smithay::wayland::alpha_modifier::AlphaModifierState;
+use smithay::wayland::background_effect::{BackgroundEffectState, ExtBackgroundEffectHandler};
 use smithay::wayland::foreign_toplevel_list::{ForeignToplevelListState, ForeignToplevelListHandler, ForeignToplevelHandle};
 use smithay::wayland::tablet_manager::TabletManagerState;
 use smithay::wayland::fifo::FifoManagerState;
@@ -95,12 +104,20 @@ impl ClientData for JwmClientState {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct DndIcon {
+    pub surface: WlSurface,
+    pub offset: Point<i32, Logical>,
+}
+
 pub struct JwmWaylandState {
     pub display_handle: DisplayHandle,
     pub pending_events: Arc<Mutex<std::collections::VecDeque<BackendEvent>>>,
 
     pub pointer_location: Point<f64, Logical>,
     pub needs_redraw: bool,
+
+    pub dnd_icon: Option<DndIcon>,
 
     pub output_manager_state: OutputManagerState,
 
@@ -913,6 +930,60 @@ impl XwmHandler for JwmWaylandState {
             let _ = window.set_fullscreen(false);
         }
     }
+
+    fn allow_selection_access(&mut self, _xwm: XwmId, _selection: SelectionTarget) -> bool {
+        // Permit X11 clients to read the Wayland selection. jwm tracks keyboard
+        // focus as a bare WlSurface, so we cannot cheaply assert the focused
+        // window is X11; allow access so the clipboard bridge works in practice.
+        true
+    }
+
+    fn send_selection(
+        &mut self,
+        _xwm: XwmId,
+        selection: SelectionTarget,
+        mime_type: String,
+        fd: std::os::fd::OwnedFd,
+    ) {
+        match selection {
+            SelectionTarget::Clipboard => {
+                if let Err(err) = request_data_device_client_selection(&self.seat, mime_type, fd) {
+                    warn!("Failed to request Wayland clipboard for Xwayland: {err:?}");
+                }
+            }
+            SelectionTarget::Primary => {
+                if let Err(err) = request_primary_client_selection(&self.seat, mime_type, fd) {
+                    warn!("Failed to request Wayland primary selection for Xwayland: {err:?}");
+                }
+            }
+        }
+    }
+
+    fn new_selection(&mut self, _xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
+        match selection {
+            SelectionTarget::Clipboard => {
+                set_data_device_selection(&self.display_handle, &self.seat, mime_types, ());
+            }
+            SelectionTarget::Primary => {
+                set_primary_selection(&self.display_handle, &self.seat, mime_types, ());
+            }
+        }
+    }
+
+    fn cleared_selection(&mut self, _xwm: XwmId, selection: SelectionTarget) {
+        match selection {
+            SelectionTarget::Clipboard => {
+                if current_data_device_selection_userdata(&self.seat).is_some() {
+                    clear_data_device_selection(&self.display_handle, &self.seat);
+                }
+            }
+            SelectionTarget::Primary => {
+                if current_primary_selection_userdata(&self.seat).is_some() {
+                    clear_primary_selection(&self.display_handle, &self.seat);
+                }
+            }
+        }
+    }
 }
 
 impl JwmWaylandState {
@@ -1085,6 +1156,12 @@ impl JwmWaylandState {
             dh, Some(&primary_selection_state), |_client| true,
         );
         let kde_decoration_state = KdeDecorationState::new::<JwmWaylandState>(dh, KdeMode::Server);
+        // ext-background-effect-v1: advertise the global so clients can request
+        // background blur regions. The region is stored per-surface in
+        // BackgroundEffectSurfaceCachedState; the GL compositor's frosted-glass
+        // system can read it during rendering. GlobalId may be dropped — the
+        // global persists in the Display.
+        BackgroundEffectState::new::<JwmWaylandState>(dh);
 
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(dh, seat_name);
@@ -1099,6 +1176,7 @@ impl JwmWaylandState {
 
                 pointer_location: (0.0, 0.0).into(),
                 needs_redraw: true,
+                dnd_icon: None,
 
                 output_manager_state,
                 compositor_state,
@@ -1313,8 +1391,21 @@ impl JwmWaylandState {
             let x1 = geo.x as f64 + geo.w as f64 + bw;
             let y1 = geo.y as f64 + geo.h as f64 + bw;
             if location.x >= x0 && location.y >= y0 && location.x < x1 && location.y < y1 {
+                let origin = self.toplevel_buffer_origin(*win).unwrap_or((geo.x, geo.y).into());
+                // For X11 windows, descend into subsurfaces so DnD enter/motion/drop
+                // target the correct child surface (xdnd drop targeting).
+                if let Some(x11) = self.x11_surfaces.get(win) {
+                    if let Some((surface, surf_loc)) =
+                        x11.surface_under(location, origin, WindowSurfaceType::ALL)
+                    {
+                        return Some((
+                            Some(*win),
+                            surface,
+                            (surf_loc.x as f64, surf_loc.y as f64).into(),
+                        ));
+                    }
+                }
                 if let Some(surface) = self.surface_for_window(*win) {
-                    let origin = self.toplevel_buffer_origin(*win).unwrap_or((geo.x, geo.y).into());
                     return Some((
                         Some(*win),
                         surface,
@@ -1906,6 +1997,34 @@ impl InputMethodHandler for JwmWaylandState {
 
 impl SelectionHandler for JwmWaylandState {
     type SelectionUserData = ();
+
+    fn new_selection(
+        &mut self,
+        ty: SelectionTarget,
+        source: Option<SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        if let Some(xwm) = self.x11_wm.as_mut() {
+            if let Err(err) = xwm.new_selection(ty, source.map(|s| s.mime_types())) {
+                warn!("Failed to set Xwayland selection {ty:?}: {err:?}");
+            }
+        }
+    }
+
+    fn send_selection(
+        &mut self,
+        ty: SelectionTarget,
+        mime_type: String,
+        fd: std::os::fd::OwnedFd,
+        _seat: Seat<Self>,
+        _user_data: &(),
+    ) {
+        if let Some(xwm) = self.x11_wm.as_mut() {
+            if let Err(err) = xwm.send_selection(ty, mime_type, fd) {
+                warn!("Failed to send selection (X11 -> Wayland): {err:?}");
+            }
+        }
+    }
 }
 
 impl DataDeviceHandler for JwmWaylandState {
@@ -1918,11 +2037,16 @@ impl WaylandDndGrabHandler for JwmWaylandState {
     fn dnd_requested<S: Source>(
         &mut self,
         source: S,
-        _icon: Option<WlSurface>,
+        icon: Option<WlSurface>,
         seat: Seat<Self>,
         serial: Serial,
         type_: GrabType,
     ) {
+        self.dnd_icon = icon.map(|surface| DndIcon {
+            surface,
+            offset: (0, 0).into(),
+        });
+        self.needs_redraw = true;
         match type_ {
             GrabType::Pointer => {
                 let Some(pointer) = seat.get_pointer() else {
@@ -1959,11 +2083,38 @@ impl WaylandDndGrabHandler for JwmWaylandState {
     }
 }
 
-impl DndGrabHandler for JwmWaylandState {}
+impl DndGrabHandler for JwmWaylandState {
+    fn dropped(
+        &mut self,
+        _target: Option<DndTarget<'_, Self>>,
+        _validated: bool,
+        _seat: Seat<Self>,
+        _location: Point<f64, Logical>,
+    ) {
+        self.dnd_icon = None;
+        self.needs_redraw = true;
+    }
+}
 
 impl PrimarySelectionHandler for JwmWaylandState {
     fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
         &mut self.primary_selection_state
+    }
+}
+
+impl ExtBackgroundEffectHandler for JwmWaylandState {
+    fn set_blur_region(
+        &mut self,
+        _wl_surface: WlSurface,
+        _region: smithay::wayland::compositor::RegionAttributes,
+    ) {
+        // Region is stored in the surface's BackgroundEffectSurfaceCachedState by
+        // the protocol; just request a redraw so the new effect is picked up.
+        self.needs_redraw = true;
+    }
+
+    fn unset_blur_region(&mut self, _wl_surface: WlSurface) {
+        self.needs_redraw = true;
     }
 }
 
