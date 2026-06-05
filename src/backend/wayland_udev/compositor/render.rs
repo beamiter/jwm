@@ -76,6 +76,93 @@ impl WaylandCompositor {
         }
     }
 
+    /// Bounding box (top-left logical px) of everything that changed since the
+    /// previous frame, or `None` to request a full redraw.
+    ///
+    /// SAFETY INVARIANT: the returned box must be a *superset* of every pixel of
+    /// `output_fbo` that differs from the previous frame. Pixels outside it are
+    /// left persisted from prior frames, so under-reporting shows stale content.
+    /// Callers only invoke this on provably "calm" frames (no animation, blur,
+    /// or effect overlays); here we additionally cover window geometry changes,
+    /// content updates, and focus-driven border/opacity changes.
+    fn compute_partial_damage_box(
+        &self,
+        scene: &[(u64, i32, i32, u32, u32)],
+        focused: Option<u64>,
+    ) -> Option<dirty_region::DirtyRect> {
+        use dirty_region::DirtyRect;
+
+        // Expand each window rect to cover its border and shadow footprint.
+        let margin = self.border_width
+            + if self.shadow_enabled && self.shadow_radius > 0.0 {
+                self.shadow_spread
+                    + self.shadow_radius
+                    + self.shadow_offset[0].abs().max(self.shadow_offset[1].abs())
+            } else {
+                0.0
+            };
+
+        fn fold(acc: &mut Option<DirtyRect>, r: DirtyRect) {
+            *acc = Some(match *acc {
+                Some(a) => a.union(&r),
+                None => r,
+            });
+        }
+        let win_rect = |id: u64| -> Option<DirtyRect> {
+            scene.iter().find(|&&(wid, ..)| wid == id).map(|&(_, x, y, w, h)| {
+                DirtyRect::new(x as f32, y as f32, w as f32, h as f32).expand(margin)
+            })
+        };
+
+        let mut acc: Option<DirtyRect> = None;
+
+        // Geometry changes (appear/disappear/move/resize), already tracked.
+        for r in self.dirty_region_tracker.regions() {
+            fold(&mut acc, r.expand(margin));
+        }
+        // Window content updates committed this frame.
+        for &id in &self.content_dirty_ids {
+            if let Some(r) = win_rect(id) {
+                fold(&mut acc, r);
+            }
+        }
+        // Focus change: border/opacity/dim differ on old and new focused windows.
+        if focused != self.prev_focused {
+            for fid in [focused, self.prev_focused].into_iter().flatten() {
+                if let Some(r) = win_rect(fid) {
+                    fold(&mut acc, r);
+                }
+            }
+        }
+        // Urgent windows draw an attention border that may toggle independently
+        // of content; keep them in the box so it never goes stale.
+        for &(id, x, y, w, h) in scene {
+            if self.windows.get(&id).map_or(false, |ws| ws.is_urgent) {
+                fold(
+                    &mut acc,
+                    DirtyRect::new(x as f32, y as f32, w as f32, h as f32).expand(margin),
+                );
+            }
+        }
+
+        let bbox = acc?;
+        // Clamp to screen bounds.
+        let x0 = bbox.x.max(0.0);
+        let y0 = bbox.y.max(0.0);
+        let x1 = (bbox.x + bbox.width).min(self.screen_w as f32);
+        let y1 = (bbox.y + bbox.height).min(self.screen_h as f32);
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        let clamped = DirtyRect::new(x0, y0, x1 - x0, y1 - y0);
+        // Scissoring a near-full-screen box is not worth the bookkeeping.
+        let screen_area = (self.screen_w as f32) * (self.screen_h as f32);
+        if clamped.area() >= 0.7 * screen_area {
+            return None;
+        }
+        Some(clamped)
+    }
+
     /// Main rendering function. Composites the entire scene into the output FBO.
     /// `scene` is a list of (window_id, x, y, w, h) in bottom-to-top order.
     /// `focused` is the currently focused window.
@@ -295,6 +382,34 @@ impl WaylandCompositor {
         }
 
         // =================================================================
+        // 2b. Partial-damage decision (experimental, default off)
+        // =================================================================
+        // Only scissor on provably "calm" frames: no animation, no blur, no
+        // effect overlays, no tilt. Everything excluded here either redraws the
+        // whole screen continuously or samples regions outside any damage box.
+        let blur_would_run = self.blur_enabled
+            && scene.iter().any(|&(win_id, ..)| {
+                self.windows.get(&win_id).map_or(false, |ws| ws.is_frosted)
+            });
+        let allow_partial = self.partial_damage_enabled
+            && !self.force_full_damage_next
+            && !any_animating
+            && !force_render
+            && !self.peek_active
+            && self.window_groups.is_empty()
+            && !self.annotation_active
+            && self.tilt_x.abs() <= 0.001
+            && self.tilt_y.abs() <= 0.001
+            && !blur_would_run;
+        let partial_box = if allow_partial {
+            self.compute_partial_damage_box(scene, focused)
+        } else {
+            None
+        };
+        // Consumed for this frame; next frame may go partial again.
+        self.force_full_damage_next = false;
+
+        // =================================================================
         // 3. Setup projection matrix
         // =================================================================
         let projection = ortho(0.0, self.screen_w as f32, self.screen_h as f32, 0.0);
@@ -308,6 +423,23 @@ impl WaylandCompositor {
             gl.Enable(ffi::BLEND);
             gl.BlendFunc(ffi::ONE, ffi::ONE_MINUS_SRC_ALPHA);
         }
+
+        // Restrict all output_fbo passes (clear, wallpaper, shadows, windows,
+        // borders) to the damage box. Regions outside persist from prior frames.
+        // GL scissor uses a bottom-left origin; our draw coords are top-left.
+        let scissor_active = if let Some(b) = partial_box {
+            let sx = b.x.floor().max(0.0) as i32;
+            let sw = b.width.ceil() as i32;
+            let sh = b.height.ceil() as i32;
+            let sy = ((self.screen_h as i32) - (b.y.floor() as i32) - sh).max(0);
+            unsafe {
+                gl.Enable(ffi::SCISSOR_TEST);
+                gl.Scissor(sx, sy, sw.max(0), sh.max(0));
+            }
+            true
+        } else {
+            false
+        };
 
         // =================================================================
         // 5. Draw background (dark blue-grey) + wallpaper
@@ -816,6 +948,15 @@ impl WaylandCompositor {
         } // border_enabled
         self.frame_profiler.zone_end();
 
+        // End of scissored output_fbo passes. Effect overlays below always run
+        // full-screen, and allow_partial already excludes every one of them, so
+        // disabling here keeps the scissor strictly around the calm-frame draws.
+        if scissor_active {
+            unsafe {
+                gl.Disable(ffi::SCISSOR_TEST);
+            }
+        }
+
         // =================================================================
         // 11. Genie animations
         // =================================================================
@@ -1047,6 +1188,8 @@ impl WaylandCompositor {
         self.perf_metrics.record_compositor(std::time::Duration::from_secs_f32(frame_ms / 1000.0));
         self.adaptive_scheduler.on_frame_completed(std::time::Duration::from_secs_f32(frame_ms / 1000.0));
         self.dirty_region_tracker.clear();
+        self.content_dirty_ids.clear();
+        self.prev_focused = focused;
 
         // Predictive render: update scene activity periodically
         self.predictive_render_mgr.update_scene_activity();

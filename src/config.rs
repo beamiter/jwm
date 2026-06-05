@@ -1111,6 +1111,12 @@ impl Config {
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Shift".to_string()],
+                key: "d".to_string(),
+                function: "togglepartialdamage".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
                 modifier: vec!["Mod1".to_string()],
                 key: "j".to_string(),
                 function: "focusstack".to_string(),
@@ -1730,6 +1736,7 @@ impl Config {
             "togglescratchpad" => Some(Jwm::togglescratchpad),
             "togglepip" => Some(Jwm::togglepip),
             "togglecompositor" => Some(Jwm::togglecompositor),
+            "togglepartialdamage" => Some(Jwm::togglepartialdamage),
             "toggle_overview" => Some(Jwm::toggle_overview),
             "cycle_overview" => Some(Jwm::cycle_overview),
             "toggle_magnifier" => Some(Jwm::toggle_magnifier),

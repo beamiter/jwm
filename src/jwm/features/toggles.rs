@@ -115,6 +115,24 @@ impl Jwm {
         Ok(())
     }
 
+    /// 切换部分重绘(scissor 局部刷新,实验性,默认关)
+    pub fn togglepartialdamage(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let enable = !backend.has_partial_damage();
+        match backend.set_partial_damage(enable) {
+            Ok(true) => log::info!(
+                "Partial-damage redraw toggled: now {}",
+                if enable { "ON" } else { "OFF" }
+            ),
+            Ok(false) => log::info!("Partial-damage toggle ignored (no compositor active)"),
+            Err(e) => log::warn!("Failed to toggle partial-damage: {e}"),
+        }
+        Ok(())
+    }
+
     /// 切换 Overview 模式（3D 窗口切换器）
     pub fn toggle_overview(
         &mut self,

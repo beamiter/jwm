@@ -2388,6 +2388,20 @@ impl Backend for UdevBackend {
         self.compositor.is_some()
     }
 
+    fn has_partial_damage(&self) -> bool {
+        self.compositor.as_ref().map_or(false, |c| c.partial_damage_enabled())
+    }
+
+    fn set_partial_damage(&mut self, enabled: bool) -> Result<bool, BackendError> {
+        match self.compositor.as_mut() {
+            Some(c) => {
+                c.set_partial_damage(enabled);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     fn compositor_needs_render(&self) -> bool {
         self.compositor.as_ref().map_or(false, |c| c.needs_render())
     }

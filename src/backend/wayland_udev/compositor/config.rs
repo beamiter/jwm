@@ -617,6 +617,9 @@ impl WaylandCompositor {
         win.content_uv = content_uv;
         self.needs_render = true;
 
+        // Record content damage for partial-damage (scissored) redraw.
+        self.content_dirty_ids.insert(window_id);
+
         // Feed performance infrastructure
         self.predictive_render_mgr.record_window_damage(window_id);
     }

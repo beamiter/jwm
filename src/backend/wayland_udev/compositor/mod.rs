@@ -748,6 +748,19 @@ pub(crate) struct WaylandCompositor {
     fullscreen_unredirect: bool,
     unredirected_window: Option<u64>,
 
+    // --- Partial-damage (scissored) redraw ---
+    // Experimental: when on, calm frames (no blur/animation/effects) only
+    // re-shade the changed bounding box instead of the whole screen. Default
+    // off; needs hardware verification before trusting (no display in CI).
+    partial_damage_enabled: bool,
+    // Force a full redraw on the next frame (set when the toggle flips or the
+    // output is resized, so output_fbo is globally valid before partial frames).
+    force_full_damage_next: bool,
+    // Window ids whose texture content was updated since the last render_frame.
+    content_dirty_ids: HashSet<u64>,
+    // Previous frame's focused window, to damage focus-driven border/opacity changes.
+    prev_focused: Option<u64>,
+
     // --- VRR ---
     is_game_window: HashMap<u64, bool>,
     vrr_active: bool,
@@ -1386,6 +1399,12 @@ impl WaylandCompositor {
             fullscreen_unredirect: false,
             unredirected_window: None,
 
+            // Partial-damage redraw (experimental, default off)
+            partial_damage_enabled: false,
+            force_full_damage_next: true,
+            content_dirty_ids: HashSet::new(),
+            prev_focused: None,
+
             // VRR
             is_game_window: HashMap::new(),
             vrr_active: false,
@@ -1521,6 +1540,21 @@ impl WaylandCompositor {
     /// Current screen dimensions.
     pub(crate) fn screen_size(&self) -> (u32, u32) {
         (self.screen_w, self.screen_h)
+    }
+
+    /// Whether experimental partial-damage (scissored) redraw is enabled.
+    pub(crate) fn partial_damage_enabled(&self) -> bool {
+        self.partial_damage_enabled
+    }
+
+    /// Toggle experimental partial-damage redraw. Forces one full redraw on the
+    /// next frame so output_fbo is globally valid before partial frames resume.
+    pub(crate) fn set_partial_damage(&mut self, on: bool) {
+        if self.partial_damage_enabled != on {
+            self.partial_damage_enabled = on;
+            self.force_full_damage_next = true;
+            self.needs_render = true;
+        }
     }
 
     /// Feed a vblank presentation timestamp for frame pacing.
@@ -1706,6 +1740,9 @@ impl WaylandCompositor {
 
         self.screen_w = w;
         self.screen_h = h;
+        // output_fbo is recreated below; its contents are undefined until a full
+        // redraw, so partial-damage frames must not persist stale regions.
+        self.force_full_damage_next = true;
 
         unsafe {
             gl.DeleteFramebuffers(1, &self.output_fbo);

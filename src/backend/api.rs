@@ -918,6 +918,17 @@ pub trait Backend: Send {
         Ok(false)
     }
 
+    /// Whether experimental partial-damage (scissored) redraw is enabled.
+    fn has_partial_damage(&self) -> bool {
+        false
+    }
+
+    /// Enable or disable experimental partial-damage redraw at runtime.
+    /// Returns `Ok(true)` if a compositor was present to apply it to.
+    fn set_partial_damage(&mut self, _enabled: bool) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
     /// Request a compositor-level screenshot.
     ///
     /// On backends that own the framebuffer (udev/KMS) this captures the
