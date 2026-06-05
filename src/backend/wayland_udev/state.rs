@@ -8,38 +8,7 @@ use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
 
-use smithay::delegate_compositor;
-use smithay::delegate_data_device;
-use smithay::delegate_layer_shell;
-use smithay::delegate_output;
-use smithay::delegate_primary_selection;
-use smithay::delegate_seat;
-use smithay::delegate_shm;
-use smithay::delegate_viewporter;
-use smithay::delegate_xdg_shell;
-use smithay::delegate_text_input_manager;
-use smithay::delegate_input_method_manager;
-use smithay::delegate_virtual_keyboard_manager;
-use smithay::delegate_xdg_activation;
-use smithay::delegate_xdg_decoration;
-use smithay::delegate_xwayland_shell;
-use smithay::delegate_pointer_constraints;
-use smithay::delegate_relative_pointer;
-use smithay::delegate_session_lock;
-use smithay::delegate_idle_inhibit;
-use smithay::delegate_idle_notify;
-use smithay::delegate_fractional_scale;
-use smithay::delegate_cursor_shape;
-use smithay::delegate_presentation;
-use smithay::delegate_pointer_gestures;
-use smithay::delegate_single_pixel_buffer;
-use smithay::delegate_content_type;
-use smithay::delegate_alpha_modifier;
-use smithay::delegate_foreign_toplevel_list;
-use smithay::delegate_tablet_manager;
-use smithay::delegate_fifo;
-use smithay::delegate_keyboard_shortcuts_inhibit;
-use smithay::delegate_security_context;
+use smithay::delegate_dispatch2;
 use smithay::xwayland::{X11Wm, X11Surface, XwmHandler, XWaylandClientData, xwm::{Reorder, ResizeEdge as XwmResizeEdge, XwmId, WmWindowProperty}};
 use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
 use smithay::input::keyboard::XkbConfig;
@@ -70,7 +39,9 @@ use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::socket::ListeningSocketSource;
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::selection::SelectionHandler;
-use smithay::wayland::selection::data_device::{ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler};
+use smithay::wayland::selection::data_device::{DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler};
+use smithay::input::dnd::{DnDGrab, DndGrabHandler, GrabType, Source};
+use smithay::input::pointer::Focus;
 use smithay::wayland::selection::primary_selection::{PrimarySelectionHandler, PrimarySelectionState};
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::text_input::TextInputManagerState;
@@ -95,7 +66,7 @@ use smithay::wayland::fifo::FifoManagerState;
 use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitState;
 use smithay::wayland::security_context::SecurityContextState;
 use smithay::wayland::commit_timing::CommitTimingManagerState;
-use smithay::wayland::shell::xdg::dialog::{XdgDialogState, XdgDialogHandler};
+use smithay::wayland::shell::xdg::dialog::{XdgDialogState, XdgDialogHandler, ToplevelDialogHint};
 use smithay::wayland::xdg_foreign::{XdgForeignState, XdgForeignHandler};
 use smithay::wayland::xdg_system_bell::{XdgSystemBellState, XdgSystemBellHandler};
 use smithay::wayland::pointer_warp::{PointerWarpManager, PointerWarpHandler};
@@ -350,67 +321,7 @@ impl JwmWaylandState {
     }
 }
 
-delegate_compositor!(JwmWaylandState);
-
-delegate_shm!(JwmWaylandState);
-
-delegate_seat!(JwmWaylandState);
-
-delegate_xdg_shell!(JwmWaylandState);
-
-delegate_layer_shell!(JwmWaylandState);
-
-delegate_output!(JwmWaylandState);
-
-delegate_data_device!(JwmWaylandState);
-
-delegate_primary_selection!(JwmWaylandState);
-
-delegate_viewporter!(JwmWaylandState);
-
-delegate_text_input_manager!(JwmWaylandState);
-
-delegate_input_method_manager!(JwmWaylandState);
-
-delegate_virtual_keyboard_manager!(JwmWaylandState);
-
-delegate_xdg_activation!(JwmWaylandState);
-
-delegate_xdg_decoration!(JwmWaylandState);
-
-delegate_xwayland_shell!(JwmWaylandState);
-
-smithay::delegate_dmabuf!(JwmWaylandState);
-
-delegate_pointer_constraints!(JwmWaylandState);
-delegate_relative_pointer!(JwmWaylandState);
-delegate_session_lock!(JwmWaylandState);
-delegate_idle_inhibit!(JwmWaylandState);
-delegate_idle_notify!(JwmWaylandState);
-delegate_fractional_scale!(JwmWaylandState);
-delegate_cursor_shape!(JwmWaylandState);
-delegate_presentation!(JwmWaylandState);
-delegate_pointer_gestures!(JwmWaylandState);
-delegate_single_pixel_buffer!(JwmWaylandState);
-delegate_content_type!(JwmWaylandState);
-delegate_alpha_modifier!(JwmWaylandState);
-delegate_foreign_toplevel_list!(JwmWaylandState);
-delegate_tablet_manager!(JwmWaylandState);
-delegate_fifo!(JwmWaylandState);
-delegate_keyboard_shortcuts_inhibit!(JwmWaylandState);
-delegate_security_context!(JwmWaylandState);
-smithay::delegate_commit_timing!(JwmWaylandState);
-smithay::delegate_xdg_dialog!(JwmWaylandState);
-smithay::delegate_xdg_foreign!(JwmWaylandState);
-smithay::delegate_xdg_system_bell!(JwmWaylandState);
-smithay::delegate_pointer_warp!(JwmWaylandState);
-smithay::delegate_xwayland_keyboard_grab!(JwmWaylandState);
-smithay::delegate_drm_syncobj!(JwmWaylandState);
-smithay::delegate_xdg_toplevel_icon!(JwmWaylandState);
-smithay::delegate_xdg_toplevel_tag!(JwmWaylandState);
-smithay::delegate_data_control!(JwmWaylandState);
-smithay::delegate_ext_data_control!(JwmWaylandState);
-smithay::delegate_kde_decoration!(JwmWaylandState);
+delegate_dispatch2!(JwmWaylandState);
 
 // ---------------------------------------------------------------------------
 // Pointer Constraints Handler – pointer lock/confine for games
@@ -429,6 +340,8 @@ impl PointerConstraintsHandler for JwmWaylandState {
             }
         }
     }
+
+    fn remove_constraint(&mut self, _surface: &WlSurface, _pointer: &PointerHandle<Self>) {}
 
     fn cursor_position_hint(
         &mut self,
@@ -559,7 +472,7 @@ impl smithay::wayland::security_context::SecurityContextHandler for JwmWaylandSt
 // xdg-dialog-v1 – modal dialog hints
 // ---------------------------------------------------------------------------
 impl XdgDialogHandler for JwmWaylandState {
-    fn modal_changed(&mut self, _toplevel: ToplevelSurface, _is_modal: bool) {
+    fn dialog_hint_changed(&mut self, _toplevel: ToplevelSurface, _hint: ToplevelDialogHint) {
         self.needs_redraw = true;
     }
 }
@@ -2001,9 +1914,52 @@ impl DataDeviceHandler for JwmWaylandState {
     }
 }
 
-impl ClientDndGrabHandler for JwmWaylandState {}
+impl WaylandDndGrabHandler for JwmWaylandState {
+    fn dnd_requested<S: Source>(
+        &mut self,
+        source: S,
+        _icon: Option<WlSurface>,
+        seat: Seat<Self>,
+        serial: Serial,
+        type_: GrabType,
+    ) {
+        match type_ {
+            GrabType::Pointer => {
+                let Some(pointer) = seat.get_pointer() else {
+                    source.cancel();
+                    return;
+                };
+                let Some(start_data) = pointer.grab_start_data() else {
+                    source.cancel();
+                    return;
+                };
+                pointer.set_grab(
+                    self,
+                    DnDGrab::new_pointer(&self.display_handle, start_data, source, seat),
+                    serial,
+                    Focus::Keep,
+                );
+            }
+            GrabType::Touch => {
+                let Some(touch) = seat.get_touch() else {
+                    source.cancel();
+                    return;
+                };
+                let Some(start_data) = touch.grab_start_data() else {
+                    source.cancel();
+                    return;
+                };
+                touch.set_grab(
+                    self,
+                    DnDGrab::new_touch(&self.display_handle, start_data, source, seat),
+                    serial,
+                );
+            }
+        }
+    }
+}
 
-impl ServerDndGrabHandler for JwmWaylandState {}
+impl DndGrabHandler for JwmWaylandState {}
 
 impl PrimarySelectionHandler for JwmWaylandState {
     fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {

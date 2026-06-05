@@ -1024,8 +1024,10 @@ impl UdevBackend {
                             }
                             // `start_wm` requires `D: XwmHandler + XWaylandShellHandler + SeatHandler`.
                             // Our `JwmWaylandState` implements all three.
+                            let dh = wl_state.display_handle.clone();
                             match X11Wm::start_wm(
                                 xw_loop_handle.clone(),
+                                &dh,
                                 x11_socket,
                                 xw_client.clone(),
                             ) {
