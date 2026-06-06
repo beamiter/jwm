@@ -179,7 +179,7 @@ pub struct BehaviorConfig {
     #[serde(default)]
     pub rounded_corners_exclude: Vec<String>,
     /// Detect windows that manage their own opacity (skip forced opacity).
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub detect_client_opacity: bool,
     /// Unredirect fullscreen windows for direct scanout (better perf).
     #[serde(default = "default_true")]
@@ -900,7 +900,7 @@ impl Default for Config {
                     opacity_rules: Vec::new(),
                     blur_exclude: Vec::new(),
                     rounded_corners_exclude: Vec::new(),
-                    detect_client_opacity: false,
+                    detect_client_opacity: true,
                     fullscreen_unredirect: true,
                     vsync_method: default_vsync_method(),
                     enable_audio_sync: true,

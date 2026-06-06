@@ -1392,7 +1392,7 @@ impl WaylandCompositor {
             shadow_exclude: Vec::new(),
             blur_exclude: Vec::new(),
             rounded_corners_exclude: Vec::new(),
-            detect_client_opacity: false,
+            detect_client_opacity: true,
             blur_use_frame_extents: false,
 
             // Fullscreen unredirect
