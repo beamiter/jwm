@@ -854,13 +854,19 @@ fn stroke_chamfer_with_fill(
     Ok(())
 }
 
+fn set_source_color_with_alpha(cr: &Context, color: Color, alpha: f64) {
+    cr.set_source_rgba(color.r, color.g, color.b, alpha.clamp(0.0, 1.0));
+}
+
 fn paint_bar_background(
     cr: &Context,
     width: u16,
     height: u16,
     bg: Color,
     is_light: bool,
+    background_opacity: f64,
 ) -> Result<()> {
+    let background_opacity = background_opacity.clamp(0.0, 1.0);
     let w = width as f64;
     let h = height as f64;
     // relm_bar inspired: subtler gradient
@@ -868,8 +874,8 @@ fn paint_bar_background(
     let bottom = if is_light { bg.lighten(0.01) } else { bg.darken(0.03) };
 
     let grad = LinearGradient::new(0.0, 0.0, 0.0, h);
-    grad.add_color_stop_rgb(0.0, top.r, top.g, top.b);
-    grad.add_color_stop_rgb(1.0, bottom.r, bottom.g, bottom.b);
+    grad.add_color_stop_rgba(0.0, top.r, top.g, top.b, background_opacity);
+    grad.add_color_stop_rgba(1.0, bottom.r, bottom.g, bottom.b, background_opacity);
     cr.set_source(&grad)?;
     cr.rectangle(0.0, 0.0, w, h);
     cr.fill()?;
@@ -877,16 +883,16 @@ fn paint_bar_background(
     // 顶部高光线 + 底部阴影线（更柔和）
     let top_line = if is_light { bg.lighten(0.12) } else { bg.lighten(0.06) };
     let bottom_line = if is_light { bg.darken(0.06) } else { bg.darken(0.15) };
-    cr.set_source_rgb(top_line.r, top_line.g, top_line.b);
+    set_source_color_with_alpha(cr, top_line, background_opacity);
     cr.rectangle(0.0, 0.0, w, 1.0);
     cr.fill()?;
-    cr.set_source_rgb(bottom_line.r, bottom_line.g, bottom_line.b);
+    set_source_color_with_alpha(cr, bottom_line, background_opacity);
     cr.rectangle(0.0, h - 1.0, w, 1.0);
     cr.fill()?;
 
     // 外框（极轻微）
     let frame = if is_light { bg.darken(0.05) } else { bg.darken(0.10) };
-    cr.set_source_rgb(frame.r, frame.g, frame.b);
+    set_source_color_with_alpha(cr, frame, background_opacity);
     cr.set_line_width(1.0);
     cr.rectangle(0.5, 0.5, (w - 1.0).max(0.0), (h - 1.0).max(0.0));
     let _ = cr.stroke();
@@ -1831,8 +1837,21 @@ pub fn draw_bar(
     font: &FontDescription,
     cfg: &BarConfig,
 ) -> Result<()> {
+    draw_bar_with_background_opacity(cr, width, height, colors, state, font, cfg, 1.0)
+}
+
+pub fn draw_bar_with_background_opacity(
+    cr: &Context,
+    width: u16,
+    height: u16,
+    colors: &Colors,
+    state: &mut AppState,
+    font: &FontDescription,
+    cfg: &BarConfig,
+    background_opacity: f64,
+) -> Result<()> {
     let is_light_theme = colors.bg.r > 0.7 && colors.bg.g > 0.7 && colors.bg.b > 0.7;
-    paint_bar_background(cr, width, height, colors.bg, is_light_theme)?;
+    paint_bar_background(cr, width, height, colors.bg, is_light_theme, background_opacity)?;
 
     let layout = create_layout(cr);
     layout.set_font_description(Some(font));
@@ -1875,6 +1894,30 @@ pub fn draw_bar_with_dirty(
     cfg: &BarConfig,
     dirty_bits: Option<DirtyBits>,
 ) -> Result<()> {
+    draw_bar_with_dirty_background_opacity(
+        cr,
+        width,
+        height,
+        colors,
+        state,
+        font,
+        cfg,
+        dirty_bits,
+        1.0,
+    )
+}
+
+pub fn draw_bar_with_dirty_background_opacity(
+    cr: &Context,
+    width: u16,
+    height: u16,
+    colors: &Colors,
+    state: &mut AppState,
+    font: &FontDescription,
+    cfg: &BarConfig,
+    dirty_bits: Option<DirtyBits>,
+    background_opacity: f64,
+) -> Result<()> {
     // If dirty_bits is Some(0), nothing changed -- skip entirely.
     if let Some(ref dirty) = dirty_bits {
         if dirty.is_empty() {
@@ -1894,7 +1937,7 @@ pub fn draw_bar_with_dirty(
 
     // ── Always: background, layout object, theme detection, pill_h ──
     let is_light_theme = colors.bg.r > 0.7 && colors.bg.g > 0.7 && colors.bg.b > 0.7;
-    paint_bar_background(cr, width, height, colors.bg, is_light_theme)?;
+    paint_bar_background(cr, width, height, colors.bg, is_light_theme, background_opacity)?;
 
     let layout = create_layout(cr);
     layout.set_font_description(Some(font));
