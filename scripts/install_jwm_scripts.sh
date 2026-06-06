@@ -61,6 +61,7 @@ ALL_BARS=(
     winit_softbuffer_bar
     winit_wgpu_bar
     xcb_wgpu_bar
+    x11rb_wgpu_bar
     x11rb_bar
     xcb_bar
 )
@@ -69,7 +70,7 @@ ALL_BARS=(
 # 默认值
 # ============================================================
 BUILD_MODE="release"
-JWM_BAR_NAME="winit_softbuffer_bar"
+JWM_BAR_NAME="x11rb_wgpu_bar"
 JWM_BAR_SET_BY_ARGS=false
 SELECTED_BARS=(
     # egui_bar
@@ -83,6 +84,7 @@ SELECTED_BARS=(
     # winit_softbuffer_bar
     # winit_wgpu_bar
     # xcb_wgpu_bar
+    # x11rb_wgpu_bar
     # x11rb_bar
     # xcb_bar
 )
