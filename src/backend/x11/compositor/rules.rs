@@ -406,6 +406,23 @@ impl Compositor {
             .unwrap_or(60) // Fallback to 60Hz if not found
     }
 
+    /// Rebuild monitor geometry + refresh-rate maps from RandR after a layout
+    /// change (hotplug / mode change). Both maps were previously only built once
+    /// at init, so per-window blur quality and per-monitor refresh lookups went
+    /// stale when displays were added/removed or modes changed.
+    ///
+    /// Map-only (no GL): the global Hz->blur_strength FBO rebuild is left to the
+    /// config-apply path, which runs with a current GL context — recreating FBOs
+    /// here (event-dispatch context) cannot assume the GL context is bound.
+    pub(in crate::backend::x11) fn refresh_monitor_layout(&mut self, root: u32) {
+        self.monitor_rects = Self::build_monitor_rects(&self.conn, root);
+        self.monitor_refresh_rates = Self::build_monitor_refresh_rates(&self.conn, root);
+        log::info!(
+            "compositor: monitor layout refreshed: {} monitors",
+            self.monitor_rects.len()
+        );
+    }
+
     /// Compute blur quality for a specific window (Task 10: Adaptive Blur + Per-Monitor)
     pub(super) fn compute_window_blur_quality(&self, wt: &WindowTexture, focused: Option<u32>) -> BlurQuality {
         let cfg = crate::config::CONFIG.load();

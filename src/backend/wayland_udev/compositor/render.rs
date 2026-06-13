@@ -598,15 +598,29 @@ impl WaylandCompositor {
 
                 let result = self.blur_fbos[0].texture;
 
-                // Cache result for temporal reuse
-                if self.temporal_blur_enabled {
+                // Temporal mix: blend a motion-scaled amount of the previous
+                // blur into the fresh result to reduce frame-to-frame shimmer.
+                // On large motion the ratio decays to ~0 (pure current) to avoid
+                // ghosting. The displayed result is fed back as the new history
+                // (exponential moving average).
+                let display_tex = if self.temporal_blur_enabled {
+                    let ratio = self.temporal_mix_ratio_for_motion(visible_scene);
+                    let mixed = match self.prev_blur_fbo {
+                        Some((_, prev_tex)) if ratio > 0.001 => unsafe {
+                            self.run_temporal_mix(gl, result, prev_tex, ratio)
+                        },
+                        _ => result,
+                    };
                     unsafe {
-                        self.copy_blur_to_prev_fbo(gl, result);
+                        self.copy_blur_to_prev_fbo(gl, mixed);
                     }
-                }
+                    mixed
+                } else {
+                    result
+                };
 
                 self.prev_window_positions_hash = current_hash;
-                result
+                display_tex
             };
 
             // Re-bind output FBO for further drawing

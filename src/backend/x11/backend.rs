@@ -493,6 +493,10 @@ impl X11Backend {
                         compositor.resize(geo.width as u32, geo.height as u32);
                     }
                 }
+                // Monitor add/remove/mode-change can alter per-monitor geometry
+                // and refresh rates; rebuild both maps so per-window blur quality
+                // and refresh lookups don't keep using the init-time layout.
+                compositor.refresh_monitor_layout(self.root_x11);
             }
             _ => {}
         }

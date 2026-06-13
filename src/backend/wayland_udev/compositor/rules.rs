@@ -333,56 +333,22 @@ impl WaylandCompositor {
         gl: &ffi::Gles2,
         current_blur_tex: u32,
     ) {
+        // The blur result lives in blur_fbos[0], which is half-resolution.
+        // prev_blur_fbo must match those dims so the temporal-mix pass samples
+        // both history and current at identical resolution.
+        let (bw, bh) = match self.blur_fbos.first() {
+            Some(l) => (l.width, l.height),
+            None => return,
+        };
         unsafe {
             let prev_fbo = match self.prev_blur_fbo {
                 Some((fbo, _tex)) => fbo,
                 None => {
-                    let mut tex = 0u32;
-                    gl.GenTextures(1, &mut tex);
-                    gl.BindTexture(ffi::TEXTURE_2D, tex);
-                    gl.TexImage2D(
-                        ffi::TEXTURE_2D,
-                        0,
-                        ffi::RGBA8 as i32,
-                        self.screen_w as i32,
-                        self.screen_h as i32,
-                        0,
-                        ffi::RGBA,
-                        ffi::UNSIGNED_BYTE,
-                        std::ptr::null(),
-                    );
-                    gl.TexParameteri(
-                        ffi::TEXTURE_2D,
-                        ffi::TEXTURE_MIN_FILTER,
-                        ffi::LINEAR as i32,
-                    );
-                    gl.TexParameteri(
-                        ffi::TEXTURE_2D,
-                        ffi::TEXTURE_MAG_FILTER,
-                        ffi::LINEAR as i32,
-                    );
-                    gl.TexParameteri(
-                        ffi::TEXTURE_2D,
-                        ffi::TEXTURE_WRAP_S,
-                        ffi::CLAMP_TO_EDGE as i32,
-                    );
-                    gl.TexParameteri(
-                        ffi::TEXTURE_2D,
-                        ffi::TEXTURE_WRAP_T,
-                        ffi::CLAMP_TO_EDGE as i32,
-                    );
-
-                    let mut fbo = 0u32;
-                    gl.GenFramebuffers(1, &mut fbo);
-                    gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
-                    gl.FramebufferTexture2D(
-                        ffi::FRAMEBUFFER,
-                        ffi::COLOR_ATTACHMENT0,
-                        ffi::TEXTURE_2D,
-                        tex,
-                        0,
-                    );
-
+                    let (fbo, tex) = if self.hdr_enabled {
+                        super::create_fbo_texture_10bit(gl, bw, bh)
+                    } else {
+                        super::create_fbo_texture(gl, bw, bh)
+                    };
                     self.prev_blur_fbo = Some((fbo, tex));
                     fbo
                 }
@@ -403,18 +369,121 @@ impl WaylandCompositor {
             gl.BlitFramebuffer(
                 0,
                 0,
-                self.screen_w as i32,
-                self.screen_h as i32,
+                bw as i32,
+                bh as i32,
                 0,
                 0,
-                self.screen_w as i32,
-                self.screen_h as i32,
+                bw as i32,
+                bh as i32,
                 ffi::COLOR_BUFFER_BIT,
                 ffi::NEAREST,
             );
 
             gl.DeleteFramebuffers(1, &src_fbo);
             gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+        }
+    }
+
+    /// Compute a motion-aware temporal-mix ratio for the current frame.
+    ///
+    /// Returns the configured `temporal_blur_mix_ratio` when the scene is static
+    /// (so the blur is maximally stabilized), decaying toward 0 as the aggregate
+    /// per-window displacement since the previous frame grows. Returning ~0 on
+    /// motion means the displayed blur is essentially the fresh current frame,
+    /// which avoids ghosting/smearing while windows move.
+    ///
+    /// Side effect: records the current positions for next frame's comparison.
+    pub(crate) fn temporal_mix_ratio_for_motion(
+        &mut self,
+        scene: &[(u64, i32, i32, u32, u32)],
+    ) -> f32 {
+        let mut total_disp: u64 = 0;
+        for &(id, x, y, _, _) in scene {
+            if let Some(&(_, px, py)) =
+                self.prev_motion_positions.iter().find(|&&(pid, _, _)| pid == id)
+            {
+                total_disp +=
+                    u64::from((x - px).unsigned_abs()) + u64::from((y - py).unsigned_abs());
+            }
+        }
+
+        // Record current positions for the next frame.
+        self.prev_motion_positions.clear();
+        self.prev_motion_positions
+            .extend(scene.iter().map(|&(id, x, y, _, _)| (id, x, y)));
+
+        let base = self.temporal_blur_mix_ratio;
+        if total_disp == 0 {
+            return base;
+        }
+        // Linear attenuation: ~16px of aggregate motion fully suppresses history.
+        let atten = (total_disp as f32 / 16.0).min(1.0);
+        base * (1.0 - atten)
+    }
+
+    /// Blend the current blur result with the cached previous blur into
+    /// `temporal_mix_fbo` (allocated lazily at half-res) and return the mixed
+    /// texture. Inputs are read-only; output is a distinct FBO to avoid a
+    /// read/write hazard.
+    ///
+    /// # Safety
+    /// Caller must ensure `gl` is valid and both textures are valid half-res blur textures.
+    pub(crate) unsafe fn run_temporal_mix(
+        &mut self,
+        gl: &ffi::Gles2,
+        current_tex: u32,
+        previous_tex: u32,
+        ratio: f32,
+    ) -> u32 {
+        let (bw, bh) = match self.blur_fbos.first() {
+            Some(l) => (l.width, l.height),
+            None => return current_tex,
+        };
+        unsafe {
+            let (fbo, tex) = match self.temporal_mix_fbo {
+                Some(p) => p,
+                None => {
+                    let p = if self.hdr_enabled {
+                        super::create_fbo_texture_10bit(gl, bw, bh)
+                    } else {
+                        super::create_fbo_texture(gl, bw, bh)
+                    };
+                    self.temporal_mix_fbo = Some(p);
+                    p
+                }
+            };
+
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
+            gl.Viewport(0, 0, bw as i32, bh as i32);
+            gl.Disable(ffi::BLEND);
+
+            gl.UseProgram(self.temporal_blur_mix_program);
+            gl.Uniform4f(self.temporal_blur_mix_uniforms.rect, 0.0, 0.0, bw as f32, bh as f32);
+            let proj = ortho(0.0, bw as f32, bh as f32, 0.0);
+            gl.UniformMatrix4fv(
+                self.temporal_blur_mix_uniforms.projection,
+                1,
+                ffi::FALSE as u8,
+                proj.as_ptr(),
+            );
+            gl.Uniform1f(self.temporal_blur_mix_uniforms.mix, ratio);
+
+            gl.ActiveTexture(ffi::TEXTURE0);
+            gl.BindTexture(ffi::TEXTURE_2D, current_tex);
+            gl.Uniform1i(self.temporal_blur_mix_uniforms.current, 0);
+
+            gl.ActiveTexture(ffi::TEXTURE1);
+            gl.BindTexture(ffi::TEXTURE_2D, previous_tex);
+            gl.Uniform1i(self.temporal_blur_mix_uniforms.previous, 1);
+
+            gl.BindVertexArray(self.quad_vao);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+
+            // Restore default texture unit to avoid leaking unit 1 state.
+            gl.ActiveTexture(ffi::TEXTURE0);
+            gl.Enable(ffi::BLEND);
+
+            tex
         }
     }
 
@@ -535,6 +604,46 @@ impl WaylandCompositor {
         result.sort_by_key(|&(hz, _)| hz);
         result
     }
+
+    /// Find the configured blur strength for a refresh rate: exact match, else
+    /// the closest entry below `hz`, else the lowest entry. `table` is sorted
+    /// ascending by `parse_blur_strength_by_hz`. Mirrors the X11 backend lookup.
+    pub(crate) fn blur_strength_for_hz(table: &[(u32, u32)], hz: u32) -> Option<u32> {
+        if table.is_empty() {
+            return None;
+        }
+        for (i, &(config_hz, strength)) in table.iter().enumerate() {
+            if config_hz == hz {
+                return Some(strength);
+            }
+            if config_hz > hz {
+                return Some(if i > 0 { table[i - 1].1 } else { strength });
+            }
+        }
+        table.last().map(|p| p.1)
+    }
+
+    /// Apply Hz-aware blur strength from the primary monitor's refresh rate.
+    /// Called on init and on every monitor-layout change (hotplug / mode change)
+    /// so `blur_strength_by_hz` tracks the live refresh rate instead of staying
+    /// fixed at the config default.
+    pub(crate) fn apply_dynamic_blur_strength(&mut self, primary_hz: u32) {
+        // Record the primary refresh rate for parity with the X11 backend's
+        // monitor_refresh_rates map (id 0 == primary).
+        self.monitor_refresh_rates.insert(0, primary_hz);
+        if let Some(strength) = Self::blur_strength_for_hz(&self.blur_strength_by_hz, primary_hz) {
+            if strength != self.blur_strength {
+                log::info!(
+                    "compositor: dynamic blur strength at {}Hz: {} (was {})",
+                    primary_hz,
+                    strength,
+                    self.blur_strength
+                );
+                self.blur_strength = strength;
+                self.needs_render = true;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -610,6 +719,23 @@ mod tests {
     fn test_parse_blur_strength_by_hz_empty() {
         let parsed = WaylandCompositor::parse_blur_strength_by_hz("");
         assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn test_blur_strength_for_hz() {
+        let table = WaylandCompositor::parse_blur_strength_by_hz("30:1,60:2,120:3,144:4,240:5");
+        // exact match
+        assert_eq!(WaylandCompositor::blur_strength_for_hz(&table, 60), Some(2));
+        assert_eq!(WaylandCompositor::blur_strength_for_hz(&table, 144), Some(4));
+        // closest entry below
+        assert_eq!(WaylandCompositor::blur_strength_for_hz(&table, 75), Some(2));
+        assert_eq!(WaylandCompositor::blur_strength_for_hz(&table, 165), Some(4));
+        // below lowest entry -> lowest entry
+        assert_eq!(WaylandCompositor::blur_strength_for_hz(&table, 24), Some(1));
+        // above highest entry -> highest entry
+        assert_eq!(WaylandCompositor::blur_strength_for_hz(&table, 360), Some(5));
+        // empty table -> None
+        assert_eq!(WaylandCompositor::blur_strength_for_hz(&[], 60), None);
     }
 
     #[test]

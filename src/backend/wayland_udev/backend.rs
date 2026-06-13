@@ -2483,37 +2483,44 @@ impl Backend for UdevBackend {
                         let ctx_id = renderer.context_id();
                         let tex = with_states(&surface, |states| {
                             let rsd = states.data_map.get::<RendererSurfaceStateUserData>();
-                            let tex_info = rsd.and_then(|d| {
-                                let locked = d.lock().unwrap();
-                                locked.texture::<GlesTexture>(ctx_id).map(|t| {
-                                    let has_alpha = locked
-                                        .buffer()
-                                        .and_then(|b| buffer_has_alpha(&**b))
-                                        .unwrap_or(true);
-                                    let tex_size = t.size();
-                                    (t.tex_id(), t.is_y_inverted(), has_alpha, tex_size)
-                                })
-                            });
-                            // The buffer-type diagnostic acquires the surface
-                            // state lock a second time and is only consumed by
-                            // the rate-limited log below, so keep it fully
-                            // behind the logging gate (hot path: one lock).
-                            if crf_log_this {
-                                let (has_buf, buf_type_str) = rsd.as_ref().map(|d| {
+                            // Single lock per surface: derive both the texture
+                            // info (hot path) and the rate-limited buffer-type
+                            // diagnostic from the same guard so the logging gate
+                            // never takes a second lock on the same surface.
+                            let (tex_info, log_buf) = match rsd {
+                                Some(d) => {
                                     let locked = d.lock().unwrap();
-                                    let buf = locked.buffer();
-                                    let has_buf = buf.is_some();
-                                    let type_str = buf.and_then(|b| buffer_type(&**b))
-                                        .map(|t| match t {
-                                            BufferType::Shm => "shm",
-                                            BufferType::Dma => "dma",
-                                            BufferType::Egl => "egl",
-                                            BufferType::SinglePixel => "single",
-                                            _ => "other",
-                                        })
-                                        .unwrap_or("unknown");
-                                    (has_buf, type_str)
-                                }).unwrap_or((false, "no_rsd"));
+                                    let tex_info = locked.texture::<GlesTexture>(ctx_id).map(|t| {
+                                        let has_alpha = locked
+                                            .buffer()
+                                            .and_then(|b| buffer_has_alpha(&**b))
+                                            .unwrap_or(true);
+                                        let tex_size = t.size();
+                                        (t.tex_id(), t.is_y_inverted(), has_alpha, tex_size)
+                                    });
+                                    let log_buf = if crf_log_this {
+                                        let buf = locked.buffer();
+                                        let has_buf = buf.is_some();
+                                        let type_str = buf
+                                            .and_then(|b| buffer_type(&**b))
+                                            .map(|t| match t {
+                                                BufferType::Shm => "shm",
+                                                BufferType::Dma => "dma",
+                                                BufferType::Egl => "egl",
+                                                BufferType::SinglePixel => "single",
+                                                _ => "other",
+                                            })
+                                            .unwrap_or("unknown");
+                                        Some((has_buf, type_str))
+                                    } else {
+                                        None
+                                    };
+                                    (tex_info, log_buf)
+                                }
+                                None => (None, crf_log_this.then_some((false, "no_rsd"))),
+                            };
+                            if crf_log_this {
+                                let (has_buf, buf_type_str) = log_buf.unwrap_or((false, "no_rsd"));
                                 log::info!("[crf] win={win_id:#x} import_ok={} has_buf={has_buf} buf={buf_type_str} tex={:?} y_inv={:?} alpha={:?}",
                                     import_result.is_ok(),
                                     tex_info.map(|(id, _, _, _)| id),
@@ -2835,8 +2842,24 @@ impl Backend for UdevBackend {
     }
 
     fn compositor_set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32)]) {
+        // Derive the primary monitor's refresh rate from the live output list so
+        // the compositor can pick an Hz-appropriate blur strength. Runs on init
+        // and on every layout change (hotplug / mode change), keeping the value
+        // in sync — the X11 backend only ever queried this once at init.
+        let primary_hz = {
+            let shared = self.shared.lock().unwrap();
+            monitors
+                .first()
+                .and_then(|&(_, px, py, _, _)| {
+                    shared.outputs.iter().find(|o| o.x == px && o.y == py)
+                })
+                .or_else(|| shared.outputs.first())
+                .map(|o| (o.refresh_rate / 1000).max(1))
+                .unwrap_or(60)
+        };
         if let Some(c) = self.compositor.as_mut() {
             c.set_monitors(monitors);
+            c.apply_dynamic_blur_strength(primary_hz);
         }
     }
 

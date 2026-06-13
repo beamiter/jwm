@@ -200,6 +200,14 @@ pub(crate) struct BlurUniforms {
     pub halfpixel: i32,
 }
 
+pub(crate) struct TemporalMixUniforms {
+    pub rect: i32,
+    pub projection: i32,
+    pub current: i32,
+    pub previous: i32,
+    pub mix: i32,
+}
+
 pub(crate) struct BorderUniforms {
     pub rect: i32,
     pub projection: i32,
@@ -769,7 +777,12 @@ pub(crate) struct WaylandCompositor {
     // --- Temporal blur ---
     temporal_blur_enabled: bool,
     temporal_blur_mix_ratio: f32,
+    temporal_blur_mix_uniforms: TemporalMixUniforms,
     prev_blur_fbo: Option<(u32, u32)>,
+    // Half-res scratch target for the temporal mix pass (mix output != either input).
+    temporal_mix_fbo: Option<(u32, u32)>,
+    // Last frame's window positions (id, x, y) for motion-aware mix attenuation.
+    prev_motion_positions: Vec<(u64, i32, i32)>,
     prev_window_positions_hash: u64,
     temporal_blur_reuse_count: u64,
     temporal_blur_total_count: u64,
@@ -965,6 +978,13 @@ impl WaylandCompositor {
             create_program(gl, shaders::VERTEX_SHADER, shaders::HUD_FRAGMENT_SHADER)?;
         let temporal_blur_mix_program =
             create_program(gl, shaders::TEMPORAL_BLUR_MIX_VERTEX, shaders::TEMPORAL_BLUR_MIX_FRAGMENT)?;
+        let temporal_blur_mix_uniforms = TemporalMixUniforms {
+            rect: get_uniform_loc(gl, temporal_blur_mix_program, "u_rect"),
+            projection: get_uniform_loc(gl, temporal_blur_mix_program, "u_projection"),
+            current: get_uniform_loc(gl, temporal_blur_mix_program, "u_current_blur"),
+            previous: get_uniform_loc(gl, temporal_blur_mix_program, "u_previous_blur"),
+            mix: get_uniform_loc(gl, temporal_blur_mix_program, "u_temporal_mix"),
+        };
         let line_program =
             create_program(gl, shaders::LINE_VERTEX_SHADER, shaders::LINE_FRAGMENT_SHADER)?;
         let line_uniform_projection = get_uniform_loc(gl, line_program, "u_projection");
@@ -1116,8 +1136,19 @@ impl WaylandCompositor {
             create_fbo_texture(gl, screen_w, screen_h)
         };
 
+        // When the output is 10-bit, keep the whole offscreen chain (scene
+        // capture, blur, postprocess, transition) at 10-bit too — an 8-bit
+        // intermediate would reintroduce banding before the final 10-bit blit.
+        let mk_fbo = |w: u32, h: u32| {
+            if hdr_10bit {
+                create_fbo_texture_10bit(gl, w, h)
+            } else {
+                create_fbo_texture(gl, w, h)
+            }
+        };
+
         // ----- Create scene FBO + texture -----
-        let (scene_fbo, scene_texture) = create_fbo_texture(gl, screen_w, screen_h);
+        let (scene_fbo, scene_texture) = mk_fbo(screen_w, screen_h);
 
         // ----- Create blur FBO chain (6 levels, each half the previous) -----
         let mut blur_fbos = Vec::with_capacity(6);
@@ -1130,7 +1161,7 @@ impl WaylandCompositor {
             if bh < 1 {
                 bh = 1;
             }
-            let (fbo, texture) = create_fbo_texture(gl, bw, bh);
+            let (fbo, texture) = mk_fbo(bw, bh);
             blur_fbos.push(BlurFboLevel {
                 fbo,
                 texture,
@@ -1142,10 +1173,10 @@ impl WaylandCompositor {
         }
 
         // ----- Create postprocess FBO + texture -----
-        let (postprocess_fbo, postprocess_texture) = create_fbo_texture(gl, screen_w, screen_h);
+        let (postprocess_fbo, postprocess_texture) = mk_fbo(screen_w, screen_h);
 
         // ----- Create transition FBO + texture -----
-        let (transition_fbo, transition_texture) = create_fbo_texture(gl, screen_w, screen_h);
+        let (transition_fbo, transition_texture) = mk_fbo(screen_w, screen_h);
 
         // ----- Create particle VAO + VBO -----
         let mut particle_vao = 0u32;
@@ -1399,8 +1430,13 @@ impl WaylandCompositor {
             fullscreen_unredirect: false,
             unredirected_window: None,
 
-            // Partial-damage redraw (experimental, default off)
-            partial_damage_enabled: false,
+            // Partial-damage redraw: on by default. The allow_partial gate
+            // (render.rs) only engages it on calm frames (no animation, no blur,
+            // no overview/peek/annotation) and the damage box is always a
+            // superset of changed pixels, so a fully-correct output_fbo is
+            // presented in full — stale pixels can't appear. Toggle off at
+            // runtime with Mod1+Shift+d if a regression is seen on hardware.
+            partial_damage_enabled: true,
             force_full_damage_next: true,
             content_dirty_ids: HashSet::new(),
             prev_focused: None,
@@ -1410,10 +1446,13 @@ impl WaylandCompositor {
             vrr_active: false,
             vrr_last_check: now,
 
-            // Temporal blur
-            temporal_blur_enabled: false,
+            // Temporal blur (default-on; config may override via apply_config)
+            temporal_blur_enabled: true,
             temporal_blur_mix_ratio: 0.8,
+            temporal_blur_mix_uniforms,
             prev_blur_fbo: None,
+            temporal_mix_fbo: None,
+            prev_motion_positions: Vec::new(),
             prev_window_positions_hash: 0,
             temporal_blur_reuse_count: 0,
             temporal_blur_total_count: 0,
@@ -1767,7 +1806,19 @@ impl WaylandCompositor {
             self.output_fbo = output_fbo;
             self.output_texture = output_texture;
 
-            let (scene_fbo, scene_texture) = create_fbo_texture(gl, w, h);
+            // Keep the offscreen chain at the same bit depth as on construction
+            // (see new()): 10-bit when the output is 10-bit, else 8-bit. Without
+            // this the chain silently reverts to 8-bit after any resize.
+            let hdr_10bit = self.hdr_enabled;
+            let mk_fbo = |w: u32, h: u32| {
+                if hdr_10bit {
+                    create_fbo_texture_10bit(gl, w, h)
+                } else {
+                    create_fbo_texture(gl, w, h)
+                }
+            };
+
+            let (scene_fbo, scene_texture) = mk_fbo(w, h);
             self.scene_fbo = scene_fbo;
             self.scene_texture = scene_texture;
 
@@ -1781,7 +1832,7 @@ impl WaylandCompositor {
                 if bh < 1 {
                     bh = 1;
                 }
-                let (fbo, texture) = create_fbo_texture(gl, bw, bh);
+                let (fbo, texture) = mk_fbo(bw, bh);
                 self.blur_fbos.push(BlurFboLevel {
                     fbo,
                     texture,
@@ -1792,13 +1843,27 @@ impl WaylandCompositor {
                 bh /= 2;
             }
 
-            let (postprocess_fbo, postprocess_texture) = create_fbo_texture(gl, w, h);
+            let (postprocess_fbo, postprocess_texture) = mk_fbo(w, h);
             self.postprocess_fbo = postprocess_fbo;
             self.postprocess_texture = postprocess_texture;
 
-            let (transition_fbo, transition_texture) = create_fbo_texture(gl, w, h);
+            let (transition_fbo, transition_texture) = mk_fbo(w, h);
             self.transition_fbo = transition_fbo;
             self.transition_texture = transition_texture;
+
+            // Temporal-blur scratch buffers are half-res and lazily allocated;
+            // drop them so they are recreated at the new size on next use.
+            // (Leaving them stale would mismatch blur_fbos[0] and leak GL memory.)
+            if let Some((fbo, tex)) = self.prev_blur_fbo.take() {
+                gl.DeleteFramebuffers(1, &fbo);
+                gl.DeleteTextures(1, &tex);
+            }
+            if let Some((fbo, tex)) = self.temporal_mix_fbo.take() {
+                gl.DeleteFramebuffers(1, &fbo);
+                gl.DeleteTextures(1, &tex);
+            }
+            self.prev_motion_positions.clear();
+            self.prev_window_positions_hash = 0;
 
             gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
             gl.BindTexture(ffi::TEXTURE_2D, 0);
