@@ -780,11 +780,22 @@ impl UdevBackend {
                     .as_ref()
                     .map(|k| k.borrow().outputs())
                     .unwrap_or_default();
+                self.state.gamma_sizes = self
+                    .kms
+                    .as_ref()
+                    .map(|k| k.borrow_mut().gamma_sizes().into_iter().collect())
+                    .unwrap_or_default();
                 // Wire screencopy pending queue to KMS state.
                 if let Some(ref screencopy_queue) = self.state.screencopy_pending {
                     if let Some(ref kms) = self.kms {
                         kms.borrow_mut()
                             .set_screencopy_pending(screencopy_queue.clone());
+                    }
+                }
+                if let Some(ref image_capture_queue) = self.state.image_capture_pending {
+                    if let Some(ref kms) = self.kms {
+                        kms.borrow_mut()
+                            .set_image_capture_pending(image_capture_queue.clone());
                     }
                 }
                 self.request_flush();
@@ -1142,6 +1153,7 @@ impl UdevBackend {
 
         if let Some(kms) = &kms {
             state.outputs = kms.borrow().outputs();
+            state.gamma_sizes = kms.borrow_mut().gamma_sizes().into_iter().collect();
 
             // Advertise linux-dmabuf formats with scanout preference tranches.
             // This tells clients which formats can bypass the compositor (direct scanout).
@@ -1180,6 +1192,10 @@ impl UdevBackend {
             if let Some(ref screencopy_queue) = state.screencopy_pending {
                 kms.borrow_mut()
                     .set_screencopy_pending(screencopy_queue.clone());
+            }
+            if let Some(ref image_capture_queue) = state.image_capture_pending {
+                kms.borrow_mut()
+                    .set_image_capture_pending(image_capture_queue.clone());
             }
         }
 
@@ -1984,15 +2000,15 @@ impl UdevBackend {
                     SessionEvent::PauseSession => {
                         libinput_context.suspend();
                         pending_events
-                            .lock()
-                            .unwrap()
+                            .lock_safe()
                             .push_back(BackendEvent::ScreenLayoutChanged);
                     }
                     SessionEvent::ActivateSession => {
-                        let _ = libinput_context.resume();
+                        if let Err(e) = libinput_context.resume() {
+                            log::warn!("[udev] libinput resume after VT-switch failed: {e:?}");
+                        }
                         pending_events
-                            .lock()
-                            .unwrap()
+                            .lock_safe()
                             .push_back(BackendEvent::ScreenLayoutChanged);
                         let _ = rebuild_outputs(&shared, &pending_events);
                         {
@@ -2030,8 +2046,7 @@ impl UdevBackend {
                     match event {
                         UdevEvent::Added { device_id, path } => {
                             shared
-                                .lock()
-                                .unwrap()
+                                .lock_safe()
                                 .device_paths
                                 .insert(device_id, path.to_path_buf());
                         }
@@ -2061,8 +2076,7 @@ impl UdevBackend {
                     }
                     shared.lock_safe().kms_needs_reinit = true;
                     pending_events
-                        .lock()
-                        .unwrap()
+                        .lock_safe()
                         .push_back(BackendEvent::ScreenLayoutChanged);
                 })
                 .map_err(|e| {
@@ -2444,6 +2458,18 @@ impl Backend for UdevBackend {
     ) -> Result<bool, BackendError> {
         if self.compositor.is_none() || self.kms.is_none() {
             return Ok(false);
+        }
+
+        // Evict compositor state for windows whose client surface was destroyed.
+        // Without this the per-window maps grow unbounded for the process lifetime.
+        if !self.state.compositor_dead_windows.is_empty() {
+            if let Some(compositor) = self.compositor.as_mut() {
+                for dead in self.state.compositor_dead_windows.drain(..) {
+                    compositor.remove_window(dead);
+                }
+            } else {
+                self.state.compositor_dead_windows.clear();
+            }
         }
 
         // Phase 1: Import surface textures into GL cache (borrow kms only, no compositor borrow).
@@ -3094,6 +3120,11 @@ impl Backend for UdevBackend {
                             .kms
                             .as_ref()
                             .map(|k| k.borrow().outputs())
+                            .unwrap_or_default();
+                        self.state.gamma_sizes = self
+                            .kms
+                            .as_ref()
+                            .map(|k| k.borrow_mut().gamma_sizes().into_iter().collect())
                             .unwrap_or_default();
                         self.state.needs_redraw = true;
                         self.state

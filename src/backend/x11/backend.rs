@@ -1290,10 +1290,22 @@ impl Backend for X11Backend {
 
     fn on_focused_client_changed(&mut self, win: Option<WindowId>) -> Result<(), BackendError> {
         if let Some(w) = win {
-            // 1. 设置 X11 输入焦点
-            self.window_ops.set_input_focus(w)?;
+            // ICCCM focus model: only call SetInputFocus when the client accepts
+            // input. The WM_HINTS input flag is absent → assume true (Passive),
+            // Some(true) → Passive/Locally Active, Some(false) → Globally Active or
+            // No Input, where the client manages its own focus and a forced
+            // SetInputFocus is incorrect (mirrors dwm's `neverfocus`).
+            let wants_input = self
+                .property_ops
+                .get_wm_hints(w)
+                .and_then(|h| h.input)
+                .unwrap_or(true);
+            if wants_input {
+                self.window_ops.set_input_focus(w)?;
+            }
 
-            // 2. 发送 WM_TAKE_FOCUS (ICCCM)
+            // Always offer WM_TAKE_FOCUS; send_take_focus is a no-op unless the
+            // client advertises it in WM_PROTOCOLS (Locally/Globally Active).
             let _ = self.window_ops.send_take_focus(w);
 
             // 3. 更新 EWMH 属性
@@ -1337,6 +1349,13 @@ impl Backend for X11Backend {
     ) -> Result<(), BackendError> {
         if let Some(facade) = self.ewmh_facade.as_ref() {
             facade.set_desktop_info(current, total, names)?;
+        }
+        Ok(())
+    }
+
+    fn set_workarea(&mut self, areas: &[(i32, i32, u32, u32)]) -> Result<(), BackendError> {
+        if let Some(facade) = self.ewmh_facade.as_ref() {
+            facade.set_workarea(areas)?;
         }
         Ok(())
     }
@@ -1712,6 +1731,7 @@ impl Backend for X11Backend {
 mod ids {
     use crate::backend::common_define::WindowId;
     use crate::backend::error::BackendError;
+    use crate::sync_ext::RwLockExt;
     use std::collections::HashMap;
     use std::sync::{
         Arc, RwLock,
@@ -1736,41 +1756,39 @@ mod ids {
 
         /// X11 window(u32) intern  WindowId
         pub(super) fn intern(&self, x11: u32) -> WindowId {
-            if let Some(id) = self.x11_to_wid.read().unwrap().get(&x11).copied() {
+            if let Some(id) = self.x11_to_wid.read_safe().get(&x11).copied() {
                 return id;
             }
             // 
-            let mut w = self.x11_to_wid.write().unwrap();
+            let mut w = self.x11_to_wid.write_safe();
             if let Some(id) = w.get(&x11).copied() {
                 return id;
             }
 
             let id = WindowId::from_raw(self.next.fetch_add(1, Ordering::Relaxed));
             w.insert(x11, id);
-            self.wid_to_x11.write().unwrap().insert(id, x11);
+            self.wid_to_x11.write_safe().insert(id, x11);
             id
         }
 
         pub(super) fn x11(&self, id: WindowId) -> Result<u32, BackendError> {
             self.wid_to_x11
-                .read()
-                .unwrap()
+                .read_safe()
                 .get(&id)
                 .copied()
                 .ok_or(BackendError::NotFound("WindowId not mapped to X11 window"))
         }
 
         pub(super) fn remove_x11(&self, x11: u32) {
-            if let Some(id) = self.x11_to_wid.write().unwrap().remove(&x11) {
-                self.wid_to_x11.write().unwrap().remove(&id);
+            if let Some(id) = self.x11_to_wid.write_safe().remove(&x11) {
+                self.wid_to_x11.write_safe().remove(&id);
             }
         }
 
         /// Return a snapshot of all known (x11_window, WindowId) pairs.
         pub(super) fn all_x11_windows(&self) -> Vec<(u32, WindowId)> {
             self.x11_to_wid
-                .read()
-                .unwrap()
+                .read_safe()
                 .iter()
                 .map(|(&x, &w)| (x, w))
                 .collect()
@@ -2435,6 +2453,7 @@ mod cursor {
 }
 
 mod event_source {
+    use std::collections::VecDeque;
     use std::os::unix::io::{AsRawFd, BorrowedFd};
     use std::sync::Arc;
     use x11rb::connection::Connection;
@@ -2457,6 +2476,9 @@ mod event_source {
         root_x11: u32,
         overlay_x11: Option<u32>,
         ids: X11IdRegistry,
+        // Events produced beyond the single one returned by map_event (e.g. a
+        // _NET_WM_STATE ClientMessage carrying two state atoms). Drained first.
+        pending: VecDeque<BackendEvent>,
     }
 
     impl X11EventSource {
@@ -2473,6 +2495,7 @@ mod event_source {
                 root_x11,
                 overlay_x11,
                 ids,
+                pending: VecDeque::new(),
             }
         }
 
@@ -2555,7 +2578,7 @@ mod event_source {
             }
         }
 
-        fn map_event(&self, ev: XEvent) -> Option<BackendEvent> {
+        fn map_event(&mut self, ev: XEvent) -> Option<BackendEvent> {
             match ev {
                 XEvent::ButtonPress(e) => {
                     log::info!(
@@ -2720,14 +2743,29 @@ mod event_source {
                     if e.type_ == self.atoms._NET_WM_STATE && e.format == 32 && data32.len() >= 2 {
                         let window = self.ids.intern(e.window);
                         if let Some(action) = Self::map_net_wm_action(data32[0]) {
+                            // A _NET_WM_STATE message may carry up to two state
+                            // atoms (data[1], data[2]); apply both (e.g. maximize
+                            // vert+horz). Return the first, queue the rest.
+                            let mut first = None;
                             for &atom in &[data32[1], data32[2]] {
+                                if atom == 0 {
+                                    continue;
+                                }
                                 if let Some(state) = self.atom_to_net_wm_state(atom) {
-                                    return Some(BackendEvent::WindowStateRequest {
+                                    let ev = BackendEvent::WindowStateRequest {
                                         window,
                                         action,
                                         state,
-                                    });
+                                    };
+                                    if first.is_none() {
+                                        first = Some(ev);
+                                    } else {
+                                        self.pending.push_back(ev);
+                                    }
                                 }
+                            }
+                            if first.is_some() {
+                                return first;
                             }
                         }
                     }
@@ -2737,7 +2775,7 @@ mod event_source {
                         });
                     }
                     if e.type_ == self.atoms._NET_CLOSE_WINDOW {
-                        return Some(BackendEvent::ActiveWindowMessage {
+                        return Some(BackendEvent::CloseWindowRequest {
                             window: self.ids.intern(e.window),
                         });
                     }
@@ -2801,6 +2839,9 @@ mod event_source {
         pub(super) fn poll_event(
             &mut self,
         ) -> Result<Option<BackendEvent>, Box<dyn std::error::Error>> {
+            if let Some(ev) = self.pending.pop_front() {
+                return Ok(Some(ev));
+            }
             let ev = self.conn.poll_for_event()?;
             Ok(ev.and_then(|e| self.map_event(e)))
         }
@@ -3028,13 +3069,23 @@ mod ewmh_facade {
                 AtomEnum::WINDOW,
                 &[frame_win],
             )?;
-            // WM_NAME (STRING)
+            // WM_NAME (legacy STRING)
             x11rb::wrapper::ConnectionExt::change_property8(
                 &*self.conn,
                 PropMode::REPLACE,
                 frame_win,
                 AtomEnum::WM_NAME,
                 AtomEnum::STRING,
+                wm_name.as_bytes(),
+            )?;
+            // _NET_WM_NAME (UTF8) — EWMH-compliant pagers read the WM name from
+            // the check window via this property, not the legacy WM_NAME.
+            x11rb::wrapper::ConnectionExt::change_property8(
+                &*self.conn,
+                PropMode::REPLACE,
+                frame_win,
+                self.atoms._NET_WM_NAME,
+                self.atoms.UTF8_STRING,
                 wm_name.as_bytes(),
             )?;
             Ok(self.ids.intern(frame_win))
@@ -4139,8 +4190,11 @@ mod property_ops {
                 }
             }
             if result.is_empty() {
+                // EWMH: a window with WM_TRANSIENT_FOR but no explicit type is a
+                // DIALOG (not DND, which was a copy-paste bug that mislabeled every
+                // typeless transient as a drag-and-drop surface).
                 if self.transient_for(win).is_some() {
-                    result.push(WindowType::Dnd);
+                    result.push(WindowType::Dialog);
                 } else {
                     result.push(WindowType::Normal);
                 }
@@ -4251,10 +4305,6 @@ mod property_ops {
                 let (mut min_w, mut min_h) = (0, 0);
                 let (mut min_aspect, mut max_aspect) = (0.0, 0.0);
 
-                if let Some((w, h)) = r.base_size {
-                    base_w = w;
-                    base_h = h;
-                }
                 if let Some((w, h)) = r.size_increment {
                     inc_w = w;
                     inc_h = h;
@@ -4263,9 +4313,28 @@ mod property_ops {
                     max_w = w;
                     max_h = h;
                 }
-                if let Some((w, h)) = r.min_size {
-                    min_w = w;
-                    min_h = h;
+                // ICCCM: if only one of base_size / min_size is supplied, each
+                // defaults to the other.
+                match (r.base_size, r.min_size) {
+                    (Some((bw, bh)), Some((mw, mh))) => {
+                        base_w = bw;
+                        base_h = bh;
+                        min_w = mw;
+                        min_h = mh;
+                    }
+                    (Some((bw, bh)), None) => {
+                        base_w = bw;
+                        base_h = bh;
+                        min_w = bw;
+                        min_h = bh;
+                    }
+                    (None, Some((mw, mh))) => {
+                        base_w = mw;
+                        base_h = mh;
+                        min_w = mw;
+                        min_h = mh;
+                    }
+                    (None, None) => {}
                 }
                 if let Some((min, max)) = r.aspect {
                     min_aspect = min.numerator as f32 / min.denominator as f32;

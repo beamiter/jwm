@@ -114,6 +114,12 @@ pub(super) struct KmsState {
 
     pub(super) needs_render: bool,
     compositor_texture_cache: Option<(u32, GlesTexture)>,
+    // Strong refs to every distinct compositor output-FBO texture we've wrapped.
+    // The GL texture is owned/deleted by the compositor, so smithay's GlesTexture
+    // Drop must never fire on it (double-glDeleteTextures / recycled-id risk).
+    // Holding a ref keeps Drop suppressed; deduping by id bounds growth across
+    // FBO swaps (replaces an unrecoverable mem::forget that leaked per swap).
+    compositor_texture_keepalive: Vec<(u32, GlesTexture)>,
     background_id: Id,
 
     cursor_theme: CursorTheme,
@@ -129,6 +135,10 @@ pub(super) struct KmsState {
 
     /// Shared queue for pending screencopy frames (from wlr-screencopy-unstable-v1).
     screencopy_pending: Option<crate::backend::wayland_udev::screencopy::PendingScreencopyQueue>,
+
+    /// Shared queue for pending ext-image-copy-capture-v1 frames.
+    image_capture_pending:
+        Option<crate::backend::wayland_udev::image_copy_capture::PendingImageCaptureQueue>,
 
     outputs: Vec<KmsOutputState>,
 
@@ -297,6 +307,14 @@ impl KmsState {
         queue: crate::backend::wayland_udev::screencopy::PendingScreencopyQueue,
     ) {
         self.screencopy_pending = Some(queue);
+    }
+
+    /// Set the shared pending ext-image-copy-capture queue.
+    pub(super) fn set_image_capture_pending(
+        &mut self,
+        queue: crate::backend::wayland_udev::image_copy_capture::PendingImageCaptureQueue,
+    ) {
+        self.image_capture_pending = Some(queue);
     }
 
     /// Get the size of the primary (first) output
@@ -899,8 +917,176 @@ impl KmsState {
         }
     }
 
+    /// Fulfill pending ext-image-copy-capture-v1 frames for `output`. Mirrors
+    /// `fulfill_screencopy_frames` (render to offscreen, read back, copy into the
+    /// client SHM buffer) but sends the ext protocol completion events. Output
+    /// sources are serviced; toplevel sources are failed (not yet supported) so
+    /// clients do not wait forever.
+    fn fulfill_image_capture_frames(
+        renderer: &mut GlesRenderer,
+        output: &Output,
+        width: i32,
+        height: i32,
+        elements: &[KmsRenderElement],
+        pending: &crate::backend::wayland_udev::image_copy_capture::PendingImageCaptureQueue,
+    ) {
+        use crate::backend::wayland_udev::image_copy_capture::CaptureSource;
+        use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_frame_v1::FailureReason;
+        use smithay::reexports::wayland_server::protocol::wl_output;
+        use smithay::wayland::shm::with_buffer_contents_mut;
+
+        let frames = {
+            let mut queue = pending.lock_safe();
+            let mut matching = Vec::new();
+            let mut remaining = Vec::new();
+            for f in queue.drain(..) {
+                match &f.source {
+                    CaptureSource::Output(o) if o == output => matching.push(f),
+                    CaptureSource::Output(_) => remaining.push(f),
+                    CaptureSource::Toplevel(_) => f.frame.failed(FailureReason::Unknown),
+                }
+            }
+            *queue = remaining;
+            matching
+        };
+
+        if frames.is_empty() {
+            return;
+        }
+
+        let fail_all = |frames: &[crate::backend::wayland_udev::image_copy_capture::PendingImageCapture]| {
+            for f in frames {
+                f.frame.failed(FailureReason::Unknown);
+            }
+        };
+
+        let size: Size<i32, BufferCoord> = (width, height).into();
+        let mut renderbuffer: GlesRenderbuffer =
+            match Offscreen::create_buffer(renderer, Fourcc::Abgr8888, size) {
+                Ok(rb) => rb,
+                Err(e) => {
+                    log::error!("[image-capture] create offscreen buffer failed: {e:?}");
+                    fail_all(&frames);
+                    return;
+                }
+            };
+
+        let mut target = match renderer.bind(&mut renderbuffer) {
+            Ok(t) => t,
+            Err(e) => {
+                log::error!("[image-capture] bind offscreen failed: {e:?}");
+                fail_all(&frames);
+                return;
+            }
+        };
+
+        let phys_size: smithay::utils::Size<i32, Physical> = (width, height).into();
+        let mut damage_tracker =
+            OutputDamageTracker::new(phys_size, Scale::from(1.0f64), Transform::Normal);
+        let clear_color = smithay::backend::renderer::Color32F::new(0.0, 0.0, 0.0, 1.0);
+        if let Err(e) = damage_tracker.render_output(renderer, &mut target, 0, elements, clear_color)
+        {
+            log::error!("[image-capture] render_output failed: {e:?}");
+            fail_all(&frames);
+            return;
+        }
+
+        let region = Rectangle::from_size(size);
+        let mapping = match renderer.copy_framebuffer(&target, region, Fourcc::Abgr8888) {
+            Ok(m) => m,
+            Err(e) => {
+                log::error!("[image-capture] copy_framebuffer failed: {e:?}");
+                fail_all(&frames);
+                return;
+            }
+        };
+        let pixels = match renderer.map_texture(&mapping) {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!("[image-capture] map_texture failed: {e:?}");
+                fail_all(&frames);
+                return;
+            }
+        };
+
+        for frame_info in frames {
+            let copy_result =
+                with_buffer_contents_mut(&frame_info.buffer, |ptr, pool_len, buf_data| {
+                    let buf_offset = buf_data.offset as usize;
+                    let buf_stride = buf_data.stride as usize;
+                    let buf_h = buf_data.height as usize;
+                    let buf_w = buf_data.width as usize;
+                    let src_stride = width as usize * 4;
+                    let copy_h = buf_h.min(height as usize);
+                    let copy_w = buf_w.min(width as usize);
+
+                    for row in 0..copy_h {
+                        let src_row_start = row * src_stride;
+                        let dst_row_start = buf_offset + row * buf_stride;
+                        if dst_row_start + copy_w * 4 > pool_len {
+                            break;
+                        }
+                        for col in 0..copy_w {
+                            let si = src_row_start + col * 4;
+                            let di = dst_row_start + col * 4;
+                            if si + 3 >= pixels.len() {
+                                break;
+                            }
+                            // GL ABGR8888 [R,G,B,A] → shm ARGB8888 [B,G,R,A].
+                            unsafe {
+                                *ptr.add(di) = pixels[si + 2];
+                                *ptr.add(di + 1) = pixels[si + 1];
+                                *ptr.add(di + 2) = pixels[si];
+                                *ptr.add(di + 3) = pixels[si + 3];
+                            }
+                        }
+                    }
+                });
+
+            match copy_result {
+                Ok(()) => {
+                    frame_info.frame.transform(wl_output::Transform::Normal);
+                    frame_info.frame.damage(0, 0, width, height);
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default();
+                    let tv_sec = now.as_secs();
+                    frame_info.frame.presentation_time(
+                        (tv_sec >> 32) as u32,
+                        (tv_sec & 0xFFFFFFFF) as u32,
+                        now.subsec_nanos(),
+                    );
+                    frame_info.frame.ready();
+                }
+                Err(e) => {
+                    log::warn!("[image-capture] buffer access failed: {e:?}");
+                    frame_info.frame.failed(FailureReason::Unknown);
+                }
+            }
+        }
+    }
+
     pub(super) fn outputs(&self) -> Vec<Output> {
         self.outputs.iter().map(|o| o.output.clone()).collect()
+    }
+
+    /// Actual hardware gamma LUT size per output (output name -> entries).
+    /// Queried from the CRTC; falls back to 256 if the driver doesn't report it.
+    pub(super) fn gamma_sizes(&mut self) -> Vec<(String, u32)> {
+        let mgr = self.drm_output_manager.lock();
+        let dev = mgr.device();
+        self.outputs
+            .iter()
+            .map(|o| {
+                let size = dev
+                    .get_crtc(o.crtc)
+                    .ok()
+                    .map(|info| info.gamma_length())
+                    .filter(|n| *n > 0)
+                    .unwrap_or(256);
+                (o.output.name(), size)
+            })
+            .collect()
     }
 
     pub(super) fn dmabuf_render_formats(&self) -> Vec<DmabufFormat> {
@@ -1011,13 +1197,20 @@ impl KmsState {
                 };
                 used_crtcs.insert(crtc);
 
-                let mode = conn
+                let Some(mode) = conn
                     .modes()
                     .iter()
                     .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
                     .copied()
                     .or_else(|| conn.modes().first().copied())
-                    .unwrap();
+                else {
+                    log::warn!(
+                        "[kms] connector {:?}-{} reported no usable mode; skipping",
+                        conn.interface(),
+                        conn.interface_id()
+                    );
+                    continue;
+                };
 
                 let wl_mode = WlMode::from(mode);
                 let frame_callback_throttle = if wl_mode.refresh > 0 {
@@ -1151,6 +1344,7 @@ impl KmsState {
             renderer,
             needs_render: true,
             compositor_texture_cache: None,
+            compositor_texture_keepalive: Vec::new(),
             background_id: Id::new(),
 
             cursor_theme,
@@ -1164,6 +1358,7 @@ impl KmsState {
             pending_screenshot: None,
             pending_screenshot_region: None,
             screencopy_pending: None,
+            image_capture_pending: None,
 
             outputs,
             last_presentation_time: None,
@@ -1479,9 +1674,17 @@ impl KmsState {
                                 size,
                             )
                         };
-                        // Leak once to prevent Smithay's Drop from calling glDeleteTextures
-                        // on the compositor's owned FBO texture.
-                        std::mem::forget(tex.clone());
+                        // Retain a strong ref so Smithay's Drop never calls
+                        // glDeleteTextures on the compositor-owned FBO texture.
+                        // Dedupe by id so recycled ids don't accumulate.
+                        if !self
+                            .compositor_texture_keepalive
+                            .iter()
+                            .any(|(id, _)| *id == tex_id)
+                        {
+                            self.compositor_texture_keepalive
+                                .push((tex_id, tex.clone()));
+                        }
                         self.compositor_texture_cache = Some((tex_id, tex.clone()));
                         tex
                     }
@@ -1782,6 +1985,19 @@ impl KmsState {
             if let Some(ref pending_queue) = self.screencopy_pending {
                 let output_ref = &self.outputs[out_idx].output;
                 Self::fulfill_screencopy_frames(
+                    &mut self.renderer,
+                    output_ref,
+                    out_w,
+                    out_h,
+                    &elements,
+                    pending_queue,
+                );
+            }
+
+            // ── ext-image-copy-capture fulfillment ──────────────────────────
+            if let Some(ref pending_queue) = self.image_capture_pending {
+                let output_ref = &self.outputs[out_idx].output;
+                Self::fulfill_image_capture_frames(
                     &mut self.renderer,
                     output_ref,
                     out_w,

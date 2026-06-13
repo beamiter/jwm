@@ -5,7 +5,49 @@
 use super::*;
 use smithay::backend::renderer::gles::ffi;
 use std::sync::mpsc;
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Instant;
+
+/// Process-wide gate bounding how many wallpaper images decode concurrently.
+/// Each decode does `image::open` + a Lanczos3 downscale, which is heavy on CPU
+/// and transiently holds a full decoded image in memory. Rapid wallpaper changes
+/// or output hotplug (one decode per monitor in `set_monitors`) would otherwise
+/// spawn an unbounded number of such threads at once. The value held in the
+/// mutex is the number of currently-available decode permits.
+fn decode_gate() -> &'static (Mutex<usize>, Condvar) {
+    static GATE: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
+    GATE.get_or_init(|| {
+        let max = std::thread::available_parallelism()
+            .map(|n| n.get().min(4))
+            .unwrap_or(2);
+        (Mutex::new(max), Condvar::new())
+    })
+}
+
+/// RAII permit for the wallpaper decode gate. Blocks on construction until a
+/// permit is free, and returns it on drop (covering early returns and panics).
+struct DecodePermit;
+
+impl DecodePermit {
+    fn acquire() -> Self {
+        let (lock, cvar) = decode_gate();
+        let mut avail = lock.lock().unwrap_or_else(|e| e.into_inner());
+        while *avail == 0 {
+            avail = cvar.wait(avail).unwrap_or_else(|e| e.into_inner());
+        }
+        *avail -= 1;
+        DecodePermit
+    }
+}
+
+impl Drop for DecodePermit {
+    fn drop(&mut self) {
+        let (lock, cvar) = decode_gate();
+        let mut avail = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *avail += 1;
+        cvar.notify_one();
+    }
+}
 
 impl WaylandCompositor {
     // =========================================================================
@@ -26,6 +68,8 @@ impl WaylandCompositor {
         let (tx, rx) = mpsc::channel();
         let path = path.to_string();
         std::thread::spawn(move || {
+            // Bound concurrent decodes; released when this thread exits.
+            let _permit = DecodePermit::acquire();
             let img = match image::open(&path) {
                 Ok(img) => img,
                 Err(e) => {

@@ -137,6 +137,31 @@ impl Jwm {
         let names: Vec<String> = (1..=total).map(|i| i.to_string()).collect();
         let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
         backend.on_desktop_changed(current, total, &name_refs)?;
+
+        // _NET_WORKAREA: EWMH expects one rect per desktop. We publish the
+        // bounding box of every monitor's strut-adjusted workarea (w_*),
+        // repeated for each desktop, so maximizing clients avoid the bar.
+        if total > 0 {
+            let mut bounds: Option<(i32, i32, i32, i32)> = None; // x0,y0,x1,y1
+            for monitor in self.state.monitors.values() {
+                let g = &monitor.geometry;
+                if g.w_w <= 0 || g.w_h <= 0 {
+                    continue;
+                }
+                let (x0, y0, x1, y1) = (g.w_x, g.w_y, g.w_x + g.w_w, g.w_y + g.w_h);
+                bounds = Some(match bounds {
+                    Some((bx0, by0, bx1, by1)) => {
+                        (bx0.min(x0), by0.min(y0), bx1.max(x1), by1.max(y1))
+                    }
+                    None => (x0, y0, x1, y1),
+                });
+            }
+            if let Some((x0, y0, x1, y1)) = bounds {
+                let rect = (x0, y0, (x1 - x0).max(1) as u32, (y1 - y0).max(1) as u32);
+                let areas = vec![rect; total as usize];
+                backend.set_workarea(&areas)?;
+            }
+        }
         Ok(())
     }
 }

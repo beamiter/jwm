@@ -136,8 +136,14 @@ impl PBOUploader {
             return unsafe { self.upload_texture_sync(gl, texture, width, height, format, data) };
         }
 
-        // Get or create PBO
-        let mut pbo = self.get_pbo(gl);
+        // Get or create PBO; on allocation failure fall back to a sync upload.
+        let mut pbo = match self.get_pbo(gl) {
+            Some(p) => p,
+            None => {
+                log::warn!("pbo_uploader: PBO allocation failed, falling back to sync upload");
+                return unsafe { self.upload_texture_sync(gl, texture, width, height, format, data) };
+            }
+        };
 
         // Wait for GPU to finish previous use
         unsafe { pbo.wait_fence(gl) };
@@ -205,13 +211,14 @@ impl PBOUploader {
         true
     }
 
-    /// Get a PBO from pool or create new one
-    fn get_pbo(&mut self, gl: &glow::Context) -> StreamingPBO {
-        self.pool.pop_front().unwrap_or_else(|| unsafe {
-            StreamingPBO::new(gl, self.pbo_size).unwrap_or_else(|| {
-                panic!("pbo_uploader: failed to create PBO");
-            })
-        })
+    /// Get a PBO from pool or create new one. Returns `None` if the driver
+    /// cannot allocate a buffer; callers fall back to a synchronous upload
+    /// rather than crashing the render path.
+    fn get_pbo(&mut self, gl: &glow::Context) -> Option<StreamingPBO> {
+        match self.pool.pop_front() {
+            Some(pbo) => Some(pbo),
+            None => unsafe { StreamingPBO::new(gl, self.pbo_size) },
+        }
     }
 
     /// Return PBO to pool

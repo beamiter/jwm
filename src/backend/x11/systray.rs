@@ -52,7 +52,10 @@ impl<C: Connection + Send + Sync + 'static> SystemTray<C> {
             1,
             1,
             0,
-            WindowClass::INPUT_ONLY,
+            // Must be INPUT_OUTPUT: tray icons are INPUT_OUTPUT windows reparented
+            // as children, and X11 forbids INPUT_OUTPUT children under an
+            // INPUT_ONLY parent (BadMatch), so embedding would fail.
+            WindowClass::INPUT_OUTPUT,
             x11rb::COPY_FROM_PARENT,
             &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
         )?;

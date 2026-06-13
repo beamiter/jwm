@@ -75,7 +75,13 @@ impl Dispatch<ZwlrGammaControlManagerV1, GammaControlManagerData> for JwmWayland
                     }
                 };
 
-                let gamma_size = 256u32;
+                // Advertise the real hardware LUT size; clients upload a ramp of
+                // exactly this length, so a wrong value makes set_gamma fail.
+                let gamma_size = state
+                    .gamma_sizes
+                    .get(&output.name())
+                    .copied()
+                    .unwrap_or(256);
 
                 let ctrl = data_init.init(
                     id,

@@ -56,7 +56,9 @@ pub fn new_pending_screencopy_queue() -> PendingScreencopyQueue {
 
 /// User data stored per `zwlr_screencopy_frame_v1` object.
 pub struct ScreencopyFrameData {
-    pub output: Output,
+    /// `None` when the requested `wl_output` had no matching compositor output;
+    /// the frame is initialized only so it can be failed cleanly.
+    pub output: Option<Output>,
     pub region: Option<(i32, i32, i32, i32)>,
     pub overlay_cursor: bool,
     pub buffer_info: (u32, u32, u32, wl_shm::Format), // (width, height, stride, format)
@@ -147,7 +149,7 @@ fn handle_capture(
             // No matching output → create the frame but immediately fail it.
             warn!("[screencopy] no matching output for wl_output {:?}", wl_output.id());
             let frame_data = ScreencopyFrameData {
-                output: state.outputs.first().unwrap().clone(), // dummy
+                output: None,
                 region,
                 overlay_cursor: overlay_cursor != 0,
                 buffer_info: (0, 0, 0, wl_shm::Format::Argb8888),
@@ -159,8 +161,24 @@ fn handle_capture(
         }
     };
 
-    // Determine output dimensions.
-    let mode = output.current_mode().unwrap();
+    // Determine output dimensions. An enabled-but-modeless output cannot be
+    // captured; init the frame so we can fail it instead of panicking.
+    let mode = match output.current_mode() {
+        Some(m) => m,
+        None => {
+            warn!("[screencopy] output {} has no current mode", output.name());
+            let frame_data = ScreencopyFrameData {
+                output: None,
+                region,
+                overlay_cursor: overlay_cursor != 0,
+                buffer_info: (0, 0, 0, wl_shm::Format::Argb8888),
+                pending_queue: pending_queue.clone(),
+            };
+            let frame = data_init.init(frame_new_id, frame_data);
+            frame.failed();
+            return;
+        }
+    };
     let (out_w, out_h) = (mode.size.w as u32, mode.size.h as u32);
 
     // For region captures, use the region size; otherwise full output.
@@ -173,7 +191,7 @@ fn handle_capture(
     let stride = cap_w * 4; // ARGB8888 → 4 bytes per pixel
 
     let frame_data = ScreencopyFrameData {
-        output: output.clone(),
+        output: Some(output.clone()),
         region,
         overlay_cursor: overlay_cursor != 0,
         buffer_info: (cap_w, cap_h, stride, wl_shm::Format::Argb8888),
@@ -232,12 +250,20 @@ fn queue_copy(
     data: &ScreencopyFrameData,
     _with_damage: bool,
 ) {
-    debug!("[screencopy] copy request queued for output {}", data.output.name());
+    let output = match data.output.as_ref() {
+        Some(o) => o,
+        None => {
+            // Frame was created for an output that no longer exists; fail cleanly.
+            frame.failed();
+            return;
+        }
+    };
+    debug!("[screencopy] copy request queued for output {}", output.name());
     let mut queue = data.pending_queue.lock_safe();
     queue.push(PendingScreencopyFrame {
         frame: frame.clone(),
         buffer: buffer.clone(),
-        output: data.output.clone(),
+        output: output.clone(),
         region: data.region,
         overlay_cursor: data.overlay_cursor,
     });

@@ -1,3 +1,4 @@
+use crate::sync_ext::RwLockExt;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::env;
@@ -64,7 +65,7 @@ impl LauncherProber {
 
     fn is_command_available(&self, cmd: &str) -> bool {
         {
-            let r = self.cache.read().unwrap();
+            let r = self.cache.read_safe();
             if let Some(&v) = r.get(cmd) {
                 return v;
             }
@@ -74,7 +75,7 @@ impl LauncherProber {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
-        self.cache.write().unwrap().insert(cmd.to_string(), result);
+        self.cache.write_safe().insert(cmd.to_string(), result);
         result
     }
 
@@ -99,7 +100,7 @@ impl LauncherProber {
     }
 
     pub fn clear_cache(&self) {
-        self.cache.write().unwrap().clear();
+        self.cache.write_safe().clear();
     }
 }
 
@@ -314,14 +315,14 @@ impl AdvancedTerminalProber {
 
     fn is_command_available(&self, cmd: &str) -> bool {
         {
-            let cache_reader = self.cache.read().unwrap();
+            let cache_reader = self.cache.read_safe();
             if let Some(&cached_result) = cache_reader.get(cmd) {
                 return cached_result;
             }
         }
         let result = self.check_command_exists(cmd);
         {
-            let mut cache_writer = self.cache.write().unwrap();
+            let mut cache_writer = self.cache.write_safe();
             cache_writer.insert(cmd.to_string(), result);
         }
         result
@@ -359,7 +360,7 @@ impl AdvancedTerminalProber {
 
     #[allow(dead_code)]
     pub fn clear_cache(&self) {
-        let mut cache_writer = self.cache.write().unwrap();
+        let mut cache_writer = self.cache.write_safe();
         cache_writer.clear();
     }
 }

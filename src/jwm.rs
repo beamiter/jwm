@@ -469,7 +469,16 @@ impl Jwm {
                     Ok(a) => a,
                     Err(_) => continue,
                 };
-                if !attr.override_redirect && attr.map_state_viewable {
+                // Adopt viewable windows and also windows left in IconicState by a
+                // previous WM (ICCCM WM_STATE == 3). Without the iconic check we
+                // silently drop minimized windows across a WM restart.
+                const ICONIC_STATE: i64 = 3;
+                let iconic = backend
+                    .property_ops()
+                    .get_wm_state(win)
+                    .map(|s| s == ICONIC_STATE)
+                    .unwrap_or(false);
+                if !attr.override_redirect && (attr.map_state_viewable || iconic) {
                     let geom = match backend.window_ops().get_geometry(win) {
                         Ok(g) => g,
                         Err(_) => continue,

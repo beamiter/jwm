@@ -569,13 +569,15 @@ impl WaylandCompositor {
         self.needs_render = true;
     }
 
-    /// Remove a window (start fade-out)
-    #[allow(dead_code)]
+    /// Remove a window (start fade-out) and evict its side-map state. Called
+    /// when the client surface is destroyed so the per-window maps don't grow
+    /// unbounded over the compositor's lifetime.
     pub(crate) fn remove_window(&mut self, window_id: u64) {
         if let Some(win) = self.windows.get_mut(&window_id) {
             win.fading_out = true;
         }
         self.predictive_render_mgr.remove_window(window_id);
+        self.is_game_window.remove(&window_id);
         self.needs_render = true;
     }
 

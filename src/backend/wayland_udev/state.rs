@@ -62,7 +62,7 @@ use smithay::wayland::relative_pointer::RelativePointerManagerState;
 use smithay::wayland::session_lock::{SessionLockHandler, SessionLockManagerState, SessionLocker, LockSurface};
 use smithay::wayland::idle_inhibit::{IdleInhibitHandler, IdleInhibitManagerState};
 use smithay::wayland::idle_notify::IdleNotifierState;
-use smithay::wayland::fractional_scale::{FractionalScaleHandler, FractionalScaleManagerState};
+use smithay::wayland::fractional_scale::{with_fractional_scale, FractionalScaleHandler, FractionalScaleManagerState};
 use smithay::wayland::cursor_shape::CursorShapeManagerState;
 use smithay::wayland::presentation::PresentationState;
 use smithay::wayland::pointer_gestures::PointerGesturesState;
@@ -118,6 +118,12 @@ pub struct JwmWaylandState {
     pub display_handle: DisplayHandle,
     pub loop_handle: smithay::reexports::calloop::LoopHandle<'static, JwmWaylandState>,
     pub pending_events: Arc<Mutex<std::collections::VecDeque<BackendEvent>>>,
+
+    /// Window ids whose client surface has been destroyed. Drained each frame by
+    /// the udev backend to evict the matching `WaylandCompositor::windows` entry;
+    /// without this the compositor window map (and its predictive/game-detection
+    /// side maps) grows unbounded for the life of the process.
+    pub compositor_dead_windows: Vec<u64>,
 
     pub pointer_location: Point<f64, Logical>,
     pub needs_redraw: bool,
@@ -195,6 +201,10 @@ pub struct JwmWaylandState {
 
     /// KMS-backed outputs currently available for mapping layer surfaces.
     pub outputs: Vec<Output>,
+
+    /// Hardware gamma LUT size per output name, queried from the CRTC.
+    /// Used by wlr-gamma-control to advertise the correct ramp size.
+    pub gamma_sizes: HashMap<String, u32>,
 
     pub next_window_raw: u64,
     pub toplevels: HashMap<WindowId, ToplevelSurface>,
@@ -428,7 +438,21 @@ impl IdleInhibitHandler for JwmWaylandState {
 // Fractional Scale Handler
 // ---------------------------------------------------------------------------
 impl FractionalScaleHandler for JwmWaylandState {
-    fn new_fractional_scale(&mut self, _surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface) {
+    fn new_fractional_scale(&mut self, surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface) {
+        // Deliver an initial preferred scale so HiDPI clients render at the
+        // right resolution instead of being upscaled (blurry). We default to the
+        // primary output's scale here; the per-window map path refines it for the
+        // output the window actually lands on.
+        let scale = self
+            .outputs
+            .first()
+            .map(|o| o.current_scale().fractional_scale())
+            .unwrap_or(1.0);
+        with_states(&surface, |states| {
+            with_fractional_scale(states, |fs| {
+                fs.set_preferred_scale(scale);
+            });
+        });
     }
 }
 
@@ -814,6 +838,7 @@ impl XwmHandler for JwmWaylandState {
 
             self.needs_redraw = true;
 
+            self.compositor_dead_windows.push(win_id.raw());
             self.push_event(BackendEvent::WindowDestroyed(win_id));
         }
     }
@@ -1193,6 +1218,7 @@ impl JwmWaylandState {
                 display_handle: dh.clone(),
                 loop_handle: handle.clone(),
                 pending_events,
+                compositor_dead_windows: Vec::new(),
 
                 pointer_location: (0.0, 0.0).into(),
                 needs_redraw: true,
@@ -1255,6 +1281,7 @@ impl JwmWaylandState {
                 active_toplevel: None,
 
                 outputs: Vec::new(),
+                gamma_sizes: HashMap::new(),
                 next_window_raw: 1,
                 toplevels: HashMap::new(),
                 surface_to_window: HashMap::new(),
@@ -1337,6 +1364,30 @@ impl JwmWaylandState {
 
             self.pending_initial_configure.remove(&win);
         }
+    }
+
+    /// Preferred fractional scale for the output a window currently occupies,
+    /// falling back to the primary output (then 1.0).
+    fn preferred_scale_for_window(&self, win: WindowId) -> f64 {
+        if let Some(g) = self.window_geometry.get(&win) {
+            let center: Point<i32, Logical> =
+                (g.x + g.w as i32 / 2, g.y + g.h as i32 / 2).into();
+            for (idx, rect) in self.output_rects.iter().enumerate() {
+                if center.x >= rect.loc.x
+                    && center.y >= rect.loc.y
+                    && center.x < rect.loc.x + rect.size.w
+                    && center.y < rect.loc.y + rect.size.h
+                {
+                    if let Some(o) = self.outputs.get(idx) {
+                        return o.current_scale().fractional_scale();
+                    }
+                }
+            }
+        }
+        self.outputs
+            .first()
+            .map(|o| o.current_scale().fractional_scale())
+            .unwrap_or(1.0)
     }
 
     pub fn surface_under(
@@ -1805,6 +1856,15 @@ impl CompositorHandler for JwmWaylandState {
                         }
 
                         self.push_event(BackendEvent::WindowMapped(win));
+
+                        // Refine the fractional scale now that the window has a
+                        // geometry and we know which output it lands on.
+                        let scale = self.preferred_scale_for_window(win);
+                        with_states(surface, |states| {
+                            with_fractional_scale(states, |fs| {
+                                fs.set_preferred_scale(scale);
+                            });
+                        });
                     }
                     self.needs_redraw = true;
                 }
@@ -1942,6 +2002,7 @@ impl CompositorHandler for JwmWaylandState {
                 ftm.remove_window(win);
             }
 
+            self.compositor_dead_windows.push(win.raw());
             self.push_event(BackendEvent::WindowDestroyed(win));
             self.needs_redraw = true;
         }
@@ -2296,6 +2357,7 @@ impl XdgShellHandler for JwmWaylandState {
             self.window_app_id.remove(&win);
             self.window_is_fullscreen.remove(&win);
             self.window_border_color.remove(&win);
+            self.compositor_dead_windows.push(win.raw());
             self.push_event(BackendEvent::WindowDestroyed(win));
             self.needs_redraw = true;
         }

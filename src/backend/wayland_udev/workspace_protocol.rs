@@ -79,8 +79,8 @@ pub fn init_workspace_protocol(dh: &DisplayHandle, tags_length: usize) -> Worksp
 impl GlobalDispatch<ExtWorkspaceManagerV1, WorkspaceManagerData> for JwmWaylandState {
     fn bind(
         state: &mut Self,
-        _handle: &DisplayHandle,
-        _client: &Client,
+        handle: &DisplayHandle,
+        client: &Client,
         resource: New<ExtWorkspaceManagerV1>,
         _global_data: &WorkspaceManagerData,
         data_init: &mut DataInit<'_, Self>,
@@ -90,15 +90,52 @@ impl GlobalDispatch<ExtWorkspaceManagerV1, WorkspaceManagerData> for JwmWaylandS
         if let Some(ref ws_state) = state.workspace_state {
             ws_state.add_manager(&manager);
             let tags_length = ws_state.tags_length();
+            let version = manager.version();
 
-            // Send workspace groups (one per output) and workspaces (one per tag).
-            // The protocol requires: workspace_group event, then workspace events,
-            // then done. Since we can't create new_id resources from events
-            // (DataInit is only in request handlers), we send the done event with
-            // no groups/workspaces. Clients will receive state on the next update cycle.
-            //
-            // Full implementation: track managers and send updates from the main loop.
-            let _ = (tags_length, state.outputs.len());
+            // One workspace group per output, with one workspace per JWM tag.
+            // Child resources are created server-side via Client::create_resource
+            // and attached with the manager's workspace_group / workspace events,
+            // then linked into the group with workspace_enter.
+            for (mon_idx, output) in state.outputs.iter().enumerate() {
+                let Ok(group) = client
+                    .create_resource::<ExtWorkspaceGroupHandleV1, _, JwmWaylandState>(
+                        handle,
+                        version,
+                        WorkspaceGroupData { monitor_index: mon_idx },
+                    )
+                else {
+                    continue;
+                };
+                manager.workspace_group(&group);
+                group.capabilities(ext_workspace_group_handle_v1::GroupCapabilities::empty());
+                for wl_output in output.client_outputs(client) {
+                    group.output_enter(&wl_output);
+                }
+
+                for tag_idx in 0..tags_length {
+                    let Ok(ws) = client
+                        .create_resource::<ExtWorkspaceHandleV1, _, JwmWaylandState>(
+                            handle,
+                            version,
+                            WorkspaceHandleData {
+                                monitor_index: mon_idx,
+                                tag_index: tag_idx,
+                            },
+                        )
+                    else {
+                        continue;
+                    };
+                    manager.workspace(&ws);
+                    ws.id(format!("{mon_idx}-{tag_idx}"));
+                    ws.name(format!("{}", tag_idx + 1));
+                    ws.capabilities(
+                        ext_workspace_handle_v1::WorkspaceCapabilities::Activate
+                            | ext_workspace_handle_v1::WorkspaceCapabilities::Deactivate,
+                    );
+                    ws.state(ext_workspace_handle_v1::State::empty());
+                    group.workspace_enter(&ws);
+                }
+            }
         }
 
         manager.done();

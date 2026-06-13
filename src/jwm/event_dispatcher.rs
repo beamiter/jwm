@@ -898,6 +898,11 @@ impl EventHandler for Jwm {
                 state,
             } => self.on_window_state_request(backend, window, action, state),
             BackendEvent::ActiveWindowMessage { window } => self.on_client_message(backend, window),
+            BackendEvent::CloseWindowRequest { window } => {
+                if let Err(e) = backend.window_ops().close_window(window) {
+                    log::warn!("[_NET_CLOSE_WINDOW] close_window failed: {e:?}");
+                }
+            }
 
             BackendEvent::MoveResizeRequest {
                 window,

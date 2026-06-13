@@ -321,6 +321,10 @@ pub enum BackendEvent {
     ActiveWindowMessage {
         window: WindowId,
     },
+    /// A pager/taskbar requested graceful close of a window (_NET_CLOSE_WINDOW).
+    CloseWindowRequest {
+        window: WindowId,
+    },
     PingResponse {
         window: WindowId,
     },
@@ -877,6 +881,10 @@ pub trait Backend: Send {
         _total: u32,
         _names: &[&str],
     ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    fn set_workarea(&mut self, _areas: &[(i32, i32, u32, u32)]) -> Result<(), BackendError> {
         Ok(())
     }
 

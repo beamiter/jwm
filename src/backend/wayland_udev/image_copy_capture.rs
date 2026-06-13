@@ -60,8 +60,11 @@ unsafe impl Send for CaptureSessionData {}
 pub struct CaptureFrameData {
     pub source: CaptureSource,
     pub paint_cursors: bool,
-    pub buffer: Option<WlBuffer>,
-    pub damage: Vec<(i32, i32, i32, i32)>,
+    // Buffer/damage are stashed here on attach_buffer/damage_buffer and only
+    // moved into the pending queue on the capture request, matching the
+    // protocol's attach → damage* → capture ordering.
+    pub buffer: Mutex<Option<WlBuffer>>,
+    pub damage: Mutex<Vec<(i32, i32, i32, i32)>>,
     pub pending_queue: PendingImageCaptureQueue,
 }
 unsafe impl Send for CaptureFrameData {}
@@ -209,12 +212,17 @@ impl Dispatch<ExtImageCopyCaptureManagerV1, CaptureManagerData> for JwmWaylandSt
                 source,
                 options,
             } => {
-                let capture_source = source
+                let capture_source = match source
                     .data::<ImageCaptureSourceData>()
                     .map(|d| d.source.clone())
-                    .unwrap_or_else(|| {
-                        CaptureSource::Output(state.outputs.first().unwrap().clone())
-                    });
+                    .or_else(|| state.outputs.first().map(|o| CaptureSource::Output(o.clone())))
+                {
+                    Some(s) => s,
+                    None => {
+                        warn!("[image-capture] CreateSession with no source and no outputs; ignoring");
+                        return;
+                    }
+                };
 
                 let paint_cursors = options
                     .into_result()
@@ -265,12 +273,17 @@ impl Dispatch<ExtImageCopyCaptureManagerV1, CaptureManagerData> for JwmWaylandSt
                 source,
                 pointer: _,
             } => {
-                let capture_source = source
+                let capture_source = match source
                     .data::<ImageCaptureSourceData>()
                     .map(|d| d.source.clone())
-                    .unwrap_or_else(|| {
-                        CaptureSource::Output(state.outputs.first().unwrap().clone())
-                    });
+                    .or_else(|| state.outputs.first().map(|o| CaptureSource::Output(o.clone())))
+                {
+                    Some(s) => s,
+                    None => {
+                        warn!("[image-capture] CreatePointerCursorSession with no source and no outputs; ignoring");
+                        return;
+                    }
+                };
 
                 data_init.init(session, CursorSessionData { source: capture_source });
             }
@@ -306,8 +319,8 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, CaptureSessionData> for JwmWaylandSt
                     CaptureFrameData {
                         source: data.source.clone(),
                         paint_cursors: data.paint_cursors,
-                        buffer: None,
-                        damage: Vec::new(),
+                        buffer: Mutex::new(None),
+                        damage: Mutex::new(Vec::new()),
                         pending_queue,
                     },
                 );
@@ -334,21 +347,8 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, CaptureFrameData> for JwmWaylandState 
     ) {
         match request {
             ext_image_copy_capture_frame_v1::Request::AttachBuffer { buffer } => {
-                // Store the buffer for later capture.
-                // Note: data is &CaptureFrameData (immutable), so we use the pending queue pattern.
-                // The actual buffer attachment happens when capture is requested.
-                let _ = &buffer;
-                // We'll stash this via the pending queue on capture.
-                // For now, we rely on the ordering: attach_buffer always comes before capture.
-                // The protocol guarantees this ordering.
-                let pending = PendingImageCapture {
-                    frame: resource.clone(),
-                    buffer,
-                    source: data.source.clone(),
-                    paint_cursors: data.paint_cursors,
-                    damage: data.damage.clone(),
-                };
-                data.pending_queue.lock_safe().push(pending);
+                // Stash until capture; the new buffer replaces any previous one.
+                *data.buffer.lock_safe() = Some(buffer);
             }
             ext_image_copy_capture_frame_v1::Request::DamageBuffer {
                 x,
@@ -356,13 +356,31 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, CaptureFrameData> for JwmWaylandState 
                 width,
                 height,
             } => {
-                // Damage hint - we capture the full frame anyway.
-                let _ = (x, y, width, height);
+                if x >= 0 && y >= 0 && width > 0 && height > 0 {
+                    data.damage.lock_safe().push((x, y, width, height));
+                }
             }
             ext_image_copy_capture_frame_v1::Request::Capture => {
-                // The frame should already be in the pending queue from attach_buffer.
-                // The render loop will fulfill it.
-                debug!("[image-capture] frame capture requested");
+                // Move the attached buffer into the pending queue; the render
+                // loop fulfills it on the next frame for the source output.
+                let buffer = data.buffer.lock_safe().take();
+                match buffer {
+                    Some(buffer) => {
+                        let damage = std::mem::take(&mut *data.damage.lock_safe());
+                        data.pending_queue.lock_safe().push(PendingImageCapture {
+                            frame: resource.clone(),
+                            buffer,
+                            source: data.source.clone(),
+                            paint_cursors: data.paint_cursors,
+                            damage,
+                        });
+                        debug!("[image-capture] frame capture queued");
+                    }
+                    None => {
+                        // capture without attach_buffer: fail rather than hang.
+                        resource.failed(ext_image_copy_capture_frame_v1::FailureReason::Unknown);
+                    }
+                }
             }
             ext_image_copy_capture_frame_v1::Request::Destroy => {}
             _ => {}

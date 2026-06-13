@@ -57,10 +57,11 @@ impl Dispatch<ZwlrOutputPowerManagerV1, OutputPowerManagerData> for JwmWaylandSt
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
-            zwlr_output_power_manager_v1::Request::GetOutputPower { id, output: _ } => {
-                let output_name = state
-                    .outputs
-                    .first()
+            zwlr_output_power_manager_v1::Request::GetOutputPower { id, output } => {
+                // Honor the requested wl_output; only fall back to the primary
+                // output when the resource can't be resolved (e.g. stale object).
+                let output_name = smithay::output::Output::from_resource(&output)
+                    .or_else(|| state.outputs.first().cloned())
                     .map(|o| o.name())
                     .unwrap_or_else(|| "unknown".to_string());
 

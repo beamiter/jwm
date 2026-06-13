@@ -29,6 +29,47 @@ use x11rb::protocol::randr::ConnectionExt as RandrExt;
 use x11rb::rust_connection::RustConnection;
 #[allow(unused_imports)]
 use super::math::ortho;
+use std::sync::{Condvar, Mutex, OnceLock};
+
+/// Process-wide gate bounding how many wallpaper images decode concurrently.
+/// Each decode does `image::open` + a Lanczos3 downscale (heavy CPU, transient
+/// full-image allocation); rapid wallpaper changes or per-monitor setup would
+/// otherwise spawn unbounded threads at once. The mutex value is the number of
+/// currently-available decode permits.
+fn decode_gate() -> &'static (Mutex<usize>, Condvar) {
+    static GATE: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
+    GATE.get_or_init(|| {
+        let max = std::thread::available_parallelism()
+            .map(|n| n.get().min(4))
+            .unwrap_or(2);
+        (Mutex::new(max), Condvar::new())
+    })
+}
+
+/// RAII permit for the wallpaper decode gate. Blocks until a permit is free,
+/// and returns it on drop (covering early returns and panics).
+struct DecodePermit;
+
+impl DecodePermit {
+    fn acquire() -> Self {
+        let (lock, cvar) = decode_gate();
+        let mut avail = lock.lock().unwrap_or_else(|e| e.into_inner());
+        while *avail == 0 {
+            avail = cvar.wait(avail).unwrap_or_else(|e| e.into_inner());
+        }
+        *avail -= 1;
+        DecodePermit
+    }
+}
+
+impl Drop for DecodePermit {
+    fn drop(&mut self) {
+        let (lock, cvar) = decode_gate();
+        let mut avail = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *avail += 1;
+        cvar.notify_one();
+    }
+}
 
 impl Compositor {
     /// Decode a wallpaper image on a background thread.
@@ -42,6 +83,8 @@ impl Compositor {
         let (tx, rx) = mpsc::channel();
         let path = path.to_string();
         std::thread::spawn(move || {
+            // Bound concurrent decodes; released when this thread exits.
+            let _permit = DecodePermit::acquire();
             let img = match image::open(&path) {
                 Ok(img) => img,
                 Err(e) => {
