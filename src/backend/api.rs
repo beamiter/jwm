@@ -206,6 +206,21 @@ pub struct Geometry {
     pub border: u32,
 }
 
+/// A single output's requested configuration, produced by the
+/// wlr-output-management protocol and applied by the backend.
+#[derive(Debug, Clone)]
+pub struct OutputConfigChange {
+    pub name: String,
+    pub enabled: bool,
+    /// Requested mode as `(width, height, refresh_mhz)`; `None` keeps the current mode.
+    pub mode: Option<(i32, i32, i32)>,
+    pub position: Option<(i32, i32)>,
+    /// wl_output transform numeric value (0..=7); `None` keeps the current transform.
+    pub transform: Option<i32>,
+    pub scale: Option<f64>,
+    pub adaptive_sync: Option<bool>,
+}
+
 // --- 事件定义 ---
 
 #[derive(Debug, Clone)]
@@ -214,6 +229,8 @@ pub enum BackendEvent {
     OutputAdded(OutputInfo),
     OutputRemoved(OutputId),
     OutputChanged(OutputInfo),
+    /// Apply a client-requested output configuration (wlr-output-management).
+    OutputConfigure { changes: Vec<OutputConfigChange> },
     ScreenLayoutChanged,
     ChildProcessExited,
     ConfigChanged,

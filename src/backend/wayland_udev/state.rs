@@ -1,3 +1,4 @@
+use crate::sync_ext::MutexExt;
 use crate::backend::api::{BackendEvent, Geometry, LayerSurfaceInfo, PropertyKind};
 use crate::backend::common_define::WindowId;
 
@@ -95,6 +96,9 @@ use smithay::input::pointer::PointerHandle;
 #[derive(Debug, Default)]
 pub struct JwmClientState {
     pub compositor_state: CompositorClientState,
+    /// Set for clients that connected through a wp_security_context listener
+    /// (Flatpak/sandbox). `None` for normal clients on the main socket.
+    pub security_context: Option<smithay::wayland::security_context::SecurityContext>,
 }
 
 impl ClientData for JwmClientState {
@@ -112,6 +116,7 @@ pub struct DndIcon {
 
 pub struct JwmWaylandState {
     pub display_handle: DisplayHandle,
+    pub loop_handle: smithay::reexports::calloop::LoopHandle<'static, JwmWaylandState>,
     pub pending_events: Arc<Mutex<std::collections::VecDeque<BackendEvent>>>,
 
     pub pointer_location: Point<f64, Logical>,
@@ -474,9 +479,23 @@ impl smithay::wayland::security_context::SecurityContextHandler for JwmWaylandSt
         source: smithay::wayland::security_context::SecurityContextListenerSource,
         security_context: smithay::wayland::security_context::SecurityContext,
     ) {
-        // TODO: integrate with calloop to accept clients from sandboxed contexts
-        let _ = source;
-        let _ = security_context;
+        let res = self
+            .loop_handle
+            .insert_source(source, move |client_stream, _, data| {
+                let client_state = Arc::new(JwmClientState {
+                    security_context: Some(security_context.clone()),
+                    ..JwmClientState::default()
+                });
+                if let Err(e) = data
+                    .display_handle
+                    .insert_client(client_stream, client_state)
+                {
+                    warn!("[udev/wayland] sandboxed insert_client failed: {e:?}");
+                }
+            });
+        if let Err(e) = res {
+            warn!("[udev/wayland] failed to listen on security_context socket: {e}");
+        }
     }
 }
 
@@ -1172,6 +1191,7 @@ impl JwmWaylandState {
         Ok((
             Self {
                 display_handle: dh.clone(),
+                loop_handle: handle.clone(),
                 pending_events,
 
                 pointer_location: (0.0, 0.0).into(),
@@ -1630,7 +1650,7 @@ impl JwmWaylandState {
     }
 
     pub(crate) fn push_event(&mut self, ev: BackendEvent) {
-        self.pending_events.lock().unwrap().push_back(ev);
+        self.pending_events.lock_safe().push_back(ev);
     }
 
     pub fn try_lookup_toplevel(&mut self, win: WindowId) -> Option<&mut ToplevelSurface> {

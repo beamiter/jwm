@@ -1922,7 +1922,8 @@ impl Config {
             _ => return vec![],
         };
 
-        let modkey = self.parse_modifiers(&[self.inner.keybindings.modkey.clone()]);
+        let modkey =
+            self.parse_modifiers(std::slice::from_ref(&self.inner.keybindings.modkey));
         vec![
             WMKey::new(modkey, key, Some(Jwm::view), jwm::WMArgEnum::UInt(1 << tag)),
             WMKey::new(

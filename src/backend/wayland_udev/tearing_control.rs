@@ -4,6 +4,7 @@
 /// input latency. The compositor stores the per-surface presentation hint and
 /// checks it during the DRM page flip path.
 
+use crate::sync_ext::MutexExt;
 use smithay::reexports::wayland_protocols::wp::tearing_control::v1::server::{
     wp_tearing_control_manager_v1::{self, WpTearingControlManagerV1},
     wp_tearing_control_v1::{self, WpTearingControlV1},
@@ -89,7 +90,7 @@ impl Dispatch<WpTearingControlManagerV1, ()> for JwmWaylandState {
                 data_init.init(id, data);
                 // Initialize with vsync
                 if let Some(ref hints) = state.tearing_hints {
-                    hints.lock().unwrap().insert(surface.id(), TearingHint::Vsync);
+                    hints.lock_safe().insert(surface.id(), TearingHint::Vsync);
                 }
             }
             wp_tearing_control_manager_v1::Request::Destroy => {}
@@ -117,12 +118,12 @@ impl Dispatch<WpTearingControlV1, TearingControlData> for JwmWaylandState {
                     _ => TearingHint::Vsync,
                 };
                 if let Some(ref hints) = state.tearing_hints {
-                    hints.lock().unwrap().insert(data.surface.id(), hint);
+                    hints.lock_safe().insert(data.surface.id(), hint);
                 }
             }
             wp_tearing_control_v1::Request::Destroy => {
                 if let Some(ref hints) = state.tearing_hints {
-                    hints.lock().unwrap().remove(&data.surface.id());
+                    hints.lock_safe().remove(&data.surface.id());
                 }
             }
             _ => {}

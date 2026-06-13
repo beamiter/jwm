@@ -1,3 +1,4 @@
+use crate::sync_ext::MutexExt;
 use crate::backend::api::{
     Backend, BackendEvent, Capabilities, ColorAllocator, CursorProvider, EventHandler, HitTarget,
     InputOps, KeyOps, OutputInfo, OutputOps, PropertyOps, ResizeEdge, ScreenInfo, WindowOps,
@@ -135,11 +136,11 @@ struct WaylandOutputOps {
 
 impl OutputOps for WaylandOutputOps {
     fn enumerate_outputs(&self) -> Vec<OutputInfo> {
-        self.shared.lock().unwrap().outputs.clone()
+        self.shared.lock_safe().outputs.clone()
     }
 
     fn screen_info(&self) -> ScreenInfo {
-        let shared = self.shared.lock().unwrap();
+        let shared = self.shared.lock_safe();
         let mut w = 0i32;
         let mut h = 0i32;
         for o in &shared.outputs {
@@ -156,7 +157,7 @@ impl OutputOps for WaylandOutputOps {
     }
 
     fn output_at(&self, x: i32, y: i32) -> Option<OutputId> {
-        let shared = self.shared.lock().unwrap();
+        let shared = self.shared.lock_safe();
         shared
             .outputs
             .iter()
@@ -579,7 +580,7 @@ impl WaylandX11Backend {
     }
 
     fn update_single_output(&mut self, width: i32, height: i32, emit_events: bool) {
-        let mut shared = self.shared.lock().unwrap();
+        let mut shared = self.shared.lock_safe();
         let key: u64 = 0;
         let id = if let Some(id) = shared.output_key_to_id.get(&key).copied() {
             id
@@ -604,7 +605,7 @@ impl WaylandX11Backend {
         };
 
         if emit_events {
-            let mut q = self.pending_events.lock().unwrap();
+            let mut q = self.pending_events.lock_safe();
             if shared.outputs.is_empty() {
                 q.push_back(BackendEvent::OutputAdded(info.clone()));
                 q.push_back(BackendEvent::ScreenLayoutChanged);
@@ -689,7 +690,7 @@ impl WaylandX11Backend {
                             let Some(data) = data else {
                                 return;
                             };
-                            if data.lock().unwrap().view().is_some() {
+                            if data.lock_safe().view().is_some() {
                                 self.output.enter(child_surface);
                                 visible_surfaces.insert(child_surface.downgrade());
                             }
@@ -742,7 +743,7 @@ impl WaylandX11Backend {
                         let Some(data) = data else {
                             return;
                         };
-                        if data.lock().unwrap().view().is_some() {
+                        if data.lock_safe().view().is_some() {
                             self.output.enter(child_surface);
                             visible_surfaces.insert(child_surface.downgrade());
                         }
@@ -785,7 +786,7 @@ impl WaylandX11Backend {
                     let Some(data) = data else {
                         return;
                     };
-                    if data.lock().unwrap().view().is_some() {
+                    if data.lock_safe().view().is_some() {
                         self.output.enter(child_surface);
                         visible_surfaces.insert(child_surface.downgrade());
                     }
@@ -843,7 +844,7 @@ impl WaylandX11Backend {
                     let Some(data) = data else {
                         return;
                     };
-                    if data.lock().unwrap().view().is_some() {
+                    if data.lock_safe().view().is_some() {
                         self.output.enter(child_surface);
                         visible_surfaces.insert(child_surface.downgrade());
                     }
@@ -893,7 +894,7 @@ impl WaylandX11Backend {
                             let Some(data) = data else {
                                 return;
                             };
-                            if data.lock().unwrap().view().is_some() {
+                            if data.lock_safe().view().is_some() {
                                 self.output.enter(child_surface);
                                 visible_surfaces.insert(child_surface.downgrade());
                             }
@@ -1011,7 +1012,7 @@ impl WaylandX11Backend {
                 let Some(data) = data else {
                     return None;
                 };
-                if data.lock().unwrap().view().is_none() {
+                if data.lock_safe().view().is_none() {
                     return None;
                 }
                 if visible.contains(&surface.downgrade()) {
@@ -1111,7 +1112,7 @@ impl WaylandX11Backend {
                 .map(|k| (k.mask & allowed_mods, k.key_sym))
                 .collect::<Vec<_>>();
 
-            let mut s = shared.lock().unwrap();
+            let mut s = shared.lock_safe();
             s.key_bindings = key_bindings;
         }
 
@@ -1349,7 +1350,7 @@ Fallback: run the winit backend instead: `JWM_BACKEND=wayland-winit` (same binar
                             state.needs_redraw = true;
 
                             let id = {
-                                let mut s = shared.lock().unwrap();
+                                let mut s = shared.lock_safe();
                                 if let Some(id) = s.output_key_to_id.get(&0).copied() {
                                     id
                                 } else {
@@ -1372,10 +1373,10 @@ Fallback: run the winit backend instead: `JWM_BACKEND=wayland-winit` (same binar
                                 hdr_capable: true,
                             };
                             {
-                                let mut s = shared.lock().unwrap();
+                                let mut s = shared.lock_safe();
                                 s.outputs = vec![info.clone()];
                             }
-                            let mut q = pending_events.lock().unwrap();
+                            let mut q = pending_events.lock_safe();
                             q.push_back(BackendEvent::OutputChanged(info));
                             q.push_back(BackendEvent::ScreenLayoutChanged);
                         }
@@ -1471,7 +1472,7 @@ fn process_input_event_windowed<B: InputBackend>(
             let delta = event.delta();
             let time = event.time_msec();
             let (x, y, output) = {
-                let mut s = shared.lock().unwrap();
+                let mut s = shared.lock_safe();
                 s.pointer_x += delta.x;
                 s.pointer_y += delta.y;
                 let x = s.pointer_x;
@@ -1542,7 +1543,7 @@ fn process_input_event_windowed<B: InputBackend>(
         InputEvent::PointerMotionAbsolute { event, .. } => {
             let time = event.time_msec();
             let (x, y, output) = {
-                let mut s = shared.lock().unwrap();
+                let mut s = shared.lock_safe();
                 let (w, h, origin_x, origin_y, output) = if let Some(first) = s.outputs.first() {
                     (
                         first.width.max(1) as i32,
@@ -1618,7 +1619,7 @@ fn process_input_event_windowed<B: InputBackend>(
             );
 
             let (x, y, output, mods_state) = {
-                let s = shared.lock().unwrap();
+                let s = shared.lock_safe();
                 let x = s.pointer_x;
                 let y = s.pointer_y;
                 let output = s
@@ -1876,7 +1877,7 @@ fn process_input_event_windowed<B: InputBackend>(
                 if pressed {
                     let keycode_u32 = u32::from(keycode);
                     let keycode_u8 = u8::try_from(keycode_u32).unwrap_or(0);
-                    let mods_state = shared.lock().unwrap().mods_state;
+                    let mods_state = shared.lock_safe().mods_state;
                     pending_events
                         .lock()
                         .unwrap()
@@ -1980,7 +1981,7 @@ impl Backend for WaylandX11Backend {
 
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError> {
         loop {
-            while let Some(ev) = { self.pending_events.lock().unwrap().pop_front() } {
+            while let Some(ev) = { self.pending_events.lock_safe().pop_front() } {
                 handler.handle_event(self, ev)?;
             }
 

@@ -354,9 +354,12 @@ impl WaylandCompositor {
                 }
             };
 
-            let mut src_fbo = 0u32;
-            gl.GenFramebuffers(1, &mut src_fbo);
-            gl.BindFramebuffer(ffi::READ_FRAMEBUFFER, src_fbo);
+            // Reuse a single read-framebuffer across frames; re-attaching a
+            // texture is cheap, gen/deleting an FBO every frame is not.
+            if self.blur_blit_src_fbo == 0 {
+                gl.GenFramebuffers(1, &mut self.blur_blit_src_fbo);
+            }
+            gl.BindFramebuffer(ffi::READ_FRAMEBUFFER, self.blur_blit_src_fbo);
             gl.FramebufferTexture2D(
                 ffi::READ_FRAMEBUFFER,
                 ffi::COLOR_ATTACHMENT0,
@@ -379,7 +382,6 @@ impl WaylandCompositor {
                 ffi::NEAREST,
             );
 
-            gl.DeleteFramebuffers(1, &src_fbo);
             gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
         }
     }

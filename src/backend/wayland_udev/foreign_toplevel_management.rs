@@ -3,6 +3,7 @@
 /// Enables taskbars (Waybar, sfwbar, etc.) to list, activate, close, maximize,
 /// minimize, and fullscreen windows.
 
+use crate::sync_ext::MutexExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -52,20 +53,20 @@ impl ForeignToplevelMgmtState {
     }
 
     pub fn add_manager(&self, mgr: ZwlrForeignToplevelManagerV1) {
-        self.inner.lock().unwrap().managers.push(mgr);
+        self.inner.lock_safe().managers.push(mgr);
     }
 
     pub fn remove_manager(&self, mgr: &ZwlrForeignToplevelManagerV1) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock_safe();
         inner.managers.retain(|m| m != mgr);
     }
 
     pub fn add_handle(&self, win: WindowId, handle: ZwlrForeignToplevelHandleV1) {
-        self.inner.lock().unwrap().handles.entry(win).or_default().push(handle);
+        self.inner.lock_safe().handles.entry(win).or_default().push(handle);
     }
 
     pub fn remove_window(&self, win: WindowId) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock_safe();
         if let Some(handles) = inner.handles.remove(&win) {
             for h in handles {
                 h.closed();
@@ -74,7 +75,7 @@ impl ForeignToplevelMgmtState {
     }
 
     pub fn update_title(&self, win: WindowId, title: &str) {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock_safe();
         if let Some(handles) = inner.handles.get(&win) {
             for h in handles {
                 h.title(title.to_string());
@@ -84,7 +85,7 @@ impl ForeignToplevelMgmtState {
     }
 
     pub fn update_app_id(&self, win: WindowId, app_id: &str) {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock_safe();
         if let Some(handles) = inner.handles.get(&win) {
             for h in handles {
                 h.app_id(app_id.to_string());
@@ -94,7 +95,7 @@ impl ForeignToplevelMgmtState {
     }
 
     pub fn update_state(&self, win: WindowId, states: &[ToplevelState]) {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock_safe();
         if let Some(handles) = inner.handles.get(&win) {
             let state_bytes: Vec<u8> = states
                 .iter()
@@ -108,7 +109,7 @@ impl ForeignToplevelMgmtState {
     }
 
     pub fn managers(&self) -> Vec<ZwlrForeignToplevelManagerV1> {
-        self.inner.lock().unwrap().managers.clone()
+        self.inner.lock_safe().managers.clone()
     }
 }
 

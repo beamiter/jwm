@@ -85,9 +85,42 @@ impl BatteryStatus {
         Ok(BatteryStatus {
             percentage,
             source,
-            time_remaining: None,  // TODO: Calculate from current_now/charge_now
+            time_remaining: Self::read_time_remaining(base_path, source),
             last_update: Instant::now(),
         })
+    }
+
+    /// Estimate seconds of runtime left (discharging) or until full (charging).
+    ///
+    /// sysfs exposes either charge_* (µAh) + current_now (µA) or energy_* (µWh) +
+    /// power_now (µW), depending on the driver. Either pair divides to hours, so
+    /// the same arithmetic works once we pick whichever the kernel provides.
+    fn read_time_remaining(base_path: &str, source: PowerSource) -> Option<u32> {
+        let read = |name: &str| -> Option<f64> {
+            fs::read_to_string(format!("{base_path}/{name}"))
+                .ok()?
+                .trim()
+                .parse::<f64>()
+                .ok()
+        };
+
+        // (now, full, rate) in consistent units (charge µAh / energy µWh, rate µA / µW).
+        let (now, full, rate) = match (read("charge_now"), read("current_now")) {
+            (Some(now), Some(rate)) => (now, read("charge_full"), rate),
+            _ => (read("energy_now")?, read("energy_full"), read("power_now")?),
+        };
+
+        if rate <= 0.0 {
+            return None; // idle/full: rate is zero, no meaningful estimate
+        }
+
+        let remaining_units = match source {
+            PowerSource::Battery => now,
+            PowerSource::AC => (full? - now).max(0.0), // charging: time until full
+            PowerSource::Unknown => return None,
+        };
+
+        Some((remaining_units / rate * 3600.0) as u32)
     }
 
     /// Check if on battery power

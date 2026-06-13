@@ -4,6 +4,7 @@
 /// The compositor captures the framebuffer during the render loop and copies the data
 /// into the client-provided wl_shm buffer.
 
+use crate::sync_ext::MutexExt;
 use std::sync::{Arc, Mutex};
 
 use log::{debug, info, warn};
@@ -232,7 +233,7 @@ fn queue_copy(
     _with_damage: bool,
 ) {
     debug!("[screencopy] copy request queued for output {}", data.output.name());
-    let mut queue = data.pending_queue.lock().unwrap();
+    let mut queue = data.pending_queue.lock_safe();
     queue.push(PendingScreencopyFrame {
         frame: frame.clone(),
         buffer: buffer.clone(),

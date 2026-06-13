@@ -3298,6 +3298,7 @@ mod input_ops {
 }
 
 mod key_ops {
+    use crate::sync_ext::MutexExt;
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -3399,7 +3400,7 @@ mod key_ops {
                 self.find_modifier_mask(numkc)? as u16
             };
 
-            *self.numlock_mask.lock().unwrap() = mask;
+            *self.numlock_mask.lock_safe() = mask;
             Ok(())
         }
 
@@ -3423,7 +3424,7 @@ mod key_ops {
 
     impl<C: Connection + Send + Sync + 'static> KeyOps for X11KeyOps<C> {
         fn clean_mods(&self, raw: u16) -> Mods {
-            let numlock = *self.numlock_mask.lock().unwrap();
+            let numlock = *self.numlock_mask.lock_safe();
             let raw_mask = x11rb::protocol::xproto::KeyButMask::from(raw);
             let numlock_mask = x11rb::protocol::xproto::KeyButMask::from(numlock);
             super::adapter::mods_from_x11(raw_mask, numlock_mask)
@@ -3440,7 +3441,7 @@ mod key_ops {
             root: WindowId,
             bindings: &[(Mods, KeySym)],
         ) -> Result<(), BackendError> {
-            let numlock_local = *self.numlock_mask.lock().unwrap();
+            let numlock_local = *self.numlock_mask.lock_safe();
             let r = self.ids.x11(root)?;
 
             // Query keyboard mapping once for all bindings
@@ -4789,6 +4790,7 @@ mod property_ops {
 }
 
 mod window_ops {
+    use crate::sync_ext::MutexExt;
     use super::adapter::{event_mask_from_generic, mods_to_x11};
     use super::ids::X11IdRegistry;
     use crate::backend::api::{CloseResult, Geometry, WindowAttributes, WindowOps};
@@ -5059,7 +5061,7 @@ mod window_ops {
         ) -> Result<(), BackendError> {
             let x_mask = event_mask_from_generic(event_mask_bits);
             let bi = ButtonIndex::from(button);
-            let numlock_val = *self.numlock_mask.lock().unwrap();
+            let numlock_val = *self.numlock_mask.lock_safe();
             let numlock_obj = KeyButMask::from(numlock_val);
             let x_mods = mods_to_x11(mods, numlock_obj);
             let mods_bits = ModMask::from(x_mods.bits());

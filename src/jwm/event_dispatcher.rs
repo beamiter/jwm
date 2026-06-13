@@ -786,6 +786,8 @@ impl EventHandler for Jwm {
             BackendEvent::OutputAdded(info) => self.on_output_added(backend, info),
             BackendEvent::OutputRemoved(id) => self.on_output_removed(backend, id),
             BackendEvent::OutputChanged(info) => self.on_output_changed(backend, info),
+            // Consumed directly by the udev backend loop; a no-op if it reaches here.
+            BackendEvent::OutputConfigure { .. } => {}
             BackendEvent::ScreenLayoutChanged => self.on_screen_layout_changed(backend),
             BackendEvent::ChildProcessExited => self.on_child_process_exited(backend),
             BackendEvent::ConfigChanged => {

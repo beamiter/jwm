@@ -781,6 +781,9 @@ pub(crate) struct WaylandCompositor {
     prev_blur_fbo: Option<(u32, u32)>,
     // Half-res scratch target for the temporal mix pass (mix output != either input).
     temporal_mix_fbo: Option<(u32, u32)>,
+    // Reusable read-framebuffer for the temporal-blur history blit. Created once
+    // (0 = not yet) and re-attached each frame instead of gen/deleting per frame.
+    blur_blit_src_fbo: u32,
     // Last frame's window positions (id, x, y) for motion-aware mix attenuation.
     prev_motion_positions: Vec<(u64, i32, i32)>,
     prev_window_positions_hash: u64,
@@ -1452,6 +1455,7 @@ impl WaylandCompositor {
             temporal_blur_mix_uniforms,
             prev_blur_fbo: None,
             temporal_mix_fbo: None,
+            blur_blit_src_fbo: 0,
             prev_motion_positions: Vec::new(),
             prev_window_positions_hash: 0,
             temporal_blur_reuse_count: 0,

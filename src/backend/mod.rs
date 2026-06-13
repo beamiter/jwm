@@ -4,6 +4,9 @@ pub mod api;
 pub mod common_define;
 pub mod error;
 
+// Backend-independent CPU bitmap text rasterizer shared by both compositors.
+pub mod compositor_font;
+
 // Shared Smithay Wayland compositor state (used by udev/KMS and windowed X11 backend).
 pub mod wayland;
 

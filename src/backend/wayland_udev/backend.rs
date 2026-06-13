@@ -1,3 +1,4 @@
+use crate::sync_ext::MutexExt;
 use crate::backend::wayland::state::JwmWaylandState;
 use crate::backend::wayland_dummy_ops::*;
 use crate::backend::wayland_key_ops::UdevKeyOps;
@@ -157,11 +158,11 @@ struct UdevOutputOps {
 
 impl OutputOps for UdevOutputOps {
     fn enumerate_outputs(&self) -> Vec<OutputInfo> {
-        self.shared.lock().unwrap().outputs.clone()
+        self.shared.lock_safe().outputs.clone()
     }
 
     fn screen_info(&self) -> ScreenInfo {
-        let shared = self.shared.lock().unwrap();
+        let shared = self.shared.lock_safe();
         let mut w = 0i32;
         let mut h = 0i32;
         for o in &shared.outputs {
@@ -181,7 +182,7 @@ impl OutputOps for UdevOutputOps {
     }
 
     fn output_at(&self, x: i32, y: i32) -> Option<OutputId> {
-        let shared = self.shared.lock().unwrap();
+        let shared = self.shared.lock_safe();
         shared
             .outputs
             .iter()
@@ -199,7 +200,7 @@ impl InputOps for UdevInputOps {
         &self,
         kind: crate::backend::common_define::StdCursorKind,
     ) -> Result<(), BackendError> {
-        let mut shared = self.shared.lock().unwrap();
+        let mut shared = self.shared.lock_safe();
         if shared.cursor_kind != kind {
             shared.cursor_kind = kind;
             shared.cursor_dirty = true;
@@ -208,7 +209,7 @@ impl InputOps for UdevInputOps {
     }
 
     fn get_pointer_position(&self) -> Result<(f64, f64), BackendError> {
-        let shared = self.shared.lock().unwrap();
+        let shared = self.shared.lock_safe();
         Ok((shared.pointer_x, shared.pointer_y))
     }
 
@@ -216,7 +217,7 @@ impl InputOps for UdevInputOps {
         if mask != 0 {
             // Non-zero mask → screenshot region-select grab.
             // Suppress events reaching Wayland clients and switch to crosshair cursor.
-            let mut shared = self.shared.lock().unwrap();
+            let mut shared = self.shared.lock_safe();
             shared.screenshot_grab_active = true;
             if shared.cursor_kind != StdCursorKind::Crosshair {
                 shared.cursor_kind = StdCursorKind::Crosshair;
@@ -227,7 +228,7 @@ impl InputOps for UdevInputOps {
     }
 
     fn ungrab_pointer(&self) -> Result<(), BackendError> {
-        let mut shared = self.shared.lock().unwrap();
+        let mut shared = self.shared.lock_safe();
         shared.screenshot_grab_active = false;
         if shared.cursor_kind != StdCursorKind::LeftPtr {
             shared.cursor_kind = StdCursorKind::LeftPtr;
@@ -237,7 +238,7 @@ impl InputOps for UdevInputOps {
     }
 
     fn query_pointer_root(&self) -> Result<(i32, i32, u16, u16), BackendError> {
-        let shared = self.shared.lock().unwrap();
+        let shared = self.shared.lock_safe();
         Ok((
             shared.pointer_x as i32,
             shared.pointer_y as i32,
@@ -708,7 +709,7 @@ impl UdevBackend {
 
     fn maybe_reinit_kms(&mut self) {
         let should = {
-            let mut s = self.shared.lock().unwrap();
+            let mut s = self.shared.lock_safe();
             if s.kms_needs_reinit {
                 s.kms_needs_reinit = false;
                 true
@@ -721,7 +722,7 @@ impl UdevBackend {
         }
 
         let selected = {
-            let s = self.shared.lock().unwrap();
+            let s = self.shared.lock_safe();
             s.device_paths
                 .iter()
                 .min_by_key(|(id, _)| *id)
@@ -739,7 +740,7 @@ impl UdevBackend {
         };
 
         let output_layout: std::collections::HashMap<u64, (i32, i32)> = {
-            let s = self.shared.lock().unwrap();
+            let s = self.shared.lock_safe();
             let mut id_to_key: HashMap<OutputId, u64> = HashMap::new();
             for (key, id) in &s.output_key_to_id {
                 id_to_key.insert(*id, *key);
@@ -889,7 +890,7 @@ impl UdevBackend {
                 .map(|k| (k.mask & allowed_shortcut_mods(), k.key_sym))
                 .collect::<Vec<_>>();
 
-            let mut s = shared.lock().unwrap();
+            let mut s = shared.lock_safe();
             s.key_bindings = key_bindings;
         }
 
@@ -903,7 +904,7 @@ impl UdevBackend {
                 .handle()
                 .insert_source(timer, move |_, _, _state| {
                     let maybe_event = {
-                        let mut s = shared.lock().unwrap();
+                        let mut s = shared.lock_safe();
 
                         let Some(mut rep) = s.repeat else {
                             return TimeoutAction::ToDuration(KEY_REPEAT_TICK);
@@ -940,7 +941,7 @@ impl UdevBackend {
                         ev
                     };
 
-                    pending_events.lock().unwrap().push_back(maybe_event);
+                    pending_events.lock_safe().push_back(maybe_event);
                     TimeoutAction::ToDuration(KEY_REPEAT_TICK)
                 })
                 .map_err(|e| {
@@ -1069,7 +1070,7 @@ impl UdevBackend {
         let libinput_backend = LibinputInputBackend::new(libinput_context.clone());
 
         {
-            let mut shared_guard = shared.lock().unwrap();
+            let mut shared_guard = shared.lock_safe();
             for (device_id, path) in udev_backend.device_list() {
                 shared_guard
                     .device_paths
@@ -1080,7 +1081,7 @@ impl UdevBackend {
 
         // Keep a copy of output geometries in the Wayland state for popup constraining.
         {
-            let s = shared.lock().unwrap();
+            let s = shared.lock_safe();
             state.output_rects = s
                 .outputs
                 .iter()
@@ -1094,7 +1095,7 @@ impl UdevBackend {
         // If this fails (e.g. missing permissions / no DRM device), keep running headless.
         let kms = {
             let selected = {
-                let s = shared.lock().unwrap();
+                let s = shared.lock_safe();
                 s.device_paths
                     .iter()
                     .min_by_key(|(id, _)| *id)
@@ -1104,7 +1105,7 @@ impl UdevBackend {
             match selected {
                 Some((dev_id, p)) => {
                     let output_layout: std::collections::HashMap<u64, (i32, i32)> = {
-                        let s = shared.lock().unwrap();
+                        let s = shared.lock_safe();
                         let mut id_to_key: HashMap<OutputId, u64> = HashMap::new();
                         for (key, id) in &s.output_key_to_id {
                             id_to_key.insert(*id, *key);
@@ -1198,7 +1199,7 @@ impl UdevBackend {
                             let delta = event.delta();
                             let time = event.time_msec();
                             let (x, y, output, in_screenshot) = {
-                                let mut s = shared.lock().unwrap();
+                                let mut s = shared.lock_safe();
                                 s.pointer_x += delta.x;
                                 s.pointer_y += delta.y;
                                 // Clamp cursor to union bounding box of all outputs.
@@ -1268,7 +1269,7 @@ impl UdevBackend {
                                 pointer.frame(state);
                             }
 
-                            pending_events.lock().unwrap().push_back(BackendEvent::MotionNotify {
+                            pending_events.lock_safe().push_back(BackendEvent::MotionNotify {
                                 target: hit.unwrap_or(HitTarget::Background { output }),
                                 root_x: x,
                                 root_y: y,
@@ -1278,7 +1279,7 @@ impl UdevBackend {
                         InputEvent::PointerMotionAbsolute { event, .. } => {
                             let time = event.time_msec();
                             let (x, y, output, in_screenshot) = {
-                                let mut s = shared.lock().unwrap();
+                                let mut s = shared.lock_safe();
                                 let (w, h, origin_x, origin_y, output) = if let Some(first) = s.outputs.first() {
                                     (first.width.max(1) as i32, first.height.max(1) as i32, first.x, first.y, Some(first.id))
                                 } else {
@@ -1329,7 +1330,7 @@ impl UdevBackend {
                                 pointer.frame(state);
                             }
 
-                            pending_events.lock().unwrap().push_back(BackendEvent::MotionNotify {
+                            pending_events.lock_safe().push_back(BackendEvent::MotionNotify {
                                 target: hit.unwrap_or(HitTarget::Background { output }),
                                 root_x: x,
                                 root_y: y,
@@ -1353,7 +1354,7 @@ impl UdevBackend {
                                 _ => (button_code & 0xFF) as u8,
                             };
                             let (x, y, output, in_screenshot) = {
-                                let s = shared.lock().unwrap();
+                                let s = shared.lock_safe();
                                 let x = s.pointer_x;
                                 let y = s.pointer_y;
                                 let _mods = s.mods_state;
@@ -1463,7 +1464,7 @@ impl UdevBackend {
                             }
 
                             if pressed {
-                                let mods_state = shared.lock().unwrap().mods_state;
+                                let mods_state = shared.lock_safe().mods_state;
 
                                 let debug_buttons = std::env::var("JWM_DEBUG_BUTTONS")
                                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -1479,7 +1480,7 @@ impl UdevBackend {
                                         hit.unwrap_or(HitTarget::Background { output })
                                     );
                                 }
-                                pending_events.lock().unwrap().push_back(BackendEvent::ButtonPress {
+                                pending_events.lock_safe().push_back(BackendEvent::ButtonPress {
                                     target: hit.unwrap_or(HitTarget::Background { output }),
                                     state: mods_state,
                                     detail: detail_btn,
@@ -1488,7 +1489,7 @@ impl UdevBackend {
                                     root_y: y,
                                 });
                             } else {
-                                pending_events.lock().unwrap().push_back(BackendEvent::ButtonRelease {
+                                pending_events.lock_safe().push_back(BackendEvent::ButtonRelease {
                                     target: hit.unwrap_or(HitTarget::Background { output }),
                                     time,
                                 });
@@ -1627,7 +1628,7 @@ impl UdevBackend {
                                 } else {
                                 if kbd.current_focus().is_none() {
                                     let (px, py) = {
-                                        let s = shared.lock().unwrap();
+                                        let s = shared.lock_safe();
                                         (s.pointer_x, s.pointer_y)
                                     };
                                     let location: Point<f64, Logical> = (px, py).into();
@@ -1713,8 +1714,8 @@ impl UdevBackend {
                                 // Smithay provides XKB/Wayland keycodes already (evdev + 8).
                                 let keycode_u32 = u32::from(keycode);
                                 let keycode_u8 = u8::try_from(keycode_u32).unwrap_or(0);
-                                let mods_state = shared.lock().unwrap().mods_state;
-                                pending_events.lock().unwrap().push_back(BackendEvent::KeyPress {
+                                let mods_state = shared.lock_safe().mods_state;
+                                pending_events.lock_safe().push_back(BackendEvent::KeyPress {
                                     keycode: keycode_u8,
                                     state: mods_state,
                                     time,
@@ -1723,7 +1724,7 @@ impl UdevBackend {
                                 // Start (or reset) key repeat for bound shortcuts.
                                 // This mirrors X11 autorepeat behavior for WM shortcuts.
                                 {
-                                    let mut s = shared.lock().unwrap();
+                                    let mut s = shared.lock_safe();
 
                                     // Any new key press cancels previous repeat.
                                     s.repeat = None;
@@ -1764,7 +1765,7 @@ impl UdevBackend {
                             // modifiers are no longer satisfied (e.g. Alt released).
                             if matches!(state_key, smithay::backend::input::KeyState::Released) {
                                 let keycode_u8 = u8::try_from(u32::from(keycode)).unwrap_or(0);
-                                let mut s = shared.lock().unwrap();
+                                let mut s = shared.lock_safe();
                                 if let Some(rep) = s.repeat {
                                     if rep.keycode == keycode_u8 {
                                         s.repeat = None;
@@ -1801,7 +1802,7 @@ impl UdevBackend {
                             let time = event.time_msec();
                             let slot = event.slot();
                             let (w, h) = {
-                                let s = shared.lock().unwrap();
+                                let s = shared.lock_safe();
                                 if let Some(first) = s.outputs.first() {
                                     (first.width.max(1) as i32, first.height.max(1) as i32)
                                 } else {
@@ -1827,7 +1828,7 @@ impl UdevBackend {
                             let time = event.time_msec();
                             let slot = event.slot();
                             let (w, h) = {
-                                let s = shared.lock().unwrap();
+                                let s = shared.lock_safe();
                                 if let Some(first) = s.outputs.first() {
                                     (first.width.max(1) as i32, first.height.max(1) as i32)
                                 } else {
@@ -1995,7 +1996,7 @@ impl UdevBackend {
                             .push_back(BackendEvent::ScreenLayoutChanged);
                         let _ = rebuild_outputs(&shared, &pending_events);
                         {
-                            let s = shared.lock().unwrap();
+                            let s = shared.lock_safe();
                             _state.output_rects = s
                                 .outputs
                                 .iter()
@@ -2010,7 +2011,7 @@ impl UdevBackend {
                         if let Some(grab_win) = _state.popup_grab_toplevel {
                             _state.reconstrain_popups_for_toplevel(grab_win);
                         }
-                        shared.lock().unwrap().kms_needs_reinit = true;
+                        shared.lock_safe().kms_needs_reinit = true;
                     }
                 })
                 .map_err(|e| {
@@ -2038,12 +2039,12 @@ impl UdevBackend {
                             let _ = device_id;
                         }
                         UdevEvent::Removed { device_id } => {
-                            shared.lock().unwrap().device_paths.remove(&device_id);
+                            shared.lock_safe().device_paths.remove(&device_id);
                         }
                     }
                     let _ = rebuild_outputs(&shared, &pending_events);
                     {
-                        let s = shared.lock().unwrap();
+                        let s = shared.lock_safe();
                         _state.output_rects = s
                             .outputs
                             .iter()
@@ -2058,7 +2059,7 @@ impl UdevBackend {
                     if let Some(grab_win) = _state.popup_grab_toplevel {
                         _state.reconstrain_popups_for_toplevel(grab_win);
                     }
-                    shared.lock().unwrap().kms_needs_reinit = true;
+                    shared.lock_safe().kms_needs_reinit = true;
                     pending_events
                         .lock()
                         .unwrap()
@@ -2082,7 +2083,7 @@ impl UdevBackend {
         // the Smithay input filter (for shortcut suppression).
         let mut key_ops_impl = UdevKeyOps::new()?;
         {
-            let mut s = shared.lock().unwrap();
+            let mut s = shared.lock_safe();
             let mut non_zero = 0usize;
             for kc in 0u16..=255u16 {
                 let u8_kc = kc as u8;
@@ -2489,7 +2490,7 @@ impl Backend for UdevBackend {
                             // never takes a second lock on the same surface.
                             let (tex_info, log_buf) = match rsd {
                                 Some(d) => {
-                                    let locked = d.lock().unwrap();
+                                    let locked = d.lock_safe();
                                     let tex_info = locked.texture::<GlesTexture>(ctx_id).map(|t| {
                                         let has_alpha = locked
                                             .buffer()
@@ -2576,7 +2577,7 @@ impl Backend for UdevBackend {
                     with_states(popup_surface, |states| {
                         let rsd = states.data_map.get::<RendererSurfaceStateUserData>();
                         rsd.and_then(|d| {
-                            let locked = d.lock().unwrap();
+                            let locked = d.lock_safe();
                             locked.texture::<GlesTexture>(ctx_id).map(|t| {
                                 let has_alpha = locked
                                     .buffer()
@@ -2626,7 +2627,7 @@ impl Backend for UdevBackend {
                     with_states(im_surface, |states| {
                         let rsd = states.data_map.get::<RendererSurfaceStateUserData>();
                         rsd.and_then(|d| {
-                            let locked = d.lock().unwrap();
+                            let locked = d.lock_safe();
                             locked.texture::<GlesTexture>(ctx_id).map(|t| {
                                 let has_alpha = locked
                                     .buffer()
@@ -2847,7 +2848,7 @@ impl Backend for UdevBackend {
         // and on every layout change (hotplug / mode change), keeping the value
         // in sync — the X11 backend only ever queried this once at init.
         let primary_hz = {
-            let shared = self.shared.lock().unwrap();
+            let shared = self.shared.lock_safe();
             monitors
                 .first()
                 .and_then(|&(_, px, py, _, _)| {
@@ -3003,7 +3004,7 @@ impl Backend for UdevBackend {
 
     fn query_vrr_capabilities(&self, output: OutputId) -> Option<crate::backend::api::VrrCapabilities> {
         let kms = self.kms.as_ref()?;
-        let shared = self.shared.lock().unwrap();
+        let shared = self.shared.lock_safe();
         let output_idx = shared.outputs.iter().position(|o| o.id == output)?;
         drop(shared);
         kms.borrow_mut().query_vrr_for_output(output_idx)
@@ -3011,7 +3012,7 @@ impl Backend for UdevBackend {
 
     fn set_vrr_enabled(&mut self, output: OutputId, enabled: bool) -> Result<(), BackendError> {
         let kms = self.kms.as_ref().ok_or(BackendError::Unsupported("no KMS"))?;
-        let shared = self.shared.lock().unwrap();
+        let shared = self.shared.lock_safe();
         let output_idx = shared.outputs.iter().position(|o| o.id == output)
             .ok_or(BackendError::NotFound("output not found"))?;
         drop(shared);
@@ -3036,7 +3037,7 @@ impl Backend for UdevBackend {
         loop {
             let mut handled_any = false;
             loop {
-                let next = { self.pending_events.lock().unwrap().pop_front() };
+                let next = { self.pending_events.lock_safe().pop_front() };
                 match next {
                     Some(BackendEvent::OutputPowerSet { ref output_name, on }) => {
                         handled_any = true;
@@ -3062,6 +3063,44 @@ impl Backend for UdevBackend {
                             }
                         }
                     }
+                    Some(BackendEvent::OutputConfigure { changes }) => {
+                        handled_any = true;
+                        if let Some(ref kms) = self.kms {
+                            let mut kms = kms.borrow_mut();
+                            for change in &changes {
+                                if !change.enabled {
+                                    log::warn!(
+                                        "[output-mgmt] disabling output '{}' is not supported; ignoring",
+                                        change.name
+                                    );
+                                    continue;
+                                }
+                                if let Err(e) = kms.configure_output(
+                                    &change.name,
+                                    change.mode,
+                                    change.position,
+                                    change.transform,
+                                    change.scale,
+                                ) {
+                                    log::warn!(
+                                        "[output-mgmt] configure_output('{}') failed: {e}",
+                                        change.name
+                                    );
+                                }
+                            }
+                        }
+                        // Refresh advertised outputs and trigger a relayout.
+                        self.state.outputs = self
+                            .kms
+                            .as_ref()
+                            .map(|k| k.borrow().outputs())
+                            .unwrap_or_default();
+                        self.state.needs_redraw = true;
+                        self.state
+                            .pending_events
+                            .lock_safe()
+                            .push_back(BackendEvent::ScreenLayoutChanged);
+                    }
                     Some(ev) => {
                         handled_any = true;
                         handler.handle_event(self, ev)?;
@@ -3076,7 +3115,7 @@ impl Backend for UdevBackend {
             // Read cursor_kind in the same lock scope so the render path below
             // doesn't have to re-acquire the shared lock every frame.
             let (cursor_dirty, cursor_kind) = {
-                let mut shared = self.shared.lock().unwrap();
+                let mut shared = self.shared.lock_safe();
                 let dirty = shared.cursor_dirty;
                 shared.cursor_dirty = false;
                 (dirty, shared.cursor_kind)
@@ -3127,7 +3166,7 @@ impl Backend for UdevBackend {
             // - Zero-poll only for queued Wayland events that need draining
             // - 16ms when animations need ticking (capped at vsync rate)
             // - Block otherwise (vblank DRM event will wake us)
-            let has_pending_events = !self.pending_events.lock().unwrap().is_empty();
+            let has_pending_events = !self.pending_events.lock_safe().is_empty();
             let needs_tick = handler.needs_tick();
             let kms_pending = self.kms.as_ref().map_or(false, |k| k.borrow().needs_render);
             let timeout = if has_pending_events {
@@ -3151,7 +3190,7 @@ fn rebuild_outputs(
     pending_events: &Arc<Mutex<VecDeque<BackendEvent>>>,
 ) -> Result<(), BackendError> {
     let (old_outputs, device_paths, mut key_to_id, mut next_raw) = {
-        let s = shared.lock().unwrap();
+        let s = shared.lock_safe();
         (
             s.outputs.clone(),
             s.device_paths.clone(),
@@ -3196,7 +3235,7 @@ fn rebuild_outputs(
     }
 
     {
-        let mut q = pending_events.lock().unwrap();
+        let mut q = pending_events.lock_safe();
         for (id, old) in &old_by_id {
             if !new_by_id.contains_key(id) {
                 q.push_back(BackendEvent::OutputRemoved(*id));
@@ -3221,7 +3260,7 @@ fn rebuild_outputs(
     }
 
     {
-        let mut s = shared.lock().unwrap();
+        let mut s = shared.lock_safe();
         s.outputs = final_outputs;
         s.output_key_to_id = key_to_id;
         s.next_output_raw = next_raw;

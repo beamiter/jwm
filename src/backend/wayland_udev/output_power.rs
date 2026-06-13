@@ -2,6 +2,7 @@
 ///
 /// Allows idle daemons like swayidle to blank/unblank displays (DPMS).
 
+use crate::sync_ext::MutexExt;
 use log::info;
 
 use smithay::reexports::wayland_protocols_wlr::output_power_management::v1::server::{
@@ -95,7 +96,7 @@ impl Dispatch<ZwlrOutputPowerV1, OutputPowerData> for JwmWaylandState {
                 match mode.into_result() {
                     Ok(zwlr_output_power_v1::Mode::Off) => {
                         info!("[udev/wayland] DPMS off requested for {}", data.output_name);
-                        state.pending_events.lock().unwrap().push_back(
+                        state.pending_events.lock_safe().push_back(
                             crate::backend::api::BackendEvent::OutputPowerSet {
                                 output_name: data.output_name.clone(),
                                 on: false,
@@ -105,7 +106,7 @@ impl Dispatch<ZwlrOutputPowerV1, OutputPowerData> for JwmWaylandState {
                     }
                     Ok(zwlr_output_power_v1::Mode::On) => {
                         info!("[udev/wayland] DPMS on requested for {}", data.output_name);
-                        state.pending_events.lock().unwrap().push_back(
+                        state.pending_events.lock_safe().push_back(
                             crate::backend::api::BackendEvent::OutputPowerSet {
                                 output_name: data.output_name.clone(),
                                 on: true,

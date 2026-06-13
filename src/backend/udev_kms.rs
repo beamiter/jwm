@@ -1,3 +1,4 @@
+use crate::sync_ext::MutexExt;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -468,6 +469,82 @@ impl KmsState {
             .map_err(|e| format!("DRM set_gamma failed: {e:?}"))
     }
 
+    /// Apply a client-requested output configuration (wlr-output-management).
+    ///
+    /// `mode` is `(width, height, refresh_mhz)`; a `None` field keeps the current
+    /// value. A mode change performs a real DRM modeset via [`DrmOutput::use_mode`]
+    /// and is the riskiest step (it can fail or, on broken hardware, blank the
+    /// output); position/scale/transform only update the advertised wl_output
+    /// state and the compositor-space origin.
+    pub(super) fn configure_output(
+        &mut self,
+        name: &str,
+        mode: Option<(i32, i32, i32)>,
+        position: Option<(i32, i32)>,
+        transform: Option<i32>,
+        scale: Option<f64>,
+    ) -> Result<(), String> {
+        let idx = self
+            .output_index_by_name(name)
+            .ok_or_else(|| format!("unknown output '{name}'"))?;
+
+        // Resolve a DRM mode if a *different* mode was requested.
+        let drm_mode = if let Some((w, h, refresh)) = mode {
+            let conn = self.outputs[idx].connector;
+            let mgr = self.drm_output_manager.lock();
+            let info = mgr
+                .device()
+                .get_connector(conn, false)
+                .map_err(|e| format!("get_connector failed: {e:?}"))?;
+            let found = info.modes().iter().copied().find(|m| {
+                let wl = WlMode::from(*m);
+                wl.size.w == w
+                    && wl.size.h == h
+                    && (refresh == 0 || (wl.refresh - refresh).abs() <= 200)
+            });
+            drop(mgr);
+            match found {
+                Some(m) if self.outputs[idx].output.current_mode() != Some(WlMode::from(m)) => {
+                    Some(m)
+                }
+                Some(_) => None, // already the current mode; skip the modeset
+                None => {
+                    return Err(format!(
+                        "requested mode {w}x{h}@{refresh} not available on '{name}'"
+                    ))
+                }
+            }
+        } else {
+            None
+        };
+
+        // Riskiest step first: perform the DRM modeset before advertising it.
+        if let Some(m) = drm_mode {
+            let elements: DrmOutputRenderElements<GlesRenderer, SolidColorRenderElement> =
+                DrmOutputRenderElements::default();
+            self.outputs[idx]
+                .drm_output
+                .use_mode(m, &mut self.renderer, &elements)
+                .map_err(|e| format!("DRM use_mode failed: {e:?}"))?;
+            self.outputs[idx].mode_size = (m.size().0 as i32, m.size().1 as i32);
+        }
+
+        // Advertise updated state to wl_output clients and update layout origin.
+        let new_wl_mode = drm_mode.map(WlMode::from);
+        let new_transform = transform.map(wl_transform_to_smithay);
+        let new_scale = scale.map(smithay::output::Scale::Fractional);
+        let new_loc = position.map(Point::from);
+        self.outputs[idx]
+            .output
+            .change_current_state(new_wl_mode, new_transform, new_scale, new_loc);
+        if let Some((x, y)) = position {
+            self.outputs[idx].origin = (x, y);
+        }
+
+        self.needs_render = true;
+        Ok(())
+    }
+
     /// Render all elements to an offscreen buffer and save as PNG.
     /// Split out as a free-standing function so it can borrow `self.renderer`
     /// without conflicting with the mutable borrow on `self.outputs`.
@@ -653,7 +730,7 @@ impl KmsState {
         use smithay::wayland::shm::with_buffer_contents_mut;
 
         let mut frames: Vec<crate::backend::wayland_udev::screencopy::PendingScreencopyFrame> = {
-            let mut queue = pending.lock().unwrap();
+            let mut queue = pending.lock_safe();
             // Drain frames that match this output.
             let mut matching = Vec::new();
             let mut remaining = Vec::new();
@@ -1223,7 +1300,7 @@ impl KmsState {
                         let Some(data) = data else {
                             return;
                         };
-                        if data.lock().unwrap().view().is_some() {
+                        if data.lock_safe().view().is_some() {
                             out.output.enter(child_surface);
                             visible_surfaces.insert(child_surface.downgrade());
                         }
@@ -1276,7 +1353,7 @@ impl KmsState {
                                 let Some(data) = data else {
                                     return;
                                 };
-                                if data.lock().unwrap().view().is_some() {
+                                if data.lock_safe().view().is_some() {
                                     out.output.enter(child_surface);
                                     visible_surfaces.insert(child_surface.downgrade());
                                 }
@@ -1333,7 +1410,7 @@ impl KmsState {
                             let Some(data) = data else {
                                 return;
                             };
-                            if data.lock().unwrap().view().is_some() {
+                            if data.lock_safe().view().is_some() {
                                 out.output.enter(child_surface);
                                 visible_surfaces.insert(child_surface.downgrade());
                             }
@@ -1354,7 +1431,7 @@ impl KmsState {
                             let Some(data) = data else {
                                 return;
                             };
-                            if data.lock().unwrap().view().is_some() {
+                            if data.lock_safe().view().is_some() {
                                 out.output.enter(child_surface);
                                 visible_surfaces.insert(child_surface.downgrade());
                             }
@@ -1378,7 +1455,7 @@ impl KmsState {
                             let Some(data) = data else {
                                 return;
                             };
-                            if data.lock().unwrap().view().is_some() {
+                            if data.lock_safe().view().is_some() {
                                 out.output.enter(child_surface);
                                 visible_surfaces.insert(child_surface.downgrade());
                             }
@@ -1471,7 +1548,7 @@ impl KmsState {
                                 let Some(data) = data else {
                                     return;
                                 };
-                                if data.lock().unwrap().view().is_some() {
+                                if data.lock_safe().view().is_some() {
                                     out.output.enter(child_surface);
                                     visible_surfaces.insert(child_surface.downgrade());
                                 }
@@ -1524,7 +1601,7 @@ impl KmsState {
                             let Some(data) = data else {
                                 return;
                             };
-                            if data.lock().unwrap().view().is_some() {
+                            if data.lock_safe().view().is_some() {
                                 out.output.enter(child_surface);
                                 visible_surfaces.insert(child_surface.downgrade());
                             }
@@ -1581,7 +1658,7 @@ impl KmsState {
                             let Some(data) = data else {
                                 return;
                             };
-                            if data.lock().unwrap().view().is_some() {
+                            if data.lock_safe().view().is_some() {
                                 out.output.enter(child_surface);
                                 visible_surfaces.insert(child_surface.downgrade());
                             }
@@ -1630,7 +1707,7 @@ impl KmsState {
                                     let Some(data) = data else {
                                         return;
                                     };
-                                    if data.lock().unwrap().view().is_some() {
+                                    if data.lock_safe().view().is_some() {
                                         out.output.enter(child_surface);
                                         visible_surfaces.insert(child_surface.downgrade());
                                     }
@@ -1846,7 +1923,7 @@ impl KmsState {
                     let Some(data) = data else {
                         return None;
                     };
-                    if data.lock().unwrap().view().is_none() {
+                    if data.lock_safe().view().is_none() {
                         return None;
                     }
                     if visible.contains(&surface.downgrade()) {
@@ -1866,6 +1943,20 @@ impl KmsState {
                 let _ = self.flush_tx.send(());
             }
         }
+    }
+}
+
+/// Convert a wl_output transform numeric value (0..=7) into a smithay `Transform`.
+fn wl_transform_to_smithay(value: i32) -> Transform {
+    match value {
+        1 => Transform::_90,
+        2 => Transform::_180,
+        3 => Transform::_270,
+        4 => Transform::Flipped,
+        5 => Transform::Flipped90,
+        6 => Transform::Flipped180,
+        7 => Transform::Flipped270,
+        _ => Transform::Normal,
     }
 }
 

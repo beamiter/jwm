@@ -5,6 +5,7 @@
 /// - Each tag bit position = one workspace
 /// - Active tags in the bitmask = active workspaces
 
+use crate::sync_ext::MutexExt;
 use std::sync::{Arc, Mutex};
 
 use log::info;
@@ -56,12 +57,12 @@ impl WorkspaceState {
     }
 
     pub fn tags_length(&self) -> usize {
-        self.inner.lock().unwrap().tags_length
+        self.inner.lock_safe().tags_length
     }
 
     fn add_manager(&self, manager: &ExtWorkspaceManagerV1) {
         let weak = manager.downgrade();
-        self.inner.lock().unwrap().managers.push(weak);
+        self.inner.lock_safe().managers.push(weak);
     }
 }
 
@@ -170,7 +171,7 @@ impl Dispatch<ExtWorkspaceHandleV1, WorkspaceHandleData> for JwmWaylandState {
                     data.monitor_index, data.tag_index
                 );
                 let tag_mask = 1u32 << data.tag_index;
-                state.pending_events.lock().unwrap().push_back(
+                state.pending_events.lock_safe().push_back(
                     crate::backend::api::BackendEvent::WorkspaceActivate {
                         monitor: data.monitor_index,
                         tag_mask,

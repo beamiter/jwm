@@ -3,6 +3,7 @@
 /// Replaces the deprecated wlr-screencopy protocol. Allows modern screen capture
 /// tools (OBS, portals, grim v2) to capture output and toplevel content.
 
+use crate::sync_ext::MutexExt;
 use std::sync::{Arc, Mutex};
 
 use log::{debug, info, warn};
@@ -242,9 +243,20 @@ impl Dispatch<ExtImageCopyCaptureManagerV1, CaptureManagerData> for JwmWaylandSt
                             sess.stopped();
                         }
                     }
-                    CaptureSource::Toplevel(_win) => {
-                        // TODO: get toplevel dimensions
-                        sess.stopped();
+                    CaptureSource::Toplevel(win) => {
+                        match state.window_geometry.get(win) {
+                            Some(geo) if geo.w > 0 && geo.h > 0 => {
+                                sess.buffer_size(geo.w, geo.h);
+                                sess.shm_format(wl_shm::Format::Argb8888);
+                                sess.shm_format(wl_shm::Format::Xrgb8888);
+                                sess.done();
+                                debug!(
+                                    "[image-capture] session created: toplevel={win:?} size={}x{}",
+                                    geo.w, geo.h
+                                );
+                            }
+                            _ => sess.stopped(),
+                        }
                     }
                 }
             }
@@ -286,8 +298,7 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, CaptureSessionData> for JwmWaylandSt
             ext_image_copy_capture_session_v1::Request::CreateFrame { frame } => {
                 let pending_queue = state
                     .image_capture_pending
-                    .as_ref()
-                    .cloned()
+                    .clone()
                     .unwrap_or_else(new_pending_image_capture_queue);
 
                 data_init.init(
@@ -337,7 +348,7 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, CaptureFrameData> for JwmWaylandState 
                     paint_cursors: data.paint_cursors,
                     damage: data.damage.clone(),
                 };
-                data.pending_queue.lock().unwrap().push(pending);
+                data.pending_queue.lock_safe().push(pending);
             }
             ext_image_copy_capture_frame_v1::Request::DamageBuffer {
                 x,
