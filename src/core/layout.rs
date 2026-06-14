@@ -160,11 +160,12 @@ pub fn calculate_tile<K: Copy>(
     } = params;
     let gap = *gap;
 
-    // 外边距：缩小可用区域
+    // 外边距：缩小可用区域。gap 过大（> 屏幕一半）时 w/h 会变负，进而让 mw/列宽
+    // 变成负数并产生非法窗口尺寸，这里夹到 >= 0。
     let wx = screen_area.x + gap;
     let wy = screen_area.y + gap;
-    let ww = screen_area.w - 2 * gap;
-    let wh = screen_area.h - 2 * gap;
+    let ww = (screen_area.w - 2 * gap).max(0);
+    let wh = (screen_area.h - 2 * gap).max(0);
 
     let border2 = 2 * clients.first().map_or(0, |c| c.border_w);
 

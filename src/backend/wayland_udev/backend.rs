@@ -798,6 +798,36 @@ impl UdevBackend {
                             .set_image_capture_pending(image_capture_queue.clone());
                     }
                 }
+
+                // The rebuilt KMS state carries a fresh EGL context, so every GL
+                // object the compositor created in the previous context (shaders,
+                // textures, FBOs) is now dangling. If the compositor was enabled,
+                // recreate it against the new renderer; otherwise effects render
+                // from invalid handles (black screen / GL errors) after the
+                // VT-switch back. Its Drop is intentionally empty, so dropping the
+                // stale compositor issues no GL calls on the new context.
+                if self.compositor.is_some() {
+                    self.compositor = None;
+                    if let Some(kms) = &self.kms {
+                        let mut kms_ref = kms.borrow_mut();
+                        let (w, h) = kms_ref.total_screen_size();
+                        let hdr_10bit = kms_ref.supports_10bit();
+                        match kms_ref
+                            .with_renderer(|gl| unsafe { WaylandCompositor::new(gl, w, h, hdr_10bit) })
+                        {
+                            Ok(Ok(compositor)) => self.compositor = Some(compositor),
+                            Ok(Err(e)) => log::error!(
+                                "[udev] compositor recreate after KMS reinit failed: {e}"
+                            ),
+                            Err(e) => log::error!(
+                                "[udev] GL access for compositor recreate failed: {e:?}"
+                            ),
+                        }
+                    }
+                    // Restore config-driven compositor settings (blur, etc.).
+                    self.compositor_apply_config();
+                }
+
                 self.request_flush();
             }
             Err(err) => {

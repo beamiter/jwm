@@ -401,16 +401,15 @@ impl Compositor {
             }
         }
 
-        // Phase 3.2: Start genie minimize animation
+        // Phase 3.2: Start genie minimize animation. This takes ownership of the
+        // window's GPU/X resources and frees them when the animation completes,
+        // so we must NOT fall through to remove_window_immediate (which would
+        // delete the texture the genie pass is still sampling — a UAF).
         if self.genie_minimize {
             if let Some(wt) = self.windows.get(&x11_win) {
-                self.start_genie_animation(
-                    x11_win,
-                    wt.x as f32,
-                    wt.y as f32,
-                    wt.w as f32,
-                    wt.h as f32,
-                );
+                let (gx, gy, gw, gh) = (wt.x as f32, wt.y as f32, wt.w as f32, wt.h as f32);
+                self.start_genie_animation(x11_win, gx, gy, gw, gh);
+                return;
             }
         }
 
@@ -429,6 +428,27 @@ impl Compositor {
         self.remove_window_immediate(x11_win);
     }
 
+    /// Release the GL texture + GLX/X pixmap + damage owned by a window.
+    /// Shared by immediate removal and by genie-animation cleanup (which takes
+    /// ownership of these resources so they outlive the WindowTexture).
+    pub(super) fn free_texture_resources(
+        &mut self,
+        gl_texture: glow::Texture,
+        glx_pixmap: x11::glx::GLXPixmap,
+        pixmap: u32,
+        damage: u32,
+    ) {
+        unsafe {
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(gl_texture));
+            (self.tfp.release)(self.xlib_display, glx_pixmap, GLX_FRONT_LEFT_EXT);
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
+            self.gl.delete_texture(gl_texture);
+            x11::glx::glXDestroyPixmap(self.xlib_display, glx_pixmap);
+        }
+        let _ = self.conn.free_pixmap(pixmap);
+        let _ = self.conn.damage_destroy(damage);
+    }
+
     /// Actually remove a window (no fade). Used internally.
     pub(super) fn remove_window_immediate(&mut self, x11_win: u32) {
         let Some(wt) = self.windows.remove(&x11_win) else {
@@ -440,15 +460,7 @@ impl Compositor {
             self.unredirected_window = None;
         }
 
-        unsafe {
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
-            (self.tfp.release)(self.xlib_display, wt.glx_pixmap, GLX_FRONT_LEFT_EXT);
-            self.gl.bind_texture(glow::TEXTURE_2D, None);
-            self.gl.delete_texture(wt.gl_texture);
-            x11::glx::glXDestroyPixmap(self.xlib_display, wt.glx_pixmap);
-        }
-        let _ = self.conn.free_pixmap(wt.pixmap);
-        let _ = self.conn.damage_destroy(wt.damage);
+        self.free_texture_resources(wt.gl_texture, wt.glx_pixmap, wt.pixmap, wt.damage);
 
         log::debug!("compositor: remove_window 0x{:x}", x11_win);
     }

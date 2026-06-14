@@ -305,11 +305,21 @@ impl Jwm {
     }
 
     pub(crate) fn move_clients_to_first_monitor(&mut self, from_monitor_key: MonitorKey) {
-        let target_monitor_key = if let Some(&first_mon_key) = self.state.monitor_order.first() {
-            first_mon_key
-        } else {
-            warn!("[move_clients_to_first_monitor] No target monitor available");
-            return;
+        // 必须排除即将被移除的 from_monitor_key，否则当它恰好是 monitor_order[0]
+        // 时 target==from，client 会被 detach 后又 attach 回这个随即删除的 monitor，
+        // 导致 client.mon 指向已删 key 且不在任何列表中——永久孤立。
+        let target_monitor_key = match self
+            .state
+            .monitor_order
+            .iter()
+            .copied()
+            .find(|&k| k != from_monitor_key)
+        {
+            Some(target) => target,
+            None => {
+                warn!("[move_clients_to_first_monitor] No target monitor available");
+                return;
+            }
         };
 
         let clients_to_move: Vec<ClientKey> = self

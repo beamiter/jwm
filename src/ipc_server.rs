@@ -6,6 +6,10 @@ use std::path::{Path, PathBuf};
 
 use crate::ipc::{IpcEvent, IpcMessage, IpcResponse};
 
+/// 单个客户端未分帧缓冲的上限(1 MiB)。正常 IPC 消息远小于此值，
+/// 超限说明对端发送了无换行的巨型数据或恶意流量。
+const MAX_CLIENT_BUF: usize = 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Client wrapper
 // ---------------------------------------------------------------------------
@@ -14,6 +18,7 @@ use crate::ipc::{IpcEvent, IpcMessage, IpcResponse};
 struct IpcClient {
     stream: UnixStream,
     buf: Vec<u8>,
+    out_buf: Vec<u8>,
     subscriptions: Vec<String>,
 }
 
@@ -23,6 +28,7 @@ impl IpcClient {
         Ok(Self {
             stream,
             buf: Vec::with_capacity(4096),
+            out_buf: Vec::new(),
             subscriptions: Vec::new(),
         })
     }
@@ -38,7 +44,17 @@ impl IpcClient {
                         "client disconnected",
                     ));
                 }
-                Ok(n) => self.buf.extend_from_slice(&tmp[..n]),
+                Ok(n) => {
+                    self.buf.extend_from_slice(&tmp[..n]);
+                    // 防止恶意/异常客户端发送无换行字节导致 buf 无界增长耗尽内存，
+                    // 拖垮整个 WM。超过上限直接断开该客户端。
+                    if self.buf.len() > MAX_CLIENT_BUF {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "client message buffer exceeded limit",
+                        ));
+                    }
+                }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) => return Err(e),
             }
@@ -55,16 +71,45 @@ impl IpcClient {
         Ok(messages)
     }
 
-    fn send_response(&mut self, resp: &IpcResponse) -> io::Result<()> {
-        let mut json = serde_json::to_string(resp).unwrap_or_default();
+    fn queue(&mut self, mut json: String) {
         json.push('\n');
-        self.stream.write_all(json.as_bytes())
+        self.out_buf.extend_from_slice(json.as_bytes());
+    }
+
+    /// 尽量把待发字节写出。仅在致命错误(对端关闭/缓冲超限)时返回 Err；
+    /// WouldBlock(对端接收缓冲暂满)会把剩余字节留待下次 flush，不视为错误,
+    /// 从而不会误删健康但慢速的客户端,也不会因 write_all 半包写入而错乱 JSON 流。
+    fn flush_out(&mut self) -> io::Result<()> {
+        while !self.out_buf.is_empty() {
+            match self.stream.write(&self.out_buf) {
+                Ok(0) => {
+                    return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
+                }
+                Ok(n) => {
+                    self.out_buf.drain(..n);
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        if self.out_buf.len() > MAX_CLIENT_BUF {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "client outbound buffer exceeded limit",
+            ));
+        }
+        Ok(())
+    }
+
+    fn send_response(&mut self, resp: &IpcResponse) -> io::Result<()> {
+        self.queue(serde_json::to_string(resp).unwrap_or_default());
+        self.flush_out()
     }
 
     fn send_event(&mut self, event: &IpcEvent) -> io::Result<()> {
-        let mut json = serde_json::to_string(event).unwrap_or_default();
-        json.push('\n');
-        self.stream.write_all(json.as_bytes())
+        self.queue(serde_json::to_string(event).unwrap_or_default());
+        self.flush_out()
     }
 
     fn is_subscribed(&self, event_type: &str) -> bool {
@@ -162,6 +207,11 @@ impl IpcServer {
         let mut dead = Vec::new();
 
         for (&id, client) in self.clients.iter_mut() {
+            // 先尝试把上次因 WouldBlock 滞留的出站字节冲刷出去。
+            if client.flush_out().is_err() {
+                dead.push(id);
+                continue;
+            }
             match client.read_messages() {
                 Ok(lines) => {
                     for line in lines {
@@ -227,10 +277,8 @@ impl IpcServer {
     pub fn broadcast(&mut self, event: &IpcEvent) {
         let mut dead = Vec::new();
         for (&id, client) in self.clients.iter_mut() {
-            if client.is_subscribed(&event.event) {
-                if let Err(_) = client.send_event(event) {
-                    dead.push(id);
-                }
+            if client.is_subscribed(&event.event) && client.send_event(event).is_err() {
+                dead.push(id);
             }
         }
         for id in dead {

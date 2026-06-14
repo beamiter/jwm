@@ -1616,55 +1616,67 @@ impl Backend for X11Backend {
             .map_err(|e| BackendError::Message(format!("Failed to insert Timer source: {}", e)))?;
 
         // 4. 注册 inotify 配置文件监听
+        //
+        // 监听父目录而非配置文件本身:编辑器普遍以"写临时文件 + rename 覆盖"的
+        // 原子保存方式落盘,这会使针对文件 inode 的 watch 收到 IN_IGNORED 而被
+        // 内核自动移除,此后热重载静默失效。目录 inode 稳定,可持续捕获保存事件。
+        // Generic 源拥有 Inotify(实现 AsFd),回调中用 read_events() 解析并按
+        // 文件名过滤,避免目录内其它文件的无关事件。
         let setup_inotify = || -> Result<(), BackendError> {
             use nix::sys::inotify::{AddWatchFlags, Inotify, InitFlags};
-            use std::os::unix::io::{AsFd, AsRawFd};
 
             let config_path = crate::config::Config::get_default_config_path();
+            let watch_dir = config_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| config_path.clone());
+            let config_file_name = config_path.file_name().map(|n| n.to_os_string());
+
             let inotify = Inotify::init(InitFlags::IN_NONBLOCK)
                 .map_err(|e| BackendError::Message(format!("Failed to init inotify: {}", e)))?;
 
             inotify
                 .add_watch(
-                    &config_path,
-                    AddWatchFlags::IN_MODIFY | AddWatchFlags::IN_CLOSE_WRITE,
+                    &watch_dir,
+                    AddWatchFlags::IN_CLOSE_WRITE
+                        | AddWatchFlags::IN_MOVED_TO
+                        | AddWatchFlags::IN_CREATE,
                 )
                 .map_err(|e| {
                     BackendError::Message(format!(
-                        "Failed to watch config file {:?}: {}",
-                        config_path, e
+                        "Failed to watch config dir {:?}: {}",
+                        watch_dir, e
                     ))
                 })?;
 
-            let inotify_fd = inotify.as_fd().as_raw_fd();
-
-            // Register as a Generic source with the raw fd
             handle
                 .insert_source(
                     calloop::generic::Generic::new(
-                        unsafe { std::os::unix::io::BorrowedFd::borrow_raw(inotify_fd) },
+                        inotify,
                         calloop::Interest::READ,
                         calloop::Mode::Level,
                     ),
-                    move |_, _, data| {
-                        // Drain inotify events
-                        let mut buf = [0u8; 4096];
-                        unsafe { libc::read(inotify_fd, buf.as_mut_ptr() as *mut _, buf.len()); }
-
-                        // Emit ConfigChanged event
-                        if let Err(e) = data.handler.handle_event(
-                            data.backend,
-                            crate::backend::api::BackendEvent::ConfigChanged,
-                        ) {
-                            log::error!("Error handling ConfigChanged: {:?}", e);
+                    move |_, inotify, data| {
+                        let events = inotify.read_events().unwrap_or_default();
+                        // 仅当配置文件本身发生写入/移入时才触发重载。
+                        let relevant = events.iter().any(|ev| match (&config_file_name, &ev.name) {
+                            (Some(want), Some(got)) => got == want,
+                            // 无文件名(理论上不应出现在目录 watch)时保守地触发一次。
+                            _ => true,
+                        });
+                        if relevant {
+                            if let Err(e) = data.handler.handle_event(
+                                data.backend,
+                                crate::backend::api::BackendEvent::ConfigChanged,
+                            ) {
+                                log::error!("Error handling ConfigChanged: {:?}", e);
+                            }
                         }
                         Ok(calloop::PostAction::Continue)
                     },
                 )
                 .map_err(|e| BackendError::Message(format!("Failed to insert inotify source: {}", e)))?;
 
-            // Keep inotify alive for the duration of the event loop
-            std::mem::forget(inotify);
             Ok(())
         };
 

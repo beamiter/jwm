@@ -2145,11 +2145,13 @@ pub static CONFIG: Lazy<ArcSwap<Config>> = Lazy::new(|| {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            Config::generate_template(&path).unwrap();
-            println!(
-                "Generated default config file at: {}",
-                path.display()
-            );
+            match Config::generate_template(&path) {
+                Ok(()) => println!("Generated default config file at: {}", path.display()),
+                Err(e) => eprintln!(
+                    "Failed to write default config at {}: {e}; using built-in defaults",
+                    path.display()
+                ),
+            }
         }
         let config = Config::load_default();
         println!("Configuration loaded from: {}", Config::resolve_load_path().display());

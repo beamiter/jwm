@@ -318,20 +318,35 @@ impl Compositor {
         }
         let duration = std::time::Duration::from_millis(self.genie_duration_ms);
         let now = std::time::Instant::now();
-        // Remove completed animations and clean up their textures
-        self.genie_active
-            .retain(|ga| now.duration_since(ga.start) < duration);
+        // Remove completed animations and free the GPU/X resources they own.
+        let mut i = 0;
+        while i < self.genie_active.len() {
+            if now.duration_since(self.genie_active[i].start) >= duration {
+                let ga = self.genie_active.remove(i);
+                self.free_texture_resources(ga.gl_texture, ga.glx_pixmap, ga.pixmap, ga.damage);
+                self.needs_render = true;
+            } else {
+                i += 1;
+            }
+        }
         !self.genie_active.is_empty()
     }
 
     /// Start a genie animation for a window being removed.
+    ///
+    /// Takes ownership of the window's GL texture + GLX/X pixmap + damage by
+    /// removing the WindowTexture from the live set and moving its resources
+    /// into the animation. `tick_genie` frees them when the animation ends.
+    /// This avoids both double-drawing the window and sampling a freed texture.
     pub(super) fn start_genie_animation(&mut self, x11_win: u32, x: f32, y: f32, w: f32, h: f32) {
         if !self.genie_minimize {
             return;
         }
-        // We need the window's GL texture — if it still exists, grab it
-        // The texture won't be deleted because we prevent remove_window_immediate
-        if let Some(wt) = self.windows.get(&x11_win) {
+        if let Some(wt) = self.windows.remove(&x11_win) {
+            if self.unredirected_window == Some(x11_win) {
+                self.unredirected_window = None;
+            }
+            self.needs_render = true;
             self.genie_active.push(super::GenieAnimation {
                 start: std::time::Instant::now(),
                 x,
@@ -340,6 +355,9 @@ impl Compositor {
                 h,
                 gl_texture: wt.gl_texture,
                 has_rgba: wt.has_rgba,
+                glx_pixmap: wt.glx_pixmap,
+                pixmap: wt.pixmap,
+                damage: wt.damage,
             });
         }
     }

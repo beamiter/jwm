@@ -94,8 +94,18 @@ impl Jwm {
 
         let _ = self.unfocus_client(backend, client_key, true);
 
+        let source_mon = self.state.clients.get(client_key).and_then(|c| c.mon);
+
         self.detach(client_key);
         self.detachstack(client_key);
+
+        // 把该 client 从源显示器的选中记录(monitor.sel + 全部 pertag.sel)中清除,
+        // 否则切回源显示器的旧 tag 时会读到一个已迁走的 key。
+        if let Some(src) = source_mon {
+            if let Some(m) = self.state.monitors.get_mut(src) {
+                m.clear_selection_of(client_key);
+            }
+        }
 
         if let Some(client) = self.state.clients.get_mut(client_key) {
             client.mon = Some(target_mon_key);

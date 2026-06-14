@@ -529,12 +529,13 @@ impl Jwm {
             current_tag.trailing_zeros() as usize
         };
 
-        const MAX_TAGS: usize = 9;
+        let max_tags = CONFIG.load().tags_length().max(1);
+        let current_tag_index = current_tag_index % max_tags;
         let next_tag_index = if direction > 0 {
-            (current_tag_index + 1) % MAX_TAGS
+            (current_tag_index + 1) % max_tags
         } else {
             if current_tag_index == 0 {
-                MAX_TAGS - 1
+                max_tags - 1
             } else {
                 current_tag_index - 1
             }
@@ -619,6 +620,15 @@ impl Jwm {
             new_tag_mask = monitor.get_active_tags();
             // 获取该 Tag 上次选中的 Client
             client_to_focus = monitor.get_selected_client_for_current_tag();
+        }
+        // pertag.sel 可能仍记录着已被移动到其它显示器或已销毁的窗口。若它已不属于
+        // 当前显示器,丢弃它,让 focus() 在本显示器内回退选择,避免焦点跳到别的屏。
+        if let Some(ck) = client_to_focus {
+            let still_here =
+                self.state.clients.get(ck).and_then(|c| c.mon) == Some(sel_mon_key);
+            if !still_here {
+                client_to_focus = None;
+            }
         }
         self.update_sticky_tags(sel_mon_key);
 

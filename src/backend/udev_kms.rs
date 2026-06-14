@@ -79,6 +79,11 @@ struct KmsOutputState {
         DrmOutput<GbmAllocator<DrmDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>,
 
     frame_pending: bool,
+    /// When `frame_pending` was last set. If a queued page flip never produces a
+    /// vblank (driver hiccup, dropped flip), `frame_pending` would otherwise stay
+    /// true forever and the output stops rendering. The watchdog in `render` uses
+    /// this to force-clear a stale pending flag after several refresh intervals.
+    frame_pending_since: Option<std::time::Instant>,
 
     send_frame_callbacks: bool,
     frame_callback_roots: Vec<WlSurface>,
@@ -141,6 +146,13 @@ pub(super) struct KmsState {
         Option<crate::backend::wayland_udev::image_copy_capture::PendingImageCaptureQueue>,
 
     outputs: Vec<KmsOutputState>,
+
+    /// Reused offscreen renderbuffer for screencopy / image-copy-capture readback,
+    /// keyed by (width, height). Continuous capture (OBS/wf-recorder) calls the
+    /// fulfill paths every frame; without this each frame allocated a fresh
+    /// full-screen GPU renderbuffer. Both fulfill paths share it within a frame
+    /// since they run sequentially on the same output size.
+    screencopy_offscreen: Option<(i32, i32, GlesRenderbuffer)>,
 
     /// Latest vblank presentation timestamp (monotonic) for frame pacing feedback.
     last_presentation_time: Option<std::time::Instant>,
@@ -421,6 +433,39 @@ impl KmsState {
         })
     }
 
+    /// Set a single DRM object property. On atomic drivers this issues an atomic
+    /// commit (probed with `TEST_ONLY` first); if the property cannot be set
+    /// atomically (e.g. the legacy-only DPMS property on some drivers) it cleanly
+    /// falls back to the legacy ioctl. The `TEST_ONLY` probe guarantees we never
+    /// apply a partial/invalid atomic state, so this can never blank an output by
+    /// committing an inconsistent modeset.
+    fn set_drm_property<H>(
+        dev: &DrmDevice,
+        handle: H,
+        prop: smithay::reexports::drm::control::property::Handle,
+        value: u64,
+    ) -> Result<(), String>
+    where
+        H: smithay::reexports::drm::control::ResourceHandle,
+    {
+        use smithay::reexports::drm::control::atomic::AtomicModeReq;
+        use smithay::reexports::drm::control::AtomicCommitFlags;
+        if dev.is_atomic() {
+            let mut req = AtomicModeReq::new();
+            req.add_raw_property(handle.into(), prop, value);
+            if dev
+                .atomic_commit(AtomicCommitFlags::TEST_ONLY, req.clone())
+                .is_ok()
+            {
+                return dev
+                    .atomic_commit(AtomicCommitFlags::empty(), req)
+                    .map_err(|e| format!("DRM atomic_commit failed: {e:?}"));
+            }
+        }
+        dev.set_property(handle, prop, value)
+            .map_err(|e| format!("DRM set_property failed: {e:?}"))
+    }
+
     /// Set VRR enabled/disabled for a given output (by index into self.outputs).
     pub(super) fn set_vrr_for_output(&mut self, output_idx: usize, enabled: bool) -> Result<(), String> {
         let output = self.outputs.get(output_idx).ok_or("output index out of range")?;
@@ -432,9 +477,12 @@ impl KmsState {
             for &prop_handle in handles {
                 if let Ok(info) = dev.get_property(prop_handle) {
                     if info.name().to_str() == Ok("VRR_ENABLED") {
-                        dev.set_property(crtc, prop_handle, if enabled { 1 } else { 0 })
-                            .map_err(|e| format!("DRM set_property failed: {e:?}"))?;
-                        return Ok(());
+                        return Self::set_drm_property(
+                            dev,
+                            crtc,
+                            prop_handle,
+                            if enabled { 1 } else { 0 },
+                        );
                     }
                 }
             }
@@ -457,9 +505,7 @@ impl KmsState {
                 if let Ok(info) = dev.get_property(prop_handle) {
                     if info.name().to_str() == Ok("DPMS") {
                         let val = if on { 0 } else { 3 }; // 0=On, 3=Off
-                        dev.set_property(conn_handle, prop_handle, val)
-                            .map_err(|e| format!("DRM set_property DPMS failed: {e:?}"))?;
-                        return Ok(());
+                        return Self::set_drm_property(dev, conn_handle, prop_handle, val);
                     }
                 }
             }
@@ -736,8 +782,34 @@ impl KmsState {
     /// This renders the given elements to an offscreen buffer and copies the
     /// RGBA pixels into each waiting client's wl_shm buffer, then sends the
     /// `flags` + `ready` events on the screencopy frame.
+    /// Get a reusable offscreen renderbuffer of the requested size, recreating
+    /// the cached one only when the dimensions change. Returns `None` if creation
+    /// fails. The buffer lives in `cache` so consecutive frames (continuous
+    /// capture) avoid reallocating a full-screen GPU buffer every frame.
+    fn screencopy_offscreen_buffer<'a>(
+        renderer: &mut GlesRenderer,
+        cache: &'a mut Option<(i32, i32, GlesRenderbuffer)>,
+        width: i32,
+        height: i32,
+    ) -> Option<&'a mut GlesRenderbuffer> {
+        let needs_new = !matches!(cache, Some((w, h, _)) if *w == width && *h == height);
+        if needs_new {
+            let size: Size<i32, BufferCoord> = (width, height).into();
+            match Offscreen::create_buffer(renderer, Fourcc::Abgr8888, size) {
+                Ok(rb) => *cache = Some((width, height, rb)),
+                Err(e) => {
+                    log::error!("[screencopy] create offscreen buffer failed: {e:?}");
+                    *cache = None;
+                    return None;
+                }
+            }
+        }
+        cache.as_mut().map(|(_, _, rb)| rb)
+    }
+
     fn fulfill_screencopy_frames(
         renderer: &mut GlesRenderer,
+        offscreen_cache: &mut Option<(i32, i32, GlesRenderbuffer)>,
         output: &Output,
         width: i32,
         height: i32,
@@ -773,13 +845,12 @@ impl KmsState {
             output.name(),
         );
 
-        // Render to offscreen buffer (same approach as screenshot capture).
+        // Render to a cached offscreen buffer (reused across frames).
         let size: Size<i32, BufferCoord> = (width, height).into();
-        let mut renderbuffer: GlesRenderbuffer =
-            match Offscreen::create_buffer(renderer, Fourcc::Abgr8888, size) {
-                Ok(rb) => rb,
-                Err(e) => {
-                    log::error!("[screencopy] create offscreen buffer failed: {e:?}");
+        let renderbuffer =
+            match Self::screencopy_offscreen_buffer(renderer, offscreen_cache, width, height) {
+                Some(rb) => rb,
+                None => {
                     for f in &frames {
                         f.frame.failed();
                     }
@@ -787,7 +858,7 @@ impl KmsState {
                 }
             };
 
-        let mut target = match renderer.bind(&mut renderbuffer) {
+        let mut target = match renderer.bind(renderbuffer) {
             Ok(t) => t,
             Err(e) => {
                 log::error!("[screencopy] bind offscreen failed: {e:?}");
@@ -924,6 +995,7 @@ impl KmsState {
     /// clients do not wait forever.
     fn fulfill_image_capture_frames(
         renderer: &mut GlesRenderer,
+        offscreen_cache: &mut Option<(i32, i32, GlesRenderbuffer)>,
         output: &Output,
         width: i32,
         height: i32,
@@ -961,17 +1033,16 @@ impl KmsState {
         };
 
         let size: Size<i32, BufferCoord> = (width, height).into();
-        let mut renderbuffer: GlesRenderbuffer =
-            match Offscreen::create_buffer(renderer, Fourcc::Abgr8888, size) {
-                Ok(rb) => rb,
-                Err(e) => {
-                    log::error!("[image-capture] create offscreen buffer failed: {e:?}");
+        let renderbuffer =
+            match Self::screencopy_offscreen_buffer(renderer, offscreen_cache, width, height) {
+                Some(rb) => rb,
+                None => {
                     fail_all(&frames);
                     return;
                 }
             };
 
-        let mut target = match renderer.bind(&mut renderbuffer) {
+        let mut target = match renderer.bind(renderbuffer) {
             Ok(t) => t,
             Err(e) => {
                 log::error!("[image-capture] bind offscreen failed: {e:?}");
@@ -1289,10 +1360,9 @@ impl KmsState {
                     for &prop_handle in handles {
                         if let Ok(info) = dev.get_property(prop_handle) {
                             if info.name().to_str() == Ok("VRR_ENABLED") {
-                                if let Err(e) = dev.set_property(p.crtc, prop_handle, 1) {
-                                    log::debug!("[kms] failed to enable VRR on crtc {:?}: {e:?}", p.crtc);
-                                } else {
-                                    log::info!("[kms] VRR enabled on crtc {:?}", p.crtc);
+                                match Self::set_drm_property(dev, p.crtc, prop_handle, 1) {
+                                    Err(e) => log::debug!("[kms] failed to enable VRR on crtc {:?}: {e}", p.crtc),
+                                    Ok(()) => log::info!("[kms] VRR enabled on crtc {:?}", p.crtc),
                                 }
                                 break;
                             }
@@ -1310,6 +1380,7 @@ impl KmsState {
                 output: p.output,
                 drm_output,
                 frame_pending: false,
+                frame_pending_since: None,
                 send_frame_callbacks: false,
                 frame_callback_roots: Vec::new(),
                 frame_callback_throttle: p.frame_callback_throttle,
@@ -1361,6 +1432,7 @@ impl KmsState {
             image_capture_pending: None,
 
             outputs,
+            screencopy_offscreen: None,
             last_presentation_time: None,
         }));
 
@@ -1395,8 +1467,31 @@ impl KmsState {
         for out_idx in 0..self.outputs.len() {
             let frame_pending = self.outputs[out_idx].frame_pending;
             if frame_pending {
-                any_skipped = true;
-                continue;
+                // Watchdog: a queued page flip should produce a vblank within one
+                // refresh interval. If it hasn't after several intervals (clamped
+                // to a sane floor), assume the flip was dropped and force-clear so
+                // the output doesn't stall permanently.
+                let out = &self.outputs[out_idx];
+                let timeout = (out.refresh_interval * 5).max(std::time::Duration::from_millis(100));
+                let stale = out
+                    .frame_pending_since
+                    .map(|t| t.elapsed() >= timeout)
+                    .unwrap_or(false);
+                if stale {
+                    log::warn!(
+                        "[vblank-watchdog] output {} frame_pending for >{:?} without vblank; \
+                         force-clearing to recover",
+                        out.output.name(),
+                        timeout,
+                    );
+                    let out = &mut self.outputs[out_idx];
+                    out.frame_pending = false;
+                    out.frame_pending_since = None;
+                    let _ = out.drm_output.frame_submitted();
+                } else {
+                    any_skipped = true;
+                    continue;
+                }
             }
 
             let scale: Scale<f64> = self.outputs[out_idx]
@@ -1986,6 +2081,7 @@ impl KmsState {
                 let output_ref = &self.outputs[out_idx].output;
                 Self::fulfill_screencopy_frames(
                     &mut self.renderer,
+                    &mut self.screencopy_offscreen,
                     output_ref,
                     out_w,
                     out_h,
@@ -1999,6 +2095,7 @@ impl KmsState {
                 let output_ref = &self.outputs[out_idx].output;
                 Self::fulfill_image_capture_frames(
                     &mut self.renderer,
+                    &mut self.screencopy_offscreen,
                     output_ref,
                     out_w,
                     out_h,
@@ -2041,6 +2138,7 @@ impl KmsState {
                         }
                     } else {
                         out.frame_pending = true;
+                        out.frame_pending_since = Some(std::time::Instant::now());
                         out.send_frame_callbacks = true;
                         out.frame_callback_roots = frame_roots;
                         out.frame_callback_visible = visible_surfaces;
@@ -2085,6 +2183,7 @@ impl KmsState {
             log::debug!("drm frame_submitted error: {err:?}");
         }
         out.frame_pending = false;
+        out.frame_pending_since = None;
 
         // Extract precise flip timestamp from DRM metadata for presentation feedback
         let presentation_time = metadata

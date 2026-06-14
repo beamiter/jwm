@@ -112,12 +112,22 @@ impl DirtyRegionTracker {
             return;
         }
 
-        // Clamp to screen bounds
+        // Clamp to screen bounds by intersecting [rect.x, rect.x+width) with
+        // [0, screen_w). A negative x must shrink width too, otherwise clamping
+        // x to 0 while keeping width pushes the right edge past the original and
+        // over-redraws. Same for y/height.
+        let x0 = rect.x.max(0);
+        let y0 = rect.y.max(0);
+        let right = (rect.x + rect.width as i32).min(self.screen_w as i32);
+        let bottom = (rect.y + rect.height as i32).min(self.screen_h as i32);
+        if right <= x0 || bottom <= y0 {
+            return;
+        }
         let clamped = DirtyRect {
-            x: rect.x.max(0) as i32,
-            y: rect.y.max(0) as i32,
-            width: rect.width.min(self.screen_w),
-            height: rect.height.min(self.screen_h),
+            x: x0,
+            y: y0,
+            width: (right - x0) as u32,
+            height: (bottom - y0) as u32,
         };
 
         // Phase 3.2: Smart merge - check if close to existing rect

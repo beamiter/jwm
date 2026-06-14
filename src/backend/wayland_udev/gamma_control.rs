@@ -149,4 +149,34 @@ impl Dispatch<ZwlrGammaControlV1, GammaControlData> for JwmWaylandState {
             _ => {}
         }
     }
+
+    /// Called when the gamma-control object is destroyed — including when the
+    /// client (wlsunset/gammastep) crashes or exits without an explicit Destroy
+    /// request. Without restoring the ramp here the hardware would stay tinted
+    /// indefinitely. Per the wlr-gamma-control spec the original gamma must be
+    /// restored; we reset to a linear identity ramp (the DRM default).
+    fn destroyed(
+        state: &mut Self,
+        _client: smithay::reexports::wayland_server::backend::ClientId,
+        _resource: &ZwlrGammaControlV1,
+        data: &GammaControlData,
+    ) {
+        let sz = data.gamma_size as usize;
+        if sz == 0 {
+            return;
+        }
+        let denom = (sz.max(2) - 1) as u64;
+        let mut ramp: Vec<u16> = Vec::with_capacity(sz * 3);
+        for _channel in 0..3 {
+            for i in 0..sz {
+                ramp.push(((i as u64 * 65535) / denom) as u16);
+            }
+        }
+        info!("[gamma] control destroyed, restoring linear ramp for output={}", data.output.name());
+        state.push_event(BackendEvent::GammaSet {
+            output_name: data.output.name(),
+            gamma_size: data.gamma_size,
+            ramp,
+        });
+    }
 }

@@ -177,20 +177,49 @@ impl Jwm {
     }
 
     pub(super) fn reap_zombies(&mut self) {
-        // 使用 WNOHANG 循环回收所有已退出的子进程
+        // 回收已退出的子进程。
+        //
+        // 关键:状态栏(secondary_bars)进程由 `std::process::Child` 句柄拥有,关闭路径
+        // 会用 `child.try_wait()` 等待并按 PID 发送 SIGTERM/SIGKILL。若这里用裸
+        // `waitpid(None)` 抢先把 bar 进程回收掉,Rust 的 Child 句柄并不知情,后续
+        // `try_wait()` 会得到 ECHILD,而那个 PID 可能已被内核复用给无关进程 —— 此时
+        // 按 PID 发 SIGKILL 会误杀别人。
+        //
+        // 因此先用 WNOWAIT 窥探待回收子进程的 PID(不消费):若属于受管的 bar,改为通过
+        // 它自己的 Child 句柄回收(保持 Rust 端状态一致);其余瞬时子进程才真正 reap。
         loop {
-            match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
-                Ok(WaitStatus::Exited(pid, status)) => {
-                    info!("Child process {} exited with status {}", pid, status);
-                }
-                Ok(WaitStatus::Signaled(pid, sig, _)) => {
-                    info!("Child process {} killed by signal {:?}", pid, sig);
-                }
-                // StillAlive 表示还有子进程在运行，Break 退出循环
-                Ok(WaitStatus::StillAlive) => break,
-                // Err 通常表示没有子进程了 (ECHILD)，也退出循环
-                Err(_) => break,
+            let peek = waitpid(None, Some(WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT));
+            let pid = match peek {
+                Ok(WaitStatus::Exited(pid, _)) | Ok(WaitStatus::Signaled(pid, _, _)) => pid,
+                // StillAlive(尚有运行中的子进程但无可回收) / ECHILD(无子进程) / 其它 → 结束
                 _ => break,
+            };
+
+            let raw = pid.as_raw() as u32;
+            if let Some(bar) = self
+                .secondary_bars
+                .values_mut()
+                .find(|b| b.child.id() == raw)
+            {
+                // 通过 Child 句柄回收(内部 waitpid(pid)),Rust 会缓存退出状态,
+                // 使关闭路径的 try_wait() 拿到正确结果而非 ECHILD。
+                match bar.child.try_wait() {
+                    Ok(Some(status)) => info!("Status bar child {} reaped: {:?}", raw, status),
+                    _ => {
+                        // 兜底:句柄回收异常时仍消费掉该僵尸,避免死循环。
+                        let _ = waitpid(pid, Some(WaitPidFlag::WNOHANG));
+                    }
+                }
+            } else {
+                match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+                    Ok(WaitStatus::Exited(p, status)) => {
+                        info!("Child process {} exited with status {}", p, status);
+                    }
+                    Ok(WaitStatus::Signaled(p, sig, _)) => {
+                        info!("Child process {} killed by signal {:?}", p, sig);
+                    }
+                    _ => {}
+                }
             }
         }
     }

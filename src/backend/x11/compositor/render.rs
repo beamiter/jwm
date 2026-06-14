@@ -2163,6 +2163,21 @@ impl Compositor {
             // Transition finished — clean up
             if self.transition_start.is_some() {
                 self.transition_start = None;
+                // Release the monitor-sized snapshot FBOs/textures instead of
+                // letting them sit idle in VRAM until the next transition (or
+                // Drop) reclaims them.
+                if let Some((fbo, tex)) = self.transition_fbo.take() {
+                    unsafe {
+                        self.gl.delete_framebuffer(fbo);
+                        self.gl.delete_texture(tex);
+                    }
+                }
+                if let Some((fbo, tex)) = self.transition_new_fbo.take() {
+                    unsafe {
+                        self.gl.delete_framebuffer(fbo);
+                        self.gl.delete_texture(tex);
+                    }
+                }
                 log::debug!("compositor: tag-switch transition completed");
             }
             false

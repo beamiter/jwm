@@ -761,6 +761,12 @@ struct GenieAnimation {
     h: f32,
     gl_texture: glow::Texture,
     has_rgba: bool,
+    // The animation owns these resources (transferred from the WindowTexture)
+    // and frees them when it completes; the texture is sampled for the whole
+    // animation, so it must not be freed earlier.
+    glx_pixmap: x11::glx::GLXPixmap,
+    pixmap: u32,
+    damage: u32,
 }
 
 // ---------------------------------------------------------------------------

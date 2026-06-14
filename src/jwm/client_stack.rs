@@ -107,8 +107,11 @@ impl Jwm {
         if let Some(client_list) = self.state.monitor_clients.get_mut(mon_key) {
             client_list.push(client_key);
         }
+        // 与新建窗口的 attachstack 保持一致:插入到聚焦栈"首部"(= 最近使用)。
+        // 此前迁移窗口被 push 到栈尾,使其被当作最久未用,导致 find_visible_client
+        // 的焦点回退顺序与 restack 的 Z 序和新建窗口表现不一致。
         if let Some(stack_list) = self.state.monitor_stack.get_mut(mon_key) {
-            stack_list.push(client_key);
+            stack_list.insert(0, client_key);
         }
         self.reorder_client_in_monitor_groups(client_key);
     }

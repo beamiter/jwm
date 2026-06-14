@@ -364,6 +364,22 @@ impl WMMonitor {
         self.sel = client;
     }
 
+    /// 清除该显示器对某 client 的所有"上次选中"记录(monitor.sel 及全部 per-tag
+    /// pertag.sel)。当 client 被移动到别的显示器或销毁时调用,否则切回某个 tag 时
+    /// 会读到一个已不属于本显示器的陈旧 key,导致焦点错误地跳到其它屏。
+    pub fn clear_selection_of(&mut self, client: ClientKey) {
+        if self.sel == Some(client) {
+            self.sel = None;
+        }
+        if let Some(ref mut pertag) = self.pertag {
+            for slot in pertag.sel.iter_mut() {
+                if *slot == Some(client) {
+                    *slot = None;
+                }
+            }
+        }
+    }
+
     /// 安全地获取当前活跃的 tag_set 值
     /// 确保 sel_tags 在有效范围内 [0, 1]，防止数组越界
     pub fn get_active_tags(&self) -> u32 {
