@@ -2881,9 +2881,24 @@ mod event_source {
                 match self.poll_event() {
                     Ok(Some(event)) => {
                         match &event {
-                            BackendEvent::MotionNotify { .. } => {
-                                // Coalesce motion events - only keep the latest one
-                                // This dramatically reduces processing overhead during drags
+                            BackendEvent::MotionNotify { target, .. } => {
+                                // Coalesce motion events - only keep the latest one.
+                                // This dramatically reduces processing overhead during
+                                // drags. But coalescing must not collapse motion across
+                                // different targets: if the new event hits a different
+                                // window/background than the one pending, flush the
+                                // pending one first so its target isn't silently lost.
+                                if let Some(BackendEvent::MotionNotify {
+                                    target: prev_target,
+                                    ..
+                                }) = &pending_motion
+                                {
+                                    if prev_target != target {
+                                        if let Some(m) = pending_motion.take() {
+                                            callback(m, &mut ());
+                                        }
+                                    }
+                                }
                                 pending_motion = Some(event);
                             }
                             _ => {
