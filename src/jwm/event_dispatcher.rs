@@ -451,8 +451,9 @@ impl WMController for Jwm {
 
             if let Some(strut) = backend.property_ops().get_window_strut_partial(win) {
                 if strut.left > 0 || strut.right > 0 || strut.top > 0 || strut.bottom > 0 {
-                    let changed = self.external_struts.get(&win) != Some(&strut);
-                    self.external_struts.insert(win, strut);
+                    let changed = self.external_struts.get(&win).map(|(s, _)| s) != Some(&strut);
+                    let host = self.strut_host_monitor(backend, win);
+                    self.external_struts.insert(win, (strut, host));
                     if changed {
                         info!(
                             "[strut] Updated external strut for {:?}: top={} bottom={} left={} right={}",

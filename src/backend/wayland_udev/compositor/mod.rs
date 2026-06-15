@@ -932,6 +932,13 @@ unsafe fn create_fbo_texture_fmt(gl: &ffi::Gles2, w: u32, h: u32, internal_forma
             0,
         );
 
+        let status = gl.CheckFramebufferStatus(ffi::FRAMEBUFFER);
+        if status != ffi::FRAMEBUFFER_COMPLETE {
+            log::warn!(
+                "[udev/compositor] incomplete FBO (status=0x{status:x}) for {w}x{h} internal_format=0x{internal_format:x}; rendering to it will be blank"
+            );
+        }
+
         (fbo, tex)
     }
 }

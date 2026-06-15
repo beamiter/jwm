@@ -1351,9 +1351,12 @@ impl Drop for Compositor {
                 let _ = child.wait();
             }
         }
+        // Tear down synchronously: remove_window() would start a fade-out / genie
+        // animation that never ticks again during Drop, leaking the GL texture,
+        // GLX pixmap, X pixmap and Damage. Free everything immediately instead.
         let wins: Vec<u32> = self.windows.keys().copied().collect();
         for w in wins {
-            self.remove_window(w);
+            self.remove_window_immediate(w);
         }
         // Destroy the _NET_WM_CM_Sn selection owner window (releases ownership)
         let _ = self.conn.destroy_window(self.cm_selection_owner);

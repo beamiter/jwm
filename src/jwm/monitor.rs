@@ -293,6 +293,7 @@ impl Jwm {
                 }
 
                 self.state.monitors.remove(mon_key_to_remove);
+                self.state.output_map.remove(mon_key_to_remove);
                 self.state.monitor_clients.remove(mon_key_to_remove);
                 self.state.monitor_stack.remove(mon_key_to_remove);
 
@@ -329,17 +330,23 @@ impl Jwm {
             .cloned()
             .unwrap_or_default();
 
-        let target_tags = if let Some(target_monitor) = self.state.monitors.get(target_monitor_key)
-        {
-            target_monitor.get_active_tags()
-        } else {
-            1
-        };
+        // Fallback tagset only used if a migrated client somehow has no tags;
+        // we must NOT overwrite a client's existing tag membership on an
+        // involuntary monitor-removal/hotplug, or windows permanently lose
+        // the tag the user assigned them.
+        let fallback_tags =
+            if let Some(target_monitor) = self.state.monitors.get(target_monitor_key) {
+                target_monitor.get_active_tags()
+            } else {
+                1
+            };
 
         for client_key in clients_to_move {
             if let Some(client) = self.state.clients.get_mut(client_key) {
                 client.mon = Some(target_monitor_key);
-                client.state.tags = target_tags;
+                if client.state.tags == 0 {
+                    client.state.tags = fallback_tags;
+                }
             }
 
             self.detach_from_monitor(client_key, from_monitor_key);

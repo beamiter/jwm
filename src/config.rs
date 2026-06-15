@@ -1571,7 +1571,10 @@ impl Config {
     }
 
     pub fn tags_length(&self) -> usize {
-        self.inner.layout.tags_length
+        // Tag masks are built with `1u32 << tag`, so a value >= 32 (or 0) from a
+        // malformed config would shift-overflow / produce empty masks. Clamp to a
+        // usable range so every downstream `1 << i` and `(1 << n) - 1` stays sound.
+        self.inner.layout.tags_length.clamp(1, 31)
     }
 
     pub fn tagmask(&self) -> u32 {
@@ -2012,7 +2015,8 @@ impl Config {
             BackendFamily::Wayland => "config_wayland.toml",
         };
         dirs::config_dir()
-            .unwrap_or_else(|| std::env::current_dir().unwrap())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("jwm")
             .join(name)
     }

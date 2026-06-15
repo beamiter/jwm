@@ -141,6 +141,25 @@ impl Jwm {
 
     pub(crate) fn cleanup_secondary_bars(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         for (mon_id, mut bar) in self.secondary_bars.drain() {
+            // The child may already have exited (and been reaped via its Child
+            // handle in reap_zombies, which caches the status). Once reaped, the
+            // PID can be recycled by the kernel, so signalling it would hit an
+            // unrelated process. Consult the handle before touching the PID.
+            match bar.child.try_wait() {
+                Ok(Some(status)) => {
+                    info!("Secondary bar {} already exited: {:?}", mon_id, status);
+                    continue;
+                }
+                Err(e) => {
+                    warn!(
+                        "Secondary bar {} status unknown ({}); not signalling PID",
+                        mon_id, e
+                    );
+                    continue;
+                }
+                Ok(None) => {}
+            }
+
             let pid = bar.child.id();
             let nix_pid = Pid::from_raw(pid as i32);
 

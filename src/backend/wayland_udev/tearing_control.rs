@@ -129,4 +129,18 @@ impl Dispatch<WpTearingControlV1, TearingControlData> for JwmWaylandState {
             _ => {}
         }
     }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: smithay::reexports::wayland_server::backend::ClientId,
+        _resource: &WpTearingControlV1,
+        data: &TearingControlData,
+    ) {
+        // A client that exits without an explicit Destroy request would otherwise
+        // leak its hint entry; since ObjectIds can be recycled, a stale entry
+        // could later be mis-applied to an unrelated surface.
+        if let Some(ref hints) = state.tearing_hints {
+            hints.lock_safe().remove(&data.surface.id());
+        }
+    }
 }

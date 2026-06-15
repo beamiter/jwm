@@ -367,6 +367,12 @@ impl Compositor {
                 x11rb::protocol::composite::Redirect::MANUAL,
             );
             let _ = self.conn.flush();
+            // The X server allocated a fresh backing pixmap while the window was
+            // unredirected; the old NameWindowPixmap binding is now stale. Force
+            // a rebind or the window renders frozen content until its next resize.
+            if let Some(wt) = self.windows.get_mut(&prev) {
+                wt.needs_pixmap_refresh = true;
+            }
             log::info!("compositor: re-redirected window 0x{:x}", prev);
             self.needs_render = true;
         }

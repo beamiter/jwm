@@ -1,6 +1,7 @@
 use log::{debug, info, warn};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
@@ -156,11 +157,18 @@ impl IpcServer {
         if path.exists() {
             let _ = std::fs::remove_file(&path);
         }
-        // Ensure parent directory exists.
+        // Ensure parent directory exists and is private (0700). This matters for
+        // the /tmp/jwm-{uid} fallback used when XDG_RUNTIME_DIR is unset: with the
+        // default umask the dir/socket would be world-connectable, letting any
+        // local user send `spawn` commands and run code as the WM user.
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
         }
         let listener = UnixListener::bind(&path)?;
+        // Restrict the socket itself to the owner (bind honours umask, so set it
+        // explicitly rather than relying on the process umask).
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
         info!("[ipc] listening on {}", path.display());
         Ok(Self {

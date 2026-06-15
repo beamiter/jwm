@@ -112,8 +112,11 @@ pub struct Jwm {
 
     key_bindings: Vec<WMKey>,
 
-    /// Strut reservations from external panels (polybar, trayer, etc.)
-    external_struts: HashMap<WindowId, StrutPartial>,
+    /// Strut reservations from external panels (polybar, trayer, etc.).
+    /// The second tuple element is the monitor that physically hosts the
+    /// panel window, used to attribute legacy whole-screen (`_NET_WM_STRUT`)
+    /// reservations to a single output instead of every monitor.
+    external_struts: HashMap<WindowId, (StrutPartial, Option<MonitorKey>)>,
 
     // IPC
     pub ipc_server: Option<IpcServer>,

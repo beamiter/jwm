@@ -394,24 +394,51 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, CaptureFrameData> for JwmWaylandState 
 
 impl Dispatch<ExtImageCopyCaptureCursorSessionV1, CursorSessionData> for JwmWaylandState {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
         _resource: &ExtImageCopyCaptureCursorSessionV1,
         request: ext_image_copy_capture_cursor_session_v1::Request,
-        _data: &CursorSessionData,
+        data: &CursorSessionData,
         _dh: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
             ext_image_copy_capture_cursor_session_v1::Request::GetCaptureSession { session } => {
                 // Create a sub-session for cursor capture.
-                data_init.init(
+                let capture_source = data.source.clone();
+                let sess = data_init.init(
                     session,
                     CaptureSessionData {
-                        source: _data.source.clone(),
+                        source: capture_source.clone(),
                         paint_cursors: true,
                     },
                 );
+
+                // A capture session is unusable until the client receives buffer
+                // constraints followed by `done`; without them a cursor-capture
+                // client stalls forever. Mirror the regular-session sizing so the
+                // client's buffer matches what the copy path writes.
+                match &capture_source {
+                    CaptureSource::Output(output) => {
+                        if let Some(mode) = output.current_mode() {
+                            sess.buffer_size(mode.size.w as u32, mode.size.h as u32);
+                            sess.shm_format(wl_shm::Format::Argb8888);
+                            sess.shm_format(wl_shm::Format::Xrgb8888);
+                            sess.done();
+                        } else {
+                            sess.stopped();
+                        }
+                    }
+                    CaptureSource::Toplevel(win) => match state.window_geometry.get(win) {
+                        Some(geo) if geo.w > 0 && geo.h > 0 => {
+                            sess.buffer_size(geo.w, geo.h);
+                            sess.shm_format(wl_shm::Format::Argb8888);
+                            sess.shm_format(wl_shm::Format::Xrgb8888);
+                            sess.done();
+                        }
+                        _ => sess.stopped(),
+                    },
+                }
             }
             ext_image_copy_capture_cursor_session_v1::Request::Destroy => {}
             _ => {}

@@ -196,20 +196,26 @@ impl Jwm {
             };
 
             let raw = pid.as_raw() as u32;
-            if let Some(bar) = self
+            let bar_key = self
                 .secondary_bars
-                .values_mut()
-                .find(|b| b.child.id() == raw)
-            {
+                .iter()
+                .find(|(_, b)| b.child.id() == raw)
+                .map(|(k, _)| *k);
+            if let Some(key) = bar_key {
                 // 通过 Child 句柄回收(内部 waitpid(pid)),Rust 会缓存退出状态,
                 // 使关闭路径的 try_wait() 拿到正确结果而非 ECHILD。
-                match bar.child.try_wait() {
-                    Ok(Some(status)) => info!("Status bar child {} reaped: {:?}", raw, status),
-                    _ => {
-                        // 兜底:句柄回收异常时仍消费掉该僵尸,避免死循环。
-                        let _ = waitpid(pid, Some(WaitPidFlag::WNOHANG));
+                if let Some(bar) = self.secondary_bars.get_mut(&key) {
+                    match bar.child.try_wait() {
+                        Ok(Some(status)) => info!("Status bar child {} reaped: {:?}", raw, status),
+                        _ => {
+                            // 兜底:句柄回收异常时仍消费掉该僵尸,避免死循环。
+                            let _ = waitpid(pid, Some(WaitPidFlag::WNOHANG));
+                        }
                     }
                 }
+                // 该 bar 已退出,从表中移除:既避免向已死进程的 shm 写状态,
+                // 也防止关闭路径按已被内核复用的 PID 误发信号。
+                self.secondary_bars.remove(&key);
             } else {
                 match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
                     Ok(WaitStatus::Exited(p, status)) => {
