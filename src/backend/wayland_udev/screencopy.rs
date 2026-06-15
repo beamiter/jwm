@@ -40,6 +40,9 @@ pub struct PendingScreencopyFrame {
     pub region: Option<(i32, i32, i32, i32)>,
     /// Whether to composite the cursor onto the frame.
     pub overlay_cursor: bool,
+    /// True for `copy_with_damage` requests: the protocol requires a `damage`
+    /// event to be sent before `ready`.
+    pub with_damage: bool,
 }
 
 // PendingScreencopyFrame contains Wayland protocol objects which are !Send.
@@ -248,7 +251,7 @@ fn queue_copy(
     frame: &ZwlrScreencopyFrameV1,
     buffer: &WlBuffer,
     data: &ScreencopyFrameData,
-    _with_damage: bool,
+    with_damage: bool,
 ) {
     let output = match data.output.as_ref() {
         Some(o) => o,
@@ -266,6 +269,7 @@ fn queue_copy(
         output: output.clone(),
         region: data.region,
         overlay_cursor: data.overlay_cursor,
+        with_damage,
     });
 }
 

@@ -967,6 +967,16 @@ impl KmsState {
                     frame_info
                         .frame
                         .flags(zwlr_screencopy_frame_v1::Flags::empty());
+                    // copy_with_damage requires a damage event before ready. We
+                    // don't track per-frame damage for screencopy, so report the
+                    // whole captured area as damaged.
+                    if frame_info.with_damage {
+                        let (dmg_w, dmg_h) = match frame_info.region {
+                            Some((_, _, rw, rh)) => (rw as u32, rh as u32),
+                            None => (width as u32, height as u32),
+                        };
+                        frame_info.frame.damage(0, 0, dmg_w, dmg_h);
+                    }
                     // Timestamp: use current time.
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
