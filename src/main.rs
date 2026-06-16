@@ -15,8 +15,16 @@ use jwm::backend::x11::backend::X11Backend;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Suppress verbose third-party crate spam unless the caller already set RUST_LOG.
+    // In debug builds default to the `debug` level so the maximum amount of
+    // diagnostic output is visible; release builds stay at `info`.
     if env::var("RUST_LOG").is_err() {
-        unsafe { env::set_var("RUST_LOG", "info,smithay=warn,libseat=warn,drm=warn") };
+        let default_level = if cfg!(debug_assertions) { "debug" } else { "info" };
+        unsafe {
+            env::set_var(
+                "RUST_LOG",
+                format!("{default_level},smithay=warn,libseat=warn,drm=warn"),
+            )
+        };
     }
 
     // --gen-config: generate backend-specific config templates for both backends, then exit.

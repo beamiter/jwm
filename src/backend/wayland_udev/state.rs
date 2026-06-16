@@ -199,6 +199,12 @@ pub struct JwmWaylandState {
     /// allocates the window.
     pub pending_x11_wl_surfaces: HashMap<u32, WlSurface>,
 
+    /// Map from our WindowId -> the X11 window's content `wl_surface`, resolved manually for the
+    /// legacy `WL_SURFACE_ID` association path (XWayland < 23.1). smithay only auto-associates via
+    /// the modern xwayland_shell protocol, so for old XWayland `X11Surface::wl_surface()` stays
+    /// `None` and we track the surface here instead.
+    pub x11_wl_surfaces: HashMap<WindowId, WlSurface>,
+
     /// KMS-backed outputs currently available for mapping layer surfaces.
     pub outputs: Vec<Output>,
 
@@ -804,6 +810,7 @@ impl XwmHandler for JwmWaylandState {
 
         if let Some(win_id) = self.x11_surface_to_window.remove(&x11_id) {
             self.x11_surfaces.remove(&win_id);
+            self.x11_wl_surfaces.remove(&win_id);
             let was_mapped = self.mapped_windows.remove(&win_id);
             self.surface_to_window.retain(|_, w| *w != win_id);
             self.window_geometry.remove(&win_id);
@@ -827,6 +834,7 @@ impl XwmHandler for JwmWaylandState {
 
         if let Some(win_id) = self.x11_surface_to_window.remove(&x11_id) {
             self.x11_surfaces.remove(&win_id);
+            self.x11_wl_surfaces.remove(&win_id);
             self.mapped_windows.remove(&win_id);
             self.surface_to_window.retain(|_, w| *w != win_id);
             self.window_geometry.remove(&win_id);
@@ -1278,6 +1286,7 @@ impl JwmWaylandState {
                 x11_surface_to_window: HashMap::new(),
                 x11_surfaces: HashMap::new(),
                 pending_x11_wl_surfaces: HashMap::new(),
+                x11_wl_surfaces: HashMap::new(),
                 active_toplevel: None,
 
                 outputs: Vec::new(),
@@ -1713,7 +1722,12 @@ impl JwmWaylandState {
         if let Some(t) = self.toplevels.get(&win) {
             return Some(t.wl_surface().clone());
         }
-        // Fall back to X11 surface.
+        // Fall back to X11 surface. Prefer the manually-resolved legacy association
+        // (XWayland < 23.1, WL_SURFACE_ID path) before smithay's own accessor, which is
+        // only populated for the modern xwayland_shell protocol.
+        if let Some(s) = self.x11_wl_surfaces.get(&win) {
+            return Some(s.clone());
+        }
         if let Some(x11) = self.x11_surfaces.get(&win) {
             return x11.wl_surface();
         }
@@ -1834,6 +1848,33 @@ impl CompositorHandler for JwmWaylandState {
         // Without this, WaylandSurfaceRenderElement will often have no view/texture and nothing
         // will be drawn even though windows are managed and receive input.
         on_commit_buffer_handler::<JwmWaylandState>(surface);
+
+        // Legacy XWayland (< 23.1) associates content via the WL_SURFACE_ID atom. smithay records
+        // it as `wl_surface_id` but, unlike the modern xwayland_shell path, never calls
+        // `set_wl_surface`/`surface_associated`, so `X11Surface::wl_surface()` stays `None` and the
+        // window renders fully transparent. Do the matching ourselves: when an unassociated
+        // XWayland-client surface commits, link it to the X11 window whose recorded id matches.
+        if !self.surface_to_window.contains_key(&surface.id())
+            && surface
+                .client()
+                .map(|c| c.get_data::<XWaylandClientData>().is_some())
+                .unwrap_or(false)
+        {
+            let pid = surface.id().protocol_id();
+            #[allow(deprecated)] // wl_surface_id is the only association path for XWayland < 23.1
+            let matched = match_x11_window_by_surface_id(
+                self.x11_surfaces
+                    .iter()
+                    .map(|(win_id, x11)| (*win_id, x11.wl_surface_id())),
+                pid,
+            );
+            if let Some(win_id) = matched {
+                info!("[xwayland] legacy WL_SURFACE_ID association: win={win_id:?} wl_surface={pid}");
+                self.surface_to_window.insert(surface.id(), win_id);
+                self.x11_wl_surfaces.insert(win_id, surface.clone());
+                self.needs_redraw = true;
+            }
+        }
 
         let win = self.surface_to_window.get(&surface.id()).copied();
 
@@ -2594,5 +2635,61 @@ impl WlrLayerShellHandler for JwmWaylandState {
                 break;
             }
         }
+    }
+}
+
+/// Find the X11 window whose recorded `WL_SURFACE_ID` matches a committed surface's protocol id.
+///
+/// XWayland < 23.1 associates content via the legacy `WL_SURFACE_ID` atom, which smithay records
+/// as `X11Surface::wl_surface_id()` but never auto-associates (only the modern xwayland_shell path
+/// does). We resolve the link ourselves in the commit handler; this is the pure matching core,
+/// kept separate so it can be unit-tested without a live Wayland server.
+fn match_x11_window_by_surface_id(
+    candidates: impl IntoIterator<Item = (WindowId, Option<u32>)>,
+    protocol_id: u32,
+) -> Option<WindowId> {
+    candidates
+        .into_iter()
+        .find(|(_, id)| *id == Some(protocol_id))
+        .map(|(win, _)| win)
+}
+
+#[cfg(test)]
+mod xwayland_legacy_assoc_tests {
+    use super::match_x11_window_by_surface_id;
+    use crate::backend::common_define::WindowId;
+
+    #[test]
+    fn matches_window_with_equal_surface_id() {
+        let a = WindowId::from_raw(1);
+        let b = WindowId::from_raw(2);
+        let candidates = vec![(a, Some(10u32)), (b, Some(20u32))];
+        assert_eq!(match_x11_window_by_surface_id(candidates, 20), Some(b));
+    }
+
+    #[test]
+    fn no_match_returns_none() {
+        let candidates = vec![(WindowId::from_raw(1), Some(10u32))];
+        assert_eq!(match_x11_window_by_surface_id(candidates, 99), None);
+    }
+
+    #[test]
+    fn windows_without_recorded_id_are_ignored() {
+        // A protocol id of 0 must not match a window that has no recorded WL_SURFACE_ID (None).
+        let a = WindowId::from_raw(1);
+        let b = WindowId::from_raw(2);
+        let candidates = vec![(a, None), (b, Some(0u32))];
+        assert_eq!(match_x11_window_by_surface_id(candidates.clone(), 0), Some(b));
+        // And a None candidate alone never matches.
+        assert_eq!(
+            match_x11_window_by_surface_id(vec![(a, None)], 0),
+            None
+        );
+    }
+
+    #[test]
+    fn empty_candidates_returns_none() {
+        let empty: Vec<(WindowId, Option<u32>)> = Vec::new();
+        assert_eq!(match_x11_window_by_surface_id(empty, 5), None);
     }
 }

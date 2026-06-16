@@ -28,10 +28,17 @@ use std::time::{Duration, Instant};
 
 use drm::control::{connector, Device as ControlDevice, ModeTypeFlags};
 
+use smithay::backend::allocator::Fourcc;
+use smithay::backend::renderer::damage::OutputDamageTracker;
+use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
+use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::GlesTexture;
 use smithay::backend::renderer::utils::{import_surface_tree, RendererSurfaceStateUserData};
-use smithay::backend::renderer::{buffer_has_alpha, buffer_type, BufferType, Renderer, Texture};
-use smithay::wayland::compositor::with_states;
+use smithay::backend::renderer::{
+    buffer_has_alpha, buffer_type, Bind, BufferType, Color32F, Offscreen, Renderer, Texture,
+};
+use smithay::utils::{Physical, Scale, Size, Transform};
+use smithay::wayland::compositor::{get_children, with_states};
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 
 use smithay::backend::input::{
@@ -678,6 +685,12 @@ pub struct UdevBackend {
     // two heap allocations per frame in compositor_render_frame.
     scratch_tex_updates: Vec<(u64, u32, u32, u32, bool, bool, [f32; 4])>,
     scratch_full_scene: Vec<(u64, i32, i32, u32, u32)>,
+
+    // Per-window offscreen textures used to composite subsurface-based clients
+    // (e.g. Electron/CEF apps like feishu) into a single texture. Persisted
+    // across frames and reused while the window size is unchanged. Tuple is
+    // (texture, width, height).
+    offscreen_window_textures: HashMap<u64, (GlesTexture, u32, u32)>,
 }
 
 // NOTE: smithay state + calloop handle types are not thread-safe.
@@ -2180,6 +2193,7 @@ impl UdevBackend {
             drag: None,
             scratch_tex_updates: Vec::new(),
             scratch_full_scene: Vec::new(),
+            offscreen_window_textures: HashMap::new(),
         })
     }
 }
@@ -2496,6 +2510,7 @@ impl Backend for UdevBackend {
             if let Some(compositor) = self.compositor.as_mut() {
                 for dead in self.state.compositor_dead_windows.drain(..) {
                     compositor.remove_window(dead);
+                    self.offscreen_window_textures.remove(&dead);
                 }
             } else {
                 self.state.compositor_dead_windows.clear();
@@ -2507,6 +2522,9 @@ impl Backend for UdevBackend {
         // other self fields below) instead of allocating one each frame.
         let mut tex_updates = std::mem::take(&mut self.scratch_tex_updates);
         tex_updates.clear();
+        // Taken out so the per-window loop can borrow it mutably while `self.kms`
+        // is also borrowed; restored at the end of Phase 1.
+        let mut offscreen = std::mem::take(&mut self.offscreen_window_textures);
         // Rate-limit diagnostic logging: log at most once per second.
         static LAST_CRF_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let crf_now_secs = std::time::SystemTime::now()
@@ -2529,12 +2547,108 @@ impl Backend for UdevBackend {
                 let win = crate::backend::common_define::WindowId::from_raw(win_id);
                 let surface_opt = self.state.surface_for_window(win);
                 if crf_log_this {
+                    let is_x11 = self.state.x11_surfaces.contains_key(&win);
+                    let class = self.state.window_app_id.get(&win).map(|s| s.as_str()).unwrap_or("");
+                    let children = surface_opt
+                        .as_ref()
+                        .map(|s| get_children(s).len())
+                        .unwrap_or(0);
                     log::info!(
-                        "[crf] win={win_id:#x} surface={} size={w}x{h}",
+                        "[crf] win={win_id:#x} class={class:?} x11={is_x11} surface={} subsurfaces={children} size={w}x{h}",
                         surface_opt.is_some()
                     );
                 }
                 if let Some(surface) = surface_opt {
+                    // Electron/CEF clients (e.g. feishu) render their content into
+                    // wl_subsurfaces while the root toplevel surface carries no
+                    // buffer. Reading only the root surface therefore yields a
+                    // transparent window. When subsurfaces are present, composite
+                    // the whole surface tree into a single per-window offscreen
+                    // texture so all existing per-window effects keep working.
+                    if !get_children(&surface).is_empty() {
+                        let (gx, gy, cw, ch) = with_states(&surface, |states| {
+                            let mut cached = states.cached_state.get::<SurfaceCachedState>();
+                            match cached.current().geometry {
+                                Some(r) if r.size.w > 0 && r.size.h > 0 => {
+                                    (r.loc.x, r.loc.y, r.size.w, r.size.h)
+                                }
+                                _ => (0, 0, w as i32, h as i32),
+                            }
+                        });
+                        let composited = kms_ref.with_gles_renderer(|renderer| {
+                            let _ = import_surface_tree(renderer, &surface);
+                            let elements: Vec<kms::KmsRenderElement> =
+                                render_elements_from_surface_tree(
+                                    renderer,
+                                    &surface,
+                                    Point::<i32, Physical>::from((-gx, -gy)),
+                                    Scale::from(1.0f64),
+                                    1.0f32,
+                                    Kind::Unspecified,
+                                );
+                            let need_new = match offscreen.get(&win_id) {
+                                Some((_, ow, oh)) => *ow != cw as u32 || *oh != ch as u32,
+                                None => true,
+                            };
+                            if need_new {
+                                match Offscreen::<GlesTexture>::create_buffer(
+                                    renderer,
+                                    Fourcc::Abgr8888,
+                                    Size::<i32, _>::from((cw, ch)),
+                                ) {
+                                    Ok(t) => {
+                                        offscreen.insert(win_id, (t, cw as u32, ch as u32));
+                                    }
+                                    Err(e) => {
+                                        log::error!(
+                                            "[crf] win={win_id:#x} offscreen create {cw}x{ch} failed: {e:?}"
+                                        );
+                                        return None;
+                                    }
+                                }
+                            }
+                            let (tex, _, _) = offscreen.get_mut(&win_id)?;
+                            let mut target = match renderer.bind(tex) {
+                                Ok(t) => t,
+                                Err(e) => {
+                                    log::error!("[crf] win={win_id:#x} offscreen bind failed: {e:?}");
+                                    return None;
+                                }
+                            };
+                            let phys: Size<i32, Physical> = (cw, ch).into();
+                            let mut dt = OutputDamageTracker::new(
+                                phys,
+                                Scale::from(1.0f64),
+                                Transform::Normal,
+                            );
+                            // age=0 forces a full redraw; transparent clear so
+                            // uncovered areas stay see-through.
+                            if let Err(e) = dt.render_output(
+                                renderer,
+                                &mut target,
+                                0,
+                                &elements,
+                                Color32F::new(0.0, 0.0, 0.0, 0.0),
+                            ) {
+                                log::error!("[crf] win={win_id:#x} offscreen render failed: {e:?}");
+                                return None;
+                            }
+                            drop(target);
+                            Some(tex.tex_id())
+                        });
+                        if let Some(tid) = composited {
+                            if crf_log_this {
+                                log::info!(
+                                    "[crf] win={win_id:#x} composited subsurfaces -> tex={tid} {cw}x{ch}"
+                                );
+                            }
+                            // render_output flips Y in its projection, so the
+                            // offscreen is stored top-to-bottom => y_inverted=false.
+                            // Content is already cropped to geometry => full UV.
+                            tex_updates.push((win_id, tid, w, h, true, false, [0.0, 0.0, 1.0, 1.0]));
+                        }
+                        continue;
+                    }
                     let tid = kms_ref.with_gles_renderer(|renderer| {
                         let import_result = import_surface_tree(renderer, &surface);
                         let ctx_id = renderer.context_id();
@@ -2742,6 +2856,7 @@ impl Backend for UdevBackend {
         // Return the scratch buffers for reuse on the next frame.
         self.scratch_tex_updates = tex_updates;
         self.scratch_full_scene = full_scene;
+        self.offscreen_window_textures = offscreen;
         Ok(result)
     }
 
