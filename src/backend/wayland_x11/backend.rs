@@ -1167,8 +1167,21 @@ impl WaylandX11Backend {
         let mut renderer = unsafe { GlesRenderer::new(context).map_err(|e| BackendError::Other(Box::new(e)))? };
         let _ = renderer.bind_wl_display(&display_handle);
 
-        let window = WindowBuilder::new()
-            .title("JWM (wayland-x11)")
+        // Default the nested window to the host X screen's full resolution
+        // instead of smithay's hardcoded 1280x800. (On a multi-monitor X server
+        // this is the combined virtual screen size.)
+        let (screen_w, screen_h) = {
+            use x11rb::connection::Connection as _;
+            let conn = handle.connection();
+            let setup = conn.setup();
+            let screen = &setup.roots[handle.screen()];
+            (screen.width_in_pixels, screen.height_in_pixels)
+        };
+        let mut window_builder = WindowBuilder::new().title("JWM (wayland-x11)");
+        if screen_w > 0 && screen_h > 0 {
+            window_builder = window_builder.size((screen_w, screen_h).into());
+        }
+        let window = window_builder
             .build(&handle)
             .map_err(|e| BackendError::Other(Box::new(e)))?;
 
@@ -1999,7 +2012,21 @@ impl Backend for WaylandX11Backend {
     }
 
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError> {
+        // The smithay X11 backend registers the host X11 connection as a calloop
+        // source whose fd can stay readable with host traffic we don't forward, so
+        // EventLoop::dispatch won't reliably block and a plain `dispatch(Some(16ms))`
+        // busy-spins a CPU core. Drain ready events non-blocking each tick and sleep
+        // out the rest of the frame budget to cap the loop at the output refresh.
+        let frame_budget = self
+            .output
+            .current_mode()
+            .and_then(|m| (m.refresh > 0).then_some(m.refresh))
+            .map(|refresh| Duration::from_secs_f64(1_000f64 / refresh as f64))
+            .unwrap_or_else(|| Duration::from_millis(16));
+
         loop {
+            let frame_start = std::time::Instant::now();
+
             while let Some(ev) = { self.pending_events.lock_safe().pop_front() } {
                 handler.handle_event(self, ev)?;
             }
@@ -2012,8 +2039,13 @@ impl Backend for WaylandX11Backend {
             }
 
             self.event_loop
-                .dispatch(Some(Duration::from_millis(16)), &mut *self.state)
+                .dispatch(Some(Duration::ZERO), &mut *self.state)
                 .map_err(|e| BackendError::Other(Box::new(e)))?;
+
+            let elapsed = frame_start.elapsed();
+            if elapsed < frame_budget {
+                std::thread::sleep(frame_budget - elapsed);
+            }
         }
         Ok(())
     }

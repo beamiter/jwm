@@ -1073,6 +1073,17 @@ impl WaylandWinitBackend {
                 .map_err(|e| BackendError::Message(format!("winit init failed: {e}")))?;
         winit_backend.window().set_title("JWM (wayland-winit)");
 
+        // Default the nested window to the current monitor's full resolution
+        // instead of smithay's hardcoded 1280x800. A plain inner-size request is
+        // ignored by Wayland hosts (the compositor owns window sizing), so go
+        // borderless-fullscreen on the current monitor; this works on both X11 and
+        // Wayland hosts. The WinitEvent::Resized handler picks up the real size.
+        winit_backend
+            .window()
+            .set_fullscreen(Some(smithay::reexports::winit::window::Fullscreen::Borderless(
+                None,
+            )));
+
         log::info!(
             "[wayland-winit] host window created (initial size: {:?})",
             winit_backend.window_size()
@@ -1825,7 +1836,24 @@ impl Backend for WaylandWinitBackend {
     }
 
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError> {
+        // The winit host connection is registered as a calloop source, and its fd
+        // can stay perpetually readable with host protocol traffic we don't forward
+        // (frame/sync events on queues winit drains but surfaces nothing for). That
+        // means EventLoop::dispatch never actually blocks, so a plain
+        // `dispatch(Some(16ms))` here busy-spins a CPU core at tens of thousands of
+        // iterations per second. Instead we drain ready events non-blocking each
+        // tick and sleep out the rest of the frame budget to cap the loop at the
+        // output refresh rate.
+        let frame_budget = self
+            .output
+            .current_mode()
+            .and_then(|m| (m.refresh > 0).then_some(m.refresh))
+            .map(|refresh| Duration::from_secs_f64(1_000f64 / refresh as f64))
+            .unwrap_or_else(|| Duration::from_millis(16));
+
         loop {
+            let frame_start = std::time::Instant::now();
+
             while let Some(ev) = { self.pending_events.lock_safe().pop_front() } {
                 handler.handle_event(self, ev)?;
             }
@@ -1838,8 +1866,13 @@ impl Backend for WaylandWinitBackend {
             }
 
             self.event_loop
-                .dispatch(Some(Duration::from_millis(16)), &mut *self.state)
+                .dispatch(Some(Duration::ZERO), &mut *self.state)
                 .map_err(|e| BackendError::Other(Box::new(e)))?;
+
+            let elapsed = frame_start.elapsed();
+            if elapsed < frame_budget {
+                std::thread::sleep(frame_budget - elapsed);
+            }
         }
         Ok(())
     }
