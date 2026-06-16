@@ -1955,7 +1955,8 @@ impl KmsState {
                 }
 
                 // IME popup surfaces (candidate windows) above normal windows.
-                for (im_surface, abs_x, abs_y) in state.im_popup_positions() {
+                for anchor in state.im_popup_positions() {
+                    let im_surface = anchor.surface;
                     frame_roots.push(im_surface.clone());
                     with_surface_tree_downward(
                         &im_surface,
@@ -1973,6 +1974,27 @@ impl KmsState {
                         },
                         |_, _, _| true,
                     );
+                    // Place the candidate box below the cursor, flipping above it when
+                    // it would overflow the parent monitor's bottom edge, and clamp
+                    // horizontally. Mirrors the compositor render path in backend.rs.
+                    let bbox = smithay::desktop::utils::bbox_from_surface_tree(
+                        &im_surface,
+                        Point::<i32, smithay::utils::Logical>::from((0, 0)),
+                    );
+                    let pw = bbox.size.w.max(1);
+                    let ph = bbox.size.h.max(1);
+                    let bx = (anchor.x + bbox.loc.x)
+                        .min(anchor.area_right - pw)
+                        .max(anchor.area_left);
+                    let below_top = anchor.cursor_bottom + bbox.loc.y;
+                    let by = if below_top + ph <= anchor.area_bottom {
+                        below_top
+                    } else {
+                        (anchor.cursor_top - ph).max(anchor.area_top)
+                    };
+                    // Convert the clamped bbox top-left back to the root surface origin.
+                    let abs_x = bx - bbox.loc.x;
+                    let abs_y = by - bbox.loc.y;
                     let location: Point<i32, Physical> = (abs_x - ox, abs_y - oy).into();
                     let tree = SurfaceTree::from_surface(&im_surface);
                     let im_elements: Vec<KmsRenderElement> =

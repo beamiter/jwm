@@ -259,6 +259,24 @@ pub struct JwmWaylandState {
     pub foreign_toplevel_mgmt: Option<crate::backend::wayland_udev::foreign_toplevel_management::ForeignToplevelMgmtState>,
 }
 
+/// Placement anchor for an IME candidate popup. Carries the cursor line in
+/// absolute coords plus the parent window's rect so the renderer can decide
+/// whether to draw the popup below the cursor or flip it above when it would
+/// overflow the bottom edge — the popup height isn't known until its texture
+/// has been imported, so the final clamp happens at render time.
+pub struct ImPopupAnchor {
+    pub surface: WlSurface,
+    pub x: i32,
+    /// Top of the text-cursor line (popup top when flipped above).
+    pub cursor_top: i32,
+    /// Bottom of the text-cursor line (popup top when placed below).
+    pub cursor_bottom: i32,
+    pub area_left: i32,
+    pub area_top: i32,
+    pub area_right: i32,
+    pub area_bottom: i32,
+}
+
 impl JwmWaylandState {
     fn surface_window_geometry_loc(&self, surface: &WlSurface) -> Point<i32, Logical> {
         // xdg_surface.set_window_geometry sets this. When non-zero, the compositor must shift the
@@ -1762,11 +1780,11 @@ impl JwmWaylandState {
         result
     }
 
-    pub fn im_popup_positions(&self) -> Vec<(WlSurface, i32, i32)> {
+    pub fn im_popup_positions(&self) -> Vec<ImPopupAnchor> {
         let mut result = Vec::new();
         for popup in &self.im_popups {
+            // Dead popups are pruned in `new_popup`/`dismiss_popup`; skip silently here.
             if !popup.alive() {
-                log::warn!("[ime-pos] not alive");
                 continue;
             }
             let loc = popup.location();
@@ -1774,24 +1792,47 @@ impl JwmWaylandState {
             let parent = match popup.get_parent() {
                 Some(p) => p,
                 None => {
-                    log::warn!("[ime-pos] no parent");
+                    log::warn!("[ime-pos] popup {:?} has no parent", popup.wl_surface().id());
                     continue;
                 }
             };
             let parent_win = match self.surface_to_window.get(&parent.surface.id()) {
                 Some(&w) => w,
                 None => {
-                    log::warn!("[ime-pos] parent {:?} not in surface_to_window", parent.surface.id());
+                    log::warn!(
+                        "[ime-pos] parent surface {:?} not mapped to a window",
+                        parent.surface.id()
+                    );
                     continue;
                 }
             };
             let geo = match self.window_geometry.get(&parent_win) {
                 Some(g) => g,
-                None => continue,
+                None => {
+                    log::warn!("[ime-pos] window {parent_win:?} has no geometry");
+                    continue;
+                }
             };
             let abs_x = geo.x + loc.x;
-            let abs_y = geo.y + loc.y + cursor_rect.size.h;
-            result.push((popup.wl_surface().clone(), abs_x, abs_y));
+            let cursor_top = geo.y + loc.y;
+            let cursor_bottom = cursor_top + cursor_rect.size.h;
+            log::info!(
+                "[ime-pos] popup {:?} parent={parent_win:?} loc=({},{}) cursor_h={} -> x={abs_x} cursor_top={cursor_top} cursor_bottom={cursor_bottom}",
+                popup.wl_surface().id(),
+                loc.x,
+                loc.y,
+                cursor_rect.size.h,
+            );
+            result.push(ImPopupAnchor {
+                surface: popup.wl_surface().clone(),
+                x: abs_x,
+                cursor_top,
+                cursor_bottom,
+                area_left: geo.x,
+                area_top: geo.y,
+                area_right: geo.x + geo.w as i32,
+                area_bottom: geo.y + geo.h as i32,
+            });
         }
         result
     }
@@ -2091,13 +2132,26 @@ impl SeatHandler for JwmWaylandState {
 
 impl InputMethodHandler for JwmWaylandState {
     fn new_popup(&mut self, surface: ImPopupSurface) {
+        // Drop any popups whose role/surface fcitx5 already destroyed: smithay's
+        // ZwpInputPopupSurfaceV2 destructor only flips the alive tracker, it never
+        // calls `dismiss_popup`, so stale dead entries would otherwise pile up here.
+        self.im_popups.retain(|p| p.alive());
         self.im_client_id = Some(surface.wl_surface().id());
+        log::info!(
+            "[ime] new_popup surface={:?} has_parent={} alive={} surface_alive={} total={}",
+            surface.wl_surface().id(),
+            surface.get_parent().is_some(),
+            surface.alive(),
+            surface.wl_surface().is_alive(),
+            self.im_popups.len() + 1,
+        );
         self.im_popups.push(surface);
         self.needs_redraw = true;
     }
 
     fn dismiss_popup(&mut self, surface: ImPopupSurface) {
-        self.im_popups.retain(|p| p != &surface);
+        log::info!("[ime] dismiss_popup surface={:?}", surface.wl_surface().id());
+        self.im_popups.retain(|p| p != &surface && p.alive());
         self.needs_redraw = true;
     }
 

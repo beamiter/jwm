@@ -56,6 +56,7 @@ use smithay::backend::session::Event as SessionEvent;
 use smithay::backend::session::Session;
 use smithay::backend::udev::{UdevBackend as SmithayUdevBackend, UdevEvent};
 use smithay::desktop::layer_map_for_output;
+use smithay::desktop::utils::bbox_from_surface_tree;
 use smithay::input::keyboard::{FilterResult, ModifiersState};
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent, RelativeMotionEvent};
 use smithay::reexports::calloop::channel::{self, Sender};
@@ -2787,10 +2788,106 @@ impl Backend for UdevBackend {
 
         // Phase 1c: Import IME popup surface textures and append to scene.
         let im_popups = self.state.im_popup_positions();
+        // Anchor the candidate box below the text cursor; if it would overflow the
+        // parent window's bottom edge, flip it above the cursor instead, and clamp
+        // horizontally so it stays on-screen. `off_x`/`off_y` carry the composited
+        // tree's bbox origin for the subsurface path (0,0 for the plain path).
+        let place_popup = |a: &crate::backend::wayland::state::ImPopupAnchor,
+                           w: i32,
+                           h: i32,
+                           off_x: i32,
+                           off_y: i32|
+         -> (i32, i32) {
+            let tx = (a.x + off_x).min(a.area_right - w).max(a.area_left);
+            let below = a.cursor_bottom + off_y;
+            let ty = if below + h <= a.area_bottom {
+                below
+            } else {
+                (a.cursor_top - h).max(a.area_top)
+            };
+            (tx, ty)
+        };
         if let Some(kms) = &self.kms {
             let mut kms_ref = kms.borrow_mut();
-            for (im_surface, abs_x, abs_y) in &im_popups {
+            for anchor in &im_popups {
+                let im_surface = &anchor.surface;
                 let im_win_id = 0xFF00_0000_0000_0000u64 | (im_surface.id().protocol_id() as u64);
+
+                // fcitx5 (and other IMEs) draw the candidate list into wl_subsurfaces
+                // of the input-popup surface; the root surface only carries a tiny
+                // pre-edit box. Reading just the root texture therefore renders a
+                // near-invisible window. When subsurfaces are present, composite the
+                // whole tree into one offscreen texture, mirroring the toplevel path.
+                if !get_children(im_surface).is_empty() {
+                    let bbox = bbox_from_surface_tree(im_surface, Point::<i32, Logical>::from((0, 0)));
+                    let (cw, ch) = (bbox.size.w.max(1), bbox.size.h.max(1));
+                    let composited = kms_ref.with_gles_renderer(|renderer| {
+                        let _ = import_surface_tree(renderer, im_surface);
+                        let elements: Vec<kms::KmsRenderElement> = render_elements_from_surface_tree(
+                            renderer,
+                            im_surface,
+                            Point::<i32, Physical>::from((-bbox.loc.x, -bbox.loc.y)),
+                            Scale::from(1.0f64),
+                            1.0f32,
+                            Kind::Unspecified,
+                        );
+                        let need_new = match offscreen.get(&im_win_id) {
+                            Some((_, ow, oh)) => *ow != cw as u32 || *oh != ch as u32,
+                            None => true,
+                        };
+                        if need_new {
+                            match Offscreen::<GlesTexture>::create_buffer(
+                                renderer,
+                                Fourcc::Abgr8888,
+                                Size::<i32, _>::from((cw, ch)),
+                            ) {
+                                Ok(t) => {
+                                    offscreen.insert(im_win_id, (t, cw as u32, ch as u32));
+                                }
+                                Err(e) => {
+                                    log::error!("[ime] popup offscreen create {cw}x{ch} failed: {e:?}");
+                                    return None;
+                                }
+                            }
+                        }
+                        let (tex, _, _) = offscreen.get_mut(&im_win_id)?;
+                        let mut target = match renderer.bind(tex) {
+                            Ok(t) => t,
+                            Err(e) => {
+                                log::error!("[ime] popup offscreen bind failed: {e:?}");
+                                return None;
+                            }
+                        };
+                        let phys: Size<i32, Physical> = (cw, ch).into();
+                        let mut dt = OutputDamageTracker::new(phys, Scale::from(1.0f64), Transform::Normal);
+                        if let Err(e) = dt.render_output(
+                            renderer,
+                            &mut target,
+                            0,
+                            &elements,
+                            Color32F::new(0.0, 0.0, 0.0, 0.0),
+                        ) {
+                            log::error!("[ime] popup offscreen render failed: {e:?}");
+                            return None;
+                        }
+                        drop(target);
+                        Some(tex.tex_id())
+                    });
+                    if let Some(tid) = composited {
+                        // bbox.loc shifts the tree origin relative to the root surface;
+                        // fold it into the anchor so subsurfaces land correctly, then
+                        // clamp so the candidate box stays on the parent's monitor.
+                        let (sx, sy) = place_popup(anchor, cw, ch, bbox.loc.x, bbox.loc.y);
+                        log::info!(
+                            "[ime] popup composited tex={tid} {cw}x{ch} children={} abs=({sx},{sy})",
+                            get_children(im_surface).len()
+                        );
+                        tex_updates.push((im_win_id, tid, cw as u32, ch as u32, true, false, [0.0, 0.0, 1.0, 1.0]));
+                        full_scene.push((im_win_id, sx, sy, cw as u32, ch as u32));
+                    }
+                    continue;
+                }
+
                 let tid = kms_ref.with_gles_renderer(|renderer| {
                     let _ = import_surface_tree(renderer, im_surface);
                     let ctx_id = renderer.context_id();
@@ -2809,12 +2906,22 @@ impl Backend for UdevBackend {
                         })
                     })
                 });
-                if let Some((tid, y_inverted, has_alpha, tex_size)) = tid {
-                    let w = tex_size.w as u32;
-                    let h = tex_size.h as u32;
-                    if w > 0 && h > 0 {
-                        tex_updates.push((im_win_id, tid, w, h, has_alpha, y_inverted, [0.0, 0.0, 1.0, 1.0]));
-                        full_scene.push((im_win_id, *abs_x, *abs_y, w, h));
+                match tid {
+                    Some((tid, y_inverted, has_alpha, tex_size)) => {
+                        let w = tex_size.w as u32;
+                        let h = tex_size.h as u32;
+                        let (px, py) = place_popup(anchor, w as i32, h as i32, 0, 0);
+                        log::info!("[ime] popup texture tex={tid} size={w}x{h} abs=({px},{py})");
+                        if w > 0 && h > 0 {
+                            tex_updates.push((im_win_id, tid, w, h, has_alpha, y_inverted, [0.0, 0.0, 1.0, 1.0]));
+                            full_scene.push((im_win_id, px, py, w, h));
+                        }
+                    }
+                    None => {
+                        log::warn!(
+                            "[ime] popup {:?} has no texture (no buffer committed yet)",
+                            im_surface.id()
+                        );
                     }
                 }
             }
