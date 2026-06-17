@@ -43,7 +43,7 @@ pub struct OmlSyncWindow {
 impl OmlSyncWindow {
     pub fn new(x11_win: u32, fps: f32) -> Self {
         let frame_delay_ns = if fps > 0.0 {
-            (1_000_000_000.0 / fps) as u64
+            (1_000_000_000.0 / fps as f64).round() as u64
         } else {
             16_666_667  // Default 60Hz
         };
@@ -59,7 +59,7 @@ impl OmlSyncWindow {
 
     pub fn set_fps(&mut self, fps: f32) {
         self.frame_delay_ns = if fps > 0.0 {
-            (1_000_000_000.0 / fps) as u64
+            (1_000_000_000.0 / fps as f64).round() as u64
         } else {
             16_666_667  // Default 60Hz
         };

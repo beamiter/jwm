@@ -3,6 +3,8 @@
 // ---------------------------------------------------------------------------
 
 pub mod shaders;
+#[cfg(test)]
+mod headless_render;
 mod render;
 mod effects;
 mod transitions;

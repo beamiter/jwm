@@ -46,19 +46,23 @@ impl AudioStreamTiming {
         }
     }
 
-    /// Calculate ideal presentation time for the next frame
-    pub fn next_frame_deadline(&self) -> Instant {
+    /// Milliseconds until the next frame is due (negative if already overdue).
+    fn next_frame_offset_ms(&self) -> f32 {
         if self.fps <= 0.0 {
-            return Instant::now();
+            return 0.0;
         }
         let frame_duration_ms = 1000.0 / self.fps;
         let elapsed_ms = self.last_update.elapsed().as_secs_f32() * 1000.0;
-        let next_frame_ms = ((self.frames_rendered as f32 + 1.0) * frame_duration_ms)
+        ((self.frames_rendered as f32 + 1.0) * frame_duration_ms)
             - elapsed_ms
-            - self.dynamic_latency_ms; // Use dynamic instead of static latency
+            - self.dynamic_latency_ms // Use dynamic instead of static latency
+    }
 
-        if next_frame_ms > 0.0 {
-            Instant::now() + std::time::Duration::from_secs_f32(next_frame_ms / 1000.0)
+    /// Calculate ideal presentation time for the next frame
+    pub fn next_frame_deadline(&self) -> Instant {
+        let offset_ms = self.next_frame_offset_ms();
+        if offset_ms > 0.0 {
+            Instant::now() + std::time::Duration::from_secs_f32(offset_ms / 1000.0)
         } else {
             Instant::now()
         }
@@ -66,7 +70,7 @@ impl AudioStreamTiming {
 
     /// Check if enough time has passed to render the next frame
     pub fn should_render_frame(&self) -> bool {
-        Instant::now() >= self.next_frame_deadline()
+        self.next_frame_offset_ms() <= 0.0
     }
 }
 
@@ -190,7 +194,9 @@ mod tests {
 
     #[test]
     fn test_frame_deadline_calculation() {
-        let timing = AudioStreamTiming::new(30.0, 50);
+        // Zero buffer latency so the deadline schedules forward by ~33ms
+        // rather than collapsing to "now" (latency >= frame time).
+        let timing = AudioStreamTiming::new(30.0, 0);
         // At 30fps, frame time is ~33.3ms
         let deadline = timing.next_frame_deadline();
         assert!(deadline > Instant::now());

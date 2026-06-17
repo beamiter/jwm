@@ -418,6 +418,7 @@ impl SubpixelRenderManager {
     /// Remove window
     pub fn remove_window(&mut self, window_id: u32) {
         if let Some(wt) = self.window_types.remove(&window_id) {
+            self.total_windows = self.total_windows.saturating_sub(1);
             if wt.should_use_subpixel() {
                 self.subpixel_windows = self.subpixel_windows.saturating_sub(1);
             }
