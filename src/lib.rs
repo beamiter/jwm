@@ -268,6 +268,8 @@ pub struct BarConfig {
     pub brightness_label: &'static str,
     pub battery_label: &'static str,
     pub battery_charging_label: &'static str,
+    pub cpu_label: &'static str,
+    pub mem_label: &'static str,
 
     // 可选组件
     pub show_audio: bool,
@@ -299,6 +301,8 @@ impl Default for BarConfig {
             brightness_label: "BRT",
             battery_label: "BAT",
             battery_charging_label: "CHG",
+            cpu_label: "CPU",
+            mem_label: "MEM",
 
             show_audio: false,
             show_theme_toggle: false,
@@ -1764,7 +1768,7 @@ pub fn draw_memory_stats(
     } else {
         0.0
     };
-    let mem_label = format!("MEM {:.0}%", mem_usage.clamp(0.0, 100.0));
+    let mem_label = format!("{} {:.0}%", cfg.mem_label, mem_usage.clamp(0.0, 100.0));
     let (mem_w, mem_h) = pango_text_size(&layout, &mem_label);
     let mem_total = mem_w as f64 + 2.0 * cfg.pill_hpadding;
     *right_x -= mem_total + cfg.tag_spacing;
@@ -1831,7 +1835,7 @@ pub fn draw_cpu_stats(
     right_x: &mut f64,
     cpu_avg: f32,
 ) -> Result<()> {
-    let cpu_label = format!("CPU {:.0}%", cpu_avg.clamp(0.0, 100.0));
+    let cpu_label = format!("{} {:.0}%", cfg.cpu_label, cpu_avg.clamp(0.0, 100.0));
     let (cpu_w, cpu_h) = pango_text_size(&layout, &cpu_label);
     let cpu_total = cpu_w as f64 + 2.0 * cfg.pill_hpadding;
     *right_x -= cpu_total + cfg.tag_spacing;
@@ -2360,13 +2364,13 @@ pub fn draw_bar_with_dirty_background_opacity(
                 (0.0, 0.0, 0.0)
             };
         let mem_usage = if mem_total_gb > 0.0 { (mem_used_gb / mem_total_gb) * 100.0 } else { 0.0 };
-        let mem_label = format!("MEM {:.0}%", mem_usage.clamp(0.0, 100.0));
+        let mem_label = format!("{} {:.0}%", cfg.mem_label, mem_usage.clamp(0.0, 100.0));
         let (mem_w, _) = pango_text_size(&layout, &mem_label);
         let mem_total = mem_w as f64 + 2.0 * cfg.pill_hpadding;
         right_x -= mem_total + cfg.tag_spacing;
 
         // Advance past CPU pill.
-        let cpu_label = format!("CPU {:.0}%", cpu_avg.clamp(0.0, 100.0));
+        let cpu_label = format!("{} {:.0}%", cfg.cpu_label, cpu_avg.clamp(0.0, 100.0));
         let (cpu_w, _) = pango_text_size(&layout, &cpu_label);
         let cpu_total = cpu_w as f64 + 2.0 * cfg.pill_hpadding;
         right_x -= cpu_total + cfg.tag_spacing;
