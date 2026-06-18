@@ -16,11 +16,15 @@ use std::time::Instant;
 use std::f64::consts::{FRAC_PI_2, PI};
 
 pub mod audio_manager;
+pub mod battery;
+pub mod brightness;
 pub mod system_monitor;
 pub use cairo;
 pub use pango;
 pub use pangocairo;
 pub use audio_manager::AudioManager;
+pub use battery::BatteryManager;
+pub use brightness::BrightnessManager;
 pub use system_monitor::SystemMonitor;
 
 // ================= Dirty Region Tracking =================
@@ -38,6 +42,8 @@ impl DirtyBits {
     pub const SYSTEM_CHANGED: u32 = 1 << 4;      // CPU/memory stats changed
     pub const LAYOUT_CHANGED: u32 = 1 << 5;      // Layout symbol changed
     pub const THEME_CHANGED: u32 = 1 << 6;       // Dark/Light mode changed
+    pub const BRIGHTNESS_CHANGED: u32 = 1 << 7;  // Backlight brightness changed
+    pub const BATTERY_CHANGED: u32 = 1 << 8;     // Battery capacity/status changed
 
     pub fn new(bits: u32) -> Self {
         DirtyBits(bits)
@@ -259,11 +265,17 @@ pub struct BarConfig {
     pub monitor_labels: [&'static str; 4], // M0, M1, M2, fallback
     pub volume_label: &'static str,
     pub mute_label: &'static str,
+    pub brightness_label: &'static str,
+    pub battery_label: &'static str,
+    pub battery_charging_label: &'static str,
 
     // 可选组件
     pub show_audio: bool,
     pub show_theme_toggle: bool,
+    pub show_brightness: bool,
+    pub show_battery: bool,
     pub volume_step: i32,
+    pub brightness_step: i32,
 }
 impl Default for BarConfig {
     fn default() -> Self {
@@ -284,10 +296,16 @@ impl Default for BarConfig {
             monitor_labels: ["M0", "M1", "M2", "M?"],
             volume_label: "VOL",
             mute_label: "MUTE",
+            brightness_label: "BRT",
+            battery_label: "BAT",
+            battery_charging_label: "CHG",
 
             show_audio: false,
             show_theme_toggle: false,
+            show_brightness: false,
+            show_battery: false,
             volume_step: 5,
+            brightness_step: 5,
         }
     }
 }
@@ -314,6 +332,8 @@ pub struct AppState {
 
     pub audio_rect: Rect,
     pub theme_rect: Rect,
+    pub brightness_rect: Rect,
+    pub battery_rect: Rect,
     pub theme_mode: ThemeMode,
 
     // Hover 状态
@@ -326,6 +346,11 @@ pub struct AppState {
 
     pub audio_manager: AudioManager,
     pub system_monitor: SystemMonitor,
+    pub brightness_manager: BrightnessManager,
+    pub battery_manager: BatteryManager,
+
+    /// Relative step (percentage) applied on a brightness click/scroll.
+    pub brightness_step: i32,
 
     pub last_time_string: String,
     pub last_monitor_update: Instant,
@@ -347,6 +372,8 @@ pub enum HoverTarget {
     Time,
     Audio,
     Theme,
+    Brightness,
+    Battery,
     Mem,
     Cpu,
     Monitor,
@@ -373,6 +400,8 @@ impl AppState {
 
             audio_rect: Rect::default(),
             theme_rect: Rect::default(),
+            brightness_rect: Rect::default(),
+            battery_rect: Rect::default(),
             theme_mode: ThemeMode::Dark,
 
             hover_target: HoverTarget::None,
@@ -383,6 +412,10 @@ impl AppState {
 
             audio_manager: AudioManager::new(),
             system_monitor: SystemMonitor::new(5),
+            brightness_manager: BrightnessManager::new(),
+            battery_manager: BatteryManager::new(),
+
+            brightness_step: 5,
 
             last_time_string: String::new(),
             last_monitor_update: Instant::now(),
@@ -540,6 +573,27 @@ impl AppState {
                 }
             }
         }
+        // 亮度：左键提高一档，右键降低一档，滚轮上/下调节
+        if self.brightness_rect.w > 0 && self.brightness_rect.contains(px, py) {
+            let step = self.brightness_step;
+            let delta = match button {
+                1 | 4 => step,
+                3 | 5 => -step,
+                _ => 0,
+            };
+            if delta != 0 {
+                self.brightness_manager.adjust(delta);
+                self.dirty_fields.set(DirtyBits::BRIGHTNESS_CHANGED);
+                need_redraw = true;
+            }
+        }
+        // 电量：左键强制刷新读数
+        if self.battery_rect.w > 0 && self.battery_rect.contains(px, py) && button == 1 {
+            if self.battery_manager.refresh() {
+                self.dirty_fields.set(DirtyBits::BATTERY_CHANGED);
+                need_redraw = true;
+            }
+        }
         // 时间 pill 切换秒显示
         if self.time_rect.contains(px, py) && button == 1 {
             self.show_seconds = !self.show_seconds;
@@ -575,6 +629,12 @@ impl AppState {
         }
         if self.theme_rect.w > 0 && self.theme_rect.contains(px, py) {
             return HoverTarget::Theme;
+        }
+        if self.brightness_rect.w > 0 && self.brightness_rect.contains(px, py) {
+            return HoverTarget::Brightness;
+        }
+        if self.battery_rect.w > 0 && self.battery_rect.contains(px, py) {
+            return HoverTarget::Battery;
         }
         if self.mem_rect.contains(px, py) {
             return HoverTarget::Mem;
@@ -1826,6 +1886,198 @@ pub fn draw_cpu_stats(
     Ok(())
 }
 
+/// Draw backlight brightness pill (right-side, optional).
+pub fn draw_brightness(
+    cr: &Context,
+    cfg: &BarConfig,
+    state: &mut AppState,
+    layout: &pango::Layout,
+    pill_h: f64,
+    is_light_theme: bool,
+    colors: &Colors,
+    right_x: &mut f64,
+) -> Result<()> {
+    if !cfg.show_brightness {
+        state.brightness_rect = Rect::default();
+        return Ok(());
+    }
+    let label = match state.brightness_manager.percent() {
+        Some(p) => format!("{} {}%", cfg.brightness_label, p),
+        None => format!("{} --", cfg.brightness_label),
+    };
+    let (bw_t, bh_t) = pango_text_size(&layout, &label);
+    let b_total = bw_t as f64 + 2.0 * cfg.pill_hpadding;
+    *right_x -= b_total + cfg.tag_spacing;
+
+    // relm_bar style: warm amber accent for brightness
+    let mut fill = if is_light_theme {
+        Color::rgb(255, 251, 235)
+    } else {
+        Color::rgb(58, 46, 16)
+    };
+    let mut border = if is_light_theme {
+        Color::rgb(253, 230, 138)
+    } else {
+        Color::rgb(90, 72, 24)
+    };
+    let mut bw = 1.0;
+    if HoverTarget::Brightness == state.hover_target {
+        fill = fill.lighten(0.08);
+        border = border.lighten(0.10);
+        bw = 2.0;
+    }
+    let _ = draw_soft_shadow(
+        cr,
+        state.shape_style,
+        *right_x,
+        cfg.padding_y,
+        b_total,
+        pill_h,
+        cfg.pill_radius,
+        colors.bg,
+        is_light_theme,
+    );
+    stroke_shape_with_fill(
+        cr,
+        state.shape_style,
+        *right_x,
+        cfg.padding_y,
+        b_total,
+        pill_h,
+        cfg.pill_radius,
+        bw,
+        border,
+        Some(fill),
+    )?;
+    let text_color = if is_light_theme {
+        Color::rgb(146, 104, 16)
+    } else {
+        Color::rgb(254, 243, 199)
+    };
+    let ty = cfg.padding_y + (pill_h - bh_t as f64) / 2.0 - 1.0;
+    pango_draw_text_left(cr, &layout, text_color, *right_x + cfg.pill_hpadding, ty, &label);
+    state.brightness_rect = Rect {
+        x: *right_x as i16,
+        y: cfg.padding_y as i16,
+        w: b_total as u16,
+        h: pill_h as u16,
+    };
+    Ok(())
+}
+
+/// Draw battery pill (right-side, optional).
+pub fn draw_battery(
+    cr: &Context,
+    cfg: &BarConfig,
+    state: &mut AppState,
+    layout: &pango::Layout,
+    pill_h: f64,
+    is_light_theme: bool,
+    colors: &Colors,
+    right_x: &mut f64,
+) -> Result<()> {
+    if !cfg.show_battery {
+        state.battery_rect = Rect::default();
+        return Ok(());
+    }
+    let charging = state.battery_manager.is_charging();
+    let (label, low) = match state.battery_manager.capacity() {
+        Some(c) => {
+            let icon = if charging {
+                cfg.battery_charging_label
+            } else {
+                cfg.battery_label
+            };
+            (format!("{} {}%", icon, c), c <= 20)
+        }
+        None => (format!("{} --", cfg.battery_label), false),
+    };
+    let (bw_t, bh_t) = pango_text_size(&layout, &label);
+    let b_total = bw_t as f64 + 2.0 * cfg.pill_hpadding;
+    *right_x -= b_total + cfg.tag_spacing;
+
+    // Color: charging -> teal/green, low -> red, otherwise neutral green
+    let (mut fill, mut border, text_color) = if charging {
+        if is_light_theme {
+            (
+                Color::rgb(220, 252, 231),
+                Color::rgb(134, 239, 172),
+                Color::rgb(22, 101, 52),
+            )
+        } else {
+            (
+                Color::rgb(16, 52, 32),
+                Color::rgb(28, 78, 50),
+                Color::rgb(187, 247, 208),
+            )
+        }
+    } else if low {
+        if is_light_theme {
+            (
+                Color::rgb(255, 234, 234),
+                Color::rgb(252, 165, 165),
+                Color::rgb(168, 7, 26),
+            )
+        } else {
+            (
+                Color::rgb(58, 26, 32),
+                Color::rgb(90, 40, 48),
+                Color::rgb(241, 216, 216),
+            )
+        }
+    } else if is_light_theme {
+        (
+            Color::rgb(240, 253, 244),
+            Color::rgb(187, 247, 208),
+            Color::rgb(22, 101, 52),
+        )
+    } else {
+        (
+            Color::rgb(17, 49, 36),
+            Color::rgb(28, 70, 52),
+            Color::rgb(209, 243, 218),
+        )
+    };
+    let mut bw = 1.0;
+    if HoverTarget::Battery == state.hover_target {
+        fill = fill.lighten(0.08);
+        border = border.lighten(0.10);
+        bw = 2.0;
+    }
+    let _ = draw_soft_shadow(
+        cr,
+        state.shape_style,
+        *right_x,
+        cfg.padding_y,
+        b_total,
+        pill_h,
+        cfg.pill_radius,
+        colors.bg,
+        is_light_theme,
+    );
+    stroke_shape_with_fill(
+        cr,
+        state.shape_style,
+        *right_x,
+        cfg.padding_y,
+        b_total,
+        pill_h,
+        cfg.pill_radius,
+        bw,
+        border,
+        Some(fill),
+    )?;
+    let ty = cfg.padding_y + (pill_h - bh_t as f64) / 2.0 - 1.0;
+    pango_draw_text_left(cr, &layout, text_color, *right_x + cfg.pill_hpadding, ty, &label);
+    state.battery_rect = Rect {
+        x: *right_x as i16,
+        y: cfg.padding_y as i16,
+        w: b_total as u16,
+        h: pill_h as u16,
+    };
+    Ok(())
+}
+
 // ================= 对外：绘制入口 =================
 
 pub fn draw_bar(
@@ -1872,6 +2124,8 @@ pub fn draw_bar_with_background_opacity(
     draw_audio_volume(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
     let cpu_avg = draw_memory_stats(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
     draw_cpu_stats(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x, cpu_avg)?;
+    draw_brightness(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+    draw_battery(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
 
     Ok(())
 }
@@ -2116,8 +2370,42 @@ pub fn draw_bar_with_dirty_background_opacity(
         let (cpu_w, _) = pango_text_size(&layout, &cpu_label);
         let cpu_total = cpu_w as f64 + 2.0 * cfg.pill_hpadding;
         right_x -= cpu_total + cfg.tag_spacing;
-        let _ = right_x; // suppress unused warning
     }
+
+    // Brightness
+    if should_draw(DirtyBits::BRIGHTNESS_CHANGED) {
+        draw_brightness(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+    } else if cfg.show_brightness {
+        let label = match state.brightness_manager.percent() {
+            Some(p) => format!("{} {}%", cfg.brightness_label, p),
+            None => format!("{} --", cfg.brightness_label),
+        };
+        let (bw_t, _) = pango_text_size(&layout, &label);
+        let b_total = bw_t as f64 + 2.0 * cfg.pill_hpadding;
+        right_x -= b_total + cfg.tag_spacing;
+    }
+
+    // Battery
+    if should_draw(DirtyBits::BATTERY_CHANGED) {
+        draw_battery(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+    } else if cfg.show_battery {
+        let charging = state.battery_manager.is_charging();
+        let label = match state.battery_manager.capacity() {
+            Some(c) => {
+                let icon = if charging {
+                    cfg.battery_charging_label
+                } else {
+                    cfg.battery_label
+                };
+                format!("{} {}%", icon, c)
+            }
+            None => format!("{} --", cfg.battery_label),
+        };
+        let (bw_t, _) = pango_text_size(&layout, &label);
+        let b_total = bw_t as f64 + 2.0 * cfg.pill_hpadding;
+        right_x -= b_total + cfg.tag_spacing;
+    }
+    let _ = right_x; // suppress unused warning
 
     // ── Clear dirty bits ──
     state.dirty_fields = DirtyBits::new(0);
