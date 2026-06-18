@@ -69,7 +69,7 @@ ALL_BARS=(
 # ============================================================
 # 默认值
 # ============================================================
-BUILD_MODE="debug"
+BUILD_MODE="release"
 JWM_BAR_NAME="x11rb_wgpu_bar"
 JWM_BAR_SET_BY_ARGS=false
 SELECTED_BARS=(
