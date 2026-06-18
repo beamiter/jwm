@@ -183,6 +183,11 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "cycle_overview" => Ok((Jwm::cycle_overview, parse_int_arg(args, 1))),
         "toggle_magnifier" => Ok((Jwm::toggle_magnifier, parse_int_arg(args, 0))),
         "toggle_peek" => Ok((Jwm::toggle_peek, parse_int_arg(args, 0))),
+        "toggle_annotation" => Ok((Jwm::toggle_annotation, parse_int_arg(args, 0))),
+
+        // --- Session ---
+        "save_session" => Ok((Jwm::save_session, parse_int_arg(args, 0))),
+        "restore_session" => Ok((Jwm::restore_session, parse_int_arg(args, 0))),
 
         _ => Err(format!("unknown command: {name}")),
     }

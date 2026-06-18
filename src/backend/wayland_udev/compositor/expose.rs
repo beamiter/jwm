@@ -256,27 +256,9 @@ impl WaylandCompositor {
             }
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
 
-            // Redraw only the focused window on top at full opacity
-            let focused_id = match focused {
-                Some(id) => id,
-                None => return,
-            };
-
-            // Find the focused window's position in the scene
-            let (wx, wy, ww, wh) = match scene.iter().find(|(id, _, _, _, _)| *id == focused_id) {
-                Some(&(_, x, y, w, h)) => (x as f32, y as f32, w as f32, h as f32),
-                None => return,
-            };
-
-            let win = match self.windows.get(&focused_id) {
-                Some(w) => w,
-                None => return,
-            };
-            let tex = match win.gl_texture {
-                Some(t) => t,
-                None => return,
-            };
-
+            // Redraw the focused window plus any peek-excluded windows (e.g. the
+            // status bar) on top at full opacity, mirroring the X11 backend where
+            // `peek_exclude` classes keep full opacity during peek.
             gl.UseProgram(self.program);
             gl.UniformMatrix4fv(
                 self.win_uniforms.projection,
@@ -284,27 +266,48 @@ impl WaylandCompositor {
                 ffi::FALSE as u8,
                 projection.as_ptr(),
             );
-            gl.Uniform4f(self.win_uniforms.rect, wx, wy, ww, wh);
-            gl.Uniform1f(self.win_uniforms.opacity, 1.0);
-            gl.Uniform1f(self.win_uniforms.radius, 6.0);
-            gl.Uniform2f(self.win_uniforms.size, ww, wh);
-            gl.Uniform1f(self.win_uniforms.dim, 1.0);
 
-            let [cu, cv, cw, ch] = win.content_uv;
-            let (uv_x, uv_y, uv_w, uv_h) = if win.y_inverted {
-                (cu, cv + ch, cw, -ch)
-            } else {
-                (cu, cv, cw, ch)
-            };
-            gl.Uniform4f(self.win_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
-            gl.Uniform1f(self.win_uniforms.ripple_progress, -1.0);
-            gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
+            for &(id, x, y, w, h) in scene {
+                let win = match self.windows.get(&id) {
+                    Some(w) => w,
+                    None => continue,
+                };
 
-            gl.ActiveTexture(ffi::TEXTURE0);
-            self.bind_window_texture(gl, tex);
-            gl.Uniform1i(self.win_uniforms.texture, 0);
+                let is_focused = focused == Some(id);
+                let is_excluded = !win.class_name.is_empty()
+                    && Self::class_matches_exclude(&win.class_name, &self.peek_exclude);
+                if !is_focused && !is_excluded {
+                    continue;
+                }
 
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                let tex = match win.gl_texture {
+                    Some(t) => t,
+                    None => continue,
+                };
+
+                let (wx, wy, ww, wh) = (x as f32, y as f32, w as f32, h as f32);
+                gl.Uniform4f(self.win_uniforms.rect, wx, wy, ww, wh);
+                gl.Uniform1f(self.win_uniforms.opacity, 1.0);
+                gl.Uniform1f(self.win_uniforms.radius, 6.0);
+                gl.Uniform2f(self.win_uniforms.size, ww, wh);
+                gl.Uniform1f(self.win_uniforms.dim, 1.0);
+
+                let [cu, cv, cw, ch] = win.content_uv;
+                let (uv_x, uv_y, uv_w, uv_h) = if win.y_inverted {
+                    (cu, cv + ch, cw, -ch)
+                } else {
+                    (cu, cv, cw, ch)
+                };
+                gl.Uniform4f(self.win_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
+                gl.Uniform1f(self.win_uniforms.ripple_progress, -1.0);
+                gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
+
+                gl.ActiveTexture(ffi::TEXTURE0);
+                self.bind_window_texture(gl, tex);
+                gl.Uniform1i(self.win_uniforms.texture, 0);
+
+                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            }
         }
     }
 

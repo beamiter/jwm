@@ -493,53 +493,42 @@ impl WaylandCompositor {
     // Adaptive blur quality
     // -----------------------------------------------------------------------
 
-    /// Compute the blur quality level for a given window, based on:
-    /// - Whether adaptive quality is enabled (`blur_quality_auto`)
-    /// - Per-monitor quality overrides
-    #[allow(dead_code)]
-    pub(crate) fn compute_window_blur_quality(
-        &self,
-        window_id: u64,
-        focused: Option<u64>,
-    ) -> BlurQuality {
-        // If auto-quality is disabled, return the global setting.
+    /// Compute the effective blur quality for the screen-wide blur pass.
+    ///
+    /// The Wayland backend runs a single global dual-Kawase pass (unlike the
+    /// X11 backend, which blurs per-window), so quality is computed globally:
+    /// - When `blur_quality_auto` is off, the user's `blur_quality` is used as-is.
+    /// - When on, recent GPU load can degrade quality *below* that baseline, but
+    ///   never raise it above (auto may only reduce cost, never add it).
+    pub(crate) fn compute_global_blur_quality(&self) -> BlurQuality {
         if !self.blur_quality_auto {
             return self.blur_quality;
         }
 
-        // Check per-monitor override: find which monitor contains this window.
-        if let Some(ws) = self.windows.get(&window_id) {
-            let win_cx = ws.width / 2;
-            let win_cy = ws.height / 2;
-
-            for &(mon_id, mx, my, mw, mh) in &self.monitors {
-                let contains_x =
-                    (win_cx as i32) >= mx && (win_cx as i32) < mx + mw as i32;
-                let contains_y =
-                    (win_cy as i32) >= my && (win_cy as i32) < my + mh as i32;
-                if contains_x && contains_y {
-                    if let Some(&quality) = self.blur_quality_by_monitor.get(&mon_id) {
-                        return quality;
-                    }
-                    break;
-                }
-            }
-        }
-
-        // Focused window always gets full quality.
-        if focused == Some(window_id) {
-            return BlurQuality::Full;
-        }
-
-        // Adaptive: estimate GPU load from frame times.
-        // last_gpu_load is a percentage 0..100.
-        if self.last_gpu_load >= 80 {
+        // Adaptive: estimate from recent GPU load (percentage 0..100).
+        let load_quality = if self.last_gpu_load >= 80 {
             BlurQuality::Minimal
         } else if self.last_gpu_load >= 70 {
             BlurQuality::Reduced
         } else {
             BlurQuality::Full
+        };
+
+        Self::more_reduced_blur_quality(load_quality, self.blur_quality)
+    }
+
+    /// Return the more aggressively reduced of two qualities
+    /// (Full = most blur levels, Minimal = fewest). Used so the global
+    /// `blur_quality` setting bounds how much adaptive auto-quality may add.
+    fn more_reduced_blur_quality(a: BlurQuality, b: BlurQuality) -> BlurQuality {
+        fn rank(q: BlurQuality) -> u8 {
+            match q {
+                BlurQuality::Full => 0,
+                BlurQuality::Reduced => 1,
+                BlurQuality::Minimal => 2,
+            }
         }
+        if rank(a) >= rank(b) { a } else { b }
     }
 
     // -----------------------------------------------------------------------
@@ -669,6 +658,19 @@ mod tests {
         let list: Vec<String> = vec![];
         assert!(WaylandCompositor::class_matches_exclude("flameshot", &list));
         assert!(WaylandCompositor::class_matches_exclude("Flameshot", &list));
+    }
+
+    #[test]
+    fn test_more_reduced_blur_quality_picks_fewer_levels() {
+        use BlurQuality::*;
+        // Full = most levels, Minimal = fewest. The "more reduced" of two
+        // qualities is the one with fewer levels.
+        assert_eq!(WaylandCompositor::more_reduced_blur_quality(Full, Minimal), Minimal);
+        assert_eq!(WaylandCompositor::more_reduced_blur_quality(Reduced, Full), Reduced);
+        assert_eq!(WaylandCompositor::more_reduced_blur_quality(Reduced, Minimal), Minimal);
+        assert_eq!(WaylandCompositor::more_reduced_blur_quality(Full, Full), Full);
+        // Symmetric.
+        assert_eq!(WaylandCompositor::more_reduced_blur_quality(Minimal, Full), Minimal);
     }
 
     #[test]

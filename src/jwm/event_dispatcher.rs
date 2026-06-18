@@ -167,12 +167,30 @@ impl WMController for Jwm {
         detail: u8,
         time: u32,
     ) {
+        // Annotation mode: a button press starts a new stroke at the cursor.
+        if self.features.annotation_active {
+            self.features.annotation_drawing = true;
+            if backend.has_compositor() {
+                let (rx, ry) = self.last_mouse_root;
+                backend.compositor_annotation_begin_stroke();
+                backend.compositor_annotation_add_point(rx as f32, ry as f32);
+                backend.compositor_force_full_redraw();
+            }
+            return;
+        }
+
         if let Err(e) = self.on_button_press_internal(backend, target, state, detail, time) {
             error!("Error handling ButtonPress: {:?}", e);
         }
     }
 
     fn on_button_release(&mut self, backend: &mut dyn Backend, _target: HitTarget, _time: u32) {
+        // Annotation mode: a button release lifts the pen (ends the current stroke).
+        if self.features.annotation_active && self.features.annotation_drawing {
+            self.features.annotation_drawing = false;
+            return;
+        }
+
         // Screenshot region selection: on mouse release, commit the selection
         // and wait for the user to choose save action (Enter=file, c=clipboard).
         if self.features.screenshot.active && self.features.screenshot.dragging {
@@ -283,6 +301,16 @@ impl WMController for Jwm {
                 let h = (sy - root_y).abs() as f32;
                 // Always update preview, even for tiny movements
                 backend.compositor_set_snap_preview(Some((x, y, w.max(1.0), h.max(1.0))));
+                backend.compositor_force_full_redraw();
+            }
+            return;
+        }
+
+        // Annotation drawing: while the pen is down, feed points into the current stroke.
+        if self.features.annotation_active && self.features.annotation_drawing {
+            self.last_mouse_root = (root_x, root_y);
+            if backend.has_compositor() {
+                backend.compositor_annotation_add_point(root_x as f32, root_y as f32);
                 backend.compositor_force_full_redraw();
             }
             return;

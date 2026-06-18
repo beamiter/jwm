@@ -41,6 +41,17 @@ impl Compositor {
         self.needs_render = true;
     }
 
+    pub(in crate::backend::x11) fn annotation_new_stroke(&mut self) {
+        if !self.annotation_active {
+            return;
+        }
+        self.annotation_strokes.push(AnnotationStroke {
+            points: Vec::new(),
+            color: self.annotation_color,
+            width: self.annotation_line_width,
+        });
+    }
+
     /// Render all annotation strokes as GL_LINES.
     pub(super) fn render_annotations(&self, proj: &[f32; 16]) {
         if self.annotation_strokes.is_empty() {

@@ -15,6 +15,7 @@ pub mod mouse_handler;
 pub mod navigation;
 pub mod property_handler;
 pub mod rules;
+pub mod session;
 pub mod stacking;
 pub mod statusbar;
 pub mod strut_manager;
@@ -256,6 +257,12 @@ impl Jwm {
             "toggle_magnifier"
         } else if eq!(Jwm::toggle_peek) {
             "toggle_peek"
+        } else if eq!(Jwm::toggle_annotation) {
+            "toggle_annotation"
+        } else if eq!(Jwm::save_session) {
+            "save_session"
+        } else if eq!(Jwm::restore_session) {
+            "restore_session"
         } else if eq!(Jwm::toggle_expose) {
             "toggle_expose"
         } else if eq!(Jwm::toggle_recording) {

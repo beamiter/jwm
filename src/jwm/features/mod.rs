@@ -29,6 +29,10 @@ pub struct FeatureStates {
     pub peek_active: bool,
     /// Expose / Mission Control 模式
     pub expose_active: bool,
+    /// Annotation (屏幕标注) 模式
+    pub annotation_active: bool,
+    /// Annotation 正在绘制中（鼠标按住）
+    pub annotation_drawing: bool,
 }
 
 impl FeatureStates {
@@ -44,6 +48,7 @@ impl FeatureStates {
             || self.magnifier.enabled
             || self.peek_active
             || self.expose_active
+            || self.annotation_active
     }
 
     /// 禁用所有特性（紧急退出）
@@ -54,6 +59,8 @@ impl FeatureStates {
         self.magnifier.disable();
         self.peek_active = false;
         self.expose_active = false;
+        self.annotation_active = false;
+        self.annotation_drawing = false;
     }
 
     /// 切换 Peek 模式

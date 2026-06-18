@@ -1118,6 +1118,12 @@ impl Config {
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Shift".to_string()],
+                key: "a".to_string(),
+                function: "toggle_annotation".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
                 modifier: vec!["Mod1".to_string()],
                 key: "j".to_string(),
                 function: "focusstack".to_string(),
@@ -1745,6 +1751,9 @@ impl Config {
             "cycle_overview" => Some(Jwm::cycle_overview),
             "toggle_magnifier" => Some(Jwm::toggle_magnifier),
             "toggle_peek" => Some(Jwm::toggle_peek),
+            "toggle_annotation" => Some(Jwm::toggle_annotation),
+            "save_session" => Some(Jwm::save_session),
+            "restore_session" => Some(Jwm::restore_session),
             "toggle_expose" => Some(Jwm::toggle_expose),
             "toggle_recording" => Some(Jwm::toggle_recording),
 

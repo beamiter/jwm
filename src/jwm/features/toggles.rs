@@ -304,6 +304,32 @@ impl Jwm {
         Ok(())
     }
 
+    /// 切换屏幕标注（Annotation）模式
+    pub fn toggle_annotation(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.features.annotation_active = !self.features.annotation_active;
+        backend.compositor_set_annotation_mode(self.features.annotation_active);
+        if self.features.annotation_active {
+            // Grab keyboard (Escape to exit) and pointer (draw over all windows).
+            if let Some(root) = backend.root_window() {
+                let _ = backend.key_ops().grab_keyboard(root);
+            }
+            let pointer_mask = (EventMaskBits::BUTTON_PRESS
+                | EventMaskBits::BUTTON_RELEASE
+                | EventMaskBits::POINTER_MOTION)
+                .bits();
+            let _ = backend.input_ops().grab_pointer(pointer_mask, None);
+        } else {
+            self.features.annotation_drawing = false;
+            let _ = backend.key_ops().ungrab_keyboard();
+            let _ = backend.input_ops().ungrab_pointer();
+        }
+        Ok(())
+    }
+
     /// 切换屏幕录制
     pub fn toggle_recording(
         &mut self,

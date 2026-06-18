@@ -968,3 +968,89 @@ impl Jwm {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ClientKey;
+    use crate::Jwm;
+    use slotmap::SlotMap;
+
+    fn keys(n: usize) -> (SlotMap<ClientKey, ()>, Vec<ClientKey>) {
+        let mut sm: SlotMap<ClientKey, ()> = SlotMap::new();
+        let ks = (0..n).map(|_| sm.insert(())).collect();
+        (sm, ks)
+    }
+
+    #[test]
+    fn primary_tag_index_basics() {
+        // Empty and "all tags" masks are ambiguous → None.
+        assert_eq!(Jwm::primary_tag_index(0), None);
+        assert_eq!(Jwm::primary_tag_index(u32::MAX), None);
+        // Single-bit masks map to their bit position.
+        assert_eq!(Jwm::primary_tag_index(0b0001), Some(0));
+        assert_eq!(Jwm::primary_tag_index(0b0100), Some(2));
+        // Multi-bit mask resolves to the lowest set bit (trailing zeros).
+        assert_eq!(Jwm::primary_tag_index(0b0110), Some(1));
+    }
+
+    #[test]
+    fn tag_switch_direction_forward_and_backward() {
+        let len = 9;
+        // tag 1 (idx 0) → tag 2 (idx 1): forward.
+        assert_eq!(Jwm::tag_switch_direction(0b001, 0b010, len), 1);
+        // tag 4 (idx 2) → tag 2 (idx 1): backward.
+        assert_eq!(Jwm::tag_switch_direction(0b100, 0b010, len), -1);
+    }
+
+    #[test]
+    fn tag_switch_direction_wraps_shortest_path() {
+        let len = 9;
+        // idx 8 → idx 0: direct delta -8, wrap-forward +1 is shorter → forward.
+        let last = 1u32 << 8;
+        assert_eq!(Jwm::tag_switch_direction(last, 0b1, len), 1);
+        // idx 0 → idx 8: direct +8, wrap-backward -1 is shorter → backward.
+        assert_eq!(Jwm::tag_switch_direction(0b1, last, len), -1);
+    }
+
+    #[test]
+    fn tag_switch_direction_edge_cases() {
+        // Same tag → defaults to forward (1).
+        assert_eq!(Jwm::tag_switch_direction(0b010, 0b010, 9), 1);
+        // Invalid masks → defaults to forward (1).
+        assert_eq!(Jwm::tag_switch_direction(0, 0b010, 9), 1);
+        assert_eq!(Jwm::tag_switch_direction(0b010, u32::MAX, 9), 1);
+        // tags_len 0 → forward.
+        assert_eq!(Jwm::tag_switch_direction(0b001, 0b010, 0), 1);
+    }
+
+    #[test]
+    fn next_in_group_walks_forward_then_stops() {
+        let (_sm, k) = keys(3);
+        assert_eq!(Jwm::next_in_group(&k, k[0]), Some(k[1]));
+        assert_eq!(Jwm::next_in_group(&k, k[1]), Some(k[2]));
+        // Last element has no successor.
+        assert_eq!(Jwm::next_in_group(&k, k[2]), None);
+    }
+
+    #[test]
+    fn prev_in_group_walks_backward_then_stops() {
+        let (_sm, k) = keys(3);
+        assert_eq!(Jwm::prev_in_group(&k, k[2]), Some(k[1]));
+        assert_eq!(Jwm::prev_in_group(&k, k[1]), Some(k[0]));
+        // First element has no predecessor.
+        assert_eq!(Jwm::prev_in_group(&k, k[0]), None);
+    }
+
+    #[test]
+    fn in_group_missing_key_returns_none() {
+        // Mint 3 keys from one map; the group is only the first 2, so k[2] is
+        // a valid-but-absent key. (Keys from two separate SlotMaps would alias.)
+        let (_sm, k) = keys(3);
+        let group = &k[..2];
+        assert_eq!(Jwm::next_in_group(group, k[2]), None);
+        assert_eq!(Jwm::prev_in_group(group, k[2]), None);
+        // Empty group.
+        assert_eq!(Jwm::next_in_group(&[], k[0]), None);
+        assert_eq!(Jwm::prev_in_group(&[], k[0]), None);
+    }
+}

@@ -9,7 +9,14 @@ impl WaylandCompositor {
         if self.blur_fbos.is_empty() {
             return;
         }
-        let levels = (self.blur_strength as usize).min(self.blur_fbos.len());
+        let base_levels = (self.blur_strength as usize).min(self.blur_fbos.len());
+        // Apply adaptive/global blur-quality cap (mirrors X11 per-window cap,
+        // but applied to the single global pass on Wayland).
+        let levels = match self.compute_global_blur_quality() {
+            BlurQuality::Full => base_levels,
+            BlurQuality::Reduced => (base_levels / 2).max(1),
+            BlurQuality::Minimal => 1,
+        };
         if levels == 0 {
             return;
         }

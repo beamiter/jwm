@@ -1144,6 +1144,9 @@ pub trait Backend: Send {
     /// Add annotation point (Phase 6.2).
     fn compositor_annotation_add_point(&mut self, _x: f32, _y: f32) {}
 
+    /// Begin a new annotation stroke (e.g. on pen-down / button press).
+    fn compositor_annotation_begin_stroke(&mut self) {}
+
     /// Start screen recording (Phase 7.3).
     fn compositor_start_recording(&mut self, _path: &str) {}
 

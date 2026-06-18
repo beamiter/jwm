@@ -396,7 +396,7 @@ impl WaylandCompositor {
             && !any_animating
             && !force_render
             && !self.peek_active
-            && self.window_groups.is_empty()
+            && (!self.window_tabs_enabled || self.window_groups.is_empty())
             && !self.annotation_active
             && self.tilt_x.abs() <= 0.001
             && self.tilt_y.abs() <= 0.001
@@ -1016,7 +1016,7 @@ impl WaylandCompositor {
         // =================================================================
         // 15c. Tab bar for window groups
         // =================================================================
-        if !self.window_groups.is_empty() {
+        if self.window_tabs_enabled && !self.window_groups.is_empty() {
             self.render_tab_bar(gl, &projection);
         }
 

@@ -52,6 +52,18 @@ impl Jwm {
             // Fall through to normal keybinding dispatch so Alt+E can toggle off
         }
 
+        if self.features.annotation_active {
+            if keysym == keys::KEY_Escape {
+                self.features.annotation_active = false;
+                self.features.annotation_drawing = false;
+                backend.compositor_set_annotation_mode(false);
+                let _ = backend.key_ops().ungrab_keyboard();
+                let _ = backend.input_ops().ungrab_pointer();
+                return Ok(());
+            }
+            // Fall through to normal keybinding dispatch so Alt+Shift+A can toggle off
+        }
+
         if self.features.overview.active {
             let overview_mods = clean_state
                 & (Mods::SHIFT

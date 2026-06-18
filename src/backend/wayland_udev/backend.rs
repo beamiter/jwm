@@ -3242,6 +3242,12 @@ impl Backend for UdevBackend {
         }
     }
 
+    fn compositor_annotation_begin_stroke(&mut self) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.annotation_new_stroke();
+        }
+    }
+
     fn compositor_start_recording(&mut self, path: &str) {
         if let Some(c) = self.compositor.as_mut() {
             c.start_recording(path);

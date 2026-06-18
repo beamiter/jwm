@@ -356,3 +356,53 @@ impl Jwm {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::Jwm;
+
+    #[test]
+    fn truncate_empty_stays_empty() {
+        assert_eq!(Jwm::truncate_chars(String::new(), 10), "");
+    }
+
+    #[test]
+    fn truncate_shorter_than_limit_unchanged() {
+        assert_eq!(Jwm::truncate_chars("hello".into(), 10), "hello");
+    }
+
+    #[test]
+    fn truncate_exact_limit_unchanged() {
+        assert_eq!(Jwm::truncate_chars("hello".into(), 5), "hello");
+    }
+
+    #[test]
+    fn truncate_longer_than_limit_cuts_to_char_count() {
+        assert_eq!(Jwm::truncate_chars("hello world".into(), 5), "hello");
+    }
+
+    #[test]
+    fn truncate_zero_yields_empty() {
+        assert_eq!(Jwm::truncate_chars("hello".into(), 0), "");
+    }
+
+    #[test]
+    fn truncate_counts_chars_not_bytes_and_respects_boundaries() {
+        // Each CJK char is 3 bytes; "中文标题测试" is 6 chars / 18 bytes.
+        let s = "中文标题测试".to_string();
+        // Limit by char count, never splitting a multi-byte char.
+        let out = Jwm::truncate_chars(s, 3);
+        assert_eq!(out, "中文标");
+        assert_eq!(out.chars().count(), 3);
+        assert_eq!(out.len(), 9); // 3 chars * 3 bytes
+    }
+
+    #[test]
+    fn truncate_mixed_width_boundary_is_safe() {
+        // Mix of 1-byte and multi-byte: "a→b" where → (U+2192) is 3 bytes.
+        let out = Jwm::truncate_chars("a→b".to_string(), 2);
+        assert_eq!(out, "a→");
+        // Must remain valid UTF-8 (would panic on a mid-char truncate).
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+}

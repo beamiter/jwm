@@ -499,7 +499,6 @@ impl WaylandCompositor {
         self.needs_render = true;
     }
 
-    #[allow(dead_code)]
     pub(crate) fn annotation_new_stroke(&mut self) {
         if !self.annotation_active {
             return;

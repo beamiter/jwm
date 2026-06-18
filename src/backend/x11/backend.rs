@@ -1131,6 +1131,12 @@ impl Backend for X11Backend {
         }
     }
 
+    fn compositor_annotation_begin_stroke(&mut self) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.annotation_new_stroke();
+        }
+    }
+
     fn compositor_zoom_to_fit(&mut self, window: Option<u32>) {
         if let Some(c) = self.compositor.as_mut() {
             c.zoom_to_fit(window);
