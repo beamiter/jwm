@@ -122,9 +122,6 @@ impl Jwm {
             return Ok(());
         }
 
-        // Find the first matching binding by immutable borrow; extract the
-        // (Copy) fn pointer and clone only the matched arg instead of cloning
-        // the whole key_bindings Vec on every keystroke.
         let key_mods = Mods::SHIFT
             | Mods::CONTROL
             | Mods::ALT
@@ -132,6 +129,64 @@ impl Jwm {
             | Mods::MOD2
             | Mods::MOD3
             | Mods::MOD5;
+
+        // Chord state machine. The leader sets `chord_armed_until` and grabs
+        // the keyboard so the WM gets the next keypress regardless of focus.
+        // The next key either matches a chord binding (dispatch + ungrab) or
+        // falls through to normal handling (also ungrab).
+        if let Some(chord) = self.chord_compiled.clone() {
+            // Expire stale arming.
+            if let Some(deadline) = self.chord_armed_until {
+                if std::time::Instant::now() >= deadline {
+                    self.chord_armed_until = None;
+                    let _ = backend.key_ops().ungrab_keyboard();
+                }
+            }
+
+            if self.chord_armed_until.is_some() {
+                // Find a matching second-key binding.
+                let mut hit = None;
+                for b in &chord.bindings {
+                    if b.key_sym == keysym && (b.mask & key_mods) == clean_state {
+                        hit = b.func_opt.map(|f| (f, b.arg.clone()));
+                        break;
+                    }
+                }
+                self.chord_armed_until = None;
+                let _ = backend.key_ops().ungrab_keyboard();
+                if let Some((func, arg)) = hit {
+                    if let Err(e) = func(self, backend, &arg) {
+                        error!("Error executing chord shortcut: {:?}", e);
+                    }
+                    return Ok(());
+                }
+                // Allow the leader itself to re-arm (Mod+Space then Mod+Space).
+                if chord.leader == (clean_state, keysym) {
+                    self.chord_armed_until =
+                        Some(std::time::Instant::now() + chord.timeout);
+                    if let Some(root) = backend.root_window() {
+                        let _ = backend.key_ops().grab_keyboard(root);
+                    }
+                    return Ok(());
+                }
+                // Otherwise fall through so the second key gets normal dispatch.
+            } else if chord.leader == (clean_state, keysym) {
+                // Arm the chord and capture next key.
+                self.chord_armed_until =
+                    Some(std::time::Instant::now() + chord.timeout);
+                if let Some(root) = backend.root_window() {
+                    let _ = backend.key_ops().grab_keyboard(root);
+                }
+                if debug_keys {
+                    info!("[chord] leader fired, armed for {:?}", chord.timeout);
+                }
+                return Ok(());
+            }
+        }
+
+        // Find the first matching binding by immutable borrow; extract the
+        // (Copy) fn pointer and clone only the matched arg instead of cloning
+        // the whole key_bindings Vec on every keystroke.
         let found = self
             .key_bindings
             .iter()

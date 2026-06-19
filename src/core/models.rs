@@ -40,6 +40,13 @@ pub struct WMClient {
     pub mon: Option<MonitorKey>,
 
     pub monitor_num: u32,
+
+    /// PID of the process that owns this window (None when unknown / Wayland).
+    pub pid: Option<u32>,
+
+    /// If this window is currently swallowing a parent terminal, the swallowed
+    /// parent's ClientKey. When this client unmaps, the parent is restored.
+    pub swallowing: Option<ClientKey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -98,6 +105,10 @@ pub struct ClientState {
     pub is_maximized_vert: bool,
     pub is_maximized_horz: bool,
     pub is_hidden: bool,
+    /// True when this client is a terminal that has been "swallowed" by a child
+    /// process (e.g. mpv launched from a shell). Excluded from arrange and from
+    /// visibility queries until the swallowing child unmaps.
+    pub is_swallowed: bool,
     pub is_above: bool,
     pub is_below: bool,
     pub demands_attention: bool,
@@ -122,6 +133,8 @@ impl WMClient {
             state: ClientState::default(),
             mon: None,
             monitor_num: 1000,
+            pid: None,
+            swallowing: None,
         }
     }
 

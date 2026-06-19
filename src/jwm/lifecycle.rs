@@ -243,6 +243,8 @@ impl Jwm {
 
         // 1. Rebind keys
         self.key_bindings = cfg.get_keys();
+        self.chord_compiled = cfg.compile_chord();
+        self.chord_armed_until = None;
         if let Err(e) = self.grabkeys(backend) {
             warn!("[config] failed to re-grab keys: {e}");
         }

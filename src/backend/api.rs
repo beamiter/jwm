@@ -1093,8 +1093,10 @@ pub trait Backend: Send {
     fn compositor_set_overview_monitor(&mut self, _x: i32, _y: i32, _w: u32, _h: u32) {}
 
     /// Update compositor with current monitor geometries for per-monitor wallpaper.
-    /// Each entry: (monitor_index, x, y, w, h).
-    fn compositor_set_monitors(&mut self, _monitors: &[(u32, i32, i32, u32, u32)]) {}
+    /// Each entry: (monitor_index, x, y, w, h, active_tags).
+    /// `active_tags` is a bitmask of currently-visible tag indices on that monitor;
+    /// it lets the compositor pick a tag-specific wallpaper when configured.
+    fn compositor_set_monitors(&mut self, _monitors: &[(u32, i32, i32, u32, u32, u32)]) {}
 
     /// Update overview selection highlight.
     fn compositor_set_overview_selection(&mut self, _window: WindowId) {}

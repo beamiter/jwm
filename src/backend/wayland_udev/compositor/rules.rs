@@ -610,7 +610,7 @@ impl WaylandCompositor {
     fn find_window_monitor_id(&self, x: i32, y: i32, w: u32, h: u32) -> u32 {
         let cx = x + w as i32 / 2;
         let cy = y + h as i32 / 2;
-        for &(id, mx, my, mw, mh) in &self.monitors {
+        for &(id, mx, my, mw, mh, _) in &self.monitors {
             if cx >= mx
                 && cx < mx + mw as i32
                 && cy >= my

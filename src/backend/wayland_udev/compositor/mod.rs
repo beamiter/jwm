@@ -359,6 +359,9 @@ pub(crate) struct MonitorWallpaper {
     pub mode: WallpaperMode,
     pub img_w: u32,
     pub img_h: u32,
+    /// Currently-loaded wallpaper path (used to skip reloads when active tags
+    /// change but the resolved wallpaper for this monitor stays the same).
+    pub current_path: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -707,7 +710,7 @@ pub(crate) struct WaylandCompositor {
     window_groups: Vec<(u32, Vec<(u32, String, bool)>)>,
 
     // Monitors info
-    monitors: Vec<(u32, i32, i32, u32, u32)>,
+    monitors: Vec<(u32, i32, i32, u32, u32, u32)>,
 
     // Zoom to fit
     zoom_to_fit_window: Option<u32>,

@@ -24,9 +24,9 @@ impl PerMonitorRenderer {
         }
     }
 
-    pub(crate) fn set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32)]) {
+    pub(crate) fn set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32, u32)]) {
         self.monitors.clear();
-        for &(id, x, y, w, h) in monitors {
+        for &(id, x, y, w, h, _active_tags) in monitors {
             self.monitors.push(MonitorRegion {
                 id,
                 x,

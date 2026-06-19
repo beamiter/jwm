@@ -42,6 +42,7 @@ impl Jwm {
         client.state.client_fact = 1.0;
         client.name = self.fetch_window_title(backend, client.win);
         self.update_class_info(backend, &mut client);
+        client.pid = backend.property_ops().get_window_pid(client.win);
 
         info!("{}", client);
         if client.is_status_bar(cfg.status_bar_name()) {
@@ -472,6 +473,8 @@ impl Jwm {
 
         self.suppress_mouse_focus_until =
             Some(std::time::Instant::now() + std::time::Duration::from_millis(300));
+
+        self.try_swallow(backend, client_key);
 
         Ok(())
     }
@@ -1162,6 +1165,28 @@ impl Jwm {
         destroyed: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.animations.remove(client_key);
+        // If this client is swallowing a parent, restore the parent first so
+        // it gets remapped before we drop our reference to the swallow link.
+        self.try_unswallow(backend, client_key);
+        // If this client itself was swallowed, drop the dangling pointer from
+        // its swallowing child (the child is still alive).
+        let was_swallowed_by: Option<ClientKey> = self
+            .state
+            .client_order
+            .iter()
+            .copied()
+            .find(|&k| {
+                self.state
+                    .clients
+                    .get(k)
+                    .and_then(|c| c.swallowing)
+                    == Some(client_key)
+            });
+        if let Some(parent_holder) = was_swallowed_by {
+            if let Some(c) = self.state.clients.get_mut(parent_holder) {
+                c.swallowing = None;
+            }
+        }
         let win = self.state.clients.get(client_key).map(|c| c.win);
         if let Some(client) = self.state.clients.get(client_key) {
             info!("[unmanage_regular_client] Removing client {}", client);

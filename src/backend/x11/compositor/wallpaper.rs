@@ -211,75 +211,141 @@ impl Compositor {
     }
 
     /// Update monitor geometries and per-monitor wallpaper textures.
-    /// Called when monitors are added/removed/changed.
-    /// `monitors`: list of (index, x, y, w, h) for each monitor.
-    pub(crate) fn set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32)]) {
-        // Phase 3.5: Save old wallpaper texture for crossfade
-        if self.wallpaper_crossfade && self.wallpaper_texture.is_some() {
-            if let Some(old) = self.old_wallpaper_texture.take() {
-                unsafe { self.gl.delete_texture(old); }
-            }
-            self.old_wallpaper_texture = self.wallpaper_texture;
-            self.wallpaper_transition_start = Some(std::time::Instant::now());
-        }
+    /// Called when monitors are added/removed/changed AND when the active
+    /// tag mask changes on a monitor (per-tag wallpaper resolution).
+    /// `monitors`: list of (index, x, y, w, h, active_tags) for each monitor.
+    pub(crate) fn set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32, u32)]) {
+        // Detect topology change: if monitor count or geometry differs we have
+        // to tear down existing per-monitor wallpaper textures. If only
+        // `active_tags` changed (typical view/toggleview path), keep existing
+        // textures and just re-resolve paths.
+        let geometry_changed = self.monitor_wallpapers.len() != monitors.len()
+            || self
+                .monitor_wallpapers
+                .iter()
+                .zip(monitors.iter())
+                .any(|(mw, b)| (mw.mon_x, mw.mon_y, mw.mon_w, mw.mon_h) != (b.1, b.2, b.3, b.4));
 
-        // Clean up old per-monitor textures
-        unsafe {
-            for mw in self.monitor_wallpapers.drain(..) {
-                if let Some(tex) = mw.texture {
-                    self.gl.delete_texture(tex);
+        if geometry_changed {
+            // Phase 3.5: Save old wallpaper texture for crossfade
+            if self.wallpaper_crossfade && self.wallpaper_texture.is_some() {
+                if let Some(old) = self.old_wallpaper_texture.take() {
+                    unsafe { self.gl.delete_texture(old); }
+                }
+                self.old_wallpaper_texture = self.wallpaper_texture;
+                self.wallpaper_transition_start = Some(std::time::Instant::now());
+            }
+
+            // Clean up old per-monitor textures
+            unsafe {
+                for mw in self.monitor_wallpapers.drain(..) {
+                    if let Some(tex) = mw.texture {
+                        self.gl.delete_texture(tex);
+                    }
                 }
             }
+            self.pending_monitor_wallpapers.clear();
         }
 
         let cfg = crate::config::CONFIG.load();
         let behavior = cfg.behavior();
 
-        // Clear any previous pending monitor wallpaper loads
-        self.pending_monitor_wallpapers.clear();
-
-        for &(idx, x, y, w, h) in monitors {
-            // Check if there's a per-monitor config for this index
-            let per_mon = behavior.wallpaper_monitors.iter().find(|wm| wm.monitor == idx);
-
-            let (path, mode_str) = if let Some(pm) = per_mon {
-                (
-                    if pm.path.is_empty() { &behavior.wallpaper } else { &pm.path },
-                    if pm.mode.is_empty() { &behavior.wallpaper_mode } else { &pm.mode },
-                )
-            } else {
-                (&behavior.wallpaper, &behavior.wallpaper_mode)
-            };
-
+        for &(idx, x, y, w, h, active_tags) in monitors {
+            let (path, mode_str) = Self::resolve_wallpaper_for_tag(behavior, idx, active_tags);
+            let path = path.to_string();
             let mode = Self::parse_wallpaper_mode(mode_str);
-            let mon_idx = self.monitor_wallpapers.len();
 
-            // Spawn async decode for per-monitor wallpaper
-            if !path.is_empty() {
-                let rx = Self::load_wallpaper_async(path, self.screen_w, self.screen_h, mode);
-                self.pending_monitor_wallpapers.push((mon_idx, rx));
+            if geometry_changed {
+                let mon_idx = self.monitor_wallpapers.len();
+                if !path.is_empty() {
+                    let rx = Self::load_wallpaper_async(&path, self.screen_w, self.screen_h, mode);
+                    self.pending_monitor_wallpapers.push((mon_idx, rx));
+                }
+                self.monitor_wallpapers.push(MonitorWallpaper {
+                    mon_x: x,
+                    mon_y: y,
+                    mon_w: w,
+                    mon_h: h,
+                    texture: None,
+                    mode,
+                    img_w: 0,
+                    img_h: 0,
+                    current_path: path,
+                });
+            } else if let Some(mw) = self.monitor_wallpapers.get_mut(idx as usize) {
+                if mw.current_path != path || mw.mode != mode {
+                    mw.mode = mode;
+                    mw.current_path = path.clone();
+                    if !path.is_empty() {
+                        let rx = Self::load_wallpaper_async(
+                            &path,
+                            self.screen_w,
+                            self.screen_h,
+                            mode,
+                        );
+                        self.pending_monitor_wallpapers.push((idx as usize, rx));
+                    }
+                }
             }
-
-            self.monitor_wallpapers.push(MonitorWallpaper {
-                mon_x: x,
-                mon_y: y,
-                mon_w: w,
-                mon_h: h,
-                texture: None, // will be filled when async load completes
-                mode,
-                img_w: 0,
-                img_h: 0,
-            });
         }
 
         self.needs_render = true;
-        log::info!(
-            "compositor: set_monitors: {} monitors, {} with wallpaper overrides",
-            monitors.len(),
-            behavior.wallpaper_monitors.len(),
-        );
+        if geometry_changed {
+            log::info!(
+                "compositor: set_monitors: {} monitors, {} monitor / {} tag wallpaper overrides",
+                monitors.len(),
+                behavior.wallpaper_monitors.len(),
+                behavior.wallpaper_tags.len(),
+            );
+        }
     }
 
+    /// Resolve wallpaper (path, mode) for a monitor given its currently-active tag mask.
+    /// Priority: tag-specific (this monitor) > tag-specific (any monitor) >
+    /// monitor override > global.
+    fn resolve_wallpaper_for_tag<'a>(
+        behavior: &'a crate::config::BehaviorConfig,
+        monitor_idx: u32,
+        active_tags: u32,
+    ) -> (&'a str, &'a str) {
+        let mut best: Option<&'a crate::config::WallpaperTagConfig> = None;
+        let mut best_specific = false;
+        for wt in &behavior.wallpaper_tags {
+            if wt.path.is_empty() {
+                continue;
+            }
+            if active_tags & (1u32 << wt.tag) == 0 {
+                continue;
+            }
+            let specific = wt.monitor == monitor_idx as i32;
+            let any = wt.monitor < 0;
+            if !specific && !any {
+                continue;
+            }
+            if best.is_none() || (specific && !best_specific) {
+                best = Some(wt);
+                best_specific = specific;
+                if specific {
+                    break;
+                }
+            }
+        }
+        if let Some(wt) = best {
+            let mode = if wt.mode.is_empty() { &behavior.wallpaper_mode } else { &wt.mode };
+            return (&wt.path, mode);
+        }
+
+        if let Some(pm) = behavior
+            .wallpaper_monitors
+            .iter()
+            .find(|wm| wm.monitor == monitor_idx)
+        {
+            let path = if pm.path.is_empty() { &behavior.wallpaper } else { &pm.path };
+            let mode = if pm.mode.is_empty() { &behavior.wallpaper_mode } else { &pm.mode };
+            return (path, mode);
+        }
+        (&behavior.wallpaper, &behavior.wallpaper_mode)
+    }
 }
 
 #[cfg(test)]

@@ -381,50 +381,111 @@ impl WaylandCompositor {
         self.needs_render = true;
     }
 
-    pub(crate) fn set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32)]) {
+    pub(crate) fn set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32, u32)]) {
+        // Detect topology change: if monitor count or geometry differs we have to
+        // tear down existing per-monitor wallpaper textures. If only `active_tags`
+        // changed (typical view/toggleview path), keep existing textures and just
+        // re-resolve paths so unchanged monitors don't trigger a reload.
+        let geometry_changed = self.monitors.len() != monitors.len()
+            || self
+                .monitors
+                .iter()
+                .zip(monitors.iter())
+                .any(|(a, b)| (a.0, a.1, a.2, a.3, a.4) != (b.0, b.1, b.2, b.3, b.4));
+
         self.monitors = monitors.to_vec();
         self.per_monitor_renderer.set_monitors(monitors);
-
-        // Rebuild per-monitor wallpapers (matching X11 backend behavior)
-        self.monitor_wallpapers.clear();
-        self.pending_monitor_wallpapers.clear();
 
         let cfg = CONFIG.load();
         let behavior = cfg.behavior();
 
-        for &(idx, x, y, w, h) in monitors {
-            let per_mon = behavior.wallpaper_monitors.iter().find(|wm| wm.monitor == idx);
+        if geometry_changed {
+            self.monitor_wallpapers.clear();
+            self.pending_monitor_wallpapers.clear();
+        }
 
-            let (path, mode_str) = if let Some(pm) = per_mon {
-                (
-                    if pm.path.is_empty() { &behavior.wallpaper } else { &pm.path },
-                    if pm.mode.is_empty() { &behavior.wallpaper_mode } else { &pm.mode },
-                )
-            } else {
-                (&behavior.wallpaper, &behavior.wallpaper_mode)
-            };
-
+        for &(idx, x, y, w, h, active_tags) in monitors {
+            let (path, mode_str) = Self::resolve_wallpaper_for_tag(behavior, idx, active_tags);
+            let path = path.to_string();
             let mode = Self::parse_wallpaper_mode(mode_str);
-            let mon_idx = self.monitor_wallpapers.len();
 
-            if !path.is_empty() {
-                let rx = Self::load_wallpaper_async(path, w, h, mode);
-                self.pending_monitor_wallpapers.push((mon_idx, rx));
+            if geometry_changed {
+                let mon_idx = self.monitor_wallpapers.len();
+                if !path.is_empty() {
+                    let rx = Self::load_wallpaper_async(&path, w, h, mode);
+                    self.pending_monitor_wallpapers.push((mon_idx, rx));
+                }
+                self.monitor_wallpapers.push(MonitorWallpaper {
+                    mon_x: x,
+                    mon_y: y,
+                    mon_w: w,
+                    mon_h: h,
+                    texture: None,
+                    mode,
+                    img_w: 0,
+                    img_h: 0,
+                    current_path: path,
+                });
+            } else if let Some(mw) = self.monitor_wallpapers.get_mut(idx as usize) {
+                if mw.current_path != path || mw.mode != mode {
+                    mw.mode = mode;
+                    mw.current_path = path.clone();
+                    if !path.is_empty() {
+                        let rx = Self::load_wallpaper_async(&path, w, h, mode);
+                        self.pending_monitor_wallpapers.push((idx as usize, rx));
+                    }
+                }
             }
-
-            self.monitor_wallpapers.push(MonitorWallpaper {
-                mon_x: x,
-                mon_y: y,
-                mon_w: w,
-                mon_h: h,
-                texture: None,
-                mode,
-                img_w: 0,
-                img_h: 0,
-            });
         }
 
         self.needs_render = true;
+    }
+
+    /// Resolve wallpaper (path, mode) for a monitor given its currently-active tag mask.
+    /// Priority: tag-specific (this monitor) > tag-specific (any monitor) >
+    /// monitor override > global.
+    fn resolve_wallpaper_for_tag<'a>(
+        behavior: &'a crate::config::BehaviorConfig,
+        monitor_idx: u32,
+        active_tags: u32,
+    ) -> (&'a str, &'a str) {
+        let mut best: Option<&'a crate::config::WallpaperTagConfig> = None;
+        let mut best_specific = false;
+        for wt in &behavior.wallpaper_tags {
+            if wt.path.is_empty() {
+                continue;
+            }
+            if active_tags & (1u32 << wt.tag) == 0 {
+                continue;
+            }
+            let specific = wt.monitor == monitor_idx as i32;
+            let any = wt.monitor < 0;
+            if !specific && !any {
+                continue;
+            }
+            if best.is_none() || (specific && !best_specific) {
+                best = Some(wt);
+                best_specific = specific;
+                if specific {
+                    break;
+                }
+            }
+        }
+        if let Some(wt) = best {
+            let mode = if wt.mode.is_empty() { &behavior.wallpaper_mode } else { &wt.mode };
+            return (&wt.path, mode);
+        }
+
+        if let Some(pm) = behavior
+            .wallpaper_monitors
+            .iter()
+            .find(|wm| wm.monitor == monitor_idx)
+        {
+            let path = if pm.path.is_empty() { &behavior.wallpaper } else { &pm.path };
+            let mode = if pm.mode.is_empty() { &behavior.wallpaper_mode } else { &pm.mode };
+            return (path, mode);
+        }
+        (&behavior.wallpaper, &behavior.wallpaper_mode)
     }
 
     pub(crate) fn notify_window_move_start(&mut self, window: u64) {

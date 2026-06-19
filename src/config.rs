@@ -540,6 +540,24 @@ pub struct BehaviorConfig {
     /// Monitors without an entry fall back to the global `wallpaper` setting.
     #[serde(default)]
     pub wallpaper_monitors: Vec<WallpaperMonitorConfig>,
+    /// Per-tag wallpaper overrides. Each entry specifies a tag (and optionally monitor)
+    /// with its own wallpaper. Resolution priority when the tag is active:
+    /// tag-specific (monitor match) > tag-specific (any monitor) > monitor override > global.
+    #[serde(default)]
+    pub wallpaper_tags: Vec<WallpaperTagConfig>,
+
+    // --- Window swallowing ---
+    /// Hide a terminal window when a child process opens its own window
+    /// (X11 only — relies on _NET_WM_PID + /proc walk).
+    #[serde(default)]
+    pub swallow_enabled: bool,
+    /// Class names of terminals that may be swallowed. Empty = no swallowing.
+    /// Match is case-insensitive against both class and instance.
+    #[serde(default)]
+    pub swallow_terminals: Vec<String>,
+    /// Class names that should NEVER swallow their parent (popups, menus, etc).
+    #[serde(default)]
+    pub swallow_exceptions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -552,6 +570,25 @@ pub struct WallpaperMonitorConfig {
     /// Wallpaper display mode for this monitor (defaults to global wallpaper_mode).
     #[serde(default)]
     pub mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WallpaperTagConfig {
+    /// Tag index (0-based). Matches when (active_tags & (1 << tag)) != 0.
+    pub tag: u32,
+    /// Monitor index (0-based). Use -1 to match any monitor.
+    #[serde(default = "default_wallpaper_tag_monitor")]
+    pub monitor: i32,
+    /// Path to wallpaper image file for this tag.
+    #[serde(default)]
+    pub path: String,
+    /// Wallpaper display mode for this tag (defaults to global wallpaper_mode).
+    #[serde(default)]
+    pub mode: String,
+}
+
+fn default_wallpaper_tag_monitor() -> i32 {
+    -1
 }
 
 fn default_corner_radius() -> f32 {
@@ -824,6 +861,38 @@ impl AnimationConfig {
 pub struct KeyBindingsConfig {
     pub modkey: String, // "Mod1", "Mod4", etc.
     pub keys: Vec<KeyConfig>,
+    /// Optional two-step chord prefix (e.g. Mod+Space then 'b' for browser).
+    /// When `leader_key` is empty, chord support is disabled.
+    #[serde(default)]
+    pub chord: ChordConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChordConfig {
+    /// Modifier(s) for the leader key (e.g. ["Mod4"]). Empty means no modifier.
+    #[serde(default)]
+    pub leader_modifier: Vec<String>,
+    /// Leader key name (e.g. "space"). Empty disables chord mode.
+    #[serde(default)]
+    pub leader_key: String,
+    /// Time in milliseconds the chord stays armed waiting for the second key.
+    #[serde(default = "default_chord_timeout")]
+    pub timeout_ms: u64,
+    /// Sequence bindings: each entry's `key` is the second key after the leader.
+    #[serde(default)]
+    pub bindings: Vec<KeyConfig>,
+}
+
+fn default_chord_timeout() -> u64 {
+    1500
+}
+
+/// Runtime-ready chord state compiled from `ChordConfig`.
+#[derive(Debug, Clone)]
+pub struct CompiledChord {
+    pub leader: (Mods, KeySym),
+    pub timeout: Duration,
+    pub bindings: Vec<WMKey>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1013,6 +1082,10 @@ impl Default for Config {
                         .into_owned(),
                     wallpaper_mode: default_wallpaper_mode(),
                     wallpaper_monitors: Vec::new(),
+                    wallpaper_tags: Vec::new(),
+                    swallow_enabled: false,
+                    swallow_terminals: Vec::new(),
+                    swallow_exceptions: Vec::new(),
                     // Phase 6: Accessibility
                     colorblind_mode: String::new(),
                     annotation_color: default_annotation_color(),
@@ -1052,6 +1125,7 @@ impl Default for Config {
                 keybindings: KeyBindingsConfig {
                     modkey: "Mod1".to_string(),
                     keys: Self::get_default_keys(),
+                    chord: ChordConfig::default(),
                 },
                 mouse_bindings: MouseBindingsConfig {
                     buttons: Self::get_default_button_configs(),
@@ -1589,6 +1663,21 @@ impl Config {
             }
         }
 
+        for (i, wt) in b.wallpaper_tags.iter().enumerate() {
+            if tag_count > 0 && wt.tag as usize >= tag_count {
+                problems.push(format!(
+                    "behavior.wallpaper_tags[{i}]: tag={} >= tag_count={}",
+                    wt.tag, tag_count
+                ));
+            }
+            if wt.monitor < -1 {
+                problems.push(format!(
+                    "behavior.wallpaper_tags[{i}]: monitor={} (must be >=-1)",
+                    wt.monitor
+                ));
+            }
+        }
+
         if !problems.is_empty() {
             log::warn!(
                 "[config] {} suspect value(s) detected:\n  - {}",
@@ -1689,6 +1778,28 @@ impl Config {
 
     pub fn animation_easing(&self) -> Easing {
         Easing::from_str(&self.inner.animation.easing)
+    }
+
+    /// Compile the chord configuration into a runtime-ready structure.
+    /// Returns `None` when chord support is disabled or the leader is unparseable.
+    pub fn compile_chord(&self) -> Option<CompiledChord> {
+        let chord = &self.inner.keybindings.chord;
+        if chord.leader_key.is_empty() {
+            return None;
+        }
+        let leader_mods = self.parse_modifiers(&chord.leader_modifier);
+        let leader_sym = self.parse_keysym(&chord.leader_key)?;
+        let mut bindings = Vec::with_capacity(chord.bindings.len());
+        for kc in &chord.bindings {
+            if let Some(wmkey) = self.convert_key_config(kc) {
+                bindings.push(wmkey);
+            }
+        }
+        Some(CompiledChord {
+            leader: (leader_mods, leader_sym),
+            timeout: Duration::from_millis(chord.timeout_ms.max(100)),
+            bindings,
+        })
     }
 
     pub fn get_keys(&self) -> Vec<WMKey> {

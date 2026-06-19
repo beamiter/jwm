@@ -1006,6 +1006,78 @@ impl UdevBackend {
                 })?;
         }
 
+        // Hot-reload of the user config: watch the parent directory (not the
+        // file inode itself — editors save via tmpfile+rename, which would
+        // make a file-inode watch silently die after the first save) and push
+        // ConfigChanged into pending_events whenever the config filename
+        // appears with a CLOSE_WRITE / MOVED_TO / CREATE event.
+        {
+            use nix::sys::inotify::{AddWatchFlags, Inotify, InitFlags};
+
+            let pending = pending_events.clone();
+            let setup = || -> Result<(), BackendError> {
+                let config_path = crate::config::Config::get_default_config_path();
+                let watch_dir = config_path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| config_path.clone());
+                let config_file_name = config_path.file_name().map(|n| n.to_os_string());
+
+                let inotify = Inotify::init(InitFlags::IN_NONBLOCK).map_err(|e| {
+                    BackendError::Message(format!("inotify init failed: {e}"))
+                })?;
+                inotify
+                    .add_watch(
+                        &watch_dir,
+                        AddWatchFlags::IN_CLOSE_WRITE
+                            | AddWatchFlags::IN_MOVED_TO
+                            | AddWatchFlags::IN_CREATE,
+                    )
+                    .map_err(|e| {
+                        BackendError::Message(format!(
+                            "inotify watch {:?} failed: {e}",
+                            watch_dir
+                        ))
+                    })?;
+
+                event_loop
+                    .handle()
+                    .insert_source(
+                        calloop::generic::Generic::new(
+                            inotify,
+                            Interest::READ,
+                            Mode::Level,
+                        ),
+                        move |_, inotify, _state| {
+                            let events = inotify.read_events().unwrap_or_default();
+                            let relevant = events.iter().any(|ev| {
+                                match (&config_file_name, &ev.name) {
+                                    (Some(want), Some(got)) => got == want,
+                                    _ => true,
+                                }
+                            });
+                            if relevant {
+                                pending
+                                    .lock_safe()
+                                    .push_back(BackendEvent::ConfigChanged);
+                            }
+                            Ok(PostAction::Continue)
+                        },
+                    )
+                    .map_err(|e| {
+                        BackendError::Message(format!(
+                            "calloop insert_source(inotify) failed: {e}"
+                        ))
+                    })?;
+                Ok(())
+            };
+            if let Err(e) = setup() {
+                log::warn!("[config] hot-reload disabled: {e}");
+            } else {
+                log::info!("[config] hot-reload enabled via inotify");
+            }
+        }
+
         let (mut session, notifier) =
             LibSeatSession::new().map_err(|e| BackendError::Other(Box::new(e)))?;
         let seat_name = session.seat();
@@ -3120,7 +3192,7 @@ impl Backend for UdevBackend {
         }
     }
 
-    fn compositor_set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32)]) {
+    fn compositor_set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32, u32)]) {
         // Build per-monitor (id, hz) pairs from the live output list.
         // Wayland blur is a single global pass shared by every monitor, so the
         // compositor will use the highest Hz to budget blur strength — but we
@@ -3129,7 +3201,7 @@ impl Backend for UdevBackend {
             let shared = self.shared.lock_safe();
             monitors
                 .iter()
-                .map(|&(id, mx, my, _, _)| {
+                .map(|&(id, mx, my, _, _, _)| {
                     let hz = shared
                         .outputs
                         .iter()

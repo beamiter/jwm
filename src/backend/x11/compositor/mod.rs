@@ -367,6 +367,9 @@ struct MonitorWallpaper {
     mode: WallpaperMode,
     img_w: u32,
     img_h: u32,
+    /// Currently-loaded wallpaper path (used to skip reloads when active tags
+    /// change but the resolved wallpaper for this monitor stays the same).
+    current_path: String,
 }
 
 /// Parsed opacity rule: "opacity_percent:class_name"

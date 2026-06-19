@@ -17,6 +17,7 @@ pub mod property_handler;
 pub mod rules;
 pub mod session;
 pub mod stacking;
+pub mod swallowing;
 pub mod statusbar;
 pub mod strut_manager;
 pub mod visibility;
@@ -112,6 +113,11 @@ pub struct Jwm {
     pub animations: AnimationManager,
 
     key_bindings: Vec<WMKey>,
+
+    /// Compiled chord (leader + second-key bindings). `None` when disabled.
+    pub(crate) chord_compiled: Option<crate::config::CompiledChord>,
+    /// Set when the leader fired and we're waiting for the second key.
+    pub(crate) chord_armed_until: Option<std::time::Instant>,
 
     /// Strut reservations from external panels (polybar, trayer, etc.).
     /// The second tuple element is the monitor that physically hosts the
@@ -429,6 +435,8 @@ impl Jwm {
             scratchpad_pending_name: None,
             animations: AnimationManager::new(),
             key_bindings: CONFIG.load().get_keys(),
+            chord_compiled: CONFIG.load().compile_chord(),
+            chord_armed_until: None,
             external_struts: HashMap::new(),
             last_mouse_root: (0.0, 0.0),
 
@@ -605,6 +613,9 @@ impl Jwm {
             self.state.clients.get(client_key),
             self.state.monitors.get(mon_key),
         ) {
+            if client.state.is_swallowed {
+                return false;
+            }
             client.state.is_sticky || (client.state.tags & monitor.get_active_tags()) > 0
         } else {
             false
@@ -613,6 +624,9 @@ impl Jwm {
 
     fn is_client_visible_by_key(&self, client_key: ClientKey) -> bool {
         if let Some(client) = self.state.clients.get(client_key) {
+            if client.state.is_swallowed {
+                return false;
+            }
             if let Some(mon_key) = client.mon {
                 if let Some(monitor) = self.state.monitors.get(mon_key) {
                     return client.state.is_sticky
@@ -931,11 +945,19 @@ impl Jwm {
     fn grabkeys(&mut self, backend: &mut dyn Backend) -> Result<(), Box<dyn std::error::Error>> {
         let root_window = backend.root_window().expect("no root window");
         backend.key_ops().clear_key_grabs(root_window)?;
-        let bindings: Vec<(Mods, KeySym)> = self
+        let mut bindings: Vec<(Mods, KeySym)> = self
             .key_bindings
             .iter()
             .map(|k| (k.mask, k.key_sym))
             .collect();
+        // Also grab the chord leader so the WM (not the focused client) sees it.
+        // Second-key bindings inside the chord are handled via grab_keyboard
+        // after the leader fires, so they don't need to be globally grabbed.
+        if let Some(chord) = &self.chord_compiled {
+            if !bindings.iter().any(|b| *b == chord.leader) {
+                bindings.push(chord.leader);
+            }
+        }
         backend.key_ops().grab_keys(root_window, &bindings)?;
         Ok(())
     }

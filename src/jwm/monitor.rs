@@ -181,28 +181,34 @@ impl Jwm {
         }
 
         // Update compositor with current monitor geometries (for per-monitor wallpaper)
-        {
-            let mon_list: Vec<(u32, i32, i32, u32, u32)> = self
-                .state
-                .monitor_order
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, &mk)| {
-                    self.state.monitors.get(mk).map(|m| {
-                        (
-                            idx as u32,
-                            m.geometry.m_x,
-                            m.geometry.m_y,
-                            m.geometry.m_w.max(1) as u32,
-                            m.geometry.m_h.max(1) as u32,
-                        )
-                    })
-                })
-                .collect();
-            backend.compositor_set_monitors(&mon_list);
-        }
+        self.refresh_compositor_monitors(backend);
 
         dirty
+    }
+
+    /// Push the current monitor list (geometry + active tag mask) down to the
+    /// compositor. Called whenever monitors change, and also after tag-switch
+    /// commands so per-tag wallpapers can be resolved.
+    pub(crate) fn refresh_compositor_monitors(&self, backend: &mut dyn Backend) {
+        let mon_list: Vec<(u32, i32, i32, u32, u32, u32)> = self
+            .state
+            .monitor_order
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, &mk)| {
+                self.state.monitors.get(mk).map(|m| {
+                    (
+                        idx as u32,
+                        m.geometry.m_x,
+                        m.geometry.m_y,
+                        m.geometry.m_w.max(1) as u32,
+                        m.geometry.m_h.max(1) as u32,
+                        m.get_active_tags(),
+                    )
+                })
+            })
+            .collect();
+        backend.compositor_set_monitors(&mon_list);
     }
 
     pub(crate) fn setup_single_monitor(&mut self) -> bool {
