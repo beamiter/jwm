@@ -50,6 +50,30 @@ impl WaylandCompositor {
         self.windows.retain(|_id, win| !(win.fading_out && win.fade_opacity <= 0.0));
     }
 
+    /// Tick genie minimize animations. Returns true if any are still active.
+    ///
+    /// When an animation completes, the corresponding WindowState is removed
+    /// (it was kept alive past surface destruction so the genie pass could
+    /// sample its EGL-imported texture).
+    pub(crate) fn tick_genie(&mut self) -> bool {
+        if self.genie_active.is_empty() {
+            return false;
+        }
+        let duration = std::time::Duration::from_millis(self.genie_duration_ms);
+        let now = std::time::Instant::now();
+        let mut i = 0;
+        while i < self.genie_active.len() {
+            if now.duration_since(self.genie_active[i].start) >= duration {
+                let ga = self.genie_active.remove(i);
+                self.windows.remove(&ga.window_id);
+                self.needs_render = true;
+            } else {
+                i += 1;
+            }
+        }
+        !self.genie_active.is_empty()
+    }
+
     /// Tick wobbly window physics (spring-mass grid)
     pub(crate) fn tick_wobbly(&mut self, dt: f32) {
         if !self.wobbly_enabled {

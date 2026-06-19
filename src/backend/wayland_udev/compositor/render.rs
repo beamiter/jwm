@@ -313,6 +313,7 @@ impl WaylandCompositor {
         // 2. Animation ticks
         // =================================================================
         self.tick_fades(dt);
+        self.tick_genie();
         self.tick_wobbly(dt);
         self.tick_particles(dt);
         self.tick_snap_preview(dt);
@@ -321,12 +322,35 @@ impl WaylandCompositor {
         self.tick_tilt(dt);
         self.tick_expose(dt);
 
+        // Focus highlight: arm a one-shot pulse on the new focus.
+        // Done before any_animating so the highlight keeps the loop ticking
+        // until the duration expires, instead of stalling on the first frame.
+        if self.focus_highlight_enabled && focused != self.prev_focused {
+            if let Some(fw) = focused {
+                self.focus_highlight_start = Some((fw, Instant::now()));
+            }
+        }
+        let focus_highlight_active = self.focus_highlight_enabled
+            && self
+                .focus_highlight_start
+                .map(|(_, start)| {
+                    (start.elapsed().as_millis() as u64) < self.focus_highlight_duration_ms
+                })
+                .unwrap_or(false);
+        // Motion trail keeps the loop ticking until trails drain to empty,
+        // even if the user has stopped moving the window.
+        let motion_trail_active = self.motion_trail_enabled
+            && self.windows.values().any(|w| !w.motion_trail.is_empty());
+
         // Determine if anything needs rendering
         let any_animating = self.has_active_animations()
             || self.transition_active
             || self.expose_active
             || !self.expose_entries.is_empty()
-            || self.overview_active;
+            || self.overview_active
+            || focus_highlight_active
+            || motion_trail_active
+            || !self.genie_active.is_empty();
 
         let force_render = any_animating
             || self.postprocess_active
@@ -590,8 +614,12 @@ impl WaylandCompositor {
                     self.screen_h,
                 );
 
-                // Run blur downsample/upsample passes
-                self.run_blur_passes(gl, self.scene_texture, &projection);
+                // Run blur downsample/upsample passes. Per-window quality:
+                // pick the highest quality among visible frosted windows so
+                // focused windows stay sharp while unfocused/off-screen ones
+                // don't drive cost up.
+                let blur_quality = self.compute_max_visible_blur_quality(visible_scene, focused);
+                self.run_blur_passes(gl, self.scene_texture, &projection, blur_quality);
 
                 // Record blur operation for cache warmup statistics
                 self.cache_warmup_mgr.record_blur_operation(self.screen_w, self.screen_h);
@@ -634,6 +662,29 @@ impl WaylandCompositor {
         };
 
         self.frame_profiler.zone_end();
+
+        // Motion trail: sample per-window position into a ring buffer.
+        // Pre-pass before the immutable draw loop so we can take &mut on the
+        // window state. When the position is unchanged we pop one entry per
+        // frame so the trail naturally drains to empty after the window stops
+        // (mirroring X11 effects.rs::update_motion_trail semantics — only there
+        // it relies on geometry-sync side effects, here we do it inline).
+        if self.motion_trail_enabled && self.motion_trail_frames > 0 {
+            let cap = self.motion_trail_frames as usize;
+            for &(win_id, x, y, _, _) in visible_scene {
+                if let Some(wt) = self.windows.get_mut(&win_id) {
+                    let last = wt.motion_trail.back().copied();
+                    if last.map_or(true, |(lx, ly)| lx != x || ly != y) {
+                        wt.motion_trail.push_back((x, y));
+                        while wt.motion_trail.len() > cap {
+                            wt.motion_trail.pop_front();
+                        }
+                    } else if !wt.motion_trail.is_empty() {
+                        wt.motion_trail.pop_front();
+                    }
+                }
+            }
+        }
 
         // =================================================================
         // 9. Draw windows (back-to-front)
@@ -758,6 +809,41 @@ impl WaylandCompositor {
 
                     // Restore UV for the actual window texture
                     gl.Uniform4f(self.win_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
+                }
+
+                // --- Motion trail ghost copies (Phase 3.1, mirrors X11) ---
+                // Draw historical positions with decreasing opacity *before* the
+                // main texture so the live window paints on top of its trail.
+                // Skips wobbly/tilt windows because the ghost would not match the
+                // deformed shader output; trails on plain moving windows are the
+                // common case and visually consistent with X11.
+                if self.motion_trail_enabled
+                    && !wt.motion_trail.is_empty()
+                    && wt.wobbly.is_none()
+                {
+                    let trail_len = wt.motion_trail.len();
+                    gl.Uniform4f(self.win_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
+                    gl.ActiveTexture(ffi::TEXTURE0);
+                    gl.BindTexture(ffi::TEXTURE_2D, texture);
+                    gl.Uniform1f(self.win_uniforms.radius, radius);
+                    gl.Uniform2f(self.win_uniforms.size, draw_w, draw_h);
+                    for (i, &(tx, ty)) in wt.motion_trail.iter().enumerate() {
+                        let ghost_opacity =
+                            self.motion_trail_opacity * (i as f32 + 1.0) / trail_len as f32;
+                        gl.Uniform1f(self.win_uniforms.opacity, ghost_opacity * fade);
+                        gl.Uniform1f(self.win_uniforms.dim, 0.7);
+                        self.set_rect_uniform(
+                            gl,
+                            self.win_uniforms.rect,
+                            tx as f32,
+                            ty as f32,
+                            draw_w,
+                            draw_h,
+                        );
+                        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                    }
+                    // Restore main-pass uniforms; opacity/dim are written below
+                    // anyway, but keep the texture bound for the standard draw.
                 }
 
                 // --- Choose shader: wobbly, tilt, or standard ---
@@ -885,6 +971,49 @@ impl WaylandCompositor {
         self.frame_profiler.zone_end();
 
         // =================================================================
+        // 9b. Genie minimize animations (mirror X11 pass 2b)
+        // =================================================================
+        if !self.genie_active.is_empty() {
+            self.frame_profiler.zone_start("genie");
+            let genie_duration_ms = self.genie_duration_ms;
+            let dock = (self.dock_x, self.dock_y);
+            unsafe {
+                gl.UseProgram(self.genie_program);
+                self.set_projection_uniform(gl, self.genie_uniforms.projection, &projection);
+                gl.Uniform1i(self.genie_uniforms.texture, 0);
+                gl.Uniform4f(self.genie_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
+                gl.Uniform1f(self.genie_uniforms.radius, 0.0);
+                let grid = 12i32;
+                gl.Uniform1i(self.genie_uniforms.grid_size, grid);
+                gl.BindVertexArray(self.quad_vao);
+
+                for ga in &self.genie_active {
+                    let elapsed = ga.start.elapsed().as_millis() as f32;
+                    let progress = (elapsed / genie_duration_ms as f32).min(1.0);
+                    let opacity = 1.0 - progress;
+                    self.set_rect_uniform(gl, self.genie_uniforms.rect, ga.x, ga.y, ga.w, ga.h);
+                    gl.Uniform2f(self.genie_uniforms.size, ga.w, ga.h);
+                    gl.Uniform1f(self.genie_uniforms.progress, progress);
+                    gl.Uniform2f(self.genie_uniforms.dock_pos, dock.0, dock.1);
+                    // Sign of opacity encodes "premultiplied alpha" path in shader
+                    // (matches X11 convention: negative for RGBA buffers).
+                    gl.Uniform1f(
+                        self.genie_uniforms.opacity,
+                        if ga.has_alpha { -opacity } else { opacity },
+                    );
+                    gl.Uniform1f(self.genie_uniforms.dim, 1.0);
+                    gl.ActiveTexture(ffi::TEXTURE0);
+                    gl.BindTexture(ffi::TEXTURE_2D, ga.gl_texture);
+                    gl.DrawArrays(ffi::TRIANGLES, 0, grid * grid * 6);
+                }
+
+                gl.BindVertexArray(0);
+                gl.UseProgram(0);
+            }
+            self.frame_profiler.zone_end();
+        }
+
+        // =================================================================
         // 10. Draw borders (focused and urgent windows)
         // =================================================================
         self.frame_profiler.zone_start("borders");
@@ -927,14 +1056,34 @@ impl WaylandCompositor {
                     (x as f32, y as f32, w as f32, h as f32)
                 };
 
-                // Border color: urgent gets red pulse, focused gets config color
-                let border_color = if wt.is_urgent {
+                // Focus highlight: temporary pulse + thicker border on the
+                // window that just became focused. Mirrors the X11 behavior
+                // (effects.rs::tick_focus_highlight) so the visual is the same
+                // on both backends.
+                let highlight_for_win = focus_highlight_active
+                    && self
+                        .focus_highlight_start
+                        .map(|(hw, _)| hw == win_id)
+                        .unwrap_or(false);
+
+                let border_color = if highlight_for_win {
+                    let (_, start) = self.focus_highlight_start.unwrap();
+                    let elapsed_ms = start.elapsed().as_millis() as f32;
+                    let dur = self.focus_highlight_duration_ms.max(1) as f32;
+                    let pulse = ((elapsed_ms / dur * std::f32::consts::PI).sin()).abs();
+                    let [r, g, b, a] = self.focus_highlight_color;
+                    [r, g, b, a * pulse * fade]
+                } else if wt.is_urgent {
                     [1.0f32, 0.2, 0.2, 0.9 * fade]
                 } else {
                     let c = self.border_color_focused;
                     [c[0], c[1], c[2], c[3] * fade]
                 };
-                let border_width = self.border_width;
+                let border_width = if highlight_for_win {
+                    (self.border_width + 2.0).max(3.0)
+                } else {
+                    self.border_width
+                };
 
                 let bdr_x = draw_x - border_width;
                 let bdr_y = draw_y - border_width;

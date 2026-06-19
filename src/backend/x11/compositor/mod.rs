@@ -727,12 +727,7 @@ impl DamageTracker {
 // Blur quality auto-downgrade (Phase 2.2)
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd)]
-pub(crate) enum BlurQuality {
-    Full,     // All blur levels
-    Reduced,  // Half blur levels
-    Minimal,  // 1 blur level
-}
+pub(crate) use crate::renderer::types::BlurQuality;
 
 // ---------------------------------------------------------------------------
 // Phase 3.2: Genie minimize animation

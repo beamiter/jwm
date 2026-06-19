@@ -549,6 +549,14 @@ impl KmsState {
     /// and is the riskiest step (it can fail or, on broken hardware, blank the
     /// output); position/scale/transform only update the advertised wl_output
     /// state and the compositor-space origin.
+    ///
+    /// Safety:
+    /// - Modeset is gated by `behavior.wlr_output_mgmt_allow_modeset` (default
+    ///   false); when disabled, mode changes are dropped silently and the
+    ///   non-modeset fields still apply.
+    /// - On `DrmOutput::use_mode` failure we attempt a best-effort rollback to
+    ///   the previously-active DRM mode so the output is not stranded mid-
+    ///   modeset.
     pub(super) fn configure_output(
         &mut self,
         name: &str,
@@ -562,29 +570,51 @@ impl KmsState {
             .ok_or_else(|| format!("unknown output '{name}'"))?;
 
         // Resolve a DRM mode if a *different* mode was requested.
+        let allow_modeset = crate::config::CONFIG
+            .load()
+            .behavior()
+            .wlr_output_mgmt_allow_modeset;
+        let mut prev_drm_mode: Option<smithay::reexports::drm::control::Mode> = None;
         let drm_mode = if let Some((w, h, refresh)) = mode {
-            let conn = self.outputs[idx].connector;
-            let mgr = self.drm_output_manager.lock();
-            let info = mgr
-                .device()
-                .get_connector(conn, false)
-                .map_err(|e| format!("get_connector failed: {e:?}"))?;
-            let found = info.modes().iter().copied().find(|m| {
-                let wl = WlMode::from(*m);
-                wl.size.w == w
-                    && wl.size.h == h
-                    && (refresh == 0 || (wl.refresh - refresh).abs() <= 200)
-            });
-            drop(mgr);
-            match found {
-                Some(m) if self.outputs[idx].output.current_mode() != Some(WlMode::from(m)) => {
-                    Some(m)
+            if !allow_modeset {
+                log::warn!(
+                    "[output-mgmt] mode change to {w}x{h}@{refresh} for '{name}' \
+                     dropped: behavior.wlr_output_mgmt_allow_modeset = false"
+                );
+                None
+            } else {
+                let conn = self.outputs[idx].connector;
+                let mgr = self.drm_output_manager.lock();
+                let info = mgr
+                    .device()
+                    .get_connector(conn, false)
+                    .map_err(|e| format!("get_connector failed: {e:?}"))?;
+                let found = info.modes().iter().copied().find(|m| {
+                    let wl = WlMode::from(*m);
+                    wl.size.w == w
+                        && wl.size.h == h
+                        && (refresh == 0 || (wl.refresh - refresh).abs() <= 200)
+                });
+                // Capture the currently-active DRM mode (not just the
+                // smithay-advertised WlMode) so we can roll back on failure.
+                let current_wl = self.outputs[idx].output.current_mode();
+                if let Some(cur) = current_wl {
+                    prev_drm_mode = info.modes().iter().copied().find(|m| {
+                        let wl = WlMode::from(*m);
+                        wl.size == cur.size && wl.refresh == cur.refresh
+                    });
                 }
-                Some(_) => None, // already the current mode; skip the modeset
-                None => {
-                    return Err(format!(
-                        "requested mode {w}x{h}@{refresh} not available on '{name}'"
-                    ))
+                drop(mgr);
+                match found {
+                    Some(m) if self.outputs[idx].output.current_mode() != Some(WlMode::from(m)) => {
+                        Some(m)
+                    }
+                    Some(_) => None, // already the current mode; skip the modeset
+                    None => {
+                        return Err(format!(
+                            "requested mode {w}x{h}@{refresh} not available on '{name}'"
+                        ))
+                    }
                 }
             }
         } else {
@@ -595,10 +625,41 @@ impl KmsState {
         if let Some(m) = drm_mode {
             let elements: DrmOutputRenderElements<GlesRenderer, SolidColorRenderElement> =
                 DrmOutputRenderElements::default();
-            self.outputs[idx]
+            if let Err(e) = self.outputs[idx]
                 .drm_output
                 .use_mode(m, &mut self.renderer, &elements)
-                .map_err(|e| format!("DRM use_mode failed: {e:?}"))?;
+            {
+                // Best-effort rollback to the previous mode so the output is not
+                // left in an undefined state. If rollback also fails, the output
+                // may be black; the user will need to physically replug or
+                // re-trigger DPMS via output-power-management.
+                let primary_err = format!("DRM use_mode failed: {e:?}");
+                if let Some(prev) = prev_drm_mode {
+                    let rollback: DrmOutputRenderElements<GlesRenderer, SolidColorRenderElement> =
+                        DrmOutputRenderElements::default();
+                    match self.outputs[idx]
+                        .drm_output
+                        .use_mode(prev, &mut self.renderer, &rollback)
+                    {
+                        Ok(()) => {
+                            log::warn!(
+                                "[output-mgmt] '{name}': modeset failed, rolled back to previous mode ({primary_err})"
+                            );
+                        }
+                        Err(rollback_err) => {
+                            log::error!(
+                                "[output-mgmt] '{name}': modeset failed AND rollback failed: \
+                                 primary={primary_err}, rollback={rollback_err:?}"
+                            );
+                        }
+                    }
+                } else {
+                    log::error!(
+                        "[output-mgmt] '{name}': modeset failed, no previous mode captured for rollback ({primary_err})"
+                    );
+                }
+                return Err(primary_err);
+            }
             self.outputs[idx].mode_size = (m.size().0 as i32, m.size().1 as i32);
         }
 

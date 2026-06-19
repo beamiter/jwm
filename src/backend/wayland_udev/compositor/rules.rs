@@ -517,6 +517,111 @@ impl WaylandCompositor {
         Self::more_reduced_blur_quality(load_quality, self.blur_quality)
     }
 
+    /// Per-window blur quality (mirrors X11's `compute_window_blur_quality`).
+    ///
+    /// Wayland still runs ONE global blur pass per frame, but this lets us pick
+    /// quality based on the most-demanding visible frosted window (focused +
+    /// onscreen wins). Caller should `max` across visible frosted windows.
+    pub(crate) fn compute_window_blur_quality(
+        &self,
+        class_name: &str,
+        x: i32, y: i32, w: u32, h: u32,
+        is_focused: bool,
+    ) -> BlurQuality {
+        if !self.blur_quality_auto {
+            return self.blur_quality;
+        }
+        let max_quality = self.blur_quality;
+
+        // Status bar: never adapt (matches X11).
+        let cfg = crate::config::CONFIG.load();
+        let status_bar_name = cfg.status_bar_name();
+        if !status_bar_name.is_empty()
+            && (class_name == status_bar_name || class_name.contains(status_bar_name))
+        {
+            return self.blur_quality;
+        }
+
+        // Per-monitor override (precedence over GPU load).
+        let monitor_id = self.find_window_monitor_id(x, y, w, h);
+        if let Some(&override_quality) = self.blur_quality_by_monitor.get(&monitor_id) {
+            return BlurQuality::min(override_quality, max_quality);
+        }
+
+        let is_onscreen = x + w as i32 > 0
+            && y + h as i32 > 0
+            && (x as i64) < self.screen_w as i64
+            && (y as i64) < self.screen_h as i64;
+
+        let load = self.last_gpu_load;
+        let per_window = if load > 80 {
+            if is_focused { BlurQuality::Full } else { BlurQuality::Minimal }
+        } else if load > 70 {
+            if is_focused {
+                BlurQuality::Full
+            } else if !is_onscreen {
+                BlurQuality::Minimal
+            } else {
+                BlurQuality::Reduced
+            }
+        } else if is_focused {
+            BlurQuality::Full
+        } else if !is_onscreen {
+            BlurQuality::Minimal
+        } else {
+            BlurQuality::Reduced
+        };
+
+        BlurQuality::min(per_window, max_quality)
+    }
+
+    /// Compute the highest blur quality needed across all visible frosted
+    /// windows. Used to pick blur levels for the single global blur pass:
+    /// the focused/onscreen frosted window drives quality, off-screen and
+    /// unfocused frosted windows do not pull it down.
+    pub(crate) fn compute_max_visible_blur_quality(
+        &self,
+        visible_scene: &[(u64, i32, i32, u32, u32)],
+        focused: Option<u64>,
+    ) -> BlurQuality {
+        let mut best: Option<BlurQuality> = None;
+        for &(win_id, x, y, w, h) in visible_scene {
+            let win = match self.windows.get(&win_id) {
+                Some(w) => w,
+                None => continue,
+            };
+            if !win.is_frosted {
+                continue;
+            }
+            let is_focused = focused == Some(win_id);
+            let q = self.compute_window_blur_quality(
+                &win.class_name, x, y, w, h, is_focused,
+            );
+            best = Some(match best {
+                Some(prev) => BlurQuality::max(prev, q),
+                None => q,
+            });
+        }
+        best.unwrap_or_else(|| self.compute_global_blur_quality())
+    }
+
+    /// Find which monitor a window's center belongs to. Returns 0 if no match
+    /// (treated as primary).
+    fn find_window_monitor_id(&self, x: i32, y: i32, w: u32, h: u32) -> u32 {
+        let cx = x + w as i32 / 2;
+        let cy = y + h as i32 / 2;
+        for &(id, mx, my, mw, mh) in &self.monitors {
+            if cx >= mx
+                && cx < mx + mw as i32
+                && cy >= my
+                && cy < my + mh as i32
+            {
+                return id;
+            }
+        }
+        0
+    }
+
     /// Return the more aggressively reduced of two qualities
     /// (Full = most blur levels, Minimal = fewest). Used so the global
     /// `blur_quality` setting bounds how much adaptive auto-quality may add.
@@ -634,6 +739,24 @@ impl WaylandCompositor {
                 self.needs_render = true;
             }
         }
+    }
+
+    /// Record per-monitor refresh rates and pick blur strength from the highest
+    /// Hz across the live output list.
+    ///
+    /// Why max-Hz: Wayland blur is a single screen-wide dual-Kawase pass shared
+    /// by every monitor (see [[project_wayland_effect_gaps]]), so we cannot
+    /// vary strength per-output the way X11 does. Picking max means the
+    /// highest-Hz display gets a strength that fits its frame budget; lower-Hz
+    /// outputs simply use that same blur — never a quality regression on the
+    /// fast display, never a frame-time blow-up on the slow one.
+    pub(crate) fn apply_per_monitor_refresh_rates(&mut self, hz_pairs: &[(u32, u32)]) {
+        self.monitor_refresh_rates.clear();
+        for &(id, hz) in hz_pairs {
+            self.monitor_refresh_rates.insert(id, hz);
+        }
+        let max_hz = hz_pairs.iter().map(|&(_, hz)| hz).max().unwrap_or(60);
+        self.apply_dynamic_blur_strength(max_hz);
     }
 }
 

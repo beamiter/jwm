@@ -217,6 +217,15 @@ pub struct BehaviorConfig {
     #[serde(default)]
     pub game_classes: Vec<String>,
 
+    /// Allow wlr-output-management clients (kanshi, wlr-randr) to perform a
+    /// real DRM modeset on Apply.
+    /// Default false: jwm advertises mode information but rejects mode changes
+    /// at the Apply step until explicitly enabled. Position/scale/transform
+    /// changes are always honored — only the modeset is gated, because a bad
+    /// mode can leave the output black with no in-protocol confirmation path.
+    #[serde(default)]
+    pub wlr_output_mgmt_allow_modeset: bool,
+
     // --- Feature 1: Window borders ---
     /// Enable window border/outline rendering.
     #[serde(default = "default_true")]
@@ -911,6 +920,7 @@ impl Default for Config {
                     vrr_min_fps: default_vrr_min_fps(),
                     vrr_max_fps: default_vrr_max_fps(),
                     game_classes: Vec::new(),
+                    wlr_output_mgmt_allow_modeset: false,
                     border_enabled: true,
                     border_width: default_border_width(),
                     border_color_focused: default_border_color_focused(),

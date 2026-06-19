@@ -563,17 +563,51 @@ impl WaylandCompositor {
             ripple_progress: 0.0,
             ripple_active: false,
             content_uv: [0.0, 0.0, 1.0, 1.0],
+            is_genie_minimizing: false,
         });
         self.predictive_render_mgr.register_window(window_id);
         self.needs_render = true;
     }
 
-    /// Remove a window (start fade-out) and evict its side-map state. Called
-    /// when the client surface is destroyed so the per-window maps don't grow
-    /// unbounded over the compositor's lifetime.
+    /// Remove a window (start fade-out, or genie minimize) and evict its
+    /// side-map state. Called when the client surface is destroyed so the
+    /// per-window maps don't grow unbounded over the compositor's lifetime.
+    ///
+    /// If the genie minimize effect is enabled and we have a recent rect for
+    /// the window in `prev_scene`, start a GenieAnimation instead of a plain
+    /// fade-out. The WindowState is then kept alive (with `is_genie_minimizing`
+    /// set) until `tick_genie` retires the animation, so the GL texture stays
+    /// valid for the genie sampling pass.
     pub(crate) fn remove_window(&mut self, window_id: u64) {
-        if let Some(win) = self.windows.get_mut(&window_id) {
-            win.fading_out = true;
+        let mut started_genie = false;
+        if self.genie_minimize_enabled {
+            if let Some(&(_, x, y, w, h)) = self
+                .prev_scene
+                .iter()
+                .find(|&&(id, _, _, _, _)| id == window_id)
+            {
+                if let Some(win) = self.windows.get_mut(&window_id) {
+                    if let Some(tex) = win.gl_texture {
+                        win.is_genie_minimizing = true;
+                        self.genie_active.push(super::GenieAnimation {
+                            window_id,
+                            start: Instant::now(),
+                            x: x as f32,
+                            y: y as f32,
+                            w: w as f32,
+                            h: h as f32,
+                            gl_texture: tex,
+                            has_alpha: win.has_alpha,
+                        });
+                        started_genie = true;
+                    }
+                }
+            }
+        }
+        if !started_genie {
+            if let Some(win) = self.windows.get_mut(&window_id) {
+                win.fading_out = true;
+            }
         }
         self.predictive_render_mgr.remove_window(window_id);
         self.is_game_window.remove(&window_id);
@@ -609,6 +643,7 @@ impl WaylandCompositor {
             ripple_progress: 0.0,
             ripple_active: false,
             content_uv: [0.0, 0.0, 1.0, 1.0],
+            is_genie_minimizing: false,
         });
         win.gl_texture = Some(tex_id);
         win.width = w;

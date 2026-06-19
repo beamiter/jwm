@@ -365,12 +365,7 @@ pub(crate) struct MonitorWallpaper {
 // Blur quality
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BlurQuality {
-    Full,
-    Reduced,
-    Minimal,
-}
+pub(crate) use crate::renderer::types::BlurQuality;
 
 // ---------------------------------------------------------------------------
 // Annotation types
@@ -419,6 +414,28 @@ pub(crate) struct WindowState {
     /// Accounts for CSD geometry offset (shadows/decorations outside window geometry).
     /// Default [0,0,1,1] means full texture = content.
     pub content_uv: [f32; 4],
+    /// Set when remove_window started a genie minimize animation; the
+    /// WindowState is kept alive so the genie pass can sample its
+    /// gl_texture, then removed by tick_genie when the animation completes.
+    pub is_genie_minimizing: bool,
+}
+
+/// Active genie minimize animation for one window (Wayland).
+///
+/// Unlike X11 we don't transfer ownership of the GL texture — the WindowState
+/// stays in `self.windows` (with `is_genie_minimizing=true`) so its
+/// EGL-imported `gl_texture` remains valid. `tick_genie` removes both the
+/// animation entry and the WindowState when the animation completes.
+#[allow(dead_code)]
+pub(crate) struct GenieAnimation {
+    pub window_id: u64,
+    pub start: Instant,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub gl_texture: u32,
+    pub has_alpha: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -682,6 +699,9 @@ pub(crate) struct WaylandCompositor {
     // Dock position (for genie)
     dock_x: f32,
     dock_y: f32,
+
+    // Active genie minimize animations
+    pub(crate) genie_active: Vec<GenieAnimation>,
 
     // Window groups (tabs)
     window_groups: Vec<(u32, Vec<(u32, String, bool)>)>,
@@ -1364,6 +1384,9 @@ impl WaylandCompositor {
             // Dock position
             dock_x: 0.0,
             dock_y: 0.0,
+
+            // Genie animations
+            genie_active: Vec::new(),
 
             // Window groups
             window_groups: Vec::new(),

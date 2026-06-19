@@ -136,12 +136,15 @@ pub struct BlurPassParams {
     pub screen_h: u32,
 }
 
-/// Blur quality levels
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Blur quality levels.
+///
+/// Variants are ordered Minimal < Reduced < Full so `Ord::min`/`max` and
+/// adaptive-downgrade comparisons can pick the lower/higher quality directly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BlurQuality {
-    Full,    // All blur levels
-    Reduced, // Half blur levels
     Minimal, // Single pass (box blur)
+    Reduced, // Half blur levels
+    Full,    // All blur levels
 }
 
 /// GPU fence synchronization status

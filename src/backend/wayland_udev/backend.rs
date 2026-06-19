@@ -3121,24 +3121,28 @@ impl Backend for UdevBackend {
     }
 
     fn compositor_set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32)]) {
-        // Derive the primary monitor's refresh rate from the live output list so
-        // the compositor can pick an Hz-appropriate blur strength. Runs on init
-        // and on every layout change (hotplug / mode change), keeping the value
-        // in sync — the X11 backend only ever queried this once at init.
-        let primary_hz = {
+        // Build per-monitor (id, hz) pairs from the live output list.
+        // Wayland blur is a single global pass shared by every monitor, so the
+        // compositor will use the highest Hz to budget blur strength — but we
+        // still record all rates for parity with X11 / future per-output use.
+        let monitor_hz_pairs: Vec<(u32, u32)> = {
             let shared = self.shared.lock_safe();
             monitors
-                .first()
-                .and_then(|&(_, px, py, _, _)| {
-                    shared.outputs.iter().find(|o| o.x == px && o.y == py)
+                .iter()
+                .map(|&(id, mx, my, _, _)| {
+                    let hz = shared
+                        .outputs
+                        .iter()
+                        .find(|o| o.x == mx && o.y == my)
+                        .map(|o| (o.refresh_rate / 1000).max(1))
+                        .unwrap_or(60);
+                    (id, hz)
                 })
-                .or_else(|| shared.outputs.first())
-                .map(|o| (o.refresh_rate / 1000).max(1))
-                .unwrap_or(60)
+                .collect()
         };
         if let Some(c) = self.compositor.as_mut() {
             c.set_monitors(monitors);
-            c.apply_dynamic_blur_strength(primary_hz);
+            c.apply_per_monitor_refresh_rates(&monitor_hz_pairs);
         }
     }
 

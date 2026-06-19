@@ -5,14 +5,23 @@ impl WaylandCompositor {
     /// Run dual-Kawase blur passes on the source texture.
     /// Downsamples through blur_fbos levels then upsamples back.
     /// Result texture is blur_fbos[0].texture.
-    pub(crate) fn run_blur_passes(&self, gl: &ffi::Gles2, source_texture: u32, _projection: &[f32; 16]) {
+    ///
+    /// `quality` selects how many of the available levels to traverse — the
+    /// caller picks this from the most-demanding visible frosted window
+    /// (`compute_max_visible_blur_quality`) so focused windows keep full
+    /// quality while unfocused/off-screen ones don't drag GPU cost up.
+    pub(crate) fn run_blur_passes(
+        &self,
+        gl: &ffi::Gles2,
+        source_texture: u32,
+        _projection: &[f32; 16],
+        quality: BlurQuality,
+    ) {
         if self.blur_fbos.is_empty() {
             return;
         }
         let base_levels = (self.blur_strength as usize).min(self.blur_fbos.len());
-        // Apply adaptive/global blur-quality cap (mirrors X11 per-window cap,
-        // but applied to the single global pass on Wayland).
-        let levels = match self.compute_global_blur_quality() {
+        let levels = match quality {
             BlurQuality::Full => base_levels,
             BlurQuality::Reduced => (base_levels / 2).max(1),
             BlurQuality::Minimal => 1,
