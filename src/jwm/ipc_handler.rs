@@ -120,6 +120,31 @@ impl Jwm {
             "get_dnd" => IpcResponse::ok(Some(serde_json::json!({
                 "enabled": self.do_not_disturb,
             }))),
+            "get_hdr_status" => {
+                let outputs: Vec<serde_json::Value> = backend
+                    .output_ops()
+                    .enumerate_outputs()
+                    .into_iter()
+                    .map(|o| {
+                        serde_json::json!({
+                            "name": o.name,
+                            "hdr_capable": o.hdr_capable,
+                        })
+                    })
+                    .collect();
+                IpcResponse::ok(Some(serde_json::json!({
+                    "config_enabled": cfg.behavior().hdr_enabled,
+                    "config_peak_nits": cfg.behavior().hdr_peak_nits,
+                    "outputs": outputs,
+                })))
+            }
+            "get_tearing_hints" => IpcResponse::ok(Some(serde_json::json!({
+                "active_surface_count": backend.compositor_tearing_hint_count(),
+            }))),
+            "get_session_lock" => IpcResponse::ok(Some(serde_json::json!({
+                "locked": backend.compositor_session_locked(),
+                "lock_surface_count": backend.compositor_session_lock_surface_count(),
+            }))),
             "get_version" => IpcResponse::ok(Some(serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "name": "jwm",

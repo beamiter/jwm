@@ -212,6 +212,11 @@ pub struct JwmWaylandState {
 
     pub idle_inhibiting_surfaces: HashSet<ObjectId>,
     pub session_locked: bool,
+    /// Per-output session lock surfaces. Key: WlOutput object id.
+    /// Populated on `SessionLockHandler::new_surface`, drained on unlock or
+    /// destruction. Used to know whether the lock client has a presence on a
+    /// given output and (later) to render only those surfaces while locked.
+    pub lock_surfaces: HashMap<ObjectId, LockSurface>,
     pub foreign_toplevel_handles: HashMap<WindowId, ForeignToplevelHandle>,
 
     /// Touchpad swipe-gesture tracker. When `intercept` is true, the WM is
@@ -482,10 +487,29 @@ impl SessionLockHandler for JwmWaylandState {
     fn unlock(&mut self) {
         info!("[udev/wayland] session unlocked");
         self.session_locked = false;
+        self.lock_surfaces.clear();
         self.needs_redraw = true;
     }
 
-    fn new_surface(&mut self, _surface: LockSurface, _output: WlOutput) {
+    fn new_surface(&mut self, surface: LockSurface, output: WlOutput) {
+        // Find the matching Output to learn its size; default to (0,0) which
+        // tells the client to pick its own size.
+        let (w, h) = Output::from_resource(&output)
+            .and_then(|o| o.current_mode())
+            .map(|m| (m.size.w as u32, m.size.h as u32))
+            .unwrap_or((0, 0));
+
+        // Configure the surface to the output size.
+        surface.with_pending_state(|state| {
+            state.size = Some((w, h).into());
+        });
+        surface.send_configure();
+
+        info!(
+            "[udev/wayland] session lock surface registered ({}x{})",
+            w, h
+        );
+        self.lock_surfaces.insert(output.id(), surface);
         self.needs_redraw = true;
     }
 }
@@ -1350,6 +1374,7 @@ impl JwmWaylandState {
 
                 idle_inhibiting_surfaces: HashSet::new(),
                 session_locked: false,
+                lock_surfaces: HashMap::new(),
                 foreign_toplevel_handles: HashMap::new(),
                 gesture_swipe: GestureSwipeTracker::default(),
 

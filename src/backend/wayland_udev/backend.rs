@@ -3421,6 +3421,22 @@ impl Backend for UdevBackend {
             .map_err(|e| BackendError::Message(e))
     }
 
+    fn compositor_tearing_hint_count(&self) -> usize {
+        self.state
+            .tearing_hints
+            .as_ref()
+            .map(|m| m.lock_safe().len())
+            .unwrap_or(0)
+    }
+
+    fn compositor_session_lock_surface_count(&self) -> usize {
+        self.state.lock_surfaces.len()
+    }
+
+    fn compositor_session_locked(&self) -> bool {
+        self.state.session_locked
+    }
+
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError> {
         // Initialize compositor from config if KMS is ready and compositor not yet created.
         if self.kms.is_some() && self.compositor.is_none() {

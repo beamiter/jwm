@@ -1038,6 +1038,17 @@ pub trait Backend: Send {
     /// Query VRR capabilities of an output.
     fn query_vrr_capabilities(&self, _output: OutputId) -> Option<VrrCapabilities> { None }
 
+    /// Number of client surfaces that have requested wp-tearing-control hints
+    /// (regardless of vsync vs async). Wayland-only; X11 returns 0.
+    fn compositor_tearing_hint_count(&self) -> usize { 0 }
+
+    /// Number of currently active session-lock surfaces (one per output when
+    /// the session is locked by a screen-locker client).
+    fn compositor_session_lock_surface_count(&self) -> usize { 0 }
+
+    /// Whether the session is currently locked.
+    fn compositor_session_locked(&self) -> bool { false }
+
     /// Enable or disable VRR for an output.
     fn set_vrr_enabled(&mut self, _output: OutputId, _enabled: bool) -> Result<(), BackendError> { Ok(()) }
 
