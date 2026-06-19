@@ -652,17 +652,23 @@ impl Compositor {
     /// When window positions are unchanged, we can mix current blur with previous blur for:
     /// - Higher visual stability (less flicker from blur recomputation)
     /// - Lower GPU cost (fewer blur samples needed for same quality)
-    #[allow(dead_code)]
-    pub(super) fn apply_temporal_blur_mix(&mut self, current_blur_tex: glow::Texture) -> glow::Texture {
+    /// Lazily create prev_blur_fbo. Must be called once per frame before
+    /// `apply_temporal_blur_mix` so that the mix path can run with `&self`
+    /// inside loops that hold immutable borrows of self.
+    pub(super) fn ensure_prev_blur_fbo(&mut self) {
         if !self.temporal_blur_enabled {
-            return current_blur_tex;
+            return;
         }
-
-        // Lazily create prev_blur_fbo on first use
         if self.prev_blur_fbo.is_none() {
             if let Ok((fbo, tex)) = unsafe { Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h) } {
                 self.prev_blur_fbo = Some((fbo, tex));
             }
+        }
+    }
+
+    pub(super) fn apply_temporal_blur_mix(&self, current_blur_tex: glow::Texture) -> glow::Texture {
+        if !self.temporal_blur_enabled {
+            return current_blur_tex;
         }
 
         let (prev_fbo, prev_tex) = match &self.prev_blur_fbo {

@@ -103,7 +103,8 @@ impl GlobalDispatch<ZwlrOutputManagerV1, OutputManagerData> for JwmWaylandState 
         let manager = data_init.init(resource, OutputManagerData);
 
         for output in &state.outputs {
-            send_head_for_output(dh, client, &manager, output);
+            let soft_disabled = state.soft_disabled_outputs.contains(&output.name());
+            send_head_for_output(dh, client, &manager, output, soft_disabled);
         }
 
         manager.done(next_serial());
@@ -116,6 +117,7 @@ fn send_head_for_output(
     client: &Client,
     manager: &ZwlrOutputManagerV1,
     output: &Output,
+    soft_disabled: bool,
 ) {
     let version = manager.version();
     let name = output.name();
@@ -167,9 +169,9 @@ fn send_head_for_output(
         }
     }
 
-    // A head is enabled when it is actively driving a CRTC. All outputs we
-    // enumerate are live, so report enabled.
-    head.enabled(1);
+    // A head is enabled when it is actively driving a CRTC. Outputs marked
+    // soft-disabled by an earlier `disable_head` Apply are reported as 0.
+    head.enabled(if soft_disabled { 0 } else { 1 });
     if let Some(ref mode_res) = current_mode_res {
         head.current_mode(mode_res);
     }
@@ -259,10 +261,22 @@ impl Dispatch<ZwlrOutputConfigurationV1, OutputConfigData> for JwmWaylandState {
                 match build_changes(state, data) {
                     Ok(changes) => {
                         debug!("[output-mgmt] apply: {} change(s)", changes.len());
+                        // Queue an ack callback that fires after the udev backend
+                        // finishes (or fails) the modeset. The wlr-output-management
+                        // spec defines `succeeded` as "the configuration was applied",
+                        // so reporting it before the modeset returns can lie to clients
+                        // (kanshi, wlr-randr) about success of e.g. a rejected mode.
+                        let res = resource.clone();
+                        state.pending_output_acks.push_back(
+                            crate::backend::wayland::state::PendingOutputAck {
+                                on_complete: Box::new(move |ok| {
+                                    if ok { res.succeeded(); } else { res.failed(); }
+                                }),
+                            },
+                        );
                         state.push_event(
                             crate::backend::api::BackendEvent::OutputConfigure { changes },
                         );
-                        resource.succeeded();
                     }
                     Err(e) => {
                         warn!("[output-mgmt] apply rejected: {e}");

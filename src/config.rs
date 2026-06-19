@@ -868,6 +868,7 @@ pub struct RuleConfig {
     pub monitor: i32,
 }
 
+#[derive(Clone)]
 pub struct Config {
     inner: TomlConfig,
 }
@@ -1513,7 +1514,88 @@ impl Config {
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let content = fs::read_to_string(path)?;
         let config: TomlConfig = toml::from_str(&content)?;
-        Ok(Self { inner: config })
+        let cfg = Self { inner: config };
+        cfg.warn_about_invalid_values();
+        Ok(cfg)
+    }
+
+    /// Walk the loaded config and emit a single warning summarising any
+    /// values that are syntactically valid TOML but semantically suspect:
+    /// out-of-range numbers, unknown keybinding function names, unknown
+    /// easings, rules pointing at impossible monitor indices. Does not
+    /// reject the config — keeps the previous load_from_file contract.
+    fn warn_about_invalid_values(&self) {
+        let mut problems: Vec<String> = Vec::new();
+        let b = &self.inner.behavior;
+
+        let in_range = |label: &str, v: f32, lo: f32, hi: f32, problems: &mut Vec<String>| {
+            if !(lo..=hi).contains(&v) {
+                problems.push(format!("{label}={v} out of [{lo}, {hi}]"));
+            }
+        };
+        in_range("behavior.active_opacity", b.active_opacity, 0.0, 1.0, &mut problems);
+        in_range("behavior.inactive_opacity", b.inactive_opacity, 0.0, 1.0, &mut problems);
+        in_range(
+            "behavior.blur_temporal_mix_ratio",
+            b.blur_temporal_mix_ratio,
+            0.0,
+            1.0,
+            &mut problems,
+        );
+        if b.blur_strength > 5 {
+            problems.push(format!(
+                "behavior.blur_strength={} out of [0, 5]",
+                b.blur_strength
+            ));
+        }
+        if b.corner_radius < 0.0 || b.corner_radius > 64.0 {
+            problems.push(format!(
+                "behavior.corner_radius={} out of [0, 64]",
+                b.corner_radius
+            ));
+        }
+
+        const KNOWN_EASINGS: &[&str] =
+            &["linear", "ease-in", "ease-out", "ease-in-out", "bounce", "elastic"];
+        if !KNOWN_EASINGS.contains(&self.inner.animation.easing.as_str()) {
+            problems.push(format!(
+                "animation.easing='{}' is not one of {:?} (falling back to ease-out)",
+                self.inner.animation.easing, KNOWN_EASINGS
+            ));
+        }
+
+        for (i, k) in self.inner.keybindings.keys.iter().enumerate() {
+            if self.parse_function(&k.function).is_none() {
+                problems.push(format!(
+                    "keybindings.keys[{i}]: unknown function '{}'",
+                    k.function
+                ));
+            }
+        }
+
+        let tag_count = self.inner.layout.tags_length;
+        for (i, r) in self.inner.rules.iter().enumerate() {
+            if tag_count > 0 && r.tags >= (1usize << tag_count) {
+                problems.push(format!(
+                    "rules[{i}] (class='{}'): tags=0x{:x} references bits beyond tag_count={}",
+                    r.class, r.tags, tag_count
+                ));
+            }
+            if r.monitor < -1 {
+                problems.push(format!(
+                    "rules[{i}] (class='{}'): monitor={} (must be >=-1)",
+                    r.class, r.monitor
+                ));
+            }
+        }
+
+        if !problems.is_empty() {
+            log::warn!(
+                "[config] {} suspect value(s) detected:\n  - {}",
+                problems.len(),
+                problems.join("\n  - ")
+            );
+        }
     }
 
     pub fn load_default() -> Self {
@@ -2087,10 +2169,79 @@ impl Config {
         self.inner = other;
     }
 
+    /// Apply a single key/value override to the in-memory config without
+    /// touching the on-disk file. Only a small set of hot-tunable scalar
+    /// keys are accepted; unknown or unsupported keys return Err.
+    pub fn set_value(&mut self, key: &str, value: &serde_json::Value) -> Result<(), String> {
+        let as_u32 = || {
+            value
+                .as_u64()
+                .filter(|v| *v <= u32::MAX as u64)
+                .map(|v| v as u32)
+                .ok_or_else(|| format!("expected u32 for '{key}'"))
+        };
+        let as_f32 = || {
+            value
+                .as_f64()
+                .map(|v| v as f32)
+                .ok_or_else(|| format!("expected number for '{key}'"))
+        };
+        let as_bool = || {
+            value
+                .as_bool()
+                .ok_or_else(|| format!("expected bool for '{key}'"))
+        };
+        match key {
+            "appearance.border_px" => self.inner.appearance.border_px = as_u32()?,
+            "appearance.gap_px" => self.inner.appearance.gap_px = as_u32()?,
+            "appearance.snap" => self.inner.appearance.snap = as_u32()?,
+            "layout.m_fact" => {
+                let v = as_f32()?;
+                if !(0.05..=0.95).contains(&v) {
+                    return Err(format!("layout.m_fact={v} out of [0.05, 0.95]"));
+                }
+                self.inner.layout.m_fact = v;
+            }
+            "layout.n_master" => self.inner.layout.n_master = as_u32()?,
+            "status_bar.show_bar" => self.inner.status_bar.show_bar = as_bool()?,
+            "behavior.active_opacity" => {
+                let v = as_f32()?;
+                if !(0.0..=1.0).contains(&v) {
+                    return Err(format!("behavior.active_opacity={v} out of [0, 1]"));
+                }
+                self.inner.behavior.active_opacity = v;
+            }
+            "behavior.inactive_opacity" => {
+                let v = as_f32()?;
+                if !(0.0..=1.0).contains(&v) {
+                    return Err(format!("behavior.inactive_opacity={v} out of [0, 1]"));
+                }
+                self.inner.behavior.inactive_opacity = v;
+            }
+            "behavior.blur_strength" => {
+                let v = as_u32()?;
+                if v > 5 {
+                    return Err(format!("behavior.blur_strength={v} out of [0, 5]"));
+                }
+                self.inner.behavior.blur_strength = v;
+            }
+            "behavior.blur_enabled" => self.inner.behavior.blur_enabled = as_bool()?,
+            "behavior.shadow_enabled" => self.inner.behavior.shadow_enabled = as_bool()?,
+            "behavior.compositor" => self.inner.behavior.compositor = as_bool()?,
+            _ => {
+                return Err(format!(
+                    "set_config: unknown or non-hot-tunable key '{key}'"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn reload(&mut self) -> Result<(), ConfigError> {
         let config_path = Self::resolve_load_path();
         if config_path.exists() {
             let new_config = Self::load_from_file(&config_path)?;
+            // load_from_file already ran warn_about_invalid_values.
             self.inner = new_config.inner;
         }
         Ok(())

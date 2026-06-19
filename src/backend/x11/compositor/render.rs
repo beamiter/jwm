@@ -413,6 +413,10 @@ impl Compositor {
         // P6A: Process deferred X11 operations at start of render frame
         self.process_deferred_x11_ops();
 
+        // P4: Ensure temporal-blur prev FBO exists before the windows loop, so
+        // the mix call inside the loop can run with &self while wt borrows are live.
+        self.ensure_prev_blur_fbo();
+
         // P6B: Update GPU fence states (non-blocking check)
         unsafe {
             self.gpu_fence_sync_mgr.update_fence_states(&self.gl);
@@ -953,14 +957,18 @@ impl Compositor {
         // overview monitor — they would be hidden behind the opaque overview
         // background anyway and their presence can visually compete with the
         // 3D prism thumbnails.
-        let overview_skip = |x: i32, y: i32, w: u32, h: u32| -> bool {
-            if !self.overview_active { return false; }
+        // Copy fields out so the closure does not borrow `self` (which
+        // prevents subsequent &mut self calls like apply_temporal_blur_mix).
+        let ov_active = self.overview_active;
+        let ov_mx = self.overview_mon_x;
+        let ov_my = self.overview_mon_y;
+        let ov_mw = self.overview_mon_w as i32;
+        let ov_mh = self.overview_mon_h as i32;
+        let overview_skip = move |x: i32, y: i32, w: u32, h: u32| -> bool {
+            if !ov_active { return false; }
             let cx = x + w as i32 / 2;
             let cy = y + h as i32 / 2;
-            let mx = self.overview_mon_x;
-            let my = self.overview_mon_y;
-            cx >= mx && cx < mx + self.overview_mon_w as i32
-                && cy >= my && cy < my + self.overview_mon_h as i32
+            cx >= ov_mx && cx < ov_mx + ov_mw && cy >= ov_my && cy < ov_my + ov_mh
         };
 
         // === Pass 1: Draw shadows (feature 14: improved shape) ===
@@ -1303,30 +1311,40 @@ impl Compositor {
                                 tex
                             };
 
-                            // P4: Temporal blur mix is ready but deferred due to borrow checker constraints
-                            // TODO: Can be activated once render_frame refactoring separates blur computation from application
-                            // Current: apply_temporal_blur_mix() prepared in apply_temporal_blur_mix() method
-                            // let blur_tex = if let Some(blurred) = blur_tex {
-                            //     if !cache_hit && self.temporal_blur_enabled && self.prev_window_positions_hash != 0 {
-                            //         Some(self.apply_temporal_blur_mix(blurred))
-                            //     } else { Some(blurred) } } else { None };
-
-                            // P4: ACTIVATION: Simple temporal mix for cache misses
-                            // On cache miss + stable positions, save current blur for next frame blending
+                            // P4: Temporal blur mix — GLSL blend of current+previous blur on
+                            // stable frames. apply_temporal_blur_mix writes into prev_blur_fbo and
+                            // returns its texture, which we then composite as the backdrop blur.
+                            // On the first temporal frame the function blits a seed; subsequent
+                            // frames mix at temporal_blur_mix_ratio.
                             if let Some(blurred) = blur_tex {
-                                if !cache_hit && self.temporal_blur_enabled && self.prev_window_positions_hash != 0 {
-                                    // Save current blur texture to prev_blur_fbo for next frame
-                                    if let Some((prev_fbo, _)) = &self.prev_blur_fbo {
-                                        self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-                                        self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(*prev_fbo));
-                                        self.gl.blit_framebuffer(
-                                            0, 0, self.screen_w as i32, self.screen_h as i32,
-                                            0, 0, self.screen_w as i32, self.screen_h as i32,
-                                            glow::COLOR_BUFFER_BIT, glow::NEAREST,
-                                        );
+                                let final_blur = if !cache_hit
+                                    && self.temporal_blur_enabled
+                                    && self.prev_window_positions_hash != 0
+                                {
+                                    let mixed = self.apply_temporal_blur_mix(blurred);
+                                    // Restore framebuffer + window-shader state for the
+                                    // backdrop-quad draw that follows: the mix function
+                                    // changes program/VAO/active framebuffer.
+                                    if postprocess_active {
+                                        let (pp_fbo, _) = self.postprocess_fbo.as_ref().unwrap();
+                                        self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(*pp_fbo));
+                                    } else {
+                                        self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                                     }
-                                }
-                                blur_tex = Some(blurred);
+                                    self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+                                    self.gl_state_tracker.use_program(&self.gl, Some(self.program));
+                                    self.gl.uniform_matrix_4_f32_slice(
+                                        self.win_uniforms.projection.as_ref(), false, &proj,
+                                    );
+                                    self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+                                    self.gl.uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
+                                    self.gl_state_tracker.bind_vertex_array(&self.gl, Some(self.quad_vao));
+                                    self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
+                                    mixed
+                                } else {
+                                    blurred
+                                };
+                                blur_tex = Some(final_blur);
                             }
 
                             if let Some(blur_tex) = blur_tex {

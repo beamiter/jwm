@@ -8,7 +8,6 @@ use super::perf_metrics::PerfMetrics;
 use super::pixel_buffer_pool::PixelBufferPool;
 use super::shader_cache::ShaderCache;
 use super::texture_pool::TexturePool;
-use crate::backend::x11::batch::X11RequestBatcher;
 use crate::backend::x11::event_coalescer::EventCoalescer;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -78,15 +77,6 @@ impl OptimizationManager {
         // Update adaptive systems
         self.adaptive_frame_rate.update_load(gpu_load);
         self.adaptive_blur.update_load(gpu_load);
-
-        // Update X11 batch thresholds
-        if let Some(batcher) = {
-            // This would need access to the X11 batcher, typically stored in backend
-            // For now, this is a placeholder
-            None as Option<&X11RequestBatcher>
-        } {
-            batcher.adjust_thresholds(gpu_load);
-        }
 
         let quality_name = match self.adaptive_blur.quality() {
             BlurQuality::Full => "full",

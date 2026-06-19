@@ -3353,16 +3353,23 @@ impl Backend for UdevBackend {
                     }
                     Some(BackendEvent::OutputConfigure { changes }) => {
                         handled_any = true;
+                        let mut all_ok = true;
                         if let Some(ref kms) = self.kms {
                             let mut kms = kms.borrow_mut();
                             for change in &changes {
                                 if !change.enabled {
-                                    log::warn!(
-                                        "[output-mgmt] disabling output '{}' is not supported; ignoring",
+                                    // Soft disable: mark the output so the renderer
+                                    // skips frame submission; we keep the DrmOutput
+                                    // alive (a full DRM teardown is unfinished).
+                                    log::info!(
+                                        "[output-mgmt] soft-disabling output '{}'",
                                         change.name
                                     );
+                                    self.state.soft_disabled_outputs.insert(change.name.clone());
                                     continue;
                                 }
+                                // Re-enabling clears the soft-disable flag.
+                                self.state.soft_disabled_outputs.remove(&change.name);
                                 if let Err(e) = kms.configure_output(
                                     &change.name,
                                     change.mode,
@@ -3374,8 +3381,11 @@ impl Backend for UdevBackend {
                                         "[output-mgmt] configure_output('{}') failed: {e}",
                                         change.name
                                     );
+                                    all_ok = false;
                                 }
                             }
+                        } else {
+                            all_ok = false;
                         }
                         // Refresh advertised outputs and trigger a relayout.
                         self.state.outputs = self
@@ -3393,6 +3403,13 @@ impl Backend for UdevBackend {
                             .pending_events
                             .lock_safe()
                             .push_back(BackendEvent::ScreenLayoutChanged);
+                        // Resolve the FIFO-matched ack now that the modeset has
+                        // been attempted. The dispatch handler that pushed this
+                        // event also pushed a matching ack callback in the same
+                        // synchronous call, so popping the head is safe.
+                        if let Some(pending) = self.state.pending_output_acks.pop_front() {
+                            (pending.on_complete)(all_ok);
+                        }
                     }
                     Some(ev) => {
                         handled_any = true;

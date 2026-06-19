@@ -101,6 +101,21 @@ pub struct JwmClientState {
     pub security_context: Option<smithay::wayland::security_context::SecurityContext>,
 }
 
+/// Deferred ack for wlr-output-management Apply requests. The udev backend
+/// invokes the callback with `true` after a successful modeset and `false`
+/// otherwise, so the wlr-output-configuration resource is acked only after
+/// the actual outcome is known. FIFO with respect to the matching
+/// `BackendEvent::OutputConfigure` entries in `pending_events`.
+pub struct PendingOutputAck {
+    pub on_complete: Box<dyn FnOnce(bool) + Send>,
+}
+
+impl std::fmt::Debug for PendingOutputAck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PendingOutputAck")
+    }
+}
+
 impl ClientData for JwmClientState {
     fn initialized(&self, _client_id: ClientId) {}
     fn disconnected(&self, client_id: ClientId, reason: DisconnectReason) {
@@ -212,6 +227,17 @@ pub struct JwmWaylandState {
 
     /// KMS-backed outputs currently available for mapping layer surfaces.
     pub outputs: Vec<Output>,
+
+    /// FIFO of pending `wlr-output-configuration::Apply` acks waiting for the
+    /// udev backend to finish their modeset. Drained in order matching
+    /// `BackendEvent::OutputConfigure` entries in `pending_events`.
+    pub pending_output_acks: std::collections::VecDeque<PendingOutputAck>,
+
+    /// Output names a client has soft-disabled via wlr-output-management
+    /// `disable_head`. We do not currently tear the DrmOutput down; instead the
+    /// output is advertised as disabled to clients and the compositor skips
+    /// frame submission for it. Re-enabled by an Apply that enables the head.
+    pub soft_disabled_outputs: HashSet<String>,
 
     /// Hardware gamma LUT size per output name, queried from the CRTC.
     /// Used by wlr-gamma-control to advertise the correct ramp size.
@@ -1319,6 +1345,8 @@ impl JwmWaylandState {
                 active_toplevel: None,
 
                 outputs: Vec::new(),
+                pending_output_acks: std::collections::VecDeque::new(),
+                soft_disabled_outputs: HashSet::new(),
                 gamma_sizes: HashMap::new(),
                 next_window_raw: 1,
                 toplevels: HashMap::new(),

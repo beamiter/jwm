@@ -1538,8 +1538,6 @@ impl Compositor {
             // P6A: Async X11 communication
             priority_event_queue: PriorityEventQueue::new(),
             deferred_ops_queue: DeferredOpQueue::new(256),
-            // P6D: Async blur computation
-            blur_compute_pipeline: BlurComputePipeline::new(),
             // P7A: Predictive rendering
             predictive_render_mgr: PredictiveRenderManager::new(),
             // P7C: Smart cache warmup

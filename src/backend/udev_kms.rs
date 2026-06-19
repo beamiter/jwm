@@ -1868,6 +1868,15 @@ impl KmsState {
 
         let mut any_skipped = false;
         for out_idx in 0..self.outputs.len() {
+            // Outputs marked soft-disabled by wlr-output-management
+            // `disable_head` Apply stop receiving frames but keep their
+            // DrmOutput alive so a later `enable_head` Apply can resume.
+            if state
+                .soft_disabled_outputs
+                .contains(&self.outputs[out_idx].output.name())
+            {
+                continue;
+            }
             let frame_pending = self.outputs[out_idx].frame_pending;
             if frame_pending {
                 // Watchdog: a queued page flip should produce a vblank within one

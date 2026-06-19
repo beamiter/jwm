@@ -941,9 +941,12 @@ impl Backend for X11Backend {
     }
 
     fn set_vrr_enabled(&mut self, _output: crate::backend::common_define::OutputId, _enabled: bool) -> Result<(), BackendError> {
-        // VRR state would be set via RandR property change (VRR_ENABLED on CRTC)
-        // For now, placeholder returns success
-        Ok(())
+        // X11 has no portable per-output VRR toggle: drivers expose it via
+        // either the `VRR_CAPABLE`/`vrr_enabled` CRTC properties (amdgpu, nouveau)
+        // or vendor-specific bits (NVIDIA G-SYNC). Wiring this up requires the
+        // RandR `change_crtc_property` path with driver-specific atom lookup,
+        // which is not implemented yet — fail loudly instead of silently lying.
+        Err(BackendError::Unsupported("X11 set_vrr_enabled not implemented"))
     }
 
     fn compositor_capture_thumbnail(

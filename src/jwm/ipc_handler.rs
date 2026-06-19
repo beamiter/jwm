@@ -64,6 +64,14 @@ impl Jwm {
             return self.handle_benchmark_command(backend, args);
         }
 
+        if name == "set_config" {
+            return self.handle_set_config_command(backend, args);
+        }
+
+        if name == "move_window_to_monitor" {
+            return self.handle_move_window_to_monitor(backend, args);
+        }
+
         match ipc::dispatch_command(name, args) {
             Ok((func, arg)) => match func(self, backend, &arg) {
                 Ok(()) => IpcResponse::ok(None),
@@ -133,6 +141,91 @@ impl Jwm {
             }
             _ => IpcResponse::err(format!("unknown query: {name}")),
         }
+    }
+
+    /// Apply a single in-memory config override (does not touch the file).
+    /// args: { "key": "appearance.border_px", "value": <json> }
+    fn handle_set_config_command(
+        &mut self,
+        backend: &mut dyn Backend,
+        args: &serde_json::Value,
+    ) -> IpcResponse {
+        let key = match args.get("key").and_then(|v| v.as_str()) {
+            Some(k) => k.to_string(),
+            None => return IpcResponse::err("set_config: missing 'key' string".to_string()),
+        };
+        let value = match args.get("value") {
+            Some(v) => v.clone(),
+            None => return IpcResponse::err("set_config: missing 'value'".to_string()),
+        };
+
+        let mut new_cfg = (**CONFIG.load()).clone();
+        if let Err(e) = new_cfg.set_value(&key, &value) {
+            return IpcResponse::err(e);
+        }
+        CONFIG.store(std::sync::Arc::new(new_cfg));
+
+        self.apply_config_changes(backend);
+        self.broadcast_ipc_event(
+            "config/changed",
+            serde_json::json!({ "key": key, "value": value }),
+        );
+        IpcResponse::ok(None)
+    }
+
+    /// Move a specific window (by raw id) to an absolute monitor index.
+    /// args: { "window": <u64>, "monitor": <i32> }
+    fn handle_move_window_to_monitor(
+        &mut self,
+        backend: &mut dyn Backend,
+        args: &serde_json::Value,
+    ) -> IpcResponse {
+        let win_id = match args.get("window").and_then(|v| v.as_u64()) {
+            Some(v) => v,
+            None => {
+                return IpcResponse::err(
+                    "move_window_to_monitor: missing 'window' (u64)".to_string(),
+                );
+            }
+        };
+        let target_num = match args.get("monitor").and_then(|v| v.as_i64()) {
+            Some(v) => v as i32,
+            None => {
+                return IpcResponse::err(
+                    "move_window_to_monitor: missing 'monitor' (i32)".to_string(),
+                );
+            }
+        };
+
+        let win = crate::backend::common_define::WindowId::from_raw(win_id);
+        let client_key = match self.state.win_to_client.get(&win).copied() {
+            Some(k) => k,
+            None => {
+                return IpcResponse::err(format!("window {win_id:#x} not managed by jwm"));
+            }
+        };
+
+        let target_mon_key = self
+            .state
+            .monitor_order
+            .iter()
+            .copied()
+            .find(|&mk| {
+                self.state
+                    .monitors
+                    .get(mk)
+                    .map(|m| m.num == target_num)
+                    .unwrap_or(false)
+            });
+        let target_mon_key = match target_mon_key {
+            Some(k) => k,
+            None => {
+                return IpcResponse::err(format!("monitor {target_num} not found"));
+            }
+        };
+
+        self.sendmon(backend, Some(client_key), Some(target_mon_key));
+        IpcResponse::ok(None)
     }
 
     fn handle_benchmark_command(
