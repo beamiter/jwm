@@ -206,10 +206,18 @@ impl App {
             monitor_labels: ["🥇", "🥈", "🥉", "❔"],
             volume_label: "🔊",
             mute_label: "🔇",
+            brightness_label: "🔆",
+            battery_label: "🔋",
+            battery_charging_label: "⚡",
+            cpu_label: "💻",
+            mem_label: "🧠",
 
             show_audio: true,
             show_theme_toggle: true,
+            show_brightness: true,
+            show_battery: true,
             volume_step: 5,
+            brightness_step: 5,
         };
 
         // 字体（尽量不依赖 Nerd Font；可用 XBAR_FONT 覆盖）
