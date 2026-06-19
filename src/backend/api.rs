@@ -346,6 +346,15 @@ pub enum BackendEvent {
     MappingNotify,
     DamageNotify { drawable: WindowId },
 
+    // === Touchpad gesture events (Wayland only) ===
+    /// A 3+ finger swipe gesture has completed and was intercepted by the
+    /// compositor (not forwarded to clients).
+    GestureSwipeAction {
+        fingers: u32,
+        /// One of: "left", "right", "up", "down".
+        direction: &'static str,
+    },
+
     // === Workspace protocol events ===
     WorkspaceActivate {
         monitor: usize,

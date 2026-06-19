@@ -119,6 +119,11 @@ pub struct Jwm {
     /// Set when the leader fired and we're waiting for the second key.
     pub(crate) chord_armed_until: Option<std::time::Instant>,
 
+    /// Do-not-disturb: when true, suppress urgent-window propagation and
+    /// hide override-redirect notification surfaces. Initialized from
+    /// `behavior.do_not_disturb` and toggled live via the `toggle_dnd` IPC.
+    pub(crate) do_not_disturb: bool,
+
     /// Strut reservations from external panels (polybar, trayer, etc.).
     /// The second tuple element is the monitor that physically hosts the
     /// panel window, used to attribute legacy whole-screen (`_NET_WM_STRUT`)
@@ -306,6 +311,14 @@ impl Jwm {
             return;
         }
 
+        // Do-not-disturb: suppress notification windows entirely.
+        if self.do_not_disturb {
+            if let Err(e) = backend.window_ops().unmap_window(win) {
+                debug!("DND: unmap notification {:?} failed: {:?}", win, e);
+            }
+            return;
+        }
+
         let geom = match backend.window_ops().get_geometry(win) {
             Ok(g) => g,
             Err(_) => return,
@@ -437,6 +450,7 @@ impl Jwm {
             key_bindings: CONFIG.load().get_keys(),
             chord_compiled: CONFIG.load().compile_chord(),
             chord_armed_until: None,
+            do_not_disturb: CONFIG.load().behavior().do_not_disturb,
             external_struts: HashMap::new(),
             last_mouse_root: (0.0, 0.0),
 

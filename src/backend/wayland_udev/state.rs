@@ -129,6 +129,18 @@ pub struct DndIcon {
     pub offset: Point<i32, Logical>,
 }
 
+/// In-progress touchpad swipe gesture, accumulated between Begin and End.
+/// When `intercept` is true, neither the corresponding Begin/Update/End nor
+/// any in-flight events should be forwarded to client surfaces — the WM has
+/// claimed the gesture.
+#[derive(Debug, Default, Clone)]
+pub struct GestureSwipeTracker {
+    pub fingers: u32,
+    pub intercept: bool,
+    pub dx: f64,
+    pub dy: f64,
+}
+
 pub struct JwmWaylandState {
     pub display_handle: DisplayHandle,
     pub loop_handle: smithay::reexports::calloop::LoopHandle<'static, JwmWaylandState>,
@@ -201,6 +213,10 @@ pub struct JwmWaylandState {
     pub idle_inhibiting_surfaces: HashSet<ObjectId>,
     pub session_locked: bool,
     pub foreign_toplevel_handles: HashMap<WindowId, ForeignToplevelHandle>,
+
+    /// Touchpad swipe-gesture tracker. When `intercept` is true, the WM is
+    /// "consuming" the in-progress swipe and forwarding nothing to clients.
+    pub gesture_swipe: GestureSwipeTracker,
 
     /// XWayland shell state (for associating X11 windows with wl_surfaces).
     pub xwayland_shell_state: XWaylandShellState,
@@ -1335,6 +1351,7 @@ impl JwmWaylandState {
                 idle_inhibiting_surfaces: HashSet::new(),
                 session_locked: false,
                 foreign_toplevel_handles: HashMap::new(),
+                gesture_swipe: GestureSwipeTracker::default(),
 
                 xwayland_shell_state,
                 x11_wm: None,

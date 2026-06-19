@@ -558,6 +558,41 @@ pub struct BehaviorConfig {
     /// Class names that should NEVER swallow their parent (popups, menus, etc).
     #[serde(default)]
     pub swallow_exceptions: Vec<String>,
+
+    // --- Touchpad gestures (Wayland only) ---
+    /// Touchpad swipe-gesture bindings. 3+ finger swipes are intercepted by the
+    /// compositor and dispatched as WM commands; 1- and 2-finger swipes continue
+    /// to forward to clients.
+    #[serde(default)]
+    pub gesture_swipe: Vec<GestureSwipeConfig>,
+    /// Minimum cumulative pixel delta along the dominant axis before a swipe
+    /// triggers its action. Smaller = more sensitive. Default 80.
+    #[serde(default = "default_gesture_swipe_threshold")]
+    pub gesture_swipe_threshold: f64,
+
+    // --- Do-not-disturb ---
+    /// When true, suppress urgent-window focus-stealing and hide notification
+    /// surfaces (X11 _NET_WM_WINDOW_TYPE_NOTIFICATION). Toggle live via the
+    /// `toggle_dnd` IPC command.
+    #[serde(default)]
+    pub do_not_disturb: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GestureSwipeConfig {
+    /// Number of fingers (3, 4, or 5).
+    pub fingers: u32,
+    /// Direction: "left", "right", "up", "down".
+    pub direction: String,
+    /// Command name (any IPC dispatch_command name, e.g. "loopview").
+    pub function: String,
+    /// Argument passed to the command. See ArgumentConfig.
+    #[serde(default)]
+    pub argument: ArgumentConfig,
+}
+
+fn default_gesture_swipe_threshold() -> f64 {
+    80.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -913,6 +948,12 @@ pub enum ArgumentConfig {
     StringVec(Vec<String>),
 }
 
+impl Default for ArgumentConfig {
+    fn default() -> Self {
+        ArgumentConfig::Int(0)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MouseBindingsConfig {
     pub buttons: Vec<ButtonConfig>,
@@ -1086,6 +1127,9 @@ impl Default for Config {
                     swallow_enabled: false,
                     swallow_terminals: Vec::new(),
                     swallow_exceptions: Vec::new(),
+                    gesture_swipe: Vec::new(),
+                    gesture_swipe_threshold: default_gesture_swipe_threshold(),
+                    do_not_disturb: false,
                     // Phase 6: Accessibility
                     colorblind_mode: String::new(),
                     annotation_color: default_annotation_color(),

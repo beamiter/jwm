@@ -115,6 +115,21 @@ impl Jwm {
         Ok(())
     }
 
+    /// Toggle do-not-disturb. Broadcasts `dnd/toggle` so bars can update.
+    pub fn toggle_dnd(
+        &mut self,
+        _backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.do_not_disturb = !self.do_not_disturb;
+        log::info!("DND {}", if self.do_not_disturb { "ON" } else { "OFF" });
+        self.broadcast_ipc_event(
+            "dnd/toggle",
+            serde_json::json!({ "enabled": self.do_not_disturb }),
+        );
+        Ok(())
+    }
+
     /// 切换部分重绘(scissor 局部刷新,实验性,默认关)
     pub fn togglepartialdamage(
         &mut self,

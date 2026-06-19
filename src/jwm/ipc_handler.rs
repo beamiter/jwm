@@ -114,8 +114,12 @@ impl Jwm {
                     "n_master": cfg.n_master(),
                     "tags_length": cfg.tags_length(),
                     "show_bar": cfg.show_bar(),
+                    "do_not_disturb": self.do_not_disturb,
                 })))
             }
+            "get_dnd" => IpcResponse::ok(Some(serde_json::json!({
+                "enabled": self.do_not_disturb,
+            }))),
             "get_version" => IpcResponse::ok(Some(serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "name": "jwm",

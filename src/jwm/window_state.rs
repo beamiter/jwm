@@ -208,8 +208,16 @@ impl Jwm {
         if let Some(hints) = backend.property_ops().get_wm_hints(win) {
             if hints.urgent {
                 let is_focused = self.is_client_selected(client_key);
-                if is_focused {
+                // Under DND, suppress urgency on unfocused clients to silence
+                // taskbar/tag highlights and prevent focus-stealing chains.
+                if is_focused || self.do_not_disturb {
                     let _ = backend.property_ops().set_urgent_hint(win, false);
+                    if let Some(c) = self.state.clients.get_mut(client_key) {
+                        c.state.is_urgent = false;
+                    }
+                    if backend.has_compositor() {
+                        backend.compositor_set_window_urgent(win, false);
+                    }
                 } else {
                     if let Some(c) = self.state.clients.get_mut(client_key) {
                         c.state.is_urgent = true;

@@ -248,6 +248,10 @@ impl Jwm {
         if let Err(e) = self.grabkeys(backend) {
             warn!("[config] failed to re-grab keys: {e}");
         }
+        // Pick up DND default from config (without overriding a runtime toggle: only
+        // when the config value differs from our default-on-startup, refresh).
+        // Simpler: trust config — reload reflects user's saved preference.
+        self.do_not_disturb = cfg.behavior().do_not_disturb;
 
         // 2. Re-apply color schemes
         let colors = cfg.colors();

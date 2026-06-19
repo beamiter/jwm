@@ -978,6 +978,9 @@ impl EventHandler for Jwm {
             }
             BackendEvent::ClientMessage { .. } => {}
 
+            BackendEvent::GestureSwipeAction { fingers, direction } => {
+                self.handle_gesture_swipe(backend, fingers, direction);
+            }
         }
 
         backend.request_render();
@@ -1066,5 +1069,46 @@ impl Jwm {
     pub(crate) fn handle_ping_response(&mut self, window: WindowId) {
         self.pending_pings.remove(&window);
         self.unresponsive_windows.remove(&window);
+    }
+
+    /// Dispatch a touchpad swipe gesture to its configured WM action.
+    /// Looks up the (fingers, direction) pair in `behavior.gesture_swipe`
+    /// and invokes the matching command via `ipc::dispatch_command`.
+    pub(crate) fn handle_gesture_swipe(
+        &mut self,
+        backend: &mut dyn Backend,
+        fingers: u32,
+        direction: &str,
+    ) {
+        let cfg = crate::config::CONFIG.load();
+        let bindings = &cfg.behavior().gesture_swipe;
+        let entry = match bindings
+            .iter()
+            .find(|g| g.fingers == fingers && g.direction.eq_ignore_ascii_case(direction))
+        {
+            Some(e) => e.clone(),
+            None => return,
+        };
+        let arg_value = match &entry.argument {
+            crate::config::ArgumentConfig::Int(i) => serde_json::json!(i),
+            crate::config::ArgumentConfig::UInt(u) => serde_json::json!(u),
+            crate::config::ArgumentConfig::Float(f) => serde_json::json!(f),
+            crate::config::ArgumentConfig::String(s) => serde_json::json!(s),
+            crate::config::ArgumentConfig::StringVec(v) => serde_json::json!(v),
+        };
+        match crate::ipc::dispatch_command(&entry.function, &arg_value) {
+            Ok((func, arg)) => {
+                if let Err(e) = func(self, backend, &arg) {
+                    log::warn!(
+                        "[gesture] {}-finger {} → {}: {e}",
+                        fingers, direction, entry.function
+                    );
+                }
+            }
+            Err(e) => log::warn!(
+                "[gesture] {}-finger {} → unknown command {}: {e}",
+                fingers, direction, entry.function
+            ),
+        }
     }
 }

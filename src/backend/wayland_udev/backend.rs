@@ -2001,19 +2001,32 @@ impl UdevBackend {
                             }
                         }
                         InputEvent::GestureSwipeBegin { event, .. } => {
-                            if let Some(pointer) = state.seat.get_pointer() {
+                            let fingers = event.fingers();
+                            // 3+ fingers: WM claims the gesture; clients see nothing.
+                            if fingers >= 3 {
+                                state.gesture_swipe = crate::backend::wayland::state::GestureSwipeTracker {
+                                    fingers,
+                                    intercept: true,
+                                    dx: 0.0,
+                                    dy: 0.0,
+                                };
+                            } else if let Some(pointer) = state.seat.get_pointer() {
                                 pointer.gesture_swipe_begin(
                                     state,
                                     &smithay::input::pointer::GestureSwipeBeginEvent {
                                         serial: SCOUNTER.next_serial(),
                                         time: event.time_msec(),
-                                        fingers: event.fingers(),
+                                        fingers,
                                     },
                                 );
                             }
                         }
                         InputEvent::GestureSwipeUpdate { event, .. } => {
-                            if let Some(pointer) = state.seat.get_pointer() {
+                            if state.gesture_swipe.intercept {
+                                let d = event.delta();
+                                state.gesture_swipe.dx += d.x;
+                                state.gesture_swipe.dy += d.y;
+                            } else if let Some(pointer) = state.seat.get_pointer() {
                                 pointer.gesture_swipe_update(
                                     state,
                                     &smithay::input::pointer::GestureSwipeUpdateEvent {
@@ -2024,7 +2037,34 @@ impl UdevBackend {
                             }
                         }
                         InputEvent::GestureSwipeEnd { event, .. } => {
-                            if let Some(pointer) = state.seat.get_pointer() {
+                            if state.gesture_swipe.intercept {
+                                let cfg = crate::config::CONFIG.load();
+                                let threshold = cfg.behavior().gesture_swipe_threshold;
+                                let dx = state.gesture_swipe.dx;
+                                let dy = state.gesture_swipe.dy;
+                                let fingers = state.gesture_swipe.fingers;
+                                let cancelled = event.cancelled();
+                                state.gesture_swipe = Default::default();
+
+                                if !cancelled {
+                                    let direction: Option<&'static str> =
+                                        if dx.abs() > dy.abs() {
+                                            if dx.abs() >= threshold {
+                                                if dx > 0.0 { Some("right") } else { Some("left") }
+                                            } else { None }
+                                        } else if dy.abs() >= threshold {
+                                            if dy > 0.0 { Some("down") } else { Some("up") }
+                                        } else { None };
+                                    if let Some(dir) = direction {
+                                        pending_events.lock_safe().push_back(
+                                            BackendEvent::GestureSwipeAction {
+                                                fingers,
+                                                direction: dir,
+                                            },
+                                        );
+                                    }
+                                }
+                            } else if let Some(pointer) = state.seat.get_pointer() {
                                 pointer.gesture_swipe_end(
                                     state,
                                     &smithay::input::pointer::GestureSwipeEndEvent {

@@ -185,6 +185,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "toggle_peek" => Ok((Jwm::toggle_peek, parse_int_arg(args, 0))),
         "toggle_annotation" => Ok((Jwm::toggle_annotation, parse_int_arg(args, 0))),
         "toggle_recording" => Ok((Jwm::toggle_recording, parse_int_arg(args, 0))),
+        "toggle_dnd" => Ok((Jwm::toggle_dnd, parse_int_arg(args, 0))),
 
         // --- Session ---
         "save_session" => Ok((Jwm::save_session, parse_int_arg(args, 0))),
