@@ -91,6 +91,34 @@ pub fn new_pending_image_capture_queue() -> PendingImageCaptureQueue {
     Arc::new(Mutex::new(Vec::new()))
 }
 
+/// Advertise dmabuf capture support on a session, emitting `dmabuf_device`
+/// followed by one `dmabuf_format` per supported fourcc with its modifier list.
+/// No-op when the compositor has no render device/formats (clients then use shm).
+/// Must be called after the shm_format events and before `done()`.
+fn advertise_session_dmabuf(sess: &ExtImageCopyCaptureSessionV1, state: &JwmWaylandState) {
+    let Some(dev) = state.dmabuf_main_device else {
+        return;
+    };
+    if state.dmabuf_render_formats.is_empty() {
+        return;
+    }
+    sess.dmabuf_device(dev.to_ne_bytes().to_vec());
+    for code in [
+        smithay::backend::allocator::Fourcc::Argb8888,
+        smithay::backend::allocator::Fourcc::Xrgb8888,
+    ] {
+        let mods: Vec<u8> = state
+            .dmabuf_render_formats
+            .iter()
+            .filter(|f| f.code == code)
+            .flat_map(|f| u64::from(f.modifier).to_ne_bytes())
+            .collect();
+        if !mods.is_empty() {
+            sess.dmabuf_format(code as u32, mods);
+        }
+    }
+}
+
 /// Initialize the ext-image-copy-capture globals.
 pub fn init_image_copy_capture(dh: &DisplayHandle) -> PendingImageCaptureQueue {
     dh.create_global::<JwmWaylandState, ExtOutputImageCaptureSourceManagerV1, _>(
@@ -245,6 +273,7 @@ impl Dispatch<ExtImageCopyCaptureManagerV1, CaptureManagerData> for JwmWaylandSt
                             sess.buffer_size(w, h);
                             sess.shm_format(wl_shm::Format::Argb8888);
                             sess.shm_format(wl_shm::Format::Xrgb8888);
+                            advertise_session_dmabuf(&sess, state);
                             sess.done();
                             debug!("[image-capture] session created: output={} size={}x{}", output.name(), w, h);
                         } else {
@@ -257,6 +286,7 @@ impl Dispatch<ExtImageCopyCaptureManagerV1, CaptureManagerData> for JwmWaylandSt
                                 sess.buffer_size(geo.w, geo.h);
                                 sess.shm_format(wl_shm::Format::Argb8888);
                                 sess.shm_format(wl_shm::Format::Xrgb8888);
+                                advertise_session_dmabuf(&sess, state);
                                 sess.done();
                                 debug!(
                                     "[image-capture] session created: toplevel={win:?} size={}x{}",
@@ -424,6 +454,7 @@ impl Dispatch<ExtImageCopyCaptureCursorSessionV1, CursorSessionData> for JwmWayl
                             sess.buffer_size(mode.size.w as u32, mode.size.h as u32);
                             sess.shm_format(wl_shm::Format::Argb8888);
                             sess.shm_format(wl_shm::Format::Xrgb8888);
+                            advertise_session_dmabuf(&sess, state);
                             sess.done();
                         } else {
                             sess.stopped();
@@ -434,6 +465,7 @@ impl Dispatch<ExtImageCopyCaptureCursorSessionV1, CursorSessionData> for JwmWayl
                             sess.buffer_size(geo.w, geo.h);
                             sess.shm_format(wl_shm::Format::Argb8888);
                             sess.shm_format(wl_shm::Format::Xrgb8888);
+                            advertise_session_dmabuf(&sess, state);
                             sess.done();
                         }
                         _ => sess.stopped(),

@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::format::FormatSet;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::Format as DmabufFormat;
@@ -47,6 +48,7 @@ use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Buffer as BufferCoord, Size};
 use smithay::utils::{DeviceFd, Physical, Point, Rectangle, Scale, Transform};
 use smithay::wayland::compositor::{with_states, with_surface_tree_downward, TraversalAction};
+use smithay::wayland::dmabuf::get_dmabuf;
 use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 use smithay::wayland::presentation::{PresentationFeedbackCachedState, Refresh};
@@ -153,6 +155,13 @@ pub(super) struct KmsState {
     /// full-screen GPU renderbuffer. Both fulfill paths share it within a frame
     /// since they run sequentially on the same output size.
     screencopy_offscreen: Option<(i32, i32, GlesRenderbuffer)>,
+
+    /// Reused offscreen renderbuffer for ext-image-copy-capture *toplevel* (single
+    /// window) capture, keyed by (width, height). Kept separate from
+    /// `screencopy_offscreen` because a window's size differs from the output's,
+    /// so sharing one cache would thrash reallocation between output and toplevel
+    /// captures every frame.
+    image_capture_toplevel_offscreen: Option<(i32, i32, GlesRenderbuffer)>,
 
     /// Latest vblank presentation timestamp (monotonic) for frame pacing feedback.
     last_presentation_time: Option<std::time::Instant>,
@@ -807,6 +816,42 @@ impl KmsState {
         cache.as_mut().map(|(_, _, rb)| rb)
     }
 
+    /// Render `elements` directly into a client-provided dmabuf buffer, avoiding
+    /// the offscreen + GPU readback + R/B-swap CPU copy of the SHM path. The
+    /// renderer binds the dmabuf as the render target and the GPU writes the
+    /// composited frame straight into the client's buffer. We wait on the
+    /// resulting `SyncPoint` so the GPU work is complete before the caller signals
+    /// `ready`. Returns `false` (caller fails the frame) if bind/render fails.
+    fn render_into_client_dmabuf(
+        renderer: &mut GlesRenderer,
+        dmabuf: &Dmabuf,
+        width: i32,
+        height: i32,
+        elements: &[KmsRenderElement],
+        clear: smithay::backend::renderer::Color32F,
+    ) -> bool {
+        let mut dmabuf = dmabuf.clone();
+        let mut target = match renderer.bind(&mut dmabuf) {
+            Ok(t) => t,
+            Err(e) => {
+                log::error!("[capture/dmabuf] bind client dmabuf failed: {e:?}");
+                return false;
+            }
+        };
+        let phys: Size<i32, Physical> = (width, height).into();
+        let mut dt = OutputDamageTracker::new(phys, Scale::from(1.0f64), Transform::Normal);
+        match dt.render_output(renderer, &mut target, 0, elements, clear) {
+            Ok(res) => {
+                let _ = res.sync.wait();
+                true
+            }
+            Err(e) => {
+                log::error!("[capture/dmabuf] render_output failed: {e:?}");
+                false
+            }
+        }
+    }
+
     fn fulfill_screencopy_frames(
         renderer: &mut GlesRenderer,
         offscreen_cache: &mut Option<(i32, i32, GlesRenderbuffer)>,
@@ -819,7 +864,7 @@ impl KmsState {
         use smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_frame_v1;
         use smithay::wayland::shm::with_buffer_contents_mut;
 
-        let mut frames: Vec<crate::backend::wayland_udev::screencopy::PendingScreencopyFrame> = {
+        let frames: Vec<crate::backend::wayland_udev::screencopy::PendingScreencopyFrame> = {
             let mut queue = pending.lock_safe();
             // Drain frames that match this output.
             let mut matching = Vec::new();
@@ -844,6 +889,50 @@ impl KmsState {
             frames.len(),
             output.name(),
         );
+
+        // Split out dmabuf-backed frames and render directly into them (no GPU
+        // readback, no CPU R/B swap). The rest keep the SHM offscreen path below.
+        let mut shm_frames = Vec::with_capacity(frames.len());
+        for f in frames {
+            let dmabuf = get_dmabuf(&f.buffer).ok().cloned();
+            match dmabuf {
+                Some(dmabuf) => {
+                    // We render the full output into the client buffer; sub-region
+                    // capture into a dmabuf is unsupported, so fail those (rare) and
+                    // let the client fall back to SHM.
+                    if f.region.is_some() {
+                        log::warn!("[screencopy] region capture into dmabuf unsupported");
+                        f.frame.failed();
+                        continue;
+                    }
+                    let clear = smithay::backend::renderer::Color32F::new(0.1, 0.15, 0.25, 1.0);
+                    if Self::render_into_client_dmabuf(
+                        renderer, &dmabuf, width, height, elements, clear,
+                    ) {
+                        f.frame.flags(zwlr_screencopy_frame_v1::Flags::empty());
+                        if f.with_damage {
+                            f.frame.damage(0, 0, width as u32, height as u32);
+                        }
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default();
+                        let tv_sec = now.as_secs();
+                        f.frame.ready(
+                            (tv_sec >> 32) as u32,
+                            (tv_sec & 0xFFFFFFFF) as u32,
+                            now.subsec_nanos(),
+                        );
+                    } else {
+                        f.frame.failed();
+                    }
+                }
+                None => shm_frames.push(f),
+            }
+        }
+        let mut frames = shm_frames;
+        if frames.is_empty() {
+            return;
+        }
 
         // Render to a cached offscreen buffer (reused across frames).
         let size: Size<i32, BufferCoord> = (width, height).into();
@@ -1024,14 +1113,50 @@ impl KmsState {
             for f in queue.drain(..) {
                 match &f.source {
                     CaptureSource::Output(o) if o == output => matching.push(f),
-                    CaptureSource::Output(_) => remaining.push(f),
-                    CaptureSource::Toplevel(_) => f.frame.failed(FailureReason::Unknown),
+                    // Toplevel frames are output-independent; leave them queued for
+                    // `fulfill_image_capture_toplevel_frames`, which runs once after
+                    // the per-output loop with access to per-window surface state.
+                    CaptureSource::Output(_) | CaptureSource::Toplevel(_) => remaining.push(f),
                 }
             }
             *queue = remaining;
             matching
         };
 
+        if frames.is_empty() {
+            return;
+        }
+
+        // Render dmabuf-backed frames directly into the client buffer (no readback).
+        let mut shm_frames = Vec::with_capacity(frames.len());
+        for f in frames {
+            let dmabuf = get_dmabuf(&f.buffer).ok().cloned();
+            match dmabuf {
+                Some(dmabuf) => {
+                    let clear = smithay::backend::renderer::Color32F::new(0.0, 0.0, 0.0, 1.0);
+                    if Self::render_into_client_dmabuf(
+                        renderer, &dmabuf, width, height, elements, clear,
+                    ) {
+                        f.frame.transform(wl_output::Transform::Normal);
+                        f.frame.damage(0, 0, width, height);
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default();
+                        let tv_sec = now.as_secs();
+                        f.frame.presentation_time(
+                            (tv_sec >> 32) as u32,
+                            (tv_sec & 0xFFFFFFFF) as u32,
+                            now.subsec_nanos(),
+                        );
+                        f.frame.ready();
+                    } else {
+                        f.frame.failed(FailureReason::Unknown);
+                    }
+                }
+                None => shm_frames.push(f),
+            }
+        }
+        let frames = shm_frames;
         if frames.is_empty() {
             return;
         }
@@ -1141,6 +1266,212 @@ impl KmsState {
                 }
                 Err(e) => {
                     log::warn!("[image-capture] buffer access failed: {e:?}");
+                    frame_info.frame.failed(FailureReason::Unknown);
+                }
+            }
+        }
+    }
+
+    /// Fulfill pending ext-image-copy-capture-v1 *toplevel* (single window) frames.
+    ///
+    /// Unlike output capture, this renders only one window's surface tree into a
+    /// window-sized offscreen buffer and reads it back into the client buffer.
+    /// Runs once per render cycle since toplevel frames are not tied to an output.
+    fn fulfill_image_capture_toplevel_frames(
+        renderer: &mut GlesRenderer,
+        offscreen_cache: &mut Option<(i32, i32, GlesRenderbuffer)>,
+        state: &crate::backend::wayland::state::JwmWaylandState,
+        pending: &crate::backend::wayland_udev::image_copy_capture::PendingImageCaptureQueue,
+    ) {
+        use crate::backend::wayland_udev::image_copy_capture::CaptureSource;
+        use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_frame_v1::FailureReason;
+        use smithay::reexports::wayland_server::protocol::wl_output;
+        use smithay::wayland::shm::with_buffer_contents_mut;
+
+        let frames = {
+            let mut queue = pending.lock_safe();
+            let mut matching = Vec::new();
+            let mut remaining = Vec::new();
+            for f in queue.drain(..) {
+                match &f.source {
+                    CaptureSource::Toplevel(_) => matching.push(f),
+                    CaptureSource::Output(_) => remaining.push(f),
+                }
+            }
+            *queue = remaining;
+            matching
+        };
+
+        if frames.is_empty() {
+            return;
+        }
+
+        for frame_info in frames {
+            let CaptureSource::Toplevel(win) = frame_info.source else {
+                continue;
+            };
+
+            let Some(surface) = state.surface_for_window(win) else {
+                frame_info.frame.failed(FailureReason::Unknown);
+                continue;
+            };
+            let Some(geo) = state.window_geometry.get(&win).copied() else {
+                frame_info.frame.failed(FailureReason::Unknown);
+                continue;
+            };
+            let (width, height) = (geo.w as i32, geo.h as i32);
+            if width <= 0 || height <= 0 {
+                frame_info.frame.failed(FailureReason::Unknown);
+                continue;
+            }
+
+            // Shift the surface buffer origin by -window_geometry.loc so client-side
+            // shadow/CSD margins don't push the content off the capture buffer.
+            let (off_x, off_y) = with_states(&surface, |states| {
+                let mut cached = states.cached_state.get::<SurfaceCachedState>();
+                cached
+                    .current()
+                    .geometry
+                    .map(|r| (r.loc.x, r.loc.y))
+                    .unwrap_or((0, 0))
+            });
+
+            let scale = Scale::from(1.0f64);
+            let location: Point<i32, Physical> = (-off_x, -off_y).into();
+            let tree = SurfaceTree::from_surface(&surface);
+            let elements: Vec<KmsRenderElement> =
+                AsRenderElements::<GlesRenderer>::render_elements(
+                    &tree, renderer, location, scale, 1.0,
+                );
+
+            // dmabuf fast path: render the window straight into the client buffer.
+            if let Some(dmabuf) = get_dmabuf(&frame_info.buffer).ok().cloned() {
+                let clear = smithay::backend::renderer::Color32F::new(0.0, 0.0, 0.0, 0.0);
+                if Self::render_into_client_dmabuf(
+                    renderer, &dmabuf, width, height, &elements, clear,
+                ) {
+                    frame_info.frame.transform(wl_output::Transform::Normal);
+                    frame_info.frame.damage(0, 0, width, height);
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default();
+                    let tv_sec = now.as_secs();
+                    frame_info.frame.presentation_time(
+                        (tv_sec >> 32) as u32,
+                        (tv_sec & 0xFFFFFFFF) as u32,
+                        now.subsec_nanos(),
+                    );
+                    frame_info.frame.ready();
+                } else {
+                    frame_info.frame.failed(FailureReason::Unknown);
+                }
+                continue;
+            }
+
+            let size: Size<i32, BufferCoord> = (width, height).into();
+            let renderbuffer = match Self::screencopy_offscreen_buffer(
+                renderer,
+                offscreen_cache,
+                width,
+                height,
+            ) {
+                Some(rb) => rb,
+                None => {
+                    frame_info.frame.failed(FailureReason::Unknown);
+                    continue;
+                }
+            };
+
+            let mut target = match renderer.bind(renderbuffer) {
+                Ok(t) => t,
+                Err(e) => {
+                    log::error!("[image-capture/toplevel] bind offscreen failed: {e:?}");
+                    frame_info.frame.failed(FailureReason::Unknown);
+                    continue;
+                }
+            };
+
+            let phys_size: smithay::utils::Size<i32, Physical> = (width, height).into();
+            let mut damage_tracker =
+                OutputDamageTracker::new(phys_size, Scale::from(1.0f64), Transform::Normal);
+            // Transparent clear so areas outside the window's content stay clear.
+            let clear_color = smithay::backend::renderer::Color32F::new(0.0, 0.0, 0.0, 0.0);
+            if let Err(e) =
+                damage_tracker.render_output(renderer, &mut target, 0, &elements, clear_color)
+            {
+                log::error!("[image-capture/toplevel] render_output failed: {e:?}");
+                frame_info.frame.failed(FailureReason::Unknown);
+                continue;
+            }
+
+            let region = Rectangle::from_size(size);
+            let mapping = match renderer.copy_framebuffer(&target, region, Fourcc::Abgr8888) {
+                Ok(m) => m,
+                Err(e) => {
+                    log::error!("[image-capture/toplevel] copy_framebuffer failed: {e:?}");
+                    frame_info.frame.failed(FailureReason::Unknown);
+                    continue;
+                }
+            };
+            let pixels = match renderer.map_texture(&mapping) {
+                Ok(p) => p,
+                Err(e) => {
+                    log::error!("[image-capture/toplevel] map_texture failed: {e:?}");
+                    frame_info.frame.failed(FailureReason::Unknown);
+                    continue;
+                }
+            };
+
+            let copy_result =
+                with_buffer_contents_mut(&frame_info.buffer, |ptr, pool_len, buf_data| {
+                    let buf_offset = buf_data.offset as usize;
+                    let buf_stride = buf_data.stride as usize;
+                    let buf_h = buf_data.height as usize;
+                    let buf_w = buf_data.width as usize;
+                    let src_stride = width as usize * 4;
+                    let copy_h = buf_h.min(height as usize);
+                    let copy_w = buf_w.min(width as usize);
+
+                    for row in 0..copy_h {
+                        let src_row_start = row * src_stride;
+                        let dst_row_start = buf_offset + row * buf_stride;
+                        if dst_row_start + copy_w * 4 > pool_len {
+                            break;
+                        }
+                        for col in 0..copy_w {
+                            let si = src_row_start + col * 4;
+                            let di = dst_row_start + col * 4;
+                            if si + 3 >= pixels.len() {
+                                break;
+                            }
+                            // GL ABGR8888 [R,G,B,A] → shm ARGB8888 [B,G,R,A].
+                            unsafe {
+                                *ptr.add(di) = pixels[si + 2];
+                                *ptr.add(di + 1) = pixels[si + 1];
+                                *ptr.add(di + 2) = pixels[si];
+                                *ptr.add(di + 3) = pixels[si + 3];
+                            }
+                        }
+                    }
+                });
+
+            match copy_result {
+                Ok(()) => {
+                    frame_info.frame.transform(wl_output::Transform::Normal);
+                    frame_info.frame.damage(0, 0, width, height);
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default();
+                    let tv_sec = now.as_secs();
+                    frame_info.frame.presentation_time(
+                        (tv_sec >> 32) as u32,
+                        (tv_sec & 0xFFFFFFFF) as u32,
+                        now.subsec_nanos(),
+                    );
+                    frame_info.frame.ready();
+                }
+                Err(e) => {
+                    log::warn!("[image-capture/toplevel] buffer access failed: {e:?}");
                     frame_info.frame.failed(FailureReason::Unknown);
                 }
             }
@@ -1443,6 +1774,7 @@ impl KmsState {
 
             outputs,
             screencopy_offscreen: None,
+            image_capture_toplevel_offscreen: None,
             last_presentation_time: None,
         }));
 
@@ -2190,6 +2522,17 @@ impl KmsState {
                     }
                 }
             }
+        }
+
+        // ── ext-image-copy-capture toplevel (single-window) fulfillment ──
+        // Output-independent: run once after all outputs are rendered.
+        if let Some(ref pending_queue) = self.image_capture_pending {
+            Self::fulfill_image_capture_toplevel_frames(
+                &mut self.renderer,
+                &mut self.image_capture_toplevel_offscreen,
+                state,
+                pending_queue,
+            );
         }
 
         if !any_skipped {

@@ -206,8 +206,17 @@ fn handle_capture(
     // Send buffer info to the client.
     frame.buffer(wl_shm::Format::Argb8888, cap_w, cap_h, stride);
 
-    // Signal that all buffer types have been enumerated (v3).
+    // Advertise a dmabuf buffer option (v3+) for the zero-copy render path.
+    // Only for full-output captures — region capture into dmabuf is unsupported.
     if frame.version() >= 3 {
+        if region.is_none() {
+            frame.linux_dmabuf(
+                smithay::backend::allocator::Fourcc::Argb8888 as u32,
+                cap_w,
+                cap_h,
+            );
+        }
+        // Signal that all buffer types have been enumerated (v3).
         frame.buffer_done();
     }
 

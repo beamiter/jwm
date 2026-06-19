@@ -144,6 +144,11 @@ pub struct JwmWaylandState {
 
     pub dmabuf_state: DmabufState,
     pub dmabuf_global: Option<DmabufGlobal>,
+    /// DRM device node (dev_t) backing the renderer, and the renderable dmabuf
+    /// formats. Captured when the dmabuf global is created so the
+    /// ext-image-copy-capture session can advertise dmabuf buffers to clients.
+    pub dmabuf_main_device: Option<libc::dev_t>,
+    pub dmabuf_render_formats: Vec<DmabufFormat>,
 
     pub layer_shell_state: WlrLayerShellState,
 
@@ -343,6 +348,10 @@ impl JwmWaylandState {
 
         let render_fmts: Vec<DmabufFormat> = render_formats.into_iter().collect();
         let scanout_fmts: Vec<DmabufFormat> = scanout_formats.into_iter().collect();
+
+        // Stash for ext-image-copy-capture dmabuf advertising.
+        self.dmabuf_main_device = Some(main_device);
+        self.dmabuf_render_formats = render_fmts.clone();
 
         match DmabufFeedbackBuilder::new(main_device, render_fmts.iter().copied())
             .add_preference_tranche(
@@ -1263,6 +1272,8 @@ impl JwmWaylandState {
 
                 dmabuf_state,
                 dmabuf_global: None,
+                dmabuf_main_device: None,
+                dmabuf_render_formats: Vec::new(),
 
                 layer_shell_state,
                 xdg_activation_state,
