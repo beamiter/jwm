@@ -117,9 +117,11 @@ usage() {
 
 选项:
   -m, --mode <debug|release>  构建模式（默认: release）
-  -b, --bar <bar_name>        指定 jwm 要启用的 bar feature，同时把该 bar 加入克隆列表；
-                              可重复传入或使用逗号分隔；第一个显式传入的 bar 作为 jwm feature，
-                              其余仅作为额外的本地克隆目标（不参与编译安装）
+  -b, --bar <bar_name>        指定要编译并安装的 bar，同时把该 bar 加入克隆列表；
+                              可重复传入或使用逗号分隔；第一个显式传入的 bar 会被编译安装，
+                              其余仅作为额外的本地克隆目标（不参与编译安装）。
+                              jwm 启动时通过 config.toml 的 status_bar.name 选择 bar，
+                              不再使用 cargo feature。
   -l, --list-bars             列出所有可用的 bar
   -j, --jobs <N>              并行编译任务数（传给 cargo）
   --gen-config                安装后重新生成默认配置（备份旧配置为 .toml.backup）
@@ -131,13 +133,14 @@ usage() {
   - CLONE_BARS（脚本顶部）只用于把哪些 bar 仓库 git clone/pull 到本地，不会编译安装。
   - 真正会被编译并安装到 /usr/local/bin 的 bar 只有 JWM_BAR_NAME（即 -b 的第一个参数，
     或脚本顶部默认的 x11rb_wgpu_bar）。
+  - jwm 通过 config.toml 的 status_bar.name 在运行时选择 bar，切换 bar 不需要重编 jwm。
 
 示例:
   $(basename "$0")                           # 编译安装 jwm + 默认 bar，按 CLONE_BARS 同步其它仓库
   $(basename "$0") --gen-config              # 同上，并重新生成默认配置
   $(basename "$0") -m debug                  # debug 模式编译安装
-  $(basename "$0") -b xcb_bar                # jwm 启用 xcb_bar feature 并编译安装该 bar
-  $(basename "$0") -b xcb_bar,egui_bar       # jwm 启用 xcb_bar；同时把 egui_bar 仓库拉到本地
+  $(basename "$0") -b xcb_bar                # 编译安装 xcb_bar
+  $(basename "$0") -b xcb_bar,egui_bar       # 编译安装 xcb_bar；同时把 egui_bar 仓库拉到本地
   $(basename "$0") -b xcb_bar --skip-jwm     # 仅编译安装 xcb_bar
   $(basename "$0") --gen-config --skip-bar   # 仅重新生成配置，不编译 bar
 EOF
@@ -322,15 +325,13 @@ build_and_install_bar() {
 build_and_install_jwm() {
     info "编译 jwm（$BUILD_MODE 模式）..."
 
-    local feature_args=()
     if [[ -n "$JWM_BAR_NAME" ]]; then
-        feature_args=(--features "$JWM_BAR_NAME")
-        info "启用 jwm feature: $JWM_BAR_NAME"
+        info "将编译并安装 bar: $JWM_BAR_NAME（jwm 通过 config.toml 的 status_bar.name 选择 bar，无需 cargo feature）"
     fi
 
     cd "$PROJECT_ROOT"
     # shellcheck disable=SC2086
-    cargo build $CARGO_BUILD_FLAG $CARGO_JOBS "${feature_args[@]}"
+    cargo build $CARGO_BUILD_FLAG $CARGO_JOBS
 
     info "安装 jwm, jwm-tool -> /usr/local/bin/"
     sudo rm -f /usr/local/bin/jwm /usr/local/bin/jwm-tool
@@ -401,7 +402,7 @@ echo ""
 info "========================================="
 info " JWM 安装脚本"
 info " 构建模式: $BUILD_MODE"
-info " JWM Feature Bar: $JWM_BAR_NAME"
+info " JWM Bar (compiled & installed): $JWM_BAR_NAME"
 if [[ ${#CLONE_BARS[@]} -gt 0 ]]; then
     info " 拉取仓库: ${CLONE_BARS[*]}"
 fi

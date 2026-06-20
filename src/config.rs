@@ -1,5 +1,4 @@
 use arc_swap::ArcSwap;
-use cfg_if::cfg_if;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -47,43 +46,7 @@ pub fn get_backend_family() -> BackendFamily {
     *ACTIVE_BACKEND.get().unwrap_or(&BackendFamily::X11)
 }
 
-macro_rules! status_bar_config {
-    ($($feature:literal => $name:literal),* $(,)?) => {
-        cfg_if! {
-            $(
-                if #[cfg(feature = $feature)] {
-                    pub const STATUS_BAR_NAME: &str = $name;
-                } else
-            )*
-            {
-                pub const STATUS_BAR_NAME: &str = "tao_softbuffer_bar";
-            }
-        }
-    };
-}
-status_bar_config!(
-    "dioxus_bar" => "dioxus_bar",
-    "egui_bar" => "egui_bar",
-    "iced_bar" => "iced_bar",
-    "gtk_bar" => "gtk_bar",
-    "relm_bar" => "relm_bar",
-    "tauri_react_bar" => "tauri_react_bar",
-    "tauri_vue_bar" => "tauri_vue_bar",
-    "tauri_svelte_bar" => "tauri_svelte_bar",
-    "tauri_solid_bar" => "tauri_solid_bar",
-    "tauri_yew_bar" => "tauri_yew_bar",
-    "tauri_leptos_bar" => "tauri_leptos_bar",
-    "x11rb_bar" => "x11rb_bar",
-    "xcb_bar" => "xcb_bar",
-    "winit_softbuffer_bar" => "winit_softbuffer_bar",
-    "tao_softbuffer_bar" => "tao_softbuffer_bar",
-    "winit_pixels_bar" => "winit_pixels_bar",
-    "tao_pixels_bar" => "tao_pixels_bar",
-    "winit_wgpu_bar" => "winit_wgpu_bar",
-    "xcb_wgpu_bar" => "xcb_wgpu_bar",
-    "x11rb_wgpu_bar" => "x11rb_wgpu_bar",
-    "tao_wgpu_bar" => "tao_wgpu_bar",
-);
+pub const STATUS_BAR_NAME: &str = "tao_softbuffer_bar";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TomlConfig {
