@@ -209,8 +209,8 @@ impl App {
             brightness_label: "🔆",
             battery_label: "🔋",
             battery_charging_label: "⚡",
-            cpu_label: "💻",
-            mem_label: "🧠",
+            cpu_label: "🧠",
+            mem_label: "💾",
 
             show_audio: true,
             show_theme_toggle: true,
