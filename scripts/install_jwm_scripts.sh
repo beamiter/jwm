@@ -76,7 +76,11 @@ ALL_BARS=(
 BUILD_MODE="release"
 JWM_BAR_NAME="x11rb_wgpu_bar"
 JWM_BAR_SET_BY_ARGS=false
-SELECTED_BARS=(
+
+# CLONE_BARS：仅用于把这些 bar 仓库拉到本地（git clone / pull），
+# 不参与编译安装。编译安装的对象只有 JWM_BAR_NAME 对应的那个 bar。
+# 取消注释你希望保留本地副本的 bar 即可。
+CLONE_BARS=(
     # dioxus_bar
     # egui_bar
     # gtk_bar
@@ -103,7 +107,6 @@ SKIP_BAR=false
 SKIP_JWM=false
 REGEN_CONFIG=false
 JOBS=""
-BARS_TO_INSTALL=()
 
 # ============================================================
 # 帮助信息
@@ -114,24 +117,29 @@ usage() {
 
 选项:
   -m, --mode <debug|release>  构建模式（默认: release）
-  -b, --bar <bar_name>        选择要编译安装的 status bar，可重复传入或使用逗号分隔；第一个显式传入的 bar 同时作为 jwm feature
+  -b, --bar <bar_name>        指定 jwm 要启用的 bar feature，同时把该 bar 加入克隆列表；
+                              可重复传入或使用逗号分隔；第一个显式传入的 bar 作为 jwm feature，
+                              其余仅作为额外的本地克隆目标（不参与编译安装）
   -l, --list-bars             列出所有可用的 bar
   -j, --jobs <N>              并行编译任务数（传给 cargo）
   --gen-config                安装后重新生成默认配置（备份旧配置为 .toml.backup）
-  --skip-bar                  跳过 bar 编译安装
-  --skip-jwm                  跳过 jwm 编译安装（仅编译 bar）
+  --skip-bar                  跳过 bar 编译安装（仍会按 CLONE_BARS 同步代码）
+  --skip-jwm                  跳过 jwm 编译安装（仅处理 bar）
   -h, --help                  显示此帮助信息
 
+说明:
+  - CLONE_BARS（脚本顶部）只用于把哪些 bar 仓库 git clone/pull 到本地，不会编译安装。
+  - 真正会被编译并安装到 /usr/local/bin 的 bar 只有 JWM_BAR_NAME（即 -b 的第一个参数，
+    或脚本顶部默认的 x11rb_wgpu_bar）。
+
 示例:
-  $(basename "$0")                           # release 模式编译安装，保留现有配置
-  $(basename "$0") --gen-config              # release 模式编译安装，并重新生成默认配置
-  $(basename "$0") -m debug                  # debug 模式编译安装 jwm
-  $(basename "$0") -b xcb_bar               # release 模式编译安装 jwm + xcb_bar
-  $(basename "$0") -b xcb_bar -b egui_bar   # release 模式依次编译安装多个 bar，jwm 仅启用 xcb_bar feature
-  $(basename "$0") -b xcb_bar,egui_bar      # 与上面等价，支持逗号分隔
-  $(basename "$0") -b xcb_bar --skip-jwm    # 仅编译安装 xcb_bar
-  $(basename "$0") -m debug -b egui_bar     # debug 模式编译安装 jwm + egui_bar
-  $(basename "$0") --gen-config --skip-bar  # 仅重新生成配置，不编译 bar
+  $(basename "$0")                           # 编译安装 jwm + 默认 bar，按 CLONE_BARS 同步其它仓库
+  $(basename "$0") --gen-config              # 同上，并重新生成默认配置
+  $(basename "$0") -m debug                  # debug 模式编译安装
+  $(basename "$0") -b xcb_bar                # jwm 启用 xcb_bar feature 并编译安装该 bar
+  $(basename "$0") -b xcb_bar,egui_bar       # jwm 启用 xcb_bar；同时把 egui_bar 仓库拉到本地
+  $(basename "$0") -b xcb_bar --skip-jwm     # 仅编译安装 xcb_bar
+  $(basename "$0") --gen-config --skip-bar   # 仅重新生成配置，不编译 bar
 EOF
     exit 0
 }
@@ -182,15 +190,16 @@ add_selected_bars() {
             JWM_BAR_SET_BY_ARGS=true
         fi
 
-        for existing in "${SELECTED_BARS[@]}"; do
+        local already_listed=false
+        for existing in "${CLONE_BARS[@]}"; do
             if [[ "$existing" == "$candidate" ]]; then
-                candidate=""
+                already_listed=true
                 break
             fi
         done
 
-        if [[ -n "$candidate" ]]; then
-            SELECTED_BARS+=("$candidate")
+        if [[ "$already_listed" == false ]]; then
+            CLONE_BARS+=("$candidate")
         fi
     done
 }
@@ -374,9 +383,18 @@ show_jwm_tool_help() {
 # ============================================================
 # 主流程
 # ============================================================
-BARS_TO_INSTALL=("${SELECTED_BARS[@]}")
-if [[ ${#BARS_TO_INSTALL[@]} -eq 0 && -n "$JWM_BAR_NAME" ]]; then
-    BARS_TO_INSTALL=("$JWM_BAR_NAME")
+# 把要编译的 bar 也加进克隆列表（去重）
+if [[ -n "$JWM_BAR_NAME" && "$SKIP_BAR" == false ]]; then
+    already_listed=false
+    for existing in "${CLONE_BARS[@]}"; do
+        if [[ "$existing" == "$JWM_BAR_NAME" ]]; then
+            already_listed=true
+            break
+        fi
+    done
+    if [[ "$already_listed" == false ]]; then
+        CLONE_BARS+=("$JWM_BAR_NAME")
+    fi
 fi
 
 echo ""
@@ -384,22 +402,26 @@ info "========================================="
 info " JWM 安装脚本"
 info " 构建模式: $BUILD_MODE"
 info " JWM Feature Bar: $JWM_BAR_NAME"
-if [[ ${#BARS_TO_INSTALL[@]} -gt 0 ]]; then
-    info " Status Bars: ${BARS_TO_INSTALL[*]}"
+if [[ ${#CLONE_BARS[@]} -gt 0 ]]; then
+    info " 拉取仓库: ${CLONE_BARS[*]}"
 fi
 info " 重新生成配置: $REGEN_CONFIG"
 info "========================================="
 echo ""
 
-# 1. 处理 bar
-if [[ ${#BARS_TO_INSTALL[@]} -gt 0 && "$SKIP_BAR" == false ]]; then
-    for bar in "${BARS_TO_INSTALL[@]}"; do
+# 1. 拉取所有 CLONE_BARS 仓库到本地（不编译）
+if [[ ${#CLONE_BARS[@]} -gt 0 ]]; then
+    for bar in "${CLONE_BARS[@]}"; do
         sync_bar_repo "$bar"
-        build_and_install_bar "$bar"
     done
 fi
 
-# 2. 处理 jwm
+# 2. 仅编译并安装 JWM_BAR_NAME 对应的 bar
+if [[ "$SKIP_BAR" == false && -n "$JWM_BAR_NAME" ]]; then
+    build_and_install_bar "$JWM_BAR_NAME"
+fi
+
+# 3. 处理 jwm
 if [[ "$SKIP_JWM" == false ]]; then
     build_and_install_jwm
     show_jwm_tool_help
