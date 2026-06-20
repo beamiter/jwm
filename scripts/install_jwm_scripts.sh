@@ -77,16 +77,16 @@ SELECTED_BARS=(
     # gtk_bar
     # iced_bar
     # relm_bar
-    # tao_pixels_bar
-    # tao_softbuffer_bar
-    # tao_wgpu_bar
-    # winit_pixels_bar
-    # winit_softbuffer_bar
-    # winit_wgpu_bar
-    # xcb_wgpu_bar
-    # x11rb_wgpu_bar
-    # x11rb_bar
-    # xcb_bar
+    tao_pixels_bar
+    tao_softbuffer_bar
+    tao_wgpu_bar
+    winit_pixels_bar
+    winit_softbuffer_bar
+    winit_wgpu_bar
+    xcb_wgpu_bar
+    x11rb_wgpu_bar
+    x11rb_bar
+    xcb_bar
 )
 SKIP_BAR=false
 SKIP_JWM=false
