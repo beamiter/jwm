@@ -22,7 +22,8 @@ body {
 }
 
 #main,
-#app {
+#app,
+#root {
   margin: 0;
   padding: 0;
   height: 40px !important;
@@ -227,13 +228,13 @@ body {
 /* ==================== 按钮基础样式 ==================== */
 
 .emoji-button {
-  width: 40px;
-  height: 38px;
-  min-width: 38;
-  min-height: 38;
-  max-width: 38;
-  max-height: 38;
-  font-size: 20px;
+  width: 38px;
+  height: 32px;
+  min-width: 38px;
+  min-height: 32px;
+  max-width: 38px;
+  max-height: 32px;
+  font-size: 18px;
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
