@@ -55,8 +55,12 @@ ALL_BARS=(
     tao_pixels_bar
     tao_softbuffer_bar
     tao_wgpu_bar
+    tauri_leptos_bar
     tauri_react_bar
+    tauri_solid_bar
+    tauri_svelte_bar
     tauri_vue_bar
+    tauri_yew_bar
     winit_pixels_bar
     winit_softbuffer_bar
     winit_wgpu_bar
@@ -81,8 +85,12 @@ SELECTED_BARS=(
     # tao_pixels_bar
     # tao_softbuffer_bar
     # tao_wgpu_bar
+    # tauri_leptos_bar
     # tauri_react_bar
+    # tauri_solid_bar
+    # tauri_svelte_bar
     # tauri_vue_bar
+    # tauri_yew_bar
     # winit_pixels_bar
     # winit_softbuffer_bar
     # winit_wgpu_bar
