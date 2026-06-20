@@ -18,8 +18,8 @@ importers:
         specifier: ^11.4.2
         version: 11.4.2
       pnpm:
-        specifier: ^10.13.1
-        version: 10.13.1
+        specifier: ^10.29.2
+        version: 10.34.4
       react:
         specifier: ^18.3.1
         version: 18.3.1
@@ -678,8 +678,8 @@ packages:
     resolution: {integrity: sha512-M7BAV6Rlcy5u+m6oPhAPFgJTzAioX/6B0DxyvDlo9l8+T3nLKbrczg2WLUyzd45L8RqfUMyGPzekbMvX2Ldkwg==}
     engines: {node: '>=12'}
 
-  pnpm@10.13.1:
-    resolution: {integrity: sha512-N+vxpcejDV+r4MXfRO6NpMllygxa89urKMOhaBtwolYhjQXIHJwNz3Z+9rhVHrW5YAQrntQwDFkkIzY3fgHPrQ==}
+  pnpm@10.34.4:
+    resolution: {integrity: sha512-h2i+VSAK4/Iia2Un/Momh+FLxOXxLXchoPJdo99HkVF3BYZI20F3uvNIEg+guidS2NjZP2vq8f5krhjajelhrw==}
     engines: {node: '>=18.12'}
     hasBin: true
 
@@ -1231,7 +1231,7 @@ snapshots:
 
   picomatch@4.0.2: {}
 
-  pnpm@10.13.1: {}
+  pnpm@10.34.4: {}
 
   postcss@8.5.6:
     dependencies:

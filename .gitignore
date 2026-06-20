@@ -8,3 +8,4 @@ Cargo.lock
 *.swo
 node_modules/
 dist/
+flake.lock
