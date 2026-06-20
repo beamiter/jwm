@@ -73,20 +73,23 @@ BUILD_MODE="release"
 JWM_BAR_NAME="x11rb_wgpu_bar"
 JWM_BAR_SET_BY_ARGS=false
 SELECTED_BARS=(
+    # dioxus_bar
     # egui_bar
     # gtk_bar
     # iced_bar
     # relm_bar
-    tao_pixels_bar
-    tao_softbuffer_bar
-    tao_wgpu_bar
-    winit_pixels_bar
-    winit_softbuffer_bar
-    winit_wgpu_bar
-    xcb_wgpu_bar
-    x11rb_wgpu_bar
-    x11rb_bar
-    xcb_bar
+    # tao_pixels_bar
+    # tao_softbuffer_bar
+    # tao_wgpu_bar
+    # tauri_react_bar
+    # tauri_vue_bar
+    # winit_pixels_bar
+    # winit_softbuffer_bar
+    # winit_wgpu_bar
+    # xcb_wgpu_bar
+    # x11rb_wgpu_bar
+    # x11rb_bar
+    # xcb_bar
 )
 SKIP_BAR=false
 SKIP_JWM=false
