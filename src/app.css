@@ -12,6 +12,10 @@ body {
   height: 40px !important;
   overflow: hidden;
   font-family:
+    "Symbols Nerd Font",
+    "JetBrainsMono Nerd Font",
+    "FiraCode Nerd Font",
+    "Hack Nerd Font",
     system-ui,
     -apple-system,
     BlinkMacSystemFont,
@@ -21,8 +25,38 @@ body {
   background: transparent;
 }
 
+/* Nerd Font 图标统一字体回退，避免被系统字体替换 */
+.nf-icon {
+  font-family:
+    "Symbols Nerd Font",
+    "JetBrainsMono Nerd Font",
+    "FiraCode Nerd Font",
+    "Hack Nerd Font",
+    "Symbols Nerd Font Mono",
+    monospace;
+  font-size: 15px;
+  line-height: 1;
+  display: inline-block;
+  vertical-align: middle;
+  width: 1.2em;
+  text-align: center;
+}
+
+/* pill 内部图标与文本之间留出固定间距 */
+.pill .nf-icon {
+  margin-right: 6px;
+}
+
+/* tag 按钮里的图标只居中显示，不需要右边距 */
+.emoji-button .nf-icon {
+  margin: 0;
+  font-size: 18px;
+  width: auto;
+}
+
 #main,
-#app {
+#app,
+#root {
   margin: 0;
   padding: 0;
   height: 40px !important;
@@ -227,13 +261,13 @@ body {
 /* ==================== 按钮基础样式 ==================== */
 
 .emoji-button {
-  width: 40px;
-  height: 38px;
-  min-width: 38;
-  min-height: 38;
-  max-width: 38;
-  max-height: 38;
-  font-size: 20px;
+  width: 38px;
+  height: 32px;
+  min-width: 38px;
+  min-height: 32px;
+  max-width: 38px;
+  max-height: 32px;
+  font-size: 18px;
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
@@ -861,6 +895,37 @@ body {
   color: #fff;
   background: rgba(120, 120, 120, 0.88);
   border-color: #777;
+}
+
+/* 音量 pill */
+.volume-pill {
+  cursor: pointer;
+  color: #fff;
+  background: rgba(20, 184, 166, 0.90); /* teal */
+  border-color: #14b8a6;
+  user-select: none;
+}
+.volume-pill:hover {
+  filter: brightness(1.08);
+  border-width: 2px;
+}
+.volume-pill.muted {
+  background: rgba(120, 120, 120, 0.85);
+  border-color: #888;
+  color: #eee;
+}
+
+/* 亮度 pill */
+.brightness-pill {
+  cursor: pointer;
+  color: #1f2937;
+  background: rgba(253, 224, 71, 0.92); /* amber */
+  border-color: #facc15;
+  user-select: none;
+}
+.brightness-pill:hover {
+  filter: brightness(1.05);
+  border-width: 2px;
 }
 
 /* 中间撑开（如果没有的话新增） */

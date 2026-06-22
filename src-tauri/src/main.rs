@@ -6,7 +6,11 @@ use log::{error, info, warn};
 use tauri::Emitter;
 use tauri::Manager;
 
-use std::{env, sync::Arc, time::Duration};
+use std::{
+    env,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 use tokio::time::sleep;
 
 use shared_structures::TagStatus;
@@ -14,6 +18,7 @@ use shared_structures::{CommandType, MonitorInfo, SharedCommand, SharedMessage, 
 use xbar_core::initialize_logging;
 use xbar_core::system_monitor::SystemMonitor;
 use xbar_core::system_monitor::SystemSnapshot;
+use xbar_core::{AudioManager, BrightnessManager};
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct MonitorInfoSnapshot {
@@ -42,9 +47,24 @@ impl MonitorInfoSnapshot {
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct AudioSnapshot {
+    pub volume: i32,
+    pub is_muted: bool,
+    pub device_name: String,
+    pub has_device: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct BrightnessSnapshot {
+    pub percent: Option<u8>,
+}
+
 // 应用状态，用于在Tauri命令间共享
 struct AppState {
     shared_buffer: Option<Arc<SharedRingBuffer>>,
+    audio_manager: Arc<Mutex<AudioManager>>,
+    brightness_manager: Arc<Mutex<BrightnessManager>>,
 }
 
 // 共享的应用状态，用于在不同任务之间共享数据
@@ -102,6 +122,40 @@ impl SharedAppState {
         self.app_handle.emit("system-update", snapshot)?;
         Ok(())
     }
+
+    fn emit_audio_update(
+        &self,
+        snapshot: &AudioSnapshot,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.app_handle.emit("audio-update", snapshot)?;
+        Ok(())
+    }
+
+    fn emit_brightness_update(
+        &self,
+        snapshot: &BrightnessSnapshot,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.app_handle.emit("brightness-update", snapshot)?;
+        Ok(())
+    }
+}
+
+fn audio_snapshot_from(am: &AudioManager) -> AudioSnapshot {
+    if let Some(dev) = am.get_master_device() {
+        AudioSnapshot {
+            volume: dev.volume.clamp(0, 100),
+            is_muted: dev.is_muted,
+            device_name: dev.name.clone(),
+            has_device: true,
+        }
+    } else {
+        AudioSnapshot {
+            volume: 0,
+            is_muted: true,
+            device_name: String::new(),
+            has_device: false,
+        }
+    }
 }
 
 /// Tauri 命令：发送标签操作
@@ -147,6 +201,44 @@ fn send_layout_command(layout_index: u32, monitor_id: i32, state: tauri::State<'
     }
 }
 
+/// Tauri 命令：调节音量（delta 百分比，正为增，负为减）
+#[tauri::command]
+fn adjust_volume(delta: i32, state: tauri::State<'_, AppState>) -> Result<AudioSnapshot, String> {
+    let mut am = state.audio_manager.lock().map_err(|e| e.to_string())?;
+    let dev_name = am
+        .get_master_device()
+        .map(|d| d.name.clone())
+        .ok_or_else(|| "no master device".to_string())?;
+    am.adjust_volume(&dev_name, delta)
+        .map_err(|e| e.to_string())?;
+    Ok(audio_snapshot_from(&am))
+}
+
+/// Tauri 命令：静音切换
+#[tauri::command]
+fn toggle_mute(state: tauri::State<'_, AppState>) -> Result<AudioSnapshot, String> {
+    let mut am = state.audio_manager.lock().map_err(|e| e.to_string())?;
+    let dev_name = am
+        .get_master_device()
+        .map(|d| d.name.clone())
+        .ok_or_else(|| "no master device".to_string())?;
+    am.toggle_mute(&dev_name).map_err(|e| e.to_string())?;
+    Ok(audio_snapshot_from(&am))
+}
+
+/// Tauri 命令：调节屏幕亮度（delta 百分比）
+#[tauri::command]
+fn adjust_brightness(
+    delta: i32,
+    state: tauri::State<'_, AppState>,
+) -> Result<BrightnessSnapshot, String> {
+    let mut bm = state.brightness_manager.lock().map_err(|e| e.to_string())?;
+    bm.adjust(delta);
+    Ok(BrightnessSnapshot {
+        percent: bm.percent(),
+    })
+}
+
 /// Tauri 命令：执行截图
 #[tauri::command]
 async fn take_screenshot() -> Result<(), String> {
@@ -158,6 +250,58 @@ async fn take_screenshot() -> Result<(), String> {
         .map_err(|e| format!("Failed to launch flameshot: {}", e))?;
 
     Ok(())
+}
+
+async fn audio_brightness_monitor_task(
+    shared_state: SharedAppState,
+    audio_manager: Arc<Mutex<AudioManager>>,
+    brightness_manager: Arc<Mutex<BrightnessManager>>,
+) {
+    info!("Starting audio/brightness monitor task");
+    tokio::task::spawn_blocking(move || {
+        let mut last_audio: Option<AudioSnapshot> = None;
+        let mut last_brightness: Option<u8> = None;
+        loop {
+            // Audio
+            {
+                if let Ok(mut am) = audio_manager.lock() {
+                    am.update_if_needed();
+                    let snap = audio_snapshot_from(&am);
+                    let changed = match &last_audio {
+                        Some(prev) => {
+                            prev.volume != snap.volume
+                                || prev.is_muted != snap.is_muted
+                                || prev.device_name != snap.device_name
+                                || prev.has_device != snap.has_device
+                        }
+                        None => true,
+                    };
+                    if changed {
+                        if let Err(e) = shared_state.emit_audio_update(&snap) {
+                            error!("Failed to emit audio update: {}", e);
+                        }
+                        last_audio = Some(snap);
+                    }
+                }
+            }
+            // Brightness
+            {
+                if let Ok(mut bm) = brightness_manager.lock() {
+                    bm.update_if_needed();
+                    let cur = bm.percent();
+                    if cur != last_brightness {
+                        if let Err(e) = shared_state.emit_brightness_update(&BrightnessSnapshot {
+                            percent: cur,
+                        }) {
+                            error!("Failed to emit brightness update: {}", e);
+                        }
+                        last_brightness = cur;
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(750));
+        }
+    });
 }
 
 async fn system_monitor_task(shared_state: SharedAppState) {
@@ -216,9 +360,14 @@ async fn background_worker(app_handle: tauri::AppHandle, shared_path: String) {
     // 初始化共享内存
     let shared_arc = SharedRingBuffer::create_shared_ring_buffer_aux(&shared_path).map(Arc::new);
 
+    let audio_manager = Arc::new(Mutex::new(AudioManager::new()));
+    let brightness_manager = Arc::new(Mutex::new(BrightnessManager::new()));
+
     // 设置应用状态用于命令处理
     app_handle.manage(AppState {
         shared_buffer: shared_arc.clone(),
+        audio_manager: audio_manager.clone(),
+        brightness_manager: brightness_manager.clone(),
     });
 
     // 创建共享应用状态
@@ -226,6 +375,9 @@ async fn background_worker(app_handle: tauri::AppHandle, shared_path: String) {
 
     // 启动系统监控任务
     system_monitor_task(shared_state.clone()).await;
+
+    // 启动音频与亮度监控任务
+    audio_brightness_monitor_task(shared_state.clone(), audio_manager, brightness_manager).await;
 
     // 如果有共享内存，启动共享内存监控任务
     if let Some(shared_buffer) = shared_arc {
@@ -273,7 +425,10 @@ async fn main() {
         .invoke_handler(tauri::generate_handler![
             send_tag_command,
             send_layout_command,
-            take_screenshot
+            take_screenshot,
+            adjust_volume,
+            toggle_mute,
+            adjust_brightness
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

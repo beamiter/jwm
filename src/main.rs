@@ -45,12 +45,48 @@ struct SystemSnapshot {
     is_charging: bool,
 }
 
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+struct AudioSnapshot {
+    volume: i32,
+    is_muted: bool,
+    device_name: String,
+    has_device: bool,
+}
+
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+struct BrightnessSnapshot {
+    percent: Option<u8>,
+}
+
 #[derive(Deserialize)]
 struct EventPayload<T> {
     payload: T,
 }
 
-const BUTTONS: [&str; 9] = ["🐖", "🐄", "🐂", "🐃", "🦥", "🦣", "🐏", "🦆", "🐢"];
+const TAG_ICONS: [&str; 9] = [
+    "\u{F0A1E}",
+    "\u{F0239}",
+    "\u{F0A1B}",
+    "\u{F0B79}",
+    "\u{F024B}",
+    "\u{F0388}",
+    "\u{F0567}",
+    "\u{F01F0}",
+    "\u{F0297}",
+];
+
+const ICON_CPU: &str = "\u{F4BC}";
+const ICON_MEM: &str = "\u{F035B}";
+const ICON_BAT_FULL: &str = "\u{F0079}";
+const ICON_BAT_CHG: &str = "\u{F0084}";
+const ICON_VOL_HIGH: &str = "\u{F057E}";
+const ICON_VOL_MID: &str = "\u{F0580}";
+const ICON_VOL_LOW: &str = "\u{F057F}";
+const ICON_VOL_MUTE: &str = "\u{F075F}";
+const ICON_BRIGHT: &str = "\u{F00DE}";
+const ICON_SHOT: &str = "\u{F0104}";
+const ICON_TIME: &str = "\u{F0954}";
+const ICON_MON: &str = "\u{F0379}";
 
 fn button_class(t: &TagStatus) -> &'static str {
     if t.is_filled {
@@ -102,9 +138,9 @@ fn parse_lt_symbol(lts: &str) -> (String, Option<f32>) {
 
 fn monitor_icon(n: i32) -> String {
     if n == 0 {
-        "󰎡".to_string()
+        "\u{F02DA}".to_string()
     } else if n == 1 {
-        "󰎤".to_string()
+        "\u{F02DB}".to_string()
     } else {
         format!("M{}", n)
     }
@@ -119,6 +155,23 @@ fn sev(p: f32) -> &'static str {
         "usage-caution"
     } else {
         "usage-danger"
+    }
+}
+
+fn volume_icon(a: Option<&AudioSnapshot>) -> &'static str {
+    match a {
+        None => ICON_VOL_MUTE,
+        Some(s) => {
+            if !s.has_device || s.is_muted || s.volume <= 0 {
+                ICON_VOL_MUTE
+            } else if s.volume < 34 {
+                ICON_VOL_LOW
+            } else if s.volume < 67 {
+                ICON_VOL_MID
+            } else {
+                ICON_VOL_HIGH
+            }
+        }
     }
 }
 
@@ -148,10 +201,17 @@ struct LayoutCmdArgs {
     monitor_id: i32,
 }
 
+#[derive(Serialize)]
+struct DeltaArgs {
+    delta: i32,
+}
+
 #[function_component(App)]
 fn app() -> Html {
     let monitor = use_state(|| None::<MonitorInfoSnapshot>);
     let system = use_state(|| None::<SystemSnapshot>);
+    let audio = use_state(|| None::<AudioSnapshot>);
+    let brightness = use_state(|| None::<BrightnessSnapshot>);
     let pressed = use_state(|| None::<usize>);
     let layout_open = use_state(|| false);
     let show_seconds = use_state(|| true);
@@ -196,6 +256,44 @@ fn app() -> Html {
         });
     }
 
+    // listen audio-update
+    {
+        let audio = audio.clone();
+        use_effect_with((), move |_| {
+            let cb = Closure::<dyn FnMut(JsValue)>::new(move |evt: JsValue| {
+                if let Ok(p) = serde_wasm_bindgen::from_value::<EventPayload<AudioSnapshot>>(evt) {
+                    audio.set(Some(p.payload));
+                }
+            });
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Err(e) = tauri_listen("audio-update", &cb).await {
+                    error!(format!("listen failed: {:?}", e));
+                }
+                cb.forget();
+            });
+            || ()
+        });
+    }
+
+    // listen brightness-update
+    {
+        let brightness = brightness.clone();
+        use_effect_with((), move |_| {
+            let cb = Closure::<dyn FnMut(JsValue)>::new(move |evt: JsValue| {
+                if let Ok(p) = serde_wasm_bindgen::from_value::<EventPayload<BrightnessSnapshot>>(evt) {
+                    brightness.set(Some(p.payload));
+                }
+            });
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Err(e) = tauri_listen("brightness-update", &cb).await {
+                    error!(format!("listen failed: {:?}", e));
+                }
+                cb.forget();
+            });
+            || ()
+        });
+    }
+
     // tick clock
     {
         let now = now.clone();
@@ -210,6 +308,8 @@ fn app() -> Html {
 
     let monitor_val = (*monitor).clone();
     let system_val = (*system).clone();
+    let audio_val = (*audio).clone();
+    let brightness_val = (*brightness).clone();
 
     if monitor_val.is_none() {
         return html! { <div class="button-row">{"Loading..."}</div> };
@@ -291,6 +391,37 @@ fn app() -> Html {
         Callback::from(move |_: MouseEvent| show_seconds.set(!*show_seconds))
     };
 
+    let toggle_mute = Callback::from(move |_: MouseEvent| {
+        invoke_async("toggle_mute", JsValue::NULL);
+    });
+    let volume_wheel = Callback::from(move |e: WheelEvent| {
+        e.prevent_default();
+        let delta = if e.delta_y() < 0.0 { 5 } else { -5 };
+        let args = serde_wasm_bindgen::to_value(&DeltaArgs { delta }).unwrap_or(JsValue::NULL);
+        invoke_async("adjust_volume", args);
+    });
+    let volume_right = Callback::from(move |e: MouseEvent| {
+        e.prevent_default();
+        let args = serde_wasm_bindgen::to_value(&DeltaArgs { delta: -5 }).unwrap_or(JsValue::NULL);
+        invoke_async("adjust_volume", args);
+    });
+
+    let brightness_click = Callback::from(move |_: MouseEvent| {
+        let args = serde_wasm_bindgen::to_value(&DeltaArgs { delta: 5 }).unwrap_or(JsValue::NULL);
+        invoke_async("adjust_brightness", args);
+    });
+    let brightness_wheel = Callback::from(move |e: WheelEvent| {
+        e.prevent_default();
+        let delta = if e.delta_y() < 0.0 { 5 } else { -5 };
+        let args = serde_wasm_bindgen::to_value(&DeltaArgs { delta }).unwrap_or(JsValue::NULL);
+        invoke_async("adjust_brightness", args);
+    });
+    let brightness_right = Callback::from(move |e: MouseEvent| {
+        e.prevent_default();
+        let args = serde_wasm_bindgen::to_value(&DeltaArgs { delta: -5 }).unwrap_or(JsValue::NULL);
+        invoke_async("adjust_brightness", args);
+    });
+
     let formatted_time = {
         let d = *now;
         let pad = |n: u32| format!("{:02}", n);
@@ -318,11 +449,29 @@ fn app() -> Html {
 
     let tags = m.tag_status_vec.clone();
 
+    let volume_pill_class = {
+        let muted = match audio_val.as_ref() {
+            None => true,
+            Some(s) => s.is_muted || !s.has_device,
+        };
+        if muted { "pill volume-pill muted" } else { "pill volume-pill" }
+    };
+    let volume_label = match audio_val.as_ref() {
+        Some(s) if s.has_device => format!("{}%", s.volume),
+        _ => "--".to_string(),
+    };
+    let volume_ico = volume_icon(audio_val.as_ref());
+
+    let brightness_label = match brightness_val.as_ref().and_then(|b| b.percent) {
+        Some(p) => format!("{}%", p),
+        None => "--".to_string(),
+    };
+
     html! {
         <div class="button-row">
             <div class="buttons-container">
                 {
-                    BUTTONS.iter().enumerate().map(|(i, emoji)| {
+                    TAG_ICONS.iter().enumerate().map(|(i, icon)| {
                         let tag = tags.get(i).cloned().unwrap_or_default();
                         let base = button_class(&tag);
                         let cls = if *pressed == Some(i) {
@@ -337,8 +486,9 @@ fn app() -> Html {
                                 onmousedown={on_press(i)}
                                 onmouseup={on_release(i)}
                                 onmouseleave={on_leave.clone()}
+                                title={format!("Tag {}", i + 1)}
                             >
-                                { *emoji }
+                                <span class="nf-icon">{ *icon }</span>
                             </button>
                         }
                     }).collect::<Html>()
@@ -369,7 +519,7 @@ fn app() -> Html {
                                 if s.battery_percent > 50.0 { "usage-good" }
                                 else if s.battery_percent > 20.0 { "usage-warn" }
                                 else { "usage-danger" });
-                            let batt_icon = if s.is_charging { "🔌" } else { "🔋" };
+                            let batt_icon = if s.is_charging { ICON_BAT_CHG } else { ICON_BAT_FULL };
                             let mem_title = format!("内存使用: {} / {}", format_bytes(s.memory_used), format_bytes(s.memory_total));
                             let batt_title = if s.is_charging {
                                 format!("电池充电中: {:.1}%", s.battery_percent)
@@ -378,17 +528,23 @@ fn app() -> Html {
                             };
                             html! {
                                 <>
-                                    <div class={cpu_cls} title="CPU 平均使用率">{ format!("CPU {:.0}%", s.cpu_average) }</div>
-                                    <div class={mem_cls} title={mem_title}>{ format!("MEM {:.0}%", s.memory_usage_percent) }</div>
-                                    <div class={batt_cls} title={batt_title}>{ format!("{} {:.0}%", batt_icon, s.battery_percent) }</div>
+                                    <div class={cpu_cls} title="CPU 平均使用率">
+                                        <span class="nf-icon">{ ICON_CPU }</span>{ format!(" {:.0}%", s.cpu_average) }
+                                    </div>
+                                    <div class={mem_cls} title={mem_title}>
+                                        <span class="nf-icon">{ ICON_MEM }</span>{ format!(" {:.0}%", s.memory_usage_percent) }
+                                    </div>
+                                    <div class={batt_cls} title={batt_title}>
+                                        <span class="nf-icon">{ batt_icon }</span>{ format!(" {:.0}%", s.battery_percent) }
+                                    </div>
                                 </>
                             }
                         } else {
                             html! {
                                 <>
-                                    <div class="pill usage-pill usage-warn">{"CPU --%"}</div>
-                                    <div class="pill usage-pill usage-warn">{"MEM --%"}</div>
-                                    <div class="pill usage-pill usage-warn">{"🔋 --%"}</div>
+                                    <div class="pill usage-pill usage-warn"><span class="nf-icon">{ ICON_CPU }</span>{" --%"}</div>
+                                    <div class="pill usage-pill usage-warn"><span class="nf-icon">{ ICON_MEM }</span>{" --%"}</div>
+                                    <div class="pill usage-pill usage-warn"><span class="nf-icon">{ ICON_BAT_FULL }</span>{" --%"}</div>
                                 </>
                             }
                         }
@@ -396,19 +552,39 @@ fn app() -> Html {
                 </div>
 
                 <div
+                    class="pill brightness-pill"
+                    onclick={brightness_click}
+                    onwheel={brightness_wheel}
+                    oncontextmenu={brightness_right}
+                    title="左键加亮 / 右键减暗 / 滚轮调节"
+                >
+                    <span class="nf-icon">{ ICON_BRIGHT }</span>{ format!(" {}", brightness_label) }
+                </div>
+
+                <div
+                    class={volume_pill_class}
+                    onclick={toggle_mute}
+                    onwheel={volume_wheel}
+                    oncontextmenu={volume_right}
+                    title="左键静音 / 滚轮调节"
+                >
+                    <span class="nf-icon">{ volume_ico }</span>{ format!(" {}", volume_label) }
+                </div>
+
+                <div
                     class={if *is_taking { "pill screenshot-pill taking" } else { "pill screenshot-pill" }}
                     onclick={take_screenshot}
                     title="截图 (Flameshot)"
                 >
-                    { if *is_taking { "⏳" } else { "📸" } }
+                    <span class="nf-icon">{ ICON_SHOT }</span>
                 </div>
 
                 <div class="pill time-pill" onclick={toggle_seconds} title="点击切换秒显示">
-                    { formatted_time }
+                    <span class="nf-icon">{ ICON_TIME }</span>{ format!(" {}", formatted_time) }
                 </div>
 
                 <div class="pill monitor-pill" title="显示器">
-                    { format!("🖥️ {}", monitor_icon(m.monitor_num)) }
+                    <span class="nf-icon">{ ICON_MON }</span>{ format!(" {}", monitor_icon(m.monitor_num)) }
                 </div>
 
                 <div class="pill scale-pill" title="Scale Factor">
