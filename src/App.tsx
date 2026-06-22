@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
@@ -19,7 +19,7 @@ interface MonitorInfoSnapshot {
   monitor_y: number;
   tag_status_vec: TagStatus[];
   client_name: string;
-  ltsymbol: string; // 形如: "[]=" 或 "[]=" + " s: 1.00, m: 0"
+  ltsymbol: string;
 }
 
 interface SystemSnapshot {
@@ -31,13 +31,50 @@ interface SystemSnapshot {
   is_charging: boolean;
 }
 
+interface AudioSnapshot {
+  volume: number;
+  is_muted: boolean;
+  device_name: string;
+  has_device: boolean;
+}
+
+interface BrightnessSnapshot {
+  percent: number | null;
+}
+
 interface UiState {
   monitor_info_snapshot: MonitorInfoSnapshot | null;
   system_snapshot: SystemSnapshot | null;
+  audio_snapshot: AudioSnapshot | null;
+  brightness_snapshot: BrightnessSnapshot | null;
 }
 
-// --- 帮助函数 ---
-const BUTTONS = ["🐖", "🐄", "🐂", "🐃", "🦥", "🦣", "🐏", "🦆", "🐢"];
+// --- Nerd Font 图标 ---
+// 9 个 tag 使用工作流主题图标：终端 / 浏览器 / 代码 / 聊天 / 文件 / 音乐 / 视频 / 邮件 / 游戏
+const TAG_ICONS = [
+  "\u{F0A1E}", // 󰨞 terminal
+  "\u{F0239}", // 󰈹 firefox/browser
+  "\u{F0A1B}", // 󰨛 code
+  "\u{F0B79}", // 󰭹 chat
+  "\u{F024B}", // 󰉋 folder
+  "\u{F0388}", // 󰎈 music
+  "\u{F0567}", // 󰕧 video
+  "\u{F01F0}", // 󰇰 mail
+  "\u{F0297}", // 󰊗 gamepad
+];
+
+const ICON_CPU = "\u{F4BC}";        //  cpu chip
+const ICON_MEM = "\u{F035B}";       // 󰍛 memory
+const ICON_BAT_FULL = "\u{F0079}";  // 󰁹 battery full
+const ICON_BAT_CHG = "\u{F0084}";   // 󰂄 charging
+const ICON_VOL_HIGH = "\u{F057E}";  // 󰕾 volume high
+const ICON_VOL_MID = "\u{F0580}";   // 󰖀 volume mid
+const ICON_VOL_LOW = "\u{F057F}";   // 󰕿 volume low
+const ICON_VOL_MUTE = "\u{F075F}";  // 󰝟 muted
+const ICON_BRIGHT = "\u{F00DE}";    // 󰃞 brightness
+const ICON_SHOT = "\u{F0104}";      // 󰄄 camera
+const ICON_TIME = "\u{F0954}";      // 󰥔 clock
+const ICON_MON = "\u{F0379}";       // 󰍹 monitor
 
 const getButtonClass = (tagStatus: TagStatus): string => {
   if (tagStatus.is_filled) return "emoji-button state-filtered";
@@ -55,7 +92,6 @@ const formatBytes = (bytes: number): string => {
   return `${size}${UNITS[i]}`;
 };
 
-// 解析 ltsymbol：提取布局符号与缩放因子
 function parseLtSymbol(lts: string | undefined) {
   if (!lts) return { symbol: "[]=", scale: undefined };
   const symbolMatch = lts.match(/^(\S+)/);
@@ -66,10 +102,18 @@ function parseLtSymbol(lts: string | undefined) {
 }
 
 function monitorIcon(num: number) {
-  // Nerd Font 字体存在时会显示图标，否则你可以改为 `M${num}`
-  if (num === 0) return "󰎡";
-  if (num === 1) return "󰎤";
+  if (num === 0) return "\u{F02DA}"; // 󰋚 M0 indicator (numbered)
+  if (num === 1) return "\u{F02DB}";
   return `M${num}`;
+}
+
+function volumeIcon(snap: AudioSnapshot | null): string {
+  if (!snap || !snap.has_device) return ICON_VOL_MUTE;
+  if (snap.is_muted) return ICON_VOL_MUTE;
+  if (snap.volume <= 0) return ICON_VOL_MUTE;
+  if (snap.volume < 34) return ICON_VOL_LOW;
+  if (snap.volume < 67) return ICON_VOL_MID;
+  return ICON_VOL_HIGH;
 }
 
 // --- 子组件 ---
@@ -79,10 +123,7 @@ const TagButtons = (
 ) => {
   const [pressedButton, setPressedButton] = useState<number | null>(null);
 
-  const handlePress = (index: number) => {
-    setPressedButton(index);
-  };
-
+  const handlePress = (index: number) => setPressedButton(index);
   const handleRelease = (index: number) => {
     setPressedButton(null);
     invoke("send_tag_command", {
@@ -94,7 +135,7 @@ const TagButtons = (
 
   return (
     <>
-      {BUTTONS.map((emoji, i) => {
+      {TAG_ICONS.map((icon, i) => {
         const tagStatus = tags[i] || {
           is_selected: false,
           is_urg: false,
@@ -112,8 +153,9 @@ const TagButtons = (
             onMouseDown={() => handlePress(i)}
             onMouseUp={() => handleRelease(i)}
             onMouseLeave={() => setPressedButton(null)}
+            title={`Tag ${i + 1}`}
           >
-            {emoji}
+            <span className="nf-icon">{icon}</span>
           </button>
         );
       })}
@@ -121,19 +163,33 @@ const TagButtons = (
   );
 };
 
-const SystemInfoDisplay = ({ snapshot }: { snapshot: SystemSnapshot | null }) => {
+const SystemInfoDisplay = (
+  { snapshot }: { snapshot: SystemSnapshot | null },
+) => {
   if (!snapshot) {
     return (
       <div className="system-info-container">
-        <div className="pill usage-pill usage-warn">CPU --%</div>
-        <div className="pill usage-pill usage-warn">MEM --%</div>
-        <div className="pill usage-pill usage-warn">🔋 --%</div>
+        <div className="pill usage-pill usage-warn">
+          <span className="nf-icon">{ICON_CPU}</span> --%
+        </div>
+        <div className="pill usage-pill usage-warn">
+          <span className="nf-icon">{ICON_MEM}</span> --%
+        </div>
+        <div className="pill usage-pill usage-warn">
+          <span className="nf-icon">{ICON_BAT_FULL}</span> --%
+        </div>
       </div>
     );
   }
 
   const sev = (p: number) =>
-    p <= 30 ? "usage-good" : p <= 60 ? "usage-warn" : p <= 80 ? "usage-caution" : "usage-danger";
+    p <= 30
+      ? "usage-good"
+      : p <= 60
+      ? "usage-warn"
+      : p <= 80
+      ? "usage-caution"
+      : "usage-danger";
 
   const cpuClass = sev(snapshot.cpu_average);
   const memClass = sev(snapshot.memory_usage_percent);
@@ -142,29 +198,96 @@ const SystemInfoDisplay = ({ snapshot }: { snapshot: SystemSnapshot | null }) =>
     : snapshot.battery_percent > 20
     ? "usage-warn"
     : "usage-danger";
-  const batteryIcon = snapshot.is_charging ? "🔌" : "🔋";
+  const batteryIcon = snapshot.is_charging ? ICON_BAT_CHG : ICON_BAT_FULL;
 
   return (
     <div className="system-info-container">
       <div className={`pill usage-pill ${cpuClass}`} title="CPU 平均使用率">
-        {`CPU ${snapshot.cpu_average.toFixed(0)}%`}
+        <span className="nf-icon">{ICON_CPU}</span>{" "}
+        {`${snapshot.cpu_average.toFixed(0)}%`}
       </div>
       <div
         className={`pill usage-pill ${memClass}`}
-        title={`内存使用: ${formatBytes(snapshot.memory_used)} / ${formatBytes(snapshot.memory_total)}`}
+        title={`内存使用: ${formatBytes(snapshot.memory_used)} / ${
+          formatBytes(snapshot.memory_total)
+        }`}
       >
-        {`MEM ${snapshot.memory_usage_percent.toFixed(0)}%`}
+        <span className="nf-icon">{ICON_MEM}</span>{" "}
+        {`${snapshot.memory_usage_percent.toFixed(0)}%`}
       </div>
       <div
         className={`pill usage-pill ${battClass}`}
-        title={
-          snapshot.is_charging
-            ? `电池充电中: ${snapshot.battery_percent.toFixed(1)}%`
-            : `电池电量: ${snapshot.battery_percent.toFixed(1)}%`
-        }
+        title={snapshot.is_charging
+          ? `电池充电中: ${snapshot.battery_percent.toFixed(1)}%`
+          : `电池电量: ${snapshot.battery_percent.toFixed(1)}%`}
       >
-        {`${batteryIcon} ${snapshot.battery_percent.toFixed(0)}%`}
+        <span className="nf-icon">{batteryIcon}</span>{" "}
+        {`${snapshot.battery_percent.toFixed(0)}%`}
       </div>
+    </div>
+  );
+};
+
+const VolumeControl = ({ snapshot }: { snapshot: AudioSnapshot | null }) => {
+  const onClick = () => {
+    invoke("toggle_mute").catch((e) => console.error(e));
+  };
+  const onWheel = (e: React.WheelEvent) => {
+    e.preventDefault();
+    const delta = e.deltaY < 0 ? 5 : -5;
+    invoke("adjust_volume", { delta }).catch((e2) => console.error(e2));
+  };
+  const onContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    invoke("adjust_volume", { delta: -5 }).catch((e2) => console.error(e2));
+  };
+
+  const muted = !snapshot || snapshot.is_muted || !snapshot.has_device;
+  const vol = snapshot?.volume ?? 0;
+  const cls = muted ? "pill volume-pill muted" : "pill volume-pill";
+  const label = snapshot?.has_device ? `${vol}%` : "--";
+
+  return (
+    <div
+      className={cls}
+      onClick={onClick}
+      onWheel={onWheel}
+      onContextMenu={onContextMenu}
+      title="左键静音 / 滚轮调节"
+    >
+      <span className="nf-icon">{volumeIcon(snapshot)}</span> {label}
+    </div>
+  );
+};
+
+const BrightnessControl = (
+  { snapshot }: { snapshot: BrightnessSnapshot | null },
+) => {
+  const onClick = () => {
+    invoke("adjust_brightness", { delta: 5 }).catch((e) => console.error(e));
+  };
+  const onContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    invoke("adjust_brightness", { delta: -5 }).catch((e2) => console.error(e2));
+  };
+  const onWheel = (e: React.WheelEvent) => {
+    e.preventDefault();
+    const delta = e.deltaY < 0 ? 5 : -5;
+    invoke("adjust_brightness", { delta }).catch((e2) => console.error(e2));
+  };
+
+  const pct = snapshot?.percent;
+  const label = typeof pct === "number" ? `${pct}%` : "--";
+
+  return (
+    <div
+      className="pill brightness-pill"
+      onClick={onClick}
+      onWheel={onWheel}
+      onContextMenu={onContextMenu}
+      title="左键加亮 / 右键减暗 / 滚轮调节"
+    >
+      <span className="nf-icon">{ICON_BRIGHT}</span> {label}
     </div>
   );
 };
@@ -190,7 +313,7 @@ const ScreenshotButton = () => {
       onClick={handleClick}
       title="截图 (Flameshot)"
     >
-      {isTaking ? "⏳" : "📸"}
+      <span className="nf-icon">{ICON_SHOT}</span>
     </div>
   );
 };
@@ -200,7 +323,10 @@ const TimeDisplay = () => {
   const [time, setTime] = useState(new Date());
 
   useEffect(() => {
-    const interval = setInterval(() => setTime(new Date()), showSeconds ? 1000 : 60000);
+    const interval = setInterval(
+      () => setTime(new Date()),
+      showSeconds ? 1000 : 60000,
+    );
     return () => clearInterval(interval);
   }, [showSeconds]);
 
@@ -214,8 +340,12 @@ const TimeDisplay = () => {
   }, [time, showSeconds]);
 
   return (
-    <div className="pill time-pill" onClick={() => setShowSeconds(!showSeconds)} title="点击切换秒显示">
-      {formatted}
+    <div
+      className="pill time-pill"
+      onClick={() => setShowSeconds(!showSeconds)}
+      title="点击切换秒显示"
+    >
+      <span className="nf-icon">{ICON_TIME}</span> {formatted}
     </div>
   );
 };
@@ -269,22 +399,54 @@ function App() {
   const [appState, setAppState] = useState<UiState>({
     monitor_info_snapshot: null,
     system_snapshot: null,
+    audio_snapshot: null,
+    brightness_snapshot: null,
   });
+
+  const mounted = useRef(true);
 
   useEffect(() => {
     console.log("Tauri React frontend has loaded.");
+    mounted.current = true;
 
-    const unlistenMonitor = listen<MonitorInfoSnapshot>("monitor-update", (event) => {
-      setAppState((prev) => ({ ...prev, monitor_info_snapshot: event.payload }));
-    });
+    const unlistenMonitor = listen<MonitorInfoSnapshot>(
+      "monitor-update",
+      (event) => {
+        if (!mounted.current) return;
+        setAppState((prev) => ({
+          ...prev,
+          monitor_info_snapshot: event.payload,
+        }));
+      },
+    );
 
     const unlistenSystem = listen<SystemSnapshot>("system-update", (event) => {
+      if (!mounted.current) return;
       setAppState((prev) => ({ ...prev, system_snapshot: event.payload }));
     });
 
+    const unlistenAudio = listen<AudioSnapshot>("audio-update", (event) => {
+      if (!mounted.current) return;
+      setAppState((prev) => ({ ...prev, audio_snapshot: event.payload }));
+    });
+
+    const unlistenBrightness = listen<BrightnessSnapshot>(
+      "brightness-update",
+      (event) => {
+        if (!mounted.current) return;
+        setAppState((prev) => ({
+          ...prev,
+          brightness_snapshot: event.payload,
+        }));
+      },
+    );
+
     return () => {
+      mounted.current = false;
       unlistenMonitor.then((f) => f());
       unlistenSystem.then((f) => f());
+      unlistenAudio.then((f) => f());
+      unlistenBrightness.then((f) => f());
     };
   }, []);
 
@@ -306,10 +468,12 @@ function App() {
 
       <div className="right-info-container">
         <SystemInfoDisplay snapshot={appState.system_snapshot} />
+        <BrightnessControl snapshot={appState.brightness_snapshot} />
+        <VolumeControl snapshot={appState.audio_snapshot} />
         <ScreenshotButton />
         <TimeDisplay />
         <div className="pill monitor-pill" title="显示器">
-          {"🖥️ " + monitorIcon(mis.monitor_num)}
+          <span className="nf-icon">{ICON_MON}</span> {monitorIcon(mis.monitor_num)}
         </div>
         <div className="pill scale-pill" title="Scale Factor">
           {scale !== undefined ? `s: ${scale.toFixed(2)}` : "s: --"}
