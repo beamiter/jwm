@@ -3,9 +3,6 @@ name = "jwm"
 version = "0.2.0"
 edition = "2024"
 
-[features]
-nixgl = []
-
 [[bin]]
 name = "jwm-tool"
 path = "tools/jwm_tool.rs"
@@ -36,7 +33,7 @@ arc-swap = "1"
 rand = "0.9.4"
 xkbcommon = "0.9.0"
 bitflags = "2.11.1"
-smithay = { git = "https://github.com/Smithay/smithay.git", rev = "85f83ab61711e725aa1f3481df4f4dc5370e925b", default-features = false, features = [
+smithay = { git = "https://github.com/Smithay/smithay.git", branch = "master", default-features = false, features = [
 "use_system_lib",
 "wayland-backend",
 "wayland_frontend",

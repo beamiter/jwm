@@ -1080,7 +1080,7 @@ impl WaylandWinitBackend {
         // Wayland hosts. The WinitEvent::Resized handler picks up the real size.
         winit_backend
             .window()
-            .set_fullscreen(Some(smithay::reexports::winit::window::Fullscreen::Borderless(
+            .set_fullscreen(Some(smithay::reexports::winit::monitor::Fullscreen::Borderless(
                 None,
             )));
 

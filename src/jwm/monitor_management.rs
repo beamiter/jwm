@@ -133,11 +133,7 @@ impl Jwm {
         // Prepare command
         let cfg = CONFIG.load();
         let bar_name = cfg.status_bar_name();
-        let mut command = if cfg!(feature = "nixgl") {
-            let mut cmd = Command::new("nixGL");
-            cmd.arg(bar_name).arg(&shared_path);
-            cmd
-        } else {
+        let mut command = {
             let mut cmd = Command::new(bar_name);
             cmd.arg(&shared_path);
             cmd

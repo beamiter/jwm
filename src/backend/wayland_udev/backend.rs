@@ -1128,7 +1128,8 @@ impl UdevBackend {
                 &display_handle,
                 None, // auto-pick display number
                 std::iter::empty::<(String, String)>(),
-                true, // open abstract socket
+                std::iter::empty::<String>(), // no extra args
+                true,                         // open abstract socket
                 Stdio::null(),
                 Stdio::null(),
                 |_| {},
