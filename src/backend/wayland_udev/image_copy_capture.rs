@@ -10,11 +10,15 @@ use log::{debug, info, warn};
 
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::ext::image_capture_source::v1::server::{
+    ext_foreign_toplevel_image_capture_source_manager_v1::{
+        self, ExtForeignToplevelImageCaptureSourceManagerV1,
+    },
     ext_image_capture_source_v1::{self, ExtImageCaptureSourceV1},
     ext_output_image_capture_source_manager_v1::{
         self, ExtOutputImageCaptureSourceManagerV1,
     },
 };
+use smithay::wayland::foreign_toplevel_list::ForeignToplevelHandle;
 use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::{
     ext_image_copy_capture_manager_v1::{self, ExtImageCopyCaptureManagerV1},
     ext_image_copy_capture_session_v1::{self, ExtImageCopyCaptureSessionV1},
@@ -125,8 +129,15 @@ pub fn init_image_copy_capture(dh: &DisplayHandle) -> PendingImageCaptureQueue {
         1,
         OutputSourceManagerData,
     );
+    dh.create_global::<JwmWaylandState, ExtForeignToplevelImageCaptureSourceManagerV1, _>(
+        1,
+        ToplevelSourceManagerData,
+    );
     dh.create_global::<JwmWaylandState, ExtImageCopyCaptureManagerV1, _>(1, CaptureManagerData);
-    info!("[udev/wayland] ext-image-copy-capture-v1 + ext-image-capture-source-v1 globals registered");
+    info!(
+        "[udev/wayland] ext-image-copy-capture-v1 + ext-image-capture-source-v1 globals registered \
+         (output + foreign-toplevel sources)"
+    );
     new_pending_image_capture_queue()
 }
 
@@ -181,6 +192,84 @@ impl Dispatch<ExtOutputImageCaptureSourceManagerV1, OutputSourceManagerData> for
                 data_init.init(source, ImageCaptureSourceData { source: capture_source });
             }
             ext_output_image_capture_source_manager_v1::Request::Destroy => {}
+            _ => {}
+        }
+    }
+}
+
+// =============================================================================
+// ext_foreign_toplevel_image_capture_source_manager_v1
+// =============================================================================
+
+impl GlobalDispatch<ExtForeignToplevelImageCaptureSourceManagerV1, ToplevelSourceManagerData>
+    for JwmWaylandState
+{
+    fn bind(
+        _state: &mut Self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<ExtForeignToplevelImageCaptureSourceManagerV1>,
+        _global_data: &ToplevelSourceManagerData,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        data_init.init(resource, ToplevelSourceManagerData);
+    }
+}
+
+impl Dispatch<ExtForeignToplevelImageCaptureSourceManagerV1, ToplevelSourceManagerData>
+    for JwmWaylandState
+{
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        _resource: &ExtForeignToplevelImageCaptureSourceManagerV1,
+        request: ext_foreign_toplevel_image_capture_source_manager_v1::Request,
+        _data: &ToplevelSourceManagerData,
+        _dh: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            ext_foreign_toplevel_image_capture_source_manager_v1::Request::CreateSource {
+                source,
+                toplevel_handle,
+            } => {
+                let Some(handle) = ForeignToplevelHandle::from_resource(&toplevel_handle) else {
+                    warn!("[image-capture] toplevel handle has no smithay user data; ignoring");
+                    return;
+                };
+                // Look up which WindowId owns this handle. Match by identifier so we
+                // don't depend on `ForeignToplevelHandle` being `PartialEq`-comparable
+                // across crate boundaries; the identifier is the stable id the protocol
+                // already sends to clients.
+                let target_id = handle.identifier();
+                let win = state
+                    .foreign_toplevel_handles
+                    .iter()
+                    .find(|(_, h)| h.identifier() == target_id)
+                    .map(|(w, _)| *w);
+                let Some(win) = win else {
+                    warn!(
+                        "[image-capture] toplevel handle identifier={target_id} not in window map; \
+                         falling back to first output"
+                    );
+                    let fallback = state.outputs.first().cloned();
+                    match fallback {
+                        Some(o) => {
+                            data_init.init(
+                                source,
+                                ImageCaptureSourceData { source: CaptureSource::Output(o) },
+                            );
+                        }
+                        None => return,
+                    }
+                    return;
+                };
+                data_init.init(
+                    source,
+                    ImageCaptureSourceData { source: CaptureSource::Toplevel(win) },
+                );
+            }
+            ext_foreign_toplevel_image_capture_source_manager_v1::Request::Destroy => {}
             _ => {}
         }
     }

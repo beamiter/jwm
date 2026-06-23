@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "portal"]
+resolver = "2"
+
 [package]
 name = "jwm"
 version = "0.2.0"
