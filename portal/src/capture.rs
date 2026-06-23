@@ -206,6 +206,13 @@ struct State {
     buffer_width: u32,
     buffer_height: u32,
     chosen_shm_format: Option<wl_shm::Format>,
+    /// dev_t of the DRM device the compositor renders into, if it advertised
+    /// one. Recorded only for diagnostics / future dmabuf path — SHM transport
+    /// is selected unconditionally for now.
+    dmabuf_device: Option<u64>,
+    /// (fourcc, [modifier]) pairs collected from `dmabuf_format` events.
+    /// Empty when the session offered no dmabuf at all.
+    dmabuf_formats: Vec<(u32, Vec<u64>)>,
     frame_status: FrameStatus,
     frame_failure: Option<FailureReason>,
 }
@@ -237,6 +244,8 @@ fn run_capture(
         buffer_width: 0,
         buffer_height: 0,
         chosen_shm_format: None,
+        dmabuf_device: None,
+        dmabuf_formats: Vec::new(),
         frame_status: FrameStatus::Idle,
         frame_failure: None,
     };
@@ -682,7 +691,36 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State {
                     }
                 }
             }
+            ext_image_copy_capture_session_v1::Event::DmabufDevice { device } => {
+                // device is an opaque array of bytes representing a dev_t. We
+                // record only the first 8 bytes interpreted as little-endian
+                // u64 for logging — comparison/equality is explicitly *not*
+                // defined by the protocol, so we treat this as diagnostic.
+                let mut buf = [0u8; 8];
+                let n = device.len().min(8);
+                buf[..n].copy_from_slice(&device[..n]);
+                state.dmabuf_device = Some(u64::from_le_bytes(buf));
+            }
+            ext_image_copy_capture_session_v1::Event::DmabufFormat { format, modifiers } => {
+                // modifiers is an array of 64-bit unsigned ints flattened to bytes.
+                let mods: Vec<u64> = modifiers
+                    .chunks_exact(8)
+                    .map(|c| {
+                        let mut b = [0u8; 8];
+                        b.copy_from_slice(c);
+                        u64::from_le_bytes(b)
+                    })
+                    .collect();
+                state.dmabuf_formats.push((format, mods));
+            }
             ext_image_copy_capture_session_v1::Event::Done => {
+                if state.dmabuf_device.is_some() || !state.dmabuf_formats.is_empty() {
+                    log::debug!(
+                        "capture: session offered dmabuf (device=0x{:x}, {} format(s)) — ignoring, SHM-only for now",
+                        state.dmabuf_device.unwrap_or(0),
+                        state.dmabuf_formats.len(),
+                    );
+                }
                 state.session_done = true;
             }
             ext_image_copy_capture_session_v1::Event::Stopped => {

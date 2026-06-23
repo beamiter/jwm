@@ -33,6 +33,12 @@ pub struct Session {
     /// with the PW streams when the session ends (or the dbus Session map
     /// entry is replaced).
     pub captures: Vec<CaptureHandle>,
+    /// Caller's persist_mode from SelectSources (0=none, 1=transient,
+    /// 2=permanent). When >0, Start generates a restore_token.
+    pub persist_mode: u32,
+    /// Pre-existing token the caller asked us to honor (echoed back from
+    /// Start if the stored selection still resolves).
+    pub restore_token: Option<String>,
 }
 
 impl Runtime {

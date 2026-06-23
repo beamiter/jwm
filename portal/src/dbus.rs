@@ -14,6 +14,7 @@ use zbus::{Connection, interface, zvariant::OwnedObjectPath, zvariant::OwnedValu
 use crate::capture::{self, CaptureHandle};
 use crate::picker::{SourceSelection, pick_outputs, pick_windows};
 use crate::pipewire_stream::{self, StreamHandle, StreamSpec};
+use crate::restore;
 use crate::session::Runtime;
 
 /// Source type bits per the portal spec.
@@ -86,6 +87,13 @@ impl ScreenCast {
             .get("multiple")
             .and_then(|v| bool::try_from(v).ok())
             .unwrap_or(false);
+        let persist_mode = options
+            .get("persist_mode")
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0);
+        let restore_token_in = options
+            .get("restore_token")
+            .and_then(|v| <&str>::try_from(&**v).ok().map(str::to_string));
         let want_monitor = types_mask & (SourceType::Monitor as u32) != 0;
         let want_window = types_mask & (SourceType::Window as u32) != 0;
 
@@ -93,7 +101,26 @@ impl ScreenCast {
             let snap = self.rt.wayland().lock().expect("wayland snapshot mutex");
             (snap.outputs.clone(), snap.toplevels.clone())
         };
-        let selection = SourceSelection {
+
+        // Try the restore path first — if the caller handed us a token and the
+        // stored sources still resolve, skip the picker entirely.
+        let mut selection: Option<SourceSelection> = None;
+        let mut honored_token: Option<String> = None;
+        if let Some(tok) = restore_token_in.as_deref() {
+            if let Some((sel, _prev_mode)) = restore::resolve(tok, &outputs, &toplevels) {
+                let filtered = SourceSelection {
+                    outputs: if want_monitor { sel.outputs } else { Vec::new() },
+                    toplevels: if want_window { sel.toplevels } else { Vec::new() },
+                };
+                if !filtered.outputs.is_empty() || !filtered.toplevels.is_empty() {
+                    info!("SelectSources honoring restore_token `{tok}`");
+                    selection = Some(filtered);
+                    honored_token = Some(tok.to_string());
+                }
+            }
+        }
+
+        let selection = selection.unwrap_or_else(|| SourceSelection {
             outputs: if want_monitor {
                 pick_outputs(&outputs, multiple)
             } else {
@@ -104,7 +131,7 @@ impl ScreenCast {
             } else {
                 Vec::new()
             },
-        };
+        });
         info!(
             "SelectSources picked {} output(s), {} toplevel(s)",
             selection.outputs.len(),
@@ -115,6 +142,8 @@ impl ScreenCast {
             .rt
             .with_session(&session_handle.to_string(), |s| {
                 s.selection = Some(selection);
+                s.persist_mode = persist_mode;
+                s.restore_token = honored_token;
             })
             .await;
         (0, HashMap::new())
@@ -132,11 +161,16 @@ impl ScreenCast {
 
         // Pull the resolved selection out of the session — SelectSources put it
         // there. Without it, this is a no-op-but-success Start.
-        let selection = self
+        let (selection, persist_mode, prior_token) = self
             .rt
-            .with_session(&session_handle.to_string(), |s| s.selection.clone())
+            .with_session(&session_handle.to_string(), |s| {
+                (
+                    s.selection.clone().unwrap_or_default(),
+                    s.persist_mode,
+                    s.restore_token.clone(),
+                )
+            })
             .await
-            .flatten()
             .unwrap_or_default();
 
         // For each picked output, spawn:
@@ -237,6 +271,21 @@ impl ScreenCast {
         let mut results = HashMap::new();
         if let Ok(v) = Value::from(streams_meta).try_into() {
             results.insert("streams".to_string(), v);
+        }
+        if persist_mode > 0 && (!selection.outputs.is_empty() || !selection.toplevels.is_empty()) {
+            let token = match prior_token {
+                Some(t) => {
+                    restore::touch(&t, &selection, persist_mode);
+                    t
+                }
+                None => restore::save_new(&selection, persist_mode),
+            };
+            if let Ok(v) = Value::from(token).try_into() {
+                results.insert("restore_token".to_string(), v);
+            }
+            if let Ok(v) = Value::from(persist_mode).try_into() {
+                results.insert("persist_mode".to_string(), v);
+            }
         }
         info!("Start {session_handle} returning streams");
         (0, results)
