@@ -187,13 +187,29 @@ impl ScreenCast {
             }
         }
         for (idx, t) in selection.toplevels.iter().enumerate() {
-            let spec = StreamSpec::default();
+            let frame_slot = capture::new_frame_slot();
+            let capture = match capture::spawn_toplevel_capture(t.identifier.clone(), frame_slot.clone()) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(
+                        "Start: failed to spawn capture for toplevel `{}` (app_id=`{}`): {e}",
+                        t.identifier, t.app_id
+                    );
+                    continue;
+                }
+            };
+            let spec = StreamSpec {
+                width: capture.width,
+                height: capture.height,
+                framerate_num: capture.framerate_num,
+                framerate_den: capture.framerate_den,
+            };
             let name = if t.app_id.is_empty() {
                 format!("jwm-window-{idx}")
             } else {
                 format!("jwm-window-{}", t.app_id)
             };
-            match pipewire_stream::spawn(spec, name, None) {
+            match pipewire_stream::spawn(spec, name, Some(frame_slot)) {
                 Ok(h) => {
                     let mut props: HashMap<String, OwnedValue> = HashMap::new();
                     if let Ok(v) = Value::from((spec.width as i32, spec.height as i32)).try_into() {
@@ -204,8 +220,9 @@ impl ScreenCast {
                     }
                     streams_meta.push((h.node_id, props));
                     handles.push(h);
+                    captures.push(capture);
                 }
-                Err(e) => warn!("Start: failed to spawn window stream: {e}"),
+                Err(e) => warn!("Start: failed to spawn window PW stream: {e}"),
             }
         }
 
@@ -231,12 +248,31 @@ impl ScreenCast {
         _options: HashMap<String, OwnedValue>,
     ) -> zbus::fdo::Result<zbus::zvariant::OwnedFd> {
         info!("OpenPipeWireRemote {session_handle}");
-        // MVP placeholder: connect to the user PipeWire daemon and hand a
-        // socket fd back. Until pipewire_stream.rs is wired, refuse.
-        Err(zbus::fdo::Error::NotSupported(
-            "OpenPipeWireRemote not yet implemented".into(),
-        ))
+        // Hand the caller a fresh UNIX-socket fd connected to the user
+        // PipeWire daemon. They feed it to `pw_context_connect_fd()` on
+        // their side to skip the usual env-var-based discovery.
+        let path = pipewire_socket_path();
+        let stream = std::os::unix::net::UnixStream::connect(&path).map_err(|e| {
+            zbus::fdo::Error::Failed(format!(
+                "OpenPipeWireRemote: connect to PipeWire socket {path:?}: {e}"
+            ))
+        })?;
+        let owned: std::os::fd::OwnedFd = stream.into();
+        Ok(zbus::zvariant::OwnedFd::from(owned))
     }
+}
+
+/// Resolve the PipeWire daemon socket path the client should connect to.
+/// Honors `PIPEWIRE_REMOTE` if set, else `$XDG_RUNTIME_DIR/pipewire-0` (the
+/// standard location written by PipeWire's own systemd unit).
+fn pipewire_socket_path() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("PIPEWIRE_REMOTE") {
+        return std::path::PathBuf::from(p);
+    }
+    let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+    let mut p = std::path::PathBuf::from(runtime);
+    p.push("pipewire-0");
+    p
 }
 
 pub async fn serve(rt: Runtime) -> Result<Connection, Box<dyn std::error::Error + Send + Sync>> {

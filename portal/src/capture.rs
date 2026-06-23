@@ -27,7 +27,12 @@ use wayland_client::{
     globals::{GlobalListContents, registry_queue_init},
     protocol::{wl_buffer, wl_output, wl_registry, wl_shm, wl_shm_pool},
 };
+use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
+    ext_foreign_toplevel_handle_v1::{self, ExtForeignToplevelHandleV1},
+    ext_foreign_toplevel_list_v1::{self, ExtForeignToplevelListV1},
+};
 use wayland_protocols::ext::image_capture_source::v1::client::{
+    ext_foreign_toplevel_image_capture_source_manager_v1::ExtForeignToplevelImageCaptureSourceManagerV1,
     ext_image_capture_source_v1::ExtImageCaptureSourceV1,
     ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1,
 };
@@ -89,12 +94,47 @@ impl Drop for CaptureHandle {
     }
 }
 
+/// Which source the capture thread should track. The string identifies it on
+/// the compositor side: a `wl_output::Name` value for Output, or an
+/// `ext_foreign_toplevel_handle_v1::Identifier` value for Toplevel.
+#[derive(Debug, Clone)]
+pub enum CaptureTarget {
+    Output { name: String },
+    Toplevel { identifier: String },
+}
+
+impl CaptureTarget {
+    fn debug_label(&self) -> &str {
+        match self {
+            CaptureTarget::Output { name } => name,
+            CaptureTarget::Toplevel { identifier } => identifier,
+        }
+    }
+}
+
 /// Spawn a capture thread targeting the wl_output whose `Name` matches
 /// `output_name`. Returns once the session has finished its initial
 /// constraint negotiation (so the caller knows the real buffer size before
 /// advertising format to PipeWire).
 pub fn spawn_output_capture(
     output_name: String,
+    frame: SharedFrame,
+) -> Result<CaptureHandle, String> {
+    spawn_capture(CaptureTarget::Output { name: output_name }, frame)
+}
+
+/// Spawn a capture thread targeting the ext-foreign-toplevel-list-v1 handle
+/// whose `Identifier` matches `identifier`. Same negotiation contract as
+/// [`spawn_output_capture`].
+pub fn spawn_toplevel_capture(
+    identifier: String,
+    frame: SharedFrame,
+) -> Result<CaptureHandle, String> {
+    spawn_capture(CaptureTarget::Toplevel { identifier }, frame)
+}
+
+fn spawn_capture(
+    target: CaptureTarget,
     frame: SharedFrame,
 ) -> Result<CaptureHandle, String> {
     let (init_tx, init_rx) = mpsc::sync_channel::<Result<NegotiatedFormat, String>>(1);
@@ -104,7 +144,7 @@ pub fn spawn_output_capture(
     let join = std::thread::Builder::new()
         .name("jwm-portal-cap".into())
         .spawn(move || {
-            let result = run_capture(output_name, frame_for_thread, &init_tx_for_thread, shutdown_rx);
+            let result = run_capture(target, frame_for_thread, &init_tx_for_thread, shutdown_rx);
             if let Err(e) = result {
                 // If we failed before sending an init result, surface it.
                 let _ = init_tx_for_thread.send(Err(e.clone()));
@@ -150,8 +190,17 @@ struct OutputProbe {
     refresh_mhz: i32,
 }
 
+#[derive(Default, Debug)]
+struct ToplevelProbe {
+    identifier: String,
+}
+
 struct State {
     outputs: Vec<(wl_output::WlOutput, OutputProbe)>,
+    toplevels: Vec<(ExtForeignToplevelHandleV1, ToplevelProbe)>,
+    /// Framerate-mhz hint from the resolved source (output's Mode event). 0
+    /// means "no hint" — caller will fall back to 60.
+    target_refresh_mhz: i32,
     session_done: bool,
     session_stopped: bool,
     buffer_width: u32,
@@ -162,7 +211,7 @@ struct State {
 }
 
 fn run_capture(
-    output_name: String,
+    target: CaptureTarget,
     frame: SharedFrame,
     init_tx: &mpsc::SyncSender<Result<NegotiatedFormat, String>>,
     shutdown_rx: mpsc::Receiver<()>,
@@ -175,15 +224,14 @@ fn run_capture(
     let shm: wl_shm::WlShm = globals
         .bind(&qh, 1..=1, ())
         .map_err(|e| format!("bind wl_shm: {e}"))?;
-    let src_mgr: ExtOutputImageCaptureSourceManagerV1 = globals
-        .bind(&qh, 1..=1, ())
-        .map_err(|e| format!("bind output_image_capture_source_manager_v1: {e}"))?;
     let cap_mgr: ExtImageCopyCaptureManagerV1 = globals
         .bind(&qh, 1..=1, ())
         .map_err(|e| format!("bind image_copy_capture_manager_v1: {e}"))?;
 
     let mut state = State {
         outputs: Vec::new(),
+        toplevels: Vec::new(),
+        target_refresh_mhz: 0,
         session_done: false,
         session_stopped: false,
         buffer_width: 0,
@@ -193,44 +241,112 @@ fn run_capture(
         frame_failure: None,
     };
 
-    for global in globals.contents().clone_list() {
-        if global.interface == wl_output::WlOutput::interface().name {
-            let wl_out = globals.registry().bind::<wl_output::WlOutput, _, State>(
-                global.name,
-                global.version.min(4),
-                &qh,
-                (),
+    // Bind source manager(s) + walk relevant globals up front. We hold the
+    // unused-side manager as None to keep the binding cost off the spec path.
+    let mut output_src_mgr: Option<ExtOutputImageCaptureSourceManagerV1> = None;
+    let mut toplevel_src_mgr: Option<ExtForeignToplevelImageCaptureSourceManagerV1> = None;
+    // Held alive for the thread lifetime so the global stays bound and we
+    // keep receiving toplevel-list events (Close, new toplevels, etc).
+    let mut _toplevel_list: Option<ExtForeignToplevelListV1> = None;
+
+    match &target {
+        CaptureTarget::Output { .. } => {
+            output_src_mgr = Some(
+                globals
+                    .bind(&qh, 1..=1, ())
+                    .map_err(|e| format!("bind output_image_capture_source_manager_v1: {e}"))?,
             );
-            state.outputs.push((wl_out, OutputProbe::default()));
+            for global in globals.contents().clone_list() {
+                if global.interface == wl_output::WlOutput::interface().name {
+                    let wl_out = globals.registry().bind::<wl_output::WlOutput, _, State>(
+                        global.name,
+                        global.version.min(4),
+                        &qh,
+                        (),
+                    );
+                    state.outputs.push((wl_out, OutputProbe::default()));
+                }
+            }
+            if state.outputs.is_empty() {
+                return Err("no wl_output advertised".into());
+            }
+        }
+        CaptureTarget::Toplevel { .. } => {
+            toplevel_src_mgr = Some(globals.bind(&qh, 1..=1, ()).map_err(|e| {
+                format!("bind foreign_toplevel_image_capture_source_manager_v1: {e}")
+            })?);
+            _toplevel_list = Some(
+                globals
+                    .bind(&qh, 1..=1, ())
+                    .map_err(|e| format!("bind foreign_toplevel_list_v1: {e}"))?,
+            );
         }
     }
-    if state.outputs.is_empty() {
-        return Err("no wl_output advertised".into());
-    }
 
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while state.outputs.iter().any(|(_, p)| p.name.is_empty()) {
-        event_queue
-            .blocking_dispatch(&mut state)
-            .map_err(|e| format!("dispatch (outputs): {e}"))?;
-        if Instant::now() > deadline {
-            warn!("capture: timed out waiting for wl_output names; using first output");
-            break;
+    // Drive enumeration until the requested target is resolvable.
+    let source = match &target {
+        CaptureTarget::Output { name } => {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while state.outputs.iter().any(|(_, p)| p.name.is_empty()) {
+                event_queue
+                    .blocking_dispatch(&mut state)
+                    .map_err(|e| format!("dispatch (outputs): {e}"))?;
+                if Instant::now() > deadline {
+                    warn!("capture: timed out waiting for wl_output names; using first output");
+                    break;
+                }
+            }
+            let target_idx = state
+                .outputs
+                .iter()
+                .position(|(_, p)| &p.name == name)
+                .unwrap_or(0);
+            let target_output = state.outputs[target_idx].0.clone();
+            let refresh_mhz = state.outputs[target_idx].1.refresh_mhz;
+            let resolved_name = state.outputs[target_idx].1.name.clone();
+            info!(
+                "capture: target output `{resolved_name}` (requested `{name}`, refresh {refresh_mhz} mHz)"
+            );
+            state.target_refresh_mhz = refresh_mhz;
+            output_src_mgr
+                .as_ref()
+                .expect("output source manager bound above")
+                .create_source(&target_output, &qh, ())
         }
-    }
+        CaptureTarget::Toplevel { identifier } => {
+            // Pump until either Finished arrives OR we see the requested id.
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let have_match = state
+                    .toplevels
+                    .iter()
+                    .any(|(_, p)| &p.identifier == identifier);
+                if have_match {
+                    break;
+                }
+                if Instant::now() > deadline {
+                    break;
+                }
+                event_queue
+                    .blocking_dispatch(&mut state)
+                    .map_err(|e| format!("dispatch (toplevels): {e}"))?;
+            }
+            let target_idx = state
+                .toplevels
+                .iter()
+                .position(|(_, p)| &p.identifier == identifier)
+                .ok_or_else(|| format!("no toplevel matching identifier `{identifier}`"))?;
+            let target_handle = state.toplevels[target_idx].0.clone();
+            info!("capture: target toplevel `{identifier}`");
+            toplevel_src_mgr
+                .as_ref()
+                .expect("toplevel source manager bound above")
+                .create_source(&target_handle, &qh, ())
+        }
+    };
 
-    let target_idx = state
-        .outputs
-        .iter()
-        .position(|(_, p)| p.name == output_name)
-        .unwrap_or(0);
-    let (target_output, probe) = state.outputs[target_idx].clone_pair();
-    info!(
-        "capture: target output `{}` (requested `{}`, refresh {} mHz)",
-        probe.name, output_name, probe.refresh_mhz
-    );
-
-    let source = src_mgr.create_source(&target_output, &qh, ());
+    state.session_done = false;
+    state.session_stopped = false;
     let session = cap_mgr.create_session(
         &source,
         ext_image_copy_capture_manager_v1::Options::PaintCursors,
@@ -301,8 +417,8 @@ fn run_capture(
         f.seq = 0;
     }
 
-    let framerate_num = if probe.refresh_mhz > 0 {
-        ((probe.refresh_mhz + 500) / 1000).max(1) as u32
+    let framerate_num = if state.target_refresh_mhz > 0 {
+        ((state.target_refresh_mhz + 500) / 1000).max(1) as u32
     } else {
         60
     };
@@ -482,8 +598,62 @@ empty_dispatch!(wl_shm::WlShm);
 empty_dispatch!(wl_shm_pool::WlShmPool);
 empty_dispatch!(wl_buffer::WlBuffer);
 empty_dispatch!(ExtOutputImageCaptureSourceManagerV1);
+empty_dispatch!(ExtForeignToplevelImageCaptureSourceManagerV1);
 empty_dispatch!(ExtImageCaptureSourceV1);
 empty_dispatch!(ExtImageCopyCaptureManagerV1);
+
+impl Dispatch<ExtForeignToplevelListV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &ExtForeignToplevelListV1,
+        event: ext_foreign_toplevel_list_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let ext_foreign_toplevel_list_v1::Event::Toplevel { toplevel } = event {
+            state
+                .toplevels
+                .push((toplevel, ToplevelProbe::default()));
+        }
+    }
+
+    fn event_created_child(
+        opcode: u16,
+        qh: &QueueHandle<Self>,
+    ) -> std::sync::Arc<dyn wayland_client::backend::ObjectData> {
+        match opcode {
+            ext_foreign_toplevel_list_v1::EVT_TOPLEVEL_OPCODE => {
+                qh.make_data::<ExtForeignToplevelHandleV1, _>(())
+            }
+            _ => panic!("unexpected child opcode for ExtForeignToplevelListV1: {opcode}"),
+        }
+    }
+}
+
+impl Dispatch<ExtForeignToplevelHandleV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        proxy: &ExtForeignToplevelHandleV1,
+        event: ext_foreign_toplevel_handle_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let Some(entry) = state.toplevels.iter_mut().find(|(p, _)| p == proxy) else {
+            return;
+        };
+        match event {
+            ext_foreign_toplevel_handle_v1::Event::Identifier { identifier } => {
+                entry.1.identifier = identifier;
+            }
+            ext_foreign_toplevel_handle_v1::Event::Closed => {
+                state.toplevels.retain(|(p, _)| p != proxy);
+            }
+            _ => {}
+        }
+    }
+}
 
 impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State {
     fn event(
