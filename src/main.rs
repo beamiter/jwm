@@ -1,9 +1,10 @@
 use chrono::Local;
 use iced::futures::channel::mpsc;
 use iced::futures::{SinkExt, Stream, StreamExt};
+use iced::mouse;
 use iced::time::{self, milliseconds};
 use iced::widget::container;
-use iced::widget::{Space, button, rich_text, slider};
+use iced::widget::{Space, button, rich_text};
 use iced::widget::{mouse_area, span};
 use iced::{Font, stream, theme};
 
@@ -24,13 +25,42 @@ use std::time::{Duration, Instant};
 
 use shared_structures::{CommandType, MonitorInfo, SharedCommand, SharedMessage, SharedRingBuffer};
 use xbar_core::audio_manager::AudioManager;
+use xbar_core::battery::BatteryManager;
+use xbar_core::brightness::BrightnessManager;
 use xbar_core::initialize_logging;
 use xbar_core::system_monitor::SystemMonitor;
 
 static _START: Once = Once::new();
 
-// const NERD_FONT: Font = Font::new("SauceCodePro NerdFont Regular");
-const NERD_FONT: Font = Font::new("NotoEmoji Regular");
+const NERD_FONT: Font = Font::new("JetBrainsMono Nerd Font");
+
+// Nerd-font icons used across the bar (aligned with tauri_react_bar)
+const TAG_ICONS: [&str; 9] = [
+    "\u{F0A1E}", // terminal
+    "\u{F0239}", // browser
+    "\u{F0A1B}", // code
+    "\u{F0B79}", // chat
+    "\u{F024B}", // folder
+    "\u{F0388}", // music
+    "\u{F0567}", // video
+    "\u{F01F0}", // mail
+    "\u{F0297}", // gamepad
+];
+
+const ICON_CPU: &str = "\u{F4BC}";
+const ICON_MEM: &str = "\u{F035B}";
+const ICON_BAT_FULL: &str = "\u{F0079}";
+const ICON_BAT_CHG: &str = "\u{F0084}";
+const ICON_VOL_HIGH: &str = "\u{F057E}";
+const ICON_VOL_MID: &str = "\u{F0580}";
+const ICON_VOL_LOW: &str = "\u{F057F}";
+const ICON_VOL_MUTE: &str = "\u{F075F}";
+const ICON_BRIGHT: &str = "\u{F00DE}";
+const ICON_SHOT: &str = "\u{F0104}";
+const ICON_TIME: &str = "\u{F0954}";
+const ICON_MON: &str = "\u{F0379}";
+const ICON_M0: &str = "\u{F02DA}";
+const ICON_M1: &str = "\u{F02DB}";
 
 fn main() -> iced::Result {
     let args: Vec<String> = env::args().collect();
@@ -58,7 +88,6 @@ fn main() -> iced::Result {
         .subscription(IcedBar::subscription)
         .title("iced_bar")
         .scale_factor(IcedBar::scale_factor)
-        // .theme(|_| Theme::Light)
         .run()
 }
 
@@ -91,13 +120,15 @@ enum Message {
 
     // Audio
     AudioToggleMute,
-    AudioOpenMixer,
-    AudioVolumeChanged(f32),
+    AudioAdjust(i32),
+
+    // Brightness
+    BrightnessAdjust(i32),
 }
 
 struct IcedBar {
     active_tab: usize,
-    tabs: [String; 9],
+    tabs: [&'static str; 9],
     tab_colors: [Color; 9],
     shared_buffer_rc: Option<Arc<SharedRingBuffer>>,
     shared_path: String,
@@ -111,9 +142,11 @@ struct IcedBar {
     layout_symbol: String,
     monitor_num: i32,
 
-    // Audio + System
+    // Audio + System + Brightness + Battery
     audio_manager: AudioManager,
     system_monitor: SystemMonitor,
+    brightness_manager: BrightnessManager,
+    battery_manager: BatteryManager,
 
     transparent: bool,
 
@@ -133,9 +166,10 @@ impl Default for IcedBar {
 
 impl IcedBar {
     const DEFAULT_COLOR: Color = color!(0x666666);
-    const TAB_WIDTH: f32 = 40.0;
-    const TAB_HEIGHT: f32 = 36.0;
-    const TAB_SPACING: f32 = 6.0;
+    const TAB_WIDTH: f32 = 38.0;
+    const TAB_HEIGHT: f32 = 32.0;
+    const TAB_SPACING: f32 = 8.0;
+    const PILL_HEIGHT: f32 = 26.0;
 
     fn new() -> Self {
         let args: Vec<String> = env::args().collect();
@@ -146,17 +180,7 @@ impl IcedBar {
 
         Self {
             active_tab: 0,
-            tabs: [
-                "🏠".to_string(),
-                "💻".to_string(),
-                "🌐".to_string(),
-                "🎵".to_string(),
-                "📁".to_string(),
-                "🎮".to_string(),
-                "📧".to_string(),
-                "🔧".to_string(),
-                "📊".to_string(),
-            ],
+            tabs: TAG_ICONS,
             tab_colors: [
                 color!(0xFF6B6B), // red
                 color!(0x4ECDC4), // cyan
@@ -176,11 +200,13 @@ impl IcedBar {
             scale_factor: 1.0,
             is_hovered: false,
             mouse_position: None,
-            show_seconds: false,
+            show_seconds: true,
             layout_symbol: "[]=".to_string(),
             monitor_num: 0,
             audio_manager: AudioManager::new(),
             system_monitor: SystemMonitor::new(5),
+            brightness_manager: BrightnessManager::new(),
+            battery_manager: BatteryManager::new(),
             transparent: true,
             last_clock_update: Instant::now(),
             last_monitor_update: Instant::now(),
@@ -198,12 +224,8 @@ impl IcedBar {
         shared_buffer_rc: Option<Arc<SharedRingBuffer>>,
     ) -> Subscription<Message> {
         Subscription::run_with(shared_buffer_rc, |shared_buffer_rc_ref| {
-            // `shared_buffer_rc_ref` 的类型是 `&Option<Arc<SharedRingBuffer>>`，这是一个临时借用。
-            // 【关键】为了让 async 块拥有 'static 生命周期，我们必须克隆 Arc，获得一个所有权值。
             let owned_shared_buffer_rc = shared_buffer_rc_ref.clone();
             stream::channel(100, move |mut output: mpsc::Sender<Message>| async move {
-                // `owned_shared_buffer_rc` (类型是 Option<Arc<...>>) 被 move 进这个 async 块，
-                // 它现在拥有数据的所有权，因此满足 'static 要求。
                 let shared_buffer = if let Some(shared_buffer) = owned_shared_buffer_rc {
                     shared_buffer
                 } else {
@@ -358,18 +380,16 @@ impl IcedBar {
                 Task::none()
             }
 
-            Message::AudioVolumeChanged(v) => {
+            Message::AudioAdjust(delta) => {
                 if let Some(dev) = self.audio_manager.get_master_device().cloned() {
-                    let volume = (v.round() as i32).clamp(0, 100);
-                    let _ = self.audio_manager.set_volume(&dev.name, volume, dev.is_muted);
+                    let new_v = (dev.volume + delta).clamp(0, 100);
+                    let _ = self.audio_manager.set_volume(&dev.name, new_v, dev.is_muted);
                 }
                 Task::none()
             }
 
-            Message::AudioOpenMixer => {
-                if let Err(e) = Command::new("pavucontrol").spawn() {
-                    warn!("Failed to spawn pavucontrol: {e}");
-                }
+            Message::BrightnessAdjust(delta) => {
+                self.brightness_manager.adjust(delta);
                 Task::none()
             }
 
@@ -394,6 +414,8 @@ impl IcedBar {
                 if self.last_monitor_update.elapsed() >= Duration::from_secs(2) {
                     self.system_monitor.update_if_needed();
                     self.audio_manager.update_if_needed();
+                    self.brightness_manager.update_if_needed();
+                    self.battery_manager.update_if_needed();
                     self.last_monitor_update = Instant::now();
                 }
 
@@ -452,17 +474,46 @@ impl IcedBar {
         1.0 / self.scale_factor
     }
 
-    fn monitor_num_to_icon(monitor_num: u8) -> &'static str {
+    fn monitor_num_to_icon(monitor_num: i32) -> String {
         match monitor_num {
-            0 => "󰎡",
-            1 => "󰎤",
-            _ => "?",
+            0 => ICON_M0.to_string(),
+            1 => ICON_M1.to_string(),
+            n => format!("M{}", n),
+        }
+    }
+
+    fn parse_lt_symbol(lts: &str) -> (String, Option<f32>) {
+        let symbol = lts
+            .split_whitespace()
+            .next()
+            .unwrap_or("[]=")
+            .to_string();
+        let scale = lts
+            .split("s:")
+            .nth(1)
+            .and_then(|s| {
+                s.trim()
+                    .split_whitespace()
+                    .next()
+                    .and_then(|n| n.parse::<f32>().ok())
+            });
+        (symbol, scale)
+    }
+
+    fn volume_icon(volume: i32, muted: bool, has_device: bool) -> &'static str {
+        if !has_device || muted || volume <= 0 {
+            ICON_VOL_MUTE
+        } else if volume < 34 {
+            ICON_VOL_LOW
+        } else if volume < 67 {
+            ICON_VOL_MID
+        } else {
+            ICON_VOL_HIGH
         }
     }
 
     // -------- Workspace pills --------
     fn tag_visuals(&self, index: usize) -> (Color, f32, Color) {
-        // returns (background, border_width, border_color)
         let tag_color = self
             .tab_colors
             .get(index)
@@ -472,27 +523,23 @@ impl IcedBar {
         if let Some(monitor) = self.monitor_info_opt.as_ref() {
             if let Some(status) = monitor.tag_status_vec.get(index) {
                 if status.is_urg {
-                    // urgent: red bg + bold violet border
                     return (
-                        Color::from_rgba(1.0, 0.0, 0.0, 0.80),
-                        2.5,
-                        Color::from_rgba(0.54, 0.17, 0.89, 1.0), // violet
+                        Color::from_rgba(0.86, 0.21, 0.27, 1.0),
+                        2.0,
+                        Color::from_rgba(0.74, 0.13, 0.19, 1.0),
                     );
                 } else if status.is_filled {
-                    // filled: solid tag color + bold border
                     return (tag_color.scale_alpha(1.0), 2.0, tag_color);
                 } else if status.is_selected {
-                    // selected: semi tag color + thin border
                     return (tag_color.scale_alpha(0.7), 1.5, tag_color);
                 } else if status.is_occ {
-                    // occupied: faint bg, no border
-                    return (tag_color.scale_alpha(0.4), 0.0, Color::TRANSPARENT);
+                    return (tag_color.scale_alpha(0.3), 1.0, tag_color.scale_alpha(0.6));
                 }
             }
         }
 
-        // default: transparent bg, no border
-        (Color::TRANSPARENT, 0.0, Color::TRANSPARENT)
+        // default
+        (Color::WHITE.scale_alpha(0.9), 1.0, color!(0xDEE2E6))
     }
 
     fn workspace_button<'a>(
@@ -501,14 +548,31 @@ impl IcedBar {
         label: &'a str,
     ) -> iced::widget::Button<'a, Message> {
         let (bg, border_w, border_c) = self.tag_visuals(index);
+        let is_selected = self
+            .monitor_info_opt
+            .as_ref()
+            .and_then(|m| m.tag_status_vec.get(index))
+            .map(|s| s.is_filled || s.is_selected || s.is_urg)
+            .unwrap_or(false);
+
+        let text_color = if is_selected {
+            // Yellow tag uses dark text for legibility
+            if index == 4 {
+                color!(0x333333)
+            } else {
+                Color::WHITE
+            }
+        } else {
+            color!(0x333333)
+        };
 
         let radius = 6.0;
         button(
-            rich_text![span(label.to_string())]
+            rich_text![span(label.to_string()).color(text_color)]
                 .size(18)
                 .on_link_click(std::convert::identity),
         )
-        .padding([4, 8])
+        .padding([4, 6])
         .width(Self::TAB_WIDTH)
         .height(Self::TAB_HEIGHT)
         .style(move |_theme: &Theme, status: button::Status| {
@@ -517,17 +581,14 @@ impl IcedBar {
 
             match status {
                 button::Status::Hovered => {
-                    // stronger border on hover
                     border_width = (border_w + 1.0).min(3.0);
                     if background.a > 0.0 {
                         background.a = (background.a + 0.08).min(1.0);
                     } else {
-                        // subtle hover when transparent
-                        background = Color::from_rgba(1.0, 1.0, 1.0, 0.08);
+                        background = Color::from_rgba(1.0, 1.0, 1.0, 0.10);
                     }
                 }
                 button::Status::Pressed => {
-                    // pressed -> slightly darker
                     if background.a > 0.0 {
                         background.a = (background.a + 0.12).min(1.0);
                     } else {
@@ -539,7 +600,7 @@ impl IcedBar {
 
             button::Style {
                 background: Some(Background::Color(background)),
-                text_color: Color::WHITE,
+                text_color,
                 border: Border {
                     color: border_c,
                     width: border_width,
@@ -551,132 +612,221 @@ impl IcedBar {
         .on_press(Message::TabSelected(index))
     }
 
-    fn audio_controls_row(&self) -> Element<'_, Message> {
-        let master = self.audio_manager.get_master_device();
+    // -------- Pills --------
 
-        let (volume, muted) = if let Some(dev) = master {
-            (dev.volume.clamp(0, 100) as f32, dev.is_muted)
+    fn pill_style(bg: Color, border_c: Color, text_color: Color) -> container::Style {
+        container::Style {
+            background: Some(Background::Color(bg)),
+            text_color: Some(text_color),
+            border: Border {
+                radius: border::radius(12.0),
+                width: 1.0,
+                color: border_c,
+            },
+            ..Default::default()
+        }
+    }
+
+    fn usage_colors(usage_percent: f32) -> (Color, Color) {
+        match usage_percent {
+            u if u <= 30.0 => (color!(0x1FBF51).scale_alpha(0.9), Color::WHITE),
+            u if u <= 60.0 => (color!(0xF4C20D).scale_alpha(0.9), color!(0x000000)),
+            u if u <= 80.0 => (color!(0xFF8C1A).scale_alpha(0.9), Color::WHITE),
+            _ => (color!(0xE53935).scale_alpha(0.9), Color::WHITE),
+        }
+    }
+
+    fn battery_colors(percent: u8, charging: bool) -> (Color, Color) {
+        if charging || percent > 50 {
+            (color!(0x1FBF51).scale_alpha(0.9), Color::WHITE)
+        } else if percent > 20 {
+            (color!(0xF4C20D).scale_alpha(0.9), color!(0x000000))
         } else {
-            (0.0, true)
-        };
+            (color!(0xE53935).scale_alpha(0.9), Color::WHITE)
+        }
+    }
 
-        let label = if master.is_some() {
-            if muted {
-                format!("🔇 {}%", volume.round() as i32)
-            } else {
-                format!("🔊 {}%", volume.round() as i32)
-            }
-        } else {
-            "🔇 --".to_string()
-        };
+    fn usage_pill<'a>(&self, icon: &'a str, value: f32) -> Element<'a, Message> {
+        let (bg, fg) = Self::usage_colors(value);
+        container(
+            text(format!("{}  {:.0}%", icon, value))
+                .size(14)
+                .color(fg),
+        )
+        .padding([3, 10])
+        .height(Self::PILL_HEIGHT)
+        .style(move |_theme: &Theme| Self::pill_style(bg, bg, fg))
+        .into()
+    }
 
-        let mute_btn = button(text(label).size(16))
-            .padding([1, 8])
-            .height(Self::TAB_HEIGHT)
-            .style(move |_theme: &Theme, status: button::Status| {
-                let base = if muted {
-                    Color::from_rgb(0.45, 0.45, 0.45)
-                } else {
-                    Color::from_rgb(0.20, 0.55, 0.95)
+    fn battery_pill<'a>(&self) -> Element<'a, Message> {
+        let pct = self.battery_manager.capacity().unwrap_or(0);
+        let charging = self.battery_manager.is_charging();
+        let icon = if charging { ICON_BAT_CHG } else { ICON_BAT_FULL };
+        let (bg, fg) = Self::battery_colors(pct, charging);
+        container(text(format!("{}  {}%", icon, pct)).size(14).color(fg))
+            .padding([3, 10])
+            .height(Self::PILL_HEIGHT)
+            .style(move |_theme: &Theme| Self::pill_style(bg, bg, fg))
+            .into()
+    }
+
+    fn brightness_pill<'a>(&self) -> Element<'a, Message> {
+        let label = match self.brightness_manager.percent() {
+            Some(p) => format!("{}  {}%", ICON_BRIGHT, p),
+            None => format!("{}  --", ICON_BRIGHT),
+        };
+        let bg = color!(0xFDE047).scale_alpha(0.92);
+        let fg = color!(0x1F2937);
+        let pill = container(text(label).size(14).color(fg))
+            .padding([3, 10])
+            .height(Self::PILL_HEIGHT)
+            .style(move |_theme: &Theme| Self::pill_style(bg, color!(0xFACC15), fg));
+
+        mouse_area(pill)
+            .on_press(Message::BrightnessAdjust(5))
+            .on_right_press(Message::BrightnessAdjust(-5))
+            .on_scroll(|delta| {
+                let d = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => y,
+                    mouse::ScrollDelta::Pixels { y, .. } => y,
                 };
-                let mut bg = base.scale_alpha(0.90);
-                let mut bw = 1.0;
-                if matches!(status, button::Status::Hovered) {
-                    bg.a = 1.0;
-                    bw = 2.0;
-                }
-
-                button::Style {
-                    background: Some(Background::Color(bg)),
-                    text_color: Color::WHITE,
-                    border: Border {
-                        color: base,
-                        width: bw,
-                        radius: border::Radius::from(12.0),
-                    },
-                    ..Default::default()
+                if d > 0.0 {
+                    Message::BrightnessAdjust(5)
+                } else {
+                    Message::BrightnessAdjust(-5)
                 }
             })
-            .on_press(Message::AudioToggleMute);
+            .into()
+    }
 
-        let vol_slider = slider(0.0..=100.0, volume, Message::AudioVolumeChanged)
-            .width(120)
-            .style(|theme: &Theme, status: slider::Status| {
-                let palette = theme.palette();
-                let active = palette.primary.base.color;
-                let hovered = Color {
-                    a: (active.a + 0.15).min(1.0),
-                    ..active
+    fn volume_pill<'a>(&self) -> Element<'a, Message> {
+        let master = self.audio_manager.get_master_device();
+        let (volume, muted, has_device) = if let Some(dev) = master {
+            (dev.volume.clamp(0, 100), dev.is_muted, true)
+        } else {
+            (0, true, false)
+        };
+
+        let icon = Self::volume_icon(volume, muted, has_device);
+        let label = if has_device {
+            format!("{}  {}%", icon, volume)
+        } else {
+            format!("{}  --", icon)
+        };
+
+        let (bg, border_c, fg) = if muted || !has_device {
+            (
+                color!(0x787878).scale_alpha(0.85),
+                color!(0x888888),
+                color!(0xEEEEEE),
+            )
+        } else {
+            (
+                color!(0x14B8A6).scale_alpha(0.9),
+                color!(0x14B8A6),
+                Color::WHITE,
+            )
+        };
+
+        let pill = container(text(label).size(14).color(fg))
+            .padding([3, 10])
+            .height(Self::PILL_HEIGHT)
+            .style(move |_theme: &Theme| Self::pill_style(bg, border_c, fg));
+
+        mouse_area(pill)
+            .on_press(Message::AudioToggleMute)
+            .on_right_press(Message::AudioAdjust(-5))
+            .on_scroll(|delta| {
+                let d = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => y,
+                    mouse::ScrollDelta::Pixels { y, .. } => y,
                 };
-
-                let rail = match status {
-                    slider::Status::Hovered => hovered,
-                    _ => active,
-                };
-
-                slider::Style {
-                    rail: slider::Rail {
-                        backgrounds: (rail.into(), Color::from_rgba(1.0, 1.0, 1.0, 0.18).into()),
-                        width: 4.0,
-                        border: Border {
-                            radius: 12.0.into(),
-                            width: 0.0,
-                            color: Color::TRANSPARENT,
-                        },
-                    },
-                    handle: slider::Handle {
-                        shape: slider::HandleShape::Circle { radius: 7.0 },
-                        background: rail.into(),
-                        border_width: 0.0,
-                        border_color: Color::TRANSPARENT,
-                    },
+                if d > 0.0 {
+                    Message::AudioAdjust(5)
+                } else {
+                    Message::AudioAdjust(-5)
                 }
+            })
+            .into()
+    }
+
+    fn screenshot_pill<'a>(&self) -> Element<'a, Message> {
+        let is_hovered = self.is_hovered;
+        let pill = container(text(ICON_SHOT.to_string()).size(15).color(Color::WHITE))
+            .padding([3, 10])
+            .height(Self::PILL_HEIGHT)
+            .style(move |_theme: &Theme| {
+                let bg = if is_hovered {
+                    color!(0xFF8800).scale_alpha(0.95)
+                } else {
+                    color!(0x00CCCC).scale_alpha(0.90)
+                };
+                Self::pill_style(bg, bg, Color::WHITE)
             });
 
-        let mixer_btn = button(text("🎚️").size(16))
-            .padding([1, 6])
-            .height(Self::TAB_HEIGHT)
-            .style(|_theme: &Theme, status: button::Status| {
-                let base = Color::from_rgb(0.10, 0.70, 0.55);
-                let mut bg = base.scale_alpha(0.90);
-                let mut bw = 1.0;
-                if matches!(status, button::Status::Hovered) {
-                    bg.a = 1.0;
-                    bw = 2.0;
-                }
+        mouse_area(pill)
+            .on_enter(Message::MouseEnterScreenShot)
+            .on_exit(Message::MouseExitScreenShot)
+            .on_press(Message::LeftClick)
+            .into()
+    }
 
-                button::Style {
-                    background: Some(Background::Color(bg)),
-                    text_color: Color::WHITE,
-                    border: Border {
-                        color: base,
-                        width: bw,
-                        radius: border::Radius::from(12.0),
-                    },
-                    ..Default::default()
-                }
-            })
-            .on_press(Message::AudioOpenMixer);
+    fn time_pill<'a>(&self) -> Element<'a, Message> {
+        let bg = color!(0x4DA3FF).scale_alpha(0.9);
+        let pill = container(
+            text(format!("{}  {}", ICON_TIME, self.formated_now))
+                .size(14)
+                .color(Color::WHITE),
+        )
+        .padding([3, 10])
+        .height(Self::PILL_HEIGHT)
+        .style(move |_theme: &Theme| Self::pill_style(bg, bg, Color::WHITE));
 
-        Row::new()
-            .spacing(6)
-            .align_y(iced::Alignment::Center)
-            .push(mute_btn)
-            .push(vol_slider)
-            .push(mixer_btn)
+        mouse_area(pill).on_press(Message::ShowSecondsToggle).into()
+    }
+
+    fn monitor_pill<'a>(&self, monitor_num: i32) -> Element<'a, Message> {
+        let bg = color!(0x9B59B6).scale_alpha(0.9);
+        container(
+            text(format!(
+                "{}  {}",
+                ICON_MON,
+                Self::monitor_num_to_icon(monitor_num)
+            ))
+            .size(14)
+            .color(Color::WHITE),
+        )
+        .padding([3, 10])
+        .height(Self::PILL_HEIGHT)
+        .style(move |_theme: &Theme| Self::pill_style(bg, bg, Color::WHITE))
+        .into()
+    }
+
+    fn scale_pill<'a>(&self, scale: Option<f32>) -> Element<'a, Message> {
+        let bg = color!(0x787878).scale_alpha(0.88);
+        let label = match scale {
+            Some(s) => format!("s: {:.2}", s),
+            None => "s: --".to_string(),
+        };
+        container(text(label).size(14).color(Color::WHITE))
+            .padding([3, 10])
+            .height(Self::PILL_HEIGHT)
+            .style(move |_theme: &Theme| Self::pill_style(bg, bg, Color::WHITE))
             .into()
     }
 
     fn layout_toggle_button<'a>(&self) -> iced::widget::Button<'a, Message> {
         let is_open = self.layout_selector_open;
-        let color_open = Color::from_rgb(0.24, 0.70, 0.44); // success
-        let color_close = Color::from_rgb(0.85, 0.33, 0.0); // error
+        let color_open = color!(0x3CB371);
+        let color_close = color!(0xD35400);
 
         let pill_color = if is_open { color_open } else { color_close };
         let label = self.layout_symbol.clone();
 
-        button(rich_text![span(label)].on_link_click(std::convert::identity))
-            .padding([1, 8])
+        button(rich_text![span(label).color(Color::WHITE)].on_link_click(std::convert::identity))
+            .padding([3, 10])
+            .height(Self::PILL_HEIGHT)
             .style(move |_theme: &Theme, status: button::Status| {
                 let mut bg = pill_color.scale_alpha(0.85);
                 let mut border_w = 1.0;
@@ -692,7 +842,7 @@ impl IcedBar {
                     border: Border {
                         color: pill_color,
                         width: border_w,
-                        radius: border::Radius::from(6.0),
+                        radius: border::Radius::from(12.0),
                     },
                     ..Default::default()
                 }
@@ -701,21 +851,21 @@ impl IcedBar {
     }
 
     fn layout_options_row(&self) -> Element<'_, Message> {
-        // Available layouts: 0 = "[]=", 1 = "><>", 2 = "[M]"
         let layouts: [(&str, u32); 3] = [("[]=", 0), ("><>", 1), ("[M]", 2)];
         let current = self.layout_symbol.as_str();
 
-        let mut row = Row::new().spacing(Self::TAB_SPACING);
+        let mut row = Row::new().spacing(6);
         for (sym, idx) in layouts {
             let is_current = sym == current;
 
-            let btn = button(text(sym))
-                .padding([1, 6])
+            let btn = button(text(sym).color(Color::WHITE))
+                .padding([3, 10])
+                .height(Self::PILL_HEIGHT)
                 .style(move |_theme: &Theme, status: button::Status| {
                     let base = if is_current {
-                        Color::from_rgb(0.24, 0.70, 0.44) // success
+                        color!(0x3CB371)
                     } else {
-                        Color::from_rgb(0.25, 0.41, 0.88) // royal blue
+                        color!(0x4169E1)
                     };
 
                     let mut bg = base.scale_alpha(0.85);
@@ -732,7 +882,7 @@ impl IcedBar {
                         border: Border {
                             color: base,
                             width: border_w,
-                            radius: border::Radius::from(6.0),
+                            radius: border::Radius::from(12.0),
                         },
                         ..Default::default()
                     }
@@ -746,7 +896,7 @@ impl IcedBar {
     }
 
     fn view_work_space(&self) -> Element<'_, Message> {
-        // Workspace pills
+        // Workspace tag buttons
         let mut tags_row = Row::new().spacing(Self::TAB_SPACING * 0.5);
         for (index, label) in self.tabs.iter().enumerate() {
             tags_row = tags_row
@@ -754,128 +904,43 @@ impl IcedBar {
                 .align_y(iced::Alignment::Center);
         }
 
-        // Layout section: main button + optional selector row
         let layout_button = self.layout_toggle_button();
-
         let layout_selector = if self.layout_selector_open {
-            let selector = self.layout_options_row();
-            Row::new()
-                .spacing(Self::TAB_SPACING)
-                .push(selector)
-                .align_y(iced::Alignment::Center)
+            self.layout_options_row()
         } else {
             Row::new().into()
         };
 
-        // Screenshot pill with hover effect
-        let is_hovered = self.is_hovered;
-        let screenshot_pill = container(
-            text(format!("📸 {:.2}", self.scale_factor))
-                .size(16)
-                .center(),
-        )
-        .height(Self::TAB_HEIGHT)
-        .padding([4, 8])
-        .style(move |_theme: &Theme| {
-            if is_hovered {
-                container::Style {
-                    background: Some(Background::Color(Color::from_rgb(1.0, 0.5, 0.0))), // 橙色背景
-                    text_color: Some(Color::WHITE),
-                    border: Border {
-                        radius: border::radius(12.0),
-                        width: 1.0,
-                        color: Color::from_rgb(1.0, 0.5, 0.0),
-                    },
-                    ..Default::default()
-                }
-            } else {
-                container::Style {
-                    background: Some(Background::Color(Color::from_rgb(0.0, 0.8, 0.8))), // 青色背景
-                    text_color: Some(Color::WHITE),
-                    border: Border {
-                        radius: border::radius(12.0),
-                        width: 1.0,
-                        color: Color::from_rgb(0.0, 0.8, 0.8),
-                    },
-                    ..Default::default()
-                }
-            }
-        });
-
-        // CPU usage pill
-        let cpu_usage = if let Some(snapshot) = self.system_monitor.get_snapshot() {
-            snapshot.cpu_average
+        // System info pills
+        let snapshot = self.system_monitor.get_snapshot();
+        let cpu_usage = snapshot.map(|s| s.cpu_average).unwrap_or(0.0);
+        let (memory_total, memory_used) = snapshot
+            .map(|s| (s.memory_total as f32, s.memory_used as f32))
+            .unwrap_or((0.0, 0.0));
+        let memory_usage = if memory_total > 0.0 {
+            (memory_used / memory_total) * 100.0
         } else {
             0.0
         };
 
-        let cpu_pill = self.create_usage_pill("CPU", cpu_usage);
+        let cpu_pill = self.usage_pill(ICON_CPU, cpu_usage);
+        let memory_pill = self.usage_pill(ICON_MEM, memory_usage);
+        let battery_pill = self.battery_pill();
 
-        // Memory usage pill
-        let (memory_total_gb, memory_used_gb) =
-            if let Some(snapshot) = self.system_monitor.get_snapshot() {
-                (
-                    snapshot.memory_total as f32 / 1e9,
-                    snapshot.memory_used as f32 / 1e9,
-                )
-            } else {
-                (0.0, 0.0)
-            };
+        let brightness_pill = self.brightness_pill();
+        let volume_pill = self.volume_pill();
+        let screenshot_pill = self.screenshot_pill();
+        let time_pill = self.time_pill();
 
-        let memory_usage = if memory_total_gb > 0.0 {
-            (memory_used_gb / memory_total_gb) * 100.0
-        } else {
-            0.0
-        };
+        let monitor_num = self
+            .monitor_info_opt
+            .as_ref()
+            .map(|m| m.monitor_num)
+            .unwrap_or(0);
+        let monitor_pill = self.monitor_pill(monitor_num);
 
-        let memory_pill = self.create_usage_pill("MEM", memory_usage);
-
-        let audio_controls = self.audio_controls_row();
-
-        // Time pill with enhanced styling
-        let time_pill = container(text(format!("🕐 {}", self.formated_now)).size(18).center())
-            .padding([1, 8])
-            .style(|_theme: &Theme| {
-                container::Style {
-                    background: Some(Background::Color(Color::from_rgb(0.3, 0.6, 0.9))), // 蓝色背景
-                    text_color: Some(Color::WHITE),
-                    border: Border {
-                        radius: border::radius(12.0),
-                        width: 1.0,
-                        color: Color::from_rgb(0.3, 0.6, 0.9),
-                    },
-                    ..Default::default()
-                }
-            });
-
-        let monitor_num = if let Some(monitor_info) = self.monitor_info_opt.as_ref() {
-            monitor_info.monitor_num
-        } else {
-            0
-        };
-
-        // Monitor indicator pill
-        let monitor_pill = container(
-            text(format!(
-                "🖥️ {}",
-                Self::monitor_num_to_icon(monitor_num as u8)
-            ))
-            .size(18)
-            .center(),
-        )
-        .padding([1, 8])
-        .style(|_theme: &Theme| {
-            container::Style {
-                background: Some(Background::Color(Color::from_rgb(0.6, 0.4, 0.8))), // 紫色背景
-                text_color: Some(Color::WHITE),
-                border: Border {
-                    radius: border::radius(12.0),
-                    width: 1.0,
-                    color: Color::from_rgb(0.6, 0.4, 0.8),
-                },
-                ..Default::default()
-            }
-        });
+        let (_, scale) = Self::parse_lt_symbol(&self.layout_symbol);
+        let scale_pill = self.scale_pill(scale);
 
         Row::new()
             .push(tags_row)
@@ -888,71 +953,21 @@ impl IcedBar {
             .push(Space::new().width(6).height(Length::Fill))
             .push(memory_pill)
             .push(Space::new().width(6).height(Length::Fill))
-            .push(audio_controls)
+            .push(battery_pill)
+            .push(Space::new().width(8).height(Length::Fill))
+            .push(brightness_pill)
             .push(Space::new().width(6).height(Length::Fill))
-            .push(
-                mouse_area(screenshot_pill)
-                    .on_enter(Message::MouseEnterScreenShot)
-                    .on_exit(Message::MouseExitScreenShot)
-                    .on_press(Message::LeftClick),
-            )
+            .push(volume_pill)
             .push(Space::new().width(6).height(Length::Fill))
-            .push(mouse_area(time_pill).on_press(Message::ShowSecondsToggle))
+            .push(screenshot_pill)
+            .push(Space::new().width(6).height(Length::Fill))
+            .push(time_pill)
             .push(Space::new().width(6).height(Length::Fill))
             .push(monitor_pill)
             .push(Space::new().width(6).height(Length::Fill))
+            .push(scale_pill)
             .align_y(iced::Alignment::Center)
             .into()
-    }
-
-    // 新增辅助方法：创建使用率pill
-    fn create_usage_pill(&self, label: &str, usage_percent: f32) -> Element<'_, Message> {
-        let usage = usage_percent.clamp(0.0, 100.0);
-
-        // 根据使用率选择颜色
-        let (bg_color, text_color) = self.get_usage_colors(usage);
-
-        container(text(format!("{} {:.0}%", label, usage)).size(18).center())
-            .padding([1, 8])
-            .style(move |_theme: &Theme| {
-                container::Style {
-                    background: Some(Background::Color(bg_color)),
-                    text_color: Some(text_color),
-                    border: Border {
-                        radius: border::radius(12.0), // 圆角pill样式
-                        width: 1.0,
-                        color: bg_color,
-                    },
-                    ..Default::default()
-                }
-            })
-            .into()
-    }
-
-    // 新增辅助方法：根据使用率获取颜色
-    fn get_usage_colors(&self, usage_percent: f32) -> (Color, Color) {
-        match usage_percent {
-            // 0-30%: 绿色 (良好)
-            usage if usage <= 30.0 => (
-                Color::from_rgb(0.2, 0.8, 0.2), // 绿色背景
-                Color::WHITE,                   // 白色文字
-            ),
-            // 30-60%: 黄色 (注意)
-            usage if usage <= 60.0 => (
-                Color::from_rgb(1.0, 0.8, 0.0), // 黄色背景
-                Color::BLACK,                   // 黑色文字
-            ),
-            // 60-80%: 橙色 (警告)
-            usage if usage <= 80.0 => (
-                Color::from_rgb(1.0, 0.6, 0.0), // 橙色背景
-                Color::WHITE,                   // 白色文字
-            ),
-            // 80-100%: 红色 (危险)
-            _ => (
-                Color::from_rgb(0.9, 0.2, 0.2), // 红色背景
-                Color::WHITE,                   // 白色文字
-            ),
-        }
     }
 
     fn view(&self) -> Element<'_, Message> {
