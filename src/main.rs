@@ -478,24 +478,6 @@ impl IcedBar {
         }
     }
 
-    fn parse_lt_symbol(lts: &str) -> (String, Option<f32>) {
-        let symbol = lts
-            .split_whitespace()
-            .next()
-            .unwrap_or("[]=")
-            .to_string();
-        let scale = lts
-            .split("s:")
-            .nth(1)
-            .and_then(|s| {
-                s.trim()
-                    .split_whitespace()
-                    .next()
-                    .and_then(|n| n.parse::<f32>().ok())
-            });
-        (symbol, scale)
-    }
-
     fn volume_icon(volume: i32, muted: bool, has_device: bool) -> &'static str {
         if !has_device || muted || volume <= 0 {
             ICON_VOL_MUTE
@@ -935,8 +917,7 @@ impl IcedBar {
             .unwrap_or(0);
         let monitor_pill = self.monitor_pill(monitor_num);
 
-        let (_, scale) = Self::parse_lt_symbol(&self.layout_symbol);
-        let scale_pill = self.scale_pill(scale);
+        let scale_pill = self.scale_pill(Some(self.scale_factor));
 
         Row::new()
             .push(tags_row)
