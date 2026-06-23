@@ -5,8 +5,8 @@ edition = "2024"
 
 [dependencies]
 iced = { git = "https://github.com/iced-rs/iced.git", branch = "master", features = ["advanced", "debug", "lazy", "smol"] }
-chrono = "0.4.42"
-log = "0.4.28"
+chrono = "0.4.45"
+log = "0.4.33"
 shared_structures = { git = "https://github.com/beamiter/shared_structures.git", features = ["use-futex"] }
 xbar_core = { git = "https://github.com/beamiter/xbar_core.git" }
-anyhow = "1.0.100"
+anyhow = "1.0.102"
