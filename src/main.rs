@@ -108,9 +108,6 @@ fn run_jwm() -> Result<(), Box<dyn std::error::Error>> {
         jwm.setup(&mut *backend)?;
         jwm.setup_initial_windows(&mut *backend)?;
 
-        // Auto-resume recording if state file exists (from a restart)
-        jwm.resume_recording_if_needed(&mut *backend);
-
         // JWM_BENCHMARK=N: auto-start benchmark collecting N frames then exit with JSON
         if let Ok(val) = env::var("JWM_BENCHMARK") {
             if let Ok(frames) = val.parse::<u32>() {

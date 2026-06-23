@@ -1166,6 +1166,12 @@ impl Config {
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
+                key: "r".to_string(),
+                function: "toggle_recording".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
                 modifier: vec!["Mod1".to_string()],
                 key: "r".to_string(),
                 function: "spawn".to_string(),
@@ -1963,6 +1969,7 @@ impl Config {
             "save_session" => Some(Jwm::save_session),
             "restore_session" => Some(Jwm::restore_session),
             "toggle_expose" => Some(Jwm::toggle_expose),
+            "toggle_recording" => Some(Jwm::toggle_recording),
 
             "scrolling_focus_column" => Some(Jwm::scrolling_focus_column),
             "scrolling_move_column" => Some(Jwm::scrolling_move_column),

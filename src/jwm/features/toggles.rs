@@ -380,7 +380,6 @@ impl Jwm {
             self.features.recording.output_path = Some(output_path.clone());
             self.features.recording.segments = Vec::new();
             self.features.recording.current_segment = Some(seg_path.clone());
-            Self::save_recording_state(&output_path, &[]);
 
             info!(
                 "[toggle_recording] start → {} (segment: {})",
@@ -410,42 +409,10 @@ impl Jwm {
         Ok(())
     }
 
-    pub(crate) const RECORDING_STATE_FILE: &'static str = "/tmp/jwm-recording-state";
-
-    pub(crate) fn save_recording_state(output_path: &str, segments: &[String]) {
-        let mut content = output_path.to_string();
-        for seg in segments {
-            content.push('\n');
-            content.push_str(seg);
-        }
-        if let Err(e) = std::fs::write(Self::RECORDING_STATE_FILE, &content) {
-            warn!("[recording] failed to save state: {e}");
-        }
-    }
-
-    fn load_recording_state() -> Option<(String, Vec<String>)> {
-        let content = std::fs::read_to_string(Self::RECORDING_STATE_FILE).ok()?;
-        let mut lines = content.lines();
-        let output_path = lines.next()?.to_string();
-        if output_path.is_empty() {
-            return None;
-        }
-        let segments: Vec<String> = lines
-            .map(|l| l.to_string())
-            .filter(|l| !l.is_empty())
-            .collect();
-        Some((output_path, segments))
-    }
-
-    fn clear_recording_state() {
-        let _ = std::fs::remove_file(Self::RECORDING_STATE_FILE);
-    }
-
     /// Concatenate segments into final output, or rename if single segment.
     fn finalize_recording(segments: Vec<String>, output_path: String) {
         std::thread::spawn(move || {
             if segments.is_empty() {
-                Self::clear_recording_state();
                 return;
             }
             if segments.len() == 1 {
@@ -486,31 +453,8 @@ impl Jwm {
                     let _ = std::fs::remove_file(seg);
                 }
             }
-            Self::clear_recording_state();
             log::info!("[recording] finalized → {output_path}");
         });
-    }
-
-    /// Auto-resume recording after restart if state file exists.
-    pub fn resume_recording_if_needed(&mut self, backend: &mut dyn Backend) {
-        if let Some((output_path, segments)) = Self::load_recording_state() {
-            let seg_index = segments.len();
-            // Derive timestamp from output path for consistent naming
-            let base = std::path::Path::new(&output_path)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .trim_start_matches("recording-");
-            let seg_path = format!("/tmp/jwm-rec-{}-seg{}.mp4", base, seg_index);
-
-            self.features.recording.output_path = Some(output_path);
-            self.features.recording.segments = segments;
-            self.features.recording.current_segment = Some(seg_path.clone());
-            self.features.recording.active = true;
-
-            backend.compositor_start_recording(&seg_path);
-            info!("[recording] auto-resumed from restart (segment {seg_index}: {seg_path})");
-        }
     }
 
     /// 切换 Expose / Mission Control 模式（显示所有窗口缩略图）
