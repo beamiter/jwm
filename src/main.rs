@@ -25,7 +25,6 @@ use std::time::{Duration, Instant};
 
 use shared_structures::{CommandType, MonitorInfo, SharedCommand, SharedMessage, SharedRingBuffer};
 use xbar_core::audio_manager::AudioManager;
-use xbar_core::battery::BatteryManager;
 use xbar_core::brightness::BrightnessManager;
 use xbar_core::initialize_logging;
 use xbar_core::system_monitor::SystemMonitor;
@@ -142,11 +141,10 @@ struct IcedBar {
     layout_symbol: String,
     monitor_num: i32,
 
-    // Audio + System + Brightness + Battery
+    // Audio + System + Brightness
     audio_manager: AudioManager,
     system_monitor: SystemMonitor,
     brightness_manager: BrightnessManager,
-    battery_manager: BatteryManager,
 
     transparent: bool,
 
@@ -206,7 +204,6 @@ impl IcedBar {
             audio_manager: AudioManager::new(),
             system_monitor: SystemMonitor::new(5),
             brightness_manager: BrightnessManager::new(),
-            battery_manager: BatteryManager::new(),
             transparent: true,
             last_clock_update: Instant::now(),
             last_monitor_update: Instant::now(),
@@ -415,7 +412,6 @@ impl IcedBar {
                     self.system_monitor.update_if_needed();
                     self.audio_manager.update_if_needed();
                     self.brightness_manager.update_if_needed();
-                    self.battery_manager.update_if_needed();
                     self.last_monitor_update = Instant::now();
                 }
 
@@ -636,10 +632,10 @@ impl IcedBar {
         }
     }
 
-    fn battery_colors(percent: u8, charging: bool) -> (Color, Color) {
-        if charging || percent > 50 {
+    fn battery_colors(percent: f32) -> (Color, Color) {
+        if percent > 50.0 {
             (color!(0x1FBF51).scale_alpha(0.9), Color::WHITE)
-        } else if percent > 20 {
+        } else if percent > 20.0 {
             (color!(0xF4C20D).scale_alpha(0.9), color!(0x000000))
         } else {
             (color!(0xE53935).scale_alpha(0.9), Color::WHITE)
@@ -660,15 +656,22 @@ impl IcedBar {
     }
 
     fn battery_pill<'a>(&self) -> Element<'a, Message> {
-        let pct = self.battery_manager.capacity().unwrap_or(0);
-        let charging = self.battery_manager.is_charging();
+        let (pct, charging) = self
+            .system_monitor
+            .get_snapshot()
+            .map(|s| (s.battery_percent, s.is_charging))
+            .unwrap_or((0.0, false));
         let icon = if charging { ICON_BAT_CHG } else { ICON_BAT_FULL };
-        let (bg, fg) = Self::battery_colors(pct, charging);
-        container(text(format!("{}  {}%", icon, pct)).size(14).color(fg))
-            .padding([3, 10])
-            .height(Self::PILL_HEIGHT)
-            .style(move |_theme: &Theme| Self::pill_style(bg, bg, fg))
-            .into()
+        let (bg, fg) = Self::battery_colors(pct);
+        container(
+            text(format!("{}  {:.0}%", icon, pct))
+                .size(14)
+                .color(fg),
+        )
+        .padding([3, 10])
+        .height(Self::PILL_HEIGHT)
+        .style(move |_theme: &Theme| Self::pill_style(bg, bg, fg))
+        .into()
     }
 
     fn brightness_pill<'a>(&self) -> Element<'a, Message> {
@@ -914,14 +917,7 @@ impl IcedBar {
         // System info pills
         let snapshot = self.system_monitor.get_snapshot();
         let cpu_usage = snapshot.map(|s| s.cpu_average).unwrap_or(0.0);
-        let (memory_total, memory_used) = snapshot
-            .map(|s| (s.memory_total as f32, s.memory_used as f32))
-            .unwrap_or((0.0, 0.0));
-        let memory_usage = if memory_total > 0.0 {
-            (memory_used / memory_total) * 100.0
-        } else {
-            0.0
-        };
+        let memory_usage = snapshot.map(|s| s.memory_usage_percent).unwrap_or(0.0);
 
         let cpu_pill = self.usage_pill(ICON_CPU, cpu_usage);
         let memory_pill = self.usage_pill(ICON_MEM, memory_usage);
