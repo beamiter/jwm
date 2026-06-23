@@ -20,6 +20,8 @@ use pipewire as pw;
 use pw::spa;
 use spa::pod::Pod;
 
+use crate::capture::SharedFrame;
+
 /// Caller-side handle. Drop to tear the stream + worker thread down.
 pub struct StreamHandle {
     pub node_id: u32,
@@ -59,14 +61,23 @@ impl Default for StreamSpec {
 
 /// Spawn a PipeWire stream worker. Returns once the worker has reported its
 /// assigned PipeWire node_id (or fails after a 5s startup deadline).
-pub fn spawn(spec: StreamSpec, node_name: String) -> Result<StreamHandle, String> {
+///
+/// `frame` is the shared slot the capture thread fills. When `Some`, each
+/// `on_process` callback drains the slot into the dequeued PW buffer; when
+/// `None`, buffers are zero-filled (used as a placeholder for the not-yet-
+/// implemented toplevel capture path).
+pub fn spawn(
+    spec: StreamSpec,
+    node_name: String,
+    frame: Option<SharedFrame>,
+) -> Result<StreamHandle, String> {
     let (node_tx, node_rx) = mpsc::sync_channel::<Result<u32, String>>(1);
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
 
     let join = std::thread::Builder::new()
         .name("jwm-portal-pw".into())
         .spawn(move || {
-            if let Err(e) = run(spec, node_name, node_tx.clone(), shutdown_rx) {
+            if let Err(e) = run(spec, node_name, frame, node_tx.clone(), shutdown_rx) {
                 warn!("pw worker exited with error: {e}");
                 let _ = node_tx.send(Err(e));
             }
@@ -88,6 +99,7 @@ pub fn spawn(spec: StreamSpec, node_name: String) -> Result<StreamHandle, String
 fn run(
     spec: StreamSpec,
     node_name: String,
+    frame: Option<SharedFrame>,
     node_tx: mpsc::SyncSender<Result<u32, String>>,
     shutdown_rx: mpsc::Receiver<()>,
 ) -> Result<(), String> {
@@ -131,17 +143,38 @@ fn run(
                 );
             }
         })
-        .process(|stream, _| {
-            // MVP: drain + re-queue empty buffers. crate::capture will fill
-            // `buffer.datas_mut()[0]` with real Wayland pixels before queue.
-            if let Some(mut buffer) = stream.dequeue_buffer() {
+        .process({
+            let frame = frame.clone();
+            move |stream, _| {
+                let Some(mut buffer) = stream.dequeue_buffer() else { return };
                 let datas = buffer.datas_mut();
-                if let Some(data) = datas.first_mut() {
-                    let chunk = data.chunk_mut();
-                    *chunk.offset_mut() = 0;
-                    *chunk.stride_mut() = 0;
-                    *chunk.size_mut() = 0;
+                let Some(data) = datas.first_mut() else { return };
+
+                let mut written_size: u32 = 0;
+                let mut written_stride: i32 = 0;
+
+                if let Some(slot) = frame.as_ref() {
+                    let snapshot = slot.lock().ok().and_then(|f| {
+                        if f.seq == 0 || f.data.is_empty() {
+                            None
+                        } else {
+                            Some((f.data.clone(), f.stride, f.height))
+                        }
+                    });
+                    if let Some((src, stride, height)) = snapshot {
+                        if let Some(dst) = data.data() {
+                            let n = dst.len().min(src.len());
+                            dst[..n].copy_from_slice(&src[..n]);
+                            written_size = (stride as u64 * height as u64).min(n as u64) as u32;
+                            written_stride = stride as i32;
+                        }
+                    }
                 }
+
+                let chunk = data.chunk_mut();
+                *chunk.offset_mut() = 0;
+                *chunk.stride_mut() = written_stride;
+                *chunk.size_mut() = written_size;
             }
         })
         .register()

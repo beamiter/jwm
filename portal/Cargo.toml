@@ -31,7 +31,7 @@ libspa = { version = "0.10", features = ["v1_2_0"] }
 libspa-sys = "0.10"
 
 # Shared between portal and jwm for IPC matchers / output identity.
-nix = { version = "0.30", features = ["fs"] }
+nix = { version = "0.30", features = ["fs", "mman"] }
 libc = "0.2"
 log = "0.4"
 env_logger = "0.11"

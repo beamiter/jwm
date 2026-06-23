@@ -11,8 +11,9 @@ use enumflags2::{BitFlags, bitflags};
 use log::{info, warn};
 use zbus::{Connection, interface, zvariant::OwnedObjectPath, zvariant::OwnedValue, zvariant::Value};
 
+use crate::capture::{self, CaptureHandle};
 use crate::picker::{SourceSelection, pick_outputs, pick_windows};
-use crate::pipewire_stream::{self, StreamSpec};
+use crate::pipewire_stream::{self, StreamHandle, StreamSpec};
 use crate::session::Runtime;
 
 /// Source type bits per the portal spec.
@@ -138,23 +139,38 @@ impl ScreenCast {
             .flatten()
             .unwrap_or_default();
 
-        // Spin up one PipeWire producer per picked source. Each handle is
-        // held on the Session so its worker thread + PW node stay alive.
+        // For each picked output, spawn:
+        //   1. Wayland capture thread (negotiates real buffer_size + format,
+        //      then pumps frames into a SharedFrame).
+        //   2. PipeWire producer thread (drains the SharedFrame in on_process).
+        //
+        // Toplevels still use the zero-fill placeholder — the wl_output side
+        // needed for re-binding inside a fresh capture thread isn't relevant
+        // for toplevels, which would need their own re-discovery path.
         let mut streams_meta: Vec<(u32, HashMap<String, OwnedValue>)> = Vec::new();
-        let mut handles = Vec::new();
+        let mut handles: Vec<StreamHandle> = Vec::new();
+        let mut captures: Vec<CaptureHandle> = Vec::new();
         for (idx, o) in selection.outputs.iter().enumerate() {
+            let frame_slot = capture::new_frame_slot();
+            let capture = match capture::spawn_output_capture(o.name.clone(), frame_slot.clone()) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!("Start: failed to spawn capture for output `{}`: {e}", o.name);
+                    continue;
+                }
+            };
             let spec = StreamSpec {
-                width: o.width.max(1) as u32,
-                height: o.height.max(1) as u32,
-                framerate_num: if o.refresh_mhz > 0 { (o.refresh_mhz / 1000) as u32 } else { 60 },
-                framerate_den: 1,
+                width: capture.width,
+                height: capture.height,
+                framerate_num: capture.framerate_num,
+                framerate_den: capture.framerate_den,
             };
             let name = if o.name.is_empty() {
                 format!("jwm-output-{idx}")
             } else {
                 format!("jwm-output-{}", o.name)
             };
-            match pipewire_stream::spawn(spec, name) {
+            match pipewire_stream::spawn(spec, name, Some(frame_slot)) {
                 Ok(h) => {
                     let mut props: HashMap<String, OwnedValue> = HashMap::new();
                     if let Ok(v) = Value::from((spec.width as i32, spec.height as i32)).try_into() {
@@ -165,8 +181,9 @@ impl ScreenCast {
                     }
                     streams_meta.push((h.node_id, props));
                     handles.push(h);
+                    captures.push(capture);
                 }
-                Err(e) => warn!("Start: failed to spawn output stream: {e}"),
+                Err(e) => warn!("Start: failed to spawn output PW stream: {e}"),
             }
         }
         for (idx, t) in selection.toplevels.iter().enumerate() {
@@ -176,7 +193,7 @@ impl ScreenCast {
             } else {
                 format!("jwm-window-{}", t.app_id)
             };
-            match pipewire_stream::spawn(spec, name) {
+            match pipewire_stream::spawn(spec, name, None) {
                 Ok(h) => {
                     let mut props: HashMap<String, OwnedValue> = HashMap::new();
                     if let Ok(v) = Value::from((spec.width as i32, spec.height as i32)).try_into() {
@@ -196,6 +213,7 @@ impl ScreenCast {
             .rt
             .with_session(&session_handle.to_string(), |s| {
                 s.streams = handles;
+                s.captures = captures;
             })
             .await;
 

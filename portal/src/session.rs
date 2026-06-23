@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::capture::CaptureHandle;
 use crate::picker::SourceSelection;
 use crate::pipewire_stream::StreamHandle;
 use crate::wayland::SharedSnapshot;
@@ -28,6 +29,10 @@ pub struct Session {
     /// Live PipeWire stream handles; dropping them tears the streams down.
     /// Order matches the `streams` array returned by Start.
     pub streams: Vec<StreamHandle>,
+    /// Live Wayland capture threads, one per output source. Dropped together
+    /// with the PW streams when the session ends (or the dbus Session map
+    /// entry is replaced).
+    pub captures: Vec<CaptureHandle>,
 }
 
 impl Runtime {
