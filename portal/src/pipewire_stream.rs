@@ -153,20 +153,18 @@ fn run(
                 let mut written_size: u32 = 0;
                 let mut written_stride: i32 = 0;
 
+                // Hold the SharedFrame lock across the memcpy directly into
+                // the dequeued PW buffer — avoids the per-frame `f.data.clone()`
+                // (multi-MB at 60 fps on a 4K source). The capture thread also
+                // takes this lock to refill the slot, and the two memcpys are
+                // serialized on it either way, so the lock-hold is the same.
                 if let Some(slot) = frame.as_ref() {
-                    let snapshot = slot.lock().ok().and_then(|f| {
-                        if f.seq == 0 || f.data.is_empty() {
-                            None
-                        } else {
-                            Some((f.data.clone(), f.stride, f.height))
-                        }
-                    });
-                    if let Some((src, stride, height)) = snapshot {
-                        if let Some(dst) = data.data() {
-                            let n = dst.len().min(src.len());
-                            dst[..n].copy_from_slice(&src[..n]);
-                            written_size = (stride as u64 * height as u64).min(n as u64) as u32;
-                            written_stride = stride as i32;
+                    if let (Some(dst), Ok(f)) = (data.data(), slot.lock()) {
+                        if f.seq != 0 && !f.data.is_empty() {
+                            let n = dst.len().min(f.data.len());
+                            dst[..n].copy_from_slice(&f.data[..n]);
+                            written_size = (f.stride as u64 * f.height as u64).min(n as u64) as u32;
+                            written_stride = f.stride as i32;
                         }
                     }
                 }

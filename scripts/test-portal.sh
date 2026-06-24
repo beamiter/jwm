@@ -100,6 +100,32 @@ else
   bad "CreateSession unexpected output: $out"
 fi
 
+step "6. Session interface served at session_handle"
+# After CreateSession we expect the backend to expose
+# org.freedesktop.impl.portal.Session at $SH, with a Close method.
+introspect_sh=$(gdbus introspect --session --dest "$BUS" --object-path "$SH" 2>&1)
+if grep -q 'org.freedesktop.impl.portal.Session' <<<"$introspect_sh"; then
+  ok "Session interface advertised at $SH"
+else
+  bad "Session interface NOT advertised at $SH (introspect: $introspect_sh)"
+fi
+
+step "7. Session.Close tears down cleanly"
+close_out=$(gdbus call --session --dest "$BUS" --object-path "$SH" \
+              --method org.freedesktop.impl.portal.Session.Close 2>&1)
+if [[ -z "$close_out" || "$close_out" == "()" ]]; then
+  ok "Session.Close succeeded"
+else
+  bad "Session.Close unexpected output: $close_out"
+fi
+# Post-close: the interface should have been removed from the bus.
+post_close=$(gdbus introspect --session --dest "$BUS" --object-path "$SH" 2>&1 || true)
+if ! grep -q 'org.freedesktop.impl.portal.Session' <<<"$post_close"; then
+  ok "Session interface removed after Close"
+else
+  bad "Session interface still present after Close"
+fi
+
 echo
 echo "Results: $PASS pass, $FAIL fail"
 if (( FAIL > 0 )); then

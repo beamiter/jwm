@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use enumflags2::{BitFlags, bitflags};
 use log::{info, warn};
+use zbus::object_server::{ObjectServer, SignalEmitter};
 use zbus::{Connection, interface, zvariant::OwnedObjectPath, zvariant::OwnedValue, zvariant::Value};
 
 use crate::capture::{self, CaptureHandle};
@@ -41,6 +42,40 @@ struct ScreenCast {
     rt: Runtime,
 }
 
+/// Per-session backend object served at the dynamic `session_handle` path.
+/// `xdg-desktop-portal` translates the client's `portal.Session.Close` into a
+/// call on this object so we can tear streams down cleanly and emit `Closed`.
+struct SessionImpl {
+    rt: Runtime,
+    handle: String,
+}
+
+#[interface(name = "org.freedesktop.impl.portal.Session")]
+impl SessionImpl {
+    #[zbus(property)]
+    fn version(&self) -> u32 {
+        1
+    }
+
+    async fn close(
+        &self,
+        #[zbus(object_server)] server: &ObjectServer,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<()> {
+        info!("Session.Close {}", self.handle);
+        // Drop streams + capture threads first so the Closed signal observers
+        // can rely on PW nodes already being gone.
+        let _ = self.rt.remove_session(&self.handle).await;
+        let _ = Self::closed(&emitter).await;
+        let path = self.handle.clone();
+        let _ = server.remove::<SessionImpl, _>(path.as_str()).await;
+        Ok(())
+    }
+
+    #[zbus(signal)]
+    async fn closed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+}
+
 #[interface(name = "org.freedesktop.impl.portal.ScreenCast")]
 impl ScreenCast {
     #[zbus(property)]
@@ -55,7 +90,7 @@ impl ScreenCast {
 
     #[zbus(property, name = "AvailableCursorModes")]
     fn available_cursor_modes(&self) -> u32 {
-        BitFlags::from(CursorMode::Embedded).bits()
+        (BitFlags::from(CursorMode::Hidden) | CursorMode::Embedded).bits()
     }
 
     async fn create_session(
@@ -64,9 +99,18 @@ impl ScreenCast {
         session_handle: OwnedObjectPath,
         _app_id: String,
         _options: HashMap<String, OwnedValue>,
+        #[zbus(object_server)] server: &ObjectServer,
     ) -> (u32, HashMap<String, OwnedValue>) {
         info!("CreateSession {session_handle}");
-        self.rt.insert_session(session_handle.to_string()).await;
+        let handle_str = session_handle.to_string();
+        self.rt.insert_session(handle_str.clone()).await;
+        let sess = SessionImpl {
+            rt: self.rt.clone(),
+            handle: handle_str.clone(),
+        };
+        if let Err(e) = server.at(session_handle.clone(), sess).await {
+            warn!("CreateSession: failed to serve Session at {handle_str}: {e}");
+        }
         (0, HashMap::new())
     }
 
@@ -91,6 +135,14 @@ impl ScreenCast {
             .get("persist_mode")
             .and_then(|v| u32::try_from(v).ok())
             .unwrap_or(0);
+        // cursor_mode is a bitmask but the client sets at most one bit per
+        // session (Hidden=1, Embedded=2, Metadata=4). Default to Embedded —
+        // matches what most apps expect when they didn't ask explicitly.
+        let cursor_mode = options
+            .get("cursor_mode")
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(CursorMode::Embedded as u32);
+        let paint_cursors = cursor_mode & (CursorMode::Embedded as u32) != 0;
         let restore_token_in = options
             .get("restore_token")
             .and_then(|v| <&str>::try_from(&**v).ok().map(str::to_string));
@@ -144,6 +196,7 @@ impl ScreenCast {
                 s.selection = Some(selection);
                 s.persist_mode = persist_mode;
                 s.restore_token = honored_token;
+                s.paint_cursors = paint_cursors;
             })
             .await;
         (0, HashMap::new())
@@ -161,17 +214,18 @@ impl ScreenCast {
 
         // Pull the resolved selection out of the session — SelectSources put it
         // there. Without it, this is a no-op-but-success Start.
-        let (selection, persist_mode, prior_token) = self
+        let (selection, persist_mode, prior_token, paint_cursors) = self
             .rt
             .with_session(&session_handle.to_string(), |s| {
                 (
                     s.selection.clone().unwrap_or_default(),
                     s.persist_mode,
                     s.restore_token.clone(),
+                    s.paint_cursors,
                 )
             })
             .await
-            .unwrap_or_default();
+            .unwrap_or((SourceSelection::default(), 0, None, true));
 
         // For each picked output, spawn:
         //   1. Wayland capture thread (negotiates real buffer_size + format,
@@ -186,7 +240,7 @@ impl ScreenCast {
         let mut captures: Vec<CaptureHandle> = Vec::new();
         for (idx, o) in selection.outputs.iter().enumerate() {
             let frame_slot = capture::new_frame_slot();
-            let capture = match capture::spawn_output_capture(o.name.clone(), frame_slot.clone()) {
+            let capture = match capture::spawn_output_capture(o.name.clone(), frame_slot.clone(), paint_cursors) {
                 Ok(c) => c,
                 Err(e) => {
                     warn!("Start: failed to spawn capture for output `{}`: {e}", o.name);
@@ -222,7 +276,7 @@ impl ScreenCast {
         }
         for (idx, t) in selection.toplevels.iter().enumerate() {
             let frame_slot = capture::new_frame_slot();
-            let capture = match capture::spawn_toplevel_capture(t.identifier.clone(), frame_slot.clone()) {
+            let capture = match capture::spawn_toplevel_capture(t.identifier.clone(), frame_slot.clone(), paint_cursors) {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(

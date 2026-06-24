@@ -54,7 +54,9 @@ pub type SharedSnapshot = Arc<Mutex<WaylandSnapshot>>;
 /// globals needed to start a capture session for either source kind.
 struct Client {
     snapshot: SharedSnapshot,
-    outputs: Vec<(wl_output::WlOutput, OutputInfo)>,
+    /// `(registry_name, proxy, info)` per advertised wl_output. The
+    /// registry_name lets us drop entries on GlobalRemove without scanning.
+    outputs: Vec<(u32, wl_output::WlOutput, OutputInfo)>,
     toplevels: Vec<(ExtForeignToplevelHandleV1, ToplevelInfo)>,
     // Manager globals — kept alive for the process lifetime and referenced
     // by the (not-yet-wired) capture session paths.
@@ -66,7 +68,7 @@ struct Client {
 
 impl Client {
     fn publish(&self) {
-        let outputs = self.outputs.iter().map(|(_, i)| i.clone()).collect();
+        let outputs = self.outputs.iter().map(|(_, _, i)| i.clone()).collect();
         let toplevels = self.toplevels.iter().map(|(_, i)| i.clone()).collect();
         let mut guard = self.snapshot.lock().expect("snapshot mutex poisoned");
         guard.outputs = outputs;
@@ -129,7 +131,7 @@ fn run_event_loop(
             let wl_out = globals
                 .registry()
                 .bind::<wl_output::WlOutput, _, Client>(global.name, global.version.min(4), &qh, ());
-            outputs.push((wl_out, OutputInfo::default()));
+            outputs.push((global.name, wl_out, OutputInfo::default()));
         }
     }
 
@@ -165,15 +167,50 @@ fn run_event_loop(
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Client {
     fn event(
-        _state: &mut Self,
-        _proxy: &wl_registry::WlRegistry,
-        _event: wl_registry::Event,
+        state: &mut Self,
+        proxy: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
         _data: &GlobalListContents,
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
-        // Hot-plug not handled in MVP — restart the portal to pick up new
-        // outputs/managers. xdg-desktop-portal restarts us on demand anyway.
+        // Track wl_output add/remove so the picker sees fresh monitors after
+        // hot-plug. Other globals (manager bindings, toplevel-list) are
+        // bound once at startup; if the compositor restarts them mid-life
+        // we'd need a fuller redo — the portal is cheap to restart, so for
+        // now we only track the dynamic output set.
+        match event {
+            wl_registry::Event::Global { name, interface, version } => {
+                if interface == wl_output::WlOutput::interface().name {
+                    let wl_out = proxy.bind::<wl_output::WlOutput, _, Client>(
+                        name,
+                        version.min(4),
+                        qh,
+                        (),
+                    );
+                    state.outputs.push((name, wl_out, OutputInfo::default()));
+                    info!("jwm-portal: wl_output hot-plug add registry_name={name}");
+                }
+            }
+            wl_registry::Event::GlobalRemove { name } => {
+                let before = state.outputs.len();
+                state.outputs.retain(|(rn, out, _)| {
+                    if *rn == name {
+                        // Release v3+ wl_output (no-op on older versions).
+                        if out.version() >= 3 {
+                            out.release();
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                });
+                if state.outputs.len() != before {
+                    info!("jwm-portal: wl_output hot-plug remove registry_name={name}");
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -186,16 +223,16 @@ impl Dispatch<wl_output::WlOutput, ()> for Client {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        let Some(entry) = state.outputs.iter_mut().find(|(p, _)| p == proxy) else {
+        let Some(entry) = state.outputs.iter_mut().find(|(_, p, _)| p == proxy) else {
             return;
         };
         match event {
-            wl_output::Event::Name { name } => entry.1.name = name,
-            wl_output::Event::Description { description } => entry.1.description = description,
+            wl_output::Event::Name { name } => entry.2.name = name,
+            wl_output::Event::Description { description } => entry.2.description = description,
             wl_output::Event::Mode { width, height, refresh, .. } => {
-                entry.1.width = width;
-                entry.1.height = height;
-                entry.1.refresh_mhz = refresh;
+                entry.2.width = width;
+                entry.2.height = height;
+                entry.2.refresh_mhz = refresh;
             }
             _ => {}
         }

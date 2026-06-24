@@ -119,8 +119,9 @@ impl CaptureTarget {
 pub fn spawn_output_capture(
     output_name: String,
     frame: SharedFrame,
+    paint_cursors: bool,
 ) -> Result<CaptureHandle, String> {
-    spawn_capture(CaptureTarget::Output { name: output_name }, frame)
+    spawn_capture(CaptureTarget::Output { name: output_name }, frame, paint_cursors)
 }
 
 /// Spawn a capture thread targeting the ext-foreign-toplevel-list-v1 handle
@@ -129,13 +130,15 @@ pub fn spawn_output_capture(
 pub fn spawn_toplevel_capture(
     identifier: String,
     frame: SharedFrame,
+    paint_cursors: bool,
 ) -> Result<CaptureHandle, String> {
-    spawn_capture(CaptureTarget::Toplevel { identifier }, frame)
+    spawn_capture(CaptureTarget::Toplevel { identifier }, frame, paint_cursors)
 }
 
 fn spawn_capture(
     target: CaptureTarget,
     frame: SharedFrame,
+    paint_cursors: bool,
 ) -> Result<CaptureHandle, String> {
     let (init_tx, init_rx) = mpsc::sync_channel::<Result<NegotiatedFormat, String>>(1);
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
@@ -144,7 +147,7 @@ fn spawn_capture(
     let join = std::thread::Builder::new()
         .name("jwm-portal-cap".into())
         .spawn(move || {
-            let result = run_capture(target, frame_for_thread, &init_tx_for_thread, shutdown_rx);
+            let result = run_capture(target, frame_for_thread, paint_cursors, &init_tx_for_thread, shutdown_rx);
             if let Err(e) = result {
                 // If we failed before sending an init result, surface it.
                 let _ = init_tx_for_thread.send(Err(e.clone()));
@@ -220,6 +223,7 @@ struct State {
 fn run_capture(
     target: CaptureTarget,
     frame: SharedFrame,
+    paint_cursors: bool,
     init_tx: &mpsc::SyncSender<Result<NegotiatedFormat, String>>,
     shutdown_rx: mpsc::Receiver<()>,
 ) -> Result<(), String> {
@@ -356,12 +360,12 @@ fn run_capture(
 
     state.session_done = false;
     state.session_stopped = false;
-    let session = cap_mgr.create_session(
-        &source,
-        ext_image_copy_capture_manager_v1::Options::PaintCursors,
-        &qh,
-        (),
-    );
+    let session_options = if paint_cursors {
+        ext_image_copy_capture_manager_v1::Options::PaintCursors
+    } else {
+        ext_image_copy_capture_manager_v1::Options::empty()
+    };
+    let session = cap_mgr.create_session(&source, session_options, &qh, ());
 
     let deadline = Instant::now() + Duration::from_secs(3);
     while !state.session_done {

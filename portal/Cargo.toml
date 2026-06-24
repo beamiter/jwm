@@ -30,6 +30,13 @@ pipewire = { version = "0.10", features = ["v1_2_0"] }
 libspa = { version = "0.10", features = ["v1_2_0"] }
 libspa-sys = "0.10"
 
+# GBM dmabuf allocator for direct-import screen-capture transport. The
+# capture thread allocates linear Argb/Xrgb buffers on the same DRM node
+# the compositor announces via dmabuf_device.
+gbm = { version = "0.18", default-features = false, features = ["drm-support"] }
+drm = { version = "0.14", default-features = false }
+drm-fourcc = "2.2"
+
 # Shared between portal and jwm for IPC matchers / output identity.
 nix = { version = "0.30", features = ["fs", "mman"] }
 libc = "0.2"

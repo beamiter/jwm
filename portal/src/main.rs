@@ -12,6 +12,7 @@ mod dbus;
 mod session;
 mod wayland;
 mod capture;
+mod dmabuf;
 mod pipewire_stream;
 mod picker;
 mod restore;

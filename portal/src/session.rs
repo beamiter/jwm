@@ -21,7 +21,6 @@ struct Inner {
     pub wayland: SharedSnapshot,
 }
 
-#[derive(Default)]
 pub struct Session {
     /// Whatever the caller asked for in SelectSources, resolved against current
     /// outputs/toplevels at the time the call was made.
@@ -39,6 +38,24 @@ pub struct Session {
     /// Pre-existing token the caller asked us to honor (echoed back from
     /// Start if the stored selection still resolves).
     pub restore_token: Option<String>,
+    /// Whether the compositor should composite the cursor into captured
+    /// frames. Mirrors the cursor_mode bit set in SelectSources (Embedded=true,
+    /// Hidden=false). Defaults to true so callers that omit cursor_mode get
+    /// the historically expected behavior.
+    pub paint_cursors: bool,
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self {
+            selection: None,
+            streams: Vec::new(),
+            captures: Vec::new(),
+            persist_mode: 0,
+            restore_token: None,
+            paint_cursors: true,
+        }
+    }
 }
 
 impl Runtime {
