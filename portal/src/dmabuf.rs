@@ -126,10 +126,11 @@ impl GbmContext {
                 ));
             }
         };
-        // RENDERING usage hints the driver toward GPU-importable storage —
-        // even though we're only memcpy-importing on the compositor side, the
-        // capability is what gates same-driver zero-copy paths.
-        let usage = BufferObjectFlags::LINEAR | BufferObjectFlags::RENDERING;
+        // With an explicit modifier list, usage flags are largely
+        // descriptive — i915 in particular rejects `RENDERING` combined with
+        // an explicit modifier (EINVAL). The modifier itself (LINEAR) fully
+        // specifies the layout; we just declare "no special usage" here.
+        let usage = BufferObjectFlags::empty();
         let mods = [Modifier::Linear].into_iter();
         let bo = self
             .device
@@ -334,5 +335,118 @@ impl DmabufPool {
                 slot.state = SlotState::Free;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// True iff the machine has at least one /dev/dri/renderD* node we can open.
+    /// Tests that need actual GBM allocation skip themselves when this is false
+    /// so the suite still passes in headless CI environments without DRM.
+    fn has_render_node() -> bool {
+        std::fs::read_dir("/dev/dri")
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with("renderD"))
+    }
+
+    #[test]
+    fn pick_render_node_finds_something() {
+        if !has_render_node() {
+            eprintln!("skip: no /dev/dri/renderD* on this host");
+            return;
+        }
+        let path = pick_render_node(None).expect("pick_render_node");
+        assert!(path.starts_with("/dev/dri/"), "got {:?}", path);
+    }
+
+    #[test]
+    fn gbm_open_succeeds() {
+        if !has_render_node() {
+            eprintln!("skip: no DRM");
+            return;
+        }
+        let _ctx = GbmContext::open(None).expect("GbmContext::open");
+    }
+
+    #[test]
+    fn allocate_linear_argb8888() {
+        if !has_render_node() {
+            eprintln!("skip: no DRM");
+            return;
+        }
+        let ctx = GbmContext::open(None).expect("GbmContext::open");
+        let buf = ctx
+            .allocate_linear(256, 256, fourcc::ARGB8888)
+            .expect("allocate ARGB8888 256x256");
+        assert!(buf.stride >= 256 * 4, "stride={}", buf.stride);
+        assert_eq!(buf.modifier, MOD_LINEAR, "modifier should be LINEAR");
+        assert_eq!(buf.plane_count(), 1, "single-plane expected");
+    }
+
+    #[test]
+    fn allocate_linear_xrgb8888() {
+        if !has_render_node() {
+            eprintln!("skip: no DRM");
+            return;
+        }
+        let ctx = GbmContext::open(None).expect("GbmContext::open");
+        let buf = ctx
+            .allocate_linear(640, 480, fourcc::XRGB8888)
+            .expect("allocate XRGB8888 640x480");
+        assert!(buf.stride >= 640 * 4);
+        assert_eq!(buf.modifier, MOD_LINEAR);
+    }
+
+    #[test]
+    fn allocate_rejects_bad_fourcc() {
+        if !has_render_node() {
+            eprintln!("skip: no DRM");
+            return;
+        }
+        let ctx = GbmContext::open(None).expect("GbmContext::open");
+        let err = ctx
+            .allocate_linear(64, 64, 0xdeadbeef)
+            .err()
+            .expect("bad fourcc should error");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn pool_state_machine() {
+        // Build a pool from synthetic Vec<DmabufBuffer> — we can't construct
+        // DmabufBuffer without GBM, so this test only runs when alloc works.
+        if !has_render_node() {
+            eprintln!("skip: no DRM");
+            return;
+        }
+        let ctx = GbmContext::open(None).expect("GbmContext::open");
+        let bufs = (0..3)
+            .map(|_| ctx.allocate_linear(64, 64, fourcc::ARGB8888).unwrap())
+            .collect::<Vec<_>>();
+        let mut pool = DmabufPool::new(bufs);
+
+        // All start Free; capture picks any.
+        let a = pool.pick_for_capture().expect("pick a");
+        assert_eq!(pool.slots[a].state, SlotState::Filling);
+        pool.mark_ready(a);
+        assert_eq!(pool.slots[a].state, SlotState::Ready);
+
+        // PW picks the freshest Ready.
+        let pw = pool.pick_for_pw().expect("pick pw");
+        assert_eq!(pw, a);
+        assert_eq!(pool.slots[pw].state, SlotState::PwInFlight);
+
+        // Capture picks again — must be a Free slot since `a` is PwInFlight.
+        let b = pool.pick_for_capture().expect("pick b");
+        assert_ne!(b, a);
+
+        // Reclaim previous PwInFlight when PW moves to a new slot.
+        pool.reclaim_in_flight_except(None);
+        assert_eq!(pool.slots[a].state, SlotState::Free);
     }
 }
