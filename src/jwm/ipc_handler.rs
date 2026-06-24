@@ -157,6 +157,30 @@ impl Jwm {
                 "locked": backend.compositor_session_locked(),
                 "lock_surface_count": backend.compositor_session_lock_surface_count(),
             }))),
+            "get_color_management_status" => {
+                let surfaces = backend.compositor_color_managed_surfaces();
+                let detail: Vec<serde_json::Value> = surfaces
+                    .iter()
+                    .map(|s| serde_json::json!({
+                        "surface_object_id": s.surface_object_id,
+                        "identity": s.identity,
+                        "tf_named": s.tf_named,
+                        "tf_power": s.tf_power,
+                        "primaries_named": s.primaries_named,
+                        "min_lum": s.min_lum,
+                        "max_lum": s.max_lum,
+                        "reference_lum": s.reference_lum,
+                        "mastering_min_lum": s.mastering_min_lum,
+                        "mastering_max_lum": s.mastering_max_lum,
+                        "max_cll": s.max_cll,
+                        "max_fall": s.max_fall,
+                    }))
+                    .collect();
+                IpcResponse::ok(Some(serde_json::json!({
+                    "surface_count": surfaces.len(),
+                    "surfaces": detail,
+                })))
+            }
             "get_version" => IpcResponse::ok(Some(serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "name": "jwm",

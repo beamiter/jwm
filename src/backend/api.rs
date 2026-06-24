@@ -76,6 +76,27 @@ pub struct VrrCapabilities {
     pub max_refresh_hz: u32,
 }
 
+/// Snapshot of one surface's wp-color-management-v1 image description, used by
+/// the diagnostic IPC. All numeric fields are taken directly from the protocol
+/// (named enums as u32, luminances in the protocol's scaled form).
+#[derive(Clone, Debug)]
+pub struct ColorManagedSurfaceInfo {
+    /// Stringified wl_surface ObjectId.
+    pub surface_object_id: String,
+    /// Compositor-assigned image-description identity (monotonic).
+    pub identity: u64,
+    pub tf_named: Option<u32>,
+    pub tf_power: Option<u32>,
+    pub primaries_named: Option<u32>,
+    pub min_lum: Option<u32>,
+    pub max_lum: Option<u32>,
+    pub reference_lum: Option<u32>,
+    pub mastering_min_lum: Option<u32>,
+    pub mastering_max_lum: Option<u32>,
+    pub max_cll: Option<u32>,
+    pub max_fall: Option<u32>,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ScreenInfo {
     pub width: i32,
@@ -1049,6 +1070,10 @@ pub trait Backend: Send {
 
     /// Whether the session is currently locked.
     fn compositor_session_locked(&self) -> bool { false }
+
+    /// Snapshot of all surfaces that currently have a wp-color-management-v1
+    /// image description attached. Empty on non-wayland_udev backends.
+    fn compositor_color_managed_surfaces(&self) -> Vec<ColorManagedSurfaceInfo> { Vec::new() }
 
     /// Enable or disable VRR for an output.
     fn set_vrr_enabled(&mut self, _output: OutputId, _enabled: bool) -> Result<(), BackendError> { Ok(()) }

@@ -3466,6 +3466,29 @@ impl Backend for UdevBackend {
         self.state.session_locked
     }
 
+    fn compositor_color_managed_surfaces(&self) -> Vec<crate::backend::api::ColorManagedSurfaceInfo> {
+        let Some(cm) = self.state.color_manager.as_ref() else {
+            return Vec::new();
+        };
+        cm.snapshot_surface_descriptions()
+            .into_iter()
+            .map(|(obj_id, record)| crate::backend::api::ColorManagedSurfaceInfo {
+                surface_object_id: format!("{:?}", obj_id),
+                identity: record.identity,
+                tf_named: record.params.tf_named,
+                tf_power: record.params.tf_power,
+                primaries_named: record.params.primaries_named,
+                min_lum: record.params.min_lum,
+                max_lum: record.params.max_lum,
+                reference_lum: record.params.reference_lum,
+                mastering_min_lum: record.params.mastering_min_lum,
+                mastering_max_lum: record.params.mastering_max_lum,
+                max_cll: record.params.max_cll,
+                max_fall: record.params.max_fall,
+            })
+            .collect()
+    }
+
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError> {
         // Initialize compositor from config if KMS is ready and compositor not yet created.
         if self.kms.is_some() && self.compositor.is_none() {

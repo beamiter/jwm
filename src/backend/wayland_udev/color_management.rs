@@ -83,13 +83,22 @@ pub enum ImageDescriptionState {
 pub type ImageDescriptionData = Arc<Mutex<ImageDescriptionState>>;
 pub type ParametricCreatorData = Arc<Mutex<ParametricParams>>;
 
+/// Snapshot of a surface's currently-applied image description, exposed to
+/// callers outside the protocol module (Backend trait, IPC).
+#[derive(Debug, Clone)]
+pub struct SurfaceDescriptionRecord {
+    pub identity: u64,
+    pub params: ParametricParams,
+}
+
 /// Singleton state held by JwmWaylandState.
 pub struct ColorManagerState {
     id_counter: Arc<Mutex<u64>>,
-    /// Per-surface applied image description id (set via
-    /// wp_color_management_surface_v1.set_image_description). Slice 1 stores
-    /// only the id; the render path is not yet integrated.
-    pub surface_descriptions: Arc<Mutex<HashMap<ObjectId, u64>>>,
+    /// Per-surface applied image description (set via
+    /// wp_color_management_surface_v1.set_image_description). Stores the full
+    /// parametric params so the render path can read them without re-walking
+    /// the protocol object graph.
+    pub surface_descriptions: Arc<Mutex<HashMap<ObjectId, SurfaceDescriptionRecord>>>,
 }
 
 impl ColorManagerState {
@@ -105,6 +114,16 @@ impl ColorManagerState {
         let id = *g;
         *g = g.wrapping_add(1);
         id
+    }
+
+    /// Snapshot every surface that currently has an applied image description.
+    /// Used by the diagnostic IPC to report active color-managed clients.
+    pub fn snapshot_surface_descriptions(&self) -> Vec<(ObjectId, SurfaceDescriptionRecord)> {
+        self.surface_descriptions
+            .lock_safe()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
     }
 }
 
@@ -369,20 +388,24 @@ impl Dispatch<WpColorManagementSurfaceV1, SurfaceCmData> for JwmWaylandState {
                 image_description,
                 render_intent: _,
             } => {
-                // Look up the description user data to grab its id.
-                let user_data = image_description
+                // Pull the ready snapshot (id + params) out of the protocol
+                // object so the render path doesn't need to chase the
+                // wp_image_description_v1 resource later.
+                let snapshot = image_description
                     .data::<ImageDescriptionData>()
-                    .cloned();
-                if let Some(d) = user_data {
-                    let id_opt = match &*d.lock_safe() {
-                        ImageDescriptionState::Ready { id, .. } => Some(*id),
+                    .and_then(|d| match &*d.lock_safe() {
+                        ImageDescriptionState::Ready { id, params, .. } => {
+                            Some(SurfaceDescriptionRecord {
+                                identity: *id,
+                                params: params.clone(),
+                            })
+                        }
                         ImageDescriptionState::Failed => None,
-                    };
-                    if let (Some(id), Some(cm)) = (id_opt, state.color_manager.as_ref()) {
-                        cm.surface_descriptions
-                            .lock_safe()
-                            .insert(data.surface.id(), id);
-                    }
+                    });
+                if let (Some(record), Some(cm)) = (snapshot, state.color_manager.as_ref()) {
+                    cm.surface_descriptions
+                        .lock_safe()
+                        .insert(data.surface.id(), record);
                 }
             }
             wp_color_management_surface_v1::Request::UnsetImageDescription => {
