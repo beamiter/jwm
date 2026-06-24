@@ -172,18 +172,37 @@ impl ScreenCast {
             }
         }
 
-        let selection = selection.unwrap_or_else(|| SourceSelection {
-            outputs: if want_monitor {
+        let selection = if let Some(sel) = selection {
+            sel
+        } else {
+            use crate::picker::PickerOutcome;
+            let outs = if want_monitor {
                 pick_outputs(&outputs, multiple)
             } else {
-                Vec::new()
-            },
-            toplevels: if want_window {
+                PickerOutcome::Picked(Vec::new())
+            };
+            let tops = if want_window {
                 pick_windows(&toplevels, multiple)
             } else {
-                Vec::new()
-            },
-        });
+                PickerOutcome::Picked(Vec::new())
+            };
+            // If the user cancelled either picker, treat the whole
+            // SelectSources as cancelled — silently substituting a default
+            // would defeat the consent dialog and share the screen anyway.
+            if matches!(outs, PickerOutcome::Cancelled) || matches!(tops, PickerOutcome::Cancelled) {
+                info!("SelectSources cancelled by user");
+                return (1, HashMap::new());
+            }
+            let outputs = match outs {
+                PickerOutcome::Picked(p) => p,
+                _ => Vec::new(),
+            };
+            let toplevels = match tops {
+                PickerOutcome::Picked(p) => p,
+                _ => Vec::new(),
+            };
+            SourceSelection { outputs, toplevels }
+        };
         info!(
             "SelectSources picked {} output(s), {} toplevel(s)",
             selection.outputs.len(),
@@ -327,6 +346,22 @@ impl ScreenCast {
                 s.captures = captures;
             })
             .await;
+
+        // Empty selection → SelectSources was either never called or returned
+        // nothing. Empty streams_meta with non-empty selection → every capture
+        // and/or PW spawn failed. Either way, returning success with no streams
+        // makes the client believe the share is active when nothing is flowing.
+        let total_picked = selection.outputs.len() + selection.toplevels.len();
+        if total_picked == 0 {
+            warn!("Start {session_handle}: no sources selected (SelectSources skipped?)");
+            return (2, HashMap::new());
+        }
+        if streams_meta.is_empty() {
+            warn!(
+                "Start {session_handle}: all {total_picked} captures failed; returning error"
+            );
+            return (2, HashMap::new());
+        }
 
         let mut results = HashMap::new();
         if let Ok(v) = Value::from(streams_meta).try_into() {
