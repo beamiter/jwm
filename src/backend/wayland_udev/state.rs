@@ -309,6 +309,9 @@ pub struct JwmWaylandState {
 
     /// wlr-foreign-toplevel-management state (taskbar window list + control).
     pub foreign_toplevel_mgmt: Option<crate::backend::wayland_udev::foreign_toplevel_management::ForeignToplevelMgmtState>,
+
+    /// wp-color-management-v1 state (per-surface image description registry).
+    pub color_manager: Option<crate::backend::wayland_udev::color_management::ColorManagerState>,
 }
 
 /// Placement anchor for an IME candidate popup. Carries the cursor line in
@@ -1239,6 +1242,9 @@ impl JwmWaylandState {
         // wp-tearing-control-v1 – allows games to opt into async page flips.
         let tearing_hints = crate::backend::wayland_udev::tearing_control::init_tearing_control_manager(dh);
 
+        // wp-color-management-v1 – HDR / color-space surface metadata.
+        let color_manager = crate::backend::wayland_udev::color_management::init_color_management(dh);
+
         // wlr-output-management-unstable-v1 – output config for kanshi/wlr-randr.
         crate::backend::wayland_udev::output_management::init_output_management(dh);
 
@@ -1427,6 +1433,8 @@ impl JwmWaylandState {
                 image_capture_pending: Some(image_capture_pending),
 
                 foreign_toplevel_mgmt: Some(foreign_toplevel_mgmt),
+
+                color_manager: Some(color_manager),
             },
             socket_name,
         ))

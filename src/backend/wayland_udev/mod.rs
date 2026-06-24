@@ -21,3 +21,5 @@ pub mod gamma_control;
 pub mod foreign_toplevel_management;
 
 pub mod virtual_pointer;
+
+pub mod color_management;
