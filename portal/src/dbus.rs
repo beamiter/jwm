@@ -12,9 +12,9 @@ use log::{info, warn};
 use zbus::object_server::{ObjectServer, SignalEmitter};
 use zbus::{Connection, interface, zvariant::OwnedObjectPath, zvariant::OwnedValue, zvariant::Value};
 
-use crate::capture::{self, CaptureHandle};
+use crate::capture::{self, CaptureHandle, CaptureTransport};
 use crate::picker::{SourceSelection, pick_outputs, pick_windows};
-use crate::pipewire_stream::{self, StreamHandle, StreamSpec};
+use crate::pipewire_stream::{self, Source, StreamHandle, StreamSpec};
 use crate::restore;
 use crate::session::Runtime;
 
@@ -239,8 +239,7 @@ impl ScreenCast {
         let mut handles: Vec<StreamHandle> = Vec::new();
         let mut captures: Vec<CaptureHandle> = Vec::new();
         for (idx, o) in selection.outputs.iter().enumerate() {
-            let frame_slot = capture::new_frame_slot();
-            let capture = match capture::spawn_output_capture(o.name.clone(), frame_slot.clone(), paint_cursors) {
+            let capture = match capture::spawn_output_capture(o.name.clone(), paint_cursors) {
                 Ok(c) => c,
                 Err(e) => {
                     warn!("Start: failed to spawn capture for output `{}`: {e}", o.name);
@@ -258,7 +257,11 @@ impl ScreenCast {
             } else {
                 format!("jwm-output-{}", o.name)
             };
-            match pipewire_stream::spawn(spec, name, Some(frame_slot)) {
+            let source = match &capture.transport {
+                CaptureTransport::Shm(f) => Source::Shm(f.clone()),
+                CaptureTransport::Dmabuf(b) => Source::Dmabuf(b.clone()),
+            };
+            match pipewire_stream::spawn(spec, name, source) {
                 Ok(h) => {
                     let mut props: HashMap<String, OwnedValue> = HashMap::new();
                     if let Ok(v) = Value::from((spec.width as i32, spec.height as i32)).try_into() {
@@ -275,8 +278,7 @@ impl ScreenCast {
             }
         }
         for (idx, t) in selection.toplevels.iter().enumerate() {
-            let frame_slot = capture::new_frame_slot();
-            let capture = match capture::spawn_toplevel_capture(t.identifier.clone(), frame_slot.clone(), paint_cursors) {
+            let capture = match capture::spawn_toplevel_capture(t.identifier.clone(), paint_cursors) {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(
@@ -297,7 +299,11 @@ impl ScreenCast {
             } else {
                 format!("jwm-window-{}", t.app_id)
             };
-            match pipewire_stream::spawn(spec, name, Some(frame_slot)) {
+            let source = match &capture.transport {
+                CaptureTransport::Shm(f) => Source::Shm(f.clone()),
+                CaptureTransport::Dmabuf(b) => Source::Dmabuf(b.clone()),
+            };
+            match pipewire_stream::spawn(spec, name, source) {
                 Ok(h) => {
                     let mut props: HashMap<String, OwnedValue> = HashMap::new();
                     if let Ok(v) = Value::from((spec.width as i32, spec.height as i32)).try_into() {

@@ -5,13 +5,23 @@
 //! returns the assigned `node_id` to the caller via a sync_channel; the node
 //! survives until the returned `StreamHandle` is dropped.
 //!
-//! **MVP scope.** The stream is wired with format negotiation (BGRx /
-//! RGBx / RGBA / BGRA) and a process callback that dequeues + zero-fills
-//! buffers, so the node is visible and pollable by OBS / Chrome but does
-//! not yet copy real Wayland frames into the buffers — that bridge lands
-//! in [`crate::capture`] in the next slice.
+//! Two transports are supported via [`Source`]:
+//!
+//!   * `Shm` — SHM frame slot. on_process holds the SharedFrame lock across a
+//!     memcpy into the dequeued PW buffer. Allocated by the capture thread.
+//!
+//!   * `Dmabuf` — three GBM-allocated LINEAR dmabuf fds shared with the
+//!     capture thread. EnumFormat pins VideoModifier=0 (LINEAR), Buffers param
+//!     declares `DataType::DmaBuf`. add_buffer writes the fd of slot `i%3`
+//!     into each pw_buffer's data[0] via unsafe spa_data manipulation;
+//!     on_process synchronously asks the capture thread to fill the relevant
+//!     slot (lookup by fd), waits up to one frame, then sets chunk.size and
+//!     queues. The capture thread frame rate gates everything.
 
+use std::collections::HashMap;
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -21,6 +31,7 @@ use pw::spa;
 use spa::pod::Pod;
 
 use crate::capture::SharedFrame;
+use crate::dmabuf;
 
 /// Caller-side handle. Drop to tear the stream + worker thread down.
 pub struct StreamHandle {
@@ -59,17 +70,47 @@ impl Default for StreamSpec {
     }
 }
 
+/// Cross-thread fill protocol for the dmabuf transport. PW thread asks the
+/// capture thread to fill a specific slot before queuing the dequeued buffer.
+/// Wrapped in Arc so both threads can share it; mpsc receivers go behind a
+/// Mutex so the PW closure can hold them in `move` capture.
+pub struct DmabufBridge {
+    #[allow(dead_code)]
+    pub fourcc: u32,
+    pub modifier: u64,
+    #[allow(dead_code)]
+    pub width: u32,
+    #[allow(dead_code)]
+    pub height: u32,
+    pub stride: u32,
+    /// `stride * height` — the payload size in each chunk.
+    pub size: u32,
+    /// PW-side copies of each slot's dmabuf fd, one per slot index. Cloned
+    /// from the capture thread's originals via `OwnedFd::try_clone` so each
+    /// side has independent lifetime management.
+    pub fds: Vec<OwnedFd>,
+    /// PW → capture: "please fill slot N".
+    pub fill_req_tx: mpsc::Sender<usize>,
+    /// Capture → PW: "slot N is filled" (value ignored; semaphore-style).
+    pub fill_done_rx: Mutex<mpsc::Receiver<()>>,
+}
+
+pub type SharedBridge = Arc<DmabufBridge>;
+
+/// What the on_process callback should read from.
+pub enum Source {
+    #[allow(dead_code)]
+    Empty,
+    Shm(SharedFrame),
+    Dmabuf(SharedBridge),
+}
+
 /// Spawn a PipeWire stream worker. Returns once the worker has reported its
 /// assigned PipeWire node_id (or fails after a 5s startup deadline).
-///
-/// `frame` is the shared slot the capture thread fills. When `Some`, each
-/// `on_process` callback drains the slot into the dequeued PW buffer; when
-/// `None`, buffers are zero-filled (used as a placeholder for the not-yet-
-/// implemented toplevel capture path).
 pub fn spawn(
     spec: StreamSpec,
     node_name: String,
-    frame: Option<SharedFrame>,
+    source: Source,
 ) -> Result<StreamHandle, String> {
     let (node_tx, node_rx) = mpsc::sync_channel::<Result<u32, String>>(1);
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
@@ -77,7 +118,7 @@ pub fn spawn(
     let join = std::thread::Builder::new()
         .name("jwm-portal-pw".into())
         .spawn(move || {
-            if let Err(e) = run(spec, node_name, frame, node_tx.clone(), shutdown_rx) {
+            if let Err(e) = run(spec, node_name, source, node_tx.clone(), shutdown_rx) {
                 warn!("pw worker exited with error: {e}");
                 let _ = node_tx.send(Err(e));
             }
@@ -99,7 +140,7 @@ pub fn spawn(
 fn run(
     spec: StreamSpec,
     node_name: String,
-    frame: Option<SharedFrame>,
+    source: Source,
     node_tx: mpsc::SyncSender<Result<u32, String>>,
     shutdown_rx: mpsc::Receiver<()>,
 ) -> Result<(), String> {
@@ -120,6 +161,23 @@ fn run(
 
     let stream = pw::stream::StreamRc::new(core, &node_name, props)
         .map_err(|e| format!("Stream: {e}"))?;
+
+    // For dmabuf transport, the PW side needs an `fd -> slot_idx` map populated
+    // in add_buffer so on_process can look up which slot to fill. Wrapping in
+    // Mutex<HashMap> because the two callbacks run on the same thread but the
+    // borrow checker still wants distinct mutable references.
+    let fd_to_slot: Arc<Mutex<HashMap<RawFd, usize>>> = Arc::new(Mutex::new(HashMap::new()));
+    let dmabuf_next_assign = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let is_dmabuf = matches!(source, Source::Dmabuf(_));
+    let bridge: Option<SharedBridge> = match &source {
+        Source::Dmabuf(b) => Some(b.clone()),
+        _ => None,
+    };
+    let shm: Option<SharedFrame> = match &source {
+        Source::Shm(s) => Some(s.clone()),
+        _ => None,
+    };
 
     let _listener = stream
         .add_local_listener_with_user_data::<()>(())
@@ -143,22 +201,103 @@ fn run(
                 );
             }
         })
+        .add_buffer({
+            let fd_to_slot = fd_to_slot.clone();
+            let next = dmabuf_next_assign.clone();
+            let bridge = bridge.clone();
+            move |_stream, _ud, pw_buffer| unsafe {
+                // Only relevant for dmabuf transport.
+                let Some(bridge) = bridge.as_ref() else { return };
+                if pw_buffer.is_null() {
+                    return;
+                }
+                let buf: *mut pw::sys::pw_buffer = pw_buffer;
+                let spa_buf = (*buf).buffer;
+                if spa_buf.is_null() || (*spa_buf).n_datas == 0 || (*spa_buf).datas.is_null() {
+                    warn!("dmabuf add_buffer: pw_buffer with no data slots");
+                    return;
+                }
+                let slot_idx = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    % bridge.fds.len();
+                let fd = bridge.fds[slot_idx].as_raw_fd();
+                let data = (*spa_buf).datas;
+                (*data).type_ = libspa_sys::SPA_DATA_DmaBuf;
+                (*data).flags = libspa_sys::SPA_DATA_FLAG_READABLE;
+                (*data).fd = fd as i64;
+                (*data).mapoffset = 0;
+                (*data).maxsize = bridge.size;
+                (*data).data = std::ptr::null_mut();
+                let chunk = (*data).chunk;
+                if !chunk.is_null() {
+                    (*chunk).offset = 0;
+                    (*chunk).stride = bridge.stride as i32;
+                    (*chunk).size = 0;
+                }
+                fd_to_slot.lock().unwrap().insert(fd, slot_idx);
+                info!(
+                    "dmabuf add_buffer: pw_buffer={:p} -> slot {slot_idx} (fd={fd})",
+                    buf
+                );
+            }
+        })
+        .remove_buffer({
+            let fd_to_slot = fd_to_slot.clone();
+            let bridge = bridge.clone();
+            move |_stream, _ud, pw_buffer| unsafe {
+                if bridge.is_none() || pw_buffer.is_null() {
+                    return;
+                }
+                let buf: *mut pw::sys::pw_buffer = pw_buffer;
+                let spa_buf = (*buf).buffer;
+                if spa_buf.is_null() || (*spa_buf).n_datas == 0 || (*spa_buf).datas.is_null() {
+                    return;
+                }
+                let fd = (*(*spa_buf).datas).fd as RawFd;
+                fd_to_slot.lock().unwrap().remove(&fd);
+            }
+        })
         .process({
-            let frame = frame.clone();
-            move |stream, _| {
+            let shm = shm.clone();
+            let bridge = bridge.clone();
+            let fd_to_slot = fd_to_slot.clone();
+            move |stream, _ud| {
                 let Some(mut buffer) = stream.dequeue_buffer() else { return };
                 let datas = buffer.datas_mut();
                 let Some(data) = datas.first_mut() else { return };
 
+                if let Some(bridge) = bridge.as_ref() {
+                    // dmabuf path — look up which slot this pw_buffer's fd
+                    // corresponds to, request a fill, wait one frame, mark
+                    // chunk size. The fd was wired in add_buffer; we never
+                    // rewrite it here.
+                    let fd = data.fd();
+                    let slot_idx = match fd_to_slot.lock().unwrap().get(&fd) {
+                        Some(&idx) => idx,
+                        None => {
+                            warn!("dmabuf process: fd {fd} has no slot mapping; queueing empty");
+                            let chunk = data.chunk_mut();
+                            *chunk.offset_mut() = 0;
+                            *chunk.stride_mut() = bridge.stride as i32;
+                            *chunk.size_mut() = 0;
+                            return;
+                        }
+                    };
+                    let _ = bridge.fill_req_tx.send(slot_idx);
+                    let recv_res = {
+                        let rx = bridge.fill_done_rx.lock().unwrap();
+                        rx.recv_timeout(Duration::from_millis(50))
+                    };
+                    let chunk = data.chunk_mut();
+                    *chunk.offset_mut() = 0;
+                    *chunk.stride_mut() = bridge.stride as i32;
+                    *chunk.size_mut() = if recv_res.is_ok() { bridge.size } else { 0 };
+                    return;
+                }
+
+                // SHM path — old memcpy behavior.
                 let mut written_size: u32 = 0;
                 let mut written_stride: i32 = 0;
-
-                // Hold the SharedFrame lock across the memcpy directly into
-                // the dequeued PW buffer — avoids the per-frame `f.data.clone()`
-                // (multi-MB at 60 fps on a 4K source). The capture thread also
-                // takes this lock to refill the slot, and the two memcpys are
-                // serialized on it either way, so the lock-hold is the same.
-                if let Some(slot) = frame.as_ref() {
+                if let Some(slot) = shm.as_ref() {
                     if let (Some(dst), Ok(f)) = (data.data(), slot.lock()) {
                         if f.seq != 0 && !f.data.is_empty() {
                             let n = dst.len().min(f.data.len());
@@ -168,7 +307,6 @@ fn run(
                         }
                     }
                 }
-
                 let chunk = data.chunk_mut();
                 *chunk.offset_mut() = 0;
                 *chunk.stride_mut() = written_stride;
@@ -178,21 +316,27 @@ fn run(
         .register()
         .map_err(|e| format!("register listener: {e}"))?;
 
-    let mut owned_pods = build_format_params(&spec)?;
+    let mut owned_pods = build_connect_params(&spec, &source)?;
     let mut params: Vec<&Pod> = owned_pods.iter_mut().map(|v| v.as_pod()).collect();
 
+    // For dmabuf transport, disable MAP_BUFFERS (PW would try to mmap the
+    // dmabuf which is wrong for hardware buffers). The DRIVER flag stays —
+    // we're still the source-of-truth for frame rate.
+    let stream_flags = if is_dmabuf {
+        pw::stream::StreamFlags::DRIVER
+    } else {
+        pw::stream::StreamFlags::DRIVER | pw::stream::StreamFlags::MAP_BUFFERS
+    };
     stream
         .connect(
             spa::utils::Direction::Output,
             None,
-            pw::stream::StreamFlags::DRIVER | pw::stream::StreamFlags::MAP_BUFFERS,
+            stream_flags,
             &mut params,
         )
         .map_err(|e| format!("stream connect: {e}"))?;
 
     // Poll the assigned node_id once it becomes valid, then report it back.
-    // ID_ANY (0xffffffff) means "not yet assigned"; the loop iterates until
-    // the registry returns the real id.
     let node_id_reporter = {
         let stream = stream.clone();
         let node_tx = node_tx.clone();
@@ -228,18 +372,22 @@ fn run(
     Ok(())
 }
 
-/// Build the `EnumFormat` param the stream advertises in `connect()`. We
-/// declare a single concrete size + framerate so PW negotiation completes
-/// without back-and-forth — the Wayland session has already pinned both.
-fn build_format_params(spec: &StreamSpec) -> Result<Vec<OwnedPod>, String> {
+/// Build the params slice we hand to `stream.connect()`. For SHM we send just
+/// an EnumFormat. For dmabuf we send EnumFormat (with VideoModifier=0 pinned)
+/// + a Buffers param declaring `DataType::DmaBuf`, `buffers=3`,
+/// `size=stride*height`.
+fn build_connect_params(spec: &StreamSpec, source: &Source) -> Result<Vec<OwnedPod>, String> {
     use spa::param::format::{FormatProperties, MediaSubtype, MediaType};
     use spa::param::video::VideoFormat;
-    use spa::pod::{Value, serialize::PodSerializer};
+    use spa::pod::{Property, PropertyFlags, Value, serialize::PodSerializer};
     use spa::utils::{Fraction, Rectangle, SpaTypes};
 
-    let obj = pw::spa::pod::object!(
-        SpaTypes::ObjectParamFormat,
-        spa::param::ParamType::EnumFormat,
+    let mut pods = Vec::new();
+
+    // EnumFormat — same shape for both transports, but dmabuf adds the
+    // VideoModifier property pinned to MOD_LINEAR (0). PW uses this to drive
+    // the correct buffer-allocation path on the consumer side.
+    let mut format_props = vec![
         pw::spa::pod::property!(FormatProperties::MediaType, Id, MediaType::Video),
         pw::spa::pod::property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
         pw::spa::pod::property!(
@@ -269,13 +417,59 @@ fn build_format_params(spec: &StreamSpec) -> Result<Vec<OwnedPod>, String> {
                 denom: spec.framerate_den,
             }
         ),
-    );
-
-    let bytes = PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &Value::Object(obj))
+    ];
+    if let Source::Dmabuf(b) = source {
+        // VideoModifier as Long, MANDATORY so consumers that don't support
+        // modifiers are filtered out. Pinned to whatever the bridge offers
+        // (we only ever set MOD_LINEAR = 0 in this slice, but the field
+        // exists for future expansion).
+        format_props.push(Property {
+            key: libspa_sys::SPA_FORMAT_VIDEO_modifier,
+            flags: PropertyFlags::MANDATORY,
+            value: Value::Long(b.modifier as i64),
+        });
+    }
+    let fmt_obj = spa::pod::Object {
+        type_: SpaTypes::ObjectParamFormat.as_raw(),
+        id: spa::param::ParamType::EnumFormat.as_raw(),
+        properties: format_props,
+    };
+    let bytes = PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &Value::Object(fmt_obj))
         .map_err(|e| format!("serialize EnumFormat: {e}"))?
         .0
         .into_inner();
-    Ok(vec![OwnedPod(bytes)])
+    pods.push(OwnedPod(bytes));
+
+    // Buffers param — only emitted for dmabuf so PW pre-allocates the right
+    // shape. For SHM we let PW pick defaults (matches the prior code).
+    if let Source::Dmabuf(b) = source {
+        let buffers_obj = spa::pod::Object {
+            type_: SpaTypes::ObjectParamBuffers.as_raw(),
+            id: spa::param::ParamType::Buffers.as_raw(),
+            properties: vec![
+                Property::new(libspa_sys::SPA_PARAM_BUFFERS_buffers, Value::Int(b.fds.len() as i32)),
+                Property::new(libspa_sys::SPA_PARAM_BUFFERS_blocks, Value::Int(1)),
+                Property::new(libspa_sys::SPA_PARAM_BUFFERS_size, Value::Int(b.size as i32)),
+                Property::new(libspa_sys::SPA_PARAM_BUFFERS_stride, Value::Int(b.stride as i32)),
+                Property::new(
+                    libspa_sys::SPA_PARAM_BUFFERS_dataType,
+                    Value::Int(1 << libspa_sys::SPA_DATA_DmaBuf),
+                ),
+            ],
+        };
+        let bytes = PodSerializer::serialize(
+            std::io::Cursor::new(Vec::new()),
+            &Value::Object(buffers_obj),
+        )
+        .map_err(|e| format!("serialize Buffers: {e}"))?
+        .0
+        .into_inner();
+        pods.push(OwnedPod(bytes));
+    }
+
+    // Suppress unused-import warning when dmabuf isn't compiled in.
+    let _ = dmabuf::MOD_LINEAR;
+    Ok(pods)
 }
 
 /// Self-owned byte buffer wrapping a serialized SPA pod. Survives long
