@@ -619,11 +619,14 @@ impl KmsState {
         let mut prev_drm_mode: Option<smithay::reexports::drm::control::Mode> = None;
         let drm_mode = if let Some((w, h, refresh)) = mode {
             if !allow_modeset {
-                log::warn!(
-                    "[output-mgmt] mode change to {w}x{h}@{refresh} for '{name}' \
-                     dropped: behavior.wlr_output_mgmt_allow_modeset = false"
-                );
-                None
+                // Defense-in-depth: build_changes should have rejected this
+                // at validation time. If we reach here the gate was bypassed
+                // and we MUST return Err so the client's succeeded() ack is
+                // not sent over a silently-dropped mode change.
+                return Err(format!(
+                    "mode change to {w}x{h}@{refresh} for '{name}' rejected: \
+                     behavior.wlr_output_mgmt_allow_modeset = false"
+                ));
             } else {
                 let conn = self.outputs[idx].connector;
                 let mgr = self.drm_output_manager.lock();
@@ -2517,6 +2520,23 @@ impl KmsState {
                 elements.push(KmsRenderElement::Solid(bg));
             }
 
+            // Notify the wp-color-management state of surface→output changes
+            // before the leave events go out, so a client receiving leave on
+            // wl_surface can correlate it with a preferred_changed firing on
+            // the corresponding feedback object. Done as a diff against the
+            // previous set so we hit each transition exactly once.
+            if let Some(cm) = state.color_manager.as_ref() {
+                for entering in visible_surfaces.difference(&out.surfaces_on_output) {
+                    if let Ok(surf) = entering.upgrade() {
+                        cm.on_surface_enters_output(&surf.id(), &out.output);
+                    }
+                }
+                for leaving in out.surfaces_on_output.difference(&visible_surfaces) {
+                    if let Ok(surf) = leaving.upgrade() {
+                        cm.on_surface_leaves_output(&surf.id(), &out.output);
+                    }
+                }
+            }
             for gone in out.surfaces_on_output.difference(&visible_surfaces) {
                 if let Ok(surf) = gone.upgrade() {
                     out.output.leave(&surf);

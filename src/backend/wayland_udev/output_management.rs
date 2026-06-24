@@ -297,6 +297,25 @@ impl Dispatch<ZwlrOutputConfigurationV1, OutputConfigData> for JwmWaylandState {
     }
 }
 
+/// Compare a `(width, height, refresh_mhz)` request to a smithay current mode.
+/// Returns true when the request would actually change the mode (so a real
+/// DRM modeset would be needed). A `refresh` of 0 means "any refresh" — i.e.
+/// only width/height must match.
+fn mode_is_change(
+    current: Option<smithay::output::Mode>,
+    requested: (i32, i32, i32),
+) -> bool {
+    let (w, h, refresh) = requested;
+    match current {
+        None => true,
+        Some(cur) => {
+            !(cur.size.w == w
+                && cur.size.h == h
+                && (refresh == 0 || (cur.refresh - refresh).abs() <= 200))
+        }
+    }
+}
+
 /// Validate the pending configuration against live outputs and lower it into a
 /// list of `OutputConfigChange`. Returns `Err` with a reason if invalid.
 fn build_changes(
@@ -304,6 +323,10 @@ fn build_changes(
     data: &OutputConfigData,
 ) -> Result<Vec<OutputConfigChange>, String> {
     let mut changes = Vec::new();
+    let allow_modeset = crate::config::CONFIG
+        .load()
+        .behavior()
+        .wlr_output_mgmt_allow_modeset;
 
     for config_head in data.enabled_heads.lock_safe().iter() {
         let Some(head_data) = config_head.data::<OutputConfigHeadData>() else {
@@ -335,6 +358,16 @@ fn build_changes(
                 if !known {
                     return Err(format!("mode {w}x{h}@{refresh} not on '{name}'"));
                 }
+            }
+            // Reject up-front when a real modeset is requested but the safety
+            // gate is closed. Without this, Apply would silently drop the mode
+            // change at the KMS layer and still report succeeded() to the
+            // client — lying about which fields were applied.
+            if !allow_modeset && mode_is_change(output.current_mode(), (w, h, refresh)) {
+                return Err(format!(
+                    "mode change to {w}x{h}@{refresh} for '{name}' rejected: \
+                     behavior.wlr_output_mgmt_allow_modeset = false"
+                ));
             }
         }
 
@@ -451,5 +484,57 @@ impl Dispatch<ZwlrOutputModeV1, OutputModeData> for JwmWaylandState {
         _dh: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mode_is_change;
+    use smithay::output::Mode as SmithayMode;
+    use smithay::utils::Size;
+
+    fn mode(w: i32, h: i32, refresh: i32) -> SmithayMode {
+        SmithayMode {
+            size: Size::from((w, h)),
+            refresh,
+        }
+    }
+
+    #[test]
+    fn no_current_mode_is_always_a_change() {
+        assert!(mode_is_change(None, (1920, 1080, 60_000)));
+    }
+
+    #[test]
+    fn exact_match_is_not_a_change() {
+        let cur = mode(1920, 1080, 60_000);
+        assert!(!mode_is_change(Some(cur), (1920, 1080, 60_000)));
+    }
+
+    #[test]
+    fn refresh_zero_matches_any_refresh_at_same_size() {
+        let cur = mode(2560, 1440, 144_000);
+        assert!(!mode_is_change(Some(cur), (2560, 1440, 0)));
+    }
+
+    #[test]
+    fn refresh_within_0_2hz_tolerance_is_not_a_change() {
+        let cur = mode(1920, 1080, 60_000);
+        // wlr-randr often quantizes to mHz; tolerate ±200 mHz.
+        assert!(!mode_is_change(Some(cur), (1920, 1080, 59_950)));
+        assert!(!mode_is_change(Some(cur), (1920, 1080, 60_200)));
+    }
+
+    #[test]
+    fn refresh_outside_tolerance_is_a_change() {
+        let cur = mode(1920, 1080, 60_000);
+        assert!(mode_is_change(Some(cur), (1920, 1080, 59_000)));
+    }
+
+    #[test]
+    fn different_size_is_a_change_regardless_of_refresh() {
+        let cur = mode(1920, 1080, 60_000);
+        assert!(mode_is_change(Some(cur), (2560, 1440, 60_000)));
+        assert!(mode_is_change(Some(cur), (2560, 1440, 0)));
     }
 }
