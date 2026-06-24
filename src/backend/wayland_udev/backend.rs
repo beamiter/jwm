@@ -3762,7 +3762,7 @@ fn scan_drm_outputs(dev_id: u64, path: &Path) -> Result<Vec<(u64, OutputInfo)>, 
 
         let name = format!("{:?}-{}", conn.interface(), conn.interface_id());
         let key = ((dev_id as u64) << 32) | (u32::from(*conn_handle) as u64);
-        let hdr_capable = query_connector_hdr_capable(&card, *conn_handle);
+        let hdr_metadata = query_connector_hdr_metadata(&card, *conn_handle);
 
         outputs.push((
             key,
@@ -3775,7 +3775,8 @@ fn scan_drm_outputs(dev_id: u64, path: &Path) -> Result<Vec<(u64, OutputInfo)>, 
                 height,
                 scale: 1.0,
                 refresh_rate,
-                hdr_capable,
+                hdr_capable: hdr_metadata.is_some(),
+                hdr_metadata,
             },
         ));
     }
@@ -3783,15 +3784,13 @@ fn scan_drm_outputs(dev_id: u64, path: &Path) -> Result<Vec<(u64, OutputInfo)>, 
     Ok(outputs)
 }
 
-fn query_connector_hdr_capable<D: drm::control::Device>(
+fn query_connector_hdr_metadata<D: drm::control::Device>(
     dev: &D,
     conn_handle: connector::Handle,
-) -> bool {
+) -> Option<crate::backend::edid::EdidHdrCapabilities> {
     use crate::backend::edid::parse_edid_hdr_from_bytes;
 
-    let Ok(props) = dev.get_properties(conn_handle) else {
-        return false;
-    };
+    let props = dev.get_properties(conn_handle).ok()?;
     let (handles, values) = props.as_props_and_values();
     for (prop_handle, value) in handles.iter().zip(values.iter()) {
         let Ok(info) = dev.get_property(*prop_handle) else {
@@ -3801,12 +3800,10 @@ fn query_connector_hdr_capable<D: drm::control::Device>(
             continue;
         }
         if *value == 0 {
-            return false;
+            return None;
         }
-        let Ok(blob) = dev.get_property_blob(*value) else {
-            return false;
-        };
-        return parse_edid_hdr_from_bytes(&blob).is_some();
+        let blob = dev.get_property_blob(*value).ok()?;
+        return parse_edid_hdr_from_bytes(&blob);
     }
-    false
+    None
 }

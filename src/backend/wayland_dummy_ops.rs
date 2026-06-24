@@ -170,6 +170,7 @@ impl OutputOps for DummyOutputOps {
             scale: 1.0,
             refresh_rate: 60000,
             hdr_capable: true,
+            hdr_metadata: None,
         }]
     }
     fn screen_info(&self) -> ScreenInfo {

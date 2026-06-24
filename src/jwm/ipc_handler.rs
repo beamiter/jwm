@@ -126,9 +126,17 @@ impl Jwm {
                     .enumerate_outputs()
                     .into_iter()
                     .map(|o| {
+                        let metadata = o.hdr_metadata.as_ref().map(|m| serde_json::json!({
+                            "max_luminance_nits": m.max_luminance_nits,
+                            "min_luminance_nits": m.min_luminance_nits,
+                            "supports_pq": m.supports_pq,
+                            "supports_hlg": m.supports_hlg,
+                            "supports_bt2020": m.supports_bt2020,
+                        }));
                         serde_json::json!({
                             "name": o.name,
                             "hdr_capable": o.hdr_capable,
+                            "edid_metadata": metadata,
                         })
                     })
                     .collect();

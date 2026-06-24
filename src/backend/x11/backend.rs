@@ -3722,6 +3722,20 @@ mod output_ops {
             false
         }
 
+        /// Read the connector's EDID blob via RandR and parse HDR Static Metadata.
+        fn query_output_edid_hdr(&self, output: u32) -> Option<crate::backend::edid::EdidHdrCapabilities> {
+            let edid_atom = self.conn.intern_atom(false, b"EDID").ok()?.reply().ok()?.atom;
+            let prop = self.conn
+                .randr_get_output_property(output, edid_atom, 0u32, 0, 256, false, false)
+                .ok()?
+                .reply()
+                .ok()?;
+            if prop.data.len() < 128 {
+                return None;
+            }
+            crate::backend::edid::parse_edid_hdr_from_bytes(&prop.data)
+        }
+
         /// Check if output supports HDR
         /// Queries for "max_bpc" property on the output (>= 10 indicates HDR support)
         fn query_output_hdr_capable(&self, output: u32) -> bool {
@@ -3832,10 +3846,12 @@ mod output_ops {
                                             })
                                             .unwrap_or(60000);
 
-                                        let hdr_capable = if let Some(&first_output) = m.outputs.first() {
-                                            self.query_output_hdr_capable(first_output)
+                                        let (hdr_capable, hdr_metadata) = if let Some(&first_output) = m.outputs.first() {
+                                            let caps = self.query_output_edid_hdr(first_output);
+                                            let bpc_capable = self.query_output_hdr_capable(first_output);
+                                            (bpc_capable || caps.is_some(), caps)
                                         } else {
-                                            true
+                                            (true, None)
                                         };
 
                                         out.push(OutputInfo {
@@ -3848,6 +3864,7 @@ mod output_ops {
                                             scale: 1.0,
                                             refresh_rate: refresh,
                                             hdr_capable,
+                                            hdr_metadata,
                                         });
 
                                         // Check for VRR support on this output
@@ -3894,6 +3911,7 @@ mod output_ops {
                                         scale: 1.0,
                                         refresh_rate: refresh,
                                         hdr_capable: true,
+                                        hdr_metadata: None,
                                     });
                                 }
                             }
@@ -3916,6 +3934,7 @@ mod output_ops {
                 scale: 1.0,
                 refresh_rate: 60000,
                 hdr_capable: true,
+                hdr_metadata: None,
             }]
         }
     }

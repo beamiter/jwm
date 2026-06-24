@@ -65,6 +65,7 @@ pub struct OutputInfo {
     pub scale: f32,
     pub refresh_rate: u32,
     pub hdr_capable: bool,
+    pub hdr_metadata: Option<crate::backend::edid::EdidHdrCapabilities>,
 }
 
 #[derive(Clone, Debug)]
