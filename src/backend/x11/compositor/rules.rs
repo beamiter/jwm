@@ -378,24 +378,50 @@ impl Compositor {
         rates
     }
 
-    /// P5B Phase 1: Map window position to monitor index using real RandR geometry
+    /// P5B Phase 1: Map window position to monitor index using real RandR geometry.
+    /// Picks the monitor with the largest rectangular overlap area; falls back
+    /// to center-point containment, then to the first monitor (primary).
     pub(super) fn get_window_monitor_id(&self, window_x: i32, window_y: i32, window_w: u32, window_h: u32) -> u32 {
-        // Calculate window center
-        let center_x = window_x + (window_w as i32) / 2;
-        let center_y = window_y + (window_h as i32) / 2;
+        if let Some(id) = Self::monitor_id_by_overlap(&self.monitor_rects, window_x, window_y, window_w, window_h) {
+            return id;
+        }
+        self.monitor_rects.first().map(|r| r.0).unwrap_or(0)
+    }
 
-        // Find which monitor contains the window center
-        for &(monitor_id, mon_x, mon_y, mon_w, mon_h) in self.monitor_rects.iter() {
-            let mon_x2 = mon_x + mon_w as i32;
-            let mon_y2 = mon_y + mon_h as i32;
-
-            if center_x >= mon_x && center_x < mon_x2 && center_y >= mon_y && center_y < mon_y2 {
-                return monitor_id;
+    pub(crate) fn monitor_id_by_overlap(
+        monitors: &[(u32, i32, i32, u32, u32)],
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+    ) -> Option<u32> {
+        if monitors.is_empty() {
+            return None;
+        }
+        let wx2 = x + w as i32;
+        let wy2 = y + h as i32;
+        let mut best: Option<(u32, i64)> = None;
+        for &(id, mx, my, mw, mh) in monitors {
+            let mx2 = mx + mw as i32;
+            let my2 = my + mh as i32;
+            let ix = (wx2.min(mx2) - x.max(mx)).max(0) as i64;
+            let iy = (wy2.min(my2) - y.max(my)).max(0) as i64;
+            let area = ix * iy;
+            if area > 0 && best.map_or(true, |(_, ba)| area > ba) {
+                best = Some((id, area));
             }
         }
-
-        // Fallback: return first monitor (primary)
-        self.monitor_rects.first().map(|r| r.0).unwrap_or(0)
+        if let Some((id, _)) = best {
+            return Some(id);
+        }
+        let cx = x + w as i32 / 2;
+        let cy = y + h as i32 / 2;
+        for &(id, mx, my, mw, mh) in monitors {
+            if cx >= mx && cx < mx + mw as i32 && cy >= my && cy < my + mh as i32 {
+                return Some(id);
+            }
+        }
+        None
     }
 
     /// P5B Phase 2: Get refresh rate for a specific monitor
@@ -1072,5 +1098,21 @@ mod tests {
         let p99 = samples[(len * 99 / 100).min(len - 1)];
         assert!(p50 <= p95);
         assert!(p95 <= p99);
+    }
+
+    #[test]
+    fn test_monitor_id_by_overlap_x11_side_by_side() {
+        let monitors = vec![
+            (0u32, 0i32, 0i32, 1920u32, 1080u32),
+            (1u32, 1920i32, 0i32, 1920u32, 1080u32),
+        ];
+        // Window entirely on monitor 1.
+        assert_eq!(Compositor::monitor_id_by_overlap(&monitors, 2000, 100, 400, 300), Some(1));
+        // Straddling, more area on monitor 0.
+        assert_eq!(Compositor::monitor_id_by_overlap(&monitors, 1340, 100, 1000, 500), Some(0));
+        // Off-screen below: no overlap, no center hit.
+        assert_eq!(Compositor::monitor_id_by_overlap(&monitors, 100, 5000, 200, 200), None);
+        // Empty monitors.
+        assert_eq!(Compositor::monitor_id_by_overlap(&[], 0, 0, 100, 100), None);
     }
 }
