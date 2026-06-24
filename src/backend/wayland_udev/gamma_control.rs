@@ -20,6 +20,11 @@ use smithay::reexports::wayland_server::{
 use crate::backend::api::BackendEvent;
 use crate::backend::wayland::state::JwmWaylandState;
 
+/// Upper bound on the LUT size we'll honor. Real hardware reports 256–4096;
+/// values above this are a sign of a buggy KMS or a malicious driver and would
+/// cause `set_gamma` to allocate gigabytes of host memory per call.
+pub(crate) const MAX_GAMMA_SIZE: u32 = 65_536;
+
 pub struct GammaControlManagerData;
 unsafe impl Send for GammaControlManagerData {}
 
@@ -77,11 +82,22 @@ impl Dispatch<ZwlrGammaControlManagerV1, GammaControlManagerData> for JwmWayland
 
                 // Advertise the real hardware LUT size; clients upload a ramp of
                 // exactly this length, so a wrong value makes set_gamma fail.
-                let gamma_size = state
+                // Clamp against pathological values (a misbehaving KMS could
+                // report a giant LUT, which would mean a multi-GB allocation
+                // on set_gamma — refuse to advertise the resource in that case).
+                let raw = state
                     .gamma_sizes
                     .get(&output.name())
                     .copied()
                     .unwrap_or(256);
+                if raw == 0 || raw > MAX_GAMMA_SIZE {
+                    warn!(
+                        "[gamma] refusing to bind: output {} reports unreasonable gamma_size={raw}",
+                        output.name()
+                    );
+                    return;
+                }
+                let gamma_size = raw;
 
                 let ctrl = data_init.init(
                     id,
@@ -120,10 +136,12 @@ impl Dispatch<ZwlrGammaControlV1, GammaControlData> for JwmWaylandState {
                 let mut file = unsafe { std::fs::File::from_raw_fd(raw_fd) };
                 match file.read_exact(&mut buf) {
                     Ok(()) => {
-                        // Convert bytes to u16 values (little-endian)
+                        // wlr-gamma-control wire format is little-endian
+                        // (matches DRM's `DRM_MODE_LUT_FORMAT_LE`). Using
+                        // `from_ne_bytes` here was wrong on big-endian hosts.
                         let ramp: Vec<u16> = buf
                             .chunks_exact(2)
-                            .map(|c| u16::from_ne_bytes([c[0], c[1]]))
+                            .map(|c| u16::from_le_bytes([c[0], c[1]]))
                             .collect();
 
                         info!(

@@ -207,7 +207,17 @@ impl Dispatch<ExtWorkspaceHandleV1, WorkspaceHandleData> for JwmWaylandState {
                     "[udev/wayland] workspace activate: monitor={} tag={}",
                     data.monitor_index, data.tag_index
                 );
-                let tag_mask = 1u32 << data.tag_index;
+                // tag_index is supplied by us at bind time, but defending the
+                // shift is cheap and prevents UB if the workspace count ever
+                // grows past 32 (left-shift by ≥ width is undefined behavior
+                // in debug, wraps to 0 in release — both wrong).
+                let Some(tag_mask) = 1u32.checked_shl(data.tag_index as u32) else {
+                    log::warn!(
+                        "[udev/wayland] workspace tag_index={} out of range for u32 mask; dropping",
+                        data.tag_index
+                    );
+                    return;
+                };
                 state.pending_events.lock_safe().push_back(
                     crate::backend::api::BackendEvent::WorkspaceActivate {
                         monitor: data.monitor_index,

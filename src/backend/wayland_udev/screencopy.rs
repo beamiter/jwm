@@ -184,8 +184,28 @@ fn handle_capture(
     };
     let (out_w, out_h) = (mode.size.w as u32, mode.size.h as u32);
 
-    // For region captures, use the region size; otherwise full output.
-    let (cap_w, cap_h) = if let Some((_, _, rw, rh)) = region {
+    // For region captures, use the region size; otherwise full output. Region
+    // dimensions come from i32 wire fields — without validation, `as u32` on a
+    // negative number wraps to ~2^32 and the resulting stride/buffer-size math
+    // overflows. Reject zero/negative dims and require the region to lie within
+    // the output rectangle.
+    let (cap_w, cap_h) = if let Some((rx, ry, rw, rh)) = region {
+        if !region_is_valid(rx, ry, rw, rh, out_w, out_h) {
+            warn!(
+                "[screencopy] invalid region ({rx},{ry} {rw}x{rh}) for output {} ({out_w}x{out_h})",
+                output.name()
+            );
+            let frame_data = ScreencopyFrameData {
+                output: None,
+                region,
+                overlay_cursor: overlay_cursor != 0,
+                buffer_info: (0, 0, 0, wl_shm::Format::Argb8888),
+                pending_queue: pending_queue.clone(),
+            };
+            let frame = data_init.init(frame_new_id, frame_data);
+            frame.failed();
+            return;
+        }
         (rw as u32, rh as u32)
     } else {
         (out_w, out_h)
@@ -284,6 +304,27 @@ fn queue_copy(
 
 // ---- Initialization ---------------------------------------------------------------
 
+/// Validate a region against the output bounds. Pure helper so it can be
+/// unit-tested without standing up a wayland Display. Returns true iff the
+/// region is fully inside [0, out_w) × [0, out_h) with positive dimensions.
+pub(crate) fn region_is_valid(
+    rx: i32,
+    ry: i32,
+    rw: i32,
+    rh: i32,
+    out_w: u32,
+    out_h: u32,
+) -> bool {
+    if rw <= 0 || rh <= 0 || rx < 0 || ry < 0 {
+        return false;
+    }
+    // i32 → u32 conversion is now safe (we just bounded everything ≥0).
+    let (rx, ry, rw, rh) = (rx as u32, ry as u32, rw as u32, rh as u32);
+    let Some(right) = rx.checked_add(rw) else { return false };
+    let Some(bottom) = ry.checked_add(rh) else { return false };
+    right <= out_w && bottom <= out_h
+}
+
 /// Create the zwlr_screencopy_manager_v1 global and return the shared pending queue.
 pub fn init_screencopy_manager(
     dh: &DisplayHandle,
@@ -293,4 +334,52 @@ pub fn init_screencopy_manager(
     dh.create_global::<JwmWaylandState, ZwlrScreencopyManagerV1, _>(3, ());
     info!("[screencopy] zwlr_screencopy_manager_v1 global created (v3)");
     queue
+}
+
+#[cfg(test)]
+mod tests {
+    use super::region_is_valid;
+
+    #[test]
+    fn negative_dims_are_rejected() {
+        assert!(!region_is_valid(0, 0, -1, 100, 1920, 1080));
+        assert!(!region_is_valid(0, 0, 100, -1, 1920, 1080));
+    }
+
+    #[test]
+    fn zero_dims_are_rejected() {
+        assert!(!region_is_valid(0, 0, 0, 100, 1920, 1080));
+        assert!(!region_is_valid(0, 0, 100, 0, 1920, 1080));
+    }
+
+    #[test]
+    fn negative_origin_rejected() {
+        // Per spec the region coords are in output logical pixels — negative
+        // origins make no sense and would alias to huge u32 if we cast.
+        assert!(!region_is_valid(-1, 0, 10, 10, 1920, 1080));
+        assert!(!region_is_valid(0, -1, 10, 10, 1920, 1080));
+    }
+
+    #[test]
+    fn region_extending_past_output_rejected() {
+        assert!(!region_is_valid(1900, 0, 100, 100, 1920, 1080));
+        assert!(!region_is_valid(0, 1000, 100, 100, 1920, 1080));
+    }
+
+    #[test]
+    fn region_flush_with_output_edges_accepted() {
+        assert!(region_is_valid(0, 0, 1920, 1080, 1920, 1080));
+        assert!(region_is_valid(1820, 980, 100, 100, 1920, 1080));
+    }
+
+    #[test]
+    fn region_inside_output_accepted() {
+        assert!(region_is_valid(100, 100, 800, 600, 1920, 1080));
+    }
+
+    #[test]
+    fn overflow_in_right_edge_rejected() {
+        // rx + rw overflows u32 — must be caught, not silently wrapped.
+        assert!(!region_is_valid(i32::MAX, 0, i32::MAX, 100, 1920, 1080));
+    }
 }
