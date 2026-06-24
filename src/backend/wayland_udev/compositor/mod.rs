@@ -1755,6 +1755,37 @@ impl WaylandCompositor {
         }
     }
 
+    /// Diagnostic snapshot of the blur pipeline, surfaced via the
+    /// `get_blur_status` IPC. Lets dual-monitor Hz selection + reuse rate be
+    /// verified without HW.
+    pub(crate) fn get_blur_status(&self) -> crate::backend::api::BlurStatus {
+        let temporal_rate = if self.temporal_blur_total_count > 0 {
+            100.0 * self.temporal_blur_reuse_count as f32 / self.temporal_blur_total_count as f32
+        } else {
+            0.0
+        };
+        let mut per_monitor_hz: Vec<(u32, u32)> = self
+            .monitor_refresh_rates
+            .iter()
+            .map(|(&id, &hz)| (id, hz))
+            .collect();
+        per_monitor_hz.sort_by_key(|&(id, _)| id);
+        let mut quality_by_monitor: Vec<(u32, String)> = self
+            .blur_quality_by_monitor
+            .iter()
+            .map(|(&id, q)| (id, format!("{:?}", q)))
+            .collect();
+        quality_by_monitor.sort_by_key(|&(id, _)| id);
+        crate::backend::api::BlurStatus {
+            current_strength: self.blur_strength,
+            temporal_enabled: self.temporal_blur_enabled,
+            temporal_reuse_rate_pct: temporal_rate,
+            hz_table: self.blur_strength_by_hz.clone(),
+            per_monitor_hz,
+            blur_quality_by_monitor: quality_by_monitor,
+        }
+    }
+
     /// Collect compositor metrics from all subsystems.
     pub(crate) fn get_metrics(&self) -> crate::backend::api::CompositorMetrics {
         let avg = self.perf_metrics.avg_frame_time().as_secs_f32() * 1000.0;

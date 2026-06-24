@@ -97,6 +97,24 @@ pub struct ColorManagedSurfaceInfo {
     pub max_fall: Option<u32>,
 }
 
+/// Snapshot of the compositor's blur pipeline state, used by the diagnostic
+/// IPC. Lets you verify Hz→strength selection and reuse rate without HW.
+#[derive(Clone, Debug, Default)]
+pub struct BlurStatus {
+    /// Current blur strength (downsample levels).
+    pub current_strength: u32,
+    /// Whether temporal blur reuse is enabled.
+    pub temporal_enabled: bool,
+    /// EMA of frames where prior blur was reused (0-100).
+    pub temporal_reuse_rate_pct: f32,
+    /// Live `blur_strength_by_hz` lookup table, sorted ascending by Hz.
+    pub hz_table: Vec<(u32, u32)>,
+    /// Live per-output refresh rates: (monitor_id, hz). Monitor 0 == primary.
+    pub per_monitor_hz: Vec<(u32, u32)>,
+    /// Per-monitor blur-quality overrides: (monitor_id, "Full"|"Reduced"|"Minimal").
+    pub blur_quality_by_monitor: Vec<(u32, String)>,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ScreenInfo {
     pub width: i32,
@@ -1074,6 +1092,10 @@ pub trait Backend: Send {
     /// Snapshot of all surfaces that currently have a wp-color-management-v1
     /// image description attached. Empty on non-wayland_udev backends.
     fn compositor_color_managed_surfaces(&self) -> Vec<ColorManagedSurfaceInfo> { Vec::new() }
+
+    /// Diagnostic snapshot of the blur pipeline. Returns None when the backend
+    /// has no compositor (CLI/headless paths) or no blur pass.
+    fn compositor_blur_status(&self) -> Option<BlurStatus> { None }
 
     /// Enable or disable VRR for an output.
     fn set_vrr_enabled(&mut self, _output: OutputId, _enabled: bool) -> Result<(), BackendError> { Ok(()) }

@@ -3388,6 +3388,10 @@ impl Backend for UdevBackend {
         self.compositor.as_ref().map(|c| c.get_metrics())
     }
 
+    fn compositor_blur_status(&self) -> Option<crate::backend::api::BlurStatus> {
+        self.compositor.as_ref().map(|c| c.get_blur_status())
+    }
+
     fn compositor_capture_thumbnail(&self, window: WindowId, max_size: u32) -> Option<(Vec<u8>, u32, u32)> {
         let compositor = self.compositor.as_ref()?;
         let kms = self.kms.as_ref()?;

@@ -894,6 +894,28 @@ mod tests {
     }
 
     #[test]
+    fn test_blur_strength_picks_max_hz_across_outputs() {
+        // Dual-monitor 60Hz + 144Hz: picked strength must come from 144Hz so
+        // the fast display gets a budget that fits, slow one absorbs the same.
+        let table = WaylandCompositor::parse_blur_strength_by_hz("60:2,144:4,240:5");
+        let hz_pairs = [(0u32, 60u32), (1u32, 144u32)];
+        let max_hz = hz_pairs.iter().map(|&(_, hz)| hz).max().unwrap();
+        assert_eq!(max_hz, 144);
+        assert_eq!(WaylandCompositor::blur_strength_for_hz(&table, max_hz), Some(4));
+
+        // Single 60Hz primary: strength = 2.
+        let hz_pairs = [(0u32, 60u32)];
+        let max_hz = hz_pairs.iter().map(|&(_, hz)| hz).max().unwrap();
+        assert_eq!(WaylandCompositor::blur_strength_for_hz(&table, max_hz), Some(2));
+
+        // Triple-display 60+75+240: strength = 5 (240 entry).
+        let hz_pairs = [(0u32, 60u32), (1u32, 75u32), (2u32, 240u32)];
+        let max_hz = hz_pairs.iter().map(|&(_, hz)| hz).max().unwrap();
+        assert_eq!(max_hz, 240);
+        assert_eq!(WaylandCompositor::blur_strength_for_hz(&table, max_hz), Some(5));
+    }
+
+    #[test]
     fn test_monitor_id_by_overlap_center_inside() {
         // Two side-by-side 1920x1080 monitors; window entirely on the right one.
         let monitors = vec![

@@ -181,6 +181,34 @@ impl Jwm {
                     "surfaces": detail,
                 })))
             }
+            "get_blur_status" => match backend.compositor_blur_status() {
+                Some(b) => {
+                    let hz_table: Vec<serde_json::Value> = b
+                        .hz_table
+                        .iter()
+                        .map(|(hz, s)| serde_json::json!({ "hz": hz, "strength": s }))
+                        .collect();
+                    let per_monitor_hz: Vec<serde_json::Value> = b
+                        .per_monitor_hz
+                        .iter()
+                        .map(|(id, hz)| serde_json::json!({ "monitor_id": id, "hz": hz }))
+                        .collect();
+                    let quality: Vec<serde_json::Value> = b
+                        .blur_quality_by_monitor
+                        .iter()
+                        .map(|(id, q)| serde_json::json!({ "monitor_id": id, "quality": q }))
+                        .collect();
+                    IpcResponse::ok(Some(serde_json::json!({
+                        "current_strength": b.current_strength,
+                        "temporal_enabled": b.temporal_enabled,
+                        "temporal_reuse_rate_pct": b.temporal_reuse_rate_pct,
+                        "hz_table": hz_table,
+                        "per_monitor_hz": per_monitor_hz,
+                        "blur_quality_by_monitor": quality,
+                    })))
+                }
+                None => IpcResponse::err("compositor not active".to_string()),
+            },
             "get_version" => IpcResponse::ok(Some(serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "name": "jwm",
