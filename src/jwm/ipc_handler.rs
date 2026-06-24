@@ -72,6 +72,10 @@ impl Jwm {
             return self.handle_move_window_to_monitor(backend, args);
         }
 
+        if name == "set_hdr_metadata" {
+            return self.handle_set_hdr_metadata_command(backend, args);
+        }
+
         match ipc::dispatch_command(name, args) {
             Ok((func, arg)) => match func(self, backend, &arg) {
                 Ok(()) => IpcResponse::ok(None),
@@ -182,6 +186,36 @@ impl Jwm {
 
     /// Apply a single in-memory config override (does not touch the file).
     /// args: { "key": "appearance.border_px", "value": <json> }
+    /// args: { "output": "<name>", "enabled": true|false }
+    /// Pushes (or clears) the HDR_OUTPUT_METADATA blob on a KMS connector.
+    fn handle_set_hdr_metadata_command(
+        &mut self,
+        backend: &mut dyn Backend,
+        args: &serde_json::Value,
+    ) -> IpcResponse {
+        let output_name = match args.get("output").and_then(|v| v.as_str()) {
+            Some(n) => n.to_string(),
+            None => return IpcResponse::err("set_hdr_metadata: missing 'output' string".to_string()),
+        };
+        let enabled = args.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+        let output_id = match backend
+            .output_ops()
+            .enumerate_outputs()
+            .into_iter()
+            .find(|o| o.name == output_name)
+        {
+            Some(o) => o.id,
+            None => return IpcResponse::err(format!("set_hdr_metadata: output '{output_name}' not found")),
+        };
+        match backend.set_hdr_metadata(output_id, enabled) {
+            Ok(()) => IpcResponse::ok(Some(serde_json::json!({
+                "output": output_name,
+                "enabled": enabled,
+            }))),
+            Err(e) => IpcResponse::err(format!("{e}")),
+        }
+    }
+
     fn handle_set_config_command(
         &mut self,
         backend: &mut dyn Backend,

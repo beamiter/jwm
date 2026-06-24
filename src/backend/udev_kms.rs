@@ -499,6 +499,48 @@ impl KmsState {
         Err("VRR_ENABLED property not found on CRTC".to_string())
     }
 
+    /// Push (or clear) the HDR_OUTPUT_METADATA connector property.
+    ///
+    /// Pass `Some(&blob)` (32-byte CTA-861.3 HDR Static Metadata) to put the
+    /// display into HDR mode, or `None` to revert to SDR (blob_id = 0).
+    /// The created blob is not destroyed — kernel cleans it up at FD close.
+    /// Per-output blob churn is tiny (config changes are rare), so the leak is
+    /// acceptable until/unless we add bookkeeping.
+    pub(super) fn set_hdr_metadata_for_output(
+        &mut self,
+        output_idx: usize,
+        blob: Option<&[u8; 32]>,
+    ) -> Result<(), String> {
+        let output = self.outputs.get(output_idx).ok_or("output index out of range")?;
+        let conn_handle = output.connector;
+        let mgr = self.drm_output_manager.lock();
+        let dev = mgr.device();
+
+        let blob_id: u64 = if let Some(bytes) = blob {
+            let v = dev
+                .create_property_blob(bytes)
+                .map_err(|e| format!("create_property_blob failed: {e:?}"))?;
+            match v {
+                smithay::reexports::drm::control::property::Value::Blob(id) => id,
+                _ => return Err("create_property_blob returned non-Blob value".to_string()),
+            }
+        } else {
+            0
+        };
+
+        if let Ok(props) = dev.get_properties(conn_handle) {
+            let (handles, _values) = props.as_props_and_values();
+            for &prop_handle in handles {
+                if let Ok(info) = dev.get_property(prop_handle) {
+                    if info.name().to_str() == Ok("HDR_OUTPUT_METADATA") {
+                        return Self::set_drm_property(dev, conn_handle, prop_handle, blob_id);
+                    }
+                }
+            }
+        }
+        Err("HDR_OUTPUT_METADATA property not found on connector".to_string())
+    }
+
     pub(super) fn output_index_by_name(&self, name: &str) -> Option<usize> {
         self.outputs.iter().position(|o| o.output.name() == name)
     }

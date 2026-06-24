@@ -3422,6 +3422,33 @@ impl Backend for UdevBackend {
             .map_err(|e| BackendError::Message(e))
     }
 
+    fn set_hdr_metadata(&mut self, output: OutputId, enabled: bool) -> Result<(), BackendError> {
+        let kms = self.kms.as_ref().ok_or(BackendError::Unsupported("no KMS"))?;
+        let shared = self.shared.lock_safe();
+        let info = shared.outputs.iter().find(|o| o.id == output)
+            .ok_or(BackendError::NotFound("output not found"))?;
+        let output_idx = shared.outputs.iter().position(|o| o.id == output)
+            .ok_or(BackendError::NotFound("output not found"))?;
+        let caps = info.hdr_metadata.clone();
+        drop(shared);
+
+        if enabled {
+            let caps = caps.ok_or(BackendError::Unsupported(
+                "output does not advertise HDR in EDID",
+            ))?;
+            let peak = crate::config::CONFIG.load().behavior().hdr_peak_nits;
+            let peak_u16 = peak.round().clamp(0.0, u16::MAX as f32) as u16;
+            let blob = crate::backend::hdr_metadata::build_from_edid(&caps, peak_u16);
+            kms.borrow_mut()
+                .set_hdr_metadata_for_output(output_idx, Some(&blob))
+                .map_err(BackendError::Message)
+        } else {
+            kms.borrow_mut()
+                .set_hdr_metadata_for_output(output_idx, None)
+                .map_err(BackendError::Message)
+        }
+    }
+
     fn compositor_tearing_hint_count(&self) -> usize {
         self.state
             .tearing_hints

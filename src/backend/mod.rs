@@ -4,6 +4,7 @@ pub mod api;
 pub mod common_define;
 pub mod edid;
 pub mod error;
+pub mod hdr_metadata;
 
 // Backend-independent CPU bitmap text rasterizer shared by both compositors.
 pub mod compositor_font;

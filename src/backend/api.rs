@@ -1053,6 +1053,13 @@ pub trait Backend: Send {
     /// Enable or disable VRR for an output.
     fn set_vrr_enabled(&mut self, _output: OutputId, _enabled: bool) -> Result<(), BackendError> { Ok(()) }
 
+    /// Push (or clear) the HDR_OUTPUT_METADATA blob on a connector. When
+    /// `enabled` is true the backend builds a CTA-861.3 Static Metadata
+    /// Type 1 blob from the output's EDID caps + configured peak nits.
+    fn set_hdr_metadata(&mut self, _output: OutputId, _enabled: bool) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported("HDR metadata push not implemented"))
+    }
+
     /// Capture a window thumbnail (returns RGBA pixels, width, height).
     fn compositor_capture_thumbnail(&self, _window: WindowId, _max_size: u32) -> Option<(Vec<u8>, u32, u32)> {
         None
