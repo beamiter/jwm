@@ -3762,6 +3762,7 @@ fn scan_drm_outputs(dev_id: u64, path: &Path) -> Result<Vec<(u64, OutputInfo)>, 
 
         let name = format!("{:?}-{}", conn.interface(), conn.interface_id());
         let key = ((dev_id as u64) << 32) | (u32::from(*conn_handle) as u64);
+        let hdr_capable = query_connector_hdr_capable(&card, *conn_handle);
 
         outputs.push((
             key,
@@ -3774,10 +3775,38 @@ fn scan_drm_outputs(dev_id: u64, path: &Path) -> Result<Vec<(u64, OutputInfo)>, 
                 height,
                 scale: 1.0,
                 refresh_rate,
-                hdr_capable: true,
+                hdr_capable,
             },
         ));
     }
 
     Ok(outputs)
+}
+
+fn query_connector_hdr_capable<D: drm::control::Device>(
+    dev: &D,
+    conn_handle: connector::Handle,
+) -> bool {
+    use crate::backend::edid::parse_edid_hdr_from_bytes;
+
+    let Ok(props) = dev.get_properties(conn_handle) else {
+        return false;
+    };
+    let (handles, values) = props.as_props_and_values();
+    for (prop_handle, value) in handles.iter().zip(values.iter()) {
+        let Ok(info) = dev.get_property(*prop_handle) else {
+            continue;
+        };
+        if info.name().to_str() != Ok("EDID") {
+            continue;
+        }
+        if *value == 0 {
+            return false;
+        }
+        let Ok(blob) = dev.get_property_blob(*value) else {
+            return false;
+        };
+        return parse_edid_hdr_from_bytes(&blob).is_some();
+    }
+    false
 }

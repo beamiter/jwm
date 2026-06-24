@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod common_define;
+pub mod edid;
 pub mod error;
 
 // Backend-independent CPU bitmap text rasterizer shared by both compositors.
