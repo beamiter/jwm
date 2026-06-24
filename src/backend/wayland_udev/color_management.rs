@@ -9,8 +9,10 @@
 /// Bound at version 1, so the v1 `ready` / `preferred_changed` events are sent
 /// (the v2 `ready2` / `preferred_changed2` variants will be added when we bump).
 
+use crate::backend::edid::EdidHdrCapabilities;
 use crate::backend::wayland::state::JwmWaylandState;
 use crate::sync_ext::MutexExt;
+use smithay::output::Output;
 use smithay::reexports::wayland_protocols::wp::color_management::v1::server::{
     wp_color_management_output_v1::{self, WpColorManagementOutputV1},
     wp_color_management_surface_feedback_v1::{self, WpColorManagementSurfaceFeedbackV1},
@@ -25,12 +27,21 @@ use smithay::reexports::wayland_protocols::wp::color_management::v1::server::{
     wp_image_description_v1::{self, Cause, WpImageDescriptionV1},
 };
 use smithay::reexports::wayland_server::backend::ObjectId;
+use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+// CIE 1931 xy chromaticities scaled by 1_000_000 (the protocol's encoding).
+const PRIMARIES_BT709: [i32; 8] = [
+    640_000, 330_000, 300_000, 600_000, 150_000, 60_000, 312_700, 329_000,
+];
+const PRIMARIES_BT2020: [i32; 8] = [
+    708_000, 292_000, 170_000, 797_000, 131_000, 46_000, 312_700, 329_000,
+];
 
 const COLOR_MANAGER_VERSION: u32 = 1;
 
@@ -134,13 +145,76 @@ fn emit_manager_caps(resource: &WpColorManagerV1) {
     resource.done();
 }
 
-/// Build a default sRGB parametric description (used as the placeholder
-/// per-output image description in slice 1).
+/// Build a default sRGB parametric description (used when no HDR caps are
+/// known for an output).
 fn srgb_params() -> ParametricParams {
     ParametricParams {
         primaries_named: Some(Primaries::Srgb as u32),
         tf_named: Some(TransferFunction::Gamma22 as u32),
         ..ParametricParams::default()
+    }
+}
+
+/// Translate an EDID HDR Static Metadata block (CTA-861) into a parametric
+/// image description. Mirrors the policy used by `hdr_metadata::build_from_edid`
+/// for the kernel-side blob so the wp-color-management answer and the
+/// HDR_OUTPUT_METADATA push agree on EOTF and gamut.
+fn params_from_edid(caps: &EdidHdrCapabilities) -> ParametricParams {
+    let mut p = ParametricParams::default();
+
+    // EOTF: prefer PQ > HLG > BT.1886.
+    p.tf_named = Some(if caps.supports_pq {
+        TransferFunction::St2084Pq as u32
+    } else if caps.supports_hlg {
+        TransferFunction::Hlg as u32
+    } else {
+        TransferFunction::Bt1886 as u32
+    });
+
+    // Container primaries: BT.2020 for any HDR-signalled display, sRGB otherwise.
+    let hdr = caps.supports_pq || caps.supports_hlg || caps.supports_bt2020;
+    if hdr {
+        p.primaries_named = Some(Primaries::Bt2020 as u32);
+        p.primaries = Some(PRIMARIES_BT2020);
+    } else {
+        p.primaries_named = Some(Primaries::Srgb as u32);
+        p.primaries = Some(PRIMARIES_BT709);
+    }
+
+    // Luminance range (cd/m²). Spec scales min_lum by 10000, max_lum unscaled.
+    if caps.max_luminance_nits > 0.0 {
+        let max_lum = caps.max_luminance_nits.round().max(1.0) as u32;
+        let min_lum_scaled = (caps.min_luminance_nits.max(0.0) * 10_000.0).round() as u32;
+        // Reference white for HDR: 203 cd/m² per BT.2408. For SDR fall back to max.
+        let reference_lum = if hdr { 203 } else { max_lum };
+        p.min_lum = Some(min_lum_scaled);
+        p.max_lum = Some(max_lum);
+        p.reference_lum = Some(reference_lum);
+
+        // Mastering display volume (target color volume) mirrors the container.
+        if hdr {
+            p.mastering_primaries = Some(PRIMARIES_BT2020);
+        }
+        p.mastering_min_lum = Some(min_lum_scaled);
+        p.mastering_max_lum = Some(max_lum);
+
+        // Surface-as-display: max_cll matches the display's peak.
+        p.max_cll = Some(max_lum);
+    }
+
+    p
+}
+
+/// Build the per-output image description params. Looks up EDID HDR caps stashed
+/// on the smithay Output's user_data (see `attach_edid_caps_to_outputs` in the
+/// wayland_udev backend).
+fn params_for_wl_output(wl_output: &WlOutput) -> ParametricParams {
+    match Output::from_resource(wl_output) {
+        Some(o) => match o.user_data().get::<EdidHdrCapabilities>() {
+            Some(caps) => params_from_edid(caps),
+            None => srgb_params(),
+        },
+        None => srgb_params(),
     }
 }
 
@@ -193,7 +267,7 @@ impl Dispatch<WpColorManagerV1, ()> for JwmWaylandState {
         match request {
             wp_color_manager_v1::Request::Destroy => {}
             wp_color_manager_v1::Request::GetOutput { id, output } => {
-                data_init.init(id, OutputCmData { _output_id: output.id() });
+                data_init.init(id, OutputCmData { wl_output: output });
             }
             wp_color_manager_v1::Request::GetSurface { id, surface } => {
                 data_init.init(id, SurfaceCmData { surface });
@@ -235,7 +309,7 @@ impl Dispatch<WpColorManagerV1, ()> for JwmWaylandState {
 // === wp_color_management_output_v1 ===
 
 pub struct OutputCmData {
-    _output_id: ObjectId,
+    pub wl_output: WlOutput,
 }
 unsafe impl Send for OutputCmData {}
 unsafe impl Sync for OutputCmData {}
@@ -246,16 +320,18 @@ impl Dispatch<WpColorManagementOutputV1, OutputCmData> for JwmWaylandState {
         _client: &Client,
         _resource: &WpColorManagementOutputV1,
         request: wp_color_management_output_v1::Request,
-        _data: &OutputCmData,
+        data: &OutputCmData,
         _dh: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
             wp_color_management_output_v1::Request::Destroy => {}
             wp_color_management_output_v1::Request::GetImageDescription { image_description } => {
-                // Slice 1: always return sRGB. Slice 2 will derive from EDID HDR caps.
-                let (id, data) = make_ready_description(state, srgb_params(), true);
-                let desc = data_init.init(image_description, data);
+                // Derive params from EDID HDR caps stashed on the smithay Output;
+                // falls back to sRGB if the output advertises no HDR static metadata.
+                let params = params_for_wl_output(&data.wl_output);
+                let (id, st) = make_ready_description(state, params, true);
+                let desc = data_init.init(image_description, st);
                 desc.ready(id as u32);
             }
             _ => {}
@@ -571,5 +647,60 @@ impl Dispatch<WpImageDescriptionReferenceV1, ()> for JwmWaylandState {
         _data_init: &mut DataInit<'_, Self>,
     ) {
         // Only `destroy` is defined; the destructor request requires no action.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn caps(pq: bool, hlg: bool, bt2020: bool, max_nits: f32, min_nits: f32) -> EdidHdrCapabilities {
+        EdidHdrCapabilities {
+            max_luminance_nits: max_nits,
+            min_luminance_nits: min_nits,
+            supports_bt2020: bt2020,
+            supports_pq: pq,
+            supports_hlg: hlg,
+        }
+    }
+
+    #[test]
+    fn sdr_only_edid_maps_to_bt709_bt1886() {
+        let p = params_from_edid(&caps(false, false, false, 0.0, 0.0));
+        assert_eq!(p.tf_named, Some(TransferFunction::Bt1886 as u32));
+        assert_eq!(p.primaries_named, Some(Primaries::Srgb as u32));
+        assert_eq!(p.primaries, Some(PRIMARIES_BT709));
+        // No luminance block → no mastering metadata.
+        assert!(p.min_lum.is_none());
+        assert!(p.max_cll.is_none());
+    }
+
+    #[test]
+    fn pq_hdr_edid_maps_to_bt2020_pq_with_mastering() {
+        let p = params_from_edid(&caps(true, false, true, 1000.0, 0.05));
+        assert_eq!(p.tf_named, Some(TransferFunction::St2084Pq as u32));
+        assert_eq!(p.primaries_named, Some(Primaries::Bt2020 as u32));
+        assert_eq!(p.primaries, Some(PRIMARIES_BT2020));
+        assert_eq!(p.max_lum, Some(1000));
+        // min_lum scaled by 10_000: 0.05 → 500.
+        assert_eq!(p.min_lum, Some(500));
+        // BT.2408 reference white for HDR.
+        assert_eq!(p.reference_lum, Some(203));
+        assert_eq!(p.mastering_primaries, Some(PRIMARIES_BT2020));
+        assert_eq!(p.mastering_max_lum, Some(1000));
+        assert_eq!(p.max_cll, Some(1000));
+    }
+
+    #[test]
+    fn hlg_preferred_over_bt1886_when_only_hlg_set() {
+        let p = params_from_edid(&caps(false, true, true, 1000.0, 0.0));
+        assert_eq!(p.tf_named, Some(TransferFunction::Hlg as u32));
+    }
+
+    #[test]
+    fn pq_wins_when_both_pq_and_hlg_advertised() {
+        let p = params_from_edid(&caps(true, true, true, 4000.0, 0.0));
+        assert_eq!(p.tf_named, Some(TransferFunction::St2084Pq as u32));
+        assert_eq!(p.max_lum, Some(4000));
     }
 }

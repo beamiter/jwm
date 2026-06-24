@@ -799,6 +799,7 @@ impl UdevBackend {
                     .as_ref()
                     .map(|k| k.borrow_mut().gamma_sizes().into_iter().collect())
                     .unwrap_or_default();
+                attach_edid_caps_to_outputs(&self.state.outputs, &self.shared.lock_safe().outputs);
                 // Wire screencopy pending queue to KMS state.
                 if let Some(ref screencopy_queue) = self.state.screencopy_pending {
                     if let Some(ref kms) = self.kms {
@@ -3554,6 +3555,10 @@ impl Backend for UdevBackend {
                             .as_ref()
                             .map(|k| k.borrow_mut().gamma_sizes().into_iter().collect())
                             .unwrap_or_default();
+                        attach_edid_caps_to_outputs(
+                            &self.state.outputs,
+                            &self.shared.lock_safe().outputs,
+                        );
                         self.state.needs_redraw = true;
                         self.state
                             .pending_events
@@ -3809,6 +3814,27 @@ fn scan_drm_outputs(dev_id: u64, path: &Path) -> Result<Vec<(u64, OutputInfo)>, 
     }
 
     Ok(outputs)
+}
+
+/// Attach each output's parsed EDID HDR static-metadata block (CTA-861) onto
+/// the matching `smithay::output::Output` user_data. The wp-color-management
+/// Dispatch reads it back via `Output::from_resource(&wl_output)`. Lookup is by
+/// output name, which both the KMS and the shared OutputInfo path build via
+/// `format!("{:?}-{}", interface, interface_id)`.
+fn attach_edid_caps_to_outputs(
+    smithay_outputs: &[smithay::output::Output],
+    shared_outputs: &[OutputInfo],
+) {
+    use crate::backend::edid::EdidHdrCapabilities;
+    for info in shared_outputs {
+        let Some(caps) = info.hdr_metadata.clone() else {
+            continue;
+        };
+        if let Some(out) = smithay_outputs.iter().find(|o| o.name() == info.name) {
+            out.user_data()
+                .insert_if_missing_threadsafe::<EdidHdrCapabilities, _>(|| caps);
+        }
+    }
 }
 
 fn query_connector_hdr_metadata<D: drm::control::Device>(
