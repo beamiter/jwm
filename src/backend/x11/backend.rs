@@ -3755,18 +3755,20 @@ mod output_ops {
                             false,  // pending
                         ) {
                             if let Ok(prop) = prop_cookie.reply() {
-                                // Property should be 32-bit integer format
-                                if prop.format == 32 && prop.num_items > 0 {
-                                    if !prop.data.is_empty() && prop.data.len() >= 4 {
-                                        // Read as 32-bit little-endian integer
-                                        let value = u32::from_le_bytes([
-                                            prop.data[0],
-                                            prop.data[1],
-                                            prop.data[2],
-                                            prop.data[3],
-                                        ]);
-                                        return value >= 10;
-                                    }
+                                // x11rb un-swaps format=32 property data to host
+                                // byte order at the connection layer; reading as
+                                // little-endian was wrong on big-endian hosts.
+                                // RandR's reply has no value32() helper so we
+                                // call from_ne_bytes directly (the format=32
+                                // codepath that xproto's value32 takes).
+                                if prop.format == 32 && prop.data.len() >= 4 {
+                                    let value = u32::from_ne_bytes([
+                                        prop.data[0],
+                                        prop.data[1],
+                                        prop.data[2],
+                                        prop.data[3],
+                                    ]);
+                                    return value >= 10;
                                 }
                             }
                         }
@@ -4048,6 +4050,21 @@ mod property_ops {
     use x11rb::x11_utils::Serialize;
     use x11rb::wrapper::ConnectionExt as _;
 
+    // Caps for client-supplied property fetches. A hostile or buggy client can
+    // set an arbitrarily large property on its own windows; reading without a
+    // cap pulls it wholesale into the WM's address space. Each cap is generous
+    // for legitimate use but bounds the worst case:
+    //   - Icon: 16 MB worth of u32 (~one 2048×2048 icon, or several 256×256).
+    //   - Opaque region: 1 M u32 = 256 K rects = 4 MB.
+    //   - Text property (UTF-8 / Latin-1, format=8): 256 KB. EWMH titles are
+    //     conventionally well under 4 KB.
+    //   - Atom list (e.g. _NET_WM_STATE): 4 K atoms = 16 KB. There aren't that
+    //     many distinct states per window in practice.
+    pub(super) const MAX_ICON_ITEMS_U32: u32 = 4 * 1024 * 1024;
+    pub(super) const MAX_OPAQUE_REGION_ITEMS_U32: u32 = 1024 * 1024;
+    pub(super) const MAX_TEXT_PROPERTY_BYTES: u32 = 256 * 1024;
+    pub(super) const MAX_ATOM_LIST_ITEMS: u32 = 4096;
+
     pub(super) struct X11PropertyOps<C: Connection> {
         conn: Arc<C>,
         atoms: Atoms,
@@ -4065,7 +4082,7 @@ mod property_ops {
             let w = self.ids.x11(win).ok()?;
             let reply = self
                 .conn
-                .get_property(false, w, atom, AtomEnum::ANY, 0, u32::MAX)
+                .get_property(false, w, atom, AtomEnum::ANY, 0, MAX_TEXT_PROPERTY_BYTES)
                 .ok()?
                 .reply()
                 .ok()?;
@@ -4101,7 +4118,7 @@ mod property_ops {
                     self.atoms._NET_WM_STATE,
                     AtomEnum::ATOM,
                     0,
-                    u32::MAX,
+                    MAX_ATOM_LIST_ITEMS,
                 )?
                 .reply()?;
             if reply.format != 32 {
@@ -4688,7 +4705,7 @@ mod property_ops {
                     self.atoms._NET_WM_ICON,
                     AtomEnum::CARDINAL,
                     0,
-                    u32::MAX,
+                    MAX_ICON_ITEMS_U32,
                 )
                 .ok()?
                 .reply()
@@ -4702,12 +4719,19 @@ mod property_ops {
             while offset + 2 < data.len() {
                 let width = data[offset];
                 let height = data[offset + 1];
-                let pixel_count = (width as usize) * (height as usize);
+                // (width × height) and (pixel_count × 4) are both u32→usize
+                // multiplications driven by client-supplied data. On 32-bit
+                // hosts usize is u32, so either can wrap silently. Bail on
+                // overflow rather than corrupting the parse cursor.
+                let Some(pixel_count) =
+                    (width as usize).checked_mul(height as usize)
+                else { break };
+                let Some(rgba_bytes) = pixel_count.checked_mul(4) else { break };
                 offset += 2;
                 if offset + pixel_count > data.len() {
                     break;
                 }
-                let mut rgba = Vec::with_capacity(pixel_count * 4);
+                let mut rgba = Vec::with_capacity(rgba_bytes);
                 for &argb in &data[offset..offset + pixel_count] {
                     let a = ((argb >> 24) & 0xFF) as u8;
                     let r = ((argb >> 16) & 0xFF) as u8;
@@ -4761,7 +4785,7 @@ mod property_ops {
                     self.atoms._NET_WM_OPAQUE_REGION,
                     AtomEnum::CARDINAL,
                     0,
-                    u32::MAX,
+                    MAX_OPAQUE_REGION_ITEMS_U32,
                 )
                 .ok()?
                 .reply()
