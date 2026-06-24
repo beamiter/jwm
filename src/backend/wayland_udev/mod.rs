@@ -23,3 +23,7 @@ pub mod foreign_toplevel_management;
 pub mod virtual_pointer;
 
 pub mod color_management;
+
+pub mod icc;
+
+pub mod color_pipeline;

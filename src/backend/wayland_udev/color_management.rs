@@ -32,7 +32,7 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 // CIE 1931 xy chromaticities scaled by 1_000_000 (the protocol's encoding).
@@ -91,6 +91,23 @@ pub struct SurfaceDescriptionRecord {
     pub params: ParametricParams,
 }
 
+/// Bookkeeping for one surface's wp_color_management_surface_feedback_v1
+/// resources, the outputs the surface currently sits on, and the
+/// preferred image description we last emitted for it.
+#[derive(Default)]
+struct FeedbackBucket {
+    /// Live feedback objects for this surface. Cleaned of dead entries lazily
+    /// on the next emit; the Dispatch::destroyed hook removes them eagerly.
+    resources: Vec<WpColorManagementSurfaceFeedbackV1>,
+    /// Output names the surface currently has frames on. Updated by
+    /// on_surface_enters_output / on_surface_leaves_output.
+    outputs: HashSet<String>,
+    /// (id, params) of the most recently emitted preferred description. Used
+    /// to short-circuit redundant preferred_changed events when the picked
+    /// output's EDID-derived params haven't actually changed.
+    last_preferred: Option<(u64, ParametricParams)>,
+}
+
 /// Singleton state held by JwmWaylandState.
 pub struct ColorManagerState {
     id_counter: Arc<Mutex<u64>>,
@@ -99,6 +116,10 @@ pub struct ColorManagerState {
     /// parametric params so the render path can read them without re-walking
     /// the protocol object graph.
     pub surface_descriptions: Arc<Mutex<HashMap<ObjectId, SurfaceDescriptionRecord>>>,
+    /// Per-surface feedback tracking — resources, current output set, and
+    /// last-emitted preferred description. Created lazily when a client first
+    /// calls get_surface_feedback.
+    feedback: Arc<Mutex<HashMap<ObjectId, FeedbackBucket>>>,
 }
 
 impl ColorManagerState {
@@ -106,6 +127,7 @@ impl ColorManagerState {
         Self {
             id_counter: Arc::new(Mutex::new(1)),
             surface_descriptions: Arc::new(Mutex::new(HashMap::new())),
+            feedback: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -125,6 +147,102 @@ impl ColorManagerState {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
+
+    /// Register a feedback resource so subsequent output changes can emit
+    /// preferred_changed on it. No-op when the surface has no feedback bucket
+    /// yet — the bucket is created here.
+    fn register_feedback(&self, surface: ObjectId, resource: WpColorManagementSurfaceFeedbackV1) {
+        self.feedback
+            .lock_safe()
+            .entry(surface)
+            .or_default()
+            .resources
+            .push(resource);
+    }
+
+    /// Look up the most recently emitted preferred (id, params) for a surface,
+    /// so a get_preferred / get_preferred_parametric returns the same description
+    /// the client already saw via preferred_changed.
+    fn current_preferred(&self, surface: &ObjectId) -> Option<(u64, ParametricParams)> {
+        self.feedback
+            .lock_safe()
+            .get(surface)
+            .and_then(|b| b.last_preferred.clone())
+    }
+
+    /// Drop everything tied to a surface — called from the surface Dispatch's
+    /// destroyed hook so a leaked WlSurface doesn't pile up here forever.
+    pub fn forget_surface(&self, surface: &ObjectId) {
+        self.feedback.lock_safe().remove(surface);
+    }
+
+    /// A surface gained a frame on `output`. Builds a new preferred description
+    /// from the output's EDID caps (or sRGB fallback) and, if the params differ
+    /// from what we last emitted, fires preferred_changed on every live
+    /// feedback resource for this surface.
+    pub fn on_surface_enters_output(&self, surface: &ObjectId, output: &Output) {
+        let mut feedback = self.feedback.lock_safe();
+        let Some(bucket) = feedback.get_mut(surface) else {
+            return;
+        };
+        // Newly-entered output → add to the set; if it was already there
+        // (e.g. a re-render of the same frame), nothing to do.
+        if !bucket.outputs.insert(output.name()) {
+            return;
+        }
+        let new_params = params_for_output(output);
+        if let Some((_, last_params)) = &bucket.last_preferred {
+            if params_match(last_params, &new_params) {
+                return;
+            }
+        }
+        let id = self.next_id();
+        bucket.last_preferred = Some((id, new_params));
+        bucket.resources.retain(|r| r.is_alive());
+        for r in &bucket.resources {
+            r.preferred_changed(id as u32);
+        }
+    }
+
+    /// A surface lost a frame on `output`. If the lost output was driving the
+    /// current preferred and there are other outputs left, picks one of them
+    /// and emits preferred_changed; if none remain, leaves last_preferred
+    /// untouched (the surface is offscreen, the cached description stays valid
+    /// for a subsequent get_preferred call).
+    pub fn on_surface_leaves_output(&self, surface: &ObjectId, output: &Output) {
+        let mut feedback = self.feedback.lock_safe();
+        let Some(bucket) = feedback.get_mut(surface) else {
+            return;
+        };
+        let removed = bucket.outputs.remove(&output.name());
+        if !removed {
+            return;
+        }
+        // If the surface still sits on other outputs, re-pick from the
+        // remaining set so the preferred matches a live output.
+        if let Some(_other) = bucket.outputs.iter().next().cloned() {
+            // We don't have a back-reference from name → Output here; the
+            // render loop will hit on_surface_enters_output for the surviving
+            // output again on the next frame and re-emit if needed. Just drop
+            // the cache so the next enter doesn't short-circuit.
+            bucket.last_preferred = None;
+        }
+    }
+
+}
+
+fn params_for_output(output: &Output) -> ParametricParams {
+    match output.user_data().get::<EdidHdrCapabilities>() {
+        Some(caps) => params_from_edid(caps),
+        None => srgb_params(),
+    }
+}
+
+fn params_match(a: &ParametricParams, b: &ParametricParams) -> bool {
+    a.tf_named == b.tf_named
+        && a.primaries_named == b.primaries_named
+        && a.primaries == b.primaries
+        && a.max_lum == b.max_lum
 }
 
 impl Default for ColorManagerState {
@@ -147,8 +265,12 @@ pub fn init_color_management(dh: &DisplayHandle) -> ColorManagerState {
 fn emit_manager_caps(resource: &WpColorManagerV1) {
     // Mandatory: perceptual.
     resource.supported_intent(RenderIntent::Perceptual);
-    // Parametric path is implemented; ICC is not (create→failed).
     resource.supported_feature(Feature::Parametric);
+    // ICC v2/v4 display profiles are parsed (see wayland_udev::icc) — the
+    // resulting parametric description carries explicit chromaticities and
+    // either a named TF or tf_power. Unparseable profiles fail at create-time
+    // rather than at the protocol layer.
+    resource.supported_feature(Feature::IccV2V4);
     resource.supported_feature(Feature::SetPrimaries);
     resource.supported_feature(Feature::SetLuminances);
     resource.supported_feature(Feature::SetMasteringDisplayPrimaries);
@@ -292,23 +414,32 @@ impl Dispatch<WpColorManagerV1, ()> for JwmWaylandState {
                 data_init.init(id, SurfaceCmData { surface });
             }
             wp_color_manager_v1::Request::GetSurfaceFeedback { id, surface } => {
-                let resource =
-                    data_init.init(id, SurfaceFeedbackData { _surface: surface.clone() });
-                // Emit initial preferred-changed using a fresh sRGB id so the
-                // client knows where to start. Future slices will recompute
-                // per output the surface is shown on.
-                let id = state
-                    .color_manager
-                    .as_ref()
-                    .map(|c| c.next_id())
-                    .unwrap_or(1);
-                resource.preferred_changed(id as u32);
+                let resource = data_init.init(
+                    id,
+                    SurfaceFeedbackData { surface: surface.clone() },
+                );
+                // Initial preferred: sRGB ride-along until the render loop
+                // observes the surface on a specific output and re-emits with
+                // EDID-derived params. Use a fresh id so the client can
+                // immediately call get_preferred and see a coherent description.
+                if let Some(cm) = state.color_manager.as_ref() {
+                    cm.register_feedback(surface.id(), resource.clone());
+                    let new_id = cm.next_id();
+                    // Seed the bucket with the sRGB description so
+                    // current_preferred() returns something sensible until the
+                    // first render-loop enter call.
+                    if let Some(bucket) = cm.feedback.lock_safe().get_mut(&surface.id()) {
+                        bucket.last_preferred = Some((new_id, srgb_params()));
+                    }
+                    resource.preferred_changed(new_id as u32);
+                }
             }
             wp_color_manager_v1::Request::CreateIccCreator { obj } => {
-                // Advertised feature set does NOT include icc_v2_v4, so well-behaved
-                // clients won't call this. If one does anyway, accept the object so
-                // the create path can fail gracefully via the failed event.
-                data_init.init(obj, IccCreatorData::default());
+                // ICC profiles are now parsed into ParametricParams in
+                // wayland_udev::icc; advertise the feature so well-behaved
+                // clients use this path instead of synthesising parametrics.
+                let data: IccCreatorData = Arc::new(Mutex::new(IccCreatorInner::default()));
+                data_init.init(obj, data);
             }
             wp_color_manager_v1::Request::CreateParametricCreator { obj } => {
                 let data: ParametricCreatorData =
@@ -429,6 +560,7 @@ impl Dispatch<WpColorManagementSurfaceV1, SurfaceCmData> for JwmWaylandState {
             cm.surface_descriptions
                 .lock_safe()
                 .remove(&data.surface.id());
+            cm.forget_surface(&data.surface.id());
         }
     }
 }
@@ -436,7 +568,7 @@ impl Dispatch<WpColorManagementSurfaceV1, SurfaceCmData> for JwmWaylandState {
 // === wp_color_management_surface_feedback_v1 ===
 
 pub struct SurfaceFeedbackData {
-    _surface: WlSurface,
+    pub surface: WlSurface,
 }
 unsafe impl Send for SurfaceFeedbackData {}
 unsafe impl Sync for SurfaceFeedbackData {}
@@ -447,7 +579,7 @@ impl Dispatch<WpColorManagementSurfaceFeedbackV1, SurfaceFeedbackData> for JwmWa
         _client: &Client,
         _resource: &WpColorManagementSurfaceFeedbackV1,
         request: wp_color_management_surface_feedback_v1::Request,
-        _data: &SurfaceFeedbackData,
+        data: &SurfaceFeedbackData,
         _dh: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
@@ -459,8 +591,31 @@ impl Dispatch<WpColorManagementSurfaceFeedbackV1, SurfaceFeedbackData> for JwmWa
             | wp_color_management_surface_feedback_v1::Request::GetPreferredParametric {
                 image_description,
             } => {
-                let (id, data) = make_ready_description(state, srgb_params(), true);
-                let desc = data_init.init(image_description, data);
+                // Pull the cached preferred (last emitted via preferred_changed)
+                // so this description matches the one the client was told to expect.
+                let cached = state
+                    .color_manager
+                    .as_ref()
+                    .and_then(|cm| cm.current_preferred(&data.surface.id()));
+                let (id, params) = match cached {
+                    Some((id, params)) => (id, params),
+                    None => {
+                        // No render-loop observation yet — fall back to sRGB
+                        // with a fresh id (still consistent with the v1 spec).
+                        let id = state
+                            .color_manager
+                            .as_ref()
+                            .map(|c| c.next_id())
+                            .unwrap_or(1);
+                        (id, srgb_params())
+                    }
+                };
+                let st: ImageDescriptionData = Arc::new(Mutex::new(ImageDescriptionState::Ready {
+                    id,
+                    params,
+                    allow_info: true,
+                }));
+                let desc = data_init.init(image_description, st);
                 desc.ready(id as u32);
             }
             _ => {}
@@ -471,34 +626,152 @@ impl Dispatch<WpColorManagementSurfaceFeedbackV1, SurfaceFeedbackData> for JwmWa
 // === wp_image_description_creator_icc_v1 ===
 
 #[derive(Default)]
-pub struct IccCreatorData {
-    pub _icc_file_set: bool,
+pub struct IccCreatorInner {
+    /// `set_icc_file` was called once already — second call is a protocol error.
+    pub set: bool,
+    /// Raw ICC bytes pulled from (fd, offset, length). Empty if read failed or
+    /// no profile was set; that case falls through to a `failed(unsupported)`
+    /// event at `create` time.
+    pub bytes: Vec<u8>,
 }
+
+pub type IccCreatorData = Arc<Mutex<IccCreatorInner>>;
 
 impl Dispatch<WpImageDescriptionCreatorIccV1, IccCreatorData> for JwmWaylandState {
     fn request(
         _state: &mut Self,
         _client: &Client,
-        _resource: &WpImageDescriptionCreatorIccV1,
+        resource: &WpImageDescriptionCreatorIccV1,
         request: wp_image_description_creator_icc_v1::Request,
-        _data: &IccCreatorData,
+        data: &IccCreatorData,
         _dh: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
+        use crate::backend::wayland_udev::icc;
+        use wp_image_description_creator_icc_v1::Error as IccErr;
         match request {
             wp_image_description_creator_icc_v1::Request::Create { image_description } => {
-                // ICC handling is not implemented in slice 1: fail the description.
-                let st: ImageDescriptionData =
-                    Arc::new(Mutex::new(ImageDescriptionState::Failed));
+                let bytes = std::mem::take(&mut data.lock_safe().bytes);
+                let result = if bytes.is_empty() {
+                    None
+                } else {
+                    icc::parse_icc(&bytes).ok()
+                };
+                let st: ImageDescriptionData = match result {
+                    Some(parsed) => {
+                        let params = parsed.into_params();
+                        let id = state_next_id_via_dispatch(); // resolved below
+                        Arc::new(Mutex::new(ImageDescriptionState::Ready {
+                            id,
+                            params,
+                            allow_info: true,
+                        }))
+                    }
+                    None => Arc::new(Mutex::new(ImageDescriptionState::Failed)),
+                };
+                let snapshot = st.lock_safe().clone();
                 let desc = data_init.init(image_description, st);
-                desc.failed(Cause::Unsupported, "ICC profiles not yet supported".into());
+                match snapshot {
+                    ImageDescriptionState::Ready { id, .. } => desc.ready(id as u32),
+                    ImageDescriptionState::Failed => desc.failed(
+                        Cause::Unsupported,
+                        "ICC profile unparseable or unsupported shape".into(),
+                    ),
+                }
             }
-            wp_image_description_creator_icc_v1::Request::SetIccFile { .. } => {
-                // Discard the fd; we don't parse ICC yet.
+            wp_image_description_creator_icc_v1::Request::SetIccFile {
+                icc_profile,
+                offset,
+                length,
+            } => {
+                {
+                    let mut g = data.lock_safe();
+                    if g.set {
+                        resource.post_error(IccErr::AlreadySet, "set_icc_file called twice");
+                        return;
+                    }
+                    g.set = true;
+                }
+                if length == 0 || length > icc::ICC_MAX_BYTES {
+                    resource.post_error(IccErr::BadSize, "ICC length 0 or > 32 MiB");
+                    return;
+                }
+                match read_icc_fd_range(&icc_profile, offset, length) {
+                    Ok(buf) => {
+                        data.lock_safe().bytes = buf;
+                    }
+                    Err(IccReadError::Seek) => {
+                        resource.post_error(IccErr::BadFd, "ICC fd not seekable/readable");
+                    }
+                    Err(IccReadError::OutOfFile) => {
+                        resource.post_error(IccErr::OutOfFile, "offset+length exceeds fd size");
+                    }
+                    Err(IccReadError::Io) => {
+                        // I/O failure independent of the client — leave bytes
+                        // empty; create() will deliver failed(operating_system)
+                        // via the per-state-Failed path. For now we collapse
+                        // into Unsupported because we don't store the cause.
+                    }
+                }
             }
             _ => {}
         }
     }
+}
+
+/// Helper to look up the next monotonic id without threading `&mut state` through.
+/// The id is only used as a debugging identity in events and IPC, so taking a
+/// fresh u64 from a process-wide counter is safe even if it's not the same
+/// counter the rest of the manager uses — until we have a real cross-creator id
+/// allocator, this keeps IDs unique inside a session.
+fn state_next_id_via_dispatch() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0x1_0000_0001);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+#[derive(Debug)]
+enum IccReadError {
+    Seek,
+    OutOfFile,
+    Io,
+}
+
+/// Read `length` bytes from `fd` starting at `offset` using positional reads,
+/// without disturbing the fd's seek cursor and without taking ownership.
+fn read_icc_fd_range(
+    fd: &std::os::fd::OwnedFd,
+    offset: u32,
+    length: u32,
+) -> Result<Vec<u8>, IccReadError> {
+    use std::os::fd::AsRawFd;
+    let raw = fd.as_raw_fd();
+    // Confirm the fd is seekable — required by protocol. fstat alone doesn't
+    // prove seekability for sockets/pipes, so a lseek to the current position
+    // is the clearest check.
+    let pos = unsafe { libc::lseek(raw, 0, libc::SEEK_CUR) };
+    if pos < 0 {
+        return Err(IccReadError::Seek);
+    }
+    let mut buf = vec![0u8; length as usize];
+    let mut got: usize = 0;
+    while got < buf.len() {
+        let want = buf.len() - got;
+        let off = offset as i64 + got as i64;
+        let n = unsafe { libc::pread(raw, buf[got..].as_mut_ptr().cast(), want, off) };
+        if n < 0 {
+            let err = std::io::Error::last_os_error();
+            return Err(match err.raw_os_error() {
+                Some(libc::EBADF) | Some(libc::ESPIPE) => IccReadError::Seek,
+                _ => IccReadError::Io,
+            });
+        }
+        if n == 0 {
+            return Err(IccReadError::OutOfFile);
+        }
+        got += n as usize;
+    }
+    Ok(buf)
 }
 
 // === wp_image_description_creator_params_v1 ===
@@ -726,4 +999,18 @@ mod tests {
         assert_eq!(p.tf_named, Some(TransferFunction::St2084Pq as u32));
         assert_eq!(p.max_lum, Some(4000));
     }
+
+    #[test]
+    fn params_match_ignores_mastering_fields() {
+        let mut a = params_from_edid(&caps(true, false, true, 1000.0, 0.0));
+        let mut b = a.clone();
+        // tf/primaries/max_lum match → match=true even if mastering differs.
+        a.mastering_max_lum = Some(1000);
+        b.mastering_max_lum = Some(4000);
+        assert!(params_match(&a, &b));
+        // But primaries change → no match (a surface migrating SDR→HDR).
+        let p_sdr = srgb_params();
+        assert!(!params_match(&a, &p_sdr));
+    }
+
 }
