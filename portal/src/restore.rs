@@ -78,17 +78,17 @@ fn flush(store: &Store) {
     }
 }
 
-/// Look up a token; resolve against the *current* available outputs / toplevels.
-/// Returns None if the token is unknown or nothing in the stored selection
-/// still exists.
-pub fn resolve(
-    token: &str,
+/// Pure resolution step: given a stored entry and the currently-available
+/// sources, drop names that no longer exist and return the surviving selection.
+/// Returns None when nothing in `entry` is still present — callers should treat
+/// this the same as "token unknown" (fall back to the picker).
+///
+/// Split out so it can be unit-tested without touching the global STORE.
+pub fn resolve_in(
+    entry: &RestoredSelection,
     available_outputs: &[OutputInfo],
     available_toplevels: &[ToplevelInfo],
 ) -> Option<(SourceSelection, u32)> {
-    let store = STORE.lock().ok()?;
-    let entry = store.sessions.get(token)?.clone();
-    drop(store);
     let outputs: Vec<OutputInfo> = entry
         .outputs
         .iter()
@@ -105,13 +105,30 @@ pub fn resolve(
         })
         .collect();
     if outputs.is_empty() && toplevels.is_empty() {
-        info!("restore: token `{token}` matched but no stored sources still exist");
         return None;
     }
     Some((
         SourceSelection { outputs, toplevels },
         entry.persist_mode,
     ))
+}
+
+/// Look up a token; resolve against the *current* available outputs / toplevels.
+/// Returns None if the token is unknown or nothing in the stored selection
+/// still exists.
+pub fn resolve(
+    token: &str,
+    available_outputs: &[OutputInfo],
+    available_toplevels: &[ToplevelInfo],
+) -> Option<(SourceSelection, u32)> {
+    let store = STORE.lock().ok()?;
+    let entry = store.sessions.get(token)?.clone();
+    drop(store);
+    let resolved = resolve_in(&entry, available_outputs, available_toplevels);
+    if resolved.is_none() {
+        info!("restore: token `{token}` matched but no stored sources still exist");
+    }
+    resolved
 }
 
 /// Store the given selection under a freshly-generated token; returns the new
@@ -153,4 +170,116 @@ fn new_token() -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn out(name: &str) -> OutputInfo {
+        OutputInfo {
+            name: name.into(),
+            description: format!("desc-{name}"),
+            width: 1920,
+            height: 1080,
+            refresh_mhz: 60_000,
+        }
+    }
+
+    fn top(id: &str) -> ToplevelInfo {
+        ToplevelInfo {
+            identifier: id.into(),
+            app_id: format!("app-{id}"),
+            title: format!("title-{id}"),
+        }
+    }
+
+    fn entry(outs: &[&str], tops: &[&str], persist_mode: u32) -> RestoredSelection {
+        RestoredSelection {
+            outputs: outs.iter().map(|s| s.to_string()).collect(),
+            toplevels: tops.iter().map(|s| s.to_string()).collect(),
+            persist_mode,
+        }
+    }
+
+    #[test]
+    fn all_sources_still_present_resolves_fully() {
+        let e = entry(&["DP-1", "HDMI-A-1"], &["t-firefox"], 2);
+        let outs = vec![out("DP-1"), out("HDMI-A-1"), out("eDP-1")];
+        let tops = vec![top("t-firefox"), top("t-terminal")];
+        let (sel, mode) = resolve_in(&e, &outs, &tops).expect("resolves");
+        assert_eq!(sel.outputs.iter().map(|o| &o.name).collect::<Vec<_>>(),
+                   vec!["DP-1", "HDMI-A-1"]);
+        assert_eq!(sel.toplevels.iter().map(|t| &t.identifier).collect::<Vec<_>>(),
+                   vec!["t-firefox"]);
+        assert_eq!(mode, 2);
+    }
+
+    #[test]
+    fn missing_outputs_are_silently_dropped_partial_match_still_ok() {
+        let e = entry(&["DP-1", "GONE-1"], &[], 1);
+        let outs = vec![out("DP-1")];
+        let (sel, _) = resolve_in(&e, &outs, &[]).expect("partial still resolves");
+        assert_eq!(sel.outputs.len(), 1);
+        assert_eq!(sel.outputs[0].name, "DP-1");
+        assert!(sel.toplevels.is_empty());
+    }
+
+    #[test]
+    fn all_outputs_gone_and_no_toplevels_returns_none() {
+        let e = entry(&["DP-1"], &[], 1);
+        let outs = vec![out("HDMI-A-1")];
+        assert!(resolve_in(&e, &outs, &[]).is_none());
+    }
+
+    #[test]
+    fn all_sources_gone_returns_none_not_empty_selection() {
+        // Caller depends on this distinction — None means "fall back to picker",
+        // Some(empty) would mean "use empty selection" which is a bug.
+        let e = entry(&["DP-1"], &["t-firefox"], 2);
+        let outs = vec![out("eDP-1")];
+        let tops = vec![top("t-other")];
+        assert!(resolve_in(&e, &outs, &tops).is_none());
+    }
+
+    #[test]
+    fn empty_stored_selection_returns_none() {
+        let e = entry(&[], &[], 0);
+        assert!(resolve_in(&e, &[out("DP-1")], &[top("t-x")]).is_none());
+    }
+
+    #[test]
+    fn persist_mode_is_preserved_through_resolve() {
+        for mode in [0u32, 1, 2] {
+            let e = entry(&["DP-1"], &[], mode);
+            let outs = vec![out("DP-1")];
+            let (_, m) = resolve_in(&e, &outs, &[]).expect("resolves");
+            assert_eq!(m, mode);
+        }
+    }
+
+    #[test]
+    fn toplevels_only_works_without_outputs() {
+        let e = entry(&[], &["t-firefox"], 1);
+        let tops = vec![top("t-firefox"), top("t-other")];
+        let (sel, _) = resolve_in(&e, &[], &tops).expect("resolves toplevel-only");
+        assert!(sel.outputs.is_empty());
+        assert_eq!(sel.toplevels.len(), 1);
+        assert_eq!(sel.toplevels[0].identifier, "t-firefox");
+    }
+
+    #[test]
+    fn resolution_preserves_stored_order_not_available_order() {
+        // The picker UI shows sources in the order the caller selected them.
+        // resolve_in must walk stored names in stored order, not iterate the
+        // available list — otherwise OBS users see their multi-monitor
+        // selections re-ordered after a restore.
+        let e = entry(&["B", "A"], &[], 0);
+        let outs = vec![out("A"), out("B"), out("C")];
+        let (sel, _) = resolve_in(&e, &outs, &[]).unwrap();
+        assert_eq!(
+            sel.outputs.iter().map(|o| &o.name).collect::<Vec<_>>(),
+            vec!["B", "A"]
+        );
+    }
 }

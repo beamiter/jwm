@@ -123,29 +123,12 @@ impl ScreenCast {
     ) -> (u32, HashMap<String, OwnedValue>) {
         info!("SelectSources {session_handle} options={:?}", options.keys().collect::<Vec<_>>());
 
-        let types_mask = options
-            .get("types")
-            .and_then(|v| u32::try_from(v).ok())
-            .unwrap_or(SourceType::Monitor as u32);
-        let multiple = options
-            .get("multiple")
-            .and_then(|v| bool::try_from(v).ok())
-            .unwrap_or(false);
-        let persist_mode = options
-            .get("persist_mode")
-            .and_then(|v| u32::try_from(v).ok())
-            .unwrap_or(0);
-        // cursor_mode is a bitmask but the client sets at most one bit per
-        // session (Hidden=1, Embedded=2, Metadata=4). Default to Embedded —
-        // matches what most apps expect when they didn't ask explicitly.
-        let cursor_mode = options
-            .get("cursor_mode")
-            .and_then(|v| u32::try_from(v).ok())
-            .unwrap_or(CursorMode::Embedded as u32);
-        let paint_cursors = cursor_mode & (CursorMode::Embedded as u32) != 0;
-        let restore_token_in = options
-            .get("restore_token")
-            .and_then(|v| <&str>::try_from(&**v).ok().map(str::to_string));
+        let parsed = parse_select_sources_opts(&options);
+        let types_mask = parsed.types_mask;
+        let multiple = parsed.multiple;
+        let persist_mode = parsed.persist_mode;
+        let paint_cursors = parsed.paint_cursors;
+        let restore_token_in = parsed.restore_token;
         let want_monitor = types_mask & (SourceType::Monitor as u32) != 0;
         let want_window = types_mask & (SourceType::Window as u32) != 0;
 
@@ -427,4 +410,163 @@ pub async fn serve(rt: Runtime) -> Result<Connection, Box<dyn std::error::Error 
         .await?;
     info!("D-Bus service registered as org.freedesktop.impl.portal.desktop.jwm");
     Ok(conn)
+}
+
+/// Parsed view of the `options` dict from `SelectSources`. Extracted so the
+/// option-parsing rules (defaults, bitmask checks, type coercion) can be unit
+/// tested without a live D-Bus stack or the wayland snapshot.
+#[derive(Debug, PartialEq)]
+pub(crate) struct SelectSourcesOpts {
+    pub types_mask: u32,
+    pub multiple: bool,
+    pub persist_mode: u32,
+    pub cursor_mode: u32,
+    /// True iff `cursor_mode` has the Embedded bit set. The compositor's
+    /// `paint_cursors` flag mirrors this — Hidden (1) → false, Embedded (2)
+    /// → true, Metadata (4) → false (we don't render the cursor; we'd
+    /// instead emit metadata, which we don't advertise yet).
+    pub paint_cursors: bool,
+    pub restore_token: Option<String>,
+}
+
+pub(crate) fn parse_select_sources_opts(
+    options: &HashMap<String, OwnedValue>,
+) -> SelectSourcesOpts {
+    let types_mask = options
+        .get("types")
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(SourceType::Monitor as u32);
+    let multiple = options
+        .get("multiple")
+        .and_then(|v| bool::try_from(v).ok())
+        .unwrap_or(false);
+    let persist_mode = options
+        .get("persist_mode")
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(0);
+    let cursor_mode = options
+        .get("cursor_mode")
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(CursorMode::Embedded as u32);
+    let paint_cursors = cursor_mode & (CursorMode::Embedded as u32) != 0;
+    let restore_token = options
+        .get("restore_token")
+        .and_then(|v| <&str>::try_from(&**v).ok().map(str::to_string));
+    SelectSourcesOpts {
+        types_mask,
+        multiple,
+        persist_mode,
+        cursor_mode,
+        paint_cursors,
+        restore_token,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zbus::zvariant::Value;
+
+    fn ov_u32(n: u32) -> OwnedValue {
+        Value::from(n).try_into().unwrap()
+    }
+    fn ov_bool(b: bool) -> OwnedValue {
+        Value::from(b).try_into().unwrap()
+    }
+    fn ov_str(s: &str) -> OwnedValue {
+        Value::from(s).try_into().unwrap()
+    }
+
+    #[test]
+    fn empty_options_yield_documented_defaults() {
+        let p = parse_select_sources_opts(&HashMap::new());
+        assert_eq!(p.types_mask, SourceType::Monitor as u32);
+        assert!(!p.multiple);
+        assert_eq!(p.persist_mode, 0);
+        assert_eq!(p.cursor_mode, CursorMode::Embedded as u32);
+        assert!(p.paint_cursors, "Embedded default means cursors are composited");
+        assert!(p.restore_token.is_none());
+    }
+
+    #[test]
+    fn cursor_mode_hidden_disables_paint_cursors() {
+        let mut opts = HashMap::new();
+        opts.insert("cursor_mode".into(), ov_u32(CursorMode::Hidden as u32));
+        let p = parse_select_sources_opts(&opts);
+        assert!(!p.paint_cursors);
+        assert_eq!(p.cursor_mode, CursorMode::Hidden as u32);
+    }
+
+    #[test]
+    fn cursor_mode_metadata_does_not_imply_painted_cursors() {
+        // Metadata mode would emit cursor info in PW metadata; we don't paint.
+        // Defensive: an unknown bit shouldn't accidentally enable painting.
+        let mut opts = HashMap::new();
+        opts.insert("cursor_mode".into(), ov_u32(CursorMode::Metadata as u32));
+        let p = parse_select_sources_opts(&opts);
+        assert!(!p.paint_cursors);
+    }
+
+    #[test]
+    fn embedded_combined_with_metadata_still_paints() {
+        let mut opts = HashMap::new();
+        let mixed = (CursorMode::Embedded as u32) | (CursorMode::Metadata as u32);
+        opts.insert("cursor_mode".into(), ov_u32(mixed));
+        let p = parse_select_sources_opts(&opts);
+        assert!(p.paint_cursors, "Embedded bit set anywhere → composite cursors");
+    }
+
+    #[test]
+    fn types_mask_window_only() {
+        let mut opts = HashMap::new();
+        opts.insert("types".into(), ov_u32(SourceType::Window as u32));
+        let p = parse_select_sources_opts(&opts);
+        assert_eq!(p.types_mask, SourceType::Window as u32);
+        let want_monitor = p.types_mask & (SourceType::Monitor as u32) != 0;
+        let want_window = p.types_mask & (SourceType::Window as u32) != 0;
+        assert!(!want_monitor);
+        assert!(want_window);
+    }
+
+    #[test]
+    fn types_mask_monitor_and_window() {
+        let mut opts = HashMap::new();
+        let both = (SourceType::Monitor as u32) | (SourceType::Window as u32);
+        opts.insert("types".into(), ov_u32(both));
+        let p = parse_select_sources_opts(&opts);
+        let want_monitor = p.types_mask & (SourceType::Monitor as u32) != 0;
+        let want_window = p.types_mask & (SourceType::Window as u32) != 0;
+        assert!(want_monitor);
+        assert!(want_window);
+    }
+
+    #[test]
+    fn multiple_and_persist_mode_round_trip() {
+        let mut opts = HashMap::new();
+        opts.insert("multiple".into(), ov_bool(true));
+        opts.insert("persist_mode".into(), ov_u32(2));
+        let p = parse_select_sources_opts(&opts);
+        assert!(p.multiple);
+        assert_eq!(p.persist_mode, 2);
+    }
+
+    #[test]
+    fn restore_token_extracted_as_owned_string() {
+        let mut opts = HashMap::new();
+        opts.insert("restore_token".into(), ov_str("abc123deadbeef"));
+        let p = parse_select_sources_opts(&opts);
+        assert_eq!(p.restore_token.as_deref(), Some("abc123deadbeef"));
+    }
+
+    #[test]
+    fn wrong_type_for_option_falls_back_to_default_not_panic() {
+        // Defense against misbehaving clients that pass e.g. a string where a
+        // u32 is expected. Parser must silently ignore and use the default.
+        let mut opts = HashMap::new();
+        opts.insert("types".into(), ov_str("not a u32"));
+        opts.insert("persist_mode".into(), ov_bool(true));
+        let p = parse_select_sources_opts(&opts);
+        assert_eq!(p.types_mask, SourceType::Monitor as u32);
+        assert_eq!(p.persist_mode, 0);
+    }
 }
