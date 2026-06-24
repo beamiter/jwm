@@ -89,10 +89,14 @@ pub struct DmabufBridge {
     /// from the capture thread's originals via `OwnedFd::try_clone` so each
     /// side has independent lifetime management.
     pub fds: Vec<OwnedFd>,
-    /// PW → capture: "please fill slot N".
-    pub fill_req_tx: mpsc::Sender<usize>,
-    /// Capture → PW: "slot N is filled" (value ignored; semaphore-style).
-    pub fill_done_rx: Mutex<mpsc::Receiver<()>>,
+    /// Monotonic request sequence allocator. Each PW on_process bumps this
+    /// and sends `(seq, slot_idx)` to capture. Done signals carry the same
+    /// seq back so stale dones from timed-out requests can be discarded.
+    pub next_req_seq: std::sync::atomic::AtomicU64,
+    /// PW → capture: `(seq, slot_idx)`.
+    pub fill_req_tx: mpsc::Sender<(u64, usize)>,
+    /// Capture → PW: the seq of the request just completed.
+    pub fill_done_rx: Mutex<mpsc::Receiver<u64>>,
 }
 
 pub type SharedBridge = Arc<DmabufBridge>;
@@ -267,9 +271,9 @@ fn run(
 
                 if let Some(bridge) = bridge.as_ref() {
                     // dmabuf path — look up which slot this pw_buffer's fd
-                    // corresponds to, request a fill, wait one frame, mark
-                    // chunk size. The fd was wired in add_buffer; we never
-                    // rewrite it here.
+                    // corresponds to, request a fill keyed by a unique seq,
+                    // wait up to one frame for the matching done. The fd
+                    // was wired in add_buffer; we never rewrite it here.
                     let fd = data.fd();
                     let slot_idx = match fd_to_slot.lock().unwrap().get(&fd) {
                         Some(&idx) => idx,
@@ -282,15 +286,48 @@ fn run(
                             return;
                         }
                     };
-                    let _ = bridge.fill_req_tx.send(slot_idx);
-                    let recv_res = {
+                    if slot_idx >= bridge.fds.len() {
+                        warn!(
+                            "dmabuf process: slot_idx {slot_idx} out of range (have {} fds)",
+                            bridge.fds.len()
+                        );
+                        let chunk = data.chunk_mut();
+                        *chunk.offset_mut() = 0;
+                        *chunk.stride_mut() = bridge.stride as i32;
+                        *chunk.size_mut() = 0;
+                        return;
+                    }
+                    // Seq protocol: each request gets a unique u64 id. Capture
+                    // echoes the seq when it signals done. If we time out on
+                    // request N, capture's eventual late done(N) gets read on
+                    // the next on_process cycle and recognized as stale (seq
+                    // != current) — discarded rather than misattributed to
+                    // request N+1. This is the only way to make timeout safe
+                    // when the worker keeps running after the deadline.
+                    let req_seq = bridge.next_req_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let _ = bridge.fill_req_tx.send((req_seq, slot_idx));
+                    let deadline = std::time::Instant::now() + Duration::from_millis(100);
+                    let filled = {
                         let rx = bridge.fill_done_rx.lock().unwrap();
-                        rx.recv_timeout(Duration::from_millis(50))
+                        loop {
+                            let now = std::time::Instant::now();
+                            if now >= deadline {
+                                break false;
+                            }
+                            match rx.recv_timeout(deadline - now) {
+                                Ok(seq) if seq == req_seq => break true,
+                                Ok(stale) => {
+                                    log::trace!("dmabuf: discarding stale done seq={stale} (want {req_seq})");
+                                    continue;
+                                }
+                                Err(_) => break false,
+                            }
+                        }
                     };
                     let chunk = data.chunk_mut();
                     *chunk.offset_mut() = 0;
                     *chunk.stride_mut() = bridge.stride as i32;
-                    *chunk.size_mut() = if recv_res.is_ok() { bridge.size } else { 0 };
+                    *chunk.size_mut() = if filled { bridge.size } else { 0 };
                     return;
                 }
 

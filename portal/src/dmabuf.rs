@@ -416,6 +416,75 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
+    /// Reproduces the bug the seq protocol exists to prevent: a slow worker
+    /// finishes request N *after* the requester timed out, and the requester
+    /// must NOT misattribute that late done to the next request.
+    #[test]
+    fn seq_protocol_discards_stale_done() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let (req_tx, req_rx) = mpsc::channel::<(u64, usize)>();
+        let (done_tx, done_rx) = mpsc::channel::<u64>();
+
+        // Worker: receives request, simulates 80ms of work, sends matching seq.
+        let worker = std::thread::spawn(move || {
+            while let Ok((seq, _slot)) = req_rx.recv() {
+                std::thread::sleep(Duration::from_millis(80));
+                let _ = done_tx.send(seq);
+            }
+        });
+
+        // Round 1: requester gives up after 20ms (way short of 80ms work).
+        let req1 = 1u64;
+        req_tx.send((req1, 0)).unwrap();
+        let deadline = Instant::now() + Duration::from_millis(20);
+        let filled1 = loop {
+            let now = Instant::now();
+            if now >= deadline {
+                break false;
+            }
+            match done_rx.recv_timeout(deadline - now) {
+                Ok(seq) if seq == req1 => break true,
+                Ok(_) => continue,
+                Err(_) => break false,
+            }
+        };
+        assert!(!filled1, "round 1 should time out");
+
+        // Round 2: starts well after round 1 worker finished. The stale
+        // done(1) is now sitting in the channel. Without the seq match, we'd
+        // read it and think round 2 succeeded immediately. With seq match,
+        // we discard it and wait for done(2).
+        std::thread::sleep(Duration::from_millis(100));
+        let req2 = 2u64;
+        req_tx.send((req2, 1)).unwrap();
+        let deadline = Instant::now() + Duration::from_millis(200);
+        let started = Instant::now();
+        let filled2 = loop {
+            let now = Instant::now();
+            if now >= deadline {
+                break false;
+            }
+            match done_rx.recv_timeout(deadline - now) {
+                Ok(seq) if seq == req2 => break true,
+                Ok(_) => continue,
+                Err(_) => break false,
+            }
+        };
+        assert!(filled2, "round 2 should succeed");
+        // It must have actually waited for the worker, not just consumed the
+        // stale done. Worker takes 80ms; allow a generous lower bound.
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(70),
+            "round 2 returned in {waited:?} — stale done was misattributed"
+        );
+
+        drop(req_tx);
+        worker.join().unwrap();
+    }
+
     #[test]
     fn pool_state_machine() {
         // Build a pool from synthetic Vec<DmabufBuffer> — we can't construct

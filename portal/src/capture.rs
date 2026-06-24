@@ -467,8 +467,8 @@ fn run_capture(
         let stride0 = buffers[0].stride;
         let size = stride0 as u32 * height;
         let modifier = buffers[0].modifier;
-        let (fill_req_tx, fill_req_rx) = mpsc::channel::<usize>();
-        let (fill_done_tx, fill_done_rx) = mpsc::channel::<()>();
+        let (fill_req_tx, fill_req_rx) = mpsc::channel::<(u64, usize)>();
+        let (fill_done_tx, fill_done_rx) = mpsc::channel::<u64>();
         let bridge = Arc::new(DmabufBridge {
             fourcc: pick,
             modifier,
@@ -477,6 +477,7 @@ fn run_capture(
             stride: stride0 as u32,
             size,
             fds: pw_fds,
+            next_req_seq: std::sync::atomic::AtomicU64::new(1),
             fill_req_tx,
             fill_done_rx: Mutex::new(fill_done_rx),
         });
@@ -611,8 +612,8 @@ struct DmabufSetup {
     _bufs: Vec<DmabufBuffer>,
     wl_buffers: Vec<wl_buffer::WlBuffer>,
     bridge: SharedBridge,
-    fill_req_rx: mpsc::Receiver<usize>,
-    fill_done_tx: mpsc::Sender<()>,
+    fill_req_rx: mpsc::Receiver<(u64, usize)>,
+    fill_done_tx: mpsc::Sender<u64>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -697,8 +698,8 @@ fn frame_loop_dmabuf(
     wl_buffers: &[wl_buffer::WlBuffer],
     width: u32,
     height: u32,
-    fill_req_rx: &mpsc::Receiver<usize>,
-    fill_done_tx: &mpsc::Sender<()>,
+    fill_req_rx: &mpsc::Receiver<(u64, usize)>,
+    fill_done_tx: &mpsc::Sender<u64>,
     qh: &QueueHandle<State>,
     shutdown_rx: &mpsc::Receiver<()>,
 ) -> Result<(), String> {
@@ -710,13 +711,17 @@ fn frame_loop_dmabuf(
             warn!("capture: session stopped by compositor");
             return Ok(());
         }
-        let slot_idx = match fill_req_rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(idx) => idx,
+        let (req_seq, slot_idx) = match fill_req_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(req) => req,
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
         };
         let Some(wl_buf) = wl_buffers.get(slot_idx) else {
-            warn!("capture: bad slot index {slot_idx} from PW");
+            warn!("capture: bad slot index {slot_idx} from PW (seq={req_seq})");
+            // Still ack — PW is waiting on this seq. Without the ack PW will
+            // time out and the next round will see this as stale anyway,
+            // but acking with the matching seq lets PW progress quickly.
+            let _ = fill_done_tx.send(req_seq);
             continue;
         };
 
@@ -740,22 +745,24 @@ fn frame_loop_dmabuf(
 
         match state.frame_status {
             FrameStatus::Ready => {
-                let _ = fill_done_tx.send(());
+                let _ = fill_done_tx.send(req_seq);
             }
             FrameStatus::Failed => {
-                warn!("capture: dmabuf frame failed: {:?}", state.frame_failure);
-                // Still signal done so PW doesn't hang on its wait — it will
-                // queue an empty chunk (size=0) which downstream treats as
-                // a dropped frame. Brief backoff so we don't tight-loop on a
+                warn!(
+                    "capture: dmabuf frame failed seq={req_seq}: {:?}",
+                    state.frame_failure
+                );
+                // Still ack so PW doesn't hang on its wait — it will queue
+                // an empty chunk (size=0) which downstream treats as a
+                // dropped frame. Brief backoff so we don't tight-loop on a
                 // persistently broken source.
-                let _ = fill_done_tx.send(());
+                let _ = fill_done_tx.send(req_seq);
                 std::thread::sleep(Duration::from_millis(100));
             }
             _ => {}
         }
 
         cap_frame.destroy();
-        let _ = height; // silence unused-warning in case the protocol stops using it
     }
 }
 
