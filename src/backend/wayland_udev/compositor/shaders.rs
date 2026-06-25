@@ -40,6 +40,11 @@ uniform int   u_decode_tf;
 uniform float u_decode_gamma;      // used only when u_decode_tf == TF_POWER
 uniform int   u_encode_tf;
 uniform float u_encode_gamma;
+// SOTA #2 Phase 2.2: scene-linear output. When 1, the fragment writes
+// linear values (skipping the final encode for CM surfaces; applying an
+// sRGB→linear decode for legacy non-CM surfaces so they end up linear
+// in the FP16 FBO). When 0 (default), behavior is unchanged.
+uniform int   u_scene_linear;
 in vec2 v_uv;
 out vec4 frag_color;
 
@@ -86,6 +91,15 @@ vec3 hlg_forward(vec3 l) {
     vec3 lo = sqrt(max(l * 3.0, 0.0));
     vec3 hi = A * log(max(12.0 * l - B, 1e-12)) + C;
     return mix(lo, hi, step(1.0 / 12.0, l));
+}
+
+// IEC 61966-2-1 sRGB inverse EOTF (encoded → linear). Used for the
+// legacy non-CM path under scene-linear compositing — clients without an
+// image description are assumed sRGB.
+vec3 srgb_inverse(vec3 c) {
+    vec3 lo = c / 12.92;
+    vec3 hi = pow(max((c + 0.055) / 1.055, 0.0), vec3(2.4));
+    return mix(lo, hi, step(0.04045, c));
 }
 
 vec3 decode_eotf(vec3 c, int kind, float gamma) {
@@ -140,7 +154,18 @@ void main() {
     if (u_color_managed == 1) {
         vec3 lin = decode_eotf(texel.rgb, u_decode_tf, u_decode_gamma);
         lin = u_color_matrix * lin;
-        texel.rgb = encode_eotf(lin, u_encode_tf, u_encode_gamma);
+        // Skip the final encode when writing to a linear-storage FBO so
+        // GL blending mixes in linear space; the encode pass at the end
+        // of the frame applies the output EOTF once over the composited
+        // result. Phase 2.2.
+        if (u_scene_linear == 1) {
+            texel.rgb = lin;
+        } else {
+            texel.rgb = encode_eotf(lin, u_encode_tf, u_encode_gamma);
+        }
+    } else if (u_scene_linear == 1) {
+        // Non-CM client under scene-linear: assume sRGB and linearize.
+        texel.rgb = srgb_inverse(texel.rgb);
     }
 
     float a = u_opacity >= 0.0 ? u_opacity : texel.a;
@@ -311,6 +336,100 @@ void main() {
     float border_mask = outer - inner;
     float a = u_border_color.a * border_mask;
     frag_color = vec4(u_border_color.rgb * a, a);  // premultiplied alpha
+}
+"#;
+
+// ---------------------------------------------------------------------------
+// SOTA #2 Phase 2.2: scene-linear encode pass
+// ---------------------------------------------------------------------------
+//
+// Fullscreen quad that reads the FP16 linear-scene FBO and applies the
+// output's forward EOTF, writing display-encoded values to output_fbo.
+// Phase 2.3 binds and dispatches this pass at the end of the window draw.
+//
+// Uses BLUR_DOWN_VERTEX for the vertex stage (same gl_VertexID-based
+// fullscreen quad). The TF discriminant values match TransferKind in
+// color_pipeline.rs and the constants at the top of FRAGMENT_SHADER.
+
+pub const SCENE_LINEAR_ENCODE_FRAGMENT: &str = r#"#version 300 es
+precision highp float;
+
+const int TF_LINEAR = 0;
+const int TF_POWER = 1;
+const int TF_BT1886 = 2;
+const int TF_GAMMA22 = 3;
+const int TF_PQ = 4;
+const int TF_HLG = 5;
+
+uniform sampler2D u_texture;
+uniform int   u_encode_tf;
+uniform float u_encode_gamma;
+in vec2 v_uv;
+out vec4 frag_color;
+
+// IEC 61966-2-1 sRGB forward EOTF (linear → encoded).
+vec3 srgb_forward(vec3 c) {
+    c = max(c, 0.0);
+    vec3 lo = c * 12.92;
+    vec3 hi = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;
+    return mix(lo, hi, step(0.0031308, c));
+}
+
+vec3 pq_forward(vec3 l) {
+    const float M1 = 0.1593017578125;
+    const float M2 = 78.84375;
+    const float C1 = 0.8359375;
+    const float C2 = 18.8515625;
+    const float C3 = 18.6875;
+    vec3 lm = pow(max(l, 0.0), vec3(M1));
+    return pow((C1 + C2 * lm) / (1.0 + C3 * lm), vec3(M2));
+}
+
+vec3 hlg_forward(vec3 l) {
+    const float A = 0.17883277;
+    const float B = 0.28466892;
+    const float C = 0.5599107;
+    vec3 lo = sqrt(max(l * 3.0, 0.0));
+    vec3 hi = A * log(max(12.0 * l - B, 1e-12)) + C;
+    return mix(lo, hi, step(1.0 / 12.0, l));
+}
+
+void main() {
+    vec4 texel = texture(u_texture, v_uv);
+    vec3 c = max(texel.rgb, 0.0);
+    if (u_encode_tf == TF_LINEAR)       c = clamp(c, 0.0, 1.0);
+    else if (u_encode_tf == TF_POWER)   c = clamp(pow(c, vec3(1.0 / max(u_encode_gamma, 1e-3))), 0.0, 1.0);
+    else if (u_encode_tf == TF_BT1886)  c = clamp(pow(c, vec3(1.0 / 2.4)), 0.0, 1.0);
+    else if (u_encode_tf == TF_GAMMA22) c = clamp(pow(c, vec3(1.0 / 2.2)), 0.0, 1.0);
+    else if (u_encode_tf == TF_PQ)      c = clamp(pq_forward(c), 0.0, 1.0);
+    else if (u_encode_tf == TF_HLG)     c = clamp(hlg_forward(c), 0.0, 1.0);
+    else                                 c = clamp(srgb_forward(c), 0.0, 1.0);
+    frag_color = vec4(c, texel.a);
+}
+"#;
+
+// Companion fullscreen-quad decode pass: reads the encoded output_fbo
+// (containing wallpaper + shadows + anything else not yet linear-aware)
+// and writes its linearization into the FP16 linear_fbo, so the window
+// draws blend correctly over it. Defaults to sRGB since legacy passes
+// produce sRGB-encoded values.
+
+pub const SCENE_LINEAR_DECODE_FRAGMENT: &str = r#"#version 300 es
+precision highp float;
+
+uniform sampler2D u_texture;
+in vec2 v_uv;
+out vec4 frag_color;
+
+vec3 srgb_inverse(vec3 c) {
+    vec3 lo = c / 12.92;
+    vec3 hi = pow(max((c + 0.055) / 1.055, 0.0), vec3(2.4));
+    return mix(lo, hi, step(0.04045, c));
+}
+
+void main() {
+    vec4 texel = texture(u_texture, v_uv);
+    frag_color = vec4(srgb_inverse(clamp(texel.rgb, 0.0, 1.0)), texel.a);
 }
 "#;
 

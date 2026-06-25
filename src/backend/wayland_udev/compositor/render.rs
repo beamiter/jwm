@@ -700,6 +700,13 @@ impl WaylandCompositor {
             // enables color management. Ancillary draws (blur/ghost) share this
             // program and must not inherit a stale transform.
             gl.Uniform1i(self.win_uniforms.color_managed, 0);
+            // SOTA #2 Phase 2.2: scene-linear output. Default 0 (encoded
+            // output, unchanged behavior). Phase 2.3 will route the
+            // window-draw pass to linear_fbo and flip this to 1, with
+            // matching decode-in / encode-out fullscreen passes wrapping
+            // the loop. Bind once outside the loop — ancillary blur/ghost
+            // draws share this program and must not inherit a stale value.
+            gl.Uniform1i(self.win_uniforms.scene_linear, 0);
             gl.BindVertexArray(self.quad_vao);
 
             for &(win_id, x, y, w, h) in visible_scene {

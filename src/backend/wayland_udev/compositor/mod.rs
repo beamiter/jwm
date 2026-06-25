@@ -192,6 +192,9 @@ pub(crate) struct WindowUniforms {
     pub decode_gamma: i32,
     pub encode_tf: i32,
     pub encode_gamma: i32,
+    // SOTA #2 Phase 2.2 scene-linear output. -1 if not present in the
+    // compiled program (e.g. older builds before the uniform was added).
+    pub scene_linear: i32,
 }
 
 pub(crate) struct ShadowUniforms {
@@ -246,6 +249,22 @@ pub(crate) struct PostprocessUniforms {
 }
 
 #[allow(dead_code)]
+#[allow(dead_code)]
+pub(crate) struct SceneLinearEncodeUniforms {
+    pub rect: i32,
+    pub projection: i32,
+    pub texture: i32,
+    pub encode_tf: i32,
+    pub encode_gamma: i32,
+}
+
+#[allow(dead_code)]
+pub(crate) struct SceneLinearDecodeUniforms {
+    pub rect: i32,
+    pub projection: i32,
+    pub texture: i32,
+}
+
 pub(crate) struct TransitionUniforms {
     pub rect: i32,
     pub projection: i32,
@@ -555,6 +574,20 @@ pub(crate) struct WaylandCompositor {
     blur_up_program: u32,
     border_program: u32,
     postprocess_program: u32,
+    // SOTA #2 Phase 2.2: scene-linear encode (linear FBO → encoded
+    // output_fbo) and decode (encoded output_fbo → linear FBO) passes.
+    // Programs are always built so that an `Effect` toggle could enable
+    // the path at runtime; render path checks linear_fbo != 0 to decide
+    // whether to dispatch them. Each pass shares BLUR_DOWN_VERTEX with
+    // the blur chain (same gl_VertexID-based fullscreen quad).
+    #[allow(dead_code)]
+    scene_linear_encode_program: u32,
+    #[allow(dead_code)]
+    scene_linear_decode_program: u32,
+    #[allow(dead_code)]
+    scene_linear_encode_uniforms: SceneLinearEncodeUniforms,
+    #[allow(dead_code)]
+    scene_linear_decode_uniforms: SceneLinearDecodeUniforms,
     transition_program: u32,
     cube_program: u32,
     portal_program: u32,
@@ -1034,6 +1067,16 @@ impl WaylandCompositor {
             create_program(gl, shaders::VERTEX_SHADER, shaders::BORDER_FRAGMENT_SHADER)?;
         let postprocess_program =
             create_program(gl, shaders::VERTEX_SHADER, shaders::POSTPROCESS_FRAGMENT_SHADER)?;
+        let scene_linear_encode_program = create_program(
+            gl,
+            shaders::BLUR_DOWN_VERTEX,
+            shaders::SCENE_LINEAR_ENCODE_FRAGMENT,
+        )?;
+        let scene_linear_decode_program = create_program(
+            gl,
+            shaders::BLUR_DOWN_VERTEX,
+            shaders::SCENE_LINEAR_DECODE_FRAGMENT,
+        )?;
         let transition_program =
             create_program(gl, shaders::VERTEX_SHADER, shaders::TRANSITION_FRAGMENT_SHADER)?;
         let cube_program =
@@ -1086,6 +1129,7 @@ impl WaylandCompositor {
             decode_gamma: get_uniform_loc(gl, program, "u_decode_gamma"),
             encode_tf: get_uniform_loc(gl, program, "u_encode_tf"),
             encode_gamma: get_uniform_loc(gl, program, "u_encode_gamma"),
+            scene_linear: get_uniform_loc(gl, program, "u_scene_linear"),
         };
 
         let shadow_uniforms = ShadowUniforms {
@@ -1129,6 +1173,20 @@ impl WaylandCompositor {
             hdr_enabled: get_uniform_loc(gl, postprocess_program, "u_hdr_enabled"),
             hdr_peak_nits: get_uniform_loc(gl, postprocess_program, "u_hdr_peak_nits"),
             tone_mapping_method: get_uniform_loc(gl, postprocess_program, "u_tone_mapping_method"),
+        };
+
+        let scene_linear_encode_uniforms = SceneLinearEncodeUniforms {
+            rect: get_uniform_loc(gl, scene_linear_encode_program, "u_rect"),
+            projection: get_uniform_loc(gl, scene_linear_encode_program, "u_projection"),
+            texture: get_uniform_loc(gl, scene_linear_encode_program, "u_texture"),
+            encode_tf: get_uniform_loc(gl, scene_linear_encode_program, "u_encode_tf"),
+            encode_gamma: get_uniform_loc(gl, scene_linear_encode_program, "u_encode_gamma"),
+        };
+
+        let scene_linear_decode_uniforms = SceneLinearDecodeUniforms {
+            rect: get_uniform_loc(gl, scene_linear_decode_program, "u_rect"),
+            projection: get_uniform_loc(gl, scene_linear_decode_program, "u_projection"),
+            texture: get_uniform_loc(gl, scene_linear_decode_program, "u_texture"),
         };
 
         let transition_uniforms = TransitionUniforms {
@@ -1296,6 +1354,10 @@ impl WaylandCompositor {
             blur_up_program,
             border_program,
             postprocess_program,
+            scene_linear_encode_program,
+            scene_linear_decode_program,
+            scene_linear_encode_uniforms,
+            scene_linear_decode_uniforms,
             transition_program,
             cube_program,
             portal_program,
