@@ -259,6 +259,17 @@ pub struct BehaviorConfig {
     #[serde(default)]
     pub color_management_render_path: bool,
 
+    /// SOTA #2: composite in scene-linear space (FP16 scene/blur FBOs,
+    /// window shader decode-only, final encode at output). When this flag
+    /// is off, compositing happens in display-encoded space (the historical
+    /// path; gamut-correct only for sRGB-on-sRGB). When on, blending and
+    /// blur become physically correct across mixed-gamut surfaces, at the
+    /// cost of doubled scene/blur FBO memory bandwidth. Requires
+    /// `color_management_render_path` to also be on; ignored otherwise.
+    /// Default off pending HW visual verification.
+    #[serde(default)]
+    pub scene_linear_compositing: bool,
+
     // --- Feature 11: Performance debug HUD ---
     /// Show FPS / frame time debug overlay.
     #[serde(default)]
@@ -1023,6 +1034,7 @@ impl Default for Config {
                     hdr_peak_nits: default_hdr_peak_nits(),
                     tone_mapping_method: default_tone_mapping_method(),
                     color_management_render_path: false,
+                    scene_linear_compositing: false,
                     debug_hud: false,
                     profiling_enabled: false,
                     direct_scanout_enabled: default_true(),

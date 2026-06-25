@@ -586,6 +586,17 @@ pub(crate) struct WaylandCompositor {
     quad_vao: u32,
     output_fbo: u32,
     output_texture: u32,
+    /// SOTA #2 Phase 2.1: FP16 (RGBA16F) intermediate target used when
+    /// `behavior.scene_linear_compositing` is on. Allocated alongside
+    /// output_fbo with the same dimensions and torn down/resized in
+    /// lockstep. Zero when the gate is off — render path checks for
+    /// this sentinel and falls back to the encoded-space pipeline.
+    /// Phase 2.2 will wire the window-shader linear-output path and the
+    /// final encode pass that reads from this texture.
+    #[allow(dead_code)]
+    linear_fbo: u32,
+    #[allow(dead_code)]
+    linear_texture: u32,
     scene_fbo: u32,
     scene_texture: u32,
     blur_fbos: Vec<BlurFboLevel>,
@@ -931,6 +942,8 @@ unsafe fn get_uniform_loc(gl: &ffi::Gles2, program: u32, name: &str) -> i32 {
 
 const GL_RGB10_A2: u32 = 0x8059;
 const GL_UNSIGNED_INT_2_10_10_10_REV: u32 = 0x8368;
+const GL_RGBA16F: u32 = 0x881A;
+const GL_HALF_FLOAT: u32 = 0x140B;
 
 unsafe fn create_fbo_texture(gl: &ffi::Gles2, w: u32, h: u32) -> (u32, u32) {
     unsafe { create_fbo_texture_fmt(gl, w, h, ffi::RGBA8) }
@@ -940,6 +953,14 @@ unsafe fn create_fbo_texture_10bit(gl: &ffi::Gles2, w: u32, h: u32) -> (u32, u32
     unsafe { create_fbo_texture_fmt(gl, w, h, GL_RGB10_A2) }
 }
 
+/// Allocate a half-float RGBA FBO for scene-linear compositing. Linear
+/// values can exceed [0, 1] (e.g. PQ peak-luminance scaling), so an 8-bit
+/// or 10-bit unsigned-normalized format would clamp them. RGBA16F is the
+/// GLES 3.0-portable storage with enough range and precision.
+unsafe fn create_fbo_texture_fp16(gl: &ffi::Gles2, w: u32, h: u32) -> (u32, u32) {
+    unsafe { create_fbo_texture_fmt(gl, w, h, GL_RGBA16F) }
+}
+
 unsafe fn create_fbo_texture_fmt(gl: &ffi::Gles2, w: u32, h: u32, internal_format: u32) -> (u32, u32) {
     unsafe {
         let mut tex = 0u32;
@@ -947,6 +968,8 @@ unsafe fn create_fbo_texture_fmt(gl: &ffi::Gles2, w: u32, h: u32, internal_forma
         gl.BindTexture(ffi::TEXTURE_2D, tex);
         let pixel_type = if internal_format == GL_RGB10_A2 {
             GL_UNSIGNED_INT_2_10_10_10_REV
+        } else if internal_format == GL_RGBA16F {
+            GL_HALF_FLOAT
         } else {
             ffi::UNSIGNED_BYTE
         };
@@ -1197,6 +1220,20 @@ impl WaylandCompositor {
             create_fbo_texture(gl, screen_w, screen_h)
         };
 
+        // ----- SOTA #2 Phase 2.1: optional FP16 linear-scene FBO -----
+        // Allocated only when behavior.scene_linear_compositing is on.
+        // Zero/zero sentinel when off; the render path (Phase 2.2) checks
+        // for linear_fbo != 0 to decide whether to take the linear path.
+        let scene_linear_enabled = crate::config::CONFIG
+            .load()
+            .behavior()
+            .scene_linear_compositing;
+        let (linear_fbo, linear_texture) = if scene_linear_enabled {
+            create_fbo_texture_fp16(gl, screen_w, screen_h)
+        } else {
+            (0, 0)
+        };
+
         // When the output is 10-bit, keep the whole offscreen chain (scene
         // capture, blur, postprocess, transition) at 10-bit too — an 8-bit
         // intermediate would reintroduce banding before the final 10-bit blit.
@@ -1289,6 +1326,8 @@ impl WaylandCompositor {
             quad_vao,
             output_fbo,
             output_texture,
+            linear_fbo,
+            linear_texture,
             scene_fbo,
             scene_texture,
             blur_fbos,
@@ -1902,6 +1941,18 @@ impl WaylandCompositor {
             };
             self.output_fbo = output_fbo;
             self.output_texture = output_texture;
+
+            // Mirror the linear-scene FBO if it was active. Zero means the
+            // gate was off at construction; we don't dynamically enable it
+            // mid-session (that needs a backend re-init for shader-program
+            // recompilation in Phase 2.2 anyway).
+            if self.linear_fbo != 0 {
+                gl.DeleteFramebuffers(1, &self.linear_fbo);
+                gl.DeleteTextures(1, &self.linear_texture);
+                let (lf, lt) = create_fbo_texture_fp16(gl, w, h);
+                self.linear_fbo = lf;
+                self.linear_texture = lt;
+            }
 
             // Keep the offscreen chain at the same bit depth as on construction
             // (see new()): 10-bit when the output is 10-bit, else 8-bit. Without
