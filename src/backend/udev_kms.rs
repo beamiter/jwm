@@ -113,11 +113,27 @@ struct KmsOutputState {
     color_pipeline_caps: Option<crate::backend::api::KmsColorPipelineCaps>,
     installed_gamma_lut:
         Option<(u64, crate::backend::wayland_udev::color_pipeline::TransferKind)>,
+    /// Tracked CTM blob id (always identity in 3.3b — no semantic tag needed
+    /// because every install carries the same payload).
+    installed_ctm: Option<u64>,
     /// Per-output target transfer function, derived from EDID HDR caps at
     /// output init.
     output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind,
     /// `true` while DPMS is off; the LUT install path skips this output.
     dpms_off: bool,
+}
+
+/// Outcome of `refresh_color_pipeline_offload`, threaded to the renderer so the
+/// shader path can disable the fragment-shader encode when the CRTC GAMMA_LUT
+/// took over. `hw_ctm_active` is unused in 3.3b (identity payload only — the
+/// per-surface ColorTransform target switch that consumes it lands in 3.3c),
+/// but is part of the contract so callers don't need a second refactor.
+#[derive(Clone, Copy)]
+pub(super) struct ColorPipelineDecision {
+    pub hw_encode_active: bool,
+    pub shader_tf: i32,
+    pub shader_gamma: f32,
+    pub hw_ctm_active: bool,
 }
 
 pub(super) struct KmsState {
@@ -592,6 +608,12 @@ impl KmsState {
                     self.outputs[output_idx].output_name);
             }
         }
+        if !on && self.outputs[output_idx].installed_ctm.is_some() {
+            if let Err(e) = self.uninstall_ctm(output_idx) {
+                log::debug!("[kms-cm] DPMS-off CTM teardown failed on {}: {e}",
+                    self.outputs[output_idx].output_name);
+            }
+        }
         let mgr = self.drm_output_manager.lock();
         let dev = mgr.device();
         let mut result: Result<(), String> = Err("DPMS property not found on connector".to_string());
@@ -739,14 +761,117 @@ impl KmsState {
         Ok(())
     }
 
-    /// Returns `(hw_encode_active, shader_encode_tf, shader_encode_gamma)`.
-    /// HW offload is all-or-nothing across active outputs because the
-    /// compositor renders a single global FBO that feeds every output.
+    /// Install a 3×3 CTM (color transform matrix) on the CRTC. Mirrors
+    /// `install_gamma_lut`: variable-length blob via `drm_ffi::mode::
+    /// create_property_blob`, atomic prop bind, free-on-failure, replace-old-
+    /// after-success. 3.3b only ever passes `IDENTITY_CTM`.
+    pub(super) fn install_ctm(
+        &mut self,
+        output_idx: usize,
+        matrix: [f32; 9],
+    ) -> Result<(), String> {
+        let output = self.outputs.get(output_idx).ok_or("output index out of range")?;
+        let crtc = output.crtc;
+        let caps = output
+            .color_pipeline_caps
+            .as_ref()
+            .ok_or("no color pipeline caps cached for output")?;
+        if !caps.ctm_supported {
+            return Err("CRTC does not advertise CTM".to_string());
+        }
+        let old_blob = output.installed_ctm;
+
+        let mut ctm = crate::backend::wayland_udev::color_pipeline::build_ctm(matrix);
+        let mgr = self.drm_output_manager.lock();
+        let dev = mgr.device();
+        let new_blob_id: u64 = {
+            use std::os::unix::io::AsFd;
+            let bytes = unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut ctm as *mut _ as *mut u8,
+                    std::mem::size_of::<
+                        crate::backend::wayland_udev::color_pipeline::DrmColorCtm,
+                    >(),
+                )
+            };
+            let blob = drm_ffi::mode::create_property_blob(dev.as_fd(), bytes)
+                .map_err(|e| format!("create_property_blob(CTM) failed: {e:?}"))?;
+            u64::from(blob.blob_id)
+        };
+
+        let mut set_result: Result<(), String> = Err("CTM property not found on CRTC".to_string());
+        if let Ok(props) = dev.get_properties(crtc) {
+            let (handles, _values) = props.as_props_and_values();
+            for &prop_handle in handles {
+                if let Ok(info) = dev.get_property(prop_handle) {
+                    if info.name().to_str() == Ok("CTM") {
+                        set_result = Self::set_drm_property(dev, crtc, prop_handle, new_blob_id);
+                        break;
+                    }
+                }
+            }
+        }
+        if let Err(e) = &set_result {
+            let _ = dev.destroy_property_blob(new_blob_id);
+            return Err(e.clone());
+        }
+        if let Some(old) = old_blob {
+            let _ = dev.destroy_property_blob(old);
+        }
+        drop(mgr);
+
+        self.outputs[output_idx].installed_ctm = Some(new_blob_id);
+        log::info!(
+            "[kms-cm] installed CTM (identity) on {}",
+            self.outputs[output_idx].output_name,
+        );
+        Ok(())
+    }
+
+    /// Zero the output's `CTM` and destroy any tracked blob. No-op when
+    /// nothing is installed.
+    pub(super) fn uninstall_ctm(&mut self, output_idx: usize) -> Result<(), String> {
+        let output = self.outputs.get(output_idx).ok_or("output index out of range")?;
+        let blob = match output.installed_ctm {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+        let crtc = output.crtc;
+        let mgr = self.drm_output_manager.lock();
+        let dev = mgr.device();
+        let mut prop_result: Result<(), String> = Err("CTM property not found on CRTC".to_string());
+        if let Ok(props) = dev.get_properties(crtc) {
+            let (handles, _values) = props.as_props_and_values();
+            for &prop_handle in handles {
+                if let Ok(info) = dev.get_property(prop_handle) {
+                    if info.name().to_str() == Ok("CTM") {
+                        prop_result = Self::set_drm_property(dev, crtc, prop_handle, 0);
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = dev.destroy_property_blob(blob);
+        drop(mgr);
+
+        self.outputs[output_idx].installed_ctm = None;
+        let name = &self.outputs[output_idx].output_name;
+        if let Err(e) = &prop_result {
+            log::debug!("[kms-cm] uninstall CTM on {name}: prop clear failed: {e}");
+        } else {
+            log::info!("[kms-cm] uninstalled CTM on {name}");
+        }
+        Ok(())
+    }
+
+    /// Returns the per-frame color-pipeline decision. HW offload is
+    /// all-or-nothing across active outputs because the compositor renders a
+    /// single global FBO that feeds every output.
     pub(super) fn refresh_color_pipeline_offload(
         &mut self,
         state: &crate::backend::wayland::state::JwmWaylandState,
-    ) -> (bool, i32, f32) {
-        use crate::backend::wayland_udev::color_pipeline::TransferKind;
+    ) -> ColorPipelineDecision {
+        use crate::backend::wayland_udev::color_pipeline::{IDENTITY_CTM, TransferKind};
 
         let gate_on = crate::config::CONFIG
             .load()
@@ -754,15 +879,25 @@ impl KmsState {
             .kms_color_pipeline_offload;
         let n = self.outputs.len();
 
+        // Precompute participation once — `participating` is read in many
+        // passes below and each pass also takes `&mut self` to call
+        // install/uninstall, so a closure borrowing `self.outputs` can't
+        // coexist with the mutable calls.
+        let participating: Vec<bool> = self
+            .outputs
+            .iter()
+            .map(|o| !o.dpms_off && !state.soft_disabled_outputs.contains(&o.output_name))
+            .collect();
+
         let uniform_tf: Option<TransferKind> = {
             let mut tf: Option<TransferKind> = None;
-            for o in &self.outputs {
-                if o.dpms_off || state.soft_disabled_outputs.contains(&o.output_name) {
+            for i in 0..n {
+                if !participating[i] {
                     continue;
                 }
                 match tf {
-                    None => tf = Some(o.output_tf),
-                    Some(t) if t != o.output_tf => {
+                    None => tf = Some(self.outputs[i].output_tf),
+                    Some(t) if t != self.outputs[i].output_tf => {
                         tf = None;
                         break;
                     }
@@ -776,91 +911,137 @@ impl KmsState {
         let shader_tf = shader_fallback.shader_id();
         let shader_gamma = shader_fallback.gamma_for_shader();
 
-        // Every TransferKind variant has a finite forward() now.
-        let lut_target: Option<TransferKind> = uniform_tf;
+        let mut decision = ColorPipelineDecision {
+            hw_encode_active: false,
+            shader_tf,
+            shader_gamma,
+            hw_ctm_active: false,
+        };
 
-        let Some(target) = lut_target.filter(|_| gate_on) else {
+        let Some(target) = uniform_tf.filter(|_| gate_on) else {
             for i in 0..n {
                 if self.outputs[i].installed_gamma_lut.is_some() {
                     let _ = self.uninstall_gamma_lut(i);
                 }
+                if self.outputs[i].installed_ctm.is_some() {
+                    let _ = self.uninstall_ctm(i);
+                }
             }
-            return (false, shader_tf, shader_gamma);
+            return decision;
         };
 
-        // Pass 1: drop LUTs on non-participating outputs (DPMS-off /
-        // soft-disabled) so CRTCs don't carry stale color state.
+        // --- GAMMA_LUT activation: drop on non-participating, then cap-check
+        // and install all-or-nothing across participating outputs.
         for i in 0..n {
-            let participating = {
-                let o = &self.outputs[i];
-                !o.dpms_off && !state.soft_disabled_outputs.contains(&o.output_name)
-            };
-            if !participating && self.outputs[i].installed_gamma_lut.is_some() {
+            if !participating[i] && self.outputs[i].installed_gamma_lut.is_some() {
                 let _ = self.uninstall_gamma_lut(i);
             }
         }
 
-        // Pass 2: every participating output must have caps for the target TF
-        // (GAMMA_LUT + size ≥ 256). If even one doesn't, peel every install
-        // back on participating outputs and bail to the shader path.
         let mut any_participating = false;
-        let mut all_capable = true;
+        let mut lut_capable = true;
         for i in 0..n {
-            let o = &self.outputs[i];
-            if o.dpms_off || state.soft_disabled_outputs.contains(&o.output_name) {
+            if !participating[i] {
                 continue;
             }
             any_participating = true;
-            let cap_ok = o
+            let cap_ok = self.outputs[i]
                 .color_pipeline_caps
                 .as_ref()
                 .map(|c| c.gamma_lut_supported && c.gamma_lut_size >= 256)
                 .unwrap_or(false);
             if !cap_ok {
-                all_capable = false;
+                lut_capable = false;
                 break;
             }
         }
-        if !any_participating || !all_capable {
+        if !any_participating || !lut_capable {
             for i in 0..n {
-                let participating = {
-                    let o = &self.outputs[i];
-                    !o.dpms_off && !state.soft_disabled_outputs.contains(&o.output_name)
-                };
-                if participating && self.outputs[i].installed_gamma_lut.is_some() {
+                if participating[i] && self.outputs[i].installed_gamma_lut.is_some() {
                     let _ = self.uninstall_gamma_lut(i);
                 }
             }
-            return (false, shader_tf, shader_gamma);
+        } else {
+            let mut lut_install_failed = false;
+            for i in 0..n {
+                if !participating[i] {
+                    continue;
+                }
+                if matches!(self.outputs[i].installed_gamma_lut, Some((_, t)) if t == target) {
+                    continue;
+                }
+                if let Err(e) = self.install_gamma_lut(i, target) {
+                    log::warn!(
+                        "[kms-cm] LUT install on {} failed ({e}); rolling back frame's LUTs",
+                        self.outputs[i].output_name,
+                    );
+                    for j in 0..n {
+                        if self.outputs[j].installed_gamma_lut.is_some() {
+                            let _ = self.uninstall_gamma_lut(j);
+                        }
+                    }
+                    lut_install_failed = true;
+                    break;
+                }
+            }
+            decision.hw_encode_active = !lut_install_failed;
         }
 
-        // Pass 3: install on participating outputs that don't already have the
-        // target TF. On any failure, roll back the whole frame to avoid a
-        // mixed-encoding presentation.
+        // --- CTM activation: independent of LUT. Drop on non-participating,
+        // verify ctm_supported across participants, install identity all-or-
+        // nothing. Identity is a pixel no-op; we install it as a foundation
+        // for 3.3c's real gamut matrix.
         for i in 0..n {
-            {
-                let o = &self.outputs[i];
-                if o.dpms_off || state.soft_disabled_outputs.contains(&o.output_name) {
-                    continue;
-                }
-                if matches!(o.installed_gamma_lut, Some((_, t)) if t == target) {
-                    continue;
-                }
-            }
-            if let Err(e) = self.install_gamma_lut(i, target) {
-                log::warn!(
-                    "[kms-cm] install on {} failed ({e}); rolling back this frame's offload",
-                    self.outputs[i].output_name,
-                );
-                for j in 0..n {
-                    if self.outputs[j].installed_gamma_lut.is_some() {
-                        let _ = self.uninstall_gamma_lut(j);
-                    }
-                }
-                return (false, shader_tf, shader_gamma);
+            if !participating[i] && self.outputs[i].installed_ctm.is_some() {
+                let _ = self.uninstall_ctm(i);
             }
         }
-        (true, shader_tf, shader_gamma)
+
+        let mut ctm_capable = any_participating;
+        for i in 0..n {
+            if !participating[i] {
+                continue;
+            }
+            let cap_ok = self.outputs[i]
+                .color_pipeline_caps
+                .as_ref()
+                .map(|c| c.ctm_supported)
+                .unwrap_or(false);
+            if !cap_ok {
+                ctm_capable = false;
+                break;
+            }
+        }
+        if !ctm_capable {
+            for i in 0..n {
+                if participating[i] && self.outputs[i].installed_ctm.is_some() {
+                    let _ = self.uninstall_ctm(i);
+                }
+            }
+        } else {
+            let mut ctm_install_failed = false;
+            for i in 0..n {
+                if !participating[i] || self.outputs[i].installed_ctm.is_some() {
+                    continue;
+                }
+                if let Err(e) = self.install_ctm(i, IDENTITY_CTM) {
+                    log::warn!(
+                        "[kms-cm] CTM install on {} failed ({e}); rolling back frame's CTMs",
+                        self.outputs[i].output_name,
+                    );
+                    for j in 0..n {
+                        if self.outputs[j].installed_ctm.is_some() {
+                            let _ = self.uninstall_ctm(j);
+                        }
+                    }
+                    ctm_install_failed = true;
+                    break;
+                }
+            }
+            decision.hw_ctm_active = !ctm_install_failed;
+        }
+
+        decision
     }
 
     pub(super) fn set_gamma_for_output(&mut self, output_idx: usize, gamma_size: u32, ramp: &[u16]) -> Result<(), String> {
@@ -2169,6 +2350,7 @@ impl KmsState {
                 output_name,
                 color_pipeline_caps,
                 installed_gamma_lut: None,
+                installed_ctm: None,
                 output_tf,
                 dpms_off: false,
             });
@@ -3145,7 +3327,10 @@ impl Drop for KmsState {
         let blobs: Vec<u64> = self
             .outputs
             .iter()
-            .filter_map(|o| o.installed_gamma_lut.map(|(id, _)| id))
+            .flat_map(|o| {
+                o.installed_gamma_lut.map(|(id, _)| id).into_iter()
+                    .chain(o.installed_ctm.into_iter())
+            })
             .collect();
         if blobs.is_empty() {
             return;

@@ -205,6 +205,30 @@ fn srgb_inverse(e: f32) -> f32 {
 }
 
 pub use drm_ffi::drm_color_lut as DrmColorLut;
+pub use drm_ffi::drm_color_ctm as DrmColorCtm;
+
+/// Identity 3×3 color matrix, row-major. Public mirror of the private `IDENTITY_3X3`
+/// used by `ColorTransform`; exposed so callers (e.g. the KMS CTM install path)
+/// can request an explicit no-op transform.
+pub const IDENTITY_CTM: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+/// Pack a row-major 3×3 f32 matrix into the kernel's `drm_color_ctm` layout
+/// (9 × s31.32 fixed-point as `u64`, sign in bit 63, magnitude in bits 62..0).
+/// Matrix values are clamped to the representable magnitude range before packing.
+pub fn build_ctm(matrix: [f32; 9]) -> DrmColorCtm {
+    let mut out = DrmColorCtm { matrix: [0; 9] };
+    for (i, &v) in matrix.iter().enumerate() {
+        let magnitude = (v.abs() * (1u64 << 32) as f32).round();
+        let mag_bits = (magnitude as u64).min(0x7FFF_FFFF_FFFF_FFFF);
+        let sign_bit = if v.is_sign_negative() && magnitude > 0.0 {
+            1u64 << 63
+        } else {
+            0
+        };
+        out.matrix[i] = sign_bit | mag_bits;
+    }
+    out
+}
 
 /// Build a hardware GAMMA_LUT for a given transfer function. The output is a
 /// gray ramp (R == G == B at every entry) of `size` entries. Each entry encodes
@@ -683,6 +707,47 @@ mod tests {
         assert_eq!(lut[lut.len() - 1].red, 65535);
         for w in lut.windows(2) {
             assert!(w[1].red >= w[0].red, "HLG LUT non-monotonic at {}", w[0].red);
+        }
+    }
+
+    #[test]
+    fn build_ctm_identity_packs_to_one_and_zero() {
+        let ctm = build_ctm(IDENTITY_CTM);
+        let one = 1u64 << 32;
+        assert_eq!(ctm.matrix, [one, 0, 0, 0, one, 0, 0, 0, one]);
+    }
+
+    #[test]
+    fn build_ctm_negative_sets_sign_bit() {
+        let m = [-0.5_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let ctm = build_ctm(m);
+        let entry = ctm.matrix[0];
+        assert_eq!(entry >> 63, 1, "sign bit must be set for negative");
+        assert_eq!(entry & 0x7FFF_FFFF_FFFF_FFFF, 1u64 << 31, "magnitude 0.5 → 2^31");
+        // Zero entries stay 0 (no sign bit on +0.0).
+        for &v in &ctm.matrix[1..] {
+            assert_eq!(v, 0);
+        }
+    }
+
+    #[test]
+    fn build_ctm_round_trip_unpack() {
+        // A non-trivial real matrix: sRGB→BT.2020 gamut.
+        let m = rgb_to_rgb_matrix(
+            &ColorSpacePrimaries::SRGB_D65,
+            &ColorSpacePrimaries::BT2020_D65,
+        );
+        let ctm = build_ctm(m);
+        // Unpack each u64 back to f32 and verify within 1 LSB (~2.3e-10).
+        for (i, &packed) in ctm.matrix.iter().enumerate() {
+            let neg = packed >> 63 == 1;
+            let mag = (packed & 0x7FFF_FFFF_FFFF_FFFF) as f64 / (1u64 << 32) as f64;
+            let unpacked = if neg { -mag } else { mag } as f32;
+            assert!(
+                (unpacked - m[i]).abs() < 1e-9,
+                "entry {i}: packed→{unpacked} vs source→{}",
+                m[i]
+            );
         }
     }
 
