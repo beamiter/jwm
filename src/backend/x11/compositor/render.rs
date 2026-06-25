@@ -1839,7 +1839,7 @@ impl Compositor {
             let text_h = self.hud_text_height as f32;
             let hud_w = text_w + pad * 2.0;
             let hud_h = text_h + pad * 2.0;
-            let hud_x = self.screen_w as f32 - hud_w - 10.0;
+            let hud_x = 10.0f32;
             let hud_y = 10.0f32;
 
             unsafe {
