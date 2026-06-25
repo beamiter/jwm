@@ -2158,7 +2158,10 @@ impl KmsState {
             // Direct scanout detection: if there's a single fullscreen window and no
             // top/overlay layer surfaces, bypass the compositor FBO and let DRM attempt
             // direct scanout via the primary plane (zero-copy, no GPU composition).
+            // Respects the `fullscreen_unredirect` config flag, mirroring the X11
+            // backend's check_fullscreen_unredirect (which gates XComposite unredirect).
             let direct_scanout_eligible = compositor.is_some()
+                && crate::config::CONFIG.load().behavior().fullscreen_unredirect
                 && elements.is_empty()  // no cursor on this output, no overlay layers
                 && state.window_stack.len() == 1
                 && state.window_stack.first().map_or(false, |win| {

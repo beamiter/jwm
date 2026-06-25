@@ -273,10 +273,22 @@ impl WaylandCompositor {
             log::info!("[compositor] Shader hot-reload: {} shaders changed", reloaded_shaders.len());
         }
 
-        // Direct scanout: check if we can bypass composition entirely
+        // Direct scanout eligibility tracking (stats only).
+        //
+        // The actual zero-copy bypass happens at the KMS level in udev_kms.rs
+        // (`direct_scanout_eligible`): when one fullscreen window owns the
+        // output, smithay's DrmCompositor skips our FBO entirely and assigns
+        // the client surface to the primary plane. Our GL composite work is
+        // still done here because we don't know in advance whether KMS will
+        // actually accept the plane assignment (format/modifier mismatch
+        // would force smithay's GL fallback — which uses our FBO).
+        //
+        // Previously this site also returned early when eligibility held,
+        // skipping the GL composite. That was unsafe: if KMS could not take
+        // the fast path (e.g. cursor moved between this decision and the
+        // KMS render), smithay would scan out a stale FBO. SOTA #4 Phase 4.1
+        // removed the early return; we now only track eligibility for metrics.
         if !self.transition_active && !self.overview_active && !self.expose_active && !self.postprocess_active {
-            // Reuse a persistent scratch Vec (taken out so we can borrow other
-            // self fields while filling it) instead of allocating every frame.
             let mut scanout_windows = std::mem::take(&mut self.scratch_scanout);
             scanout_windows.clear();
             for &(win_id, x, y, w, h) in scene {
@@ -292,13 +304,8 @@ impl WaylandCompositor {
                     }));
                 }
             }
-            let (can_scanout, _scanout_win) = self.direct_scanout_mgr.check_scene(&scanout_windows, focused);
+            let _ = self.direct_scanout_mgr.check_scene(&scanout_windows, focused);
             self.scratch_scanout = scanout_windows;
-            if can_scanout && self.fullscreen_unredirect {
-                self.frame_profiler.end_frame();
-                self.frame_rate_limiter.mark_frame();
-                return true;
-            }
         }
 
         // =================================================================

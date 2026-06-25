@@ -841,10 +841,6 @@ pub(crate) struct WaylandCompositor {
     detect_client_opacity: bool,
     blur_use_frame_extents: bool,
 
-    // --- Fullscreen unredirect ---
-    fullscreen_unredirect: bool,
-    unredirected_window: Option<u64>,
-
     // --- Partial-damage (scissored) redraw ---
     // Experimental: when on, calm frames (no blur/animation/effects) only
     // re-shade the changed bounding box instead of the whole screen. Default
@@ -1591,10 +1587,6 @@ impl WaylandCompositor {
             rounded_corners_exclude: Vec::new(),
             detect_client_opacity: true,
             blur_use_frame_extents: false,
-
-            // Fullscreen unredirect
-            fullscreen_unredirect: false,
-            unredirected_window: None,
 
             // Partial-damage redraw: on by default. The allow_partial gate
             // (render.rs) only engages it on calm frames (no animation, no blur,

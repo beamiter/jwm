@@ -89,7 +89,9 @@ impl WaylandCompositor {
         self.border_color_unfocused = b.border_color_unfocused;
 
         // --- Fullscreen unredirect ---
-        self.fullscreen_unredirect = b.fullscreen_unredirect;
+        // Note: the `fullscreen_unredirect` behavior flag is consumed directly
+        // in udev_kms.rs at the KMS direct-scanout eligibility check; no
+        // compositor field is needed here.
 
         // --- VRR ---
         // vrr_active is managed by update_vrr_state(), we just note config is read
