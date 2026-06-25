@@ -1949,6 +1949,52 @@ impl CompositorHandler for JwmWaylandState {
         panic!("Missing compositor client state (neither JwmClientState nor XWaylandClientData)")
     }
 
+    fn new_surface(&mut self, surface: &WlSurface) {
+        // Per-surface pre-commit hook for wp-linux-drm-syncobj-v1 explicit
+        // sync. Without this the smithay protocol module accepts acquire/
+        // release points but never actually waits on the acquire fence, so a
+        // commit could be applied before the client's GPU writes are visible.
+        // The hook reads DrmSyncobjCachedState.pending().acquire_point on
+        // every commit, builds a (Blocker, EventSource) pair, registers the
+        // source with calloop, and parks the commit on the blocker — calloop
+        // releases it the instant the kernel signals the syncobj eventfd.
+        smithay::wayland::compositor::add_pre_commit_hook::<JwmWaylandState, _>(
+            surface,
+            |state, _dh, surface| {
+                if state.drm_syncobj_state.is_none() {
+                    return;
+                }
+                let acquire_point = with_states(surface, |states| {
+                    let mut cached = states
+                        .cached_state
+                        .get::<smithay::wayland::drm_syncobj::DrmSyncobjCachedState>();
+                    cached.pending().acquire_point.clone()
+                });
+                let Some(acquire) = acquire_point else { return };
+                let (blocker, source) = match acquire.generate_blocker() {
+                    Ok(pair) => pair,
+                    Err(err) => {
+                        log::warn!(
+                            "[drm_syncobj] generate_blocker failed, falling back to implicit sync: {err}"
+                        );
+                        return;
+                    }
+                };
+                let Some(client) = surface.client() else { return };
+                let registered = state.loop_handle.insert_source(source, move |_, _, data| {
+                    let dh = data.display_handle.clone();
+                    data.client_compositor_state(&client).blocker_cleared(data, &dh);
+                    Ok(())
+                });
+                if registered.is_err() {
+                    log::warn!("[drm_syncobj] failed to register sync-point source with calloop");
+                    return;
+                }
+                smithay::wayland::compositor::add_blocker(surface, blocker);
+            },
+        );
+    }
+
     fn commit(&mut self, surface: &WlSurface) {
         // Snapshot the buffer assignment kind BEFORE on_commit_buffer_handler consumes it.
         // on_commit_buffer_handler calls RendererSurfaceState::update_buffer which takes
