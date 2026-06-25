@@ -34,6 +34,7 @@ const int TF_BT1886 = 2;
 const int TF_GAMMA22 = 3;
 const int TF_PQ = 4;
 const int TF_HLG = 5;
+const int TF_SRGB = 6;
 uniform int   u_color_managed;     // 0 = bypass (no transform), 1 = apply
 uniform mat3  u_color_matrix;      // linear surface→output RGB (row-major in Rust → already column-major here per GLSL convention; we transpose at bind time)
 uniform int   u_decode_tf;
@@ -102,6 +103,13 @@ vec3 srgb_inverse(vec3 c) {
     return mix(lo, hi, step(0.04045, c));
 }
 
+vec3 srgb_forward(vec3 c) {
+    c = max(c, 0.0);
+    vec3 lo = c * 12.92;
+    vec3 hi = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;
+    return mix(lo, hi, step(0.0031308, c));
+}
+
 vec3 decode_eotf(vec3 c, int kind, float gamma) {
     c = clamp(c, 0.0, 1.0);
     if (kind == TF_LINEAR)  return c;
@@ -110,6 +118,7 @@ vec3 decode_eotf(vec3 c, int kind, float gamma) {
     if (kind == TF_GAMMA22) return pow(c, vec3(2.2));
     if (kind == TF_PQ)      return pq_inverse(c);
     if (kind == TF_HLG)     return hlg_inverse(c);
+    if (kind == TF_SRGB)    return srgb_inverse(c);
     return c;
 }
 
@@ -121,6 +130,7 @@ vec3 encode_eotf(vec3 c, int kind, float gamma) {
     if (kind == TF_GAMMA22) return clamp(pow(c, vec3(1.0 / 2.2)), 0.0, 1.0);
     if (kind == TF_PQ)      return clamp(pq_forward(c), 0.0, 1.0);
     if (kind == TF_HLG)     return clamp(hlg_forward(c), 0.0, 1.0);
+    if (kind == TF_SRGB)    return clamp(srgb_forward(c), 0.0, 1.0);
     return clamp(c, 0.0, 1.0);
 }
 
@@ -360,6 +370,7 @@ const int TF_BT1886 = 2;
 const int TF_GAMMA22 = 3;
 const int TF_PQ = 4;
 const int TF_HLG = 5;
+const int TF_SRGB = 6;
 
 uniform sampler2D u_texture;
 uniform int   u_encode_tf;
@@ -403,6 +414,7 @@ void main() {
     else if (u_encode_tf == TF_GAMMA22) c = clamp(pow(c, vec3(1.0 / 2.2)), 0.0, 1.0);
     else if (u_encode_tf == TF_PQ)      c = clamp(pq_forward(c), 0.0, 1.0);
     else if (u_encode_tf == TF_HLG)     c = clamp(hlg_forward(c), 0.0, 1.0);
+    // TF_SRGB and the -1 default both encode sRGB; fall through to the else.
     else                                 c = clamp(srgb_forward(c), 0.0, 1.0);
     frag_color = vec4(c, texel.a);
 }

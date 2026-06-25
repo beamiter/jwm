@@ -270,6 +270,15 @@ pub struct BehaviorConfig {
     #[serde(default)]
     pub scene_linear_compositing: bool,
 
+    /// Offload the final sRGB OETF encode to the CRTC's `GAMMA_LUT` hardware
+    /// pipeline. Active only when every connected, DPMS-on output exposes
+    /// `GAMMA_LUT` with size ≥ 256; otherwise the shader encode runs. The
+    /// offload is all-or-nothing per frame to keep multi-output sessions
+    /// consistent (never half-encoded across screens). Bit-identical to
+    /// gate-off when no output supports it. Default off pending HW visual A/B.
+    #[serde(default)]
+    pub kms_color_pipeline_offload: bool,
+
     // --- Feature 11: Performance debug HUD ---
     /// Show FPS / frame time debug overlay.
     #[serde(default)]
@@ -1035,6 +1044,7 @@ impl Default for Config {
                     tone_mapping_method: default_tone_mapping_method(),
                     color_management_render_path: false,
                     scene_linear_compositing: false,
+                    kms_color_pipeline_offload: false,
                     debug_hud: false,
                     profiling_enabled: false,
                     direct_scanout_enabled: default_true(),

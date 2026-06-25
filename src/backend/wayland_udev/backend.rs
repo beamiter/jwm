@@ -3130,9 +3130,19 @@ impl Backend for UdevBackend {
             if let Some(presented_at) = kms.borrow_mut().take_presentation_time() {
                 compositor.on_vblank_presented(presented_at);
             }
+            // Decide once per frame whether the per-output CRTC GAMMA_LUT
+            // will do the OETF at scanout. When true, render_frame skips the
+            // shader encode pass (avoiding double encoding); when false, the
+            // shader continues to encode. All-or-nothing across active outputs
+            // is enforced inside the helper.
+            let hw_encode_active = kms
+                .borrow_mut()
+                .refresh_color_pipeline_offload(&self.state);
             let rendered = kms
                 .borrow_mut()
-                .with_renderer(|gl| compositor.render_frame(gl, &full_scene, focused_window))
+                .with_renderer(|gl| {
+                    compositor.render_frame(gl, &full_scene, focused_window, hw_encode_active)
+                })
                 .unwrap_or(false);
             if crf_log_this {
                 log::info!("[crf] render_frame returned {rendered}");

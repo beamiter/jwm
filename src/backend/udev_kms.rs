@@ -96,6 +96,25 @@ struct KmsOutputState {
 
     last_vblank: Option<std::time::Duration>,
     refresh_interval: std::time::Duration,
+
+    /// Cached `output.name()` — smithay's accessor allocates a fresh `String`
+    /// per call, and the per-frame color-pipeline refresh would otherwise pay
+    /// that allocation for every output every frame to compare against
+    /// `soft_disabled_outputs`.
+    output_name: String,
+
+    /// Per-CRTC color pipeline state. Caps are probed once at output init.
+    /// `installed_gamma_lut` carries `Some((blob_id, tf))` when a GAMMA_LUT
+    /// blob is currently bound on the CRTC, so the activation refresh can
+    /// no-op when the desired TF already matches and so teardown / DPMS-off
+    /// can `destroy_property_blob` cleanly.
+    color_pipeline_caps: Option<crate::backend::api::KmsColorPipelineCaps>,
+    installed_gamma_lut:
+        Option<(u64, crate::backend::wayland_udev::color_pipeline::TransferKind)>,
+    /// `true` while DPMS is off — `refresh_color_pipeline_offload` skips this
+    /// output entirely. Set by `set_dpms_for_output`. Defaults to `false`
+    /// (DPMS on at init).
+    dpms_off: bool,
 }
 
 pub(super) struct KmsState {
@@ -442,36 +461,14 @@ impl KmsState {
         })
     }
 
-    /// Query per-CRTC KMS color pipeline capabilities for a given output.
-    /// Probes for the DEGAMMA_LUT / GAMMA_LUT / CTM CRTC properties and the
-    /// corresponding `_SIZE` properties. SOTA #3 Phase 3.1: probe only —
-    /// nothing in the render path consumes this yet. Foundation for the
-    /// upcoming "encode-pass via GAMMA_LUT" offload work.
+    /// Return the cached per-CRTC color pipeline capabilities for a given
+    /// output. Caps are probed once at output init (see `KmsState::new`) and
+    /// stored on `KmsOutputState.color_pipeline_caps`; this is a pure read.
     pub(super) fn query_color_pipeline_caps_for_output(
-        &mut self,
+        &self,
         output_idx: usize,
     ) -> Option<crate::backend::api::KmsColorPipelineCaps> {
-        let output = self.outputs.get(output_idx)?;
-        let crtc = output.crtc;
-        let mgr = self.drm_output_manager.lock();
-        let dev = mgr.device();
-        let mut caps = crate::backend::api::KmsColorPipelineCaps::default();
-        if let Ok(props) = dev.get_properties(crtc) {
-            let (handles, values) = props.as_props_and_values();
-            for (i, &prop_handle) in handles.iter().enumerate() {
-                if let Ok(info) = dev.get_property(prop_handle) {
-                    match info.name().to_str().unwrap_or("") {
-                        "DEGAMMA_LUT" => caps.degamma_lut_supported = true,
-                        "GAMMA_LUT" => caps.gamma_lut_supported = true,
-                        "CTM" => caps.ctm_supported = true,
-                        "DEGAMMA_LUT_SIZE" => caps.degamma_lut_size = values[i] as u32,
-                        "GAMMA_LUT_SIZE" => caps.gamma_lut_size = values[i] as u32,
-                        _ => {}
-                    }
-                }
-            }
-        }
-        Some(caps)
+        self.outputs.get(output_idx)?.color_pipeline_caps.clone()
     }
 
     /// Set a single DRM object property. On atomic drivers this issues an atomic
@@ -580,20 +577,269 @@ impl KmsState {
     pub(super) fn set_dpms_for_output(&mut self, output_idx: usize, on: bool) -> Result<(), String> {
         let output = self.outputs.get(output_idx).ok_or("output index out of range")?;
         let conn_handle = output.connector;
+        // When powering off, drop any installed GAMMA_LUT and free its blob
+        // so the CRTC isn't carrying stale color state while blanked; the next
+        // render_if_needed pass after power-on will reinstall via
+        // refresh_color_pipeline_offload.
+        if !on && self.outputs[output_idx].installed_gamma_lut.is_some() {
+            // Best-effort: log + continue. DPMS itself is more important than
+            // a clean LUT teardown.
+            if let Err(e) = self.uninstall_gamma_lut(output_idx) {
+                log::debug!("[kms-cm] DPMS-off LUT teardown failed on {}: {e}",
+                    self.outputs[output_idx].output_name);
+            }
+        }
         let mgr = self.drm_output_manager.lock();
         let dev = mgr.device();
+        let mut result: Result<(), String> = Err("DPMS property not found on connector".to_string());
         if let Ok(props) = dev.get_properties(conn_handle) {
             let (handles, _values) = props.as_props_and_values();
             for &prop_handle in handles {
                 if let Ok(info) = dev.get_property(prop_handle) {
                     if info.name().to_str() == Ok("DPMS") {
                         let val = if on { 0 } else { 3 }; // 0=On, 3=Off
-                        return Self::set_drm_property(dev, conn_handle, prop_handle, val);
+                        result = Self::set_drm_property(dev, conn_handle, prop_handle, val);
+                        break;
                     }
                 }
             }
         }
-        Err("DPMS property not found on connector".to_string())
+        drop(mgr);
+        // Track DPMS state only on success — refresh_color_pipeline_offload
+        // reads dpms_off to decide whether to skip the output. If we wrote
+        // here on a failed set, the next refresh would either re-install the
+        // LUT on a powered-down CRTC or skip a still-powered-on one.
+        if result.is_ok() {
+            self.outputs[output_idx].dpms_off = !on;
+        }
+        result
+    }
+
+    // ============================================================
+    // KMS color pipeline activation (GAMMA_LUT)
+    // ============================================================
+
+    /// Push a `GAMMA_LUT` blob for `tf` to the output's CRTC. Creates a fresh
+    /// blob, atomically sets the prop, then `destroy_property_blob`s any
+    /// previously-installed blob for the same output. Stores
+    /// `(blob_id, tf)` on `KmsOutputState.installed_gamma_lut`.
+    pub(super) fn install_gamma_lut(
+        &mut self,
+        output_idx: usize,
+        tf: crate::backend::wayland_udev::color_pipeline::TransferKind,
+    ) -> Result<(), String> {
+        let output = self.outputs.get(output_idx).ok_or("output index out of range")?;
+        let crtc = output.crtc;
+        let caps = output
+            .color_pipeline_caps
+            .as_ref()
+            .ok_or("no color pipeline caps cached for output")?;
+        if !caps.gamma_lut_supported {
+            return Err("CRTC does not advertise GAMMA_LUT".to_string());
+        }
+        let size = caps.gamma_lut_size as usize;
+        if size < 2 {
+            return Err(format!("GAMMA_LUT_SIZE={size} is below the minimum of 2"));
+        }
+        let old_blob = output.installed_gamma_lut.map(|(id, _)| id);
+
+        let mut lut = crate::backend::wayland_udev::color_pipeline::build_gamma_lut(tf, size);
+        let mgr = self.drm_output_manager.lock();
+        let dev = mgr.device();
+        // drm 0.14's `create_property_blob<T: Sized>` uses `size_of::<T>()` and
+        // can't accept a variable-length slice. Smithay solves this in
+        // PlaneDamageClips by calling `drm_ffi::mode::create_property_blob`
+        // directly on a `&mut [u8]` view of the array.
+        let new_blob_id: u64 = {
+            use std::os::unix::io::AsFd;
+            let bytes = unsafe {
+                std::slice::from_raw_parts_mut(
+                    lut.as_mut_ptr() as *mut u8,
+                    std::mem::size_of::<
+                        crate::backend::wayland_udev::color_pipeline::DrmColorLut,
+                    >() * lut.len(),
+                )
+            };
+            let blob = drm_ffi::mode::create_property_blob(dev.as_fd(), bytes)
+                .map_err(|e| format!("create_property_blob(GAMMA_LUT) failed: {e:?}"))?;
+            u64::from(blob.blob_id)
+        };
+
+        // Locate GAMMA_LUT property handle on the CRTC and set it.
+        let mut set_result: Result<(), String> = Err("GAMMA_LUT property not found on CRTC".to_string());
+        if let Ok(props) = dev.get_properties(crtc) {
+            let (handles, _values) = props.as_props_and_values();
+            for &prop_handle in handles {
+                if let Ok(info) = dev.get_property(prop_handle) {
+                    if info.name().to_str() == Ok("GAMMA_LUT") {
+                        set_result = Self::set_drm_property(dev, crtc, prop_handle, new_blob_id);
+                        break;
+                    }
+                }
+            }
+        }
+        if let Err(e) = &set_result {
+            // Failed atomic commit → free the just-created blob, leave state untouched.
+            let _ = dev.destroy_property_blob(new_blob_id);
+            return Err(e.clone());
+        }
+        // Replace old blob (if any) only after the new one is live.
+        if let Some(old) = old_blob {
+            let _ = dev.destroy_property_blob(old);
+        }
+        drop(mgr);
+
+        self.outputs[output_idx].installed_gamma_lut = Some((new_blob_id, tf));
+        log::info!(
+            "[kms-cm] installed GAMMA_LUT on {} (size={size}, tf={tf:?})",
+            self.outputs[output_idx].output_name,
+        );
+        Ok(())
+    }
+
+    /// Zero the output's `GAMMA_LUT` (revert to driver default) and destroy
+    /// any tracked blob. No-op when nothing is installed.
+    pub(super) fn uninstall_gamma_lut(&mut self, output_idx: usize) -> Result<(), String> {
+        let output = self.outputs.get(output_idx).ok_or("output index out of range")?;
+        let blob = match output.installed_gamma_lut {
+            Some((id, _)) => id,
+            None => return Ok(()),
+        };
+        let crtc = output.crtc;
+        let mgr = self.drm_output_manager.lock();
+        let dev = mgr.device();
+        // Set GAMMA_LUT to 0 first so the CRTC reverts before the blob is
+        // destroyed. Best-effort: even if this fails we still try to free the
+        // blob (a leaked blob is preferable to a dangling kernel reference).
+        let mut prop_result: Result<(), String> = Err("GAMMA_LUT property not found on CRTC".to_string());
+        if let Ok(props) = dev.get_properties(crtc) {
+            let (handles, _values) = props.as_props_and_values();
+            for &prop_handle in handles {
+                if let Ok(info) = dev.get_property(prop_handle) {
+                    if info.name().to_str() == Ok("GAMMA_LUT") {
+                        prop_result = Self::set_drm_property(dev, crtc, prop_handle, 0);
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = dev.destroy_property_blob(blob);
+        drop(mgr);
+
+        self.outputs[output_idx].installed_gamma_lut = None;
+        let name = &self.outputs[output_idx].output_name;
+        if let Err(e) = &prop_result {
+            log::debug!("[kms-cm] uninstall GAMMA_LUT on {name}: prop clear failed: {e}");
+        } else {
+            log::info!("[kms-cm] uninstalled GAMMA_LUT on {name}");
+        }
+        Ok(())
+    }
+
+    /// Per-frame orchestrator. Returns whether HW encode offload is active
+    /// **for this frame across all outputs**: true iff the gate is on and
+    /// every active (DPMS-on, has caps, size ≥ 256) output ended this call
+    /// with the target TF installed. False otherwise → caller keeps the GL
+    /// shader encode pass enabled.
+    ///
+    /// The all-or-nothing rule avoids half-encoded multi-output sessions:
+    /// the compositor renders a single global FBO that feeds every output,
+    /// so if one output can't offload, none can.
+    pub(super) fn refresh_color_pipeline_offload(
+        &mut self,
+        state: &crate::backend::wayland::state::JwmWaylandState,
+    ) -> bool {
+        let gate_on = crate::config::CONFIG
+            .load()
+            .behavior()
+            .kms_color_pipeline_offload;
+        let target = crate::backend::wayland_udev::color_pipeline::TransferKind::Srgb;
+        let n = self.outputs.len();
+
+        if !gate_on {
+            for i in 0..n {
+                if self.outputs[i].installed_gamma_lut.is_some() {
+                    let _ = self.uninstall_gamma_lut(i);
+                }
+            }
+            return false;
+        }
+
+        // Pass 1: any non-participating output (DPMS-off or soft-disabled)
+        // drops its LUT so the CRTC isn't carrying stale color state. Uses the
+        // cached `output_name` to avoid the per-frame `String` that
+        // `smithay::output::Output::name()` allocates on every call.
+        for i in 0..n {
+            let participating = {
+                let o = &self.outputs[i];
+                !o.dpms_off && !state.soft_disabled_outputs.contains(&o.output_name)
+            };
+            if !participating && self.outputs[i].installed_gamma_lut.is_some() {
+                let _ = self.uninstall_gamma_lut(i);
+            }
+        }
+
+        // Pass 2: every participating output must have caps for the target TF
+        // (GAMMA_LUT + size ≥ 256). If even one doesn't, peel every install
+        // back on participating outputs and return false.
+        let mut any_participating = false;
+        let mut all_capable = true;
+        for i in 0..n {
+            let o = &self.outputs[i];
+            if o.dpms_off || state.soft_disabled_outputs.contains(&o.output_name) {
+                continue;
+            }
+            any_participating = true;
+            let cap_ok = o
+                .color_pipeline_caps
+                .as_ref()
+                .map(|c| c.gamma_lut_supported && c.gamma_lut_size >= 256)
+                .unwrap_or(false);
+            if !cap_ok {
+                all_capable = false;
+                break;
+            }
+        }
+        if !any_participating || !all_capable {
+            for i in 0..n {
+                let participating = {
+                    let o = &self.outputs[i];
+                    !o.dpms_off && !state.soft_disabled_outputs.contains(&o.output_name)
+                };
+                if participating && self.outputs[i].installed_gamma_lut.is_some() {
+                    let _ = self.uninstall_gamma_lut(i);
+                }
+            }
+            return false;
+        }
+
+        // Pass 3: install on participating outputs that don't already have the
+        // target TF. On any failure, roll back the whole frame to avoid a
+        // mixed-encoding presentation.
+        for i in 0..n {
+            {
+                let o = &self.outputs[i];
+                if o.dpms_off || state.soft_disabled_outputs.contains(&o.output_name) {
+                    continue;
+                }
+                if matches!(o.installed_gamma_lut, Some((_, t)) if t == target) {
+                    continue;
+                }
+            }
+            if let Err(e) = self.install_gamma_lut(i, target) {
+                log::warn!(
+                    "[kms-cm] install on {} failed ({e}); rolling back this frame's offload",
+                    self.outputs[i].output_name,
+                );
+                for j in 0..n {
+                    if self.outputs[j].installed_gamma_lut.is_some() {
+                        let _ = self.uninstall_gamma_lut(j);
+                    }
+                }
+                return false;
+            }
+        }
+        true
     }
 
     pub(super) fn set_gamma_for_output(&mut self, output_idx: usize, gamma_size: u32, ramp: &[u16]) -> Result<(), String> {
@@ -1850,7 +2096,33 @@ impl KmsState {
                 }
             }
 
+            // SOTA #3 Phase 3.1: probe color-pipeline caps inline (the
+            // standalone helper takes &mut self which isn't available here).
+            // Cached on KmsOutputState; consumed by refresh_color_pipeline_offload.
+            let color_pipeline_caps = {
+                let mgr = drm_output_manager.lock();
+                let dev = mgr.device();
+                let mut caps = crate::backend::api::KmsColorPipelineCaps::default();
+                if let Ok(props) = dev.get_properties(p.crtc) {
+                    let (handles, values) = props.as_props_and_values();
+                    for (i, &prop_handle) in handles.iter().enumerate() {
+                        if let Ok(info) = dev.get_property(prop_handle) {
+                            match info.name().to_str().unwrap_or("") {
+                                "DEGAMMA_LUT" => caps.degamma_lut_supported = true,
+                                "GAMMA_LUT" => caps.gamma_lut_supported = true,
+                                "CTM" => caps.ctm_supported = true,
+                                "DEGAMMA_LUT_SIZE" => caps.degamma_lut_size = values[i] as u32,
+                                "GAMMA_LUT_SIZE" => caps.gamma_lut_size = values[i] as u32,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                Some(caps)
+            };
+
             let refresh_interval = p.frame_callback_throttle.unwrap_or(std::time::Duration::from_millis(16));
+            let output_name = p.output.name();
             outputs.push(KmsOutputState {
                 crtc: p.crtc,
                 connector: p.connector,
@@ -1867,6 +2139,10 @@ impl KmsState {
                 surfaces_on_output: HashSet::new(),
                 last_vblank: None,
                 refresh_interval,
+                output_name,
+                color_pipeline_caps,
+                installed_gamma_lut: None,
+                dpms_off: false,
             });
         }
 
@@ -2799,6 +3075,29 @@ impl KmsState {
             if !self.flush_pending.swap(true, Ordering::SeqCst) {
                 let _ = self.flush_tx.send(());
             }
+        }
+    }
+}
+
+impl Drop for KmsState {
+    /// Best-effort cleanup of any GAMMA_LUT blobs still tracked at teardown.
+    /// The kernel reclaims blobs on FD close anyway, so this is belt-and-braces
+    /// — it eliminates the brief window in which an orderly shutdown leaks a
+    /// blob reference and avoids "blob leaked" dmesg warnings under
+    /// drm.debug=0x4.
+    fn drop(&mut self) {
+        let blobs: Vec<u64> = self
+            .outputs
+            .iter()
+            .filter_map(|o| o.installed_gamma_lut.map(|(id, _)| id))
+            .collect();
+        if blobs.is_empty() {
+            return;
+        }
+        let mgr = self.drm_output_manager.lock();
+        let dev = mgr.device();
+        for id in blobs {
+            let _ = dev.destroy_property_blob(id);
         }
     }
 }

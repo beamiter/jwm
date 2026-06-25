@@ -88,6 +88,10 @@ pub enum TransferKind {
     St2084Pq,
     /// Hybrid Log-Gamma (Rec. ITU-R BT.2100 / ARIB STD-B67).
     Hlg,
+    /// IEC 61966-2-1 sRGB — piecewise (linear segment near black, ≈2.4 power
+    /// above). Distinct from `Bt1886` and `Gamma22`: the SOTA #3 GAMMA_LUT
+    /// offload path needs the exact piecewise OETF, not a power approximation.
+    Srgb,
 }
 
 impl TransferKind {
@@ -123,6 +127,7 @@ impl TransferKind {
             Self::Gamma22 => 3,
             Self::St2084Pq => 4,
             Self::Hlg => 5,
+            Self::Srgb => 6,
         }
     }
 
@@ -157,8 +162,67 @@ impl TransferKind {
             Self::Gamma22 => x.powf(2.2),
             Self::St2084Pq => pq_inverse(x),
             Self::Hlg => hlg_inverse(x),
+            Self::Srgb => srgb_inverse(x),
         }
     }
+
+    /// Apply this curve's forward OETF to a scene-linear value in 0..1.
+    /// Returns the encoded value in 0..1, suitable for quantizing into a
+    /// hardware GAMMA_LUT entry. Only implemented for variants the SOTA #3
+    /// GAMMA_LUT offload path uses; other variants panic so a future caller
+    /// gets a loud signal rather than silent wrong output.
+    pub fn forward(self, x: f32) -> f32 {
+        let x = x.clamp(0.0, 1.0);
+        match self {
+            Self::Linear => x,
+            Self::Srgb => srgb_forward(x),
+            Self::Power { gamma_x10000 } => {
+                let g = (gamma_x10000 as f32 / 10_000.0).max(1e-3);
+                x.powf(1.0 / g)
+            }
+            Self::Bt1886 => x.powf(1.0 / 2.4),
+            Self::Gamma22 => x.powf(1.0 / 2.2),
+            Self::St2084Pq => todo!("implement pq_forward before enabling HDR LUT path"),
+            Self::Hlg => todo!("implement hlg_forward before enabling HDR LUT path"),
+        }
+    }
+}
+
+/// IEC 61966-2-1 sRGB OETF (linear → encoded), piecewise.
+fn srgb_forward(l: f32) -> f32 {
+    if l <= 0.003_130_8 {
+        12.92 * l
+    } else {
+        1.055 * l.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// IEC 61966-2-1 sRGB EOTF (encoded → linear), piecewise.
+fn srgb_inverse(e: f32) -> f32 {
+    if e <= 0.040_45 {
+        e / 12.92
+    } else {
+        ((e + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+pub use drm_ffi::drm_color_lut as DrmColorLut;
+
+/// Build a hardware GAMMA_LUT for a given transfer function. The output is a
+/// gray ramp (R == G == B at every entry) of `size` entries. Each entry encodes
+/// `tf.forward(i / (size - 1))` scaled into the 16-bit unsigned fixed-point
+/// range expected by the kernel. Caller guarantees `size >= 2`.
+pub fn build_gamma_lut(tf: TransferKind, size: usize) -> Vec<DrmColorLut> {
+    let denom = (size - 1) as f32;
+    (0..size)
+        .map(|i| {
+            let linear = i as f32 / denom;
+            let encoded = tf.forward(linear).clamp(0.0, 1.0);
+            let q = (encoded * 65535.0 + 0.5) as u32;
+            let v = q.min(65535) as u16;
+            DrmColorLut { red: v, green: v, blue: v, reserved: 0 }
+        })
+        .collect()
 }
 
 /// PQ (SMPTE ST 2084) inverse: encoded 0..1 → linear 0..1 representing 0..10000 cd/m².
@@ -468,6 +532,7 @@ mod tests {
         assert_eq!(TransferKind::Gamma22.shader_id(), 3);
         assert_eq!(TransferKind::St2084Pq.shader_id(), 4);
         assert_eq!(TransferKind::Hlg.shader_id(), 5);
+        assert_eq!(TransferKind::Srgb.shader_id(), 6);
     }
 
     #[test]
@@ -485,8 +550,73 @@ mod tests {
         assert_eq!(TransferKind::Gamma22.gamma_for_shader(), 1.0);
         assert_eq!(TransferKind::St2084Pq.gamma_for_shader(), 1.0);
         assert_eq!(TransferKind::Hlg.gamma_for_shader(), 1.0);
+        assert_eq!(TransferKind::Srgb.gamma_for_shader(), 1.0);
         // Zero gamma must not become a divide-by-zero or NaN producer.
         let g = TransferKind::Power { gamma_x10000: 0 }.gamma_for_shader();
         assert!(g.is_finite() && g > 0.0);
+    }
+
+    #[test]
+    fn srgb_roundtrip_endpoints_and_midpoint() {
+        // Endpoints must hit exactly.
+        assert!(approx_eq(TransferKind::Srgb.forward(0.0), 0.0, 1e-7));
+        assert!(approx_eq(TransferKind::Srgb.forward(1.0), 1.0, 1e-5));
+        assert!(approx_eq(TransferKind::Srgb.inverse(0.0), 0.0, 1e-7));
+        assert!(approx_eq(TransferKind::Srgb.inverse(1.0), 1.0, 1e-5));
+        // forward ∘ inverse ≈ identity at a few interior points.
+        for &e in &[0.05f32, 0.18, 0.5, 0.75] {
+            let r = TransferKind::Srgb.forward(TransferKind::Srgb.inverse(e));
+            assert!(approx_eq(r, e, 1e-5), "srgb round-trip at {e} got {r}");
+        }
+    }
+
+    #[test]
+    fn build_gamma_lut_linear_is_identity() {
+        let lut = build_gamma_lut(TransferKind::Linear, 256);
+        assert_eq!(lut.len(), 256);
+        assert_eq!(lut[0].red, 0);
+        assert_eq!(lut[0].green, 0);
+        assert_eq!(lut[0].blue, 0);
+        assert_eq!(lut[255].red, 65535);
+        assert_eq!(lut[255].green, 65535);
+        assert_eq!(lut[255].blue, 65535);
+        // Channels stay equal (gray ramp), reserved is zero.
+        for e in &lut {
+            assert_eq!(e.red, e.green);
+            assert_eq!(e.green, e.blue);
+            assert_eq!(e.reserved, 0);
+        }
+        // Linear ramp: entry i ≈ i * 257 (255 * 257 = 65535).
+        assert!((lut[128].red as i32 - 32896).abs() <= 1);
+    }
+
+    #[test]
+    fn build_gamma_lut_srgb_endpoints_and_known_midpoint() {
+        let lut = build_gamma_lut(TransferKind::Srgb, 256);
+        assert_eq!(lut[0].red, 0);
+        assert_eq!(lut[255].red, 65535);
+        // Reference: linear 0.5 → sRGB encoded ≈ 0.7353569; ×65535 ≈ 48196.
+        let expected = (srgb_forward(0.5) * 65535.0 + 0.5) as u16;
+        // Use the lut entry whose linear x is exactly 0.5 (i = 127.5 isn't integer;
+        // check the nearest two are within 1 LSB of the analytic curve).
+        for i in [127usize, 128] {
+            let lin = i as f32 / 255.0;
+            let analytic = (srgb_forward(lin) * 65535.0 + 0.5) as u16;
+            assert!(
+                (lut[i].red as i32 - analytic as i32).abs() <= 1,
+                "i={i} lut={} analytic={analytic}",
+                lut[i].red
+            );
+        }
+        // Sanity: at index 127 the value is in the expected neighborhood.
+        assert!((lut[127].red as i32 - expected as i32).abs() <= 200);
+    }
+
+    #[test]
+    fn build_gamma_lut_srgb_monotonic() {
+        let lut = build_gamma_lut(TransferKind::Srgb, 1024);
+        for w in lut.windows(2) {
+            assert!(w[1].red >= w[0].red, "non-monotonic at value {}", w[0].red);
+        }
     }
 }

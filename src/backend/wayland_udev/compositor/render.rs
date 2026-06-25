@@ -242,12 +242,16 @@ impl WaylandCompositor {
     /// Main rendering function. Composites the entire scene into the output FBO.
     /// `scene` is a list of (window_id, x, y, w, h) in bottom-to-top order.
     /// `focused` is the currently focused window.
+    /// `hw_encode_active`: when true, the per-output CRTC `GAMMA_LUT` will
+    /// OETF-encode at scanout, so the shader-side encode pass must be skipped
+    /// (otherwise we double-encode).
     /// Returns true if a frame was rendered (false if skipped due to no changes).
     pub(crate) fn render_frame(
         &mut self,
         gl: &ffi::Gles2,
         scene: &[(u64, i32, i32, u32, u32)],
         focused: Option<u64>,
+        hw_encode_active: bool,
     ) -> bool {
         // =================================================================
         // 0. Performance infrastructure - frame start
@@ -1107,10 +1111,11 @@ impl WaylandCompositor {
             gl.UseProgram(0);
         }
 
-        if scene_linear_active {
-            // SOTA #2 Phase 2.3: encode linear_fbo → output_fbo. encode_tf = -1
-            // (shader's else branch = sRGB forward). Per-output transfer
-            // selection is deferred until output_params caching lands.
+        if scene_linear_active && !hw_encode_active {
+            // Encode linear_fbo → output_fbo. encode_tf = -1 (shader else
+            // branch = sRGB forward). Skipped when the CRTC GAMMA_LUT will
+            // OETF at scanout — linear values then flow straight through
+            // smithay's per-output composite into the 10-bit GBM FB.
             self.dispatch_scene_linear_encode_pass(gl, &projection, -1, 1.0);
         }
 
