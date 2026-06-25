@@ -114,13 +114,9 @@ struct KmsOutputState {
     installed_gamma_lut:
         Option<(u64, crate::backend::wayland_udev::color_pipeline::TransferKind)>,
     /// Per-output target transfer function, derived from EDID HDR caps at
-    /// output init (PQ/HLG for HDR-signalled displays; Gamma22 for sRGB).
-    /// Read by `refresh_color_pipeline_offload` to pick the uniform target
-    /// across active outputs and to drive the shader-side encode pass.
+    /// output init.
     output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind,
-    /// `true` while DPMS is off — `refresh_color_pipeline_offload` skips this
-    /// output entirely. Set by `set_dpms_for_output`. Defaults to `false`
-    /// (DPMS on at init).
+    /// `true` while DPMS is off; the LUT install path skips this output.
     dpms_off: bool,
 }
 
@@ -743,26 +739,9 @@ impl KmsState {
         Ok(())
     }
 
-    /// Per-frame orchestrator. Returns
-    /// `(hw_encode_active, shader_encode_tf, shader_encode_gamma)`.
-    ///
-    /// `hw_encode_active` is true iff the gate is on, every active
-    /// (DPMS-on, soft-enabled) output reports the **same** target TF (read
-    /// from EDID at init into `KmsOutputState.output_tf`), that TF is one
-    /// the LUT generator supports (Linear/Srgb/Bt1886/Gamma22/Power — PQ/HLG
-    /// have no `forward()` yet), every output has caps for it, and the LUT
-    /// install succeeded on every participating output. False otherwise →
-    /// caller keeps the GL shader encode pass enabled.
-    ///
-    /// `shader_encode_tf` / `shader_encode_gamma` are the parameters the
-    /// shader path should use when `hw_encode_active` is false. They reflect
-    /// the uniform participating TF if there is one (so an HDR-only session
-    /// gets PQ encode), or sRGB when the set is mixed (status-quo fallback;
-    /// fixing mixed-TF needs per-output render passes — Phase 3.3).
-    ///
-    /// The all-or-nothing rule avoids half-encoded multi-output sessions:
-    /// the compositor renders a single global FBO that feeds every output,
-    /// so if one output can't offload, none can.
+    /// Returns `(hw_encode_active, shader_encode_tf, shader_encode_gamma)`.
+    /// HW offload is all-or-nothing across active outputs because the
+    /// compositor renders a single global FBO that feeds every output.
     pub(super) fn refresh_color_pipeline_offload(
         &mut self,
         state: &crate::backend::wayland::state::JwmWaylandState,
@@ -775,10 +754,8 @@ impl KmsState {
             .kms_color_pipeline_offload;
         let n = self.outputs.len();
 
-        // Uniform participating TF (None if mixed or no participating outputs).
         let uniform_tf: Option<TransferKind> = {
             let mut tf: Option<TransferKind> = None;
-            let mut mixed = false;
             for o in &self.outputs {
                 if o.dpms_off || state.soft_disabled_outputs.contains(&o.output_name) {
                     continue;
@@ -786,22 +763,20 @@ impl KmsState {
                 match tf {
                     None => tf = Some(o.output_tf),
                     Some(t) if t != o.output_tf => {
-                        mixed = true;
+                        tf = None;
                         break;
                     }
                     _ => {}
                 }
             }
-            if mixed { None } else { tf }
+            tf
         };
 
-        // Shader-path fallback: prefer the uniform TF (better encoding for
-        // single-HDR sessions); fall back to sRGB on mixed or no outputs.
         let shader_fallback = uniform_tf.unwrap_or(TransferKind::Srgb);
         let shader_tf = shader_fallback.shader_id();
         let shader_gamma = shader_fallback.gamma_for_shader();
 
-        // HW LUT path is only available for TFs the generator supports.
+        // HW LUT path only supports TFs the generator implements.
         let lut_target: Option<TransferKind> = uniform_tf.filter(|t| matches!(
             t,
             TransferKind::Linear
@@ -811,15 +786,14 @@ impl KmsState {
                 | TransferKind::Power { .. }
         ));
 
-        if !gate_on || lut_target.is_none() {
+        let Some(target) = lut_target.filter(|_| gate_on) else {
             for i in 0..n {
                 if self.outputs[i].installed_gamma_lut.is_some() {
                     let _ = self.uninstall_gamma_lut(i);
                 }
             }
             return (false, shader_tf, shader_gamma);
-        }
-        let target = lut_target.expect("checked above");
+        };
 
         // Pass 1: drop LUTs on non-participating outputs (DPMS-off /
         // soft-disabled) so CRTCs don't carry stale color state.
@@ -2150,9 +2124,8 @@ impl KmsState {
                 }
             }
 
-            // SOTA #3 Phase 3.1: probe color-pipeline caps inline (the
-            // standalone helper takes &mut self which isn't available here).
-            // Cached on KmsOutputState; consumed by refresh_color_pipeline_offload.
+            // Probe color-pipeline caps inline (the standalone helper takes
+            // &mut self which isn't available here).
             let color_pipeline_caps = {
                 let mgr = drm_output_manager.lock();
                 let dev = mgr.device();
@@ -2177,18 +2150,11 @@ impl KmsState {
 
             let refresh_interval = p.frame_callback_throttle.unwrap_or(std::time::Duration::from_millis(16));
             let output_name = p.output.name();
-            // Derive the target transfer function from EDID HDR caps so the
-            // encode pass (shader or HW LUT) targets the right TF instead of
-            // hardwired sRGB. Matches the wp-color-management response policy
-            // in color_management::params_from_edid.
             let output_tf = {
                 use crate::backend::wayland_udev::color_pipeline::TransferKind;
-                let params = p
-                    .output
-                    .user_data()
-                    .get::<crate::backend::edid::EdidHdrCapabilities>()
-                    .map(crate::backend::wayland_udev::color_management::params_from_edid)
-                    .unwrap_or_else(crate::backend::wayland_udev::color_management::srgb_params);
+                let params = crate::backend::wayland_udev::color_management::params_for_output(
+                    &p.output,
+                );
                 TransferKind::from_params(&params)
             };
             outputs.push(KmsOutputState {
@@ -2639,29 +2605,28 @@ impl KmsState {
                 );
                 elements.push(KmsRenderElement::Texture(elem));
             } else {
-                // Overlay-plane candidate: when `fullscreen_unredirect` is on and
-                // exactly one mapped fullscreen window exists, tag its surface
-                // elements with `Kind::ScanoutCandidate`. smithay's
-                // `try_assign_overlay_plane` only considers elements with that
-                // kind; the kernel atomic test still has the final say. Other
-                // elements (cursor, layer surfaces) stay on the primary plane.
-                let overlay_candidate_window = {
-                    if crate::config::CONFIG.load().behavior().fullscreen_unredirect {
-                        let mut fs = None;
-                        let mut count: u32 = 0;
-                        for w in &state.window_stack {
-                            if state.mapped_windows.contains(w)
-                                && state.window_is_fullscreen.get(w).copied().unwrap_or(false)
-                            {
-                                fs = Some(*w);
-                                count += 1;
-                                if count > 1 { break; }
+                // smithay's try_assign_overlay_plane only considers Kind::ScanoutCandidate
+                // elements; the kernel atomic test still has final say.
+                let overlay_candidate_window = if crate::config::CONFIG
+                    .load()
+                    .behavior()
+                    .fullscreen_unredirect
+                {
+                    let mut fs = None;
+                    for w in &state.window_stack {
+                        if state.mapped_windows.contains(w)
+                            && state.window_is_fullscreen.get(w).copied().unwrap_or(false)
+                        {
+                            if fs.is_some() {
+                                fs = None;
+                                break;
                             }
+                            fs = Some(*w);
                         }
-                        if count == 1 { fs } else { None }
-                    } else {
-                        None
                     }
+                    fs
+                } else {
+                    None
                 };
                 for win in state.window_stack.iter().rev() {
                     if !state.mapped_windows.contains(win) {

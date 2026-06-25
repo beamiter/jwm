@@ -243,7 +243,7 @@ impl ColorManagerState {
 
 }
 
-fn params_for_output(output: &Output) -> ParametricParams {
+pub(crate) fn params_for_output(output: &Output) -> ParametricParams {
     match output.user_data().get::<EdidHdrCapabilities>() {
         Some(caps) => params_from_edid(caps),
         None => srgb_params(),
