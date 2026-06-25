@@ -434,7 +434,7 @@ fn mat3_mul(a: &[f32; 9], b: &[f32; 9]) -> [f32; 9] {
 /// supplies explicit primaries with a different white point, the result is a
 /// pure rotation in XYZ — sufficient correctness for the V1 slice; a future
 /// pass can fold in a Bradford CAT if real clients hit it.
-fn rgb_to_rgb_matrix(
+pub fn rgb_to_rgb_matrix(
     surface: &ColorSpacePrimaries,
     output: &ColorSpacePrimaries,
 ) -> [f32; 9] {

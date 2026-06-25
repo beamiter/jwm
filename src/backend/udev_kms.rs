@@ -113,12 +113,22 @@ struct KmsOutputState {
     color_pipeline_caps: Option<crate::backend::api::KmsColorPipelineCaps>,
     installed_gamma_lut:
         Option<(u64, crate::backend::wayland_udev::color_pipeline::TransferKind)>,
-    /// Tracked CTM blob id (always identity in 3.3b — no semantic tag needed
-    /// because every install carries the same payload).
+    /// Tracked CTM blob id. The installed payload is always
+    /// `rgb_to_rgb_matrix(SRGB_D65, output_primaries)` (or identity when the
+    /// monitor is sRGB-primaries), derived from EDID at init — constant for
+    /// the life of the `KmsOutputState`, so we only ever install once per
+    /// output and skip reinstall when `installed_ctm.is_some()`.
     installed_ctm: Option<u64>,
     /// Per-output target transfer function, derived from EDID HDR caps at
     /// output init.
     output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind,
+    /// Per-output sRGB→output-primaries 3x3 matrix, cached at init. Pushed
+    /// via `install_ctm` once `kms_color_pipeline_offload + scene_linear` are
+    /// both on, so the FBO can stay uniform-sRGB while each CRTC converts to
+    /// its native primaries at scanout (the trick that lets the single global
+    /// FBO drive a mixed-primaries multi-output session without per-output
+    /// passes).
+    output_ctm: [f32; 9],
     /// `true` while DPMS is off; the LUT install path skips this output.
     dpms_off: bool,
 }
@@ -822,7 +832,7 @@ impl KmsState {
 
         self.outputs[output_idx].installed_ctm = Some(new_blob_id);
         log::info!(
-            "[kms-cm] installed CTM (identity) on {}",
+            "[kms-cm] installed CTM on {}",
             self.outputs[output_idx].output_name,
         );
         Ok(())
@@ -871,12 +881,17 @@ impl KmsState {
         &mut self,
         state: &crate::backend::wayland::state::JwmWaylandState,
     ) -> ColorPipelineDecision {
-        use crate::backend::wayland_udev::color_pipeline::{IDENTITY_CTM, TransferKind};
+        use crate::backend::wayland_udev::color_pipeline::TransferKind;
 
-        let gate_on = crate::config::CONFIG
-            .load()
-            .behavior()
-            .kms_color_pipeline_offload;
+        let behavior = crate::config::CONFIG.load();
+        let gate_on = behavior.behavior().kms_color_pipeline_offload;
+        // CTM (3.3c) transforms linear-RGB values, so it requires the FBO to
+        // hold linear data — i.e. scene-linear compositing on. With it off
+        // the FBO is OETF-encoded and a per-output gamut matrix would scramble
+        // the data. GAMMA_LUT (3.2) is independent: it just applies the
+        // output OETF to whatever is in the FBO.
+        let ctm_gate_on = gate_on && behavior.behavior().scene_linear_compositing;
+        drop(behavior);
         let n = self.outputs.len();
 
         // Precompute participation once — `participating` is read in many
@@ -988,16 +1003,19 @@ impl KmsState {
         }
 
         // --- CTM activation: independent of LUT. Drop on non-participating,
-        // verify ctm_supported across participants, install identity all-or-
-        // nothing. Identity is a pixel no-op; we install it as a foundation
-        // for 3.3c's real gamut matrix.
+        // verify ctm_supported AND scene-linear gate AND ctm gate across
+        // participants, install per-output `output_ctm` (sRGB → output
+        // primaries) all-or-nothing. When `hw_ctm_active`, the per-surface
+        // ColorTransform pass in backend.rs targets sRGB primaries so the
+        // FBO is uniform-sRGB and each CRTC's CTM converts to its native
+        // primaries at scanout.
         for i in 0..n {
             if !participating[i] && self.outputs[i].installed_ctm.is_some() {
                 let _ = self.uninstall_ctm(i);
             }
         }
 
-        let mut ctm_capable = any_participating;
+        let mut ctm_capable = any_participating && ctm_gate_on;
         for i in 0..n {
             if !participating[i] {
                 continue;
@@ -1024,7 +1042,8 @@ impl KmsState {
                 if !participating[i] || self.outputs[i].installed_ctm.is_some() {
                     continue;
                 }
-                if let Err(e) = self.install_ctm(i, IDENTITY_CTM) {
+                let matrix = self.outputs[i].output_ctm;
+                if let Err(e) = self.install_ctm(i, matrix) {
                     log::warn!(
                         "[kms-cm] CTM install on {} failed ({e}); rolling back frame's CTMs",
                         self.outputs[i].output_name,
@@ -2324,12 +2343,17 @@ impl KmsState {
 
             let refresh_interval = p.frame_callback_throttle.unwrap_or(std::time::Duration::from_millis(16));
             let output_name = p.output.name();
-            let output_tf = {
-                use crate::backend::wayland_udev::color_pipeline::TransferKind;
+            let (output_tf, output_ctm) = {
+                use crate::backend::wayland_udev::color_pipeline::{
+                    ColorSpacePrimaries, TransferKind, rgb_to_rgb_matrix,
+                };
                 let params = crate::backend::wayland_udev::color_management::params_for_output(
                     &p.output,
                 );
-                TransferKind::from_params(&params)
+                let tf = TransferKind::from_params(&params);
+                let prim = ColorSpacePrimaries::from_params(&params);
+                let ctm = rgb_to_rgb_matrix(&ColorSpacePrimaries::SRGB_D65, &prim);
+                (tf, ctm)
             };
             outputs.push(KmsOutputState {
                 crtc: p.crtc,
@@ -2352,6 +2376,7 @@ impl KmsState {
                 installed_gamma_lut: None,
                 installed_ctm: None,
                 output_tf,
+                output_ctm,
                 dpms_off: false,
             });
         }

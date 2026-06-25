@@ -3055,6 +3055,15 @@ impl Backend for UdevBackend {
                     }
                 }
             }
+            // Decide once per frame whether the per-output CRTC GAMMA_LUT
+            // will do the OETF at scanout and whether each CRTC's CTM will do
+            // the sRGB→output-primaries gamut map. The per-surface
+            // ColorTransform pass below reads `decision.hw_ctm_active` to
+            // choose its target params (sRGB when true, the overlapping
+            // output's primaries otherwise), so this must run first.
+            let decision = kms
+                .borrow_mut()
+                .refresh_color_pipeline_offload(&self.state);
             let cm_render_gate = crate::config::CONFIG
                 .load()
                 .behavior()
@@ -3076,26 +3085,33 @@ impl Backend for UdevBackend {
                     .map(|cm| cm.snapshot_surface_params())
                     .unwrap_or_default();
 
-                // Precompute (rect, output_params) per output once per frame
-                // — output layout and EDID caps are constant within a frame.
-                let output_cache: Vec<(Rectangle<i32, Logical>, _)> = self
-                    .state
-                    .outputs
-                    .iter()
-                    .filter_map(|o| {
-                        let mode = o.current_mode()?;
-                        let scale = o.current_scale().fractional_scale();
-                        let logical_size = mode.size.to_f64().to_logical(scale).to_i32_round();
-                        let logical_size = o.current_transform().transform_size(logical_size);
-                        let rect = Rectangle::<i32, Logical>::new(o.current_location(), logical_size);
-                        let params = o
-                            .user_data()
-                            .get::<EdidHdrCapabilities>()
-                            .map(params_from_edid)
-                            .unwrap_or_else(srgb_params);
-                        Some((rect, params))
-                    })
-                    .collect();
+                // When the per-output CTM will convert sRGB→native primaries
+                // at scanout (3.3c), every surface should converge on sRGB
+                // primaries in the FBO. Build the per-output cache only when
+                // we still need it for the "match the overlapping output"
+                // fallback.
+                let srgb_target = srgb_params();
+                let output_cache: Vec<(Rectangle<i32, Logical>, _)> = if decision.hw_ctm_active {
+                    Vec::new()
+                } else {
+                    self.state
+                        .outputs
+                        .iter()
+                        .filter_map(|o| {
+                            let mode = o.current_mode()?;
+                            let scale = o.current_scale().fractional_scale();
+                            let logical_size = mode.size.to_f64().to_logical(scale).to_i32_round();
+                            let logical_size = o.current_transform().transform_size(logical_size);
+                            let rect = Rectangle::<i32, Logical>::new(o.current_location(), logical_size);
+                            let params = o
+                                .user_data()
+                                .get::<EdidHdrCapabilities>()
+                                .map(params_from_edid)
+                                .unwrap_or_else(srgb_params);
+                            Some((rect, params))
+                        })
+                        .collect()
+                };
 
                 for &(win_id, x, y, w, h) in &full_scene {
                     let wid = WindowId::from_raw(win_id);
@@ -3105,19 +3121,23 @@ impl Backend for UdevBackend {
                         .and_then(|s| surface_params_map.get(&s.id()));
 
                     let xform = if let Some(sp) = surface_params {
-                        let win_rect = Rectangle::<i32, Logical>::new(
-                            Point::from((x, y)),
-                            (w.max(1) as i32, h.max(1) as i32).into(),
-                        );
-                        let output_params = output_cache
-                            .iter()
-                            .max_by_key(|(rect, _)| {
-                                rect.intersection(win_rect)
-                                    .map(|r| r.size.w.max(0) as i64 * r.size.h.max(0) as i64)
-                                    .unwrap_or(0)
-                            })
-                            .map(|(_, p)| p);
-                        output_params.and_then(|op| ColorTransform::build(sp, op))
+                        if decision.hw_ctm_active {
+                            ColorTransform::build(sp, &srgb_target)
+                        } else {
+                            let win_rect = Rectangle::<i32, Logical>::new(
+                                Point::from((x, y)),
+                                (w.max(1) as i32, h.max(1) as i32).into(),
+                            );
+                            let output_params = output_cache
+                                .iter()
+                                .max_by_key(|(rect, _)| {
+                                    rect.intersection(win_rect)
+                                        .map(|r| r.size.w.max(0) as i64 * r.size.h.max(0) as i64)
+                                        .unwrap_or(0)
+                                })
+                                .map(|(_, p)| p);
+                            output_params.and_then(|op| ColorTransform::build(sp, op))
+                        }
                     } else {
                         None
                     };
@@ -3130,14 +3150,6 @@ impl Backend for UdevBackend {
             if let Some(presented_at) = kms.borrow_mut().take_presentation_time() {
                 compositor.on_vblank_presented(presented_at);
             }
-            // Decide once per frame whether the per-output CRTC GAMMA_LUT
-            // will do the OETF at scanout. When true, render_frame skips the
-            // shader encode pass (avoiding double encoding); when false, the
-            // shader continues to encode. All-or-nothing across active outputs
-            // is enforced inside the helper.
-            let decision = kms
-                .borrow_mut()
-                .refresh_color_pipeline_offload(&self.state);
             let rendered = kms
                 .borrow_mut()
                 .with_renderer(|gl| {
