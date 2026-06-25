@@ -76,6 +76,82 @@ impl WaylandCompositor {
         }
     }
 
+    // SOTA #2 Phase 2.3: Linearize the currently-encoded output_fbo into
+    // linear_fbo so subsequent window draws (with u_scene_linear=1) blend
+    // correctly over the wallpaper/shadows. Called only when self.linear_fbo
+    // != 0. Disables blending — this is a full overwrite.
+    fn dispatch_scene_linear_decode_pass(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+        unsafe {
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, self.linear_fbo);
+            gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            gl.Disable(ffi::BLEND);
+            gl.UseProgram(self.scene_linear_decode_program);
+            self.set_projection_uniform(
+                gl,
+                self.scene_linear_decode_uniforms.projection,
+                projection,
+            );
+            self.set_rect_uniform(
+                gl,
+                self.scene_linear_decode_uniforms.rect,
+                0.0,
+                0.0,
+                self.screen_w as f32,
+                self.screen_h as f32,
+            );
+            gl.Uniform1i(self.scene_linear_decode_uniforms.texture, 0);
+            gl.ActiveTexture(ffi::TEXTURE0);
+            gl.BindTexture(ffi::TEXTURE_2D, self.output_texture);
+            gl.BindVertexArray(self.quad_vao);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            gl.BindVertexArray(0);
+            gl.UseProgram(0);
+            gl.Enable(ffi::BLEND);
+        }
+    }
+
+    // SOTA #2 Phase 2.3: Encode the FP16 linear_fbo back into output_fbo
+    // using the output's forward EOTF. encode_tf < 0 means "sRGB default";
+    // the shader's else-branch covers it. encode_gamma is only consulted
+    // for TF_POWER. Disables blending.
+    fn dispatch_scene_linear_encode_pass(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        encode_tf: i32,
+        encode_gamma: f32,
+    ) {
+        unsafe {
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
+            gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            gl.Disable(ffi::BLEND);
+            gl.UseProgram(self.scene_linear_encode_program);
+            self.set_projection_uniform(
+                gl,
+                self.scene_linear_encode_uniforms.projection,
+                projection,
+            );
+            self.set_rect_uniform(
+                gl,
+                self.scene_linear_encode_uniforms.rect,
+                0.0,
+                0.0,
+                self.screen_w as f32,
+                self.screen_h as f32,
+            );
+            gl.Uniform1i(self.scene_linear_encode_uniforms.texture, 0);
+            gl.Uniform1i(self.scene_linear_encode_uniforms.encode_tf, encode_tf);
+            gl.Uniform1f(self.scene_linear_encode_uniforms.encode_gamma, encode_gamma);
+            gl.ActiveTexture(ffi::TEXTURE0);
+            gl.BindTexture(ffi::TEXTURE_2D, self.linear_texture);
+            gl.BindVertexArray(self.quad_vao);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            gl.BindVertexArray(0);
+            gl.UseProgram(0);
+            gl.Enable(ffi::BLEND);
+        }
+    }
+
     /// Bounding box (top-left logical px) of everything that changed since the
     /// previous frame, or `None` to request a full redraw.
     ///
@@ -689,9 +765,22 @@ impl WaylandCompositor {
         // =================================================================
         // 9. Draw windows (back-to-front)
         // =================================================================
+        // SOTA #2 Phase 2.3: when scene-linear compositing is active, decode
+        // the currently-encoded output_fbo (wallpaper + shadows + blur) into
+        // linear_fbo, then route the window-draw pass there. The encode pass
+        // after the loop converts back to encoded space for genie/borders/
+        // effects (which still draw in encoded space in v2.3).
+        let scene_linear_active = self.linear_fbo != 0;
+        if scene_linear_active {
+            self.dispatch_scene_linear_decode_pass(gl, &projection);
+        }
         self.frame_profiler.zone_start("windows");
         unsafe {
             gl.UseProgram(self.program);
+            if scene_linear_active {
+                gl.BindFramebuffer(ffi::FRAMEBUFFER, self.linear_fbo);
+                gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            }
             self.set_projection_uniform(gl, self.win_uniforms.projection, &projection);
             gl.Uniform1i(self.win_uniforms.texture, 0);
             gl.Uniform4f(self.win_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
@@ -700,13 +789,10 @@ impl WaylandCompositor {
             // enables color management. Ancillary draws (blur/ghost) share this
             // program and must not inherit a stale transform.
             gl.Uniform1i(self.win_uniforms.color_managed, 0);
-            // SOTA #2 Phase 2.2: scene-linear output. Default 0 (encoded
-            // output, unchanged behavior). Phase 2.3 will route the
-            // window-draw pass to linear_fbo and flip this to 1, with
-            // matching decode-in / encode-out fullscreen passes wrapping
-            // the loop. Bind once outside the loop — ancillary blur/ghost
-            // draws share this program and must not inherit a stale value.
-            gl.Uniform1i(self.win_uniforms.scene_linear, 0);
+            gl.Uniform1i(
+                self.win_uniforms.scene_linear,
+                if scene_linear_active { 1 } else { 0 },
+            );
             gl.BindVertexArray(self.quad_vao);
 
             for &(win_id, x, y, w, h) in visible_scene {
@@ -1012,6 +1098,13 @@ impl WaylandCompositor {
 
             gl.BindVertexArray(0);
             gl.UseProgram(0);
+        }
+
+        if scene_linear_active {
+            // SOTA #2 Phase 2.3: encode linear_fbo → output_fbo. encode_tf = -1
+            // (shader's else branch = sRGB forward). Per-output transfer
+            // selection is deferred until output_params caching lands.
+            self.dispatch_scene_linear_encode_pass(gl, &projection, -1, 1.0);
         }
 
         self.frame_profiler.zone_end();
