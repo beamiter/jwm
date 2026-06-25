@@ -442,6 +442,38 @@ impl KmsState {
         })
     }
 
+    /// Query per-CRTC KMS color pipeline capabilities for a given output.
+    /// Probes for the DEGAMMA_LUT / GAMMA_LUT / CTM CRTC properties and the
+    /// corresponding `_SIZE` properties. SOTA #3 Phase 3.1: probe only —
+    /// nothing in the render path consumes this yet. Foundation for the
+    /// upcoming "encode-pass via GAMMA_LUT" offload work.
+    pub(super) fn query_color_pipeline_caps_for_output(
+        &mut self,
+        output_idx: usize,
+    ) -> Option<crate::backend::api::KmsColorPipelineCaps> {
+        let output = self.outputs.get(output_idx)?;
+        let crtc = output.crtc;
+        let mgr = self.drm_output_manager.lock();
+        let dev = mgr.device();
+        let mut caps = crate::backend::api::KmsColorPipelineCaps::default();
+        if let Ok(props) = dev.get_properties(crtc) {
+            let (handles, values) = props.as_props_and_values();
+            for (i, &prop_handle) in handles.iter().enumerate() {
+                if let Ok(info) = dev.get_property(prop_handle) {
+                    match info.name().to_str().unwrap_or("") {
+                        "DEGAMMA_LUT" => caps.degamma_lut_supported = true,
+                        "GAMMA_LUT" => caps.gamma_lut_supported = true,
+                        "CTM" => caps.ctm_supported = true,
+                        "DEGAMMA_LUT_SIZE" => caps.degamma_lut_size = values[i] as u32,
+                        "GAMMA_LUT_SIZE" => caps.gamma_lut_size = values[i] as u32,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Some(caps)
+    }
+
     /// Set a single DRM object property. On atomic drivers this issues an atomic
     /// commit (probed with `TEST_ONLY` first); if the property cannot be set
     /// atomically (e.g. the legacy-only DPMS property on some drivers) it cleanly

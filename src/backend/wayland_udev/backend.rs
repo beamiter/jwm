@@ -3487,6 +3487,17 @@ impl Backend for UdevBackend {
         kms.borrow_mut().query_vrr_for_output(output_idx)
     }
 
+    fn query_kms_color_pipeline_caps(
+        &self,
+        output: OutputId,
+    ) -> Option<crate::backend::api::KmsColorPipelineCaps> {
+        let kms = self.kms.as_ref()?;
+        let shared = self.shared.lock_safe();
+        let output_idx = shared.outputs.iter().position(|o| o.id == output)?;
+        drop(shared);
+        kms.borrow_mut().query_color_pipeline_caps_for_output(output_idx)
+    }
+
     fn set_vrr_enabled(&mut self, output: OutputId, enabled: bool) -> Result<(), BackendError> {
         let kms = self.kms.as_ref().ok_or(BackendError::Unsupported("no KMS"))?;
         let shared = self.shared.lock_safe();

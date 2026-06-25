@@ -76,6 +76,20 @@ pub struct VrrCapabilities {
     pub max_refresh_hz: u32,
 }
 
+/// Per-CRTC KMS color pipeline capabilities. A `_size` of 0 indicates the LUT
+/// hardware is absent (and the matching `_supported` flag will be false). When
+/// `_supported` is true, `_size` is the number of `drm_color_lut` entries the
+/// kernel expects in a `*_LUT` blob. Future SOTA work uses these to offload
+/// the encode/decode/CTM passes from the GL shader to fixed-function hardware.
+#[derive(Clone, Debug, Default)]
+pub struct KmsColorPipelineCaps {
+    pub degamma_lut_supported: bool,
+    pub degamma_lut_size: u32,
+    pub gamma_lut_supported: bool,
+    pub gamma_lut_size: u32,
+    pub ctm_supported: bool,
+}
+
 /// Snapshot of one surface's wp-color-management-v1 image description, used by
 /// the diagnostic IPC. All numeric fields are taken directly from the protocol
 /// (named enums as u32, luminances in the protocol's scaled form).
@@ -1077,6 +1091,11 @@ pub trait Backend: Send {
 
     /// Query VRR capabilities of an output.
     fn query_vrr_capabilities(&self, _output: OutputId) -> Option<VrrCapabilities> { None }
+
+    /// Query per-CRTC KMS color pipeline capabilities (degamma/CTM/gamma LUT).
+    /// Returns `None` for non-KMS backends. The probe iterates DRM properties
+    /// so it's not free — cache the result if you call it on a hot path.
+    fn query_kms_color_pipeline_caps(&self, _output: OutputId) -> Option<KmsColorPipelineCaps> { None }
 
     /// Number of client surfaces that have requested wp-tearing-control hints
     /// (regardless of vsync vs async). Wayland-only; X11 returns 0.
