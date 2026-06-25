@@ -168,9 +168,7 @@ impl TransferKind {
 
     /// Apply this curve's forward OETF to a scene-linear value in 0..1.
     /// Returns the encoded value in 0..1, suitable for quantizing into a
-    /// hardware GAMMA_LUT entry. Only implemented for variants the SOTA #3
-    /// GAMMA_LUT offload path uses; other variants panic so a future caller
-    /// gets a loud signal rather than silent wrong output.
+    /// hardware GAMMA_LUT entry.
     pub fn forward(self, x: f32) -> f32 {
         let x = x.clamp(0.0, 1.0);
         match self {
@@ -182,8 +180,8 @@ impl TransferKind {
             }
             Self::Bt1886 => x.powf(1.0 / 2.4),
             Self::Gamma22 => x.powf(1.0 / 2.2),
-            Self::St2084Pq => todo!("implement pq_forward before enabling HDR LUT path"),
-            Self::Hlg => todo!("implement hlg_forward before enabling HDR LUT path"),
+            Self::St2084Pq => pq_forward(x),
+            Self::Hlg => hlg_forward(x),
         }
     }
 }
@@ -240,14 +238,34 @@ fn pq_inverse(e: f32) -> f32 {
 
 /// HLG inverse: encoded 0..1 → linear 0..1 (system-relative).
 fn hlg_inverse(e: f32) -> f32 {
-    const A: f32 = 0.17883277;
-    const B: f32 = 1.0 - 4.0 * A; // 0.28466892
-    // C = 0.5 - A * ln(4A); precomputed to keep this a plain fn
-    const C: f32 = 0.559_910_7;
     if e <= 0.5 {
         (e * e) / 3.0
     } else {
-        (((e - C) / A).exp() + B) / 12.0
+        (((e - HLG_C) / HLG_A).exp() + HLG_B) / 12.0
+    }
+}
+
+/// PQ (SMPTE ST 2084) forward (OETF): linear 0..1 → encoded 0..1. Inverse of `pq_inverse`.
+fn pq_forward(l: f32) -> f32 {
+    const M1: f32 = 0.1593017578125;
+    const M2: f32 = 78.84375;
+    const C1: f32 = 0.8359375;
+    const C2: f32 = 18.8515625;
+    const C3: f32 = 18.6875;
+    let lm = l.max(0.0).powf(M1);
+    ((C1 + C2 * lm) / (1.0 + C3 * lm)).powf(M2)
+}
+
+const HLG_A: f32 = 0.17883277;
+const HLG_B: f32 = 1.0 - 4.0 * HLG_A; // 0.28466892
+const HLG_C: f32 = 0.559_910_7; // 0.5 - A * ln(4A)
+
+/// HLG (BT.2100) forward (OETF): linear 0..1 → encoded 0..1. Inverse of `hlg_inverse`.
+fn hlg_forward(l: f32) -> f32 {
+    if l <= 1.0 / 12.0 {
+        (3.0 * l.max(0.0)).sqrt()
+    } else {
+        HLG_A * (12.0 * l - HLG_B).max(1e-12).ln() + HLG_C
     }
 }
 
@@ -610,6 +628,62 @@ mod tests {
         }
         // Sanity: at index 127 the value is in the expected neighborhood.
         assert!((lut[127].red as i32 - expected as i32).abs() <= 200);
+    }
+
+    #[test]
+    fn pq_forward_endpoints_and_known_point() {
+        // L=0 ⇒ encoded = (C1)^M2 ≈ 7.3e-7 (mathematically nonzero by spec
+        // but quantizes to 0 in 16-bit). L=1 ⇒ encoded = 1.0.
+        assert!(pq_forward(0.0) < 1e-5);
+        assert!(approx_eq(pq_forward(1.0), 1.0, 1e-6));
+        // SMPTE ST 2084 reference: linear 0.01 (100 cd/m²) ⇒ encoded ≈ 0.5081.
+        assert!(approx_eq(pq_forward(0.01), 0.5081, 5e-4));
+    }
+
+    #[test]
+    fn pq_forward_inverse_round_trips() {
+        for &l in &[0.001_f32, 0.01, 0.1, 0.5, 0.9, 1.0] {
+            let r = pq_inverse(pq_forward(l));
+            assert!(approx_eq(r, l, 5e-4), "pq round-trip at {l} got {r}");
+        }
+    }
+
+    #[test]
+    fn hlg_forward_endpoints_and_known_points() {
+        assert!(approx_eq(hlg_forward(0.0), 0.0, 1e-7));
+        assert!(approx_eq(hlg_forward(1.0), 1.0, 1e-5));
+        // Continuity at the L=1/12 piecewise breakpoint: both branches return 0.5.
+        assert!(approx_eq(hlg_forward(1.0 / 12.0), 0.5, 1e-5));
+        // Quadratic-region check: L = 0.25/3 ⇒ encoded = sqrt(0.25) = 0.5.
+        assert!(approx_eq(hlg_forward(0.25 / 3.0), 0.5, 1e-5));
+    }
+
+    #[test]
+    fn hlg_forward_inverse_round_trips() {
+        for &l in &[0.0_f32, 0.01, 0.05, 1.0 / 12.0, 0.1, 0.5, 0.9, 1.0] {
+            let r = hlg_inverse(hlg_forward(l));
+            assert!(approx_eq(r, l, 5e-5), "hlg round-trip at {l} got {r}");
+        }
+    }
+
+    #[test]
+    fn build_gamma_lut_pq_monotonic_and_endpoints() {
+        let lut = build_gamma_lut(TransferKind::St2084Pq, 1024);
+        assert_eq!(lut[0].red, 0);
+        assert_eq!(lut[lut.len() - 1].red, 65535);
+        for w in lut.windows(2) {
+            assert!(w[1].red >= w[0].red, "PQ LUT non-monotonic at {}", w[0].red);
+        }
+    }
+
+    #[test]
+    fn build_gamma_lut_hlg_monotonic_and_endpoints() {
+        let lut = build_gamma_lut(TransferKind::Hlg, 1024);
+        assert_eq!(lut[0].red, 0);
+        assert_eq!(lut[lut.len() - 1].red, 65535);
+        for w in lut.windows(2) {
+            assert!(w[1].red >= w[0].red, "HLG LUT non-monotonic at {}", w[0].red);
+        }
     }
 
     #[test]

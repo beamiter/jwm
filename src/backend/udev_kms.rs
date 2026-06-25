@@ -776,15 +776,8 @@ impl KmsState {
         let shader_tf = shader_fallback.shader_id();
         let shader_gamma = shader_fallback.gamma_for_shader();
 
-        // HW LUT path only supports TFs the generator implements.
-        let lut_target: Option<TransferKind> = uniform_tf.filter(|t| matches!(
-            t,
-            TransferKind::Linear
-                | TransferKind::Srgb
-                | TransferKind::Bt1886
-                | TransferKind::Gamma22
-                | TransferKind::Power { .. }
-        ));
+        // Every TransferKind variant has a finite forward() now.
+        let lut_target: Option<TransferKind> = uniform_tf;
 
         let Some(target) = lut_target.filter(|_| gate_on) else {
             for i in 0..n {
