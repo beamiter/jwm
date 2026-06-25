@@ -111,6 +111,11 @@ struct KmsOutputState {
     color_pipeline_caps: Option<crate::backend::api::KmsColorPipelineCaps>,
     installed_gamma_lut:
         Option<(u64, crate::backend::wayland_udev::color_pipeline::TransferKind)>,
+    /// Per-output target transfer function, derived from EDID HDR caps at
+    /// output init (PQ/HLG for HDR-signalled displays; Gamma22 for sRGB).
+    /// Read by `refresh_color_pipeline_offload` to pick the uniform target
+    /// across active outputs and to drive the shader-side encode pass.
+    output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind,
     /// `true` while DPMS is off — `refresh_color_pipeline_offload` skips this
     /// output entirely. Set by `set_dpms_for_output`. Defaults to `false`
     /// (DPMS on at init).
@@ -736,11 +741,22 @@ impl KmsState {
         Ok(())
     }
 
-    /// Per-frame orchestrator. Returns whether HW encode offload is active
-    /// **for this frame across all outputs**: true iff the gate is on and
-    /// every active (DPMS-on, has caps, size ≥ 256) output ended this call
-    /// with the target TF installed. False otherwise → caller keeps the GL
-    /// shader encode pass enabled.
+    /// Per-frame orchestrator. Returns
+    /// `(hw_encode_active, shader_encode_tf, shader_encode_gamma)`.
+    ///
+    /// `hw_encode_active` is true iff the gate is on, every active
+    /// (DPMS-on, soft-enabled) output reports the **same** target TF (read
+    /// from EDID at init into `KmsOutputState.output_tf`), that TF is one
+    /// the LUT generator supports (Linear/Srgb/Bt1886/Gamma22/Power — PQ/HLG
+    /// have no `forward()` yet), every output has caps for it, and the LUT
+    /// install succeeded on every participating output. False otherwise →
+    /// caller keeps the GL shader encode pass enabled.
+    ///
+    /// `shader_encode_tf` / `shader_encode_gamma` are the parameters the
+    /// shader path should use when `hw_encode_active` is false. They reflect
+    /// the uniform participating TF if there is one (so an HDR-only session
+    /// gets PQ encode), or sRGB when the set is mixed (status-quo fallback;
+    /// fixing mixed-TF needs per-output render passes — Phase 3.3).
     ///
     /// The all-or-nothing rule avoids half-encoded multi-output sessions:
     /// the compositor renders a single global FBO that feeds every output,
@@ -748,27 +764,63 @@ impl KmsState {
     pub(super) fn refresh_color_pipeline_offload(
         &mut self,
         state: &crate::backend::wayland::state::JwmWaylandState,
-    ) -> bool {
+    ) -> (bool, i32, f32) {
+        use crate::backend::wayland_udev::color_pipeline::TransferKind;
+
         let gate_on = crate::config::CONFIG
             .load()
             .behavior()
             .kms_color_pipeline_offload;
-        let target = crate::backend::wayland_udev::color_pipeline::TransferKind::Srgb;
         let n = self.outputs.len();
 
-        if !gate_on {
+        // Uniform participating TF (None if mixed or no participating outputs).
+        let uniform_tf: Option<TransferKind> = {
+            let mut tf: Option<TransferKind> = None;
+            let mut mixed = false;
+            for o in &self.outputs {
+                if o.dpms_off || state.soft_disabled_outputs.contains(&o.output_name) {
+                    continue;
+                }
+                match tf {
+                    None => tf = Some(o.output_tf),
+                    Some(t) if t != o.output_tf => {
+                        mixed = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if mixed { None } else { tf }
+        };
+
+        // Shader-path fallback: prefer the uniform TF (better encoding for
+        // single-HDR sessions); fall back to sRGB on mixed or no outputs.
+        let shader_fallback = uniform_tf.unwrap_or(TransferKind::Srgb);
+        let shader_tf = shader_fallback.shader_id();
+        let shader_gamma = shader_fallback.gamma_for_shader();
+
+        // HW LUT path is only available for TFs the generator supports.
+        let lut_target: Option<TransferKind> = uniform_tf.filter(|t| matches!(
+            t,
+            TransferKind::Linear
+                | TransferKind::Srgb
+                | TransferKind::Bt1886
+                | TransferKind::Gamma22
+                | TransferKind::Power { .. }
+        ));
+
+        if !gate_on || lut_target.is_none() {
             for i in 0..n {
                 if self.outputs[i].installed_gamma_lut.is_some() {
                     let _ = self.uninstall_gamma_lut(i);
                 }
             }
-            return false;
+            return (false, shader_tf, shader_gamma);
         }
+        let target = lut_target.expect("checked above");
 
-        // Pass 1: any non-participating output (DPMS-off or soft-disabled)
-        // drops its LUT so the CRTC isn't carrying stale color state. Uses the
-        // cached `output_name` to avoid the per-frame `String` that
-        // `smithay::output::Output::name()` allocates on every call.
+        // Pass 1: drop LUTs on non-participating outputs (DPMS-off /
+        // soft-disabled) so CRTCs don't carry stale color state.
         for i in 0..n {
             let participating = {
                 let o = &self.outputs[i];
@@ -781,7 +833,7 @@ impl KmsState {
 
         // Pass 2: every participating output must have caps for the target TF
         // (GAMMA_LUT + size ≥ 256). If even one doesn't, peel every install
-        // back on participating outputs and return false.
+        // back on participating outputs and bail to the shader path.
         let mut any_participating = false;
         let mut all_capable = true;
         for i in 0..n {
@@ -810,7 +862,7 @@ impl KmsState {
                     let _ = self.uninstall_gamma_lut(i);
                 }
             }
-            return false;
+            return (false, shader_tf, shader_gamma);
         }
 
         // Pass 3: install on participating outputs that don't already have the
@@ -836,10 +888,10 @@ impl KmsState {
                         let _ = self.uninstall_gamma_lut(j);
                     }
                 }
-                return false;
+                return (false, shader_tf, shader_gamma);
             }
         }
-        true
+        (true, shader_tf, shader_gamma)
     }
 
     pub(super) fn set_gamma_for_output(&mut self, output_idx: usize, gamma_size: u32, ramp: &[u16]) -> Result<(), String> {
@@ -2123,6 +2175,20 @@ impl KmsState {
 
             let refresh_interval = p.frame_callback_throttle.unwrap_or(std::time::Duration::from_millis(16));
             let output_name = p.output.name();
+            // Derive the target transfer function from EDID HDR caps so the
+            // encode pass (shader or HW LUT) targets the right TF instead of
+            // hardwired sRGB. Matches the wp-color-management response policy
+            // in color_management::params_from_edid.
+            let output_tf = {
+                use crate::backend::wayland_udev::color_pipeline::TransferKind;
+                let params = p
+                    .output
+                    .user_data()
+                    .get::<crate::backend::edid::EdidHdrCapabilities>()
+                    .map(crate::backend::wayland_udev::color_management::params_from_edid)
+                    .unwrap_or_else(crate::backend::wayland_udev::color_management::srgb_params);
+                TransferKind::from_params(&params)
+            };
             outputs.push(KmsOutputState {
                 crtc: p.crtc,
                 connector: p.connector,
@@ -2142,6 +2208,7 @@ impl KmsState {
                 output_name,
                 color_pipeline_caps,
                 installed_gamma_lut: None,
+                output_tf,
                 dpms_off: false,
             });
         }

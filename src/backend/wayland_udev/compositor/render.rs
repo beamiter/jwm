@@ -245,6 +245,8 @@ impl WaylandCompositor {
     /// `hw_encode_active`: when true, the per-output CRTC `GAMMA_LUT` will
     /// OETF-encode at scanout, so the shader-side encode pass must be skipped
     /// (otherwise we double-encode).
+    /// `shader_encode_tf` / `shader_encode_gamma`: TF parameters used by the
+    /// shader encode pass when `hw_encode_active` is false. Ignored otherwise.
     /// Returns true if a frame was rendered (false if skipped due to no changes).
     pub(crate) fn render_frame(
         &mut self,
@@ -252,6 +254,8 @@ impl WaylandCompositor {
         scene: &[(u64, i32, i32, u32, u32)],
         focused: Option<u64>,
         hw_encode_active: bool,
+        shader_encode_tf: i32,
+        shader_encode_gamma: f32,
     ) -> bool {
         // =================================================================
         // 0. Performance infrastructure - frame start
@@ -1112,11 +1116,16 @@ impl WaylandCompositor {
         }
 
         if scene_linear_active && !hw_encode_active {
-            // Encode linear_fbo → output_fbo. encode_tf = -1 (shader else
-            // branch = sRGB forward). Skipped when the CRTC GAMMA_LUT will
-            // OETF at scanout — linear values then flow straight through
-            // smithay's per-output composite into the 10-bit GBM FB.
-            self.dispatch_scene_linear_encode_pass(gl, &projection, -1, 1.0);
+            // Encode linear_fbo → output_fbo using the uniform participating
+            // TF (sRGB fallback when outputs are mixed). Skipped when the CRTC
+            // GAMMA_LUT will OETF at scanout — linear values then flow straight
+            // through smithay's per-output composite into the 10-bit GBM FB.
+            self.dispatch_scene_linear_encode_pass(
+                gl,
+                &projection,
+                shader_encode_tf,
+                shader_encode_gamma,
+            );
         }
 
         self.frame_profiler.zone_end();

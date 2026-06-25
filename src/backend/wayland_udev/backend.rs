@@ -3135,13 +3135,20 @@ impl Backend for UdevBackend {
             // shader encode pass (avoiding double encoding); when false, the
             // shader continues to encode. All-or-nothing across active outputs
             // is enforced inside the helper.
-            let hw_encode_active = kms
+            let (hw_encode_active, shader_encode_tf, shader_encode_gamma) = kms
                 .borrow_mut()
                 .refresh_color_pipeline_offload(&self.state);
             let rendered = kms
                 .borrow_mut()
                 .with_renderer(|gl| {
-                    compositor.render_frame(gl, &full_scene, focused_window, hw_encode_active)
+                    compositor.render_frame(
+                        gl,
+                        &full_scene,
+                        focused_window,
+                        hw_encode_active,
+                        shader_encode_tf,
+                        shader_encode_gamma,
+                    )
                 })
                 .unwrap_or(false);
             if crf_log_this {
