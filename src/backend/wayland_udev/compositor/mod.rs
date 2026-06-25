@@ -184,6 +184,14 @@ pub(crate) struct WindowUniforms {
     pub uv_rect: i32,
     pub ripple_progress: i32,
     pub ripple_amplitude: i32,
+    // wp-color-management uniforms — locations may be -1 on older shader
+    // drivers; the bind helpers no-op on -1 so missing values are safe.
+    pub color_managed: i32,
+    pub color_matrix: i32,
+    pub decode_tf: i32,
+    pub decode_gamma: i32,
+    pub encode_tf: i32,
+    pub encode_gamma: i32,
 }
 
 pub(crate) struct ShadowUniforms {
@@ -421,6 +429,12 @@ pub(crate) struct WindowState {
     /// WindowState is kept alive so the genie pass can sample its
     /// gl_texture, then removed by tick_genie when the animation completes.
     pub is_genie_minimizing: bool,
+    /// wp-color-management transform to apply in the window fragment shader
+    /// for this frame. `None` = identity / bypass. Refreshed each frame in
+    /// `compositor_render_frame` from `(surface_params, output_params)`; the
+    /// stored value is read once in the draw loop and then becomes stale —
+    /// do not rely on its lifetime beyond a single frame.
+    pub color_transform: Option<crate::backend::wayland_udev::color_pipeline::ColorTransform>,
 }
 
 /// Active genie minimize animation for one window (Wayland).
@@ -589,6 +603,12 @@ pub(crate) struct WaylandCompositor {
 
     // Per-window state
     windows: HashMap<u64, WindowState>,
+
+    // Set true while any WindowState carries a non-None color_transform.
+    // The gate-off branch of the render path skips its per-window clear loop
+    // when this is false, so a session that never enables color management
+    // pays no per-frame cost.
+    any_color_transform_active: bool,
 
     // Config
     corner_radius: f32,
@@ -1037,6 +1057,12 @@ impl WaylandCompositor {
             uv_rect: get_uniform_loc(gl, program, "u_uv_rect"),
             ripple_progress: get_uniform_loc(gl, program, "u_ripple_progress"),
             ripple_amplitude: get_uniform_loc(gl, program, "u_ripple_amplitude"),
+            color_managed: get_uniform_loc(gl, program, "u_color_managed"),
+            color_matrix: get_uniform_loc(gl, program, "u_color_matrix"),
+            decode_tf: get_uniform_loc(gl, program, "u_decode_tf"),
+            decode_gamma: get_uniform_loc(gl, program, "u_decode_gamma"),
+            encode_tf: get_uniform_loc(gl, program, "u_encode_tf"),
+            encode_gamma: get_uniform_loc(gl, program, "u_encode_gamma"),
         };
 
         let shadow_uniforms = ShadowUniforms {
@@ -1279,6 +1305,7 @@ impl WaylandCompositor {
 
             // Per-window state
             windows: HashMap::new(),
+            any_color_transform_active: false,
 
             // Config defaults — intentionally conservative; apply_config() reads config.toml
             corner_radius: 0.0,

@@ -696,6 +696,10 @@ impl WaylandCompositor {
             gl.Uniform1i(self.win_uniforms.texture, 0);
             gl.Uniform4f(self.win_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
             gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
+            // Default off — only the per-window standard draw path conditionally
+            // enables color management. Ancillary draws (blur/ghost) share this
+            // program and must not inherit a stale transform.
+            gl.Uniform1i(self.win_uniforms.color_managed, 0);
             gl.BindVertexArray(self.quad_vao);
 
             for &(win_id, x, y, w, h) in visible_scene {
@@ -953,9 +957,44 @@ impl WaylandCompositor {
                         gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.03);
                     }
 
+                    // wp-color-management transform for this surface, if any.
+                    // GLSL's mat3 is column-major; ColorTransform stores
+                    // matrix_row_major, so pass GL_TRUE for transpose.
+                    if let Some(t) = wt.color_transform.as_ref() {
+                        gl.Uniform1i(self.win_uniforms.color_managed, 1);
+                        gl.UniformMatrix3fv(
+                            self.win_uniforms.color_matrix,
+                            1,
+                            ffi::TRUE,
+                            t.matrix_row_major.as_ptr(),
+                        );
+                        gl.Uniform1i(
+                            self.win_uniforms.decode_tf,
+                            t.inverse_eotf.shader_id(),
+                        );
+                        gl.Uniform1f(
+                            self.win_uniforms.decode_gamma,
+                            t.inverse_eotf.gamma_for_shader(),
+                        );
+                        gl.Uniform1i(
+                            self.win_uniforms.encode_tf,
+                            t.forward_eotf.shader_id(),
+                        );
+                        gl.Uniform1f(
+                            self.win_uniforms.encode_gamma,
+                            t.forward_eotf.gamma_for_shader(),
+                        );
+                    }
+
                     gl.ActiveTexture(ffi::TEXTURE0);
                     self.bind_window_texture(gl, texture);
                     gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+
+                    // Reset to default off so the next iteration's blur/ghost
+                    // draws don't inherit this window's transform.
+                    if wt.color_transform.is_some() {
+                        gl.Uniform1i(self.win_uniforms.color_managed, 0);
+                    }
 
                     // Reset ripple
                     if wt.ripple_active {

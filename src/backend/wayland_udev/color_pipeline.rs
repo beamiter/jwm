@@ -112,6 +112,31 @@ impl TransferKind {
         Self::Gamma22
     }
 
+    /// Shader-side discriminant. The numeric assignment is part of the public
+    /// API contract between Rust and the GLSL window shader and MUST be kept
+    /// in lockstep with the `if` chain in `decode_eotf`/`encode_eotf`.
+    pub fn shader_id(self) -> i32 {
+        match self {
+            Self::Linear => 0,
+            Self::Power { .. } => 1,
+            Self::Bt1886 => 2,
+            Self::Gamma22 => 3,
+            Self::St2084Pq => 4,
+            Self::Hlg => 5,
+        }
+    }
+
+    /// Companion gamma value for the `Power` variant. For every other variant
+    /// returns `1.0` so the corresponding uniform always has a defined value
+    /// (GLSL undefined-uniform reads are implementation-defined; binding 1.0
+    /// makes the value harmless if a TF branch accidentally consults it).
+    pub fn gamma_for_shader(self) -> f32 {
+        match self {
+            Self::Power { gamma_x10000 } => (gamma_x10000 as f32 / 10_000.0).max(1e-3),
+            _ => 1.0,
+        }
+    }
+
     /// Apply this curve's inverse to a value in the curve's encoded range.
     /// Returns scene-linear light, normalized to 1.0 = display reference white
     /// for SDR-style curves, or 1.0 = 10000 cd/m² for PQ. HLG is normalized so
@@ -431,5 +456,37 @@ mod tests {
         assert_eq!(t.forward_eotf, TransferKind::Gamma22);
         // Primaries match → matrix is identity.
         assert!(approx_mat(&t.matrix_row_major, &IDENTITY_3X3, 1e-6));
+    }
+
+    #[test]
+    fn shader_id_is_stable_and_distinct() {
+        // The shader's if-chain in decode_eotf/encode_eotf depends on these
+        // exact integer values. Renumbering breaks the GL contract.
+        assert_eq!(TransferKind::Linear.shader_id(), 0);
+        assert_eq!(TransferKind::Power { gamma_x10000: 22_000 }.shader_id(), 1);
+        assert_eq!(TransferKind::Bt1886.shader_id(), 2);
+        assert_eq!(TransferKind::Gamma22.shader_id(), 3);
+        assert_eq!(TransferKind::St2084Pq.shader_id(), 4);
+        assert_eq!(TransferKind::Hlg.shader_id(), 5);
+    }
+
+    #[test]
+    fn gamma_for_shader_defined_for_every_variant() {
+        // Power's gamma comes from the variant. Other variants return 1.0 so
+        // the matching shader uniform is always defined, even on a TF branch
+        // that never consults the value — undefined-uniform reads are
+        // implementation-defined and we don't want stale data leaking in.
+        assert_eq!(
+            TransferKind::Power { gamma_x10000: 24_000 }.gamma_for_shader(),
+            2.4
+        );
+        assert_eq!(TransferKind::Linear.gamma_for_shader(), 1.0);
+        assert_eq!(TransferKind::Bt1886.gamma_for_shader(), 1.0);
+        assert_eq!(TransferKind::Gamma22.gamma_for_shader(), 1.0);
+        assert_eq!(TransferKind::St2084Pq.gamma_for_shader(), 1.0);
+        assert_eq!(TransferKind::Hlg.gamma_for_shader(), 1.0);
+        // Zero gamma must not become a divide-by-zero or NaN producer.
+        let g = TransferKind::Power { gamma_x10000: 0 }.gamma_for_shader();
+        assert!(g.is_finite() && g > 0.0);
     }
 }

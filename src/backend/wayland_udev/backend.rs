@@ -3055,6 +3055,77 @@ impl Backend for UdevBackend {
                     }
                 }
             }
+            let cm_render_gate = crate::config::CONFIG
+                .load()
+                .behavior()
+                .color_management_render_path;
+            if cm_render_gate {
+                use crate::backend::edid::EdidHdrCapabilities;
+                use crate::backend::wayland_udev::color_management::{
+                    params_from_edid, srgb_params,
+                };
+                use crate::backend::wayland_udev::color_pipeline::ColorTransform;
+                use smithay::utils::{Logical, Point, Rectangle};
+
+                // Take the surface→params map once per frame instead of
+                // acquiring the wp-color-management mutex per-window.
+                let surface_params_map = self
+                    .state
+                    .color_manager
+                    .as_ref()
+                    .map(|cm| cm.snapshot_surface_params())
+                    .unwrap_or_default();
+
+                // Precompute (rect, output_params) per output once per frame
+                // — output layout and EDID caps are constant within a frame.
+                let output_cache: Vec<(Rectangle<i32, Logical>, _)> = self
+                    .state
+                    .outputs
+                    .iter()
+                    .filter_map(|o| {
+                        let mode = o.current_mode()?;
+                        let scale = o.current_scale().fractional_scale();
+                        let logical_size = mode.size.to_f64().to_logical(scale).to_i32_round();
+                        let logical_size = o.current_transform().transform_size(logical_size);
+                        let rect = Rectangle::<i32, Logical>::new(o.current_location(), logical_size);
+                        let params = o
+                            .user_data()
+                            .get::<EdidHdrCapabilities>()
+                            .map(params_from_edid)
+                            .unwrap_or_else(srgb_params);
+                        Some((rect, params))
+                    })
+                    .collect();
+
+                for &(win_id, x, y, w, h) in &full_scene {
+                    let wid = WindowId::from_raw(win_id);
+                    let surface = self.state.surface_for_window(wid);
+                    let surface_params = surface
+                        .as_ref()
+                        .and_then(|s| surface_params_map.get(&s.id()));
+
+                    let xform = if let Some(sp) = surface_params {
+                        let win_rect = Rectangle::<i32, Logical>::new(
+                            Point::from((x, y)),
+                            (w.max(1) as i32, h.max(1) as i32).into(),
+                        );
+                        let output_params = output_cache
+                            .iter()
+                            .max_by_key(|(rect, _)| {
+                                rect.intersection(win_rect)
+                                    .map(|r| r.size.w.max(0) as i64 * r.size.h.max(0) as i64)
+                                    .unwrap_or(0)
+                            })
+                            .map(|(_, p)| p);
+                        output_params.and_then(|op| ColorTransform::build(sp, op))
+                    } else {
+                        None
+                    };
+                    compositor.set_window_color_transform(win_id, xform);
+                }
+            } else {
+                compositor.clear_all_color_transforms();
+            }
             // Feed vblank presentation time for frame pacing
             if let Some(presented_at) = kms.borrow_mut().take_presentation_time() {
                 compositor.on_vblank_presented(presented_at);

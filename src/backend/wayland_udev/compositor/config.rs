@@ -625,6 +625,7 @@ impl WaylandCompositor {
             ripple_active: false,
             content_uv: [0.0, 0.0, 1.0, 1.0],
             is_genie_minimizing: false,
+            color_transform: None,
         });
         self.predictive_render_mgr.register_window(window_id);
         self.needs_render = true;
@@ -705,6 +706,7 @@ impl WaylandCompositor {
             ripple_active: false,
             content_uv: [0.0, 0.0, 1.0, 1.0],
             is_genie_minimizing: false,
+            color_transform: None,
         });
         win.gl_texture = Some(tex_id);
         win.width = w;
@@ -752,6 +754,34 @@ impl WaylandCompositor {
             self.subpixel_mgr.register_window(window_id, class_name);
             self.needs_render = true;
         }
+    }
+
+    /// Set the per-window surface→output color transform, used by the window
+    /// fragment shader when `behavior.color_management_render_path` is enabled.
+    pub(crate) fn set_window_color_transform(
+        &mut self,
+        window_id: u64,
+        xform: Option<crate::backend::wayland_udev::color_pipeline::ColorTransform>,
+    ) {
+        if let Some(win) = self.windows.get_mut(&window_id) {
+            win.color_transform = xform;
+            if xform.is_some() {
+                self.any_color_transform_active = true;
+            }
+        }
+    }
+
+    /// Clear every window's color transform in a single pass and reset the
+    /// "any active" flag. Used by the render loop when the runtime gate is
+    /// off to guarantee no stale transform leaks into a draw.
+    pub(crate) fn clear_all_color_transforms(&mut self) {
+        if !self.any_color_transform_active {
+            return;
+        }
+        for win in self.windows.values_mut() {
+            win.color_transform = None;
+        }
+        self.any_color_transform_active = false;
     }
 
     /// Notify a tag/workspace switch for transition animation

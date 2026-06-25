@@ -499,6 +499,124 @@ fn main_window_shader_renders_opacity_and_dim() {
     }
 }
 
+/// When `u_color_managed = 1` with linear→linear EOTFs and an identity gamut
+/// matrix, the per-surface color pipeline must be a no-op. This guards both
+/// the "gate-on but no work to do" path and the GLSL helpers (decode_eotf /
+/// encode_eotf / mat3 bind) against regressions that would tint pixels even
+/// when the transform should be identity.
+#[test]
+fn main_window_shader_color_management_identity_is_passthrough() {
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping color_management_identity_is_passthrough");
+        return;
+    };
+    let gl = &h.gl;
+
+    unsafe {
+        let prog = link(gl, super::shaders::VERTEX_SHADER, super::shaders::FRAGMENT_SHADER)
+            .expect("main window shaders must link");
+
+        const W: i32 = 8;
+        const H: i32 = 8;
+
+        let texel = [180u8, 90, 30, 255];
+        let mut input_pixels = Vec::with_capacity(4 * 4);
+        for _ in 0..4 {
+            input_pixels.extend_from_slice(&texel);
+        }
+        let input_tex = gl.create_texture().unwrap();
+        gl.bind_texture(glow::TEXTURE_2D, Some(input_tex));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA as i32,
+            2,
+            2,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(&input_pixels)),
+        );
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+
+        let out_tex = gl.create_texture().unwrap();
+        gl.bind_texture(glow::TEXTURE_2D, Some(out_tex));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA as i32,
+            W,
+            H,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(None),
+        );
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+        let fbo = gl.create_framebuffer().unwrap();
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+        gl.framebuffer_texture_2d(
+            glow::FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(out_tex),
+            0,
+        );
+        assert_eq!(
+            gl.check_framebuffer_status(glow::FRAMEBUFFER),
+            glow::FRAMEBUFFER_COMPLETE,
+            "output FBO incomplete"
+        );
+
+        gl.viewport(0, 0, W, H);
+        gl.disable(glow::BLEND);
+        gl.use_program(Some(prog));
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_2D, Some(input_tex));
+
+        let proj = ortho(W as f32, H as f32);
+        let u = |n: &str| gl.get_uniform_location(prog, n);
+        gl.uniform_4_f32(u("u_rect").as_ref(), 0.0, 0.0, W as f32, H as f32);
+        gl.uniform_matrix_4_f32_slice(u("u_projection").as_ref(), false, &proj);
+        gl.uniform_1_i32(u("u_texture").as_ref(), 0);
+        gl.uniform_1_f32(u("u_radius").as_ref(), 0.0);
+        gl.uniform_2_f32(u("u_size").as_ref(), W as f32, H as f32);
+        gl.uniform_4_f32(u("u_uv_rect").as_ref(), 0.0, 0.0, 1.0, 1.0);
+        gl.uniform_1_f32(u("u_ripple_progress").as_ref(), -1.0);
+        gl.uniform_1_f32(u("u_ripple_amplitude").as_ref(), 0.0);
+        gl.uniform_1_f32(u("u_opacity").as_ref(), 1.0);
+        gl.uniform_1_f32(u("u_dim").as_ref(), 1.0);
+
+        // Enable color management with an identity transform: linear→linear,
+        // identity matrix. The fragment shader should leave the texel pixels
+        // unchanged within rounding error.
+        gl.uniform_1_i32(u("u_color_managed").as_ref(), 1);
+        let identity = [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        gl.uniform_matrix_3_f32_slice(u("u_color_matrix").as_ref(), false, &identity);
+        gl.uniform_1_i32(u("u_decode_tf").as_ref(), 0); // Linear
+        gl.uniform_1_f32(u("u_decode_gamma").as_ref(), 1.0);
+        gl.uniform_1_i32(u("u_encode_tf").as_ref(), 0); // Linear
+        gl.uniform_1_f32(u("u_encode_gamma").as_ref(), 1.0);
+
+        gl.clear_color(0.0, 0.0, 0.0, 1.0);
+        gl.clear(glow::COLOR_BUFFER_BIT);
+        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        gl.finish();
+        assert_pixel(read_center(gl, W, H), [180, 90, 30, 255], 2, "cm-identity");
+
+        // Gate off: same shader, same texel, must still pass through.
+        gl.uniform_1_i32(u("u_color_managed").as_ref(), 0);
+        gl.clear(glow::COLOR_BUFFER_BIT);
+        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        gl.finish();
+        assert_pixel(read_center(gl, W, H), [180, 90, 30, 255], 2, "cm-off");
+    }
+}
+
 /// Blurring a flat color must return that same color, whatever the kernel
 /// weights are (Kawase down sums to 8, Kawase up to 12, box to 9). With a solid
 /// input texture every neighbour tap is identical, so the weighted average

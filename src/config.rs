@@ -250,6 +250,14 @@ pub struct BehaviorConfig {
     /// Tone mapping method: "none", "reinhard", "aces".
     #[serde(default = "default_tone_mapping_method")]
     pub tone_mapping_method: String,
+    /// Apply per-surface wp-color-management transforms (decode →
+    /// gamut-matrix → encode) in the window shader. Default off — the
+    /// render-path math has unit-test coverage but no HW visual
+    /// verification yet. When this flag is off the gate-on path is
+    /// dead-stripped at runtime and pixels render identically to the
+    /// pre-color-management pipeline.
+    #[serde(default)]
+    pub color_management_render_path: bool,
 
     // --- Feature 11: Performance debug HUD ---
     /// Show FPS / frame time debug overlay.
@@ -1014,6 +1022,7 @@ impl Default for Config {
                     hdr_enabled: false,  // Disabled by default (requires HDR display)
                     hdr_peak_nits: default_hdr_peak_nits(),
                     tone_mapping_method: default_tone_mapping_method(),
+                    color_management_render_path: false,
                     debug_hud: false,
                     profiling_enabled: false,
                     direct_scanout_enabled: default_true(),

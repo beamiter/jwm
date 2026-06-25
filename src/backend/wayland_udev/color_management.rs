@@ -138,6 +138,18 @@ impl ColorManagerState {
         id
     }
 
+    /// Snapshot the surface→description map in one lock acquisition. The
+    /// returned map is decoupled from the live state and safe to consult
+    /// across many surfaces without re-locking per-surface (used by the
+    /// render-path color-management pass).
+    pub fn snapshot_surface_params(&self) -> HashMap<ObjectId, ParametricParams> {
+        self.surface_descriptions
+            .lock_safe()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.params.clone()))
+            .collect()
+    }
+
     /// Snapshot every surface that currently has an applied image description.
     /// Used by the diagnostic IPC to report active color-managed clients.
     pub fn snapshot_surface_descriptions(&self) -> Vec<(ObjectId, SurfaceDescriptionRecord)> {
@@ -288,7 +300,7 @@ fn emit_manager_caps(resource: &WpColorManagerV1) {
 
 /// Build a default sRGB parametric description (used when no HDR caps are
 /// known for an output).
-fn srgb_params() -> ParametricParams {
+pub(crate) fn srgb_params() -> ParametricParams {
     ParametricParams {
         primaries_named: Some(Primaries::Srgb as u32),
         tf_named: Some(TransferFunction::Gamma22 as u32),
@@ -300,7 +312,7 @@ fn srgb_params() -> ParametricParams {
 /// image description. Mirrors the policy used by `hdr_metadata::build_from_edid`
 /// for the kernel-side blob so the wp-color-management answer and the
 /// HDR_OUTPUT_METADATA push agree on EOTF and gamut.
-fn params_from_edid(caps: &EdidHdrCapabilities) -> ParametricParams {
+pub(crate) fn params_from_edid(caps: &EdidHdrCapabilities) -> ParametricParams {
     let mut p = ParametricParams::default();
 
     // EOTF: prefer PQ > HLG > BT.1886.

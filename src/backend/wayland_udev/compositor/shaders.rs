@@ -25,12 +25,89 @@ uniform float u_dim;     // dim multiplier (1.0 = no dim, <1.0 = darken)
 uniform vec4  u_uv_rect; // x, y, w, h in UV space
 uniform float u_ripple_progress;  // 0.0 = start, 1.0 = done, <0 = inactive
 uniform float u_ripple_amplitude; // UV distortion strength (0 = no ripple)
+
+// wp-color-management transform. Discriminant values must match
+// TransferKind::shader_id in src/backend/wayland_udev/color_pipeline.rs.
+const int TF_LINEAR = 0;
+const int TF_POWER = 1;
+const int TF_BT1886 = 2;
+const int TF_GAMMA22 = 3;
+const int TF_PQ = 4;
+const int TF_HLG = 5;
+uniform int   u_color_managed;     // 0 = bypass (no transform), 1 = apply
+uniform mat3  u_color_matrix;      // linear surface→output RGB (row-major in Rust → already column-major here per GLSL convention; we transpose at bind time)
+uniform int   u_decode_tf;
+uniform float u_decode_gamma;      // used only when u_decode_tf == TF_POWER
+uniform int   u_encode_tf;
+uniform float u_encode_gamma;
 in vec2 v_uv;
 out vec4 frag_color;
 
 float rounded_rect_sdf(vec2 p, vec2 half_size, float r) {
     vec2 d = abs(p) - half_size + vec2(r);
     return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;
+}
+
+// PQ inverse (SMPTE ST 2084): encoded → linear 0..1 representing 0..10000 cd/m².
+vec3 pq_inverse(vec3 e) {
+    const float M1 = 0.1593017578125;
+    const float M2 = 78.84375;
+    const float C1 = 0.8359375;
+    const float C2 = 18.8515625;
+    const float C3 = 18.6875;
+    vec3 ep_m2 = pow(max(e, 0.0), vec3(1.0 / M2));
+    vec3 num = max(ep_m2 - C1, 0.0);
+    vec3 den = max(C2 - C3 * ep_m2, 1e-12);
+    return pow(num / den, vec3(1.0 / M1));
+}
+vec3 pq_forward(vec3 l) {
+    const float M1 = 0.1593017578125;
+    const float M2 = 78.84375;
+    const float C1 = 0.8359375;
+    const float C2 = 18.8515625;
+    const float C3 = 18.6875;
+    vec3 lm = pow(max(l, 0.0), vec3(M1));
+    return pow((C1 + C2 * lm) / (1.0 + C3 * lm), vec3(M2));
+}
+
+// HLG inverse (BT.2100): C = 0.5599107, A = 0.17883277, B = 0.28466892.
+vec3 hlg_inverse(vec3 e) {
+    const float A = 0.17883277;
+    const float B = 0.28466892;
+    const float C = 0.5599107;
+    vec3 lo = (e * e) / 3.0;
+    vec3 hi = (exp((e - C) / A) + B) / 12.0;
+    return mix(lo, hi, step(0.5, e));
+}
+vec3 hlg_forward(vec3 l) {
+    const float A = 0.17883277;
+    const float B = 0.28466892;
+    const float C = 0.5599107;
+    vec3 lo = sqrt(max(l * 3.0, 0.0));
+    vec3 hi = A * log(max(12.0 * l - B, 1e-12)) + C;
+    return mix(lo, hi, step(1.0 / 12.0, l));
+}
+
+vec3 decode_eotf(vec3 c, int kind, float gamma) {
+    c = clamp(c, 0.0, 1.0);
+    if (kind == TF_LINEAR)  return c;
+    if (kind == TF_POWER)   return pow(c, vec3(max(gamma, 1e-3)));
+    if (kind == TF_BT1886)  return pow(c, vec3(2.4));
+    if (kind == TF_GAMMA22) return pow(c, vec3(2.2));
+    if (kind == TF_PQ)      return pq_inverse(c);
+    if (kind == TF_HLG)     return hlg_inverse(c);
+    return c;
+}
+
+vec3 encode_eotf(vec3 c, int kind, float gamma) {
+    c = max(c, 0.0);
+    if (kind == TF_LINEAR)  return clamp(c, 0.0, 1.0);
+    if (kind == TF_POWER)   return clamp(pow(c, vec3(1.0 / max(gamma, 1e-3))), 0.0, 1.0);
+    if (kind == TF_BT1886)  return clamp(pow(c, vec3(1.0 / 2.4)), 0.0, 1.0);
+    if (kind == TF_GAMMA22) return clamp(pow(c, vec3(1.0 / 2.2)), 0.0, 1.0);
+    if (kind == TF_PQ)      return clamp(pq_forward(c), 0.0, 1.0);
+    if (kind == TF_HLG)     return clamp(hlg_forward(c), 0.0, 1.0);
+    return clamp(c, 0.0, 1.0);
 }
 
 void main() {
@@ -52,6 +129,20 @@ void main() {
     }
 
     vec4 texel = texture(u_texture, uv);
+
+    // wp-color-management transform: decode surface encoding → linearize,
+    // apply gamut matrix to output primaries, re-encode for output. Applied
+    // pre-AA / pre-dim because both are linear scalar ops in display space
+    // (existing approximation). For premultiplied-alpha surfaces this is
+    // technically wrong — we would need to un-premultiply, transform,
+    // re-premultiply — but the intended HDR-source use case (mpv, gamescope)
+    // is opaque. Documented out-of-scope for this slice.
+    if (u_color_managed == 1) {
+        vec3 lin = decode_eotf(texel.rgb, u_decode_tf, u_decode_gamma);
+        lin = u_color_matrix * lin;
+        texel.rgb = encode_eotf(lin, u_encode_tf, u_encode_gamma);
+    }
+
     float a = u_opacity >= 0.0 ? u_opacity : texel.a;
 
     // Rounded corners – must mask both alpha AND rgb for premultiplied-alpha
