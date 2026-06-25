@@ -24,7 +24,9 @@ use smithay::backend::renderer::element::memory::{
     MemoryRenderBuffer, MemoryRenderBufferRenderElement,
 };
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
-use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
+use smithay::backend::renderer::element::surface::{
+    WaylandSurfaceRenderElement, render_elements_from_surface_tree,
+};
 use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::{AsRenderElements, Id, Kind};
 use smithay::backend::renderer::gles::ffi as gl_ffi;
@@ -2637,6 +2639,30 @@ impl KmsState {
                 );
                 elements.push(KmsRenderElement::Texture(elem));
             } else {
+                // Overlay-plane candidate: when `fullscreen_unredirect` is on and
+                // exactly one mapped fullscreen window exists, tag its surface
+                // elements with `Kind::ScanoutCandidate`. smithay's
+                // `try_assign_overlay_plane` only considers elements with that
+                // kind; the kernel atomic test still has the final say. Other
+                // elements (cursor, layer surfaces) stay on the primary plane.
+                let overlay_candidate_window = {
+                    if crate::config::CONFIG.load().behavior().fullscreen_unredirect {
+                        let mut fs = None;
+                        let mut count: u32 = 0;
+                        for w in &state.window_stack {
+                            if state.mapped_windows.contains(w)
+                                && state.window_is_fullscreen.get(w).copied().unwrap_or(false)
+                            {
+                                fs = Some(*w);
+                                count += 1;
+                                if count > 1 { break; }
+                            }
+                        }
+                        if count == 1 { fs } else { None }
+                    } else {
+                        None
+                    }
+                };
                 for win in state.window_stack.iter().rev() {
                     if !state.mapped_windows.contains(win) {
                         continue;
@@ -2744,14 +2770,19 @@ impl KmsState {
 
                     let location: Point<i32, Physical> =
                         (geo.x - ox - toplevel_off_x, geo.y - oy - toplevel_off_y).into();
-                    let tree = SurfaceTree::from_surface(&surface);
+                    let window_kind = if Some(*win) == overlay_candidate_window {
+                        Kind::ScanoutCandidate
+                    } else {
+                        Kind::Unspecified
+                    };
                     let window_elements: Vec<KmsRenderElement> =
-                        AsRenderElements::<GlesRenderer>::render_elements(
-                            &tree,
+                        render_elements_from_surface_tree(
                             &mut self.renderer,
+                            &surface,
                             location,
                             scale,
                             1.0,
+                            window_kind,
                         );
                     elements.extend(window_elements);
 
