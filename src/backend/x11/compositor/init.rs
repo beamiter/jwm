@@ -1290,6 +1290,7 @@ impl Compositor {
             hud_text_height: 0,
             hud_text_cache: String::new(),
             debug_hud: behavior.debug_hud,
+            sys_stats: crate::backend::sys_stats::SysStatsSampler::new(),
             frame_stats: FrameStats {
                 frame_count: 0,
                 last_fps_update: std::time::Instant::now(),

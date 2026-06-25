@@ -1605,17 +1605,45 @@ impl WaylandCompositor {
     }
 
     unsafe fn render_debug_hud(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+        self.sys_stats.maybe_sample();
+
         let uptime = self.compositor_start_time.elapsed().as_secs();
-        let hud_text = format!(
-            "FPS: {:.0}\nFrame: {}\nWindows: {}\nUptime: {}s\nBlur reuse: {}/{}\nVRR: {}",
+        let frame_ms = if self.fps > 0.0 { 1000.0 / self.fps } else { 0.0 };
+        let mut hud_text = format!(
+            "JWM debug HUD (Alt+Shift+F12)\n\
+             Backend: wayland_udev\n\
+             FPS: {:.1}   Frame: {:.2} ms   Frames: {}\n\
+             Windows: {}   Monitors: {}   Uptime: {}s\n\
+             Memory: {:.1} MiB RSS\n\
+             CPU: {:.1} %\n\
+             VRR: {}   Blur reuse: {}/{}",
             self.fps,
+            frame_ms,
             self.frame_count,
             self.windows.len(),
+            self.monitors.len(),
             uptime,
+            self.sys_stats.rss_mib(),
+            self.sys_stats.cpu_pct(),
+            if self.vrr_active { "ON" } else { "off" },
             self.temporal_blur_reuse_count,
             self.temporal_blur_total_count,
-            if self.vrr_active { "ON" } else { "off" },
         );
+
+        if self.debug_hud_extended {
+            use std::fmt::Write;
+            let _ = write!(
+                hud_text,
+                "\n--- Profiler (ms avg/min/max, last 120 frames) ---",
+            );
+            for (name, stats) in self.frame_profiler.all_zone_stats() {
+                let _ = write!(
+                    hud_text,
+                    "\n{:<8}: {:>5.2} / {:>5.2} / {:>5.2}  (n={})",
+                    name, stats.avg_ms, stats.min_ms, stats.max_ms, stats.sample_count,
+                );
+            }
+        }
 
         if hud_text != self.hud_text_cache {
             let (pixels, w, h) =

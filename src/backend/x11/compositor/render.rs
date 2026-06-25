@@ -193,6 +193,12 @@ impl Compositor {
         self.needs_render = true;
     }
 
+    pub(crate) fn set_debug_hud_extended(&mut self, enabled: bool) {
+        self.debug_hud_extended = enabled;
+        self.frame_profiler.set_enabled(enabled);
+        self.needs_render = true;
+    }
+
     #[allow(dead_code)]
     pub(crate) fn debug_hud_enabled(&self) -> bool {
         self.debug_hud
@@ -1759,6 +1765,8 @@ impl Compositor {
 
         // === Pass 5: Debug HUD (feature 11) ===
         if self.debug_hud {
+            self.sys_stats.maybe_sample();
+
             // Format HUD text
             let avg_dt = if self.frame_stats.frame_times.is_empty() { 0.0 }
                 else { self.frame_stats.frame_times.iter().sum::<f32>() / self.frame_stats.frame_times.len() as f32 };
@@ -1767,11 +1775,18 @@ impl Compositor {
             let min_dt = if min_dt == f32::MAX { 0.0 } else { min_dt };
 
             let mut hud_text = format!(
-                "FPS: {:.1}  Avg: {:.1}ms  Max: {:.1}ms  Min: {:.1}ms\nWindows: {}  Tiles: {}  Dirty: {:.0}%",
+                "JWM debug HUD (Alt+Shift+F12)\n\
+                 Backend: x11\n\
+                 FPS: {:.1}  Avg: {:.1}ms  Max: {:.1}ms  Min: {:.1}ms\n\
+                 Windows: {}  Tiles: {}  Dirty: {:.0}%\n\
+                 Memory: {:.1} MiB RSS\n\
+                 CPU: {:.1} %",
                 self.frame_stats.fps, avg_dt * 1000.0, max_dt * 1000.0, min_dt * 1000.0,
                 self.windows.len(),
                 self.damage_tracker.dirty_tiles.len(),
                 self.damage_tracker.dirty_fraction() * 100.0,
+                self.sys_stats.rss_mib(),
+                self.sys_stats.cpu_pct(),
             );
             if self.debug_hud_extended {
                 let tex_mem_kb = self.frame_stats.texture_memory_bytes / 1024;
@@ -1797,6 +1812,21 @@ impl Compositor {
                         "\nLatency: avg {:.1}ms  p50 {:.1}ms  p95 {:.1}ms  p99 {:.1}ms",
                         avg, p50, p95, p99,
                     );
+                }
+
+                // Per-zone profiler breakdown
+                let zones_map = self.frame_profiler.all_zone_stats();
+                if !zones_map.is_empty() {
+                    let _ = write!(hud_text, "\n--- Profiler (ms avg/min/max) ---");
+                    let mut zones: Vec<_> = zones_map.into_iter().collect();
+                    zones.sort_by(|a, b| a.0.cmp(b.0));
+                    for (name, zs) in zones {
+                        let _ = write!(
+                            hud_text,
+                            "\n{:<8}: {:>5.2} / {:>5.2} / {:>5.2}",
+                            name, zs.avg_ms, zs.min_ms, zs.max_ms,
+                        );
+                    }
                 }
             }
 

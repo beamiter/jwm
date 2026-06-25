@@ -746,6 +746,7 @@ pub(crate) struct WaylandCompositor {
 
     // Debug HUD
     debug_hud_enabled: bool,
+    sys_stats: crate::backend::sys_stats::SysStatsSampler,
 
     // Optimization
     needs_render: bool,
@@ -1496,6 +1497,7 @@ impl WaylandCompositor {
 
             // Debug HUD
             debug_hud_enabled: false,
+            sys_stats: crate::backend::sys_stats::SysStatsSampler::new(),
 
             // Optimization
             needs_render: true,

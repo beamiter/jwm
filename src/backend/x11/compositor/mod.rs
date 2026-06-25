@@ -914,6 +914,7 @@ pub(super) struct Compositor {
     hud_text_height: u32,
     hud_text_cache: String,
     debug_hud: bool,
+    sys_stats: crate::backend::sys_stats::SysStatsSampler,
     frame_stats: FrameStats,
 
     // --- Feature 12: Screenshot ---

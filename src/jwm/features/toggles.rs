@@ -130,6 +130,22 @@ impl Jwm {
         Ok(())
     }
 
+    /// 切换 debug 看板(HUD): 显示 FPS / 帧周期 / 内存 / CPU / 渲染分区耗时
+    pub fn toggle_debug_hud(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.debug_hud_on = !self.debug_hud_on;
+        backend.compositor_set_debug_hud(self.debug_hud_on);
+        backend.compositor_set_debug_hud_extended(self.debug_hud_on);
+        log::info!(
+            "Debug HUD {}",
+            if self.debug_hud_on { "ON" } else { "OFF" }
+        );
+        Ok(())
+    }
+
     /// 切换部分重绘(scissor 局部刷新,实验性,默认关)
     pub fn togglepartialdamage(
         &mut self,

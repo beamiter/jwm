@@ -205,6 +205,12 @@ impl WaylandCompositor {
         self.needs_render = true;
     }
 
+    pub(crate) fn set_debug_hud_extended(&mut self, enabled: bool) {
+        self.debug_hud_extended = enabled;
+        self.frame_profiler.set_enabled(enabled);
+        self.needs_render = true;
+    }
+
     pub(crate) fn set_transition_mode(&mut self, mode: &str) {
         self.transition_mode = match mode {
             "slide" => TransitionMode::Slide,

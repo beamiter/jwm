@@ -9,6 +9,9 @@ pub mod hdr_metadata;
 // Backend-independent CPU bitmap text rasterizer shared by both compositors.
 pub mod compositor_font;
 
+// Backend-independent process RSS + CPU sampler used by the debug HUD.
+pub mod sys_stats;
+
 // Shared Smithay Wayland compositor state (used by udev/KMS and windowed X11 backend).
 pub mod wayland;
 

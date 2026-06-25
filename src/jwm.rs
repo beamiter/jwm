@@ -124,6 +124,10 @@ pub struct Jwm {
     /// `behavior.do_not_disturb` and toggled live via the `toggle_dnd` IPC.
     pub(crate) do_not_disturb: bool,
 
+    /// Debug HUD on/off, toggled by `toggle_debug_hud` (default keybinding
+    /// Alt+Shift+F12). Initialized from `behavior.debug_hud`.
+    pub(crate) debug_hud_on: bool,
+
     /// Strut reservations from external panels (polybar, trayer, etc.).
     /// The second tuple element is the monitor that physically hosts the
     /// panel window, used to attribute legacy whole-screen (`_NET_WM_STRUT`)
@@ -451,6 +455,7 @@ impl Jwm {
             chord_compiled: CONFIG.load().compile_chord(),
             chord_armed_until: None,
             do_not_disturb: CONFIG.load().behavior().do_not_disturb,
+            debug_hud_on: CONFIG.load().behavior().debug_hud,
             external_struts: HashMap::new(),
             last_mouse_root: (0.0, 0.0),
 

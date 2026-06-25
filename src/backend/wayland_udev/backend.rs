@@ -3229,6 +3229,12 @@ impl Backend for UdevBackend {
         }
     }
 
+    fn compositor_set_debug_hud_extended(&mut self, enabled: bool) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_debug_hud_extended(enabled);
+        }
+    }
+
     fn compositor_set_transition_mode(&mut self, mode: &str) {
         if let Some(c) = self.compositor.as_mut() {
             c.set_transition_mode(mode);
