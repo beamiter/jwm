@@ -39,16 +39,8 @@ impl TexturePool {
             let mut tex: u32 = 0;
             gl.GenTextures(1, &mut tex);
             gl.BindTexture(ffi::TEXTURE_2D, tex);
-            gl.TexParameteri(
-                ffi::TEXTURE_2D,
-                ffi::TEXTURE_MIN_FILTER,
-                ffi::LINEAR as i32,
-            );
-            gl.TexParameteri(
-                ffi::TEXTURE_2D,
-                ffi::TEXTURE_MAG_FILTER,
-                ffi::LINEAR as i32,
-            );
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
             gl.TexParameteri(
                 ffi::TEXTURE_2D,
                 ffi::TEXTURE_WRAP_S,

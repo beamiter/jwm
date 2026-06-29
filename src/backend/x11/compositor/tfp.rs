@@ -129,18 +129,26 @@ impl Compositor {
             if let Some(&(cfg, is_rgba)) = self.tfp_visual_configs_10bit.get(&win_visual) {
                 log::debug!(
                     "compositor: win 0x{:x} visual 0x{:x} -> 10-bit TFP FBConfig (rgba={})",
-                    x11_win, win_visual, is_rgba
+                    x11_win,
+                    win_visual,
+                    is_rgba
                 );
                 (cfg, is_rgba)
             } else if let Some(&(cfg, is_rgba)) = self.tfp_visual_configs.get(&win_visual) {
                 log::debug!(
                     "compositor: win 0x{:x} visual 0x{:x} -> 8-bit TFP FBConfig (rgba={}, HDR fallback)",
-                    x11_win, win_visual, is_rgba
+                    x11_win,
+                    win_visual,
+                    is_rgba
                 );
                 (cfg, is_rgba)
             } else {
                 let rgba = win_depth == 32 && !self.fbconfig_rgba.is_null();
-                let cfg = if rgba { self.fbconfig_rgba } else { self.fbconfig_rgb };
+                let cfg = if rgba {
+                    self.fbconfig_rgba
+                } else {
+                    self.fbconfig_rgb
+                };
                 (cfg, rgba)
             }
         } else if let Some(&(cfg, is_rgba)) = self.tfp_visual_configs.get(&win_visual) {
@@ -486,12 +494,16 @@ impl Compositor {
                 // Expand by shadow radius to cover shadow artifacts.
                 let expand = self.shadow_radius as i32 + self.shadow_offset[0].abs() as i32 + 4;
                 self.damage_tracker.mark_region_dirty(
-                    old_x - expand, old_y - expand,
-                    old_w + expand as u32 * 2, old_h + expand as u32 * 2,
+                    old_x - expand,
+                    old_y - expand,
+                    old_w + expand as u32 * 2,
+                    old_h + expand as u32 * 2,
                 );
                 self.damage_tracker.mark_region_dirty(
-                    x - expand, y - expand,
-                    w.max(old_w) + expand as u32 * 2, h.max(old_h) + expand as u32 * 2,
+                    x - expand,
+                    y - expand,
+                    w.max(old_w) + expand as u32 * 2,
+                    h.max(old_h) + expand as u32 * 2,
                 );
             }
 
@@ -635,8 +647,10 @@ impl Compositor {
             // Expand by shadow radius to cover shadow
             let expand = self.shadow_radius as i32 + self.shadow_offset[0].abs() as i32 + 4;
             self.damage_tracker.mark_region_dirty(
-                wt.x - expand, wt.y - expand,
-                wt.w + expand as u32 * 2, wt.h + expand as u32 * 2,
+                wt.x - expand,
+                wt.y - expand,
+                wt.w + expand as u32 * 2,
+                wt.h + expand as u32 * 2,
             );
             // Subtract damage so we get future notifications
             let _ = self.conn.damage_subtract(wt.damage, 0u32, 0u32);
@@ -671,7 +685,8 @@ impl Compositor {
                 if is_video_player && wt.audio_sync_target.is_none() {
                     log::info!(
                         "compositor: detected video player {} (0x{:x}), enabling audio sync",
-                        class_name, x11_win
+                        class_name,
+                        x11_win
                     );
                     // Default audio sync at 60fps; will be overridden by app notification
                     wt.audio_sync_target = Some(60.0);
@@ -680,7 +695,11 @@ impl Compositor {
                 // Track game windows for VRR
                 if is_game {
                     self.is_game_window.insert(x11_win, true);
-                    log::debug!("compositor: detected game window: {} (0x{:x})", class_name, x11_win);
+                    log::debug!(
+                        "compositor: detected game window: {} (0x{:x})",
+                        class_name,
+                        x11_win
+                    );
                 } else {
                     self.is_game_window.remove(&x11_win);
                 }
@@ -693,9 +712,18 @@ impl Compositor {
         let class_lower = class_name.to_lowercase();
         matches!(
             class_lower.as_str(),
-            "mpv" | "vlc" | "ffplay" | "kodi" | "mplayer" | "mplayer2"
-                | "smplayer" | "totem" | "gstreamer"
-                | "rhythmbox" | "audacious" | "clementine"
+            "mpv"
+                | "vlc"
+                | "ffplay"
+                | "kodi"
+                | "mplayer"
+                | "mplayer2"
+                | "smplayer"
+                | "totem"
+                | "gstreamer"
+                | "rhythmbox"
+                | "audacious"
+                | "clementine"
         )
     }
 

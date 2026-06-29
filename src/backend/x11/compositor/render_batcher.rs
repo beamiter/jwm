@@ -6,8 +6,8 @@ use glow::HasContext;
 /// Batch key - identifies compatible render state
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BatchKey {
-    pub program: u32,      // Shader program (raw GL name, 0 = none)
-    pub texture: u32,      // Texture (raw GL name, 0 = none)
+    pub program: u32, // Shader program (raw GL name, 0 = none)
+    pub texture: u32, // Texture (raw GL name, 0 = none)
     pub blend_enabled: bool,
 }
 
@@ -148,7 +148,9 @@ pub struct GLStateTracker<P, T, V, F> {
     redundant_changes_avoided: u32,
 }
 
-impl<P: Copy + PartialEq, T: Copy + PartialEq, V: Copy + PartialEq, F: Copy + PartialEq> GLStateTracker<P, T, V, F> {
+impl<P: Copy + PartialEq, T: Copy + PartialEq, V: Copy + PartialEq, F: Copy + PartialEq>
+    GLStateTracker<P, T, V, F>
+{
     pub fn new() -> Self {
         Self {
             current_program: None,
@@ -173,7 +175,12 @@ impl<P: Copy + PartialEq, T: Copy + PartialEq, V: Copy + PartialEq, F: Copy + Pa
     }
 
     /// Bind texture, returns true if state changed
-    pub fn bind_texture<C: HasContext<Texture = T>>(&mut self, gl: &C, target: u32, texture: Option<T>) -> bool {
+    pub fn bind_texture<C: HasContext<Texture = T>>(
+        &mut self,
+        gl: &C,
+        target: u32,
+        texture: Option<T>,
+    ) -> bool {
         if self.current_texture == texture {
             self.redundant_changes_avoided += 1;
             return false;
@@ -184,7 +191,11 @@ impl<P: Copy + PartialEq, T: Copy + PartialEq, V: Copy + PartialEq, F: Copy + Pa
     }
 
     /// Bind VAO, returns true if state changed
-    pub fn bind_vertex_array<C: HasContext<VertexArray = V>>(&mut self, gl: &C, vao: Option<V>) -> bool {
+    pub fn bind_vertex_array<C: HasContext<VertexArray = V>>(
+        &mut self,
+        gl: &C,
+        vao: Option<V>,
+    ) -> bool {
         if self.current_vao == vao {
             self.redundant_changes_avoided += 1;
             return false;
@@ -195,7 +206,12 @@ impl<P: Copy + PartialEq, T: Copy + PartialEq, V: Copy + PartialEq, F: Copy + Pa
     }
 
     /// Bind FBO, returns true if state changed
-    pub fn bind_framebuffer<C: HasContext<Framebuffer = F>>(&mut self, gl: &C, target: u32, fbo: Option<F>) -> bool {
+    pub fn bind_framebuffer<C: HasContext<Framebuffer = F>>(
+        &mut self,
+        gl: &C,
+        target: u32,
+        fbo: Option<F>,
+    ) -> bool {
         if self.current_fbo == fbo {
             self.redundant_changes_avoided += 1;
             return false;
@@ -260,7 +276,9 @@ impl<P: Copy + PartialEq, T: Copy + PartialEq, V: Copy + PartialEq, F: Copy + Pa
     }
 }
 
-impl<P: Copy + PartialEq, T: Copy + PartialEq, V: Copy + PartialEq, F: Copy + PartialEq> Default for GLStateTracker<P, T, V, F> {
+impl<P: Copy + PartialEq, T: Copy + PartialEq, V: Copy + PartialEq, F: Copy + PartialEq> Default
+    for GLStateTracker<P, T, V, F>
+{
     fn default() -> Self {
         Self::new()
     }
@@ -286,9 +304,16 @@ mod tests {
             blend_enabled: true,
         };
         let quad = QuadInstance {
-            x: 0.0, y: 0.0, width: 100.0, height: 100.0,
-            opacity: 1.0, corner_radius: 0.0,
-            u: 0.0, v: 0.0, u_width: 1.0, v_height: 1.0,
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            opacity: 1.0,
+            corner_radius: 0.0,
+            u: 0.0,
+            v: 0.0,
+            u_width: 1.0,
+            v_height: 1.0,
         };
 
         // Add 3 quads with same state
@@ -303,12 +328,27 @@ mod tests {
     #[test]
     fn test_batch_state_change() {
         let mut batcher = RenderBatcher::new();
-        let key1 = BatchKey { program: 1, texture: 10, blend_enabled: true };
-        let key2 = BatchKey { program: 2, texture: 10, blend_enabled: true };
+        let key1 = BatchKey {
+            program: 1,
+            texture: 10,
+            blend_enabled: true,
+        };
+        let key2 = BatchKey {
+            program: 2,
+            texture: 10,
+            blend_enabled: true,
+        };
         let quad = QuadInstance {
-            x: 0.0, y: 0.0, width: 100.0, height: 100.0,
-            opacity: 1.0, corner_radius: 0.0,
-            u: 0.0, v: 0.0, u_width: 1.0, v_height: 1.0,
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            opacity: 1.0,
+            corner_radius: 0.0,
+            u: 0.0,
+            v: 0.0,
+            u_width: 1.0,
+            v_height: 1.0,
         };
 
         batcher.batch_quad(key1, quad);
@@ -324,11 +364,22 @@ mod tests {
     #[test]
     fn test_batch_efficiency() {
         let mut batcher = RenderBatcher::new();
-        let key = BatchKey { program: 1, texture: 10, blend_enabled: true };
+        let key = BatchKey {
+            program: 1,
+            texture: 10,
+            blend_enabled: true,
+        };
         let quad = QuadInstance {
-            x: 0.0, y: 0.0, width: 100.0, height: 100.0,
-            opacity: 1.0, corner_radius: 0.0,
-            u: 0.0, v: 0.0, u_width: 1.0, v_height: 1.0,
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            opacity: 1.0,
+            corner_radius: 0.0,
+            u: 0.0,
+            v: 0.0,
+            u_width: 1.0,
+            v_height: 1.0,
         };
 
         // Add 10 quads

@@ -1,5 +1,7 @@
 // State accessors, setters, apply_config
 #[allow(unused_imports)]
+use super::math::ortho;
+#[allow(unused_imports)]
 use super::*;
 #[allow(unused_imports)]
 use glow::HasContext;
@@ -14,21 +16,19 @@ use std::sync::mpsc;
 #[allow(unused_imports)]
 use x11rb::connection::{Connection, RequestConnection};
 #[allow(unused_imports)]
-use x11rb::wrapper::ConnectionExt as WrapperExt;
-#[allow(unused_imports)]
 use x11rb::protocol::composite::ConnectionExt as CompositeExt;
 #[allow(unused_imports)]
 use x11rb::protocol::damage::{self, ConnectionExt as DamageExt};
+#[allow(unused_imports)]
+use x11rb::protocol::randr::ConnectionExt as RandrExt;
 #[allow(unused_imports)]
 use x11rb::protocol::xfixes::ConnectionExt as XFixesExt;
 #[allow(unused_imports)]
 use x11rb::protocol::xproto::{self, ConnectionExt as XProtoExt};
 #[allow(unused_imports)]
-use x11rb::protocol::randr::ConnectionExt as RandrExt;
-#[allow(unused_imports)]
 use x11rb::rust_connection::RustConnection;
 #[allow(unused_imports)]
-use super::math::ortho;
+use x11rb::wrapper::ConnectionExt as WrapperExt;
 
 impl Compositor {
     pub(crate) fn needs_render(&self) -> bool {
@@ -44,14 +44,22 @@ impl Compositor {
             }
         }
         // Need render if overview or expose is active (or expose exit animation in progress)
-        if self.overview_active || self.expose_active || !self.expose_entries.is_empty() { return true; }
+        if self.overview_active || self.expose_active || !self.expose_entries.is_empty() {
+            return true;
+        }
         // Need render if particles are active
-        if !self.particle_systems.is_empty() { return true; }
+        if !self.particle_systems.is_empty() {
+            return true;
+        }
         // Need render if any window has active wobbly
         if self.wobbly_windows {
             for wt in self.windows.values() {
                 if let Some(ref w) = wt.wobbly {
-                    if w.dragging || w.offsets.iter().any(|o| o[0].abs() > 0.1 || o[1].abs() > 0.1) {
+                    if w.dragging
+                        || w.offsets
+                            .iter()
+                            .any(|o| o[0].abs() > 0.1 || o[1].abs() > 0.1)
+                    {
                         return true;
                     }
                 }
@@ -60,13 +68,19 @@ impl Compositor {
         // Need render if attention animation is active for any window
         if self.attention_animation {
             for wt in self.windows.values() {
-                if wt.is_urgent { return true; }
+                if wt.is_urgent {
+                    return true;
+                }
             }
         }
         // Need render if magnifier is active (tracking mouse)
-        if self.magnifier_enabled { return true; }
+        if self.magnifier_enabled {
+            return true;
+        }
         // Need render if edge glow is active (mouse near screen edge)
-        if self.edge_glow && self.edge_glow_active { return true; }
+        if self.edge_glow && self.edge_glow_active {
+            return true;
+        }
         // Need render if window tilt is animating
         if self.window_tilt {
             let epsilon = 0.0001;
@@ -81,7 +95,9 @@ impl Compositor {
         // Need render if scale animation active
         if self.window_animation {
             for wt in self.windows.values() {
-                if (wt.anim_scale - wt.anim_scale_target).abs() > 0.001 { return true; }
+                if (wt.anim_scale - wt.anim_scale_target).abs() > 0.001 {
+                    return true;
+                }
             }
         }
         // Need render to poll async wallpaper loading
@@ -112,7 +128,9 @@ impl Compositor {
 
         log::debug!(
             "compositor: Present complete for 0x{:x} msc={} ust={}",
-            x11_win, msc, ust
+            x11_win,
+            msc,
+            ust
         );
     }
 
@@ -206,7 +224,10 @@ impl Compositor {
         // --- VSync method (runtime change support) ---
         let new_vsync_method = match behavior.vsync_method.as_str() {
             "oml_sync_control" => {
-                if self.oml.is_some() || oml_sync_control::OmlSyncControl::load(self.xlib_display, self.glx_drawable).is_some() {
+                if self.oml.is_some()
+                    || oml_sync_control::OmlSyncControl::load(self.xlib_display, self.glx_drawable)
+                        .is_some()
+                {
                     VsyncMethod::OmlSyncControl
                 } else {
                     log::warn!("vsync_method: OML_sync_control not available, using global vsync");
@@ -230,7 +251,8 @@ impl Compositor {
             self.vsync_method = new_vsync_method;
             if new_vsync_method == VsyncMethod::OmlSyncControl && self.oml.is_none() {
                 // Try to load OML if not already loaded
-                self.oml = oml_sync_control::OmlSyncControl::load(self.xlib_display, self.glx_drawable);
+                self.oml =
+                    oml_sync_control::OmlSyncControl::load(self.xlib_display, self.glx_drawable);
             }
         }
 
@@ -238,7 +260,9 @@ impl Compositor {
         self.blur_quality_auto = behavior.blur_quality_auto;
 
         // --- Blur (may need FBO rebuild) ---
-        if self.blur_enabled != behavior.blur_enabled || self.blur_strength != behavior.blur_strength {
+        if self.blur_enabled != behavior.blur_enabled
+            || self.blur_strength != behavior.blur_strength
+        {
             // Tear down old blur FBOs
             unsafe {
                 for level in self.blur_fbos.drain(..) {
@@ -251,7 +275,12 @@ impl Compositor {
             // Recreate if enabled
             if self.blur_enabled {
                 self.blur_fbos = unsafe {
-                    Self::create_blur_fbos(&self.gl, self.screen_w, self.screen_h, self.blur_strength)
+                    Self::create_blur_fbos(
+                        &self.gl,
+                        self.screen_w,
+                        self.screen_h,
+                        self.blur_strength,
+                    )
                 };
             }
         }
@@ -262,44 +291,56 @@ impl Compositor {
         self.rounded_corners_exclude
             .clone_from(&behavior.rounded_corners_exclude);
 
-        self.opacity_rules = behavior.opacity_rules.iter().filter_map(|rule| {
-            let parts: Vec<&str> = rule.splitn(2, ':').collect();
-            if parts.len() == 2 {
-                if let Ok(pct) = parts[0].trim().parse::<f32>() {
-                    return Some(OpacityRule {
-                        opacity: (pct / 100.0).clamp(0.0, 1.0),
-                        class_name: parts[1].trim().to_string(),
-                    });
+        self.opacity_rules = behavior
+            .opacity_rules
+            .iter()
+            .filter_map(|rule| {
+                let parts: Vec<&str> = rule.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    if let Ok(pct) = parts[0].trim().parse::<f32>() {
+                        return Some(OpacityRule {
+                            opacity: (pct / 100.0).clamp(0.0, 1.0),
+                            class_name: parts[1].trim().to_string(),
+                        });
+                    }
                 }
-            }
-            None
-        }).collect();
+                None
+            })
+            .collect();
 
-        self.corner_radius_rules = behavior.corner_radius_rules.iter().filter_map(|rule| {
-            let parts: Vec<&str> = rule.splitn(2, ':').collect();
-            if parts.len() == 2 {
-                if let Ok(r) = parts[0].trim().parse::<f32>() {
-                    return Some(CornerRadiusRule {
-                        radius: r.max(0.0),
-                        class_name: parts[1].trim().to_string(),
-                    });
+        self.corner_radius_rules = behavior
+            .corner_radius_rules
+            .iter()
+            .filter_map(|rule| {
+                let parts: Vec<&str> = rule.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    if let Ok(r) = parts[0].trim().parse::<f32>() {
+                        return Some(CornerRadiusRule {
+                            radius: r.max(0.0),
+                            class_name: parts[1].trim().to_string(),
+                        });
+                    }
                 }
-            }
-            None
-        }).collect();
+                None
+            })
+            .collect();
 
-        self.scale_rules = behavior.scale_rules.iter().filter_map(|rule| {
-            let parts: Vec<&str> = rule.splitn(2, ':').collect();
-            if parts.len() == 2 {
-                if let Ok(pct) = parts[0].trim().parse::<f32>() {
-                    return Some(ScaleRule {
-                        scale: (pct / 100.0).clamp(0.1, 2.0),
-                        class_name: parts[1].trim().to_string(),
-                    });
+        self.scale_rules = behavior
+            .scale_rules
+            .iter()
+            .filter_map(|rule| {
+                let parts: Vec<&str> = rule.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    if let Ok(pct) = parts[0].trim().parse::<f32>() {
+                        return Some(ScaleRule {
+                            scale: (pct / 100.0).clamp(0.1, 2.0),
+                            class_name: parts[1].trim().to_string(),
+                        });
+                    }
                 }
-            }
-            None
-        }).collect();
+                None
+            })
+            .collect();
 
         // --- Borders ---
         self.border_enabled = behavior.border_enabled;
@@ -485,12 +526,16 @@ impl Compositor {
     }
 
     pub(crate) fn benchmark_stop(&mut self) -> Option<String> {
-        self.benchmark.stop().map(|r| serde_json::to_string_pretty(&r).unwrap_or_default())
+        self.benchmark
+            .stop()
+            .map(|r| serde_json::to_string_pretty(&r).unwrap_or_default())
     }
 
     pub(crate) fn benchmark_report(&self) -> Option<String> {
         if self.benchmark.is_complete() {
-            Some(serde_json::to_string_pretty(&self.benchmark.generate_report()).unwrap_or_default())
+            Some(
+                serde_json::to_string_pretty(&self.benchmark.generate_report()).unwrap_or_default(),
+            )
         } else {
             None
         }

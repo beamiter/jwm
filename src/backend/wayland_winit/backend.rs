@@ -1,4 +1,3 @@
-use crate::sync_ext::MutexExt;
 use crate::backend::api::{
     Backend, BackendEvent, Capabilities, ColorAllocator, CursorProvider, EventHandler, HitTarget,
     InputOps, KeyOps, OutputInfo, OutputOps, PropertyOps, ScreenInfo, WindowOps,
@@ -8,6 +7,7 @@ use crate::backend::error::BackendError;
 use crate::backend::wayland::state::JwmWaylandState;
 use crate::backend::{wayland_dummy_ops, wayland_key_ops};
 use crate::config::CONFIG;
+use crate::sync_ext::MutexExt;
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -27,7 +27,9 @@ use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::{AsRenderElements, Id, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::{Color32F, ImportAll, ImportEgl, ImportMem};
-use smithay::backend::winit::{self as smithay_winit, WinitEvent, WinitGraphicsBackend, WinitEventLoop};
+use smithay::backend::winit::{
+    self as smithay_winit, WinitEvent, WinitEventLoop, WinitGraphicsBackend,
+};
 use smithay::desktop::layer_map_for_output;
 use smithay::desktop::space::SurfaceTree;
 use smithay::desktop::utils::send_frames_surface_tree;
@@ -38,11 +40,13 @@ use smithay::reexports::calloop::channel::{self, Sender};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{self, Display, DisplayHandle, Resource};
-use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
-use smithay::utils::{Logical, Physical, Point, Rectangle, Scale, Transform, SERIAL_COUNTER as SCOUNTER};
-use smithay::wayland::compositor::{with_surface_tree_downward, TraversalAction};
+use smithay::utils::{
+    Logical, Physical, Point, Rectangle, SERIAL_COUNTER as SCOUNTER, Scale, Transform,
+};
+use smithay::wayland::compositor::{TraversalAction, with_surface_tree_downward};
 use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
 
 smithay::backend::renderer::element::render_elements! {
@@ -148,7 +152,10 @@ impl OutputOps for WaylandOutputOps {
         if h == 0 {
             h = 720;
         }
-        ScreenInfo { width: w, height: h }
+        ScreenInfo {
+            width: w,
+            height: h,
+        }
     }
 
     fn output_at(&self, x: i32, y: i32) -> Option<OutputId> {
@@ -305,7 +312,10 @@ impl WindowOps for WaylandWindowOps {
         Ok(())
     }
 
-    fn close_window(&self, win: WindowId) -> Result<crate::backend::api::CloseResult, BackendError> {
+    fn close_window(
+        &self,
+        win: WindowId,
+    ) -> Result<crate::backend::api::CloseResult, BackendError> {
         unsafe {
             self.with_state_mut(|state| {
                 if let Some(toplevel) = state.try_lookup_toplevel(win) {
@@ -406,7 +416,11 @@ impl PropertyOps for WaylandPropertyOps {
         let app_id = unsafe {
             self.with_state_mut(|state| state.window_app_id.get(&win).cloned().unwrap_or_default())
         };
-        let value = if app_id.is_empty() { "app".to_string() } else { app_id };
+        let value = if app_id.is_empty() {
+            "app".to_string()
+        } else {
+            app_id
+        };
         (value.clone(), value)
     }
 
@@ -436,7 +450,10 @@ impl PropertyOps for WaylandPropertyOps {
         vec![crate::backend::api::WindowType::Normal]
     }
 
-    fn get_layer_surface_info(&self, win: WindowId) -> Option<crate::backend::api::LayerSurfaceInfo> {
+    fn get_layer_surface_info(
+        &self,
+        win: WindowId,
+    ) -> Option<crate::backend::api::LayerSurfaceInfo> {
         unsafe { self.with_state_mut(|state| state.window_layer_info.get(&win).copied()) }
     }
 
@@ -484,7 +501,10 @@ impl PropertyOps for WaylandPropertyOps {
         Ok(())
     }
 
-    fn fetch_normal_hints(&self, _win: WindowId) -> Result<Option<crate::backend::api::NormalHints>, BackendError> {
+    fn fetch_normal_hints(
+        &self,
+        _win: WindowId,
+    ) -> Result<Option<crate::backend::api::NormalHints>, BackendError> {
         Ok(None)
     }
 
@@ -514,7 +534,12 @@ impl PropertyOps for WaylandPropertyOps {
         Ok(())
     }
 
-    fn set_client_info_props(&self, _win: WindowId, _tags: u32, _monitor_num: u32) -> Result<(), BackendError> {
+    fn set_client_info_props(
+        &self,
+        _win: WindowId,
+        _tags: u32,
+        _monitor_num: u32,
+    ) -> Result<(), BackendError> {
         Ok(())
     }
 }
@@ -620,7 +645,8 @@ impl WaylandWinitBackend {
         let scale = Scale::from(self.output.current_scale().fractional_scale());
         let ox = 0;
         let oy = 0;
-        let output_rect_global = Rectangle::<i32, Logical>::new((ox, oy).into(), (out_w, out_h).into());
+        let output_rect_global =
+            Rectangle::<i32, Logical>::new((ox, oy).into(), (out_w, out_h).into());
 
         let mut elements: Vec<WinitRenderElement<GlesRenderer>> = Vec::new();
         let mut visible_surfaces: HashSet<wayland_server::Weak<WlSurface>> = HashSet::new();
@@ -726,7 +752,8 @@ impl WaylandWinitBackend {
                     |child_surface, child_states, _| {
                         let data = child_states
                             .data_map
-                            .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>();
+                            .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>(
+                        );
                         let Some(data) = data else {
                             return;
                         };
@@ -738,7 +765,8 @@ impl WaylandWinitBackend {
                     |_, _, _| true,
                 );
 
-                let location: Point<i32, Physical> = (popup_rect.loc.x - ox, popup_rect.loc.y - oy).into();
+                let location: Point<i32, Physical> =
+                    (popup_rect.loc.x - ox, popup_rect.loc.y - oy).into();
                 let tree = SurfaceTree::from_surface(&popup_surface);
                 let popup_elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                     AsRenderElements::<GlesRenderer>::render_elements(
@@ -768,7 +796,8 @@ impl WaylandWinitBackend {
                 |child_surface, child_states, _| {
                     let data = child_states
                         .data_map
-                        .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>();
+                        .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>(
+                    );
                     let Some(data) = data else {
                         return;
                     };
@@ -827,7 +856,8 @@ impl WaylandWinitBackend {
                 |child_surface, child_states, _| {
                     let data = child_states
                         .data_map
-                        .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>();
+                        .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>(
+                    );
                     let Some(data) = data else {
                         return;
                     };
@@ -924,21 +954,21 @@ impl WaylandWinitBackend {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or(std::time::Duration::ZERO);
-        let throttle = self
-            .output
-            .current_mode()
-            .and_then(|m| if m.refresh > 0 {
+        let throttle = self.output.current_mode().and_then(|m| {
+            if m.refresh > 0 {
                 Some(Duration::from_secs_f64(1_000f64 / m.refresh as f64))
             } else {
                 None
-            });
+            }
+        });
         let output = self.output.clone();
         let visible = visible_surfaces;
         for root in &frame_roots {
             send_frames_surface_tree(root, &output, now, throttle, |surface, states| {
                 let data = states
                     .data_map
-                    .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>();
+                    .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>(
+                );
                 let Some(data) = data else {
                     return None;
                 };
@@ -980,7 +1010,11 @@ impl WaylandWinitBackend {
                     }
                     flush_pending.store(false, Ordering::SeqCst);
                 })
-                .map_err(|e| BackendError::Message(format!("calloop insert_source(wayland flush) failed: {e}")))?;
+                .map_err(|e| {
+                    BackendError::Message(format!(
+                        "calloop insert_source(wayland flush) failed: {e}"
+                    ))
+                })?;
         }
 
         let wayland_poll_fd = {
@@ -1006,7 +1040,11 @@ impl WaylandWinitBackend {
                         Ok(PostAction::Continue)
                     },
                 )
-                .map_err(|e| BackendError::Message(format!("calloop insert_source(wayland display) failed: {e}")))?;
+                .map_err(|e| {
+                    BackendError::Message(format!(
+                        "calloop insert_source(wayland display) failed: {e}"
+                    ))
+                })?;
         }
 
         {
@@ -1069,9 +1107,11 @@ impl WaylandWinitBackend {
 
         let mut state = Box::new(wayland_state);
 
-        let (mut winit_backend, winit_event_loop): (WinitGraphicsBackend<GlesRenderer>, WinitEventLoop) =
-            smithay_winit::init::<GlesRenderer>()
-                .map_err(|e| BackendError::Message(format!("winit init failed: {e}")))?;
+        let (mut winit_backend, winit_event_loop): (
+            WinitGraphicsBackend<GlesRenderer>,
+            WinitEventLoop,
+        ) = smithay_winit::init::<GlesRenderer>()
+            .map_err(|e| BackendError::Message(format!("winit init failed: {e}")))?;
         winit_backend.window().set_title("JWM (wayland-winit)");
 
         // Default the nested window to the current monitor's full resolution
@@ -1079,11 +1119,9 @@ impl WaylandWinitBackend {
         // ignored by Wayland hosts (the compositor owns window sizing), so go
         // borderless-fullscreen on the current monitor; this works on both X11 and
         // Wayland hosts. The WinitEvent::Resized handler picks up the real size.
-        winit_backend
-            .window()
-            .set_fullscreen(Some(smithay::reexports::winit::monitor::Fullscreen::Borderless(
-                None,
-            )));
+        winit_backend.window().set_fullscreen(Some(
+            smithay::reexports::winit::monitor::Fullscreen::Borderless(None),
+        ));
 
         log::info!(
             "[wayland-winit] host window created (initial size: {:?})",
@@ -1497,10 +1535,7 @@ fn process_input_event_windowed<B: InputBackend>(
         InputEvent::PointerButton { event, .. } => {
             let time = event.time_msec();
             let button_code = event.button_code();
-            let pressed = matches!(
-                event.state(),
-                smithay::backend::input::ButtonState::Pressed
-            );
+            let pressed = matches!(event.state(), smithay::backend::input::ButtonState::Pressed);
 
             let (x, y, output, mods_state) = {
                 let s = shared.lock_safe();
@@ -1523,16 +1558,20 @@ fn process_input_event_windowed<B: InputBackend>(
 
             if pressed {
                 if let Some(grab_win) = state.popup_grab_toplevel {
-                    let in_any_popup = state
-                        .popup_rects_for_toplevel(grab_win)
-                        .iter()
-                        .any(|(_surf, rect)| {
-                            let x0 = rect.loc.x as f64;
-                            let y0 = rect.loc.y as f64;
-                            let x1 = x0 + rect.size.w as f64;
-                            let y1 = y0 + rect.size.h as f64;
-                            location.x >= x0 && location.y >= y0 && location.x < x1 && location.y < y1
-                        });
+                    let in_any_popup =
+                        state
+                            .popup_rects_for_toplevel(grab_win)
+                            .iter()
+                            .any(|(_surf, rect)| {
+                                let x0 = rect.loc.x as f64;
+                                let y0 = rect.loc.y as f64;
+                                let x1 = x0 + rect.size.w as f64;
+                                let y1 = y0 + rect.size.h as f64;
+                                location.x >= x0
+                                    && location.y >= y0
+                                    && location.x < x1
+                                    && location.y < y1
+                            });
 
                     if !in_any_popup {
                         state.dismiss_popups_for_toplevel(grab_win);

@@ -3,7 +3,9 @@
 use crate::backend::api::Backend;
 use crate::config::CONFIG;
 use crate::core::animation::AnimationKind;
-use crate::core::layout::{self as core_layout, LayoutClient, LayoutParams, LayoutResult, ScrollingParams};
+use crate::core::layout::{
+    self as core_layout, LayoutClient, LayoutParams, LayoutResult, ScrollingParams,
+};
 use crate::core::models::{ClientKey, MonitorKey, ScrollingState};
 use crate::core::types::Rect;
 use crate::jwm::Jwm;
@@ -142,7 +144,12 @@ impl Jwm {
     }
 
     pub(crate) fn three_col(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
-        self.tiling_layout_wrapper(backend, mon_key, "three_col", core_layout::calculate_three_col);
+        self.tiling_layout_wrapper(
+            backend,
+            mon_key,
+            "three_col",
+            core_layout::calculate_three_col,
+        );
     }
 
     pub(crate) fn tatami(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
@@ -329,7 +336,10 @@ impl Jwm {
         }
     }
 
-    pub(crate) fn sync_scrolling_columns(state: &mut ScrollingState, visible_clients: &[ClientKey]) {
+    pub(crate) fn sync_scrolling_columns(
+        state: &mut ScrollingState,
+        visible_clients: &[ClientKey],
+    ) {
         // 1. Remove clients that are no longer visible
         for col in &mut state.columns {
             col.retain(|k| visible_clients.contains(k));

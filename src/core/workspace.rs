@@ -28,7 +28,10 @@ mod tests {
     #[test]
     fn test_calculate_new_tags_set_no_toggle() {
         // toggle=false → just return mask
-        assert_eq!(WorkspaceManager::calculate_new_tags(0b0101, 0b0010, false), 0b0010);
+        assert_eq!(
+            WorkspaceManager::calculate_new_tags(0b0101, 0b0010, false),
+            0b0010
+        );
     }
 
     #[test]
@@ -46,13 +49,19 @@ mod tests {
     #[test]
     fn test_calculate_new_tags_toggle_no_op_on_zero() {
         // XOR with 0 leaves current unchanged
-        assert_eq!(WorkspaceManager::calculate_new_tags(0b1010, 0, true), 0b1010);
+        assert_eq!(
+            WorkspaceManager::calculate_new_tags(0b1010, 0, true),
+            0b1010
+        );
     }
 
     #[test]
     fn test_calculate_new_tags_set_replaces_all() {
         // no toggle: mask fully replaces current
-        assert_eq!(WorkspaceManager::calculate_new_tags(0xFF, 0x01, false), 0x01);
+        assert_eq!(
+            WorkspaceManager::calculate_new_tags(0xFF, 0x01, false),
+            0x01
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -46,7 +46,12 @@ impl WaylandCompositor {
     fn render_slide_transition(&self, gl: &ffi::Gles2, projection: &[f32; 16], t: f32) {
         unsafe {
             gl.UseProgram(self.transition_program);
-            gl.UniformMatrix4fv(self.transition_uniforms.projection, 1, ffi::FALSE as u8, projection.as_ptr());
+            gl.UniformMatrix4fv(
+                self.transition_uniforms.projection,
+                1,
+                ffi::FALSE as u8,
+                projection.as_ptr(),
+            );
             gl.Uniform4f(self.transition_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
 
             // Old scene slides out
@@ -54,8 +59,10 @@ impl WaylandCompositor {
             let offset_x = -dir * t * self.screen_w as f32;
             gl.Uniform4f(
                 self.transition_uniforms.rect,
-                offset_x, 0.0,
-                self.screen_w as f32, self.screen_h as f32,
+                offset_x,
+                0.0,
+                self.screen_w as f32,
+                self.screen_h as f32,
             );
             gl.Uniform1f(self.transition_uniforms.opacity, 1.0 - t);
 
@@ -97,14 +104,19 @@ impl WaylandCompositor {
             let cos_a = angle.cos();
             let sin_a = angle.sin();
             let mut rot = [0.0f32; 16];
-            rot[0] = cos_a; rot[2] = sin_a;
+            rot[0] = cos_a;
+            rot[2] = sin_a;
             rot[5] = 1.0;
-            rot[8] = -sin_a; rot[10] = cos_a;
+            rot[8] = -sin_a;
+            rot[10] = cos_a;
             rot[15] = 1.0;
 
             // Translation (push back)
             let mut trans = [0.0f32; 16];
-            trans[0] = 1.0; trans[5] = 1.0; trans[10] = 1.0; trans[15] = 1.0;
+            trans[0] = 1.0;
+            trans[5] = 1.0;
+            trans[10] = 1.0;
+            trans[15] = 1.0;
             trans[14] = -2.5; // z offset
 
             // MVP = persp * trans * rot
@@ -141,15 +153,29 @@ impl WaylandCompositor {
                 let x = center_x - w * 0.5;
 
                 gl.UseProgram(self.transition_program);
-                gl.UniformMatrix4fv(self.transition_uniforms.projection, 1, ffi::FALSE as u8, projection.as_ptr());
-                gl.Uniform4f(self.transition_uniforms.rect, x, 0.0, w, self.screen_h as f32);
+                gl.UniformMatrix4fv(
+                    self.transition_uniforms.projection,
+                    1,
+                    ffi::FALSE as u8,
+                    projection.as_ptr(),
+                );
+                gl.Uniform4f(
+                    self.transition_uniforms.rect,
+                    x,
+                    0.0,
+                    w,
+                    self.screen_h as f32,
+                );
                 gl.Uniform4f(self.transition_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
                 gl.Uniform1f(self.transition_uniforms.opacity, 1.0);
 
                 gl.ActiveTexture(ffi::TEXTURE0);
                 gl.BindTexture(ffi::TEXTURE_2D, self.transition_texture);
                 gl.Uniform1i(
-                    gl.GetUniformLocation(self.transition_program, b"u_texture\0".as_ptr() as *const _),
+                    gl.GetUniformLocation(
+                        self.transition_program,
+                        b"u_texture\0".as_ptr() as *const _,
+                    ),
                     0,
                 );
 
@@ -162,8 +188,19 @@ impl WaylandCompositor {
     fn render_fade_transition(&self, gl: &ffi::Gles2, projection: &[f32; 16], t: f32) {
         unsafe {
             gl.UseProgram(self.transition_program);
-            gl.UniformMatrix4fv(self.transition_uniforms.projection, 1, ffi::FALSE as u8, projection.as_ptr());
-            gl.Uniform4f(self.transition_uniforms.rect, 0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
+            gl.UniformMatrix4fv(
+                self.transition_uniforms.projection,
+                1,
+                ffi::FALSE as u8,
+                projection.as_ptr(),
+            );
+            gl.Uniform4f(
+                self.transition_uniforms.rect,
+                0.0,
+                0.0,
+                self.screen_w as f32,
+                self.screen_h as f32,
+            );
             gl.Uniform4f(self.transition_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
             gl.Uniform1f(self.transition_uniforms.opacity, 1.0 - t);
 
@@ -188,7 +225,12 @@ impl WaylandCompositor {
             let y = (self.screen_h as f32 - h) * 0.5;
 
             gl.UseProgram(self.transition_program);
-            gl.UniformMatrix4fv(self.transition_uniforms.projection, 1, ffi::FALSE as u8, projection.as_ptr());
+            gl.UniformMatrix4fv(
+                self.transition_uniforms.projection,
+                1,
+                ffi::FALSE as u8,
+                projection.as_ptr(),
+            );
             gl.Uniform4f(self.transition_uniforms.rect, x, y, w, h);
             gl.Uniform4f(self.transition_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
             gl.Uniform1f(self.transition_uniforms.opacity, 1.0 - t);
@@ -208,8 +250,19 @@ impl WaylandCompositor {
     fn render_portal_transition(&self, gl: &ffi::Gles2, projection: &[f32; 16], t: f32) {
         unsafe {
             gl.UseProgram(self.portal_program);
-            gl.UniformMatrix4fv(self.portal_uniforms.projection, 1, ffi::FALSE as u8, projection.as_ptr());
-            gl.Uniform4f(self.portal_uniforms.rect, 0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
+            gl.UniformMatrix4fv(
+                self.portal_uniforms.projection,
+                1,
+                ffi::FALSE as u8,
+                projection.as_ptr(),
+            );
+            gl.Uniform4f(
+                self.portal_uniforms.rect,
+                0.0,
+                0.0,
+                self.screen_w as f32,
+                self.screen_h as f32,
+            );
             gl.Uniform4f(self.portal_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
             gl.Uniform1f(self.portal_uniforms.progress, t);
             gl.Uniform1f(self.portal_uniforms.glow, 1.0 - t);
@@ -239,7 +292,12 @@ impl WaylandCompositor {
             let y = (self.screen_h as f32 - h) * 0.5;
 
             gl.UseProgram(self.transition_program);
-            gl.UniformMatrix4fv(self.transition_uniforms.projection, 1, ffi::FALSE as u8, projection.as_ptr());
+            gl.UniformMatrix4fv(
+                self.transition_uniforms.projection,
+                1,
+                ffi::FALSE as u8,
+                projection.as_ptr(),
+            );
             gl.Uniform4f(self.transition_uniforms.rect, x, y, w, h);
             gl.Uniform4f(self.transition_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
             gl.Uniform1f(self.transition_uniforms.opacity, opacity);
@@ -259,7 +317,12 @@ impl WaylandCompositor {
     fn render_blinds_transition(&self, gl: &ffi::Gles2, projection: &[f32; 16], t: f32) {
         unsafe {
             gl.UseProgram(self.transition_program);
-            gl.UniformMatrix4fv(self.transition_uniforms.projection, 1, ffi::FALSE as u8, projection.as_ptr());
+            gl.UniformMatrix4fv(
+                self.transition_uniforms.projection,
+                1,
+                ffi::FALSE as u8,
+                projection.as_ptr(),
+            );
             gl.Uniform1f(self.transition_uniforms.opacity, 1.0);
 
             gl.ActiveTexture(ffi::TEXTURE0);
@@ -300,7 +363,13 @@ impl WaylandCompositor {
                 // Draw old scene with UV covering only this strip
                 let uv_left = i as f32 / num_strips as f32;
                 let uv_width = 1.0 / num_strips as f32;
-                gl.Uniform4f(self.transition_uniforms.uv_rect, uv_left, 0.0, uv_width, 1.0);
+                gl.Uniform4f(
+                    self.transition_uniforms.uv_rect,
+                    uv_left,
+                    0.0,
+                    uv_width,
+                    1.0,
+                );
                 gl.Uniform4f(self.transition_uniforms.rect, x, 0.0, w, screen_h);
 
                 gl.BindVertexArray(self.quad_vao);
@@ -336,21 +405,29 @@ impl WaylandCompositor {
 
             // Translation (push back in Z)
             let mut trans = [0.0f32; 16];
-            trans[0] = 1.0; trans[5] = 1.0; trans[10] = 1.0; trans[15] = 1.0;
+            trans[0] = 1.0;
+            trans[5] = 1.0;
+            trans[10] = 1.0;
+            trans[15] = 1.0;
             trans[14] = -2.5;
 
             // Rotation around Y axis
             let cos_a = angle.cos();
             let sin_a = angle.sin();
             let mut rot = [0.0f32; 16];
-            rot[0] = cos_a; rot[2] = sin_a;
+            rot[0] = cos_a;
+            rot[2] = sin_a;
             rot[5] = 1.0;
-            rot[8] = -sin_a; rot[10] = cos_a;
+            rot[8] = -sin_a;
+            rot[10] = cos_a;
             rot[15] = 1.0;
 
             // Lateral offset translation
             let mut lateral = [0.0f32; 16];
-            lateral[0] = 1.0; lateral[5] = 1.0; lateral[10] = 1.0; lateral[15] = 1.0;
+            lateral[0] = 1.0;
+            lateral[5] = 1.0;
+            lateral[10] = 1.0;
+            lateral[15] = 1.0;
             lateral[12] = t * 1.5 * dir;
 
             // MVP = persp * trans * rot * lateral
@@ -405,7 +482,10 @@ impl WaylandCompositor {
 
             // Translation (push back + helix Z offset)
             let mut trans = [0.0f32; 16];
-            trans[0] = 1.0; trans[5] = 1.0; trans[10] = 1.0; trans[15] = 1.0;
+            trans[0] = 1.0;
+            trans[5] = 1.0;
+            trans[10] = 1.0;
+            trans[15] = 1.0;
             trans[12] = x;
             trans[14] = -2.5 + z;
 
@@ -414,14 +494,19 @@ impl WaylandCompositor {
             let cos_a = rot_angle.cos();
             let sin_a = rot_angle.sin();
             let mut rot = [0.0f32; 16];
-            rot[0] = cos_a; rot[2] = sin_a;
+            rot[0] = cos_a;
+            rot[2] = sin_a;
             rot[5] = 1.0;
-            rot[8] = -sin_a; rot[10] = cos_a;
+            rot[8] = -sin_a;
+            rot[10] = cos_a;
             rot[15] = 1.0;
 
             // Scale matrix
             let mut scale = [0.0f32; 16];
-            scale[0] = s; scale[5] = s; scale[10] = 1.0; scale[15] = 1.0;
+            scale[0] = s;
+            scale[5] = s;
+            scale[10] = 1.0;
+            scale[15] = 1.0;
 
             // MVP = persp * trans * rot * scale
             let model = mat4_mul(&rot, &scale);
@@ -453,9 +538,16 @@ impl WaylandCompositor {
             gl.BindFramebuffer(ffi::READ_FRAMEBUFFER, self.output_fbo);
             gl.BindFramebuffer(ffi::DRAW_FRAMEBUFFER, self.transition_fbo);
             gl.BlitFramebuffer(
-                0, 0, self.screen_w as i32, self.screen_h as i32,
-                0, 0, self.screen_w as i32, self.screen_h as i32,
-                ffi::COLOR_BUFFER_BIT, ffi::NEAREST,
+                0,
+                0,
+                self.screen_w as i32,
+                self.screen_h as i32,
+                0,
+                0,
+                self.screen_w as i32,
+                self.screen_h as i32,
+                ffi::COLOR_BUFFER_BIT,
+                ffi::NEAREST,
             );
             gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
         }

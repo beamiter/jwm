@@ -1,5 +1,7 @@
 // Feature control methods
 #[allow(unused_imports)]
+use super::math::ortho;
+#[allow(unused_imports)]
 use super::*;
 #[allow(unused_imports)]
 use glow::HasContext;
@@ -14,21 +16,19 @@ use std::sync::mpsc;
 #[allow(unused_imports)]
 use x11rb::connection::{Connection, RequestConnection};
 #[allow(unused_imports)]
-use x11rb::wrapper::ConnectionExt as WrapperExt;
-#[allow(unused_imports)]
 use x11rb::protocol::composite::ConnectionExt as CompositeExt;
 #[allow(unused_imports)]
 use x11rb::protocol::damage::{self, ConnectionExt as DamageExt};
+#[allow(unused_imports)]
+use x11rb::protocol::randr::ConnectionExt as RandrExt;
 #[allow(unused_imports)]
 use x11rb::protocol::xfixes::ConnectionExt as XFixesExt;
 #[allow(unused_imports)]
 use x11rb::protocol::xproto::{self, ConnectionExt as XProtoExt};
 #[allow(unused_imports)]
-use x11rb::protocol::randr::ConnectionExt as RandrExt;
-#[allow(unused_imports)]
 use x11rb::rust_connection::RustConnection;
 #[allow(unused_imports)]
-use super::math::ortho;
+use x11rb::wrapper::ConnectionExt as WrapperExt;
 
 impl Compositor {
     pub(crate) fn set_mouse_position(&mut self, x: f32, y: f32) {
@@ -101,7 +101,8 @@ impl Compositor {
     /// This lets the compositor schedule frame presentation to match
     /// each window's independent audio clock, preventing desync.
     pub(crate) fn notify_audio_timing(&mut self, x11_win: u32, fps: f32, buffer_latency_ms: u32) {
-        self.audio_sync.register_stream(x11_win, fps, buffer_latency_ms);
+        self.audio_sync
+            .register_stream(x11_win, fps, buffer_latency_ms);
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             wt.audio_sync_target = Some(fps);
         }
@@ -120,7 +121,11 @@ impl Compositor {
                     log::debug!("compositor: window 0x{:x} registered with Present", x11_win);
                 }
                 Err(e) => {
-                    log::warn!("compositor: failed to register 0x{:x} with Present: {}", x11_win, e);
+                    log::warn!(
+                        "compositor: failed to register 0x{:x} with Present: {}",
+                        x11_win,
+                        e
+                    );
                 }
             }
         }
@@ -128,23 +133,23 @@ impl Compositor {
 
     /// Present a window's pixmap at a specific MSC (for Present-enabled windows)
     #[allow(dead_code)]
-    pub(crate) fn present_pixmap(
-        &self,
-        x11_win: u32,
-        pixmap: u32,
-        target_msc: u64,
-        serial: u32,
-    ) {
+    pub(crate) fn present_pixmap(&self, x11_win: u32, pixmap: u32, target_msc: u64, serial: u32) {
         if let Some(present_mgr) = &self.present_mgr {
             match present_mgr.present_pixmap(x11_win, pixmap, target_msc, serial) {
                 Ok(()) => {
                     log::debug!(
                         "compositor: presented pixmap for 0x{:x} (serial={}, msc={})",
-                        x11_win, serial, target_msc
+                        x11_win,
+                        serial,
+                        target_msc
                     );
                 }
                 Err(e) => {
-                    log::debug!("compositor: present_pixmap failed for 0x{:x}: {}", x11_win, e);
+                    log::debug!(
+                        "compositor: present_pixmap failed for 0x{:x}: {}",
+                        x11_win,
+                        e
+                    );
                 }
             }
         }
@@ -163,7 +168,11 @@ impl Compositor {
         self.overview_mon_h = h;
     }
 
-    pub(crate) fn set_overview_mode(&mut self, active: bool, windows: Vec<(u32, f32, f32, f32, f32, bool, String)>) {
+    pub(crate) fn set_overview_mode(
+        &mut self,
+        active: bool,
+        windows: Vec<(u32, f32, f32, f32, f32, bool, String)>,
+    ) {
         if !active && self.overview_active && !self.overview_closing {
             // Begin exit animation — don't clear state yet
             self.overview_closing = true;
@@ -178,8 +187,10 @@ impl Compositor {
         let n = windows.len();
         let face_w = self.screen_w as f32 * 0.8;
         let face_h = self.screen_h as f32 * 0.8;
-        self.overview_windows = windows.into_iter().enumerate().map(|(i, (win, _x, _y, _w, _h, sel, title))| {
-            OverviewEntry {
+        self.overview_windows = windows
+            .into_iter()
+            .enumerate()
+            .map(|(i, (win, _x, _y, _w, _h, sel, title))| OverviewEntry {
                 x11_win: win,
                 target_w: face_w,
                 target_h: face_h,
@@ -188,8 +199,8 @@ impl Compositor {
                 title,
                 title_texture: None,
                 face_index: i.min(5),
-            }
-        }).collect();
+            })
+            .collect();
         self.overview_total_clients = n;
         self.overview_slide_offset = 0;
         self.overview_prism_target_angle = 0.0;
@@ -222,14 +233,20 @@ impl Compositor {
         let new_target = -(selected_face as f32) * std::f32::consts::FRAC_PI_3;
         // Normalize angular difference to shortest path (within -PI..PI).
         let mut diff = new_target - self.overview_prism_target_angle;
-        while diff > std::f32::consts::PI { diff -= 2.0 * std::f32::consts::PI; }
-        while diff < -std::f32::consts::PI { diff += 2.0 * std::f32::consts::PI; }
+        while diff > std::f32::consts::PI {
+            diff -= 2.0 * std::f32::consts::PI;
+        }
+        while diff < -std::f32::consts::PI {
+            diff += 2.0 * std::f32::consts::PI;
+        }
         self.overview_prism_target_angle += diff;
         self.needs_render = true;
     }
 
     pub(crate) fn notify_window_move_start(&mut self, x11_win: u32) {
-        if !self.wobbly_windows { return; }
+        if !self.wobbly_windows {
+            return;
+        }
         let grid_n = (self.wobbly_grid_size as usize + 1).min(17);
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             // Determine anchor node: closest grid node to mouse position
@@ -249,7 +266,10 @@ impl Compositor {
                 last_tick: std::time::Instant::now(),
             });
         } else {
-            log::warn!("[wobbly] move_start: window 0x{:x} not tracked by compositor", x11_win);
+            log::warn!(
+                "[wobbly] move_start: window 0x{:x} not tracked by compositor",
+                x11_win
+            );
         }
     }
 
@@ -274,7 +294,9 @@ impl Compositor {
                     let ac = w.anchor_col;
                     for row in 0..n {
                         for col in 0..n {
-                            if row == ar && col == ac { continue; }
+                            if row == ar && col == ac {
+                                continue;
+                            }
                             let idx = row * n + col;
                             w.offsets[idx][0] -= dx;
                             w.offsets[idx][1] -= dy;
@@ -290,17 +312,17 @@ impl Compositor {
 
         // During interactive move/resize, request full-frame redraw when backdrop
         // blur is active so translucent windows see real-time updated background.
-        let blur_active = self.blur_enabled
-            && self.scene_fbo.is_some()
-            && !self.blur_fbos.is_empty()
-            && {
+        let blur_active =
+            self.blur_enabled && self.scene_fbo.is_some() && !self.blur_fbos.is_empty() && {
                 let cfg = crate::config::CONFIG.load();
                 let status_bar_name = cfg.status_bar_name();
-                self.windows.values().any(|wt| self.needs_backdrop_blur(wt, status_bar_name))
+                self.windows
+                    .values()
+                    .any(|wt| self.needs_backdrop_blur(wt, status_bar_name))
             };
         if blur_active {
             self.damage_tracker.mark_all_dirty();
-            self.dirty_region_tracker.mark_all_dirty();  // P5C: Sync rect tracker
+            self.dirty_region_tracker.mark_all_dirty(); // P5C: Sync rect tracker
         }
         self.needs_render = true;
     }
@@ -377,9 +399,13 @@ impl Compositor {
     // Phase 7: Diagnostics
     // =====================================================================
 
-    pub(crate) fn reload_shader_from_file(&mut self, name: &str, path: &std::path::Path) -> Result<(), String> {
-        let file_content = std::fs::read_to_string(path)
-            .map_err(|e| format!("read shader file: {e}"))?;
+    pub(crate) fn reload_shader_from_file(
+        &mut self,
+        name: &str,
+        path: &std::path::Path,
+    ) -> Result<(), String> {
+        let file_content =
+            std::fs::read_to_string(path).map_err(|e| format!("read shader file: {e}"))?;
 
         let (vs_src, fs_src) = match name {
             "window" => (shaders::VERTEX_SHADER, file_content.as_str()),
@@ -401,8 +427,13 @@ impl Compositor {
             "genie" => (shaders::GENIE_VERTEX_SHADER, file_content.as_str()),
             "overview_bg" => (shaders::VERTEX_SHADER, file_content.as_str()),
             _ if name.ends_with("_vs") => {
-                log::warn!("compositor: shader reload requires both vertex and fragment shaders to be specified");
-                return Err(format!("shader {} needs corresponding fragment shader", name));
+                log::warn!(
+                    "compositor: shader reload requires both vertex and fragment shaders to be specified"
+                );
+                return Err(format!(
+                    "shader {} needs corresponding fragment shader",
+                    name
+                ));
             }
             _ => return Err(format!("unknown shader: {name}")),
         };
@@ -411,25 +442,78 @@ impl Compositor {
             Ok(new_program) => {
                 unsafe {
                     match name {
-                        "window" => { self.gl.delete_program(self.program); self.program = new_program; }
-                        "shadow" => { self.gl.delete_program(self.shadow_program); self.shadow_program = new_program; }
-                        "border" => { self.gl.delete_program(self.border_program); self.border_program = new_program; }
-                        "blur_down" => { self.gl.delete_program(self.blur_down_program); self.blur_down_program = new_program; }
-                        "blur_up" => { self.gl.delete_program(self.blur_up_program); self.blur_up_program = new_program; }
+                        "window" => {
+                            self.gl.delete_program(self.program);
+                            self.program = new_program;
+                        }
+                        "shadow" => {
+                            self.gl.delete_program(self.shadow_program);
+                            self.shadow_program = new_program;
+                        }
+                        "border" => {
+                            self.gl.delete_program(self.border_program);
+                            self.border_program = new_program;
+                        }
+                        "blur_down" => {
+                            self.gl.delete_program(self.blur_down_program);
+                            self.blur_down_program = new_program;
+                        }
+                        "blur_up" => {
+                            self.gl.delete_program(self.blur_up_program);
+                            self.blur_up_program = new_program;
+                        }
                         "box_blur" => { /* no separate program, used in blur_optimize */ }
-                        "postprocess" => { self.gl.delete_program(self.postprocess_program); self.postprocess_program = new_program; }
-                        "hud" => { self.gl.delete_program(self.hud_program); self.hud_program = new_program; }
-                        "hud_text" => { self.gl.delete_program(self.hud_text_program); self.hud_text_program = new_program; }
-                        "transition" => { self.gl.delete_program(self.transition_program); self.transition_program = new_program; }
-                        "cube" => { self.gl.delete_program(self.cube_program); self.cube_program = new_program; }
-                        "portal" => { self.gl.delete_program(self.portal_program); self.portal_program = new_program; }
-                        "edge_glow" => { self.gl.delete_program(self.edge_glow_program); self.edge_glow_program = new_program; }
-                        "tilt" => { self.gl.delete_program(self.tilt_program); self.tilt_program = new_program; }
-                        "wobbly" => { self.gl.delete_program(self.wobbly_program); self.wobbly_program = new_program; }
-                        "particle" => { self.gl.delete_program(self.particle_program); self.particle_program = new_program; }
-                        "genie" => { self.gl.delete_program(self.genie_program); self.genie_program = new_program; }
-                        "overview_bg" => { self.gl.delete_program(self.overview_bg_program); self.overview_bg_program = new_program; }
-                        _ => { self.gl.delete_program(new_program); }
+                        "postprocess" => {
+                            self.gl.delete_program(self.postprocess_program);
+                            self.postprocess_program = new_program;
+                        }
+                        "hud" => {
+                            self.gl.delete_program(self.hud_program);
+                            self.hud_program = new_program;
+                        }
+                        "hud_text" => {
+                            self.gl.delete_program(self.hud_text_program);
+                            self.hud_text_program = new_program;
+                        }
+                        "transition" => {
+                            self.gl.delete_program(self.transition_program);
+                            self.transition_program = new_program;
+                        }
+                        "cube" => {
+                            self.gl.delete_program(self.cube_program);
+                            self.cube_program = new_program;
+                        }
+                        "portal" => {
+                            self.gl.delete_program(self.portal_program);
+                            self.portal_program = new_program;
+                        }
+                        "edge_glow" => {
+                            self.gl.delete_program(self.edge_glow_program);
+                            self.edge_glow_program = new_program;
+                        }
+                        "tilt" => {
+                            self.gl.delete_program(self.tilt_program);
+                            self.tilt_program = new_program;
+                        }
+                        "wobbly" => {
+                            self.gl.delete_program(self.wobbly_program);
+                            self.wobbly_program = new_program;
+                        }
+                        "particle" => {
+                            self.gl.delete_program(self.particle_program);
+                            self.particle_program = new_program;
+                        }
+                        "genie" => {
+                            self.gl.delete_program(self.genie_program);
+                            self.genie_program = new_program;
+                        }
+                        "overview_bg" => {
+                            self.gl.delete_program(self.overview_bg_program);
+                            self.overview_bg_program = new_program;
+                        }
+                        _ => {
+                            self.gl.delete_program(new_program);
+                        }
                     }
                 }
                 self.needs_render = true;
@@ -467,9 +551,24 @@ impl Compositor {
         }
 
         const SHADER_NAMES: &[&str] = &[
-            "window", "shadow", "border", "blur_down", "blur_up", "box_blur",
-            "postprocess", "hud", "hud_text", "transition", "cube", "portal",
-            "edge_glow", "tilt", "wobbly", "particle", "genie", "overview_bg",
+            "window",
+            "shadow",
+            "border",
+            "blur_down",
+            "blur_up",
+            "box_blur",
+            "postprocess",
+            "hud",
+            "hud_text",
+            "transition",
+            "cube",
+            "portal",
+            "edge_glow",
+            "tilt",
+            "wobbly",
+            "particle",
+            "genie",
+            "overview_bg",
         ];
 
         let dir = std::path::PathBuf::from(&self.shader_dir);
@@ -477,7 +576,9 @@ impl Compositor {
 
         for &name in SHADER_NAMES {
             let path = dir.join(format!("{name}.frag"));
-            if !path.exists() { continue; }
+            if !path.exists() {
+                continue;
+            }
             let mtime = match std::fs::metadata(&path).and_then(|m| m.modified()) {
                 Ok(t) => t,
                 Err(_) => continue,
@@ -501,7 +602,9 @@ impl Compositor {
     }
 
     pub(crate) fn start_recording(&mut self, output_path: &str) {
-        if self.recording_active { return; }
+        if self.recording_active {
+            return;
+        }
         let w = self.screen_w;
         let h = self.screen_h;
         let fps = self.recording_fps;
@@ -521,17 +624,45 @@ impl Compositor {
                 .unwrap_or(false)
         };
 
-        enum Encoder { Nvenc, Vaapi, Sw }
+        enum Encoder {
+            Nvenc,
+            Vaapi,
+            Sw,
+        }
         let encoder = match self.recording_encoder.as_str() {
             "nvenc" => Encoder::Nvenc,
             "vaapi" => Encoder::Vaapi,
             "software" => Encoder::Sw,
             _ => {
                 // auto: probe NVENC > VAAPI > SW
-                if probe(&["-f", "lavfi", "-i", "nullsrc=s=64x64", "-frames:v", "1", "-c:v", "h264_nvenc", "-f", "null", "-"]) {
+                if probe(&[
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "nullsrc=s=64x64",
+                    "-frames:v",
+                    "1",
+                    "-c:v",
+                    "h264_nvenc",
+                    "-f",
+                    "null",
+                    "-",
+                ]) {
                     Encoder::Nvenc
                 } else if std::path::Path::new("/dev/dri/renderD128").exists()
-                    && probe(&["-vaapi_device", "/dev/dri/renderD128", "-f", "lavfi", "-i", "nullsrc=s=64x64", "-frames:v", "1", "-f", "null", "-"])
+                    && probe(&[
+                        "-vaapi_device",
+                        "/dev/dri/renderD128",
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        "nullsrc=s=64x64",
+                        "-frames:v",
+                        "1",
+                        "-f",
+                        "null",
+                        "-",
+                    ])
                 {
                     Encoder::Vaapi
                 } else {
@@ -540,10 +671,16 @@ impl Compositor {
             }
         };
 
-        let codec_name = match encoder { Encoder::Nvenc => "h264_nvenc", Encoder::Vaapi => "h264_vaapi", Encoder::Sw => "libopenh264" };
+        let codec_name = match encoder {
+            Encoder::Nvenc => "h264_nvenc",
+            Encoder::Vaapi => "h264_vaapi",
+            Encoder::Sw => "libopenh264",
+        };
         let bitrate = &self.recording_bitrate;
         let quality_str = self.recording_quality.to_string();
-        log::info!("compositor: recording encoder={codec_name}, size={w}x{h}, fps={fps}, bitrate={bitrate}, qp={quality_str}, output={output_path}");
+        log::info!(
+            "compositor: recording encoder={codec_name}, size={w}x{h}, fps={fps}, bitrate={bitrate}, qp={quality_str}, output={output_path}"
+        );
 
         let size_str = format!("{w}x{h}");
         let fps_str = fps.to_string();
@@ -556,18 +693,24 @@ impl Compositor {
         // The nominal `-r` is moved to the output side; ffmpeg duplicates/drops
         // frames automatically to produce a constant-frame-rate file.
         args.extend_from_slice(&[
-            "-use_wallclock_as_timestamps", "1",
-            "-f", "rawvideo",
-            "-pix_fmt", "rgba",
-            "-s", &size_str,
-            "-i", "pipe:0",
+            "-use_wallclock_as_timestamps",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "-s",
+            &size_str,
+            "-i",
+            "pipe:0",
         ]);
         match encoder {
             Encoder::Nvenc => args.extend_from_slice(&["-vf", "vflip"]),
             Encoder::Vaapi => args.extend_from_slice(&["-vf", "vflip,format=nv12,hwupload"]),
             Encoder::Sw => args.extend_from_slice(&["-vf", "vflip"]),
         }
-        args.push("-c:v"); args.push(codec_name);
+        args.push("-c:v");
+        args.push(codec_name);
         match encoder {
             Encoder::Vaapi => args.extend_from_slice(&["-rc_mode", "CQP", "-qp", &quality_str]),
             _ => args.extend_from_slice(&["-b:v", bitrate]),
@@ -610,7 +753,9 @@ impl Compositor {
     }
 
     pub(crate) fn stop_recording(&mut self) {
-        if !self.recording_active { return; }
+        if !self.recording_active {
+            return;
+        }
         self.recording_active = false;
 
         unsafe {
@@ -629,7 +774,9 @@ impl Compositor {
     }
 
     pub(super) fn capture_recording_frame(&mut self) {
-        if !self.recording_active { return; }
+        if !self.recording_active {
+            return;
+        }
 
         let now = std::time::Instant::now();
         let min_interval = std::time::Duration::from_secs_f32(1.0 / self.recording_fps as f32);
@@ -649,8 +796,12 @@ impl Compositor {
             unsafe {
                 self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
                 self.gl.read_pixels(
-                    0, 0, w as i32, h as i32,
-                    glow::RGBA, glow::UNSIGNED_BYTE,
+                    0,
+                    0,
+                    w as i32,
+                    h as i32,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
                     glow::PixelPackData::BufferOffset(0),
                 );
 
@@ -691,12 +842,18 @@ impl Compositor {
                 "name_pixmap" => {
                     // Deferred NameWindowPixmap operation
                     // This was originally in event handler, now batched in render thread
-                    log::debug!("compositor: processing deferred name_pixmap for window 0x{:x}", op.window_id);
+                    log::debug!(
+                        "compositor: processing deferred name_pixmap for window 0x{:x}",
+                        op.window_id
+                    );
                     // Implementation would go here (currently placeholder)
                 }
                 "destroy_pixmap" => {
                     // Deferred pixmap destruction
-                    log::debug!("compositor: processing deferred destroy_pixmap for window 0x{:x}", op.window_id);
+                    log::debug!(
+                        "compositor: processing deferred destroy_pixmap for window 0x{:x}",
+                        op.window_id
+                    );
                 }
                 _ => {
                     log::warn!("compositor: unknown deferred op type: {}", op.op_type);
@@ -704,5 +861,4 @@ impl Compositor {
             }
         }
     }
-
 }

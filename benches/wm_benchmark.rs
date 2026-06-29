@@ -1,6 +1,6 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use rand::Rng;
-use slotmap::{new_key_type, SecondaryMap, SlotMap};
+use slotmap::{SecondaryMap, SlotMap, new_key_type};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -418,9 +418,9 @@ pub fn setup_new_wm(num_monitors: usize, num_clients: usize) -> NewWM {
 // ===================================================================
 
 const CONFIGS: &[(usize, usize)] = &[
-    (5, 100),   // 小规模
-    // (10, 1000), // 中规模
-    // (20, 5000), // 大规模
+    (5, 100), // 小规模
+              // (10, 1000), // 中规模
+              // (20, 5000), // 大规模
 ];
 
 fn benchmark_traversal(c: &mut Criterion) {

@@ -191,7 +191,9 @@ mod tests {
     fn test_wildcard_match() {
         // 空字段作为通配符
         let rule = create_test_rule("", "Firefox", "");
-        assert!(RuleMatcher::matches(&rule, "anything", "Firefox", "anything"));
+        assert!(RuleMatcher::matches(
+            &rule, "anything", "Firefox", "anything"
+        ));
 
         // 只匹配 class
         assert!(RuleMatcher::matches(
@@ -224,10 +226,7 @@ mod tests {
 
         // 实例不匹配
         assert!(!RuleMatcher::matches(
-            &rule,
-            "firefox",
-            "Firefox",
-            "Browser"
+            &rule, "firefox", "Firefox", "Browser"
         ));
     }
 
@@ -235,7 +234,9 @@ mod tests {
     fn test_empty_rule_no_match() {
         let rule = create_test_rule("", "", "");
         // 完全空的规则不匹配任何窗口
-        assert!(!RuleMatcher::matches(&rule, "anything", "anything", "anything"));
+        assert!(!RuleMatcher::matches(
+            &rule, "anything", "anything", "anything"
+        ));
     }
 
     #[test]
@@ -301,10 +302,19 @@ mod tests {
 
         // 部分匹配
         assert!(RuleMatcher::matches(&rule, "xterm", "anything", "anything"));
-        assert!(RuleMatcher::matches(&rule, "terminal", "anything", "anything"));
-        assert!(RuleMatcher::matches(&rule, "terminator", "anything", "anything"));
+        assert!(RuleMatcher::matches(
+            &rule, "terminal", "anything", "anything"
+        ));
+        assert!(RuleMatcher::matches(
+            &rule,
+            "terminator",
+            "anything",
+            "anything"
+        ));
 
         // 不匹配
-        assert!(!RuleMatcher::matches(&rule, "chrome", "anything", "anything"));
+        assert!(!RuleMatcher::matches(
+            &rule, "chrome", "anything", "anything"
+        ));
     }
 }

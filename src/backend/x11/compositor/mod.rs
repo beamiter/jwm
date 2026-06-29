@@ -1,8 +1,8 @@
-pub mod math;
 mod annotations;
 mod effects;
 mod expose;
 mod font;
+pub mod math;
 mod overview;
 mod pipeline;
 mod postprocess;
@@ -11,66 +11,66 @@ mod tfp;
 mod transitions;
 
 // Optimization modules
-pub mod perf_metrics;
-pub mod texture_pool;
-pub mod shader_cache;
-pub mod pixel_buffer_pool;
-pub mod pbo_uploader;
-pub mod gpu_fence_sync;
 pub mod async_x11;
-pub mod predictive_render;
-pub mod cache_warmup;
-pub mod power_saving;
-pub mod frame_rate;
 pub mod blur_optimize;
-pub mod per_monitor;
+pub mod cache_warmup;
+pub mod direct_scanout;
 pub mod dirty_region;
+pub mod frame_rate;
+pub mod gpu_fence_sync;
+pub mod integration_helpers;
 pub mod optimization_manager;
-pub mod subpixel_render;
-pub mod subpixel_integration;
+pub mod pbo_uploader;
+pub mod per_monitor;
+pub mod perf_metrics;
+pub mod pixel_buffer_pool;
+pub mod power_saving;
+pub mod predictive_render;
 pub mod profiler;
 pub mod render_batcher;
-pub mod direct_scanout;
-pub mod integration_helpers;
 pub mod render_stats;
+pub mod shader_cache;
+pub mod subpixel_integration;
+pub mod subpixel_render;
+pub mod texture_pool;
 
 // Sync control modules
-pub mod oml_sync_control;
 pub mod audio_sync;
+pub mod oml_sync_control;
 pub mod present;
 
 // Benchmark
 pub mod benchmark;
 
-mod init;
-mod wallpaper;
-mod rules;
 mod config;
-mod render;
 mod features;
+mod init;
+mod render;
+mod rules;
+mod wallpaper;
 
-pub use perf_metrics::PerfMetrics;
-pub use texture_pool::TexturePool;
-pub use shader_cache::ShaderCache;
-pub use pixel_buffer_pool::PixelBufferPool;
-pub use pbo_uploader::PBOUploader;
-pub use gpu_fence_sync::GPUFenceSyncManager;
-pub use async_x11::{EventQueue, DeferredOpQueue, PriorityEventQueue, InputPriority};
-pub use predictive_render::{PredictiveRenderManager, SceneActivity};
-pub use cache_warmup::{CacheWarmupManager, BlurSizeStats};
-pub use power_saving::{PowerSavingManager, PowerProfile, BatteryStatus, PowerSavingConfig};
-pub use frame_rate::{FrameRateLimiter, AdaptiveFrameRate};
-pub use blur_optimize::{AdaptiveBlur, GaussianBlurParams, BlurCache, BlurCacheStats};
-pub use per_monitor::{PerMonitorRenderer, MonitorRenderRegion};
-pub use dirty_region::{DirtyRegionTracker, DirtyRect};
-pub use optimization_manager::{OptimizationManager, OptimizationStatus};
-pub use oml_sync_control::OmlSyncControl;
-pub use subpixel_render::{SubpixelRenderManager, SubpixelMode, WindowType, SubpixelMetrics};
-pub use subpixel_integration::{SubpixelCompositorIntegration, SubpixelRenderParams};
-pub use profiler::{FrameProfiler, ProfileZone, ZoneStats};
-pub use render_batcher::{RenderBatcher, GLStateTracker, BatchKey, QuadInstance};
+pub use async_x11::{DeferredOpQueue, EventQueue, InputPriority, PriorityEventQueue};
+pub use blur_optimize::{AdaptiveBlur, BlurCache, BlurCacheStats, GaussianBlurParams};
+pub use cache_warmup::{BlurSizeStats, CacheWarmupManager};
 pub use direct_scanout::{DirectScanoutManager, DirectScanoutStats, WindowScanoutInfo};
-pub use render_stats::{RenderStats, PassStats, GLCallStats};
+pub use dirty_region::{DirtyRect, DirtyRegionTracker};
+pub use frame_rate::{AdaptiveFrameRate, FrameRateLimiter};
+pub use gpu_fence_sync::GPUFenceSyncManager;
+pub use oml_sync_control::OmlSyncControl;
+pub use optimization_manager::{OptimizationManager, OptimizationStatus};
+pub use pbo_uploader::PBOUploader;
+pub use per_monitor::{MonitorRenderRegion, PerMonitorRenderer};
+pub use perf_metrics::PerfMetrics;
+pub use pixel_buffer_pool::PixelBufferPool;
+pub use power_saving::{BatteryStatus, PowerProfile, PowerSavingConfig, PowerSavingManager};
+pub use predictive_render::{PredictiveRenderManager, SceneActivity};
+pub use profiler::{FrameProfiler, ProfileZone, ZoneStats};
+pub use render_batcher::{BatchKey, GLStateTracker, QuadInstance, RenderBatcher};
+pub use render_stats::{GLCallStats, PassStats, RenderStats};
+pub use shader_cache::ShaderCache;
+pub use subpixel_integration::{SubpixelCompositorIntegration, SubpixelRenderParams};
+pub use subpixel_render::{SubpixelMetrics, SubpixelMode, SubpixelRenderManager, WindowType};
+pub use texture_pool::TexturePool;
 
 use glow::HasContext;
 use std::collections::HashMap;
@@ -115,9 +115,9 @@ const GLX_FRONT_LEFT_EXT: i32 = 0x20DE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VsyncMethod {
-    Global,          // glXSwapInterval=1 (traditional, all windows locked to one vblank)
-    OmlSyncControl,  // GLX_OML_sync_control (per-window MSC-based timing)
-    Present,         // X11 Present extension (per-window independent presentation)
+    Global,         // glXSwapInterval=1 (traditional, all windows locked to one vblank)
+    OmlSyncControl, // GLX_OML_sync_control (per-window MSC-based timing)
+    Present,        // X11 Present extension (per-window independent presentation)
 }
 
 impl Default for VsyncMethod {
@@ -160,7 +160,12 @@ impl WindowTextureState {
     /// Check if texture is ready for rendering
     #[allow(dead_code)]
     fn is_renderable(&self) -> bool {
-        matches!(self, WindowTextureState::Active { .. } | WindowTextureState::FadingOut { .. } | WindowTextureState::Animating { .. })
+        matches!(
+            self,
+            WindowTextureState::Active { .. }
+                | WindowTextureState::FadingOut { .. }
+                | WindowTextureState::Animating { .. }
+        )
     }
 
     /// Check if TFP refresh is needed
@@ -189,7 +194,6 @@ impl WindowTextureState {
 // ---------------------------------------------------------------------------
 
 struct WindowTexture {
-
     x: i32,
     y: i32,
     w: u32,
@@ -405,8 +409,8 @@ struct BorderUniforms {
 
 // --- Feature 9/10: Post-process uniforms ---
 struct PostprocessUniforms {
-    projection: Option<glow::UniformLocation>,  // P5F.1: Cache to avoid per-frame lookup
-    rect: Option<glow::UniformLocation>,        // P5F.1: Cache to avoid per-frame lookup
+    projection: Option<glow::UniformLocation>, // P5F.1: Cache to avoid per-frame lookup
+    rect: Option<glow::UniformLocation>,       // P5F.1: Cache to avoid per-frame lookup
     texture: Option<glow::UniformLocation>,
     color_temp: Option<glow::UniformLocation>,
     saturation: Option<glow::UniformLocation>,
@@ -441,7 +445,7 @@ struct FrameStats {
     frame_count: u64,
     last_fps_update: std::time::Instant,
     fps: f32,
-    frame_times: std::collections::VecDeque<f32>,  // P5F.3: VecDeque for O(1) operations
+    frame_times: std::collections::VecDeque<f32>, // P5F.3: VecDeque for O(1) operations
     last_frame_time: std::time::Instant,
     // Phase 7.2: Extended debug stats
     draw_calls: u32,
@@ -450,18 +454,18 @@ struct FrameStats {
     blur_cache_misses: u64,
     // Task 8: Input latency tracking
     last_input_time: Option<std::time::Instant>,
-    latency_samples: std::collections::VecDeque<f32>,  // in ms, ring buffer up to 300 samples
+    latency_samples: std::collections::VecDeque<f32>, // in ms, ring buffer up to 300 samples
 }
 
 /// Per-window wobbly animation state (grid spring-mass system).
 struct WobblyState {
-    grid_n: usize,                   // nodes per axis = grid_size + 1
-    offsets: Vec<[f32; 2]>,          // grid_n * grid_n node offsets (pixels)
-    velocities: Vec<[f32; 2]>,       // grid_n * grid_n node velocities
-    dragging: bool,                  // true while interactive move is active
-    anchor_row: usize,               // drag anchor node row
-    anchor_col: usize,               // drag anchor node column
-    last_tick: std::time::Instant,   // for accurate dt calculation
+    grid_n: usize,                 // nodes per axis = grid_size + 1
+    offsets: Vec<[f32; 2]>,        // grid_n * grid_n node offsets (pixels)
+    velocities: Vec<[f32; 2]>,     // grid_n * grid_n node velocities
+    dragging: bool,                // true while interactive move is active
+    anchor_row: usize,             // drag anchor node row
+    anchor_col: usize,             // drag anchor node column
+    last_tick: std::time::Instant, // for accurate dt calculation
 }
 
 /// Entry for Alt-Tab overview mode.
@@ -492,15 +496,27 @@ struct Particle {
 /// Entry for Expose/Mission Control mode.
 struct ExposeEntry {
     x11_win: u32,
-    orig_x: f32, orig_y: f32, orig_w: f32, orig_h: f32,
-    target_x: f32, target_y: f32, target_w: f32, target_h: f32,
-    current_x: f32, current_y: f32, current_w: f32, current_h: f32,
+    orig_x: f32,
+    orig_y: f32,
+    orig_w: f32,
+    orig_h: f32,
+    target_x: f32,
+    target_y: f32,
+    target_w: f32,
+    target_h: f32,
+    current_x: f32,
+    current_y: f32,
+    current_w: f32,
+    current_h: f32,
     is_hovered: bool,
 }
 
 /// Snap preview state.
 struct SnapPreview {
-    x: f32, y: f32, w: f32, h: f32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
     opacity: f32,
     start: std::time::Instant,
     fading_out: bool,
@@ -639,9 +655,9 @@ impl DamageTracker {
         }
         // More windows = more likely to have localized damage
         match self.window_count {
-            0..=3 => 0.7,  // Few windows = large tiles OK, higher threshold
-            4..=8 => 0.5,  // Moderate
-            _ => 0.35,     // Many windows = keep scissor precision
+            0..=3 => 0.7, // Few windows = large tiles OK, higher threshold
+            4..=8 => 0.5, // Moderate
+            _ => 0.35,    // Many windows = keep scissor precision
         }
     }
 
@@ -722,7 +738,6 @@ impl DamageTracker {
         self.dirty_tiles = vec![true; (tile_cols * tile_rows) as usize];
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Blur quality auto-downgrade (Phase 2.2)
@@ -902,7 +917,7 @@ pub(super) struct Compositor {
     // --- P3: HDR / 10-bit output ---
     hdr_enabled: bool,
     hdr_peak_nits: f32,
-    tone_mapping_method: i32,  // 0=none, 1=Reinhard, 2=ACES
+    tone_mapping_method: i32, // 0=none, 1=Reinhard, 2=ACES
 
     // --- Feature 11: Debug HUD ---
     hud_program: glow::Program,
@@ -1179,11 +1194,11 @@ pub(super) struct Compositor {
 
     // --- P4: Per-monitor and temporal blur optimization ---
     /// Parsed blur strength mapping: Hz -> strength (e.g., 60->2, 144->4)
-    blur_strength_by_hz: Vec<(u32, u32)>,  // [(hz, strength), ...]
+    blur_strength_by_hz: Vec<(u32, u32)>, // [(hz, strength), ...]
     /// Per-monitor blur quality: monitor_index -> BlurQuality
     blur_quality_by_monitor: HashMap<u32, BlurQuality>,
     /// Monitor rectangles: monitor_index -> (x, y, width, height) from RandR
-    monitor_rects: Vec<(u32, i32, i32, u32, u32)>,  // P5B: Real geometry for window->monitor mapping
+    monitor_rects: Vec<(u32, i32, i32, u32, u32)>, // P5B: Real geometry for window->monitor mapping
     /// Monitor refresh rates: monitor_index -> Hz
     monitor_refresh_rates: HashMap<u32, u32>,
     /// Temporal blur: previous frame blur FBO
@@ -1241,15 +1256,16 @@ pub(super) struct Compositor {
     /// Frame profiler for render pipeline timing
     frame_profiler: FrameProfiler,
     /// GL state tracker to avoid redundant state changes
-    gl_state_tracker: GLStateTracker<glow::Program, glow::Texture, glow::VertexArray, glow::Framebuffer>,
+    gl_state_tracker:
+        GLStateTracker<glow::Program, glow::Texture, glow::VertexArray, glow::Framebuffer>,
 
     // --- Benchmark harness ---
     benchmark: benchmark::BenchmarkHarness,
 
     // --- HDR output control ---
-    eotf_mode: i32,           // 0=sRGB gamma, 1=PQ (ST2084), 2=HLG
-    output_colorspace: i32,   // 0=BT.709, 1=BT.2020
-    hdr_output_10bit: bool,   // true if GLX context is actually 10-bit
+    eotf_mode: i32,         // 0=sRGB gamma, 1=PQ (ST2084), 2=HLG
+    output_colorspace: i32, // 0=BT.709, 1=BT.2020
+    hdr_output_10bit: bool, // true if GLX context is actually 10-bit
 
     // --- Reusable per-frame scratch buffers (render_frame) ---
     // Detached via mem::take during the frame, refilled, then restored, so the
@@ -1357,7 +1373,9 @@ impl Drop for Compositor {
             self.root,
             x11rb::protocol::composite::Redirect::MANUAL,
         );
-        let _ = self.conn.composite_release_overlay_window(self.overlay_window);
+        let _ = self
+            .conn
+            .composite_release_overlay_window(self.overlay_window);
         let _ = self.conn.flush();
         unsafe {
             x11::glx::glXDestroyContext(self.xlib_display, self.glx_context);
@@ -1365,7 +1383,6 @@ impl Drop for Compositor {
         }
     }
 }
-
 
 /// X error handler that logs errors instead of calling exit().
 unsafe extern "C" fn ignore_x_error(
@@ -1375,8 +1392,11 @@ unsafe extern "C" fn ignore_x_error(
     let e = unsafe { &*event };
     log::debug!(
         "compositor: X error: type={}, error_code={}, request_code={}, minor_code={}, resourceid=0x{:x}",
-        e.type_, e.error_code, e.request_code, e.minor_code, e.resourceid
+        e.type_,
+        e.error_code,
+        e.request_code,
+        e.minor_code,
+        e.resourceid
     );
     0
 }
-

@@ -2,7 +2,6 @@
 ///
 /// Replaces the deprecated wlr-screencopy protocol. Allows modern screen capture
 /// tools (OBS, portals, grim v2) to capture output and toplevel content.
-
 use crate::sync_ext::MutexExt;
 use std::sync::{Arc, Mutex};
 
@@ -14,22 +13,20 @@ use smithay::reexports::wayland_protocols::ext::image_capture_source::v1::server
         self, ExtForeignToplevelImageCaptureSourceManagerV1,
     },
     ext_image_capture_source_v1::{self, ExtImageCaptureSourceV1},
-    ext_output_image_capture_source_manager_v1::{
-        self, ExtOutputImageCaptureSourceManagerV1,
-    },
+    ext_output_image_capture_source_manager_v1::{self, ExtOutputImageCaptureSourceManagerV1},
 };
-use smithay::wayland::foreign_toplevel_list::ForeignToplevelHandle;
 use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::{
+    ext_image_copy_capture_cursor_session_v1::{self, ExtImageCopyCaptureCursorSessionV1},
+    ext_image_copy_capture_frame_v1::{self, ExtImageCopyCaptureFrameV1},
     ext_image_copy_capture_manager_v1::{self, ExtImageCopyCaptureManagerV1},
     ext_image_copy_capture_session_v1::{self, ExtImageCopyCaptureSessionV1},
-    ext_image_copy_capture_frame_v1::{self, ExtImageCopyCaptureFrameV1},
-    ext_image_copy_capture_cursor_session_v1::{self, ExtImageCopyCaptureCursorSessionV1},
 };
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_shm;
 use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
+use smithay::wayland::foreign_toplevel_list::ForeignToplevelHandle;
 
 use crate::backend::wayland::state::JwmWaylandState;
 
@@ -189,7 +186,12 @@ impl Dispatch<ExtOutputImageCaptureSourceManagerV1, OutputSourceManagerData> for
                         }
                     }
                 };
-                data_init.init(source, ImageCaptureSourceData { source: capture_source });
+                data_init.init(
+                    source,
+                    ImageCaptureSourceData {
+                        source: capture_source,
+                    },
+                );
             }
             ext_output_image_capture_source_manager_v1::Request::Destroy => {}
             _ => {}
@@ -257,7 +259,9 @@ impl Dispatch<ExtForeignToplevelImageCaptureSourceManagerV1, ToplevelSourceManag
                         Some(o) => {
                             data_init.init(
                                 source,
-                                ImageCaptureSourceData { source: CaptureSource::Output(o) },
+                                ImageCaptureSourceData {
+                                    source: CaptureSource::Output(o),
+                                },
                             );
                         }
                         None => return,
@@ -266,7 +270,9 @@ impl Dispatch<ExtForeignToplevelImageCaptureSourceManagerV1, ToplevelSourceManag
                 };
                 data_init.init(
                     source,
-                    ImageCaptureSourceData { source: CaptureSource::Toplevel(win) },
+                    ImageCaptureSourceData {
+                        source: CaptureSource::Toplevel(win),
+                    },
                 );
             }
             ext_foreign_toplevel_image_capture_source_manager_v1::Request::Destroy => {}
@@ -332,11 +338,17 @@ impl Dispatch<ExtImageCopyCaptureManagerV1, CaptureManagerData> for JwmWaylandSt
                 let capture_source = match source
                     .data::<ImageCaptureSourceData>()
                     .map(|d| d.source.clone())
-                    .or_else(|| state.outputs.first().map(|o| CaptureSource::Output(o.clone())))
-                {
+                    .or_else(|| {
+                        state
+                            .outputs
+                            .first()
+                            .map(|o| CaptureSource::Output(o.clone()))
+                    }) {
                     Some(s) => s,
                     None => {
-                        warn!("[image-capture] CreateSession with no source and no outputs; ignoring");
+                        warn!(
+                            "[image-capture] CreateSession with no source and no outputs; ignoring"
+                        );
                         return;
                     }
                 };
@@ -364,27 +376,30 @@ impl Dispatch<ExtImageCopyCaptureManagerV1, CaptureManagerData> for JwmWaylandSt
                             sess.shm_format(wl_shm::Format::Xrgb8888);
                             advertise_session_dmabuf(&sess, state);
                             sess.done();
-                            debug!("[image-capture] session created: output={} size={}x{}", output.name(), w, h);
+                            debug!(
+                                "[image-capture] session created: output={} size={}x{}",
+                                output.name(),
+                                w,
+                                h
+                            );
                         } else {
                             sess.stopped();
                         }
                     }
-                    CaptureSource::Toplevel(win) => {
-                        match state.window_geometry.get(win) {
-                            Some(geo) if geo.w > 0 && geo.h > 0 => {
-                                sess.buffer_size(geo.w, geo.h);
-                                sess.shm_format(wl_shm::Format::Argb8888);
-                                sess.shm_format(wl_shm::Format::Xrgb8888);
-                                advertise_session_dmabuf(&sess, state);
-                                sess.done();
-                                debug!(
-                                    "[image-capture] session created: toplevel={win:?} size={}x{}",
-                                    geo.w, geo.h
-                                );
-                            }
-                            _ => sess.stopped(),
+                    CaptureSource::Toplevel(win) => match state.window_geometry.get(win) {
+                        Some(geo) if geo.w > 0 && geo.h > 0 => {
+                            sess.buffer_size(geo.w, geo.h);
+                            sess.shm_format(wl_shm::Format::Argb8888);
+                            sess.shm_format(wl_shm::Format::Xrgb8888);
+                            advertise_session_dmabuf(&sess, state);
+                            sess.done();
+                            debug!(
+                                "[image-capture] session created: toplevel={win:?} size={}x{}",
+                                geo.w, geo.h
+                            );
                         }
-                    }
+                        _ => sess.stopped(),
+                    },
                 }
             }
             ext_image_copy_capture_manager_v1::Request::CreatePointerCursorSession {
@@ -395,16 +410,27 @@ impl Dispatch<ExtImageCopyCaptureManagerV1, CaptureManagerData> for JwmWaylandSt
                 let capture_source = match source
                     .data::<ImageCaptureSourceData>()
                     .map(|d| d.source.clone())
-                    .or_else(|| state.outputs.first().map(|o| CaptureSource::Output(o.clone())))
-                {
+                    .or_else(|| {
+                        state
+                            .outputs
+                            .first()
+                            .map(|o| CaptureSource::Output(o.clone()))
+                    }) {
                     Some(s) => s,
                     None => {
-                        warn!("[image-capture] CreatePointerCursorSession with no source and no outputs; ignoring");
+                        warn!(
+                            "[image-capture] CreatePointerCursorSession with no source and no outputs; ignoring"
+                        );
                         return;
                     }
                 };
 
-                data_init.init(session, CursorSessionData { source: capture_source });
+                data_init.init(
+                    session,
+                    CursorSessionData {
+                        source: capture_source,
+                    },
+                );
             }
             ext_image_copy_capture_manager_v1::Request::Destroy => {}
             _ => {}

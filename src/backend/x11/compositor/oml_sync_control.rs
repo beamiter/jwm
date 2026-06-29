@@ -3,32 +3,38 @@ use std::time::{Duration, Instant};
 
 /// GLX_OML_sync_control function pointers
 pub struct OmlSyncControlFunctions {
-    pub get_sync_values: Option<unsafe extern "C" fn(
-        *mut x11::xlib::Display,
-        x11::glx::GLXDrawable,
-        *mut u64,  // ust
-        *mut u64,  // msc
-        *mut i64,  // sbc
-    ) -> bool>,
+    pub get_sync_values: Option<
+        unsafe extern "C" fn(
+            *mut x11::xlib::Display,
+            x11::glx::GLXDrawable,
+            *mut u64, // ust
+            *mut u64, // msc
+            *mut i64, // sbc
+        ) -> bool,
+    >,
 
-    pub wait_for_msc: Option<unsafe extern "C" fn(
-        *mut x11::xlib::Display,
-        x11::glx::GLXDrawable,
-        u64,       // target_msc
-        u64,       // divisor
-        u64,       // remainder
-        *mut u64,  // ust
-        *mut u64,  // msc
-        *mut i64,  // sbc
-    ) -> bool>,
+    pub wait_for_msc: Option<
+        unsafe extern "C" fn(
+            *mut x11::xlib::Display,
+            x11::glx::GLXDrawable,
+            u64,      // target_msc
+            u64,      // divisor
+            u64,      // remainder
+            *mut u64, // ust
+            *mut u64, // msc
+            *mut i64, // sbc
+        ) -> bool,
+    >,
 
-    pub swap_buffers_msc: Option<unsafe extern "C" fn(
-        *mut x11::xlib::Display,
-        x11::glx::GLXDrawable,
-        i64,       // target_msc
-        i64,       // divisor
-        i64,       // remainder
-    ) -> i64>,
+    pub swap_buffers_msc: Option<
+        unsafe extern "C" fn(
+            *mut x11::xlib::Display,
+            x11::glx::GLXDrawable,
+            i64, // target_msc
+            i64, // divisor
+            i64, // remainder
+        ) -> i64,
+    >,
 }
 
 /// Per-window OML sync state
@@ -37,7 +43,7 @@ pub struct OmlSyncWindow {
     pub last_msc: u64,
     pub last_ust: u64,
     pub last_update: Instant,
-    pub frame_delay_ns: u64,  // Nanoseconds between frames at current FPS
+    pub frame_delay_ns: u64, // Nanoseconds between frames at current FPS
 }
 
 impl OmlSyncWindow {
@@ -45,7 +51,7 @@ impl OmlSyncWindow {
         let frame_delay_ns = if fps > 0.0 {
             (1_000_000_000.0 / fps as f64).round() as u64
         } else {
-            16_666_667  // Default 60Hz
+            16_666_667 // Default 60Hz
         };
 
         Self {
@@ -61,14 +67,14 @@ impl OmlSyncWindow {
         self.frame_delay_ns = if fps > 0.0 {
             (1_000_000_000.0 / fps as f64).round() as u64
         } else {
-            16_666_667  // Default 60Hz
+            16_666_667 // Default 60Hz
         };
     }
 
     /// Estimate next MSC when this window should present
     pub fn estimate_next_msc(&self) -> u64 {
         if self.last_msc == 0 {
-            return 0;  // First frame, let compositor decide
+            return 0; // First frame, let compositor decide
         }
 
         let elapsed = self.last_update.elapsed();
@@ -114,7 +120,9 @@ impl OmlSyncControl {
             && funcs.swap_buffers_msc.is_some();
 
         if !available {
-            log::warn!("compositor: GLX_OML_sync_control not available, falling back to global vsync");
+            log::warn!(
+                "compositor: GLX_OML_sync_control not available, falling back to global vsync"
+            );
             return None;
         }
 
@@ -135,7 +143,8 @@ impl OmlSyncControl {
 
     /// Register a window for OML sync tracking
     pub fn register_window(&mut self, x11_win: u32, fps: f32) {
-        self.windows.insert(x11_win, OmlSyncWindow::new(x11_win, fps));
+        self.windows
+            .insert(x11_win, OmlSyncWindow::new(x11_win, fps));
     }
 
     /// Unregister a window
@@ -172,11 +181,7 @@ impl OmlSyncControl {
             )
         };
 
-        if ret {
-            Some((ust, msc, sbc))
-        } else {
-            None
-        }
+        if ret { Some((ust, msc, sbc)) } else { None }
     }
 
     /// Wait for a specific MSC (vblank counter)
@@ -196,19 +201,15 @@ impl OmlSyncControl {
                 self.xlib_display,
                 self.glx_drawable,
                 target_msc,
-                1,  // divisor (wait for any MSC)
-                0,  // remainder
+                1, // divisor (wait for any MSC)
+                0, // remainder
                 &mut ust,
                 &mut msc,
                 &mut sbc,
             )
         };
 
-        if ret {
-            Some((ust, msc, sbc))
-        } else {
-            None
-        }
+        if ret { Some((ust, msc, sbc)) } else { None }
     }
 
     /// Swap buffers at specific MSC
@@ -224,16 +225,12 @@ impl OmlSyncControl {
                 self.xlib_display,
                 self.glx_drawable,
                 target_msc,
-                1,  // divisor (any MSC will do)
-                0,  // remainder
+                1, // divisor (any MSC will do)
+                0, // remainder
             )
         };
 
-        if sbc > 0 {
-            Some(sbc)
-        } else {
-            None
-        }
+        if sbc > 0 { Some(sbc) } else { None }
     }
 
     /// Estimate next MSC for a window (for independent frame pacing)
@@ -260,7 +257,7 @@ impl OmlSyncControl {
         // Estimate based on last known vblank interval
         // Typical is 16.67ms for 60Hz, but this is a rough estimate
         // In real implementation, should track actual vblank period
-        let vblank_interval_ns = 16_666_667u64;  // 60Hz
+        let vblank_interval_ns = 16_666_667u64; // 60Hz
 
         // Simple heuristic: return ~half the vblank period
         // (actual sync needs more sophisticated timing)

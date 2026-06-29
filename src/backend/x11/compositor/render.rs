@@ -1,5 +1,7 @@
 // render_frame and rendering helpers
 #[allow(unused_imports)]
+use super::math::ortho;
+#[allow(unused_imports)]
 use super::*;
 #[allow(unused_imports)]
 use glow::HasContext;
@@ -14,21 +16,19 @@ use std::sync::mpsc;
 #[allow(unused_imports)]
 use x11rb::connection::{Connection, RequestConnection};
 #[allow(unused_imports)]
-use x11rb::wrapper::ConnectionExt as WrapperExt;
-#[allow(unused_imports)]
 use x11rb::protocol::composite::ConnectionExt as CompositeExt;
 #[allow(unused_imports)]
 use x11rb::protocol::damage::{self, ConnectionExt as DamageExt};
+#[allow(unused_imports)]
+use x11rb::protocol::randr::ConnectionExt as RandrExt;
 #[allow(unused_imports)]
 use x11rb::protocol::xfixes::ConnectionExt as XFixesExt;
 #[allow(unused_imports)]
 use x11rb::protocol::xproto::{self, ConnectionExt as XProtoExt};
 #[allow(unused_imports)]
-use x11rb::protocol::randr::ConnectionExt as RandrExt;
-#[allow(unused_imports)]
 use x11rb::rust_connection::RustConnection;
 #[allow(unused_imports)]
-use super::math::ortho;
+use x11rb::wrapper::ConnectionExt as WrapperExt;
 
 impl Compositor {
     // =====================================================================
@@ -83,17 +83,22 @@ impl Compositor {
 
         // Create snapshot FBO at monitor size
         if self.transition_fbo.is_none() {
-            self.transition_fbo = unsafe {
-                Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok()
-            };
+            self.transition_fbo = unsafe { Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok() };
         }
 
         // Create new-scene FBO for modes that need both old and new textures
-        let needs_new_fbo = matches!(self.transition_mode, TransitionMode::Cube | TransitionMode::Flip | TransitionMode::Blinds | TransitionMode::CoverFlow | TransitionMode::Helix | TransitionMode::Portal);
+        let needs_new_fbo = matches!(
+            self.transition_mode,
+            TransitionMode::Cube
+                | TransitionMode::Flip
+                | TransitionMode::Blinds
+                | TransitionMode::CoverFlow
+                | TransitionMode::Helix
+                | TransitionMode::Portal
+        );
         if needs_new_fbo && self.transition_new_fbo.is_none() {
-            self.transition_new_fbo = unsafe {
-                Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok()
-            };
+            self.transition_new_fbo =
+                unsafe { Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok() };
         }
 
         // Store monitor rect for rendering
@@ -111,13 +116,16 @@ impl Compositor {
             // Tag switch can radically change visible scene; force a full redraw
             // to avoid stale pixels from partial-damage scissor regions.
             self.damage_tracker.mark_all_dirty();
-            self.dirty_region_tracker.mark_all_dirty();  // P5C: Sync rect tracker
+            self.dirty_region_tracker.mark_all_dirty(); // P5C: Sync rect tracker
             self.needs_render = true;
             log::debug!(
                 "compositor: tag-switch slide transition started ({:?}, dir={}, mon={}x{}+{}+{})",
                 duration,
                 direction,
-                mon_w, mon_h, mon_x, mon_y,
+                mon_w,
+                mon_h,
+                mon_x,
+                mon_y,
             );
         }
     }
@@ -143,7 +151,8 @@ impl Compositor {
 
             if workspace_h > 0 {
                 self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-                self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(dst_fbo));
+                self.gl
+                    .bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(dst_fbo));
                 self.gl.blit_framebuffer(
                     mon_x,
                     gl_y,
@@ -217,14 +226,19 @@ impl Compositor {
         };
         let max_frame_time = frame_times_vec.iter().copied().fold(0.0, f32::max);
         let min_frame_time = frame_times_vec.iter().copied().fold(f32::MAX, f32::min);
-        let min_frame_time = if min_frame_time == f32::MAX { 0.0 } else { min_frame_time };
-
-        let blur_hit_rate = if self.frame_stats.blur_cache_hits + self.frame_stats.blur_cache_misses > 0 {
-            100.0 * self.frame_stats.blur_cache_hits as f32
-                / (self.frame_stats.blur_cache_hits + self.frame_stats.blur_cache_misses) as f32
-        } else {
+        let min_frame_time = if min_frame_time == f32::MAX {
             0.0
+        } else {
+            min_frame_time
         };
+
+        let blur_hit_rate =
+            if self.frame_stats.blur_cache_hits + self.frame_stats.blur_cache_misses > 0 {
+                100.0 * self.frame_stats.blur_cache_hits as f32
+                    / (self.frame_stats.blur_cache_hits + self.frame_stats.blur_cache_misses) as f32
+            } else {
+                0.0
+            };
 
         let temporal_blur_reuse_rate = if self.temporal_blur_total_count > 0 {
             100.0 * self.temporal_blur_reuse_count as f32 / self.temporal_blur_total_count as f32
@@ -232,7 +246,12 @@ impl Compositor {
             0.0
         };
 
-        let dirty_tiles_count = self.damage_tracker.dirty_tiles.iter().filter(|&&d| d).count();
+        let dirty_tiles_count = self
+            .damage_tracker
+            .dirty_tiles
+            .iter()
+            .filter(|&&d| d)
+            .count();
         let dirty_fraction = self.damage_tracker.dirty_fraction();
 
         let latency_stats = self.compute_latency_stats();
@@ -295,15 +314,36 @@ impl Compositor {
             if let Ok(tex) = self.gl.create_texture() {
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
                 self.gl.tex_image_2d(
-                    glow::TEXTURE_2D, 0, glow::RGBA8 as i32,
-                    w as i32, h as i32, 0,
-                    glow::RGBA, glow::UNSIGNED_BYTE,
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA8 as i32,
+                    w as i32,
+                    h as i32,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
                     glow::PixelUnpackData::Slice(Some(&pixels)),
                 );
-                self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-                self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
-                self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-                self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+                self.gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MIN_FILTER,
+                    glow::NEAREST as i32,
+                );
+                self.gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAG_FILTER,
+                    glow::NEAREST as i32,
+                );
+                self.gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_WRAP_S,
+                    glow::CLAMP_TO_EDGE as i32,
+                );
+                self.gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_WRAP_T,
+                    glow::CLAMP_TO_EDGE as i32,
+                );
                 self.gl.bind_texture(glow::TEXTURE_2D, None);
                 self.hud_text_texture = Some(tex);
                 self.hud_text_width = w;
@@ -336,7 +376,11 @@ impl Compositor {
 
     /// Check if there's a single fullscreen opaque window covering the screen.
     /// If so, and fullscreen_unredirect is enabled, we can skip compositing.
-    pub(super) fn check_fullscreen_unredirect(&mut self, scene: &[(u32, i32, i32, u32, u32)], focused: Option<u32>) -> bool {
+    pub(super) fn check_fullscreen_unredirect(
+        &mut self,
+        scene: &[(u32, i32, i32, u32, u32)],
+        focused: Option<u32>,
+    ) -> bool {
         if !self.fullscreen_unredirect {
             return false;
         }
@@ -345,8 +389,11 @@ impl Compositor {
             if let Some(wt) = self.windows.get(&focused_win) {
                 if wt.is_fullscreen && !wt.has_rgba {
                     // Check if it covers the full screen
-                    if let Some(&(_, x, y, w, h)) = scene.iter().rfind(|&&(win, _, _, _, _)| win == focused_win) {
-                        if x <= 0 && y <= 0
+                    if let Some(&(_, x, y, w, h)) =
+                        scene.iter().rfind(|&&(win, _, _, _, _)| win == focused_win)
+                    {
+                        if x <= 0
+                            && y <= 0
                             && (x + w as i32) >= self.screen_w as i32
                             && (y + h as i32) >= self.screen_h as i32
                         {
@@ -358,7 +405,10 @@ impl Compositor {
                                 );
                                 let _ = self.conn.flush();
                                 self.unredirected_window = Some(focused_win);
-                                log::info!("compositor: unredirected fullscreen window 0x{:x}", focused_win);
+                                log::info!(
+                                    "compositor: unredirected fullscreen window 0x{:x}",
+                                    focused_win
+                                );
                             }
                             return true;
                         }
@@ -368,10 +418,9 @@ impl Compositor {
         }
         // Re-redirect if we had an unredirected window that's no longer fullscreen
         if let Some(prev) = self.unredirected_window.take() {
-            let _ = self.conn.composite_redirect_window(
-                prev,
-                x11rb::protocol::composite::Redirect::MANUAL,
-            );
+            let _ = self
+                .conn
+                .composite_redirect_window(prev, x11rb::protocol::composite::Redirect::MANUAL);
             let _ = self.conn.flush();
             // The X server allocated a fresh backing pixmap while the window was
             // unredirected; the old NameWindowPixmap binding is now stale. Force
@@ -468,7 +517,8 @@ impl Compositor {
         };
 
         // Periodic diagnostic logging
-        static RENDER_LOG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        static RENDER_LOG_COUNT: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(0);
         let count = RENDER_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if count < 5 || count % 500 == 0 {
             log::info!(
@@ -482,8 +532,10 @@ impl Compositor {
         // Track render frequency for flicker diagnosis (info-level only — the
         // SystemTime/realtime-clock read and counter churn are skipped entirely
         // when info logging is off, which is the normal case).
-        static RENDER_FREQ_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        static RENDER_FREQ_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        static RENDER_FREQ_COUNT: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(0);
+        static RENDER_FREQ_EPOCH: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
         if log::log_enabled!(log::Level::Info) {
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -498,7 +550,9 @@ impl Compositor {
                 let elapsed = (now_ms - epoch) as f64 / 1000.0;
                 log::info!(
                     "[compositor::render_freq] {:.1} renders/sec (needs_render={}, focused={:?})",
-                    fc as f64 / elapsed, self.needs_render, focused,
+                    fc as f64 / elapsed,
+                    self.needs_render,
+                    focused,
                 );
                 RENDER_FREQ_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
                 RENDER_FREQ_EPOCH.store(now_ms, std::sync::atomic::Ordering::Relaxed);
@@ -513,22 +567,26 @@ impl Compositor {
             scene_info.extend(scene.iter().filter_map(|&(win, x, y, w, h)| {
                 self.windows.get(&win).map(|wt| {
                     let corner_radius = wt.corner_radius_override.unwrap_or(self.corner_radius);
-                    (win, WindowScanoutInfo {
-                        x,
-                        y,
-                        width: w,
-                        height: h,
-                        is_fullscreen: wt.is_fullscreen,
-                        has_alpha: wt.has_rgba,
-                        has_blur: wt.is_frosted,
-                        has_shadow: self.shadow_enabled,
-                        has_corner_radius: corner_radius > 0.0,
-                        opacity: wt.fade_opacity,
-                    })
+                    (
+                        win,
+                        WindowScanoutInfo {
+                            x,
+                            y,
+                            width: w,
+                            height: h,
+                            is_fullscreen: wt.is_fullscreen,
+                            has_alpha: wt.has_rgba,
+                            has_blur: wt.is_frosted,
+                            has_shadow: self.shadow_enabled,
+                            has_corner_radius: corner_radius > 0.0,
+                            opacity: wt.fade_opacity,
+                        },
+                    )
                 })
             }));
 
-            let (should_scanout, _scanout_win) = self.direct_scanout_mgr.check_scene(&scene_info, focused);
+            let (should_scanout, _scanout_win) =
+                self.direct_scanout_mgr.check_scene(&scene_info, focused);
             self.scratch_scene_info = scene_info;
             if should_scanout {
                 // Direct scanout active - bypass compositor rendering
@@ -559,10 +617,17 @@ impl Compositor {
         let wallpaper_crossfade_active = self.tick_wallpaper_crossfade();
 
         // Update damage tracker scene state for dynamic thresholds
-        let any_animating = fades_active || wobbly_active || expose_animating
-            || snap_animating || peek_animating || genie_active || ripples_active
-            || focus_highlight_active || wallpaper_crossfade_active;
-        self.damage_tracker.update_state(self.windows.len(), any_animating);
+        let any_animating = fades_active
+            || wobbly_active
+            || expose_animating
+            || snap_animating
+            || peek_animating
+            || genie_active
+            || ripples_active
+            || focus_highlight_active
+            || wallpaper_crossfade_active;
+        self.damage_tracker
+            .update_state(self.windows.len(), any_animating);
 
         // Phase 3.4: Detect focus change
         if self.focus_highlight {
@@ -578,7 +643,9 @@ impl Compositor {
         let mut wallpaper_just_loaded = false;
         if let Some(rx) = &self.pending_wallpaper {
             if let Ok(data) = rx.try_recv() {
-                if let Some((tex, w, h)) = Self::upload_wallpaper_texture(&self.gl, &data, self.hdr_enabled) {
+                if let Some((tex, w, h)) =
+                    Self::upload_wallpaper_texture(&self.gl, &data, self.hdr_enabled)
+                {
                     self.wallpaper_texture = Some(tex);
                     self.wallpaper_img_w = w;
                     self.wallpaper_img_h = h;
@@ -593,13 +660,20 @@ impl Compositor {
         self.pending_monitor_wallpapers.retain_mut(|(idx, rx)| {
             if let Ok(data) = rx.try_recv() {
                 if let Some(mw) = self.monitor_wallpapers.get_mut(*idx) {
-                    if let Some((tex, w, h)) = Self::upload_wallpaper_texture(&self.gl, &data, self.hdr_enabled) {
+                    if let Some((tex, w, h)) =
+                        Self::upload_wallpaper_texture(&self.gl, &data, self.hdr_enabled)
+                    {
                         mw.texture = Some(tex);
                         mw.img_w = w;
                         mw.img_h = h;
                         mw.mode = data.mode;
                         wallpaper_just_loaded = true;
-                        log::info!("compositor: async monitor wallpaper [{}] ready ({}x{})", idx, w, h);
+                        log::info!(
+                            "compositor: async monitor wallpaper [{}] ready ({}x{})",
+                            idx,
+                            w,
+                            h
+                        );
                     }
                 }
                 false // remove from pending list
@@ -614,14 +688,29 @@ impl Compositor {
         // Skip-unchanged-frame: if scene hasn't changed and no textures are
         // dirty, we can skip the entire GL render (unless screenshot pending or HUD active).
         let has_dirty = scene.iter().any(|&(win, _, _, _, _)| {
-            self.windows.get(&win).map_or(false, |wt| wt.dirty || wt.needs_pixmap_refresh)
+            self.windows
+                .get(&win)
+                .map_or(false, |wt| wt.dirty || wt.needs_pixmap_refresh)
         });
         let explicit_render = std::mem::replace(&mut self.needs_render, false);
-        let force_render = self.pending_screenshot.is_some() || self.pending_screenshot_region.is_some() || self.debug_hud || self.transition_active() || self.overview_active
-            || self.expose_active || expose_animating || snap_animating || peek_animating
-            || genie_active || ripples_active || focus_highlight_active || wallpaper_crossfade_active
-            || self.recording_active || self.annotation_active || wallpaper_just_loaded
-            || wobbly_active || explicit_render;
+        let force_render = self.pending_screenshot.is_some()
+            || self.pending_screenshot_region.is_some()
+            || self.debug_hud
+            || self.transition_active()
+            || self.overview_active
+            || self.expose_active
+            || expose_animating
+            || snap_animating
+            || peek_animating
+            || genie_active
+            || ripples_active
+            || focus_highlight_active
+            || wallpaper_crossfade_active
+            || self.recording_active
+            || self.annotation_active
+            || wallpaper_just_loaded
+            || wobbly_active
+            || explicit_render;
         let hash = Self::scene_hash(scene, focused);
         let scene_changed = hash != self.last_scene_hash;
         if !has_dirty && !fades_active && !force_render && !scene_changed {
@@ -680,7 +769,9 @@ impl Compositor {
         let mut blur_dirty_wins = std::mem::take(&mut self.scratch_blur_dirty);
         blur_dirty_wins.clear();
         blur_dirty_wins.extend(scene.iter().filter_map(|&(win, _, _, _, _)| {
-            self.windows.get(&win).and_then(|wt| if wt.dirty { Some(win) } else { None })
+            self.windows
+                .get(&win)
+                .and_then(|wt| if wt.dirty { Some(win) } else { None })
         }));
 
         // Refresh TFP textures for dirty windows with per-frame time budget.
@@ -731,24 +822,20 @@ impl Compositor {
 
                     // Phase 2.3: Check fence before rebind — skip if GPU not done yet
                     if let Some(fence) = wt.pending_fence.take() {
-                        let status = unsafe {
-                            self.gl.client_wait_sync(fence, 0, 0)
-                        };
+                        let status = unsafe { self.gl.client_wait_sync(fence, 0, 0) };
                         if status == glow::TIMEOUT_EXPIRED {
                             // GPU not done yet, skip this window's update; use old texture
                             wt.pending_fence = Some(fence);
                             continue;
                         }
-                        unsafe { self.gl.delete_sync(fence); }
+                        unsafe {
+                            self.gl.delete_sync(fence);
+                        }
                     }
 
                     unsafe {
                         self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
-                        (self.tfp.release)(
-                            self.xlib_display,
-                            wt.glx_pixmap,
-                            GLX_FRONT_LEFT_EXT,
-                        );
+                        (self.tfp.release)(self.xlib_display, wt.glx_pixmap, GLX_FRONT_LEFT_EXT);
                         (self.tfp.bind)(
                             self.xlib_display,
                             wt.glx_pixmap,
@@ -785,9 +872,16 @@ impl Compositor {
             for i in (0..scene.len()).rev() {
                 let (win, x, y, w, h) = scene[i];
                 let is_rgba = self.windows.get(&win).map_or(false, |wt| wt.has_rgba);
-                let has_fade = self.windows.get(&win).map_or(false, |wt| wt.fade_opacity < 1.0);
-                if !is_rgba && !has_fade && x <= 0 && y <= 0
-                    && (x + w as i32) >= sw && (y + h as i32) >= sh
+                let has_fade = self
+                    .windows
+                    .get(&win)
+                    .map_or(false, |wt| wt.fade_opacity < 1.0);
+                if !is_rgba
+                    && !has_fade
+                    && x <= 0
+                    && y <= 0
+                    && (x + w as i32) >= sw
+                    && (y + h as i32) >= sh
                 {
                     first_visible = i;
                     break;
@@ -814,11 +908,16 @@ impl Compositor {
                 // GL scissor uses bottom-left origin
                 let gl_y = self.screen_h as i32 - rect.y - rect.height as i32;
                 damage_scissor = (rect.x, gl_y, rect.width as i32, rect.height as i32);
-                self.gl.scissor(damage_scissor.0, damage_scissor.1, damage_scissor.2, damage_scissor.3);
+                self.gl.scissor(
+                    damage_scissor.0,
+                    damage_scissor.1,
+                    damage_scissor.2,
+                    damage_scissor.3,
+                );
             }
         }
         self.damage_tracker.clear();
-        self.dirty_region_tracker.clear();  // P5C: Clear rect tracker
+        self.dirty_region_tracker.clear(); // P5C: Clear rect tracker
 
         // Clear
         unsafe {
@@ -843,20 +942,24 @@ impl Compositor {
         {
             let wallpaper_occluded = first_visible > 0;
             let has_wallpaper = !wallpaper_occluded
-                && (!self.monitor_wallpapers.is_empty()
-                    || self.wallpaper_texture.is_some());
+                && (!self.monitor_wallpapers.is_empty() || self.wallpaper_texture.is_some());
             if has_wallpaper {
                 unsafe {
                     self.gl.use_program(Some(self.program));
                     self.gl.uniform_matrix_4_f32_slice(
-                        self.win_uniforms.projection.as_ref(), false, &proj,
+                        self.win_uniforms.projection.as_ref(),
+                        false,
+                        &proj,
                     );
                     self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
                     self.gl.bind_vertex_array(Some(self.quad_vao));
-                    self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
-                    self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), 0.0);
+                    self.gl
+                        .uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
+                    self.gl
+                        .uniform_1_f32(self.win_uniforms.radius.as_ref(), 0.0);
                     self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
-                    self.gl.uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
+                    self.gl
+                        .uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
                     self.gl.active_texture(glow::TEXTURE0);
 
                     if !self.monitor_wallpapers.is_empty() {
@@ -871,7 +974,12 @@ impl Compositor {
                             let (tex, mode, iw, ih) = if let Some(t) = mw.texture {
                                 (t, mw.mode, mw.img_w, mw.img_h)
                             } else if let Some(t) = self.wallpaper_texture {
-                                (t, self.wallpaper_mode, self.wallpaper_img_w, self.wallpaper_img_h)
+                                (
+                                    t,
+                                    self.wallpaper_mode,
+                                    self.wallpaper_img_w,
+                                    self.wallpaper_img_h,
+                                )
                             } else {
                                 continue;
                             };
@@ -879,12 +987,8 @@ impl Compositor {
                             // Scissor to this monitor's area
                             let gl_y = self.screen_h as i32 - (mw.mon_y + mw.mon_h as i32);
                             self.gl.enable(glow::SCISSOR_TEST);
-                            self.gl.scissor(
-                                mw.mon_x,
-                                gl_y,
-                                mw.mon_w as i32,
-                                mw.mon_h as i32,
-                            );
+                            self.gl
+                                .scissor(mw.mon_x, gl_y, mw.mon_w as i32, mw.mon_h as i32);
 
                             let area = (
                                 mw.mon_x as f32,
@@ -892,14 +996,11 @@ impl Compositor {
                                 mw.mon_w as f32,
                                 mw.mon_h as f32,
                             );
-                            let (rx, ry, rw, rh) =
-                                Self::compute_wallpaper_rect(mode, area, iw, ih);
-                            self.gl.uniform_4_f32(
-                                self.win_uniforms.rect.as_ref(), rx, ry, rw, rh,
-                            );
-                            self.gl.uniform_2_f32(
-                                self.win_uniforms.size.as_ref(), rw, rh,
-                            );
+                            let (rx, ry, rw, rh) = Self::compute_wallpaper_rect(mode, area, iw, ih);
+                            self.gl
+                                .uniform_4_f32(self.win_uniforms.rect.as_ref(), rx, ry, rw, rh);
+                            self.gl
+                                .uniform_2_f32(self.win_uniforms.size.as_ref(), rw, rh);
                             self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
                             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                         }
@@ -913,34 +1014,40 @@ impl Compositor {
                             self.wallpaper_img_w,
                             self.wallpaper_img_h,
                         );
-                        self.gl.uniform_4_f32(
-                            self.win_uniforms.rect.as_ref(), rx, ry, rw, rh,
-                        );
-                        self.gl.uniform_2_f32(
-                            self.win_uniforms.size.as_ref(), rw, rh,
-                        );
+                        self.gl
+                            .uniform_4_f32(self.win_uniforms.rect.as_ref(), rx, ry, rw, rh);
+                        self.gl
+                            .uniform_2_f32(self.win_uniforms.size.as_ref(), rw, rh);
                         self.gl.bind_texture(glow::TEXTURE_2D, Some(wp_tex));
                         self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                     }
 
                     // Phase 3.5: Draw old wallpaper for crossfade
-                    if let (Some(old_tex), Some(start)) = (self.old_wallpaper_texture, self.wallpaper_transition_start) {
+                    if let (Some(old_tex), Some(start)) =
+                        (self.old_wallpaper_texture, self.wallpaper_transition_start)
+                    {
                         let elapsed = start.elapsed().as_millis() as f32;
                         let duration = self.wallpaper_crossfade_duration_ms as f32;
                         let old_opacity = (1.0 - elapsed / duration).max(0.0);
                         if old_opacity > 0.0 {
                             let area = (0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
                             let (rx, ry, rw, rh) = Self::compute_wallpaper_rect(
-                                self.wallpaper_mode, area,
-                                self.wallpaper_img_w, self.wallpaper_img_h,
+                                self.wallpaper_mode,
+                                area,
+                                self.wallpaper_img_w,
+                                self.wallpaper_img_h,
                             );
-                            self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), old_opacity);
-                            self.gl.uniform_4_f32(self.win_uniforms.rect.as_ref(), rx, ry, rw, rh);
-                            self.gl.uniform_2_f32(self.win_uniforms.size.as_ref(), rw, rh);
+                            self.gl
+                                .uniform_1_f32(self.win_uniforms.opacity.as_ref(), old_opacity);
+                            self.gl
+                                .uniform_4_f32(self.win_uniforms.rect.as_ref(), rx, ry, rw, rh);
+                            self.gl
+                                .uniform_2_f32(self.win_uniforms.size.as_ref(), rw, rh);
                             self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
                             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                             // Restore opacity for subsequent draws
-                            self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
+                            self.gl
+                                .uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
                         }
                     }
 
@@ -950,7 +1057,12 @@ impl Compositor {
 
                     // Restore damage-region scissor if it was active
                     if use_scissor {
-                        self.gl.scissor(damage_scissor.0, damage_scissor.1, damage_scissor.2, damage_scissor.3);
+                        self.gl.scissor(
+                            damage_scissor.0,
+                            damage_scissor.1,
+                            damage_scissor.2,
+                            damage_scissor.3,
+                        );
                         self.gl.enable(glow::SCISSOR_TEST);
                     }
                 }
@@ -971,7 +1083,9 @@ impl Compositor {
         let ov_mw = self.overview_mon_w as i32;
         let ov_mh = self.overview_mon_h as i32;
         let overview_skip = move |x: i32, y: i32, w: u32, h: u32| -> bool {
-            if !ov_active { return false; }
+            if !ov_active {
+                return false;
+            }
             let cx = x + w as i32 / 2;
             let cy = y + h as i32 / 2;
             cx >= ov_mx && cx < ov_mx + ov_mw && cy >= ov_my && cy < ov_my + ov_mh
@@ -981,25 +1095,30 @@ impl Compositor {
         if self.shadow_enabled && self.shadow_radius > 0.0 {
             unsafe {
                 // Phase 2: Use state tracker for shadow pass
-                self.gl_state_tracker.use_program(&self.gl, Some(self.shadow_program));
+                self.gl_state_tracker
+                    .use_program(&self.gl, Some(self.shadow_program));
                 self.gl.uniform_matrix_4_f32_slice(
-                    self.shadow_uniforms.projection.as_ref(), false, &proj,
+                    self.shadow_uniforms.projection.as_ref(),
+                    false,
+                    &proj,
                 );
-                self.gl_state_tracker.bind_vertex_array(&self.gl, Some(self.quad_vao));
+                self.gl_state_tracker
+                    .bind_vertex_array(&self.gl, Some(self.quad_vao));
 
                 let spread = self.shadow_radius;
                 let [ox, oy] = self.shadow_offset;
                 let [sr, sg, sb, sa] = self.shadow_color;
                 let bottom_extra = self.shadow_bottom_extra;
 
-                self.gl.uniform_1_f32(
-                    self.shadow_uniforms.spread.as_ref(), spread,
-                );
+                self.gl
+                    .uniform_1_f32(self.shadow_uniforms.spread.as_ref(), spread);
 
                 let status_bar_name = frame_status_bar_name;
 
                 for &(win, x, y, w, h) in visible_scene {
-                    if overview_skip(x, y, w, h) { continue; }
+                    if overview_skip(x, y, w, h) {
+                        continue;
+                    }
                     let wt = match self.windows.get(&win) {
                         Some(wt) => wt,
                         None => continue,
@@ -1023,23 +1142,31 @@ impl Compositor {
                     // Fade: modulate shadow alpha
                     let fade = wt.fade_opacity;
                     let sa_faded = sa * fade;
-                    if sa_faded <= 0.0 { continue; }
+                    if sa_faded <= 0.0 {
+                        continue;
+                    }
 
                     self.gl.uniform_4_f32(
-                        self.shadow_uniforms.shadow_color.as_ref(), sr, sg, sb, sa_faded,
+                        self.shadow_uniforms.shadow_color.as_ref(),
+                        sr,
+                        sg,
+                        sb,
+                        sa_faded,
                     );
 
                     // Feature 3: Per-window corner radius for shadow
                     let win_radius = wt.corner_radius_override.unwrap_or(
-                        if Self::class_matches_exclude(&wt.class_name, &self.rounded_corners_exclude) {
+                        if Self::class_matches_exclude(
+                            &wt.class_name,
+                            &self.rounded_corners_exclude,
+                        ) {
                             0.0
                         } else {
                             self.corner_radius
-                        }
+                        },
                     );
-                    self.gl.uniform_1_f32(
-                        self.shadow_uniforms.radius.as_ref(), win_radius,
-                    );
+                    self.gl
+                        .uniform_1_f32(self.shadow_uniforms.radius.as_ref(), win_radius);
 
                     // Feature 14: Non-uniform shadow offset (heavier bottom)
                     let sy_offset = oy + bottom_extra;
@@ -1055,19 +1182,18 @@ impl Compositor {
 
                     // Dynamic shadow offset for tilted focused window
                     if self.window_tilt && focused == Some(win) {
-                        let tilt_mag = (self.tilt_current_x.powi(2) + self.tilt_current_y.powi(2)).sqrt();
+                        let tilt_mag =
+                            (self.tilt_current_x.powi(2) + self.tilt_current_y.powi(2)).sqrt();
                         let extra = tilt_mag * 15.0;
                         sx += self.tilt_current_y * 30.0 - extra;
                         sy += self.tilt_current_x * 30.0 - extra;
                         sw += extra * 2.0;
                         sh += extra * 2.0;
                     }
-                    self.gl.uniform_4_f32(
-                        self.shadow_uniforms.rect.as_ref(), sx, sy, sw, sh,
-                    );
-                    self.gl.uniform_2_f32(
-                        self.shadow_uniforms.size.as_ref(), win_w, win_h,
-                    );
+                    self.gl
+                        .uniform_4_f32(self.shadow_uniforms.rect.as_ref(), sx, sy, sw, sh);
+                    self.gl
+                        .uniform_2_f32(self.shadow_uniforms.size.as_ref(), win_w, win_h);
                     self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 }
 
@@ -1088,23 +1214,34 @@ impl Compositor {
         }
 
         // === Pass 1.5: Background blur (now computed per-window in Pass 2) ===
-        let blur_available = self.blur_enabled
-            && !self.blur_fbos.is_empty()
-            && self.scene_fbo.is_some();
+        let blur_available =
+            self.blur_enabled && !self.blur_fbos.is_empty() && self.scene_fbo.is_some();
 
         // === Pass 2: Draw window textures ===
         let wm_border_px = frame_cfg.border_px() as f32;
 
         // Count actual client windows (excluding statusbar) to apply smart borders
         let status_bar_name = frame_status_bar_name;
-        let client_window_count = visible_scene.iter().filter(|&&(win, _, _, _, _)| {
-            self.windows.get(&win)
-                .map(|wt| !(wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name)))
-                .unwrap_or(false)
-        }).count();
+        let client_window_count = visible_scene
+            .iter()
+            .filter(|&&(win, _, _, _, _)| {
+                self.windows
+                    .get(&win)
+                    .map(|wt| {
+                        !(wt.class_name == status_bar_name
+                            || wt.class_name.contains(status_bar_name))
+                    })
+                    .unwrap_or(false)
+            })
+            .count();
 
-        let effective_border_enabled = (self.border_enabled || wm_border_px > 0.0) && client_window_count > 1;
-        let base_border_width = if self.border_enabled { self.border_width } else { wm_border_px };
+        let effective_border_enabled =
+            (self.border_enabled || wm_border_px > 0.0) && client_window_count > 1;
+        let base_border_width = if self.border_enabled {
+            self.border_width
+        } else {
+            wm_border_px
+        };
 
         // Track the below-scene for blur caching: a running hash of (win, x, y, w, h)
         // for all windows drawn so far, plus whether any was dirty this frame.
@@ -1113,26 +1250,38 @@ impl Compositor {
 
         unsafe {
             // Phase 2: Use state tracker for main window rendering pass
-            self.gl_state_tracker.use_program(&self.gl, Some(self.program));
-            self.gl.uniform_matrix_4_f32_slice(
-                self.win_uniforms.projection.as_ref(), false, &proj,
-            );
+            self.gl_state_tracker
+                .use_program(&self.gl, Some(self.program));
+            self.gl
+                .uniform_matrix_4_f32_slice(self.win_uniforms.projection.as_ref(), false, &proj);
             self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
-            self.gl.uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
-            self.gl.uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
-            self.gl_state_tracker.bind_vertex_array(&self.gl, Some(self.quad_vao));
+            self.gl
+                .uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
+            self.gl
+                .uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
+            self.gl_state_tracker
+                .bind_vertex_array(&self.gl, Some(self.quad_vao));
 
             let status_bar_name_main = frame_status_bar_name;
 
             for &(win, x, y, w, h) in visible_scene {
-                if overview_skip(x, y, w, h) { continue; }
+                if overview_skip(x, y, w, h) {
+                    continue;
+                }
                 if let Some(wt) = self.windows.get(&win) {
                     let is_focused = focused == Some(win);
                     let fade = wt.fade_opacity;
-                    if fade <= 0.0 { continue; }
-                    let focus_highlight_active_for_win = if let Some((hw, start)) = self.focus_highlight_start {
-                        hw == win && start.elapsed().as_millis() < self.focus_highlight_duration_ms as u128
-                    } else { false };
+                    if fade <= 0.0 {
+                        continue;
+                    }
+                    let focus_highlight_active_for_win =
+                        if let Some((hw, start)) = self.focus_highlight_start {
+                            hw == win
+                                && start.elapsed().as_millis()
+                                    < self.focus_highlight_duration_ms as u128
+                        } else {
+                            false
+                        };
                     let attention_active_for_win = wt.is_urgent && self.attention_animation;
                     let has_special_border = attention_active_for_win || wt.is_pip;
 
@@ -1146,22 +1295,38 @@ impl Compositor {
                         0.0
                     } else {
                         wt.corner_radius_override.unwrap_or(
-                            if Self::class_matches_exclude(&wt.class_name, &self.rounded_corners_exclude) {
+                            if Self::class_matches_exclude(
+                                &wt.class_name,
+                                &self.rounded_corners_exclude,
+                            ) {
                                 0.0
                             } else {
                                 self.corner_radius
-                            }
+                            },
                         )
                     };
-                    self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
+                    self.gl
+                        .uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
 
                     // Compute effective opacity
-                    let is_statusbar = wt.class_name == status_bar_name_main || wt.class_name.contains(status_bar_name_main);
+                    let is_statusbar = wt.class_name == status_bar_name_main
+                        || wt.class_name.contains(status_bar_name_main);
 
-                    let base_opacity = if is_statusbar { 1.0 } else if is_focused { self.active_opacity } else { self.inactive_opacity };
+                    let base_opacity = if is_statusbar {
+                        1.0
+                    } else if is_focused {
+                        self.active_opacity
+                    } else {
+                        self.inactive_opacity
+                    };
                     let rule_opacity = wt.opacity_override.unwrap_or(base_opacity);
                     let has_explicit_transparency = wt.opacity_override.map_or(false, |o| o < 1.0);
-                    let inactive_dim_factor = if is_statusbar || is_focused || wt.is_override_redirect { 1.0 } else { self.inactive_dim };
+                    let inactive_dim_factor =
+                        if is_statusbar || is_focused || wt.is_override_redirect {
+                            1.0
+                        } else {
+                            self.inactive_dim
+                        };
                     let dim = if wt.has_rgba {
                         rule_opacity * fade * inactive_dim_factor
                     } else {
@@ -1192,19 +1357,34 @@ impl Compositor {
 
                     // Phase 5.3: Apply peek opacity
                     let opacity = if peek_mul < 1.0 {
-                        if opacity < 0.0 { opacity * peek_mul } else { (opacity * peek_mul).clamp(0.0, 1.0) }
+                        if opacity < 0.0 {
+                            opacity * peek_mul
+                        } else {
+                            (opacity * peek_mul).clamp(0.0, 1.0)
+                        }
                     } else {
                         opacity
                     };
                     // Feature 4: Apply per-window scale + Phase 3.4 focus bounce
-                    let focus_bounce = if !is_statusbar && self.focus_highlight && focused == Some(win) {
-                        if let Some((hw, start)) = self.focus_highlight_start {
-                            if hw == win && start.elapsed().as_millis() < self.focus_highlight_duration_ms as u128 {
-                                let t = start.elapsed().as_millis() as f32 / self.focus_highlight_duration_ms as f32;
-                                1.0 + 0.02 * (1.0 - t) * ((t * std::f32::consts::PI).sin())
-                            } else { 1.0 }
-                        } else { 1.0 }
-                    } else { 1.0 };
+                    let focus_bounce =
+                        if !is_statusbar && self.focus_highlight && focused == Some(win) {
+                            if let Some((hw, start)) = self.focus_highlight_start {
+                                if hw == win
+                                    && start.elapsed().as_millis()
+                                        < self.focus_highlight_duration_ms as u128
+                                {
+                                    let t = start.elapsed().as_millis() as f32
+                                        / self.focus_highlight_duration_ms as f32;
+                                    1.0 + 0.02 * (1.0 - t) * ((t * std::f32::consts::PI).sin())
+                                } else {
+                                    1.0
+                                }
+                            } else {
+                                1.0
+                            }
+                        } else {
+                            1.0
+                        };
                     let scale = wt.scale * wt.anim_scale * focus_bounce;
                     let (draw_x, draw_y, draw_w, draw_h) = if (scale - 1.0).abs() > f32::EPSILON {
                         let cw = w as f32 * scale;
@@ -1257,9 +1437,11 @@ impl Compositor {
                                     self.frosted_glass_strength as usize
                                 } else {
                                     // Get monitor-specific blur strength based on refresh rate
-                                    let monitor_id = self.get_window_monitor_id(wt.x, wt.y, wt.w, wt.h);
+                                    let monitor_id =
+                                        self.get_window_monitor_id(wt.x, wt.y, wt.w, wt.h);
                                     let monitor_hz = self.get_monitor_refresh_hz(monitor_id);
-                                    let monitor_strength = self.get_blur_strength_for_hz(monitor_hz)
+                                    let monitor_strength = self
+                                        .get_blur_strength_for_hz(monitor_hz)
                                         .unwrap_or(self.blur_strength);
 
                                     // Cap at available FBO levels (can't exceed pre-created fbos)
@@ -1282,7 +1464,9 @@ impl Compositor {
                                 );
 
                                 if let Some(start) = blur_bench_start {
-                                    let pixel_count: u64 = self.blur_fbos.iter()
+                                    let pixel_count: u64 = self
+                                        .blur_fbos
+                                        .iter()
                                         .take(blur_levels)
                                         .map(|l| l.w as u64 * l.h as u64)
                                         .sum();
@@ -1302,16 +1486,28 @@ impl Compositor {
                                 } else {
                                     self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                                 }
-                                self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+                                self.gl
+                                    .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
                                 // Phase 2: Restore state via tracker after blur
-                                self.gl_state_tracker.use_program(&self.gl, Some(self.program));
+                                self.gl_state_tracker
+                                    .use_program(&self.gl, Some(self.program));
                                 self.gl.uniform_matrix_4_f32_slice(
-                                    self.win_uniforms.projection.as_ref(), false, &proj,
+                                    self.win_uniforms.projection.as_ref(),
+                                    false,
+                                    &proj,
                                 );
                                 self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
-                                self.gl.uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
-                                self.gl_state_tracker.bind_vertex_array(&self.gl, Some(self.quad_vao));
-                                self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
+                                self.gl.uniform_4_f32(
+                                    self.win_uniforms.uv_rect.as_ref(),
+                                    0.0,
+                                    0.0,
+                                    1.0,
+                                    1.0,
+                                );
+                                self.gl_state_tracker
+                                    .bind_vertex_array(&self.gl, Some(self.quad_vao));
+                                self.gl
+                                    .uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
 
                                 self.blur_cache_hash = blur_below_hash;
                                 tex
@@ -1337,15 +1533,31 @@ impl Compositor {
                                     } else {
                                         self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                                     }
-                                    self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
-                                    self.gl_state_tracker.use_program(&self.gl, Some(self.program));
+                                    self.gl.viewport(
+                                        0,
+                                        0,
+                                        self.screen_w as i32,
+                                        self.screen_h as i32,
+                                    );
+                                    self.gl_state_tracker
+                                        .use_program(&self.gl, Some(self.program));
                                     self.gl.uniform_matrix_4_f32_slice(
-                                        self.win_uniforms.projection.as_ref(), false, &proj,
+                                        self.win_uniforms.projection.as_ref(),
+                                        false,
+                                        &proj,
                                     );
                                     self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
-                                    self.gl.uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
-                                    self.gl_state_tracker.bind_vertex_array(&self.gl, Some(self.quad_vao));
-                                    self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
+                                    self.gl.uniform_4_f32(
+                                        self.win_uniforms.uv_rect.as_ref(),
+                                        0.0,
+                                        0.0,
+                                        1.0,
+                                        1.0,
+                                    );
+                                    self.gl_state_tracker
+                                        .bind_vertex_array(&self.gl, Some(self.quad_vao));
+                                    self.gl
+                                        .uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
                                     mixed
                                 } else {
                                     blurred
@@ -1356,16 +1568,17 @@ impl Compositor {
                             if let Some(blur_tex) = blur_tex {
                                 // Feature 13: If blur_use_frame_extents, crop blur to client area
                                 // For RGBA windows, always use full rect so transparent areas show blur
-                                let (bx, by, bw, bh) = if self.blur_use_frame_extents && !wt.has_rgba {
-                                    let [fl, fr, ft, fb] = wt.frame_extents;
-                                    let bx = draw_x + fl as f32;
-                                    let by = draw_y + ft as f32;
-                                    let bw = (draw_w - fl as f32 - fr as f32).max(1.0);
-                                    let bh = (draw_h - ft as f32 - fb as f32).max(1.0);
-                                    (bx, by, bw, bh)
-                                } else {
-                                    (draw_x, draw_y, draw_w, draw_h)
-                                };
+                                let (bx, by, bw, bh) =
+                                    if self.blur_use_frame_extents && !wt.has_rgba {
+                                        let [fl, fr, ft, fb] = wt.frame_extents;
+                                        let bx = draw_x + fl as f32;
+                                        let by = draw_y + ft as f32;
+                                        let bw = (draw_w - fl as f32 - fr as f32).max(1.0);
+                                        let bh = (draw_h - ft as f32 - fb as f32).max(1.0);
+                                        (bx, by, bw, bh)
+                                    } else {
+                                        (draw_x, draw_y, draw_w, draw_h)
+                                    };
                                 self.gl.active_texture(glow::TEXTURE0);
                                 self.gl.bind_texture(glow::TEXTURE_2D, Some(blur_tex));
                                 let uv_x = (bx / self.screen_w as f32).clamp(0.0, 1.0);
@@ -1379,17 +1592,26 @@ impl Compositor {
                                     uv_w,
                                     uv_h,
                                 );
-                                self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), fade);
+                                self.gl
+                                    .uniform_1_f32(self.win_uniforms.opacity.as_ref(), fade);
                                 self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
-                                self.gl.uniform_2_f32(self.win_uniforms.size.as_ref(), bw, bh);
+                                self.gl
+                                    .uniform_2_f32(self.win_uniforms.size.as_ref(), bw, bh);
                                 self.gl.uniform_4_f32(
-                                    self.win_uniforms.rect.as_ref(), bx, by, bw, bh,
+                                    self.win_uniforms.rect.as_ref(),
+                                    bx,
+                                    by,
+                                    bw,
+                                    bh,
                                 );
                                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                                 // Restore default UV for regular window textures.
                                 self.gl.uniform_4_f32(
                                     self.win_uniforms.uv_rect.as_ref(),
-                                    0.0, 0.0, 1.0, 1.0,
+                                    0.0,
+                                    0.0,
+                                    1.0,
+                                    1.0,
                                 );
                             }
                         }
@@ -1399,11 +1621,20 @@ impl Compositor {
                     if self.motion_trail_enabled && !wt.motion_trail.is_empty() {
                         let trail_len = wt.motion_trail.len();
                         for (i, &(tx, ty)) in wt.motion_trail.iter().enumerate() {
-                            let trail_opacity = self.motion_trail_opacity * (i as f32 + 1.0) / trail_len as f32;
-                            self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), trail_opacity);
+                            let trail_opacity =
+                                self.motion_trail_opacity * (i as f32 + 1.0) / trail_len as f32;
+                            self.gl
+                                .uniform_1_f32(self.win_uniforms.opacity.as_ref(), trail_opacity);
                             self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 0.7);
-                            self.gl.uniform_4_f32(self.win_uniforms.rect.as_ref(), tx as f32, ty as f32, draw_w, draw_h);
-                            self.gl.uniform_2_f32(self.win_uniforms.size.as_ref(), draw_w, draw_h);
+                            self.gl.uniform_4_f32(
+                                self.win_uniforms.rect.as_ref(),
+                                tx as f32,
+                                ty as f32,
+                                draw_w,
+                                draw_h,
+                            );
+                            self.gl
+                                .uniform_2_f32(self.win_uniforms.size.as_ref(), draw_w, draw_h);
                             self.gl.active_texture(glow::TEXTURE0);
                             self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
                             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -1418,28 +1649,42 @@ impl Compositor {
                         let wobbly = wt.wobbly.as_ref().unwrap();
                         self.gl.use_program(Some(self.wobbly_program));
                         self.gl.uniform_matrix_4_f32_slice(
-                            self.wobbly_uniforms.projection.as_ref(), false, &proj,
+                            self.wobbly_uniforms.projection.as_ref(),
+                            false,
+                            &proj,
                         );
                         self.gl.uniform_4_f32(
-                            self.wobbly_uniforms.rect.as_ref(), draw_x, draw_y, draw_w, draw_h,
+                            self.wobbly_uniforms.rect.as_ref(),
+                            draw_x,
+                            draw_y,
+                            draw_w,
+                            draw_h,
                         );
-                        self.gl.uniform_1_i32(self.wobbly_uniforms.texture.as_ref(), 0);
-                        self.gl.uniform_1_f32(self.wobbly_uniforms.opacity.as_ref(), opacity);
-                        self.gl.uniform_1_f32(self.wobbly_uniforms.radius.as_ref(), radius);
-                        self.gl.uniform_2_f32(self.wobbly_uniforms.size.as_ref(), draw_w, draw_h);
-                        self.gl.uniform_1_f32(self.wobbly_uniforms.dim.as_ref(), dim);
+                        self.gl
+                            .uniform_1_i32(self.wobbly_uniforms.texture.as_ref(), 0);
+                        self.gl
+                            .uniform_1_f32(self.wobbly_uniforms.opacity.as_ref(), opacity);
+                        self.gl
+                            .uniform_1_f32(self.wobbly_uniforms.radius.as_ref(), radius);
+                        self.gl
+                            .uniform_2_f32(self.wobbly_uniforms.size.as_ref(), draw_w, draw_h);
+                        self.gl
+                            .uniform_1_f32(self.wobbly_uniforms.dim.as_ref(), dim);
                         self.gl.uniform_4_f32(
-                            self.wobbly_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0,
+                            self.wobbly_uniforms.uv_rect.as_ref(),
+                            0.0,
+                            0.0,
+                            1.0,
+                            1.0,
                         );
                         // Upload grid offsets as flat vec2 array
-                        let flat: Vec<f32> = wobbly.offsets.iter()
-                            .flat_map(|o| [o[0], o[1]])
-                            .collect();
-                        self.gl.uniform_2_f32_slice(
-                            self.wobbly_uniforms.grid_offsets.as_ref(), &flat,
-                        );
+                        let flat: Vec<f32> =
+                            wobbly.offsets.iter().flat_map(|o| [o[0], o[1]]).collect();
+                        self.gl
+                            .uniform_2_f32_slice(self.wobbly_uniforms.grid_offsets.as_ref(), &flat);
                         let grid_n = wobbly.grid_n as i32;
-                        self.gl.uniform_1_i32(self.wobbly_uniforms.grid_n.as_ref(), grid_n);
+                        self.gl
+                            .uniform_1_i32(self.wobbly_uniforms.grid_n.as_ref(), grid_n);
                         // Grid: (grid_n-1)^2 quads, 6 verts each
                         let quads = grid_n - 1;
                         self.gl.draw_arrays(glow::TRIANGLES, 0, quads * quads * 6);
@@ -1447,13 +1692,20 @@ impl Compositor {
                         // Restore standard window program
                         self.gl.use_program(Some(self.program));
                         self.gl.uniform_matrix_4_f32_slice(
-                            self.win_uniforms.projection.as_ref(), false, &proj,
+                            self.win_uniforms.projection.as_ref(),
+                            false,
+                            &proj,
                         );
                         self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
                         self.gl.uniform_4_f32(
-                            self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0,
+                            self.win_uniforms.uv_rect.as_ref(),
+                            0.0,
+                            0.0,
+                            1.0,
+                            1.0,
                         );
-                        self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
+                        self.gl
+                            .uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
                     } else if self.window_tilt && is_focused && !is_statusbar {
                         // Update tilt target from mouse position (clamped)
                         let cx = draw_x + draw_w * 0.5;
@@ -1465,72 +1717,121 @@ impl Compositor {
 
                         self.gl.use_program(Some(self.tilt_program));
                         self.gl.uniform_matrix_4_f32_slice(
-                            self.tilt_uniforms.projection.as_ref(), false, &proj,
+                            self.tilt_uniforms.projection.as_ref(),
+                            false,
+                            &proj,
                         );
                         self.gl.uniform_4_f32(
-                            self.tilt_uniforms.rect.as_ref(), draw_x, draw_y, draw_w, draw_h,
+                            self.tilt_uniforms.rect.as_ref(),
+                            draw_x,
+                            draw_y,
+                            draw_w,
+                            draw_h,
                         );
-                        self.gl.uniform_1_i32(self.tilt_uniforms.texture.as_ref(), 0);
-                        self.gl.uniform_1_f32(self.tilt_uniforms.opacity.as_ref(), opacity);
-                        self.gl.uniform_1_f32(self.tilt_uniforms.radius.as_ref(), radius);
-                        self.gl.uniform_2_f32(self.tilt_uniforms.size.as_ref(), draw_w, draw_h);
+                        self.gl
+                            .uniform_1_i32(self.tilt_uniforms.texture.as_ref(), 0);
+                        self.gl
+                            .uniform_1_f32(self.tilt_uniforms.opacity.as_ref(), opacity);
+                        self.gl
+                            .uniform_1_f32(self.tilt_uniforms.radius.as_ref(), radius);
+                        self.gl
+                            .uniform_2_f32(self.tilt_uniforms.size.as_ref(), draw_w, draw_h);
                         self.gl.uniform_1_f32(self.tilt_uniforms.dim.as_ref(), dim);
                         self.gl.uniform_4_f32(
-                            self.tilt_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0,
+                            self.tilt_uniforms.uv_rect.as_ref(),
+                            0.0,
+                            0.0,
+                            1.0,
+                            1.0,
                         );
-                        self.gl.uniform_2_f32(self.tilt_uniforms.tilt.as_ref(), self.tilt_current_x, self.tilt_current_y);
-                        self.gl.uniform_1_f32(self.tilt_uniforms.perspective.as_ref(), self.tilt_perspective);
+                        self.gl.uniform_2_f32(
+                            self.tilt_uniforms.tilt.as_ref(),
+                            self.tilt_current_x,
+                            self.tilt_current_y,
+                        );
+                        self.gl.uniform_1_f32(
+                            self.tilt_uniforms.perspective.as_ref(),
+                            self.tilt_perspective,
+                        );
                         let grid = self.tilt_grid as i32;
-                        self.gl.uniform_1_i32(self.tilt_uniforms.grid_size.as_ref(), grid);
-                        self.gl.uniform_2_f32(self.tilt_uniforms.light_dir.as_ref(), 0.0, -1.0);
+                        self.gl
+                            .uniform_1_i32(self.tilt_uniforms.grid_size.as_ref(), grid);
+                        self.gl
+                            .uniform_2_f32(self.tilt_uniforms.light_dir.as_ref(), 0.0, -1.0);
                         // Grid: grid^2 quads, 6 verts each
                         self.gl.draw_arrays(glow::TRIANGLES, 0, grid * grid * 6);
 
                         // Restore standard window program
                         self.gl.use_program(Some(self.program));
                         self.gl.uniform_matrix_4_f32_slice(
-                            self.win_uniforms.projection.as_ref(), false, &proj,
+                            self.win_uniforms.projection.as_ref(),
+                            false,
+                            &proj,
                         );
                         self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
                         self.gl.uniform_4_f32(
-                            self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0,
+                            self.win_uniforms.uv_rect.as_ref(),
+                            0.0,
+                            0.0,
+                            1.0,
+                            1.0,
                         );
-                        self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
+                        self.gl
+                            .uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
                     } else {
-                        self.gl.uniform_1_f32(self.win_uniforms.opacity.as_ref(), opacity);
+                        self.gl
+                            .uniform_1_f32(self.win_uniforms.opacity.as_ref(), opacity);
                         self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), dim);
-                        self.gl.uniform_2_f32(
-                            self.win_uniforms.size.as_ref(), draw_w, draw_h,
-                        );
+                        self.gl
+                            .uniform_2_f32(self.win_uniforms.size.as_ref(), draw_w, draw_h);
                         self.gl.uniform_4_f32(
-                            self.win_uniforms.rect.as_ref(), draw_x, draw_y, draw_w, draw_h,
+                            self.win_uniforms.rect.as_ref(),
+                            draw_x,
+                            draw_y,
+                            draw_w,
+                            draw_h,
                         );
 
                         // Window-open ripple: set per-window distortion uniforms
-                        let ripple_prog = self.ripple_active.iter()
-                            .find(|r| r.x11_win == win)
-                            .map(|r| {
-                                let elapsed = r.start.elapsed().as_secs_f32();
-                                (elapsed / self.ripple_duration).min(1.0)
-                            });
+                        let ripple_prog =
+                            self.ripple_active
+                                .iter()
+                                .find(|r| r.x11_win == win)
+                                .map(|r| {
+                                    let elapsed = r.start.elapsed().as_secs_f32();
+                                    (elapsed / self.ripple_duration).min(1.0)
+                                });
                         if let Some(progress) = ripple_prog {
-                            self.gl.uniform_1_f32(self.win_uniforms.ripple_progress.as_ref(), progress);
-                            self.gl.uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), self.ripple_amplitude);
+                            self.gl.uniform_1_f32(
+                                self.win_uniforms.ripple_progress.as_ref(),
+                                progress,
+                            );
+                            self.gl.uniform_1_f32(
+                                self.win_uniforms.ripple_amplitude.as_ref(),
+                                self.ripple_amplitude,
+                            );
                         } else {
-                            self.gl.uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
+                            self.gl
+                                .uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
                         }
 
                         self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
                         // Reset ripple for next window
                         if ripple_prog.is_some() {
-                            self.gl.uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
+                            self.gl
+                                .uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
                         }
                     }
 
-                    if !is_statusbar && !wt.is_override_redirect && ((effective_border_enabled && base_border_width > 0.0) || has_special_border) {
+                    if !is_statusbar
+                        && !wt.is_override_redirect
+                        && ((effective_border_enabled && base_border_width > 0.0)
+                            || has_special_border)
+                    {
                         let color = if focus_highlight_active_for_win {
-                            let elapsed_ms = self.focus_highlight_start.unwrap().1.elapsed().as_millis() as f32;
+                            let elapsed_ms =
+                                self.focus_highlight_start.unwrap().1.elapsed().as_millis() as f32;
                             let dur = self.focus_highlight_duration_ms as f32;
                             let pulse = ((elapsed_ms / dur * std::f32::consts::PI).sin()).abs();
                             let [r, g, b, a] = self.focus_highlight_color;
@@ -1570,35 +1871,48 @@ impl Compositor {
 
                             self.gl.use_program(Some(self.border_program));
                             self.gl.uniform_matrix_4_f32_slice(
-                                self.border_uniforms.projection.as_ref(), false, &proj,
+                                self.border_uniforms.projection.as_ref(),
+                                false,
+                                &proj,
                             );
-                            self.gl.uniform_1_f32(
-                                self.border_uniforms.border_width.as_ref(), bw,
-                            );
+                            self.gl
+                                .uniform_1_f32(self.border_uniforms.border_width.as_ref(), bw);
                             self.gl.uniform_4_f32(
                                 self.border_uniforms.border_color.as_ref(),
-                                color[0], color[1], color[2], color[3] * fade,
+                                color[0],
+                                color[1],
+                                color[2],
+                                color[3] * fade,
                             );
-                            self.gl.uniform_1_f32(
-                                self.border_uniforms.radius.as_ref(), radius,
-                            );
-                            self.gl.uniform_2_f32(
-                                self.border_uniforms.size.as_ref(), bdr_w, bdr_h,
-                            );
+                            self.gl
+                                .uniform_1_f32(self.border_uniforms.radius.as_ref(), radius);
+                            self.gl
+                                .uniform_2_f32(self.border_uniforms.size.as_ref(), bdr_w, bdr_h);
                             self.gl.uniform_4_f32(
-                                self.border_uniforms.rect.as_ref(), bdr_x, bdr_y, bdr_w, bdr_h,
+                                self.border_uniforms.rect.as_ref(),
+                                bdr_x,
+                                bdr_y,
+                                bdr_w,
+                                bdr_h,
                             );
                             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
                             self.gl.use_program(Some(self.program));
                             self.gl.uniform_matrix_4_f32_slice(
-                                self.win_uniforms.projection.as_ref(), false, &proj,
+                                self.win_uniforms.projection.as_ref(),
+                                false,
+                                &proj,
                             );
                             self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
                             self.gl.uniform_4_f32(
-                                self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0,
+                                self.win_uniforms.uv_rect.as_ref(),
+                                0.0,
+                                0.0,
+                                1.0,
+                                1.0,
                             );
-                            self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
+                            self.gl
+                                .uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
                         }
                     }
 
@@ -1628,13 +1942,19 @@ impl Compositor {
             unsafe {
                 self.gl.use_program(Some(self.genie_program));
                 self.gl.uniform_matrix_4_f32_slice(
-                    self.genie_uniforms.projection.as_ref(), false, &proj,
+                    self.genie_uniforms.projection.as_ref(),
+                    false,
+                    &proj,
                 );
-                self.gl.uniform_1_i32(self.genie_uniforms.texture.as_ref(), 0);
-                self.gl.uniform_4_f32(self.genie_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
-                self.gl.uniform_1_f32(self.genie_uniforms.radius.as_ref(), 0.0);
+                self.gl
+                    .uniform_1_i32(self.genie_uniforms.texture.as_ref(), 0);
+                self.gl
+                    .uniform_4_f32(self.genie_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
+                self.gl
+                    .uniform_1_f32(self.genie_uniforms.radius.as_ref(), 0.0);
                 let grid = 12i32;
-                self.gl.uniform_1_i32(self.genie_uniforms.grid_size.as_ref(), grid);
+                self.gl
+                    .uniform_1_i32(self.genie_uniforms.grid_size.as_ref(), grid);
                 self.gl.bind_vertex_array(Some(self.quad_vao));
 
                 let dock = self.dock_position;
@@ -1643,14 +1963,22 @@ impl Compositor {
                     let progress = (elapsed / genie_duration_ms as f32).min(1.0);
                     let opacity = 1.0 - progress;
                     self.gl.uniform_4_f32(
-                        self.genie_uniforms.rect.as_ref(), ga.x, ga.y, ga.w, ga.h,
+                        self.genie_uniforms.rect.as_ref(),
+                        ga.x,
+                        ga.y,
+                        ga.w,
+                        ga.h,
                     );
-                    self.gl.uniform_2_f32(
-                        self.genie_uniforms.size.as_ref(), ga.w, ga.h,
+                    self.gl
+                        .uniform_2_f32(self.genie_uniforms.size.as_ref(), ga.w, ga.h);
+                    self.gl
+                        .uniform_1_f32(self.genie_uniforms.progress.as_ref(), progress);
+                    self.gl
+                        .uniform_2_f32(self.genie_uniforms.dock_pos.as_ref(), dock.0, dock.1);
+                    self.gl.uniform_1_f32(
+                        self.genie_uniforms.opacity.as_ref(),
+                        if ga.has_rgba { -opacity } else { opacity },
                     );
-                    self.gl.uniform_1_f32(self.genie_uniforms.progress.as_ref(), progress);
-                    self.gl.uniform_2_f32(self.genie_uniforms.dock_pos.as_ref(), dock.0, dock.1);
-                    self.gl.uniform_1_f32(self.genie_uniforms.opacity.as_ref(), if ga.has_rgba { -opacity } else { opacity });
                     self.gl.uniform_1_f32(self.genie_uniforms.dim.as_ref(), 1.0);
                     self.gl.active_texture(glow::TEXTURE0);
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(ga.gl_texture));
@@ -1673,7 +2001,9 @@ impl Compositor {
 
         // Disable scissor (feature 6)
         if use_scissor {
-            unsafe { self.gl.disable(glow::SCISSOR_TEST); }
+            unsafe {
+                self.gl.disable(glow::SCISSOR_TEST);
+            }
         }
 
         // === Pass 4: Post-processing (features 8/9/10) ===
@@ -1683,45 +2013,109 @@ impl Compositor {
             unsafe {
                 // Switch back to default framebuffer
                 self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-                self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+                self.gl
+                    .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
                 self.gl.clear(glow::COLOR_BUFFER_BIT);
 
                 self.gl.use_program(Some(self.postprocess_program));
                 // Set up fullscreen quad
-                let pp_proj = ortho(0.0, self.screen_w as f32, self.screen_h as f32, 0.0, -1.0, 1.0);
+                let pp_proj = ortho(
+                    0.0,
+                    self.screen_w as f32,
+                    self.screen_h as f32,
+                    0.0,
+                    -1.0,
+                    1.0,
+                );
                 // P5F.1: Use cached uniform locations (no per-frame driver call)
-                self.gl.uniform_matrix_4_f32_slice(self.postprocess_uniforms.projection.as_ref(), false, &pp_proj);
-                self.gl.uniform_4_f32(self.postprocess_uniforms.rect.as_ref(), 0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.postprocess_uniforms.projection.as_ref(),
+                    false,
+                    &pp_proj,
+                );
+                self.gl.uniform_4_f32(
+                    self.postprocess_uniforms.rect.as_ref(),
+                    0.0,
+                    0.0,
+                    self.screen_w as f32,
+                    self.screen_h as f32,
+                );
 
-                self.gl.uniform_1_i32(self.postprocess_uniforms.texture.as_ref(), 0);
-                self.gl.uniform_1_f32(self.postprocess_uniforms.color_temp.as_ref(), self.color_temperature);
-                self.gl.uniform_1_f32(self.postprocess_uniforms.saturation.as_ref(), self.saturation);
-                self.gl.uniform_1_f32(self.postprocess_uniforms.brightness.as_ref(), self.brightness);
-                self.gl.uniform_1_f32(self.postprocess_uniforms.contrast.as_ref(), self.contrast);
-                self.gl.uniform_1_i32(self.postprocess_uniforms.invert.as_ref(), if self.invert_colors { 1 } else { 0 });
-                self.gl.uniform_1_i32(self.postprocess_uniforms.grayscale.as_ref(), if self.grayscale { 1 } else { 0 });
+                self.gl
+                    .uniform_1_i32(self.postprocess_uniforms.texture.as_ref(), 0);
+                self.gl.uniform_1_f32(
+                    self.postprocess_uniforms.color_temp.as_ref(),
+                    self.color_temperature,
+                );
+                self.gl.uniform_1_f32(
+                    self.postprocess_uniforms.saturation.as_ref(),
+                    self.saturation,
+                );
+                self.gl.uniform_1_f32(
+                    self.postprocess_uniforms.brightness.as_ref(),
+                    self.brightness,
+                );
+                self.gl
+                    .uniform_1_f32(self.postprocess_uniforms.contrast.as_ref(), self.contrast);
+                self.gl.uniform_1_i32(
+                    self.postprocess_uniforms.invert.as_ref(),
+                    if self.invert_colors { 1 } else { 0 },
+                );
+                self.gl.uniform_1_i32(
+                    self.postprocess_uniforms.grayscale.as_ref(),
+                    if self.grayscale { 1 } else { 0 },
+                );
 
                 // HDR tone mapping uniforms
-                self.gl.uniform_1_i32(self.postprocess_uniforms.hdr_enabled.as_ref(), if self.hdr_enabled { 1 } else { 0 });
-                self.gl.uniform_1_f32(self.postprocess_uniforms.hdr_peak_nits.as_ref(), self.hdr_peak_nits);
-                self.gl.uniform_1_i32(self.postprocess_uniforms.tone_mapping_method.as_ref(), self.tone_mapping_method);
-                self.gl.uniform_1_i32(self.postprocess_uniforms.eotf_mode.as_ref(), self.eotf_mode);
-                self.gl.uniform_1_i32(self.postprocess_uniforms.output_colorspace.as_ref(), self.output_colorspace);
+                self.gl.uniform_1_i32(
+                    self.postprocess_uniforms.hdr_enabled.as_ref(),
+                    if self.hdr_enabled { 1 } else { 0 },
+                );
+                self.gl.uniform_1_f32(
+                    self.postprocess_uniforms.hdr_peak_nits.as_ref(),
+                    self.hdr_peak_nits,
+                );
+                self.gl.uniform_1_i32(
+                    self.postprocess_uniforms.tone_mapping_method.as_ref(),
+                    self.tone_mapping_method,
+                );
+                self.gl
+                    .uniform_1_i32(self.postprocess_uniforms.eotf_mode.as_ref(), self.eotf_mode);
+                self.gl.uniform_1_i32(
+                    self.postprocess_uniforms.output_colorspace.as_ref(),
+                    self.output_colorspace,
+                );
 
                 // Magnifier uniforms
-                self.gl.uniform_1_i32(self.magnifier_uniforms.magnifier_enabled.as_ref(), if self.magnifier_enabled { 1 } else { 0 });
+                self.gl.uniform_1_i32(
+                    self.magnifier_uniforms.magnifier_enabled.as_ref(),
+                    if self.magnifier_enabled { 1 } else { 0 },
+                );
                 if self.magnifier_enabled {
                     let cx = self.mouse_x / self.screen_w as f32;
                     let cy = self.mouse_y / self.screen_h as f32;
                     // The fragment shader flips Y (uv.y = 1.0 - v_uv.y) so that
                     // uv.y=1 corresponds to the top of the screen.  Flip cy to match.
-                    self.gl.uniform_2_f32(self.magnifier_uniforms.magnifier_center.as_ref(), cx, 1.0 - cy);
-                    self.gl.uniform_1_f32(self.magnifier_uniforms.magnifier_radius.as_ref(), self.magnifier_radius / self.screen_w as f32);
-                    self.gl.uniform_1_f32(self.magnifier_uniforms.magnifier_zoom.as_ref(), self.magnifier_zoom);
+                    self.gl.uniform_2_f32(
+                        self.magnifier_uniforms.magnifier_center.as_ref(),
+                        cx,
+                        1.0 - cy,
+                    );
+                    self.gl.uniform_1_f32(
+                        self.magnifier_uniforms.magnifier_radius.as_ref(),
+                        self.magnifier_radius / self.screen_w as f32,
+                    );
+                    self.gl.uniform_1_f32(
+                        self.magnifier_uniforms.magnifier_zoom.as_ref(),
+                        self.magnifier_zoom,
+                    );
                 }
 
                 // Colorblind correction uniform
-                self.gl.uniform_1_i32(self.magnifier_uniforms.colorblind_mode.as_ref(), self.colorblind_mode);
+                self.gl.uniform_1_i32(
+                    self.magnifier_uniforms.colorblind_mode.as_ref(),
+                    self.colorblind_mode,
+                );
 
                 self.gl.active_texture(glow::TEXTURE0);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(pp_tex));
@@ -1747,14 +2141,18 @@ impl Compositor {
         // === Always update frame stats (decoupled from HUD rendering) ===
         {
             let now = std::time::Instant::now();
-            let dt = now.duration_since(self.frame_stats.last_frame_time).as_secs_f32();
+            let dt = now
+                .duration_since(self.frame_stats.last_frame_time)
+                .as_secs_f32();
             self.frame_stats.last_frame_time = now;
             self.frame_stats.frame_count += 1;
             self.frame_stats.frame_times.push_back(dt);
             if self.frame_stats.frame_times.len() > 120 {
                 self.frame_stats.frame_times.pop_front();
             }
-            let elapsed = now.duration_since(self.frame_stats.last_fps_update).as_secs_f32();
+            let elapsed = now
+                .duration_since(self.frame_stats.last_fps_update)
+                .as_secs_f32();
             if elapsed >= 1.0 {
                 self.frame_stats.fps = self.frame_stats.frame_times.len() as f32 / elapsed;
                 self.frame_stats.frame_times.clear();
@@ -1768,10 +2166,24 @@ impl Compositor {
             self.sys_stats.maybe_sample();
 
             // Format HUD text
-            let avg_dt = if self.frame_stats.frame_times.is_empty() { 0.0 }
-                else { self.frame_stats.frame_times.iter().sum::<f32>() / self.frame_stats.frame_times.len() as f32 };
-            let max_dt = self.frame_stats.frame_times.iter().copied().fold(0.0, f32::max);
-            let min_dt = self.frame_stats.frame_times.iter().copied().fold(f32::MAX, f32::min);
+            let avg_dt = if self.frame_stats.frame_times.is_empty() {
+                0.0
+            } else {
+                self.frame_stats.frame_times.iter().sum::<f32>()
+                    / self.frame_stats.frame_times.len() as f32
+            };
+            let max_dt = self
+                .frame_stats
+                .frame_times
+                .iter()
+                .copied()
+                .fold(0.0, f32::max);
+            let min_dt = self
+                .frame_stats
+                .frame_times
+                .iter()
+                .copied()
+                .fold(f32::MAX, f32::min);
             let min_dt = if min_dt == f32::MAX { 0.0 } else { min_dt };
 
             let mut hud_text = format!(
@@ -1781,7 +2193,10 @@ impl Compositor {
                  Windows: {}  Tiles: {}  Dirty: {:.0}%\n\
                  Memory: {:.1} MiB RSS\n\
                  CPU: {:.1} %",
-                self.frame_stats.fps, avg_dt * 1000.0, max_dt * 1000.0, min_dt * 1000.0,
+                self.frame_stats.fps,
+                avg_dt * 1000.0,
+                max_dt * 1000.0,
+                min_dt * 1000.0,
                 self.windows.len(),
                 self.damage_tracker.dirty_tiles.len(),
                 self.damage_tracker.dirty_fraction() * 100.0,
@@ -1790,17 +2205,24 @@ impl Compositor {
             );
             if self.debug_hud_extended {
                 let tex_mem_kb = self.frame_stats.texture_memory_bytes / 1024;
-                let blur_hit_rate = if self.frame_stats.blur_cache_hits + self.frame_stats.blur_cache_misses > 0 {
-                    100.0 * self.frame_stats.blur_cache_hits as f32 / (self.frame_stats.blur_cache_hits + self.frame_stats.blur_cache_misses) as f32
-                } else {
-                    0.0
-                };
+                let blur_hit_rate =
+                    if self.frame_stats.blur_cache_hits + self.frame_stats.blur_cache_misses > 0 {
+                        100.0 * self.frame_stats.blur_cache_hits as f32
+                            / (self.frame_stats.blur_cache_hits
+                                + self.frame_stats.blur_cache_misses)
+                                as f32
+                    } else {
+                        0.0
+                    };
                 use std::fmt::Write;
                 let _ = write!(
                     hud_text,
                     "\nDraw calls: {}  Mem: {}KB\nBlur: {:.0}% hit rate ({}/{})\nQuality: {:?}",
-                    self.frame_stats.draw_calls, tex_mem_kb,
-                    blur_hit_rate, self.frame_stats.blur_cache_hits, self.frame_stats.blur_cache_misses,
+                    self.frame_stats.draw_calls,
+                    tex_mem_kb,
+                    blur_hit_rate,
+                    self.frame_stats.blur_cache_hits,
+                    self.frame_stats.blur_cache_misses,
                     self.blur_quality,
                 );
 
@@ -1846,20 +2268,18 @@ impl Compositor {
                 // Draw background panel
                 self.gl.use_program(Some(self.hud_program));
                 self.gl.uniform_matrix_4_f32_slice(
-                    self.hud_uniforms.projection.as_ref(), false, &proj,
+                    self.hud_uniforms.projection.as_ref(),
+                    false,
+                    &proj,
                 );
-                self.gl.uniform_4_f32(
-                    self.hud_uniforms.bg_color.as_ref(), 0.0, 0.0, 0.0, 0.7,
-                );
-                self.gl.uniform_4_f32(
-                    self.hud_uniforms.fg_color.as_ref(), 0.0, 1.0, 0.0, 1.0,
-                );
-                self.gl.uniform_2_f32(
-                    self.hud_uniforms.size.as_ref(), hud_w, hud_h,
-                );
-                self.gl.uniform_4_f32(
-                    self.hud_uniforms.rect.as_ref(), hud_x, hud_y, hud_w, hud_h,
-                );
+                self.gl
+                    .uniform_4_f32(self.hud_uniforms.bg_color.as_ref(), 0.0, 0.0, 0.0, 0.7);
+                self.gl
+                    .uniform_4_f32(self.hud_uniforms.fg_color.as_ref(), 0.0, 1.0, 0.0, 1.0);
+                self.gl
+                    .uniform_2_f32(self.hud_uniforms.size.as_ref(), hud_w, hud_h);
+                self.gl
+                    .uniform_4_f32(self.hud_uniforms.rect.as_ref(), hud_x, hud_y, hud_w, hud_h);
                 self.gl.bind_vertex_array(Some(self.quad_vao));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
@@ -1867,15 +2287,19 @@ impl Compositor {
                 if let Some(tex) = self.hud_text_texture {
                     self.gl.use_program(Some(self.hud_text_program));
                     self.gl.uniform_matrix_4_f32_slice(
-                        self.hud_text_uniforms.projection.as_ref(), false, &proj,
+                        self.hud_text_uniforms.projection.as_ref(),
+                        false,
+                        &proj,
                     );
                     self.gl.uniform_4_f32(
                         self.hud_text_uniforms.rect.as_ref(),
-                        hud_x + pad, hud_y + pad, text_w, text_h,
+                        hud_x + pad,
+                        hud_y + pad,
+                        text_w,
+                        text_h,
                     );
-                    self.gl.uniform_1_i32(
-                        self.hud_text_uniforms.texture.as_ref(), 0,
-                    );
+                    self.gl
+                        .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
                     self.gl.active_texture(glow::TEXTURE0);
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
                     self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -1891,15 +2315,21 @@ impl Compositor {
                     let tex_mem_kb = self.frame_stats.texture_memory_bytes / 1024;
                     log::info!(
                         "[HUD] FPS: {:.1}, frame_time: {:.2}ms, windows: {}, draw_calls: {}, tex_mem: {}KB, blur_hits: {}, blur_misses: {}",
-                        self.frame_stats.fps, avg_dt * 1000.0, self.windows.len(),
-                        self.frame_stats.draw_calls, tex_mem_kb,
-                        self.frame_stats.blur_cache_hits, self.frame_stats.blur_cache_misses,
+                        self.frame_stats.fps,
+                        avg_dt * 1000.0,
+                        self.windows.len(),
+                        self.frame_stats.draw_calls,
+                        tex_mem_kb,
+                        self.frame_stats.blur_cache_hits,
+                        self.frame_stats.blur_cache_misses,
                     );
                     self.frame_stats.draw_calls = 0;
                 } else {
                     log::info!(
                         "[HUD] FPS: {:.1}, frame_time: {:.2}ms, windows: {}",
-                        self.frame_stats.fps, avg_dt * 1000.0, self.windows.len()
+                        self.frame_stats.fps,
+                        avg_dt * 1000.0,
+                        self.windows.len()
                     );
                 }
             }
@@ -1914,22 +2344,37 @@ impl Compositor {
             unsafe {
                 self.gl.use_program(Some(self.edge_glow_program));
                 self.gl.uniform_matrix_4_f32_slice(
-                    self.edge_glow_uniforms.projection.as_ref(), false, &proj,
+                    self.edge_glow_uniforms.projection.as_ref(),
+                    false,
+                    &proj,
                 );
                 self.gl.uniform_4_f32(
                     self.edge_glow_uniforms.rect.as_ref(),
-                    0.0, 0.0, self.screen_w as f32, self.screen_h as f32,
+                    0.0,
+                    0.0,
+                    self.screen_w as f32,
+                    self.screen_h as f32,
                 );
                 self.gl.uniform_4_f32(
                     self.edge_glow_uniforms.glow_color.as_ref(),
-                    self.edge_glow_color[0], self.edge_glow_color[1],
-                    self.edge_glow_color[2], self.edge_glow_color[3],
+                    self.edge_glow_color[0],
+                    self.edge_glow_color[1],
+                    self.edge_glow_color[2],
+                    self.edge_glow_color[3],
                 );
-                self.gl.uniform_1_f32(self.edge_glow_uniforms.glow_width.as_ref(), self.edge_glow_width);
-                self.gl.uniform_2_f32(self.edge_glow_uniforms.mouse.as_ref(), self.mouse_x, self.mouse_y);
+                self.gl.uniform_1_f32(
+                    self.edge_glow_uniforms.glow_width.as_ref(),
+                    self.edge_glow_width,
+                );
+                self.gl.uniform_2_f32(
+                    self.edge_glow_uniforms.mouse.as_ref(),
+                    self.mouse_x,
+                    self.mouse_y,
+                );
                 self.gl.uniform_2_f32(
                     self.edge_glow_uniforms.screen_size.as_ref(),
-                    self.screen_w as f32, self.screen_h as f32,
+                    self.screen_w as f32,
+                    self.screen_h as f32,
                 );
                 self.gl.uniform_1_f32(
                     self.edge_glow_uniforms.time.as_ref(),
@@ -1962,8 +2407,8 @@ impl Compositor {
         // === Feature 12: Screenshot capture (after all rendering, before overlays) ===
         // Capture BEFORE rendering snap preview / annotations so the screenshot
         // doesn't include the selection overlay or annotation strokes.
-        let has_pending_screenshot = self.pending_screenshot.is_some()
-            || self.pending_screenshot_region.is_some();
+        let has_pending_screenshot =
+            self.pending_screenshot.is_some() || self.pending_screenshot_region.is_some();
         if let Some(path) = self.pending_screenshot.take() {
             self.capture_screenshot(&path);
         }
@@ -1984,7 +2429,9 @@ impl Compositor {
         }
 
         // === Tag-switch transition overlay ===
-        let transition_still_active = if let Some(progress) = self.transition_progress(std::time::Instant::now()) {
+        let transition_still_active = if let Some(progress) =
+            self.transition_progress(std::time::Instant::now())
+        {
             // Monitor-local geometry for the transition
             let mon_x = self.transition_mon_x;
             let mon_y = self.transition_mon_y;
@@ -1994,7 +2441,11 @@ impl Compositor {
             let draw_y = (mon_y as u32 + exclude_top) as f32; // Y in screen coords
             let draw_h = (mon_h - exclude_top) as f32;
             let draw_x = mon_x as f32;
-            let top_frac = if mon_h == 0 { 0.0 } else { exclude_top as f32 / mon_h as f32 };
+            let top_frac = if mon_h == 0 {
+                0.0
+            } else {
+                exclude_top as f32 / mon_h as f32
+            };
             // OpenGL scissor Y is flipped
             let scissor_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
 
@@ -2024,27 +2475,38 @@ impl Compositor {
                                     (mon_h - exclude_top) as i32,
                                 );
 
-                                self.gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+                                self.gl
+                                    .blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
 
                                 self.gl.use_program(Some(self.transition_program));
                                 self.gl.uniform_matrix_4_f32_slice(
-                                    self.transition_uniforms.projection.as_ref(), false, &proj,
+                                    self.transition_uniforms.projection.as_ref(),
+                                    false,
+                                    &proj,
                                 );
-                                self.gl.uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
+                                self.gl
+                                    .uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
                                 self.gl.active_texture(glow::TEXTURE0);
 
                                 let uv = [0.0f32, 0.0, 1.0, 1.0 - top_frac];
 
                                 self.gl.uniform_4_f32(
                                     self.transition_uniforms.rect.as_ref(),
-                                    draw_x + slide_offset, draw_y, mon_w as f32, draw_h,
+                                    draw_x + slide_offset,
+                                    draw_y,
+                                    mon_w as f32,
+                                    draw_h,
                                 );
                                 self.gl.uniform_1_f32(
-                                    self.transition_uniforms.opacity.as_ref(), fade_opacity,
+                                    self.transition_uniforms.opacity.as_ref(),
+                                    fade_opacity,
                                 );
                                 self.gl.uniform_4_f32(
                                     self.transition_uniforms.uv_rect.as_ref(),
-                                    uv[0], uv[1], uv[2], uv[3],
+                                    uv[0],
+                                    uv[1],
+                                    uv[2],
+                                    uv[3],
                                 );
                                 self.gl.bind_texture(glow::TEXTURE_2D, Some(snap_tex));
                                 self.gl.bind_vertex_array(Some(self.quad_vao));
@@ -2071,16 +2533,42 @@ impl Compositor {
                         unsafe {
                             if draw_h > 0.0 && fade_opacity > 0.0 {
                                 self.gl.enable(glow::SCISSOR_TEST);
-                                self.gl.scissor(mon_x, scissor_gl_y, mon_w as i32, (mon_h - exclude_top) as i32);
-                                self.gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+                                self.gl.scissor(
+                                    mon_x,
+                                    scissor_gl_y,
+                                    mon_w as i32,
+                                    (mon_h - exclude_top) as i32,
+                                );
+                                self.gl
+                                    .blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
                                 self.gl.use_program(Some(self.transition_program));
-                                self.gl.uniform_matrix_4_f32_slice(self.transition_uniforms.projection.as_ref(), false, &proj);
-                                self.gl.uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
+                                self.gl.uniform_matrix_4_f32_slice(
+                                    self.transition_uniforms.projection.as_ref(),
+                                    false,
+                                    &proj,
+                                );
+                                self.gl
+                                    .uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
                                 self.gl.active_texture(glow::TEXTURE0);
                                 let uv = [0.0f32, 0.0, 1.0, 1.0 - top_frac];
-                                self.gl.uniform_4_f32(self.transition_uniforms.rect.as_ref(), draw_x, draw_y, mon_w as f32, draw_h);
-                                self.gl.uniform_1_f32(self.transition_uniforms.opacity.as_ref(), fade_opacity);
-                                self.gl.uniform_4_f32(self.transition_uniforms.uv_rect.as_ref(), uv[0], uv[1], uv[2], uv[3]);
+                                self.gl.uniform_4_f32(
+                                    self.transition_uniforms.rect.as_ref(),
+                                    draw_x,
+                                    draw_y,
+                                    mon_w as f32,
+                                    draw_h,
+                                );
+                                self.gl.uniform_1_f32(
+                                    self.transition_uniforms.opacity.as_ref(),
+                                    fade_opacity,
+                                );
+                                self.gl.uniform_4_f32(
+                                    self.transition_uniforms.uv_rect.as_ref(),
+                                    uv[0],
+                                    uv[1],
+                                    uv[2],
+                                    uv[3],
+                                );
                                 self.gl.bind_texture(glow::TEXTURE_2D, Some(snap_tex));
                                 self.gl.bind_vertex_array(Some(self.quad_vao));
                                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -2110,16 +2598,42 @@ impl Compositor {
                         unsafe {
                             if draw_h > 0.0 && fade_opacity > 0.0 {
                                 self.gl.enable(glow::SCISSOR_TEST);
-                                self.gl.scissor(mon_x, scissor_gl_y, mon_w as i32, (mon_h - exclude_top) as i32);
-                                self.gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+                                self.gl.scissor(
+                                    mon_x,
+                                    scissor_gl_y,
+                                    mon_w as i32,
+                                    (mon_h - exclude_top) as i32,
+                                );
+                                self.gl
+                                    .blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
                                 self.gl.use_program(Some(self.transition_program));
-                                self.gl.uniform_matrix_4_f32_slice(self.transition_uniforms.projection.as_ref(), false, &proj);
-                                self.gl.uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
+                                self.gl.uniform_matrix_4_f32_slice(
+                                    self.transition_uniforms.projection.as_ref(),
+                                    false,
+                                    &proj,
+                                );
+                                self.gl
+                                    .uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
                                 self.gl.active_texture(glow::TEXTURE0);
                                 let uv = [0.0f32, 0.0, 1.0, 1.0 - top_frac];
-                                self.gl.uniform_4_f32(self.transition_uniforms.rect.as_ref(), offset_x, offset_y, scaled_w, scaled_h);
-                                self.gl.uniform_1_f32(self.transition_uniforms.opacity.as_ref(), fade_opacity);
-                                self.gl.uniform_4_f32(self.transition_uniforms.uv_rect.as_ref(), uv[0], uv[1], uv[2], uv[3]);
+                                self.gl.uniform_4_f32(
+                                    self.transition_uniforms.rect.as_ref(),
+                                    offset_x,
+                                    offset_y,
+                                    scaled_w,
+                                    scaled_h,
+                                );
+                                self.gl.uniform_1_f32(
+                                    self.transition_uniforms.opacity.as_ref(),
+                                    fade_opacity,
+                                );
+                                self.gl.uniform_4_f32(
+                                    self.transition_uniforms.uv_rect.as_ref(),
+                                    uv[0],
+                                    uv[1],
+                                    uv[2],
+                                    uv[3],
+                                );
                                 self.gl.bind_texture(glow::TEXTURE_2D, Some(snap_tex));
                                 self.gl.bind_vertex_array(Some(self.quad_vao));
                                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -2145,24 +2659,49 @@ impl Compositor {
                         unsafe {
                             if draw_h > 0.0 {
                                 self.gl.enable(glow::SCISSOR_TEST);
-                                self.gl.scissor(mon_x, scissor_gl_y, mon_w as i32, (mon_h - exclude_top) as i32);
+                                self.gl.scissor(
+                                    mon_x,
+                                    scissor_gl_y,
+                                    mon_w as i32,
+                                    (mon_h - exclude_top) as i32,
+                                );
 
                                 // First: clear workspace area and redraw wallpaper behind
                                 self.gl.clear_color(0.0, 0.0, 0.0, 1.0);
                                 self.gl.clear(glow::COLOR_BUFFER_BIT);
-                                self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+                                self.gl
+                                    .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
                                 self.draw_wallpaper_in_region(&proj, mon_x, mon_y, mon_w, mon_h);
 
                                 // Draw dimmed/scaled old scene
-                                self.gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+                                self.gl
+                                    .blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
                                 self.gl.use_program(Some(self.transition_program));
-                                self.gl.uniform_matrix_4_f32_slice(self.transition_uniforms.projection.as_ref(), false, &proj);
-                                self.gl.uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
+                                self.gl.uniform_matrix_4_f32_slice(
+                                    self.transition_uniforms.projection.as_ref(),
+                                    false,
+                                    &proj,
+                                );
+                                self.gl
+                                    .uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
                                 self.gl.active_texture(glow::TEXTURE0);
                                 let uv = [0.0f32, 0.0, 1.0, 1.0 - top_frac];
-                                self.gl.uniform_4_f32(self.transition_uniforms.rect.as_ref(), old_x, old_y, old_w, old_h);
-                                self.gl.uniform_1_f32(self.transition_uniforms.opacity.as_ref(), dim);
-                                self.gl.uniform_4_f32(self.transition_uniforms.uv_rect.as_ref(), uv[0], uv[1], uv[2], uv[3]);
+                                self.gl.uniform_4_f32(
+                                    self.transition_uniforms.rect.as_ref(),
+                                    old_x,
+                                    old_y,
+                                    old_w,
+                                    old_h,
+                                );
+                                self.gl
+                                    .uniform_1_f32(self.transition_uniforms.opacity.as_ref(), dim);
+                                self.gl.uniform_4_f32(
+                                    self.transition_uniforms.uv_rect.as_ref(),
+                                    uv[0],
+                                    uv[1],
+                                    uv[2],
+                                    uv[3],
+                                );
                                 self.gl.bind_texture(glow::TEXTURE_2D, Some(snap_tex));
                                 self.gl.bind_vertex_array(Some(self.quad_vao));
                                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -2179,13 +2718,31 @@ impl Compositor {
                                 if let Some((new_fbo, new_tex)) = &self.transition_new_fbo {
                                     let new_fbo = *new_fbo;
                                     let new_tex = *new_tex;
-                                    self.capture_transition_scene(new_fbo, mon_x, mon_y, mon_w, mon_h);
+                                    self.capture_transition_scene(
+                                        new_fbo, mon_x, mon_y, mon_w, mon_h,
+                                    );
 
                                     // New scene slides in from the side
-                                    let new_slide = (1.0 - progress) * self.transition_direction * mon_w as f32;
-                                    self.gl.uniform_4_f32(self.transition_uniforms.rect.as_ref(), draw_x + new_slide, draw_y, mon_w as f32, draw_h);
-                                    self.gl.uniform_1_f32(self.transition_uniforms.opacity.as_ref(), 1.0);
-                                    self.gl.uniform_4_f32(self.transition_uniforms.uv_rect.as_ref(), uv[0], uv[1], uv[2], uv[3]);
+                                    let new_slide =
+                                        (1.0 - progress) * self.transition_direction * mon_w as f32;
+                                    self.gl.uniform_4_f32(
+                                        self.transition_uniforms.rect.as_ref(),
+                                        draw_x + new_slide,
+                                        draw_y,
+                                        mon_w as f32,
+                                        draw_h,
+                                    );
+                                    self.gl.uniform_1_f32(
+                                        self.transition_uniforms.opacity.as_ref(),
+                                        1.0,
+                                    );
+                                    self.gl.uniform_4_f32(
+                                        self.transition_uniforms.uv_rect.as_ref(),
+                                        uv[0],
+                                        uv[1],
+                                        uv[2],
+                                        uv[3],
+                                    );
                                     self.gl.bind_texture(glow::TEXTURE_2D, Some(new_tex));
                                     self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                                 }
@@ -2249,11 +2806,15 @@ impl Compositor {
                         // Successfully used OML swap
                     } else {
                         // Fall back to traditional swap
-                        unsafe { x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable); }
+                        unsafe {
+                            x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable);
+                        }
                     }
                 } else {
                     // OML not available, fall back
-                    unsafe { x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable); }
+                    unsafe {
+                        x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable);
+                    }
                 }
             }
             VsyncMethod::Present => {
@@ -2261,13 +2822,20 @@ impl Compositor {
                 // When VRR is active for a game window, the driver automatically uses
                 // adaptive refresh rates via the Present extension capabilities.
                 if self.vrr_active {
-                    log::debug!("compositor: rendering frame with VRR active (target: {} Hz)", self.get_vrr_refresh_rate());
+                    log::debug!(
+                        "compositor: rendering frame with VRR active (target: {} Hz)",
+                        self.get_vrr_refresh_rate()
+                    );
                 }
-                unsafe { x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable); }
+                unsafe {
+                    x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable);
+                }
             }
             VsyncMethod::Global => {
                 // Traditional global vsync (all windows locked to 60Hz)
-                unsafe { x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable); }
+                unsafe {
+                    x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable);
+                }
             }
         }
 
@@ -2277,9 +2845,19 @@ impl Compositor {
         }
 
         // Schedule re-render if fades or transition are still in progress
-        if fades_active || transition_still_active || wobbly_active || !self.particle_systems.is_empty() || self.overview_active
-            || genie_active || ripples_active || focus_highlight_active || wallpaper_crossfade_active
-            || expose_animating || snap_animating || peek_animating || self.expose_active
+        if fades_active
+            || transition_still_active
+            || wobbly_active
+            || !self.particle_systems.is_empty()
+            || self.overview_active
+            || genie_active
+            || ripples_active
+            || focus_highlight_active
+            || wallpaper_crossfade_active
+            || expose_animating
+            || snap_animating
+            || peek_animating
+            || self.expose_active
         {
             self.needs_render = true;
         }
@@ -2348,7 +2926,10 @@ impl Compositor {
                 for (zone, zs) in stats {
                     log::info!(
                         "[profiler]   {}: avg={:.2}ms min={:.2}ms max={:.2}ms",
-                        zone, zs.avg_ms, zs.min_ms, zs.max_ms
+                        zone,
+                        zs.avg_ms,
+                        zs.min_ms,
+                        zs.max_ms
                     );
                 }
             }
@@ -2364,5 +2945,4 @@ impl Compositor {
     // =====================================================================
     // New feature methods
     // =====================================================================
-
 }

@@ -223,10 +223,18 @@ mod tests {
         let limiter = FrameRateLimiter::new(60);
 
         limiter.set_target_fps(0);
-        assert_eq!(limiter.target_fps(), 1, "FPS should be clamped to minimum of 1");
+        assert_eq!(
+            limiter.target_fps(),
+            1,
+            "FPS should be clamped to minimum of 1"
+        );
 
         limiter.set_target_fps(500);
-        assert_eq!(limiter.target_fps(), 300, "FPS should be clamped to maximum of 300");
+        assert_eq!(
+            limiter.target_fps(),
+            300,
+            "FPS should be clamped to maximum of 300"
+        );
     }
 
     #[test]
@@ -257,7 +265,10 @@ mod tests {
     fn test_should_render_with_vsync_disabled() {
         let limiter = FrameRateLimiter::new(60);
         limiter.set_vsync(false);
-        assert!(limiter.should_render(), "Should always render when VSync is disabled");
+        assert!(
+            limiter.should_render(),
+            "Should always render when VSync is disabled"
+        );
     }
 
     #[test]
@@ -266,7 +277,10 @@ mod tests {
         limiter.mark_frame();
 
         let time_since = limiter.time_since_last_frame();
-        assert!(time_since.as_millis() < 10, "Time since frame should be very small");
+        assert!(
+            time_since.as_millis() < 10,
+            "Time since frame should be very small"
+        );
     }
 
     #[test]
@@ -276,7 +290,10 @@ mod tests {
         limiter.reset();
 
         let time_since = limiter.time_since_last_frame();
-        assert!(time_since.as_millis() < 10, "Time since reset should be small");
+        assert!(
+            time_since.as_millis() < 10,
+            "Time since reset should be small"
+        );
     }
 
     #[test]
@@ -341,7 +358,10 @@ mod tests {
         adaptive.update_load(40);
         assert_eq!(adaptive.current_load(), 40);
         let fps = adaptive.limiter().target_fps();
-        assert!(fps > 75, "Medium-low load should increase FPS towards maximum");
+        assert!(
+            fps > 75,
+            "Medium-low load should increase FPS towards maximum"
+        );
     }
 
     #[test]
@@ -349,7 +369,11 @@ mod tests {
         let adaptive = AdaptiveFrameRate::new(30, 120);
 
         adaptive.update_load(150);
-        assert_eq!(adaptive.current_load(), 100, "Load should be clamped to 100");
+        assert_eq!(
+            adaptive.current_load(),
+            100,
+            "Load should be clamped to 100"
+        );
     }
 
     #[test]
@@ -358,7 +382,11 @@ mod tests {
         adaptive1.update_load(75);
 
         let adaptive2 = adaptive1.clone();
-        assert_eq!(adaptive2.current_load(), 75, "Clone should share load state");
+        assert_eq!(
+            adaptive2.current_load(),
+            75,
+            "Clone should share load state"
+        );
     }
 
     #[test]

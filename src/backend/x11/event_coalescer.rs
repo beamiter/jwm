@@ -178,9 +178,20 @@ impl EventCoalescer {
 
     /// Record a geometry update event, returns Some if should be processed immediately
     /// Returns None if the event should be coalesced with the next one
-    pub fn coalesce_geometry(&mut self, x: i32, y: i32, width: u32, height: u32) -> Option<GeometryEvent> {
+    pub fn coalesce_geometry(
+        &mut self,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> Option<GeometryEvent> {
         let now = Instant::now();
-        let event = GeometryEvent { x, y, width, height };
+        let event = GeometryEvent {
+            x,
+            y,
+            width,
+            height,
+        };
 
         // Check if we should emit this geometry event
         if let Some(last_time) = self.last_geometry_emitted {
@@ -239,7 +250,11 @@ impl EventCoalescer {
     pub fn coalesce_property(&mut self, window: u64, atom: u32) -> Option<PropertyEvent> {
         let now = Instant::now();
         let key = PropertyKey { window, atom };
-        let event = PropertyEvent { window, atom, time: now };
+        let event = PropertyEvent {
+            window,
+            atom,
+            time: now,
+        };
 
         // Check if we have a recent pending event for this window+atom
         if let Some(pending) = self.pending_properties.get(&key) {
@@ -277,8 +292,20 @@ impl EventCoalescer {
 
     /// Record an expose/damage event
     /// Returns Some(merged_rect) if should be processed immediately, None if coalesced
-    pub fn coalesce_expose(&mut self, window: u64, x: i32, y: i32, width: u32, height: u32) -> Option<ExposeRect> {
-        let rect = ExposeRect { x, y, width, height };
+    pub fn coalesce_expose(
+        &mut self,
+        window: u64,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> Option<ExposeRect> {
+        let rect = ExposeRect {
+            x,
+            y,
+            width,
+            height,
+        };
 
         // Merge with pending expose for this window
         let merged = if let Some(pending) = self.pending_exposes.get(&window) {

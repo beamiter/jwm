@@ -1,7 +1,6 @@
 /// wlr-output-power-management-unstable-v1 protocol implementation for JWM.
 ///
 /// Allows idle daemons like swayidle to blank/unblank displays (DPMS).
-
 use crate::sync_ext::MutexExt;
 use log::info;
 
@@ -93,32 +92,30 @@ impl Dispatch<ZwlrOutputPowerV1, OutputPowerData> for JwmWaylandState {
         _data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
-            zwlr_output_power_v1::Request::SetMode { mode } => {
-                match mode.into_result() {
-                    Ok(zwlr_output_power_v1::Mode::Off) => {
-                        info!("[udev/wayland] DPMS off requested for {}", data.output_name);
-                        state.pending_events.lock_safe().push_back(
-                            crate::backend::api::BackendEvent::OutputPowerSet {
-                                output_name: data.output_name.clone(),
-                                on: false,
-                            },
-                        );
-                        resource.mode(zwlr_output_power_v1::Mode::Off);
-                    }
-                    Ok(zwlr_output_power_v1::Mode::On) => {
-                        info!("[udev/wayland] DPMS on requested for {}", data.output_name);
-                        state.pending_events.lock_safe().push_back(
-                            crate::backend::api::BackendEvent::OutputPowerSet {
-                                output_name: data.output_name.clone(),
-                                on: true,
-                            },
-                        );
-                        state.needs_redraw = true;
-                        resource.mode(zwlr_output_power_v1::Mode::On);
-                    }
-                    _ => {}
+            zwlr_output_power_v1::Request::SetMode { mode } => match mode.into_result() {
+                Ok(zwlr_output_power_v1::Mode::Off) => {
+                    info!("[udev/wayland] DPMS off requested for {}", data.output_name);
+                    state.pending_events.lock_safe().push_back(
+                        crate::backend::api::BackendEvent::OutputPowerSet {
+                            output_name: data.output_name.clone(),
+                            on: false,
+                        },
+                    );
+                    resource.mode(zwlr_output_power_v1::Mode::Off);
                 }
-            }
+                Ok(zwlr_output_power_v1::Mode::On) => {
+                    info!("[udev/wayland] DPMS on requested for {}", data.output_name);
+                    state.pending_events.lock_safe().push_back(
+                        crate::backend::api::BackendEvent::OutputPowerSet {
+                            output_name: data.output_name.clone(),
+                            on: true,
+                        },
+                    );
+                    state.needs_redraw = true;
+                    resource.mode(zwlr_output_power_v1::Mode::On);
+                }
+                _ => {}
+            },
             zwlr_output_power_v1::Request::Destroy => {}
             _ => {}
         }

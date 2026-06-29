@@ -141,7 +141,8 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "focus_none" => Ok((Jwm::focus_none, parse_int_arg(args, 0))),
         "focus_window" => Ok((Jwm::focus_window, parse_window_id_arg(args)?)),
         "focus_tab" => {
-            let cmd = parse_string_vec_arg(args).unwrap_or_else(|_| vec!["0".to_string(), "0".to_string()]);
+            let cmd = parse_string_vec_arg(args)
+                .unwrap_or_else(|_| vec!["0".to_string(), "0".to_string()]);
             Ok((Jwm::focus_tab, WMArgEnum::StringVec(cmd)))
         }
         "refocus" => Ok((Jwm::refocus, parse_int_arg(args, 0))),

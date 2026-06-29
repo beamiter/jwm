@@ -9,10 +9,10 @@
 // Wayland backends return `None` from `get_window_pid` so swallowing simply
 // never activates there.
 
+use crate::Jwm;
 use crate::backend::api::Backend;
 use crate::config::CONFIG;
 use crate::jwm::ClientKey;
-use crate::Jwm;
 
 impl Jwm {
     /// Try to swallow an ancestor terminal. Called from `manage_regular_client`
@@ -45,28 +45,23 @@ impl Jwm {
             return;
         }
 
-        let parent_key = self
-            .state
-            .client_order
-            .iter()
-            .copied()
-            .find(|&k| {
-                let c = match self.state.clients.get(k) {
-                    Some(c) => c,
-                    None => return false,
-                };
-                if c.state.is_swallowed || k == child_key {
-                    return false;
-                }
-                let pid = match c.pid {
-                    Some(p) => p,
-                    None => return false,
-                };
-                if !ancestors.contains(&pid) {
-                    return false;
-                }
-                matches_any(&beh.swallow_terminals, &c.class, &c.instance)
-            });
+        let parent_key = self.state.client_order.iter().copied().find(|&k| {
+            let c = match self.state.clients.get(k) {
+                Some(c) => c,
+                None => return false,
+            };
+            if c.state.is_swallowed || k == child_key {
+                return false;
+            }
+            let pid = match c.pid {
+                Some(p) => p,
+                None => return false,
+            };
+            if !ancestors.contains(&pid) {
+                return false;
+            }
+            matches_any(&beh.swallow_terminals, &c.class, &c.instance)
+        });
 
         let parent_key = match parent_key {
             Some(k) => k,

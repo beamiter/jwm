@@ -1,4 +1,3 @@
-use crate::sync_ext::MutexExt;
 use crate::backend::api::{
     Backend, BackendEvent, Capabilities, ColorAllocator, CursorProvider, EventHandler, HitTarget,
     InputOps, KeyOps, OutputInfo, OutputOps, PropertyOps, ResizeEdge, ScreenInfo, WindowOps,
@@ -8,6 +7,7 @@ use crate::backend::error::BackendError;
 use crate::backend::wayland::state::JwmWaylandState;
 use crate::backend::{wayland_dummy_ops, wayland_key_ops};
 use crate::config::CONFIG;
+use crate::sync_ext::MutexExt;
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -17,9 +17,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use smithay::backend::allocator::Modifier;
 use smithay::backend::allocator::dmabuf::DmabufAllocator;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags};
-use smithay::backend::allocator::Modifier;
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::input::{
     AbsolutePositionEvent, Event as InputEventExt, InputBackend, InputEvent, KeyboardKeyEvent,
@@ -43,11 +43,13 @@ use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
 use smithay::reexports::gbm;
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{self, Display, DisplayHandle, Resource};
-use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
-use smithay::utils::{DeviceFd, Logical, Physical, Point, Rectangle, Scale, SERIAL_COUNTER as SCOUNTER};
-use smithay::wayland::compositor::{with_surface_tree_downward, TraversalAction};
+use smithay::utils::{
+    DeviceFd, Logical, Physical, Point, Rectangle, SERIAL_COUNTER as SCOUNTER, Scale,
+};
+use smithay::wayland::compositor::{TraversalAction, with_surface_tree_downward};
 use smithay::wayland::shell::wlr_layer::{KeyboardInteractivity, Layer as WlrLayer};
 
 smithay::backend::renderer::element::render_elements! {
@@ -153,7 +155,10 @@ impl OutputOps for WaylandOutputOps {
         if h == 0 {
             h = 720;
         }
-        ScreenInfo { width: w, height: h }
+        ScreenInfo {
+            width: w,
+            height: h,
+        }
     }
 
     fn output_at(&self, x: i32, y: i32) -> Option<OutputId> {
@@ -284,7 +289,10 @@ impl WindowOps for WaylandWindowOps {
         Ok(())
     }
 
-    fn close_window(&self, win: WindowId) -> Result<crate::backend::api::CloseResult, BackendError> {
+    fn close_window(
+        &self,
+        win: WindowId,
+    ) -> Result<crate::backend::api::CloseResult, BackendError> {
         unsafe {
             self.with_state_mut(|state| {
                 if let Some(toplevel) = state.try_lookup_toplevel(win) {
@@ -411,7 +419,11 @@ impl PropertyOps for WaylandPropertyOps {
         let app_id = unsafe {
             self.with_state_mut(|state| state.window_app_id.get(&win).cloned().unwrap_or_default())
         };
-        let value = if app_id.is_empty() { "app".to_string() } else { app_id };
+        let value = if app_id.is_empty() {
+            "app".to_string()
+        } else {
+            app_id
+        };
         (value.clone(), value)
     }
 
@@ -442,7 +454,10 @@ impl PropertyOps for WaylandPropertyOps {
         vec![crate::backend::api::WindowType::Normal]
     }
 
-    fn get_layer_surface_info(&self, win: WindowId) -> Option<crate::backend::api::LayerSurfaceInfo> {
+    fn get_layer_surface_info(
+        &self,
+        win: WindowId,
+    ) -> Option<crate::backend::api::LayerSurfaceInfo> {
         unsafe { self.with_state_mut(|state| state.window_layer_info.get(&win).copied()) }
     }
 
@@ -490,7 +505,10 @@ impl PropertyOps for WaylandPropertyOps {
         Ok(())
     }
 
-    fn fetch_normal_hints(&self, _win: WindowId) -> Result<Option<crate::backend::api::NormalHints>, BackendError> {
+    fn fetch_normal_hints(
+        &self,
+        _win: WindowId,
+    ) -> Result<Option<crate::backend::api::NormalHints>, BackendError> {
         Ok(None)
     }
 
@@ -520,7 +538,12 @@ impl PropertyOps for WaylandPropertyOps {
         Ok(())
     }
 
-    fn set_client_info_props(&self, _win: WindowId, _tags: u32, _monitor_num: u32) -> Result<(), BackendError> {
+    fn set_client_info_props(
+        &self,
+        _win: WindowId,
+        _tags: u32,
+        _monitor_num: u32,
+    ) -> Result<(), BackendError> {
         Ok(())
     }
 }
@@ -634,7 +657,8 @@ impl WaylandX11Backend {
         let scale = Scale::from(self.output.current_scale().fractional_scale());
         let ox = 0;
         let oy = 0;
-        let output_rect_global = Rectangle::<i32, Logical>::new((ox, oy).into(), (out_w, out_h).into());
+        let output_rect_global =
+            Rectangle::<i32, Logical>::new((ox, oy).into(), (out_w, out_h).into());
 
         let mut elements: Vec<X11RenderElement<GlesRenderer>> = Vec::new();
         let mut visible_surfaces: HashSet<wayland_server::Weak<WlSurface>> = HashSet::new();
@@ -740,7 +764,8 @@ impl WaylandX11Backend {
                     |child_surface, child_states, _| {
                         let data = child_states
                             .data_map
-                            .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>();
+                            .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>(
+                        );
                         let Some(data) = data else {
                             return;
                         };
@@ -783,7 +808,8 @@ impl WaylandX11Backend {
                 |child_surface, child_states, _| {
                     let data = child_states
                         .data_map
-                        .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>();
+                        .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>(
+                    );
                     let Some(data) = data else {
                         return;
                     };
@@ -842,7 +868,8 @@ impl WaylandX11Backend {
                 |child_surface, child_states, _| {
                     let data = child_states
                         .data_map
-                        .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>();
+                        .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>(
+                    );
                     let Some(data) = data else {
                         return;
                     };
@@ -1014,21 +1041,21 @@ impl WaylandX11Backend {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or(std::time::Duration::ZERO);
-        let throttle = self
-            .output
-            .current_mode()
-            .and_then(|m| if m.refresh > 0 {
+        let throttle = self.output.current_mode().and_then(|m| {
+            if m.refresh > 0 {
                 Some(Duration::from_secs_f64(1_000f64 / m.refresh as f64))
             } else {
                 None
-            });
+            }
+        });
         let output = self.output.clone();
         let visible = visible_surfaces;
         for root in &frame_roots {
             send_frames_surface_tree(root, &output, now, throttle, |surface, states| {
                 let data = states
                     .data_map
-                    .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>();
+                    .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>(
+                );
                 let Some(data) = data else {
                     return None;
                 };
@@ -1070,7 +1097,11 @@ impl WaylandX11Backend {
                     }
                     flush_pending.store(false, Ordering::SeqCst);
                 })
-                .map_err(|e| BackendError::Message(format!("calloop insert_source(wayland flush) failed: {e}")))?;
+                .map_err(|e| {
+                    BackendError::Message(format!(
+                        "calloop insert_source(wayland flush) failed: {e}"
+                    ))
+                })?;
         }
 
         let wayland_poll_fd = {
@@ -1096,7 +1127,11 @@ impl WaylandX11Backend {
                         Ok(PostAction::Continue)
                     },
                 )
-                .map_err(|e| BackendError::Message(format!("calloop insert_source(wayland display) failed: {e}")))?;
+                .map_err(|e| {
+                    BackendError::Message(format!(
+                        "calloop insert_source(wayland display) failed: {e}"
+                    ))
+                })?;
         }
 
         {
@@ -1109,7 +1144,11 @@ impl WaylandX11Backend {
                     state.ensure_initial_configure_timeout(initial_configure_timeout);
                     TimeoutAction::ToDuration(tick)
                 })
-                .map_err(|e| BackendError::Message(format!("calloop insert_source(initial configure timer) failed: {e}")))?;
+                .map_err(|e| {
+                    BackendError::Message(format!(
+                        "calloop insert_source(initial configure timer) failed: {e}"
+                    ))
+                })?;
         }
 
         let shared = Arc::new(Mutex::new(SharedState::default()));
@@ -1161,11 +1200,14 @@ impl WaylandX11Backend {
         let (_node, fd) = handle
             .drm_node()
             .map_err(|e| BackendError::Message(format!("x11 drm_node failed: {e:?}")))?;
-        let device = gbm::Device::new(DeviceFd::from(fd))
-            .map_err(|e| BackendError::Other(Box::new(e)))?;
-        let egl = unsafe { EGLDisplay::new(device.clone()).map_err(|e| BackendError::Other(Box::new(e)))? };
+        let device =
+            gbm::Device::new(DeviceFd::from(fd)).map_err(|e| BackendError::Other(Box::new(e)))?;
+        let egl = unsafe {
+            EGLDisplay::new(device.clone()).map_err(|e| BackendError::Other(Box::new(e)))?
+        };
         let context = EGLContext::new(&egl).map_err(|e| BackendError::Other(Box::new(e)))?;
-        let mut renderer = unsafe { GlesRenderer::new(context).map_err(|e| BackendError::Other(Box::new(e)))? };
+        let mut renderer =
+            unsafe { GlesRenderer::new(context).map_err(|e| BackendError::Other(Box::new(e)))? };
         let _ = renderer.bind_wl_display(&display_handle);
 
         // Default the nested window to the host X screen's full resolution
@@ -1210,7 +1252,12 @@ impl WaylandX11Backend {
             _ => {
                 preferred_modifiers.push(Modifier::Linear);
                 preferred_modifiers.push(Modifier::Invalid);
-                for m in renderer.egl_context().dmabuf_render_formats().iter().map(|f| f.modifier) {
+                for m in renderer
+                    .egl_context()
+                    .dmabuf_render_formats()
+                    .iter()
+                    .map(|f| f.modifier)
+                {
                     if m != Modifier::Linear && m != Modifier::Invalid {
                         preferred_modifiers.push(m);
                     }
@@ -1221,10 +1268,7 @@ impl WaylandX11Backend {
         let mut x11_surface = handle
             .create_surface(
                 &window,
-                DmabufAllocator(GbmAllocator::new(
-                    device,
-                    GbmBufferFlags::RENDERING,
-                )),
+                DmabufAllocator(GbmAllocator::new(device, GbmBufferFlags::RENDERING)),
                 preferred_modifiers.into_iter(),
             )
             .map_err(|e| BackendError::Other(Box::new(e)))?;
@@ -1233,11 +1277,11 @@ impl WaylandX11Backend {
         // as a framebuffer via EGLImage. If the EGL/GL stack lacks EGLImage support, rendering
         // will fail every frame. Detect this early and provide a clear action.
         {
-            let (mut test_buffer, _age) = x11_surface
-                .buffer()
-                .map_err(|e| BackendError::Message(format!(
+            let (mut test_buffer, _age) = x11_surface.buffer().map_err(|e| {
+                BackendError::Message(format!(
                     "[wayland-x11] failed to acquire initial X11 buffer for preflight: {e:?}"
-                )))?;
+                ))
+            })?;
             match renderer.bind(&mut test_buffer) {
                 Ok(fb) => {
                     drop(fb);
@@ -1647,10 +1691,7 @@ fn process_input_event_windowed<B: InputBackend>(
         InputEvent::PointerButton { event, .. } => {
             let time = event.time_msec();
             let button_code = event.button_code();
-            let pressed = matches!(
-                event.state(),
-                smithay::backend::input::ButtonState::Pressed
-            );
+            let pressed = matches!(event.state(), smithay::backend::input::ButtonState::Pressed);
 
             let (x, y, output, mods_state) = {
                 let s = shared.lock_safe();
@@ -1674,16 +1715,20 @@ fn process_input_event_windowed<B: InputBackend>(
             // Minimal xdg_popup grab behavior: click outside dismisses.
             if pressed {
                 if let Some(grab_win) = state.popup_grab_toplevel {
-                    let in_any_popup = state
-                        .popup_rects_for_toplevel(grab_win)
-                        .iter()
-                        .any(|(_surf, rect)| {
-                            let x0 = rect.loc.x as f64;
-                            let y0 = rect.loc.y as f64;
-                            let x1 = x0 + rect.size.w as f64;
-                            let y1 = y0 + rect.size.h as f64;
-                            location.x >= x0 && location.y >= y0 && location.x < x1 && location.y < y1
-                        });
+                    let in_any_popup =
+                        state
+                            .popup_rects_for_toplevel(grab_win)
+                            .iter()
+                            .any(|(_surf, rect)| {
+                                let x0 = rect.loc.x as f64;
+                                let y0 = rect.loc.y as f64;
+                                let x1 = x0 + rect.size.w as f64;
+                                let y1 = y0 + rect.size.h as f64;
+                                location.x >= x0
+                                    && location.y >= y0
+                                    && location.x < x1
+                                    && location.y < y1
+                            });
 
                     if !in_any_popup {
                         state.dismiss_popups_for_toplevel(grab_win);
@@ -1797,45 +1842,47 @@ fn process_input_event_windowed<B: InputBackend>(
                 // Route keyboard to exclusive layer-shell surfaces if any.
                 let cfg = crate::config::CONFIG.load();
                 let bar_name = cfg.status_bar_name();
-                let exclusive_surface = state
-                    .layer_shell_state
-                    .layer_surfaces()
-                    .rev()
-                    .find_map(|layer| {
-                        if !bar_name.is_empty() {
-                            if let Some(win) = state
-                                .surface_to_window
-                                .get(&layer.wl_surface().id())
-                                .copied()
-                            {
-                                let title = state
-                                    .window_title
-                                    .get(&win)
-                                    .map(|s| s.as_str())
-                                    .unwrap_or("");
-                                let app_id = state
-                                    .window_app_id
-                                    .get(&win)
-                                    .map(|s| s.as_str())
-                                    .unwrap_or("");
-                                if title == bar_name || app_id == bar_name {
-                                    return None;
+                let exclusive_surface =
+                    state
+                        .layer_shell_state
+                        .layer_surfaces()
+                        .rev()
+                        .find_map(|layer| {
+                            if !bar_name.is_empty() {
+                                if let Some(win) = state
+                                    .surface_to_window
+                                    .get(&layer.wl_surface().id())
+                                    .copied()
+                                {
+                                    let title = state
+                                        .window_title
+                                        .get(&win)
+                                        .map(|s| s.as_str())
+                                        .unwrap_or("");
+                                    let app_id = state
+                                        .window_app_id
+                                        .get(&win)
+                                        .map(|s| s.as_str())
+                                        .unwrap_or("");
+                                    if title == bar_name || app_id == bar_name {
+                                        return None;
+                                    }
                                 }
                             }
-                        }
 
-                        let exclusive = layer.with_cached_state(|data| {
-                            let exclusive_zone: i32 = data.exclusive_zone.into();
-                            data.keyboard_interactivity == KeyboardInteractivity::Exclusive
-                                && (data.layer == WlrLayer::Top || data.layer == WlrLayer::Overlay)
-                                && exclusive_zone != 0
+                            let exclusive = layer.with_cached_state(|data| {
+                                let exclusive_zone: i32 = data.exclusive_zone.into();
+                                data.keyboard_interactivity == KeyboardInteractivity::Exclusive
+                                    && (data.layer == WlrLayer::Top
+                                        || data.layer == WlrLayer::Overlay)
+                                    && exclusive_zone != 0
+                            });
+                            if exclusive {
+                                Some(layer.wl_surface().clone())
+                            } else {
+                                None
+                            }
                         });
-                        if exclusive {
-                            Some(layer.wl_surface().clone())
-                        } else {
-                            None
-                        }
-                    });
 
                 if let Some(surface) = exclusive_surface {
                     kbd.set_focus(state, Some(surface), serial);

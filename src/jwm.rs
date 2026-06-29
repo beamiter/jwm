@@ -17,18 +17,18 @@ pub mod property_handler;
 pub mod rules;
 pub mod session;
 pub mod stacking;
-pub mod swallowing;
 pub mod statusbar;
 pub mod strut_manager;
-pub mod visibility;
+pub mod swallowing;
 pub mod tag_manager;
 pub mod types;
+pub mod visibility;
 
+pub mod monitor_management;
+pub mod positioning;
 pub mod process;
 pub mod rendering;
 pub mod window_state;
-pub mod monitor_management;
-pub mod positioning;
 pub use types::{
     ICONIC_STATE, InteractionAction, InteractionState, MonitorIndex, NORMAL_STATE, STEXT_MAX_LEN,
     SecondaryBarInstance, WITHDRAWN_STATE, WMArgEnum, WMButton, WMClickType, WMFuncType, WMKey,
@@ -66,9 +66,7 @@ use crate::backend::common_define::SchemeType;
 use crate::backend::common_define::{KeySym, Mods};
 use crate::config::CONFIG;
 use crate::core::layout::LayoutEnum;
-use crate::core::models::{
-    ClientKey, MonitorKey, ScrollingState, WMClient, WMMonitor,
-};
+use crate::core::models::{ClientKey, MonitorKey, ScrollingState, WMClient, WMMonitor};
 use crate::ipc_server::IpcServer;
 
 use crate::core::animation::AnimationManager;
@@ -172,7 +170,6 @@ pub struct Jwm {
     /// Last user interaction timestamp (for _NET_WM_USER_TIME focus-steal prevention)
     pub last_user_activity_time: u32,
 }
-
 
 impl Jwm {
     fn enable_floating_keep_geometry(
@@ -1224,7 +1221,6 @@ impl Jwm {
         Ok(())
     }
 
-
     /// Compute the night light color temperature factor (0.0 = neutral, up to
     /// `full_temp` when fully inside the night window).  Times are given as
     /// "HH:MM" strings.  `transition_mins` controls the linear ramp-in/out at
@@ -1315,8 +1311,6 @@ impl Jwm {
     }
 
     /// Prepare screenshot output path (shared by both interactive and fullscreen).
-
-
 
     /// 处理 Expose 事件（窗口需要重绘）
     fn expose(

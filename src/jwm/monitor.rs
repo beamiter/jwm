@@ -1,10 +1,10 @@
 // Monitor management operations: output handling, geometry, and client distribution
 
+use crate::Jwm;
 use crate::backend::api::Backend;
 use crate::backend::common_define::OutputId;
 use crate::config::CONFIG;
 use crate::core::models::{ClientKey, MonitorKey};
-use crate::Jwm;
 use log::{info, warn};
 
 impl Jwm {

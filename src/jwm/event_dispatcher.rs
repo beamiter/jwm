@@ -114,7 +114,11 @@ impl WMController for Jwm {
 
             // Use event coalescer to rate-limit downstream processing (configurenotify)
             // but always update cache above to keep compositor in sync
-            if self.event_coalescer.coalesce_geometry(x, y, width, height).is_none() {
+            if self
+                .event_coalescer
+                .coalesce_geometry(x, y, width, height)
+                .is_none()
+            {
                 // Event was coalesced (rate-limited), skip downstream processing
                 return;
             }
@@ -609,10 +613,11 @@ impl WMController for Jwm {
                                 false,
                             );
                         }
-                        let _ =
-                            backend
-                                .property_ops()
-                                .set_net_wm_state_flag(win, NetWmState::Above, on);
+                        let _ = backend.property_ops().set_net_wm_state_flag(
+                            win,
+                            NetWmState::Above,
+                            on,
+                        );
                     }
                 }
                 NetWmState::Below => {
@@ -631,10 +636,11 @@ impl WMController for Jwm {
                                 false,
                             );
                         }
-                        let _ =
-                            backend
-                                .property_ops()
-                                .set_net_wm_state_flag(win, NetWmState::Below, on);
+                        let _ = backend.property_ops().set_net_wm_state_flag(
+                            win,
+                            NetWmState::Below,
+                            on,
+                        );
                     }
                 }
                 NetWmState::Sticky => {
@@ -714,10 +720,7 @@ impl WMController for Jwm {
                             NetWmState::MaximizedHorz => c.state.is_maximized_horz = on,
                             _ => {}
                         }
-                        let _ =
-                            backend
-                                .property_ops()
-                                .set_net_wm_state_flag(win, state, on);
+                        let _ = backend.property_ops().set_net_wm_state_flag(win, state, on);
                     }
                 }
             }
@@ -748,7 +751,12 @@ impl Jwm {
     /// 处理 _NET_WM_MOVERESIZE 客户端消息
     ///
     /// 允许窗口通过协议请求进行移动或调整大小（例如 GTK 应用的窗口边框拖动）
-    pub(crate) fn on_moveresize_request(&mut self, backend: &mut dyn Backend, win: WindowId, direction: u32) {
+    pub(crate) fn on_moveresize_request(
+        &mut self,
+        backend: &mut dyn Backend,
+        win: WindowId,
+        direction: u32,
+    ) {
         const _NET_WM_MOVERESIZE_CANCEL: u32 = 11;
         const _NET_WM_MOVERESIZE_MOVE: u32 = 8;
 
@@ -947,7 +955,10 @@ impl EventHandler for Jwm {
             BackendEvent::PresentIdle { .. } => {}
 
             // Workspace protocol: client requests tag switch
-            BackendEvent::WorkspaceActivate { monitor: _, tag_mask } => {
+            BackendEvent::WorkspaceActivate {
+                monitor: _,
+                tag_mask,
+            } => {
                 use crate::jwm::types::WMArgEnum;
                 let _ = self.view(backend, &WMArgEnum::UInt(tag_mask));
             }
@@ -1101,13 +1112,17 @@ impl Jwm {
                 if let Err(e) = func(self, backend, &arg) {
                     log::warn!(
                         "[gesture] {}-finger {} → {}: {e}",
-                        fingers, direction, entry.function
+                        fingers,
+                        direction,
+                        entry.function
                     );
                 }
             }
             Err(e) => log::warn!(
                 "[gesture] {}-finger {} → unknown command {}: {e}",
-                fingers, direction, entry.function
+                fingers,
+                direction,
+                entry.function
             ),
         }
     }

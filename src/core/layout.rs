@@ -1106,7 +1106,11 @@ mod tests {
     use super::*;
 
     fn client(key: u32, factor: f32) -> LayoutClient<u32> {
-        LayoutClient { key, factor, border_w: 1 }
+        LayoutClient {
+            key,
+            factor,
+            border_w: 1,
+        }
     }
 
     fn params(w: i32, h: i32) -> LayoutParams {
@@ -1270,7 +1274,10 @@ mod tests {
         let stack = result[1].rect;
         // Right edge of master must not exceed left edge of stack
         let master_right = master.x + master.w + 2; // +border
-        assert!(master_right <= stack.x, "master and stack should not overlap");
+        assert!(
+            master_right <= stack.x,
+            "master and stack should not overlap"
+        );
     }
 
     // -----------------------------------------------------------------------

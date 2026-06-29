@@ -5,7 +5,7 @@ use std::os::unix::process::CommandExt;
 use std::{env, process::Command, sync::atomic::Ordering};
 use xbar_core::initialize_logging;
 
-use jwm::config::{set_backend_family, BackendFamily};
+use jwm::config::{BackendFamily, set_backend_family};
 
 // 导入后端
 use jwm::backend::wayland_udev::backend::UdevBackend;
@@ -18,7 +18,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // In debug builds default to the `debug` level so the maximum amount of
     // diagnostic output is visible; release builds stay at `info`.
     if env::var("RUST_LOG").is_err() {
-        let default_level = if cfg!(debug_assertions) { "debug" } else { "info" };
+        let default_level = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "info"
+        };
         unsafe {
             env::set_var(
                 "RUST_LOG",
@@ -117,7 +121,10 @@ fn run_jwm() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or(60);
                 backend.compositor_benchmark_start(frames, warmup);
                 backend.compositor_benchmark_set_auto_exit(true);
-                info!("Benchmark mode: collecting {} frames (warmup={})", frames, warmup);
+                info!(
+                    "Benchmark mode: collecting {} frames (warmup={})",
+                    frames, warmup
+                );
             }
         }
 

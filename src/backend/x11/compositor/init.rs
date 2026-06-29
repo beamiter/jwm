@@ -1,5 +1,7 @@
 // Compositor::new() constructor
 #[allow(unused_imports)]
+use super::math::ortho;
+#[allow(unused_imports)]
 use super::*;
 #[allow(unused_imports)]
 use glow::HasContext;
@@ -14,21 +16,19 @@ use std::sync::mpsc;
 #[allow(unused_imports)]
 use x11rb::connection::{Connection, RequestConnection};
 #[allow(unused_imports)]
-use x11rb::wrapper::ConnectionExt as WrapperExt;
-#[allow(unused_imports)]
 use x11rb::protocol::composite::ConnectionExt as CompositeExt;
 #[allow(unused_imports)]
 use x11rb::protocol::damage::{self, ConnectionExt as DamageExt};
+#[allow(unused_imports)]
+use x11rb::protocol::randr::ConnectionExt as RandrExt;
 #[allow(unused_imports)]
 use x11rb::protocol::xfixes::ConnectionExt as XFixesExt;
 #[allow(unused_imports)]
 use x11rb::protocol::xproto::{self, ConnectionExt as XProtoExt};
 #[allow(unused_imports)]
-use x11rb::protocol::randr::ConnectionExt as RandrExt;
-#[allow(unused_imports)]
 use x11rb::rust_connection::RustConnection;
 #[allow(unused_imports)]
-use super::math::ortho;
+use x11rb::wrapper::ConnectionExt as WrapperExt;
 
 impl Compositor {
     pub(crate) fn new(
@@ -103,13 +103,15 @@ impl Compositor {
             // XFixes version negotiation is REQUIRED before using xfixes_set_window_shape_region.
             // Without this, some X servers (e.g. Ubuntu 20's Xorg) silently ignore the request,
             // leaving the overlay opaque to input and blocking all mouse clicks to client windows.
-            let xfixes_ver = conn.xfixes_query_version(5, 0)
+            let xfixes_ver = conn
+                .xfixes_query_version(5, 0)
                 .map_err(|e| format!("xfixes_query_version: {e}"))?
                 .reply()
                 .map_err(|e| format!("xfixes version reply: {e}"))?;
             log::info!(
                 "compositor: XFixes version {}.{}",
-                xfixes_ver.major_version, xfixes_ver.minor_version
+                xfixes_ver.major_version,
+                xfixes_ver.minor_version
             );
 
             log::info!(
@@ -130,7 +132,8 @@ impl Compositor {
             conn.xfixes_destroy_region(region)
                 .map_err(|e| format!("destroy_region: {e}"))?;
             // Flush and round-trip to ensure the shape region is applied before proceeding
-            conn.flush().map_err(|e| format!("flush after shape: {e}"))?;
+            conn.flush()
+                .map_err(|e| format!("flush after shape: {e}"))?;
             // Round-trip: get_input_focus forces the X server to process all prior requests
             conn.get_input_focus()
                 .map_err(|e| format!("sync after shape: {e}"))?
@@ -171,9 +174,7 @@ impl Compositor {
             if !ext_str.contains("GLX_EXT_texture_from_pixmap") {
                 unsafe { x11::xlib::XCloseDisplay(xlib_display) };
                 // Guard will undo redirect + release overlay
-                return Err(
-                    "GLX_EXT_texture_from_pixmap not available (nested X server?)".into(),
-                );
+                return Err("GLX_EXT_texture_from_pixmap not available (nested X server?)".into());
             }
             log::info!("GLX extensions: {ext_str}");
         }
@@ -251,17 +252,28 @@ impl Compositor {
         let (configs, n_configs) = if (configs.is_null() || n_configs == 0) && hdr_enabled {
             log::warn!("compositor: 10-bit FBConfig unavailable, falling back to 8-bit for HDR");
             let fallback_attrs: Vec<i32> = vec![
-                x11::glx::GLX_RENDER_TYPE, x11::glx::GLX_RGBA_BIT,
-                x11::glx::GLX_DRAWABLE_TYPE, x11::glx::GLX_WINDOW_BIT,
-                x11::glx::GLX_DOUBLEBUFFER, 1,
-                x11::glx::GLX_RED_SIZE, 8,
-                x11::glx::GLX_GREEN_SIZE, 8,
-                x11::glx::GLX_BLUE_SIZE, 8,
+                x11::glx::GLX_RENDER_TYPE,
+                x11::glx::GLX_RGBA_BIT,
+                x11::glx::GLX_DRAWABLE_TYPE,
+                x11::glx::GLX_WINDOW_BIT,
+                x11::glx::GLX_DOUBLEBUFFER,
+                1,
+                x11::glx::GLX_RED_SIZE,
+                8,
+                x11::glx::GLX_GREEN_SIZE,
+                8,
+                x11::glx::GLX_BLUE_SIZE,
+                8,
                 0,
             ];
             let mut n2: i32 = 0;
             let c2 = unsafe {
-                x11::glx::glXChooseFBConfig(xlib_display, screen_num, fallback_attrs.as_ptr(), &mut n2)
+                x11::glx::glXChooseFBConfig(
+                    xlib_display,
+                    screen_num,
+                    fallback_attrs.as_ptr(),
+                    &mut n2,
+                )
             };
             if c2.is_null() || n2 == 0 {
                 return Err("No suitable GLX FBConfig found (tried 10-bit and 8-bit)".into());
@@ -270,7 +282,9 @@ impl Compositor {
         } else if configs.is_null() || n_configs == 0 {
             return Err("No suitable GLX FBConfig found".into());
         } else {
-            if hdr_enabled { hdr_got_10bit = true; }
+            if hdr_enabled {
+                hdr_got_10bit = true;
+            }
             (configs, n_configs)
         };
 
@@ -299,7 +313,10 @@ impl Compositor {
             }
             x11::xlib::XFree(configs as *mut _);
         }
-        log::info!("compositor: found matching FBConfig for context (from {} candidates)", n_configs);
+        log::info!(
+            "compositor: found matching FBConfig for context (from {} candidates)",
+            n_configs
+        );
 
         // Log the actual visual depth from selected FBConfig
         let visual_depth = unsafe {
@@ -325,7 +342,10 @@ impl Compositor {
                 );
             }
         } else {
-            log::info!("compositor: HDR disabled, using standard 8-bit visual depth={}", visual_depth);
+            log::info!(
+                "compositor: HDR disabled, using standard 8-bit visual depth={}",
+                visual_depth
+            );
         }
 
         // 8. Create GLX context
@@ -357,7 +377,10 @@ impl Compositor {
             return Err("GLX context is indirect; compositor requires direct rendering".into());
         }
 
-        log::info!("compositor: direct rendering OK, creating GLX window on overlay 0x{:x}...", overlay_window);
+        log::info!(
+            "compositor: direct rendering OK, creating GLX window on overlay 0x{:x}...",
+            overlay_window
+        );
         // 9. Create GLX window on the overlay
         let glx_drawable = unsafe {
             x11::glx::glXCreateWindow(
@@ -374,12 +397,7 @@ impl Compositor {
         log::info!("compositor: GLX window created, making context current...");
         // Make context current
         let ok = unsafe {
-            x11::glx::glXMakeContextCurrent(
-                xlib_display,
-                glx_drawable,
-                glx_drawable,
-                glx_context,
-            )
+            x11::glx::glXMakeContextCurrent(xlib_display, glx_drawable, glx_drawable, glx_context)
         };
         if ok == 0 {
             return Err("glXMakeContextCurrent failed".into());
@@ -389,8 +407,7 @@ impl Compositor {
         // 10. Load TFP extension functions
         let bind_name = CString::new("glXBindTexImageEXT").unwrap();
         let release_name = CString::new("glXReleaseTexImageEXT").unwrap();
-        let bind_ptr =
-            unsafe { x11::glx::glXGetProcAddress(bind_name.as_ptr() as *const u8) };
+        let bind_ptr = unsafe { x11::glx::glXGetProcAddress(bind_name.as_ptr() as *const u8) };
         let release_ptr =
             unsafe { x11::glx::glXGetProcAddress(release_name.as_ptr() as *const u8) };
         if bind_ptr.is_none() || release_ptr.is_none() {
@@ -406,16 +423,15 @@ impl Compositor {
         {
             let swap_ext_name = CString::new("glXSwapIntervalEXT").unwrap();
             let swap_mesa_name = CString::new("glXSwapIntervalMESA").unwrap();
-            let swap_ext_ptr = unsafe {
-                x11::glx::glXGetProcAddress(swap_ext_name.as_ptr() as *const u8)
-            };
-            let swap_mesa_ptr = unsafe {
-                x11::glx::glXGetProcAddress(swap_mesa_name.as_ptr() as *const u8)
-            };
+            let swap_ext_ptr =
+                unsafe { x11::glx::glXGetProcAddress(swap_ext_name.as_ptr() as *const u8) };
+            let swap_mesa_ptr =
+                unsafe { x11::glx::glXGetProcAddress(swap_mesa_name.as_ptr() as *const u8) };
 
             if let Some(ptr) = swap_ext_ptr {
                 // glXSwapIntervalEXT(Display*, GLXDrawable, int interval)
-                type SwapIntervalEXT = unsafe extern "C" fn(*mut x11::xlib::Display, x11::glx::GLXDrawable, i32);
+                type SwapIntervalEXT =
+                    unsafe extern "C" fn(*mut x11::xlib::Display, x11::glx::GLXDrawable, i32);
                 let swap_fn: SwapIntervalEXT = unsafe { std::mem::transmute(ptr) };
                 unsafe { swap_fn(xlib_display, glx_drawable, 1) };
                 log::info!("compositor: vsync enabled via glXSwapIntervalEXT(1)");
@@ -507,7 +523,8 @@ impl Compositor {
         // visual doesn't match the source pixmap's visual produces garbled
         // textures (e.g. solid orange).  Per-visual matching fixes this.
         let mut tfp_visual_configs: HashMap<u32, (x11::glx::GLXFBConfig, bool)> = HashMap::new();
-        let mut tfp_visual_configs_10bit: HashMap<u32, (x11::glx::GLXFBConfig, bool)> = HashMap::new();
+        let mut tfp_visual_configs_10bit: HashMap<u32, (x11::glx::GLXFBConfig, bool)> =
+            HashMap::new();
         let mut fbconfig_rgba: x11::glx::GLXFBConfig = std::ptr::null_mut();
         let mut fbconfig_rgb: x11::glx::GLXFBConfig = std::ptr::null_mut();
         let mut fbconfig_rgba_10bit: x11::glx::GLXFBConfig = std::ptr::null_mut();
@@ -517,12 +534,7 @@ impl Compositor {
 
         // --- RGBA TFP configs ---
         let cfgs_rgba = unsafe {
-            x11::glx::glXChooseFBConfig(
-                xlib_display,
-                screen_num,
-                tfp_rgba_attrs.as_ptr(),
-                &mut n,
-            )
+            x11::glx::glXChooseFBConfig(xlib_display, screen_num, tfp_rgba_attrs.as_ptr(), &mut n)
         };
         if !cfgs_rgba.is_null() && n > 0 {
             fbconfig_rgba = unsafe { *cfgs_rgba };
@@ -546,12 +558,7 @@ impl Compositor {
 
         // --- RGB TFP configs ---
         let cfgs_rgb = unsafe {
-            x11::glx::glXChooseFBConfig(
-                xlib_display,
-                screen_num,
-                tfp_rgb_attrs.as_ptr(),
-                &mut n,
-            )
+            x11::glx::glXChooseFBConfig(xlib_display, screen_num, tfp_rgb_attrs.as_ptr(), &mut n)
         };
         if !cfgs_rgb.is_null() && n > 0 {
             fbconfig_rgb = unsafe { *cfgs_rgb };
@@ -598,7 +605,9 @@ impl Compositor {
                         );
                     }
                     if vid != 0 {
-                        tfp_visual_configs_10bit.entry(vid as u32).or_insert((cfg, true));
+                        tfp_visual_configs_10bit
+                            .entry(vid as u32)
+                            .or_insert((cfg, true));
                     }
                 }
                 unsafe { x11::xlib::XFree(cfgs_rgba_10 as *mut _) };
@@ -627,7 +636,9 @@ impl Compositor {
                         );
                     }
                     if vid != 0 {
-                        tfp_visual_configs_10bit.entry(vid as u32).or_insert((cfg, false));
+                        tfp_visual_configs_10bit
+                            .entry(vid as u32)
+                            .or_insert((cfg, false));
                     }
                 }
                 unsafe { x11::xlib::XFree(cfgs_rgb_10 as *mut _) };
@@ -661,13 +672,24 @@ impl Compositor {
         // P5D: Create shader cache
         let cache_dir = dirs::cache_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-            .join("jwm").join("shaders");
+            .join("jwm")
+            .join("shaders");
         let shader_cache = ShaderCache::new(cache_dir);
 
         log::info!("compositor: glow GL context created, compiling shaders...");
         // 14. Compile shaders with caching
-        let program = shader_cache.get_or_compile(&gl, "main", shaders::VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
-        let shadow_program = shader_cache.get_or_compile(&gl, "shadow", shaders::VERTEX_SHADER, shaders::SHADOW_FRAGMENT_SHADER)?;
+        let program = shader_cache.get_or_compile(
+            &gl,
+            "main",
+            shaders::VERTEX_SHADER,
+            shaders::FRAGMENT_SHADER,
+        )?;
+        let shadow_program = shader_cache.get_or_compile(
+            &gl,
+            "shadow",
+            shaders::VERTEX_SHADER,
+            shaders::SHADOW_FRAGMENT_SHADER,
+        )?;
 
         // Cache uniform locations (avoids per-frame string lookups)
         let win_uniforms = unsafe {
@@ -696,8 +718,18 @@ impl Compositor {
         };
 
         // Compile blur shaders
-        let blur_down_program = shader_cache.get_or_compile(&gl, "blur_down", shaders::BLUR_DOWN_VERTEX, shaders::BLUR_DOWN_FRAGMENT)?;
-        let blur_up_program = shader_cache.get_or_compile(&gl, "blur_up", shaders::BLUR_DOWN_VERTEX, shaders::BLUR_UP_FRAGMENT)?;
+        let blur_down_program = shader_cache.get_or_compile(
+            &gl,
+            "blur_down",
+            shaders::BLUR_DOWN_VERTEX,
+            shaders::BLUR_DOWN_FRAGMENT,
+        )?;
+        let blur_up_program = shader_cache.get_or_compile(
+            &gl,
+            "blur_up",
+            shaders::BLUR_DOWN_VERTEX,
+            shaders::BLUR_UP_FRAGMENT,
+        )?;
         let blur_down_uniforms = unsafe {
             BlurUniforms {
                 projection: gl.get_uniform_location(blur_down_program, "u_projection"),
@@ -716,7 +748,12 @@ impl Compositor {
         };
 
         // P4: Compile temporal blur mix shader
-        let temporal_blur_mix_program = shader_cache.get_or_compile(&gl, "temporal_mix", shaders::TEMPORAL_BLUR_MIX_VERTEX, shaders::TEMPORAL_BLUR_MIX_FRAGMENT)?;
+        let temporal_blur_mix_program = shader_cache.get_or_compile(
+            &gl,
+            "temporal_mix",
+            shaders::TEMPORAL_BLUR_MIX_VERTEX,
+            shaders::TEMPORAL_BLUR_MIX_FRAGMENT,
+        )?;
         let temporal_blur_mix_uniforms = unsafe {
             BlurUniforms {
                 projection: gl.get_uniform_location(temporal_blur_mix_program, "u_projection"),
@@ -727,7 +764,12 @@ impl Compositor {
         };
 
         // Compile border shader (feature 1)
-        let border_program = shader_cache.get_or_compile(&gl, "border", shaders::VERTEX_SHADER, shaders::BORDER_FRAGMENT_SHADER)?;
+        let border_program = shader_cache.get_or_compile(
+            &gl,
+            "border",
+            shaders::VERTEX_SHADER,
+            shaders::BORDER_FRAGMENT_SHADER,
+        )?;
         let border_uniforms = unsafe {
             BorderUniforms {
                 projection: gl.get_uniform_location(border_program, "u_projection"),
@@ -740,11 +782,16 @@ impl Compositor {
         };
 
         // Compile post-process shader (features 8/9/10 + magnifier)
-        let postprocess_program = shader_cache.get_or_compile(&gl, "postprocess", shaders::BLUR_DOWN_VERTEX, shaders::MAGNIFIER_POSTPROCESS_FRAGMENT_SHADER)?;
+        let postprocess_program = shader_cache.get_or_compile(
+            &gl,
+            "postprocess",
+            shaders::BLUR_DOWN_VERTEX,
+            shaders::MAGNIFIER_POSTPROCESS_FRAGMENT_SHADER,
+        )?;
         let postprocess_uniforms = unsafe {
             PostprocessUniforms {
-                projection: gl.get_uniform_location(postprocess_program, "u_projection"),  // P5F.1
-                rect: gl.get_uniform_location(postprocess_program, "u_rect"),              // P5F.1
+                projection: gl.get_uniform_location(postprocess_program, "u_projection"), // P5F.1
+                rect: gl.get_uniform_location(postprocess_program, "u_rect"),             // P5F.1
                 texture: gl.get_uniform_location(postprocess_program, "u_texture"),
                 color_temp: gl.get_uniform_location(postprocess_program, "u_color_temp"),
                 saturation: gl.get_uniform_location(postprocess_program, "u_saturation"),
@@ -754,24 +801,34 @@ impl Compositor {
                 grayscale: gl.get_uniform_location(postprocess_program, "u_grayscale"),
                 hdr_enabled: gl.get_uniform_location(postprocess_program, "u_hdr_enabled"),
                 hdr_peak_nits: gl.get_uniform_location(postprocess_program, "u_hdr_peak_nits"),
-                tone_mapping_method: gl.get_uniform_location(postprocess_program, "u_tone_mapping_method"),
+                tone_mapping_method: gl
+                    .get_uniform_location(postprocess_program, "u_tone_mapping_method"),
                 eotf_mode: gl.get_uniform_location(postprocess_program, "u_eotf_mode"),
-                output_colorspace: gl.get_uniform_location(postprocess_program, "u_output_colorspace"),
+                output_colorspace: gl
+                    .get_uniform_location(postprocess_program, "u_output_colorspace"),
             }
         };
 
         let magnifier_uniforms = unsafe {
             MagnifierUniforms {
-                magnifier_enabled: gl.get_uniform_location(postprocess_program, "u_magnifier_enabled"),
-                magnifier_center: gl.get_uniform_location(postprocess_program, "u_magnifier_center"),
-                magnifier_radius: gl.get_uniform_location(postprocess_program, "u_magnifier_radius"),
+                magnifier_enabled: gl
+                    .get_uniform_location(postprocess_program, "u_magnifier_enabled"),
+                magnifier_center: gl
+                    .get_uniform_location(postprocess_program, "u_magnifier_center"),
+                magnifier_radius: gl
+                    .get_uniform_location(postprocess_program, "u_magnifier_radius"),
                 magnifier_zoom: gl.get_uniform_location(postprocess_program, "u_magnifier_zoom"),
                 colorblind_mode: gl.get_uniform_location(postprocess_program, "u_colorblind_mode"),
             }
         };
 
         // Compile HUD shader (feature 11)
-        let hud_program = shader_cache.get_or_compile(&gl, "hud", shaders::VERTEX_SHADER, shaders::HUD_FRAGMENT_SHADER)?;
+        let hud_program = shader_cache.get_or_compile(
+            &gl,
+            "hud",
+            shaders::VERTEX_SHADER,
+            shaders::HUD_FRAGMENT_SHADER,
+        )?;
         let hud_uniforms = unsafe {
             HudUniforms {
                 projection: gl.get_uniform_location(hud_program, "u_projection"),
@@ -783,7 +840,12 @@ impl Compositor {
         };
 
         // Compile HUD text shader (feature 11b)
-        let hud_text_program = shader_cache.get_or_compile(&gl, "hud_text", shaders::VERTEX_SHADER, shaders::HUD_TEXT_FRAGMENT_SHADER)?;
+        let hud_text_program = shader_cache.get_or_compile(
+            &gl,
+            "hud_text",
+            shaders::VERTEX_SHADER,
+            shaders::HUD_TEXT_FRAGMENT_SHADER,
+        )?;
         let hud_text_uniforms = unsafe {
             HudTextUniforms {
                 projection: gl.get_uniform_location(hud_text_program, "u_projection"),
@@ -793,7 +855,12 @@ impl Compositor {
         };
 
         // Compile tag-switch transition shader
-        let transition_program = shader_cache.get_or_compile(&gl, "transition", shaders::BLUR_DOWN_VERTEX, shaders::TRANSITION_FRAGMENT_SHADER)?;
+        let transition_program = shader_cache.get_or_compile(
+            &gl,
+            "transition",
+            shaders::BLUR_DOWN_VERTEX,
+            shaders::TRANSITION_FRAGMENT_SHADER,
+        )?;
         let transition_uniforms = unsafe {
             TransitionUniforms {
                 projection: gl.get_uniform_location(transition_program, "u_projection"),
@@ -805,7 +872,12 @@ impl Compositor {
         };
 
         // Compile cube transition shader
-        let cube_program = shader_cache.get_or_compile(&gl, "cube", shaders::CUBE_VERTEX_SHADER, shaders::CUBE_FRAGMENT_SHADER)?;
+        let cube_program = shader_cache.get_or_compile(
+            &gl,
+            "cube",
+            shaders::CUBE_VERTEX_SHADER,
+            shaders::CUBE_FRAGMENT_SHADER,
+        )?;
         let cube_uniforms = unsafe {
             CubeUniforms {
                 mvp: gl.get_uniform_location(cube_program, "u_mvp"),
@@ -817,7 +889,12 @@ impl Compositor {
         };
 
         // Compile portal transition shader
-        let portal_program = shader_cache.get_or_compile(&gl, "portal", shaders::BLUR_DOWN_VERTEX, shaders::PORTAL_FRAGMENT_SHADER)?;
+        let portal_program = shader_cache.get_or_compile(
+            &gl,
+            "portal",
+            shaders::BLUR_DOWN_VERTEX,
+            shaders::PORTAL_FRAGMENT_SHADER,
+        )?;
         let portal_uniforms = unsafe {
             PortalUniforms {
                 projection: gl.get_uniform_location(portal_program, "u_projection"),
@@ -831,7 +908,12 @@ impl Compositor {
         };
 
         // Compile edge glow shader
-        let edge_glow_program = shader_cache.get_or_compile(&gl, "edge_glow", shaders::VERTEX_SHADER, shaders::EDGE_GLOW_FRAGMENT_SHADER)?;
+        let edge_glow_program = shader_cache.get_or_compile(
+            &gl,
+            "edge_glow",
+            shaders::VERTEX_SHADER,
+            shaders::EDGE_GLOW_FRAGMENT_SHADER,
+        )?;
         let edge_glow_uniforms = unsafe {
             EdgeGlowUniforms {
                 projection: gl.get_uniform_location(edge_glow_program, "u_projection"),
@@ -845,7 +927,12 @@ impl Compositor {
         };
 
         // Compile tilt shader (uses tilt vertex + tilt fragment)
-        let tilt_program = shader_cache.get_or_compile(&gl, "tilt", shaders::TILT_VERTEX_SHADER, shaders::TILT_FRAGMENT_SHADER)?;
+        let tilt_program = shader_cache.get_or_compile(
+            &gl,
+            "tilt",
+            shaders::TILT_VERTEX_SHADER,
+            shaders::TILT_FRAGMENT_SHADER,
+        )?;
         let tilt_uniforms = unsafe {
             TiltUniforms {
                 projection: gl.get_uniform_location(tilt_program, "u_projection"),
@@ -864,7 +951,12 @@ impl Compositor {
         };
 
         // Compile wobbly shader (uses wobbly vertex + standard fragment)
-        let wobbly_program = shader_cache.get_or_compile(&gl, "wobbly", shaders::WOBBLY_VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
+        let wobbly_program = shader_cache.get_or_compile(
+            &gl,
+            "wobbly",
+            shaders::WOBBLY_VERTEX_SHADER,
+            shaders::FRAGMENT_SHADER,
+        )?;
         let wobbly_uniforms = unsafe {
             WobblyUniforms {
                 projection: gl.get_uniform_location(wobbly_program, "u_projection"),
@@ -881,7 +973,12 @@ impl Compositor {
         };
 
         // Compile overview background shader
-        let overview_bg_program = shader_cache.get_or_compile(&gl, "overview_bg", shaders::VERTEX_SHADER, shaders::OVERVIEW_BG_FRAGMENT_SHADER)?;
+        let overview_bg_program = shader_cache.get_or_compile(
+            &gl,
+            "overview_bg",
+            shaders::VERTEX_SHADER,
+            shaders::OVERVIEW_BG_FRAGMENT_SHADER,
+        )?;
         let overview_bg_uniforms = unsafe {
             OverviewBgUniforms {
                 projection: gl.get_uniform_location(overview_bg_program, "u_projection"),
@@ -891,7 +988,12 @@ impl Compositor {
         };
 
         // Compile particle shader
-        let particle_program = shader_cache.get_or_compile(&gl, "particle", shaders::PARTICLE_VERTEX_SHADER, shaders::PARTICLE_FRAGMENT_SHADER)?;
+        let particle_program = shader_cache.get_or_compile(
+            &gl,
+            "particle",
+            shaders::PARTICLE_VERTEX_SHADER,
+            shaders::PARTICLE_FRAGMENT_SHADER,
+        )?;
         let particle_uniforms = unsafe {
             ParticleUniforms {
                 projection: gl.get_uniform_location(particle_program, "u_projection"),
@@ -901,8 +1003,12 @@ impl Compositor {
 
         // Create particle VAO/VBO
         let (particle_vao, particle_vbo) = unsafe {
-            let vao = gl.create_vertex_array().map_err(|e| format!("particle vao: {e}"))?;
-            let vbo = gl.create_buffer().map_err(|e| format!("particle vbo: {e}"))?;
+            let vao = gl
+                .create_vertex_array()
+                .map_err(|e| format!("particle vao: {e}"))?;
+            let vbo = gl
+                .create_buffer()
+                .map_err(|e| format!("particle vbo: {e}"))?;
             gl.bind_vertex_array(Some(vao));
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
             // Layout: vec2 position, vec4 color, float life = 7 floats per vertex
@@ -929,7 +1035,12 @@ impl Compositor {
         };
 
         // Phase 3.2: Compile genie minimize shader
-        let genie_program = shader_cache.get_or_compile(&gl, "genie", shaders::GENIE_VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
+        let genie_program = shader_cache.get_or_compile(
+            &gl,
+            "genie",
+            shaders::GENIE_VERTEX_SHADER,
+            shaders::FRAGMENT_SHADER,
+        )?;
         let genie_uniforms = unsafe {
             GenieUniforms {
                 projection: gl.get_uniform_location(genie_program, "u_projection"),
@@ -1015,7 +1126,10 @@ impl Compositor {
                 0, // copy_from_parent depth
                 sel_win,
                 root,
-                0, 0, 1, 1, // off-screen 1x1
+                0,
+                0,
+                1,
+                1, // off-screen 1x1
                 0,
                 xproto::WindowClass::INPUT_ONLY,
                 0, // copy_from_parent visual
@@ -1027,7 +1141,8 @@ impl Compositor {
             let _ = conn.flush();
             log::info!(
                 "compositor: claimed {} selection (owner=0x{:x})",
-                sel_name, sel_win
+                sel_name,
+                sel_win
             );
             sel_win
         };
@@ -1045,24 +1160,34 @@ impl Compositor {
         let (oml, vsync_method, present_mgr) = match behavior.vsync_method.as_str() {
             "oml_sync_control" => {
                 if let Some(oml_ctrl) = oml_loaded {
-                    log::info!("compositor: using GLX_OML_sync_control for per-window vblank timing");
+                    log::info!(
+                        "compositor: using GLX_OML_sync_control for per-window vblank timing"
+                    );
                     (Some(oml_ctrl), VsyncMethod::OmlSyncControl, present_loaded)
                 } else {
-                    log::warn!("compositor: GLX_OML_sync_control requested but unavailable, falling back to global vsync");
+                    log::warn!(
+                        "compositor: GLX_OML_sync_control requested but unavailable, falling back to global vsync"
+                    );
                     (None, VsyncMethod::Global, present_loaded)
                 }
             }
             "present" => {
                 if present_loaded.is_some() {
-                    log::info!("compositor: using Present extension for per-window independent presentation");
+                    log::info!(
+                        "compositor: using Present extension for per-window independent presentation"
+                    );
                     (oml_loaded, VsyncMethod::Present, present_loaded)
                 } else {
                     // Fallback chain: Present unavailable → try OML → Global
                     if let Some(oml_ctrl) = oml_loaded {
-                        log::warn!("compositor: Present unavailable, falling back to OML_sync_control");
+                        log::warn!(
+                            "compositor: Present unavailable, falling back to OML_sync_control"
+                        );
                         (Some(oml_ctrl), VsyncMethod::OmlSyncControl, None)
                     } else {
-                        log::warn!("compositor: Present and OML both unavailable, using global vsync");
+                        log::warn!(
+                            "compositor: Present and OML both unavailable, using global vsync"
+                        );
                         (None, VsyncMethod::Global, None)
                     }
                 }
@@ -1074,49 +1199,61 @@ impl Compositor {
         };
 
         // Parse opacity rules ("opacity_percent:class_name")
-        let opacity_rules: Vec<OpacityRule> = behavior.opacity_rules.iter().filter_map(|rule| {
-            let parts: Vec<&str> = rule.splitn(2, ':').collect();
-            if parts.len() == 2 {
-                if let Ok(pct) = parts[0].trim().parse::<f32>() {
-                    return Some(OpacityRule {
-                        opacity: (pct / 100.0).clamp(0.0, 1.0),
-                        class_name: parts[1].trim().to_string(),
-                    });
+        let opacity_rules: Vec<OpacityRule> = behavior
+            .opacity_rules
+            .iter()
+            .filter_map(|rule| {
+                let parts: Vec<&str> = rule.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    if let Ok(pct) = parts[0].trim().parse::<f32>() {
+                        return Some(OpacityRule {
+                            opacity: (pct / 100.0).clamp(0.0, 1.0),
+                            class_name: parts[1].trim().to_string(),
+                        });
+                    }
                 }
-            }
-            log::warn!("compositor: invalid opacity rule: {rule}");
-            None
-        }).collect();
+                log::warn!("compositor: invalid opacity rule: {rule}");
+                None
+            })
+            .collect();
 
         // Parse corner radius rules ("radius:class_name") — feature 3
-        let corner_radius_rules: Vec<CornerRadiusRule> = behavior.corner_radius_rules.iter().filter_map(|rule| {
-            let parts: Vec<&str> = rule.splitn(2, ':').collect();
-            if parts.len() == 2 {
-                if let Ok(r) = parts[0].trim().parse::<f32>() {
-                    return Some(CornerRadiusRule {
-                        radius: r.max(0.0),
-                        class_name: parts[1].trim().to_string(),
-                    });
+        let corner_radius_rules: Vec<CornerRadiusRule> = behavior
+            .corner_radius_rules
+            .iter()
+            .filter_map(|rule| {
+                let parts: Vec<&str> = rule.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    if let Ok(r) = parts[0].trim().parse::<f32>() {
+                        return Some(CornerRadiusRule {
+                            radius: r.max(0.0),
+                            class_name: parts[1].trim().to_string(),
+                        });
+                    }
                 }
-            }
-            log::warn!("compositor: invalid corner radius rule: {rule}");
-            None
-        }).collect();
+                log::warn!("compositor: invalid corner radius rule: {rule}");
+                None
+            })
+            .collect();
 
         // Parse scale rules ("scale_percent:class_name") — feature 4
-        let scale_rules: Vec<ScaleRule> = behavior.scale_rules.iter().filter_map(|rule| {
-            let parts: Vec<&str> = rule.splitn(2, ':').collect();
-            if parts.len() == 2 {
-                if let Ok(pct) = parts[0].trim().parse::<f32>() {
-                    return Some(ScaleRule {
-                        scale: (pct / 100.0).clamp(0.1, 2.0),
-                        class_name: parts[1].trim().to_string(),
-                    });
+        let scale_rules: Vec<ScaleRule> = behavior
+            .scale_rules
+            .iter()
+            .filter_map(|rule| {
+                let parts: Vec<&str> = rule.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    if let Ok(pct) = parts[0].trim().parse::<f32>() {
+                        return Some(ScaleRule {
+                            scale: (pct / 100.0).clamp(0.1, 2.0),
+                            class_name: parts[1].trim().to_string(),
+                        });
+                    }
                 }
-            }
-            log::warn!("compositor: invalid scale rule: {rule}");
-            None
-        }).collect();
+                log::warn!("compositor: invalid scale rule: {rule}");
+                None
+            })
+            .collect();
 
         // Create blur FBOs if blur is enabled
         let blur_fbos = if behavior.blur_enabled {
@@ -1136,7 +1273,12 @@ impl Compositor {
         // desktop appears immediately and the wallpaper fades in once ready.
         let wallpaper_mode = Self::parse_wallpaper_mode(&behavior.wallpaper_mode);
         let pending_wallpaper = if !behavior.wallpaper.is_empty() {
-            Some(Self::load_wallpaper_async(&behavior.wallpaper, screen_w, screen_h, wallpaper_mode))
+            Some(Self::load_wallpaper_async(
+                &behavior.wallpaper,
+                screen_w,
+                screen_h,
+                wallpaper_mode,
+            ))
         } else {
             None
         };
@@ -1158,16 +1300,24 @@ impl Compositor {
         let blur_strength_by_hz = Self::parse_blur_strength_by_hz(&behavior.blur_strength_by_hz);
 
         // Parse P4: blur_quality_by_monitor configuration
-        let blur_quality_by_monitor = Self::parse_blur_quality_by_monitor(&behavior.blur_quality_by_monitor);
+        let blur_quality_by_monitor =
+            Self::parse_blur_quality_by_monitor(&behavior.blur_quality_by_monitor);
 
         // P5: Apply dynamic blur strength based on Hz
         // Use actual primary monitor refresh rate (now queried from RandR)
         let mut dynamic_blur_strength = behavior.blur_strength;
         if !blur_strength_by_hz.is_empty() {
             // Use actual primary monitor refresh rate from RandR
-            if let Some(hz_strength) = Self::new_get_blur_strength_for_hz_static(&blur_strength_by_hz, primary_refresh_hz) {
+            if let Some(hz_strength) =
+                Self::new_get_blur_strength_for_hz_static(&blur_strength_by_hz, primary_refresh_hz)
+            {
                 dynamic_blur_strength = hz_strength;
-                log::info!("compositor: dynamic blur strength at {}Hz: {} (config: {})", primary_refresh_hz, hz_strength, behavior.blur_strength);
+                log::info!(
+                    "compositor: dynamic blur strength at {}Hz: {} (config: {})",
+                    primary_refresh_hz,
+                    hz_strength,
+                    behavior.blur_strength
+                );
             }
         }
 
@@ -1182,7 +1332,12 @@ impl Compositor {
             let hz = monitor_refresh_rates.get(id).copied().unwrap_or(60);
             log::info!(
                 "  Monitor {}: rect=({},{} {}x{}) refresh={}Hz",
-                id, x, y, w, h, hz
+                id,
+                x,
+                y,
+                w,
+                h,
+                hz
             );
         }
 
@@ -1278,7 +1433,7 @@ impl Compositor {
             tone_mapping_method: match behavior.tone_mapping_method.as_str() {
                 "reinhard" => 1,
                 "aces" => 2,
-                _ => 0,  // "none" or unknown
+                _ => 0, // "none" or unknown
             },
             // Feature 11: debug HUD
             hud_program,
@@ -1295,7 +1450,7 @@ impl Compositor {
                 frame_count: 0,
                 last_fps_update: std::time::Instant::now(),
                 fps: 0.0,
-                frame_times: std::collections::VecDeque::with_capacity(120),  // P5F.3
+                frame_times: std::collections::VecDeque::with_capacity(120), // P5F.3
                 last_frame_time: std::time::Instant::now(),
                 draw_calls: 0,
                 texture_memory_bytes: 0,
@@ -1524,8 +1679,8 @@ impl Compositor {
             // P4: Per-monitor and temporal blur
             blur_strength_by_hz,
             blur_quality_by_monitor,
-            monitor_rects,  // P5B Phase 1: Real monitor geometry
-            monitor_refresh_rates,  // P5B Phase 2: Per-monitor refresh rates
+            monitor_rects,         // P5B Phase 1: Real monitor geometry
+            monitor_refresh_rates, // P5B Phase 2: Per-monitor refresh rates
             prev_blur_fbo: None,
             prev_window_positions_hash: 0,
             temporal_blur_mix_ratio: behavior.blur_temporal_mix_ratio,
@@ -1573,7 +1728,11 @@ impl Compositor {
         })
     }
 
-    pub(crate) unsafe fn create_program(gl: &glow::Context, vs_src: &str, fs_src: &str) -> Result<glow::Program, String> {
+    pub(crate) unsafe fn create_program(
+        gl: &glow::Context,
+        vs_src: &str,
+        fs_src: &str,
+    ) -> Result<glow::Program, String> {
         unsafe {
             let vs = gl
                 .create_shader(glow::VERTEX_SHADER)
@@ -1616,5 +1775,4 @@ impl Compositor {
             Ok(program)
         }
     }
-
 }

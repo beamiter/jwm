@@ -91,18 +91,18 @@ pub fn build_from_edid(caps: &EdidHdrCapabilities, configured_peak_nits: u16) ->
         configured_peak_nits
     };
     let min_lum_units = (caps.min_luminance_nits * 10_000.0).round().max(0.0) as u16;
-    build_hdr_static_metadata_blob(eotf, primaries, max_nits, min_lum_units, max_nits, max_nits / 2)
+    build_hdr_static_metadata_blob(
+        eotf,
+        primaries,
+        max_nits,
+        min_lum_units,
+        max_nits,
+        max_nits / 2,
+    )
 }
 
 pub fn build_sdr_clear_blob() -> [u8; 32] {
-    build_hdr_static_metadata_blob(
-        Eotf::TraditionalSdr,
-        PRIMARIES_BT709,
-        0,
-        0,
-        0,
-        0,
-    )
+    build_hdr_static_metadata_blob(Eotf::TraditionalSdr, PRIMARIES_BT709, 0, 0, 0, 0)
 }
 
 #[cfg(test)]
@@ -111,14 +111,7 @@ mod tests {
 
     #[test]
     fn blob_is_32_bytes_and_zero_padded() {
-        let blob = build_hdr_static_metadata_blob(
-            Eotf::Pq,
-            PRIMARIES_BT2020,
-            1000,
-            50,
-            1000,
-            400,
-        );
+        let blob = build_hdr_static_metadata_blob(Eotf::Pq, PRIMARIES_BT2020, 1000, 50, 1000, 400);
         assert_eq!(blob.len(), 32);
         assert_eq!(&blob[30..32], &[0, 0], "trailing 2 bytes must be padding");
     }
@@ -135,7 +128,8 @@ mod tests {
         assert_eq!(blob[4], 2, "PQ encodes to 2");
         let blob = build_hdr_static_metadata_blob(Eotf::Hlg, PRIMARIES_BT709, 0, 0, 0, 0);
         assert_eq!(blob[4], 3, "HLG encodes to 3");
-        let blob = build_hdr_static_metadata_blob(Eotf::TraditionalSdr, PRIMARIES_BT709, 0, 0, 0, 0);
+        let blob =
+            build_hdr_static_metadata_blob(Eotf::TraditionalSdr, PRIMARIES_BT709, 0, 0, 0, 0);
         assert_eq!(blob[4], 0);
     }
 
@@ -147,14 +141,7 @@ mod tests {
 
     #[test]
     fn primaries_encode_at_offset_6() {
-        let blob = build_hdr_static_metadata_blob(
-            Eotf::Pq,
-            PRIMARIES_BT2020,
-            0,
-            0,
-            0,
-            0,
-        );
+        let blob = build_hdr_static_metadata_blob(Eotf::Pq, PRIMARIES_BT2020, 0, 0, 0, 0);
         assert_eq!(u16::from_ne_bytes([blob[6], blob[7]]), 35400);
         assert_eq!(u16::from_ne_bytes([blob[8], blob[9]]), 14600);
         assert_eq!(u16::from_ne_bytes([blob[10], blob[11]]), 8500);
@@ -167,14 +154,7 @@ mod tests {
 
     #[test]
     fn luminance_fields_at_correct_offsets() {
-        let blob = build_hdr_static_metadata_blob(
-            Eotf::Pq,
-            PRIMARIES_BT709,
-            1000,
-            50,
-            900,
-            400,
-        );
+        let blob = build_hdr_static_metadata_blob(Eotf::Pq, PRIMARIES_BT709, 1000, 50, 900, 400);
         assert_eq!(u16::from_ne_bytes([blob[22], blob[23]]), 1000);
         assert_eq!(u16::from_ne_bytes([blob[24], blob[25]]), 50);
         assert_eq!(u16::from_ne_bytes([blob[26], blob[27]]), 900);
@@ -192,7 +172,11 @@ mod tests {
         };
         let blob = build_from_edid(&caps, 400);
         assert_eq!(blob[4], 2, "PQ");
-        assert_eq!(u16::from_ne_bytes([blob[22], blob[23]]), 1000, "EDID nits override config peak");
+        assert_eq!(
+            u16::from_ne_bytes([blob[22], blob[23]]),
+            1000,
+            "EDID nits override config peak"
+        );
         assert_eq!(u16::from_ne_bytes([blob[6], blob[7]]), 35400, "BT2020 R.x");
     }
 
@@ -207,7 +191,11 @@ mod tests {
         };
         let blob = build_from_edid(&caps, 600);
         assert_eq!(blob[4], 3, "HLG");
-        assert_eq!(u16::from_ne_bytes([blob[22], blob[23]]), 600, "config peak used");
+        assert_eq!(
+            u16::from_ne_bytes([blob[22], blob[23]]),
+            600,
+            "config peak used"
+        );
         assert_eq!(u16::from_ne_bytes([blob[6], blob[7]]), 32000, "BT709 R.x");
     }
 }

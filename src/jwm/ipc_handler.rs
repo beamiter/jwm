@@ -1,10 +1,12 @@
 // IPC handling: command processing, queries, and event broadcasting
 
+use crate::Jwm;
 use crate::backend::api::Backend;
 use crate::config::CONFIG;
-use crate::ipc::{self, IpcEvent, IpcResponse, MonitorInfoIpc, TreeNode, WindowInfo, WorkspaceInfo};
+use crate::ipc::{
+    self, IpcEvent, IpcResponse, MonitorInfoIpc, TreeNode, WindowInfo, WorkspaceInfo,
+};
 use crate::ipc_server::IncomingIpc;
-use crate::Jwm;
 
 impl Jwm {
     pub(crate) fn process_ipc(&mut self, backend: &mut dyn Backend) {
@@ -109,18 +111,16 @@ impl Jwm {
                 let tree = self.query_tree();
                 IpcResponse::ok(Some(serde_json::to_value(tree).unwrap_or_default()))
             }
-            "get_config" => {
-                IpcResponse::ok(Some(serde_json::json!({
-                    "border_px": cfg.border_px(),
-                    "gap_px": cfg.gap_px(),
-                    "snap": cfg.snap(),
-                    "m_fact": cfg.m_fact(),
-                    "n_master": cfg.n_master(),
-                    "tags_length": cfg.tags_length(),
-                    "show_bar": cfg.show_bar(),
-                    "do_not_disturb": self.do_not_disturb,
-                })))
-            }
+            "get_config" => IpcResponse::ok(Some(serde_json::json!({
+                "border_px": cfg.border_px(),
+                "gap_px": cfg.gap_px(),
+                "snap": cfg.snap(),
+                "m_fact": cfg.m_fact(),
+                "n_master": cfg.n_master(),
+                "tags_length": cfg.tags_length(),
+                "show_bar": cfg.show_bar(),
+                "do_not_disturb": self.do_not_disturb,
+            }))),
             "get_dnd" => IpcResponse::ok(Some(serde_json::json!({
                 "enabled": self.do_not_disturb,
             }))),
@@ -130,13 +130,15 @@ impl Jwm {
                     .enumerate_outputs()
                     .into_iter()
                     .map(|o| {
-                        let metadata = o.hdr_metadata.as_ref().map(|m| serde_json::json!({
-                            "max_luminance_nits": m.max_luminance_nits,
-                            "min_luminance_nits": m.min_luminance_nits,
-                            "supports_pq": m.supports_pq,
-                            "supports_hlg": m.supports_hlg,
-                            "supports_bt2020": m.supports_bt2020,
-                        }));
+                        let metadata = o.hdr_metadata.as_ref().map(|m| {
+                            serde_json::json!({
+                                "max_luminance_nits": m.max_luminance_nits,
+                                "min_luminance_nits": m.min_luminance_nits,
+                                "supports_pq": m.supports_pq,
+                                "supports_hlg": m.supports_hlg,
+                                "supports_bt2020": m.supports_bt2020,
+                            })
+                        });
                         serde_json::json!({
                             "name": o.name,
                             "hdr_capable": o.hdr_capable,
@@ -161,20 +163,22 @@ impl Jwm {
                 let surfaces = backend.compositor_color_managed_surfaces();
                 let detail: Vec<serde_json::Value> = surfaces
                     .iter()
-                    .map(|s| serde_json::json!({
-                        "surface_object_id": s.surface_object_id,
-                        "identity": s.identity,
-                        "tf_named": s.tf_named,
-                        "tf_power": s.tf_power,
-                        "primaries_named": s.primaries_named,
-                        "min_lum": s.min_lum,
-                        "max_lum": s.max_lum,
-                        "reference_lum": s.reference_lum,
-                        "mastering_min_lum": s.mastering_min_lum,
-                        "mastering_max_lum": s.mastering_max_lum,
-                        "max_cll": s.max_cll,
-                        "max_fall": s.max_fall,
-                    }))
+                    .map(|s| {
+                        serde_json::json!({
+                            "surface_object_id": s.surface_object_id,
+                            "identity": s.identity,
+                            "tf_named": s.tf_named,
+                            "tf_power": s.tf_power,
+                            "primaries_named": s.primaries_named,
+                            "min_lum": s.min_lum,
+                            "max_lum": s.max_lum,
+                            "reference_lum": s.reference_lum,
+                            "mastering_min_lum": s.mastering_min_lum,
+                            "mastering_max_lum": s.mastering_max_lum,
+                            "max_cll": s.max_cll,
+                            "max_fall": s.max_fall,
+                        })
+                    })
                     .collect();
                 IpcResponse::ok(Some(serde_json::json!({
                     "surface_count": surfaces.len(),
@@ -247,9 +251,14 @@ impl Jwm {
     ) -> IpcResponse {
         let output_name = match args.get("output").and_then(|v| v.as_str()) {
             Some(n) => n.to_string(),
-            None => return IpcResponse::err("set_hdr_metadata: missing 'output' string".to_string()),
+            None => {
+                return IpcResponse::err("set_hdr_metadata: missing 'output' string".to_string());
+            }
         };
-        let enabled = args.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+        let enabled = args
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
         let output_id = match backend
             .output_ops()
             .enumerate_outputs()
@@ -257,7 +266,11 @@ impl Jwm {
             .find(|o| o.name == output_name)
         {
             Some(o) => o.id,
-            None => return IpcResponse::err(format!("set_hdr_metadata: output '{output_name}' not found")),
+            None => {
+                return IpcResponse::err(format!(
+                    "set_hdr_metadata: output '{output_name}' not found"
+                ));
+            }
         };
         match backend.set_hdr_metadata(output_id, enabled) {
             Ok(()) => IpcResponse::ok(Some(serde_json::json!({
@@ -328,18 +341,13 @@ impl Jwm {
             }
         };
 
-        let target_mon_key = self
-            .state
-            .monitor_order
-            .iter()
-            .copied()
-            .find(|&mk| {
-                self.state
-                    .monitors
-                    .get(mk)
-                    .map(|m| m.num == target_num)
-                    .unwrap_or(false)
-            });
+        let target_mon_key = self.state.monitor_order.iter().copied().find(|&mk| {
+            self.state
+                .monitors
+                .get(mk)
+                .map(|m| m.num == target_num)
+                .unwrap_or(false)
+        });
         let target_mon_key = match target_mon_key {
             Some(k) => k,
             None => {
@@ -362,7 +370,9 @@ impl Jwm {
                 let frames = args.get("frames").and_then(|v| v.as_u64()).unwrap_or(600) as u32;
                 let warmup = args.get("warmup").and_then(|v| v.as_u64()).unwrap_or(60) as u32;
                 if backend.compositor_benchmark_start(frames, warmup) {
-                    IpcResponse::ok(Some(serde_json::json!({"status": "started", "frames": frames, "warmup": warmup})))
+                    IpcResponse::ok(Some(
+                        serde_json::json!({"status": "started", "frames": frames, "warmup": warmup}),
+                    ))
                 } else {
                     IpcResponse::err("compositor not available".to_string())
                 }

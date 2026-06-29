@@ -11,11 +11,24 @@ use std::time::Instant;
 
 /// Common window classes that should be pre-warmed
 const COMMON_WINDOW_CLASSES: &[&str] = &[
-    "firefox", "chrome", "chromium", "brave",          // Browsers
-    "alacritty", "kitty", "wezterm", "gnome-terminal", // Terminals
-    "code", "vscode", "sublime_text", "emacs", "vim",  // Editors
-    "mpv", "vlc", "ffplay",                            // Video players
-    "steam", "lutris",                                 // Gaming
+    "firefox",
+    "chrome",
+    "chromium",
+    "brave", // Browsers
+    "alacritty",
+    "kitty",
+    "wezterm",
+    "gnome-terminal", // Terminals
+    "code",
+    "vscode",
+    "sublime_text",
+    "emacs",
+    "vim", // Editors
+    "mpv",
+    "vlc",
+    "ffplay", // Video players
+    "steam",
+    "lutris", // Gaming
 ];
 
 /// Blur size frequency tracker
@@ -48,7 +61,9 @@ impl BlurSizeStats {
 
     /// Get top N most frequent blur sizes
     pub fn top_sizes(&self, n: usize) -> Vec<((u32, u32), u64)> {
-        let mut sizes: Vec<_> = self.size_frequency.iter()
+        let mut sizes: Vec<_> = self
+            .size_frequency
+            .iter()
             .map(|(&size, &count)| (size, count))
             .collect();
         sizes.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
@@ -58,7 +73,8 @@ impl BlurSizeStats {
     /// Get cache warmup candidates (sizes with >5% frequency)
     pub fn warmup_candidates(&self) -> Vec<(u32, u32)> {
         let threshold = (self.total_blurs as f32 * 0.05) as u64;
-        self.size_frequency.iter()
+        self.size_frequency
+            .iter()
             .filter(|&(_, count)| *count > threshold)
             .map(|(size, _)| *size)
             .collect()
@@ -143,7 +159,8 @@ impl CacheWarmupManager {
 
     /// Record shader variant usage
     pub fn record_shader_variant(&mut self, class_name: &str, features: Vec<String>) {
-        let variant = self.shader_variants
+        let variant = self
+            .shader_variants
             .entry(class_name.to_string())
             .or_insert_with(|| ShaderVariant::new(class_name.to_string(), features.clone()));
         variant.record_hit();
@@ -171,12 +188,7 @@ impl CacheWarmupManager {
 
         // Phase 2: Pre-warm common blur sizes
         // Common resolutions: 1920x1080, 2560x1440, 3840x2160
-        let common_blur_sizes = vec![
-            (1920, 1080),
-            (2560, 1440),
-            (1280, 720),
-            (3840, 2160),
-        ];
+        let common_blur_sizes = vec![(1920, 1080), (2560, 1440), (1280, 720), (3840, 2160)];
         self.prewarmed_blur_sizes.clone_from(&common_blur_sizes);
 
         // Call warmup function (provided by compositor)
@@ -212,7 +224,8 @@ impl CacheWarmupManager {
         let candidates = self.blur_stats.warmup_candidates();
 
         // Only warmup if we have new candidates
-        let new_candidates: Vec<_> = candidates.iter()
+        let new_candidates: Vec<_> = candidates
+            .iter()
             .filter(|size| !self.prewarmed_blur_sizes.contains(size))
             .copied()
             .collect();
@@ -322,7 +335,9 @@ impl ShaderFeatureDetector {
 
     /// Get most common features
     pub fn common_features(&self, n: usize) -> Vec<(String, u64)> {
-        let mut features: Vec<_> = self.feature_counts.iter()
+        let mut features: Vec<_> = self
+            .feature_counts
+            .iter()
             .map(|(feat, &count)| (feat.clone(), count))
             .collect();
         features.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
@@ -331,7 +346,9 @@ impl ShaderFeatureDetector {
 
     /// Get most common feature combinations
     pub fn common_combos(&self, n: usize) -> Vec<(Vec<String>, u64)> {
-        let mut combos: Vec<_> = self.feature_combos.iter()
+        let mut combos: Vec<_> = self
+            .feature_combos
+            .iter()
             .map(|(combo, &count)| (combo.clone(), count))
             .collect();
         combos.sort_by_key(|&(_, count)| std::cmp::Reverse(count));

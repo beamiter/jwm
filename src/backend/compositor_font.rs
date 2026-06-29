@@ -298,7 +298,10 @@ mod tests {
         // 'A' has set bits, space does not.
         let fg = [10, 20, 30, 40];
         let (px, _, _) = render_text_to_rgba("A", 1, fg);
-        assert!(px.chunks_exact(4).any(|p| p == fg), "expected some fg pixels");
+        assert!(
+            px.chunks_exact(4).any(|p| p == fg),
+            "expected some fg pixels"
+        );
         assert!(
             px.chunks_exact(4).any(|p| p == [0, 0, 0, 0]),
             "expected some transparent pixels"

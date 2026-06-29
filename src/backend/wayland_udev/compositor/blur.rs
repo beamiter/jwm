@@ -43,9 +43,20 @@ impl WaylandCompositor {
                 gl.Viewport(0, 0, level.width as i32, level.height as i32);
 
                 // Set uniforms
-                gl.Uniform4f(self.blur_uniforms.rect, 0.0, 0.0, level.width as f32, level.height as f32);
+                gl.Uniform4f(
+                    self.blur_uniforms.rect,
+                    0.0,
+                    0.0,
+                    level.width as f32,
+                    level.height as f32,
+                );
                 let blur_proj = ortho(0.0, level.width as f32, level.height as f32, 0.0);
-                gl.UniformMatrix4fv(self.blur_uniforms.projection, 1, ffi::FALSE as u8, blur_proj.as_ptr());
+                gl.UniformMatrix4fv(
+                    self.blur_uniforms.projection,
+                    1,
+                    ffi::FALSE as u8,
+                    blur_proj.as_ptr(),
+                );
                 gl.Uniform2f(
                     self.blur_uniforms.halfpixel,
                     0.5 / level.width as f32,
@@ -71,9 +82,20 @@ impl WaylandCompositor {
                 gl.BindFramebuffer(ffi::FRAMEBUFFER, level.fbo);
                 gl.Viewport(0, 0, level.width as i32, level.height as i32);
 
-                gl.Uniform4f(self.blur_uniforms.rect, 0.0, 0.0, level.width as f32, level.height as f32);
+                gl.Uniform4f(
+                    self.blur_uniforms.rect,
+                    0.0,
+                    0.0,
+                    level.width as f32,
+                    level.height as f32,
+                );
                 let blur_proj = ortho(0.0, level.width as f32, level.height as f32, 0.0);
-                gl.UniformMatrix4fv(self.blur_uniforms.projection, 1, ffi::FALSE as u8, blur_proj.as_ptr());
+                gl.UniformMatrix4fv(
+                    self.blur_uniforms.projection,
+                    1,
+                    ffi::FALSE as u8,
+                    blur_proj.as_ptr(),
+                );
                 gl.Uniform2f(
                     self.blur_uniforms.halfpixel,
                     0.5 / level.width as f32,
@@ -102,9 +124,16 @@ impl WaylandCompositor {
             gl.BindFramebuffer(ffi::READ_FRAMEBUFFER, self.output_fbo);
             gl.BindFramebuffer(ffi::DRAW_FRAMEBUFFER, self.scene_fbo);
             gl.BlitFramebuffer(
-                0, 0, self.screen_w as i32, self.screen_h as i32,
-                0, 0, self.screen_w as i32, self.screen_h as i32,
-                ffi::COLOR_BUFFER_BIT, ffi::NEAREST,
+                0,
+                0,
+                self.screen_w as i32,
+                self.screen_h as i32,
+                0,
+                0,
+                self.screen_w as i32,
+                self.screen_h as i32,
+                ffi::COLOR_BUFFER_BIT,
+                ffi::NEAREST,
             );
             gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
         }

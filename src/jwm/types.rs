@@ -1,20 +1,23 @@
-use crate::backend::api::{Backend, ResizeEdge, Geometry};
+use crate::backend::api::{Backend, Geometry, ResizeEdge};
+use crate::backend::common_define::WindowId;
 use crate::backend::common_define::{KeySym, Mods, MouseButton};
 use crate::core::layout::LayoutEnum;
 use crate::core::models::ClientKey;
+use shared_structures::SharedRingBuffer;
+use std::process::Child;
 use std::rc::Rc;
 use std::time::Instant;
-use std::process::Child;
-use shared_structures::SharedRingBuffer;
-use crate::backend::common_define::WindowId;
 
 pub const WITHDRAWN_STATE: u8 = 0;
 pub const STEXT_MAX_LEN: usize = 512;
 pub const NORMAL_STATE: u8 = 1;
 pub const ICONIC_STATE: u8 = 2;
 
-pub type WMFuncType =
-    fn(&mut crate::jwm::Jwm, &mut dyn Backend, &WMArgEnum) -> Result<(), Box<dyn std::error::Error>>;
+pub type WMFuncType = fn(
+    &mut crate::jwm::Jwm,
+    &mut dyn Backend,
+    &WMArgEnum,
+) -> Result<(), Box<dyn std::error::Error>>;
 
 pub type MonitorIndex = i32;
 

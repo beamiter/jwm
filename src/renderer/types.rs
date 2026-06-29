@@ -1,5 +1,4 @@
 /// Rendering types and parameters
-
 use std::fmt;
 
 // === Opaque IDs for GPU resources ===

@@ -135,16 +135,11 @@ impl RecordingState {
                 gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, self.pbo[other_pbo]);
 
                 let buffer_size = (self.width * self.height * 4) as isize;
-                let ptr = gl.MapBufferRange(
-                    ffi::PIXEL_PACK_BUFFER,
-                    0,
-                    buffer_size,
-                    ffi::MAP_READ_BIT,
-                );
+                let ptr =
+                    gl.MapBufferRange(ffi::PIXEL_PACK_BUFFER, 0, buffer_size, ffi::MAP_READ_BIT);
 
                 if !ptr.is_null() {
-                    let data =
-                        std::slice::from_raw_parts(ptr as *const u8, buffer_size as usize);
+                    let data = std::slice::from_raw_parts(ptr as *const u8, buffer_size as usize);
 
                     if let Some(ref mut child) = self.child {
                         if let Some(ref mut stdin) = child.stdin {

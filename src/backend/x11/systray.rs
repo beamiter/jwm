@@ -82,8 +82,11 @@ impl<C: Connection + Send + Sync + 'static> SystemTray<C> {
             return Ok(false);
         }
 
-        self.conn
-            .set_selection_owner(self.tray_window, self.selection_atom, x11rb::CURRENT_TIME)?;
+        self.conn.set_selection_owner(
+            self.tray_window,
+            self.selection_atom,
+            x11rb::CURRENT_TIME,
+        )?;
 
         let owner = self
             .conn
@@ -152,12 +155,11 @@ impl<C: Connection + Send + Sync + 'static> SystemTray<C> {
         }
 
         // Reparent icon into tray window
-        self.conn
-            .change_window_attributes(
-                icon_window,
-                &ChangeWindowAttributesAux::new()
-                    .event_mask(EventMask::STRUCTURE_NOTIFY | EventMask::PROPERTY_CHANGE),
-            )?;
+        self.conn.change_window_attributes(
+            icon_window,
+            &ChangeWindowAttributesAux::new()
+                .event_mask(EventMask::STRUCTURE_NOTIFY | EventMask::PROPERTY_CHANGE),
+        )?;
 
         self.conn
             .reparent_window(icon_window, self.tray_window, 0, 0)?;
@@ -299,10 +301,14 @@ impl<C: Connection + Send + Sync + 'static> SystemTray<C> {
     }
 
     fn read_xembed_mapped(&self, window: u32) -> bool {
-        let reply = match self
-            .conn
-            .get_property(false, window, self.atoms._XEMBED_INFO, AtomEnum::ANY, 0, 2)
-        {
+        let reply = match self.conn.get_property(
+            false,
+            window,
+            self.atoms._XEMBED_INFO,
+            AtomEnum::ANY,
+            0,
+            2,
+        ) {
             Ok(cookie) => match cookie.reply() {
                 Ok(r) => r,
                 Err(_) => return true,

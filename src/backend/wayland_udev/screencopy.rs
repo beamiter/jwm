@@ -3,7 +3,6 @@
 /// This allows clients like `grim` to request screen content from the compositor.
 /// The compositor captures the framebuffer during the render loop and copies the data
 /// into the client-provided wl_shm buffer.
-
 use crate::sync_ext::MutexExt;
 use std::sync::{Arc, Mutex};
 
@@ -100,7 +99,14 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for JwmWaylandState {
                 overlay_cursor,
                 output: wl_output,
             } => {
-                handle_capture(state, data_init, frame_new_id, overlay_cursor, wl_output, None);
+                handle_capture(
+                    state,
+                    data_init,
+                    frame_new_id,
+                    overlay_cursor,
+                    wl_output,
+                    None,
+                );
             }
             zwlr_screencopy_manager_v1::Request::CaptureOutputRegion {
                 frame: frame_new_id,
@@ -150,7 +156,10 @@ fn handle_capture(
         Some(o) => o,
         None => {
             // No matching output → create the frame but immediately fail it.
-            warn!("[screencopy] no matching output for wl_output {:?}", wl_output.id());
+            warn!(
+                "[screencopy] no matching output for wl_output {:?}",
+                wl_output.id()
+            );
             let frame_data = ScreencopyFrameData {
                 output: None,
                 region,
@@ -290,7 +299,10 @@ fn queue_copy(
             return;
         }
     };
-    debug!("[screencopy] copy request queued for output {}", output.name());
+    debug!(
+        "[screencopy] copy request queued for output {}",
+        output.name()
+    );
     let mut queue = data.pending_queue.lock_safe();
     queue.push(PendingScreencopyFrame {
         frame: frame.clone(),
@@ -307,28 +319,23 @@ fn queue_copy(
 /// Validate a region against the output bounds. Pure helper so it can be
 /// unit-tested without standing up a wayland Display. Returns true iff the
 /// region is fully inside [0, out_w) × [0, out_h) with positive dimensions.
-pub(crate) fn region_is_valid(
-    rx: i32,
-    ry: i32,
-    rw: i32,
-    rh: i32,
-    out_w: u32,
-    out_h: u32,
-) -> bool {
+pub(crate) fn region_is_valid(rx: i32, ry: i32, rw: i32, rh: i32, out_w: u32, out_h: u32) -> bool {
     if rw <= 0 || rh <= 0 || rx < 0 || ry < 0 {
         return false;
     }
     // i32 → u32 conversion is now safe (we just bounded everything ≥0).
     let (rx, ry, rw, rh) = (rx as u32, ry as u32, rw as u32, rh as u32);
-    let Some(right) = rx.checked_add(rw) else { return false };
-    let Some(bottom) = ry.checked_add(rh) else { return false };
+    let Some(right) = rx.checked_add(rw) else {
+        return false;
+    };
+    let Some(bottom) = ry.checked_add(rh) else {
+        return false;
+    };
     right <= out_w && bottom <= out_h
 }
 
 /// Create the zwlr_screencopy_manager_v1 global and return the shared pending queue.
-pub fn init_screencopy_manager(
-    dh: &DisplayHandle,
-) -> PendingScreencopyQueue {
+pub fn init_screencopy_manager(dh: &DisplayHandle) -> PendingScreencopyQueue {
     let queue = new_pending_screencopy_queue();
     // Version 3 – includes buffer_done, linux_dmabuf, copy_with_damage.
     dh.create_global::<JwmWaylandState, ZwlrScreencopyManagerV1, _>(3, ());

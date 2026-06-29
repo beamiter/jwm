@@ -5,8 +5,8 @@
 use crate::backend::api::{AllowedAction, Backend};
 use crate::backend::common_define::WindowId;
 use crate::core::models::ClientKey;
-use crate::jwm::types::STEXT_MAX_LEN;
 use crate::jwm::Jwm;
+use crate::jwm::types::STEXT_MAX_LEN;
 use log::debug;
 
 impl Jwm {
@@ -126,7 +126,11 @@ impl Jwm {
     }
 
     /// 从窗口获取标题文本
-    pub(crate) fn fetch_window_title(&mut self, backend: &mut dyn Backend, window: WindowId) -> String {
+    pub(crate) fn fetch_window_title(
+        &mut self,
+        backend: &mut dyn Backend,
+        window: WindowId,
+    ) -> String {
         let title = backend.property_ops().get_title(window);
         Self::truncate_chars(title, STEXT_MAX_LEN)
     }
@@ -265,11 +269,7 @@ impl Jwm {
         Ok(())
     }
 
-    pub(crate) fn apply_motif_hints(
-        &mut self,
-        backend: &mut dyn Backend,
-        client_key: ClientKey,
-    ) {
+    pub(crate) fn apply_motif_hints(&mut self, backend: &mut dyn Backend, client_key: ClientKey) {
         let win = match self.state.clients.get(client_key) {
             Some(c) => c.win,
             None => return,
@@ -339,11 +339,7 @@ impl Jwm {
         let _ = backend.property_ops().set_allowed_actions(win, &actions);
     }
 
-    pub(crate) fn read_sync_counter(
-        &mut self,
-        backend: &mut dyn Backend,
-        client_key: ClientKey,
-    ) {
+    pub(crate) fn read_sync_counter(&mut self, backend: &mut dyn Backend, client_key: ClientKey) {
         let win = match self.state.clients.get(client_key) {
             Some(c) => c.win,
             None => return,

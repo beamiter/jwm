@@ -25,7 +25,13 @@ impl WaylandCompositor {
             );
 
             if rect_loc >= 0 {
-                gl.Uniform4f(rect_loc, 0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
+                gl.Uniform4f(
+                    rect_loc,
+                    0.0,
+                    0.0,
+                    self.screen_w as f32,
+                    self.screen_h as f32,
+                );
             }
             if proj_loc >= 0 {
                 gl.UniformMatrix4fv(proj_loc, 1, ffi::FALSE as u8, projection.as_ptr());
@@ -65,7 +71,12 @@ impl WaylandCompositor {
                     let sy = entry.current_y - (sh - entry.current_h) * 0.5;
                     (sx, sy, sw, sh)
                 } else {
-                    (entry.current_x, entry.current_y, entry.current_w, entry.current_h)
+                    (
+                        entry.current_x,
+                        entry.current_y,
+                        entry.current_w,
+                        entry.current_h,
+                    )
                 };
 
                 // Draw shadow behind each window
@@ -232,10 +243,8 @@ impl WaylandCompositor {
 
             // Draw dark semi-transparent overlay over the entire screen
             gl.UseProgram(self.overview_bg_program);
-            let rect_loc = gl.GetUniformLocation(
-                self.overview_bg_program,
-                b"u_rect\0".as_ptr() as *const _,
-            );
+            let rect_loc =
+                gl.GetUniformLocation(self.overview_bg_program, b"u_rect\0".as_ptr() as *const _);
             let proj_loc = gl.GetUniformLocation(
                 self.overview_bg_program,
                 b"u_projection\0".as_ptr() as *const _,
@@ -246,7 +255,13 @@ impl WaylandCompositor {
             );
 
             if rect_loc >= 0 {
-                gl.Uniform4f(rect_loc, 0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
+                gl.Uniform4f(
+                    rect_loc,
+                    0.0,
+                    0.0,
+                    self.screen_w as f32,
+                    self.screen_h as f32,
+                );
             }
             if proj_loc >= 0 {
                 gl.UniformMatrix4fv(proj_loc, 1, ffi::FALSE as u8, projection.as_ptr());
@@ -363,7 +378,13 @@ impl WaylandCompositor {
                     ffi::FALSE as u8,
                     projection.as_ptr(),
                 );
-                gl.Uniform4f(self.border_uniforms.rect, bar_x, bar_y, bar_w, TAB_BAR_HEIGHT);
+                gl.Uniform4f(
+                    self.border_uniforms.rect,
+                    bar_x,
+                    bar_y,
+                    bar_w,
+                    TAB_BAR_HEIGHT,
+                );
                 gl.Uniform4f(self.border_uniforms.border_color, 0.1, 0.1, 0.15, 0.9);
                 gl.Uniform2f(self.border_uniforms.size, bar_w, TAB_BAR_HEIGHT);
                 gl.Uniform1f(self.border_uniforms.radius, 4.0);
@@ -377,7 +398,13 @@ impl WaylandCompositor {
 
                     if *is_active {
                         // Highlighted active tab
-                        gl.Uniform4f(self.border_uniforms.rect, tab_x, bar_y, tab_w, TAB_BAR_HEIGHT);
+                        gl.Uniform4f(
+                            self.border_uniforms.rect,
+                            tab_x,
+                            bar_y,
+                            tab_w,
+                            TAB_BAR_HEIGHT,
+                        );
                         gl.Uniform4f(self.border_uniforms.border_color, 0.2, 0.3, 0.5, 0.9);
                         gl.Uniform2f(self.border_uniforms.size, tab_w, TAB_BAR_HEIGHT);
                         gl.Uniform1f(self.border_uniforms.radius, 4.0);

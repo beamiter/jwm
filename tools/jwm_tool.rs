@@ -1,13 +1,13 @@
 use chrono::Local;
 use clap::{Parser, Subcommand};
 use glob::glob;
-use nix::fcntl::{open, OFlag};
-use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
-use nix::sys::signal::{kill, Signal};
+use nix::fcntl::{OFlag, open};
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+use nix::sys::signal::{Signal, kill};
 use nix::sys::stat::Mode;
 use nix::sys::wait::WaitStatus;
-use nix::sys::wait::{waitpid, WaitPidFlag};
-use nix::unistd::{mkfifo, read, Pid};
+use nix::sys::wait::{WaitPidFlag, waitpid};
+use nix::unistd::{Pid, mkfifo, read};
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::flag;
 use std::collections::VecDeque;
@@ -20,8 +20,8 @@ use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -48,7 +48,10 @@ fn control_pipe_path(daemon_pid: i32) -> PathBuf {
 }
 
 fn response_path(control_pipe: &Path) -> PathBuf {
-    let name = control_pipe.file_name().unwrap_or_default().to_string_lossy();
+    let name = control_pipe
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
     runtime_dir().join(format!("{}_response", name))
 }
 
@@ -72,7 +75,7 @@ fn control_pipe_glob_pattern() -> String {
                   jwm-tool msg view --args '{\"tag\":2}'   # 切换到标签 2\n  \
                   jwm-tool msg get_windows               # 查询所有窗口\n  \
                   jwm-tool msg get_windows --raw          # 查询并输出原始 JSON\n  \
-                  jwm-tool rebuild                       # 重新编译并重启 JWM",
+                  jwm-tool rebuild                       # 重新编译并重启 JWM"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -155,7 +158,7 @@ enum Commands {
                       jwm-tool msg get_windows --raw                    # 原始 JSON 输出\n  \
                       jwm-tool msg reload_config                        # 重新加载配置\n  \
                       jwm-tool msg \"\" --subscribe 'window,tag'          # 订阅事件流\n  \
-                      jwm-tool msg \"\" --subscribe '*'                   # 订阅全部事件",
+                      jwm-tool msg \"\" --subscribe '*'                   # 订阅全部事件"
     )]
     Msg {
         /// 命令或查询名称（get_ 前缀自动识别为查询）
@@ -164,20 +167,25 @@ enum Commands {
                       查询: get_windows, get_workspaces, get_monitors, get_tree, get_config, get_version")]
         name: String,
         /// JSON 参数，格式取决于命令类型
-        #[arg(long, default_value = "null",
-              help = "JSON 参数，格式取决于命令类型\n\
+        #[arg(
+            long,
+            default_value = "null",
+            help = "JSON 参数，格式取决于命令类型\n\
                       整数参数: '{\"value\": N}' 或直接 'N'  (focusstack, movestack, ...)\n\
                       浮点参数: '{\"value\": F}' 或直接 'F'  (setmfact, setcfact)\n\
                       标签参数: '{\"tag\": N}'               (view, tag, toggleview, ...)\n\
                       布局参数: '{\"layout\": \"name\"}'       (setlayout)\n\
-                      命令参数: '{\"cmd\": [\"prog\", ...]}'   (spawn)")]
+                      命令参数: '{\"cmd\": [\"prog\", ...]}'   (spawn)"
+        )]
         args: String,
         /// 订阅事件流（逗号分隔的主题列表）
-        #[arg(long,
-              help = "订阅事件流（逗号分隔的主题列表）\n\
+        #[arg(
+            long,
+            help = "订阅事件流（逗号分隔的主题列表）\n\
                       主题: window, tag, layout, monitor, config, * (全部)\n\
                       事件: window/new, window/close, window/focus, window/title,\n\
-                            tag/view, layout/set, monitor/focus, config/reload")]
+                            tag/view, layout/set, monitor/focus, config/reload"
+        )]
         subscribe: Option<String>,
         /// 输出原始 JSON（不做格式化美化）
         #[arg(long)]
@@ -425,7 +433,7 @@ fn read_commands_from_fd<F: AsFd>(fd: F, buf: &mut String) -> io::Result<Vec<Str
             return Err(io::Error::new(
                 io::ErrorKind::Other,
                 format!("读取FIFO失败: {e}"),
-            ))
+            ));
         }
     };
 
@@ -549,7 +557,10 @@ fn run_daemon(jwm_binary: PathBuf, backend: Option<String>) -> io::Result<()> {
         // Check JWM process health
         if let Some(pid) = mgr.jwm_pid {
             if kill(Pid::from_raw(pid), None).is_err() {
-                log_line(&format!("检测到JWM意外退出 (PID: {}), 守护进程一并退出", pid));
+                log_line(&format!(
+                    "检测到JWM意外退出 (PID: {}), 守护进程一并退出",
+                    pid
+                ));
                 mgr.jwm_pid = None;
                 mgr.jwm_child = None;
                 cleanup_resources(&control_pipe);
@@ -591,11 +602,7 @@ fn find_control_pipe() -> Option<PathBuf> {
         return None;
     }
     let pipe = control_pipe_for(pid);
-    if is_fifo(&pipe) {
-        Some(pipe)
-    } else {
-        None
-    }
+    if is_fifo(&pipe) { Some(pipe) } else { None }
 }
 
 fn send_command(cmd: &str) -> io::Result<()> {
@@ -759,10 +766,7 @@ fn install_jwm(jwm_dir: &str) -> io::Result<()> {
         ("jwm", jwm_dir.join("target/release/jwm")),
         ("jwm-tool", jwm_dir.join("target/release/jwm-tool")),
         ("jwm-x11.desktop", jwm_dir.join("jwm-x11.desktop")),
-        (
-            "jwm-wayland.desktop",
-            jwm_dir.join("jwm-wayland.desktop"),
-        ),
+        ("jwm-wayland.desktop", jwm_dir.join("jwm-wayland.desktop")),
     ];
 
     for (name, path) in files_to_check {
@@ -931,7 +935,12 @@ fn main() -> io::Result<()> {
 
         Commands::Debug => debug_info(),
 
-        Commands::Msg { name, args, subscribe, raw } => {
+        Commands::Msg {
+            name,
+            args,
+            subscribe,
+            raw,
+        } => {
             run_ipc_msg(&name, &args, subscribe.as_deref(), raw)?;
         }
     }
@@ -983,7 +992,9 @@ fn run_ipc_msg(name: &str, args_str: &str, subscribe: Option<&str>, raw: bool) -
                         println!("{}", line.trim());
                     } else {
                         match serde_json::from_str::<serde_json::Value>(line.trim()) {
-                            Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or(line)),
+                            Ok(v) => {
+                                println!("{}", serde_json::to_string_pretty(&v).unwrap_or(line))
+                            }
                             Err(_) => println!("{}", line.trim()),
                         }
                     }
@@ -1033,7 +1044,12 @@ fn read_ipc_line(stream: &mut UnixStream) -> io::Result<String> {
     let mut byte = [0u8; 1];
     loop {
         match io::Read::read(stream, &mut byte) {
-            Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed")),
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "connection closed",
+                ));
+            }
             Ok(_) => {
                 if byte[0] == b'\n' {
                     return Ok(String::from_utf8_lossy(&buf).to_string());

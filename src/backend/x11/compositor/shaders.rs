@@ -962,4 +962,3 @@ void main() {
     frag_color = mix(current, previous, u_temporal_mix);
 }
 "#;
-

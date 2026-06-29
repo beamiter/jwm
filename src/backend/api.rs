@@ -32,8 +32,8 @@ pub struct CompositorMetrics {
     pub window_count: usize,
     pub blur_quality: String,
     pub vrr_enabled: bool,
-    pub vrr_active: bool,  // VRR currently active for focused game window
-    pub current_refresh_rate: u32,  // Current target refresh rate (Hz)
+    pub vrr_active: bool, // VRR currently active for focused game window
+    pub current_refresh_rate: u32, // Current target refresh rate (Hz)
     // Task 8: Input latency metrics
     pub input_latency_avg_ms: f32,
     pub input_latency_p50_ms: f32,
@@ -284,7 +284,9 @@ pub enum BackendEvent {
     OutputRemoved(OutputId),
     OutputChanged(OutputInfo),
     /// Apply a client-requested output configuration (wlr-output-management).
-    OutputConfigure { changes: Vec<OutputConfigChange> },
+    OutputConfigure {
+        changes: Vec<OutputConfigChange>,
+    },
     ScreenLayoutChanged,
     ChildProcessExited,
     ConfigChanged,
@@ -398,7 +400,9 @@ pub enum BackendEvent {
         button: u32,
     },
     MappingNotify,
-    DamageNotify { drawable: WindowId },
+    DamageNotify {
+        drawable: WindowId,
+    },
 
     // === Touchpad gesture events (Wayland only) ===
     /// A 3+ finger swipe gesture has completed and was intercepted by the
@@ -685,7 +689,12 @@ pub trait PropertyOps: Send {
         None
     }
 
-    fn send_sync_request(&self, _win: WindowId, _counter: u32, _value: u64) -> Result<(), BackendError> {
+    fn send_sync_request(
+        &self,
+        _win: WindowId,
+        _counter: u32,
+        _value: u64,
+    ) -> Result<(), BackendError> {
         Ok(())
     }
 }
@@ -787,10 +796,7 @@ pub trait OutputOps: Send {
     }
 
     /// Get current gamma ramp for an output
-    fn get_gamma_ramp(
-        &self,
-        _output: OutputId,
-    ) -> Option<(Vec<u16>, Vec<u16>, Vec<u16>)> {
+    fn get_gamma_ramp(&self, _output: OutputId) -> Option<(Vec<u16>, Vec<u16>, Vec<u16>)> {
         None
     }
 }
@@ -802,9 +808,13 @@ pub trait KeyOps: Send {
 
     /// Grab the entire keyboard so all key events are delivered to the WM.
     /// Used for modal states like overview mode.
-    fn grab_keyboard(&self, _root: WindowId) -> Result<(), BackendError> { Ok(()) }
+    fn grab_keyboard(&self, _root: WindowId) -> Result<(), BackendError> {
+        Ok(())
+    }
     /// Release the keyboard grab.
-    fn ungrab_keyboard(&self) -> Result<(), BackendError> { Ok(()) }
+    fn ungrab_keyboard(&self) -> Result<(), BackendError> {
+        Ok(())
+    }
 
     // 辅助转换
     fn clean_mods(&self, raw_state: u16) -> Mods;
@@ -820,7 +830,12 @@ pub trait EwmhFacade: Send {
     fn setup_supporting_wm_check(&self, wm_name: &str) -> Result<WindowId, BackendError>;
     fn declare_supported(&self, features: &[EwmhFeature]) -> Result<(), BackendError>;
     fn reset_root_properties(&self) -> Result<(), BackendError>;
-    fn set_desktop_info(&self, current: u32, total: u32, names: &[&str]) -> Result<(), BackendError>;
+    fn set_desktop_info(
+        &self,
+        current: u32,
+        total: u32,
+        names: &[&str],
+    ) -> Result<(), BackendError>;
     fn set_workarea(&self, _areas: &[(i32, i32, u32, u32)]) -> Result<(), BackendError> {
         Ok(())
     }
@@ -1073,70 +1088,112 @@ pub trait Backend: Send {
     fn compositor_apply_config(&mut self) {}
 
     /// Get current FPS from compositor debug stats.
-    fn compositor_fps(&self) -> f32 { 0.0 }
+    fn compositor_fps(&self) -> f32 {
+        0.0
+    }
 
     /// Get detailed compositor performance metrics.
-    fn compositor_get_metrics(&self) -> Option<CompositorMetrics> { None }
+    fn compositor_get_metrics(&self) -> Option<CompositorMetrics> {
+        None
+    }
 
     /// Start compositor benchmark (collect N frames after warmup).
-    fn compositor_benchmark_start(&mut self, _frames: u32, _warmup: u32) -> bool { false }
+    fn compositor_benchmark_start(&mut self, _frames: u32, _warmup: u32) -> bool {
+        false
+    }
 
     /// Stop benchmark early and return JSON report.
-    fn compositor_benchmark_stop(&mut self) -> Option<String> { None }
+    fn compositor_benchmark_stop(&mut self) -> Option<String> {
+        None
+    }
 
     /// Get benchmark report JSON (only available when complete).
-    fn compositor_benchmark_report(&self) -> Option<String> { None }
+    fn compositor_benchmark_report(&self) -> Option<String> {
+        None
+    }
 
     /// Check if benchmark has completed.
-    fn compositor_benchmark_is_complete(&self) -> bool { false }
+    fn compositor_benchmark_is_complete(&self) -> bool {
+        false
+    }
 
     /// Enable auto-exit mode: exits with JSON report when benchmark completes.
     fn compositor_benchmark_set_auto_exit(&mut self, _enabled: bool) {}
 
     /// Query VRR capabilities of an output.
-    fn query_vrr_capabilities(&self, _output: OutputId) -> Option<VrrCapabilities> { None }
+    fn query_vrr_capabilities(&self, _output: OutputId) -> Option<VrrCapabilities> {
+        None
+    }
 
     /// Query per-CRTC KMS color pipeline capabilities (degamma/CTM/gamma LUT).
     /// Returns `None` for non-KMS backends. The probe iterates DRM properties
     /// so it's not free — cache the result if you call it on a hot path.
-    fn query_kms_color_pipeline_caps(&self, _output: OutputId) -> Option<KmsColorPipelineCaps> { None }
+    fn query_kms_color_pipeline_caps(&self, _output: OutputId) -> Option<KmsColorPipelineCaps> {
+        None
+    }
 
     /// Number of client surfaces that have requested wp-tearing-control hints
     /// (regardless of vsync vs async). Wayland-only; X11 returns 0.
-    fn compositor_tearing_hint_count(&self) -> usize { 0 }
+    fn compositor_tearing_hint_count(&self) -> usize {
+        0
+    }
 
     /// Number of currently active session-lock surfaces (one per output when
     /// the session is locked by a screen-locker client).
-    fn compositor_session_lock_surface_count(&self) -> usize { 0 }
+    fn compositor_session_lock_surface_count(&self) -> usize {
+        0
+    }
 
     /// Whether the session is currently locked.
-    fn compositor_session_locked(&self) -> bool { false }
+    fn compositor_session_locked(&self) -> bool {
+        false
+    }
 
     /// Snapshot of all surfaces that currently have a wp-color-management-v1
     /// image description attached. Empty on non-wayland_udev backends.
-    fn compositor_color_managed_surfaces(&self) -> Vec<ColorManagedSurfaceInfo> { Vec::new() }
+    fn compositor_color_managed_surfaces(&self) -> Vec<ColorManagedSurfaceInfo> {
+        Vec::new()
+    }
 
     /// Diagnostic snapshot of the blur pipeline. Returns None when the backend
     /// has no compositor (CLI/headless paths) or no blur pass.
-    fn compositor_blur_status(&self) -> Option<BlurStatus> { None }
+    fn compositor_blur_status(&self) -> Option<BlurStatus> {
+        None
+    }
 
     /// Enable or disable VRR for an output.
-    fn set_vrr_enabled(&mut self, _output: OutputId, _enabled: bool) -> Result<(), BackendError> { Ok(()) }
+    fn set_vrr_enabled(&mut self, _output: OutputId, _enabled: bool) -> Result<(), BackendError> {
+        Ok(())
+    }
 
     /// Push (or clear) the HDR_OUTPUT_METADATA blob on a connector. When
     /// `enabled` is true the backend builds a CTA-861.3 Static Metadata
     /// Type 1 blob from the output's EDID caps + configured peak nits.
     fn set_hdr_metadata(&mut self, _output: OutputId, _enabled: bool) -> Result<(), BackendError> {
-        Err(BackendError::Unsupported("HDR metadata push not implemented"))
+        Err(BackendError::Unsupported(
+            "HDR metadata push not implemented",
+        ))
     }
 
     /// Capture a window thumbnail (returns RGBA pixels, width, height).
-    fn compositor_capture_thumbnail(&self, _window: WindowId, _max_size: u32) -> Option<(Vec<u8>, u32, u32)> {
+    fn compositor_capture_thumbnail(
+        &self,
+        _window: WindowId,
+        _max_size: u32,
+    ) -> Option<(Vec<u8>, u32, u32)> {
         None
     }
 
     /// Set frame extents for a window (used for blur mask).
-    fn compositor_set_frame_extents(&mut self, _window: WindowId, _left: u32, _right: u32, _top: u32, _bottom: u32) {}
+    fn compositor_set_frame_extents(
+        &mut self,
+        _window: WindowId,
+        _left: u32,
+        _right: u32,
+        _top: u32,
+        _bottom: u32,
+    ) {
+    }
 
     /// Set window shaped flag (for shadow adjustments).
     fn compositor_set_window_shaped(&mut self, _window: WindowId, _shaped: bool) {}
@@ -1153,7 +1210,8 @@ pub trait Backend: Send {
         _direction: i32,
         _exclude_top: u32,
         _mon_rect: (i32, i32, u32, u32),
-    ) {}
+    ) {
+    }
 
     /// Force the compositor to redraw the full output on the next frame.
     fn compositor_force_full_redraw(&mut self) {}
@@ -1182,10 +1240,21 @@ pub trait Backend: Send {
     /// `window`: the window with the audio stream
     /// `fps`: target frame rate of the audio stream
     /// `buffer_latency_ms`: audio buffer latency in milliseconds
-    fn compositor_notify_audio_timing(&mut self, _window: WindowId, _fps: f32, _buffer_latency_ms: u32) {}
+    fn compositor_notify_audio_timing(
+        &mut self,
+        _window: WindowId,
+        _fps: f32,
+        _buffer_latency_ms: u32,
+    ) {
+    }
 
     /// Set overview mode for Alt-Tab window preview.
-    fn compositor_set_overview_mode(&mut self, _active: bool, _windows: &[(WindowId, f32, f32, f32, f32, bool, String)]) {}
+    fn compositor_set_overview_mode(
+        &mut self,
+        _active: bool,
+        _windows: &[(WindowId, f32, f32, f32, f32, bool, String)],
+    ) {
+    }
 
     /// Set monitor bounds for overview rendering (multi-monitor support).
     fn compositor_set_overview_monitor(&mut self, _x: i32, _y: i32, _w: u32, _h: u32) {}
@@ -1212,7 +1281,12 @@ pub trait Backend: Send {
     fn compositor_set_dock_position(&mut self, _x: f32, _y: f32) {}
 
     /// Set expose/mission control mode. windows: Vec<(window_id, x, y, w, h)>.
-    fn compositor_set_expose_mode(&mut self, _active: bool, _windows: Vec<(WindowId, i32, i32, u32, u32)>) {}
+    fn compositor_set_expose_mode(
+        &mut self,
+        _active: bool,
+        _windows: Vec<(WindowId, i32, i32, u32, u32)>,
+    ) {
+    }
 
     /// Set snap preview rectangle. None = hide preview (with fade-out animation).
     fn compositor_set_snap_preview(&mut self, _preview: Option<(f32, f32, f32, f32)>) {}
@@ -1227,13 +1301,21 @@ pub trait Backend: Send {
     fn compositor_set_window_groups(&mut self, _groups: Vec<(u32, Vec<(u32, String, bool)>)>) {}
 
     /// Request a live thumbnail for a window. Returns (pixels, width, height).
-    fn compositor_request_live_thumbnail(&mut self, _window: u32, _max_size: u32) -> Option<(Vec<u8>, u32, u32)> { None }
+    fn compositor_request_live_thumbnail(
+        &mut self,
+        _window: u32,
+        _max_size: u32,
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        None
+    }
 
     /// Zoom-to-fit a window (or reset if None).
     fn compositor_zoom_to_fit(&mut self, _window: Option<u32>) {}
 
     /// Expose mode click at screen coordinates. Returns the selected window or None.
-    fn compositor_expose_click(&mut self, _x: f32, _y: f32) -> Option<WindowId> { None }
+    fn compositor_expose_click(&mut self, _x: f32, _y: f32) -> Option<WindowId> {
+        None
+    }
 
     /// Set colorblind correction mode (Phase 6.1).
     fn compositor_set_colorblind_mode(&mut self, _mode: &str) {}

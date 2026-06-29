@@ -38,13 +38,19 @@ impl ColorSpacePrimaries {
         r: Chromaticity { x: 0.640, y: 0.330 },
         g: Chromaticity { x: 0.300, y: 0.600 },
         b: Chromaticity { x: 0.150, y: 0.060 },
-        w: Chromaticity { x: 0.3127, y: 0.3290 },
+        w: Chromaticity {
+            x: 0.3127,
+            y: 0.3290,
+        },
     };
     pub const BT2020_D65: Self = Self {
         r: Chromaticity { x: 0.708, y: 0.292 },
         g: Chromaticity { x: 0.170, y: 0.797 },
         b: Chromaticity { x: 0.131, y: 0.046 },
-        w: Chromaticity { x: 0.3127, y: 0.3290 },
+        w: Chromaticity {
+            x: 0.3127,
+            y: 0.3290,
+        },
     };
 
     /// Reconstruct primaries from the wp-color-management ParametricParams.
@@ -56,10 +62,22 @@ impl ColorSpacePrimaries {
         if let Some(prim) = p.primaries {
             let f = |raw: i32| raw as f32 / 1_000_000.0;
             return Self {
-                r: Chromaticity { x: f(prim[0]), y: f(prim[1]) },
-                g: Chromaticity { x: f(prim[2]), y: f(prim[3]) },
-                b: Chromaticity { x: f(prim[4]), y: f(prim[5]) },
-                w: Chromaticity { x: f(prim[6]), y: f(prim[7]) },
+                r: Chromaticity {
+                    x: f(prim[0]),
+                    y: f(prim[1]),
+                },
+                g: Chromaticity {
+                    x: f(prim[2]),
+                    y: f(prim[3]),
+                },
+                b: Chromaticity {
+                    x: f(prim[4]),
+                    y: f(prim[5]),
+                },
+                w: Chromaticity {
+                    x: f(prim[6]),
+                    y: f(prim[7]),
+                },
             };
         }
         match p.primaries_named {
@@ -204,8 +222,8 @@ fn srgb_inverse(e: f32) -> f32 {
     }
 }
 
-pub use drm_ffi::drm_color_lut as DrmColorLut;
 pub use drm_ffi::drm_color_ctm as DrmColorCtm;
+pub use drm_ffi::drm_color_lut as DrmColorLut;
 
 /// Identity 3×3 color matrix, row-major. Public mirror of the private `IDENTITY_3X3`
 /// used by `ColorTransform`; exposed so callers (e.g. the KMS CTM install path)
@@ -242,7 +260,12 @@ pub fn build_gamma_lut(tf: TransferKind, size: usize) -> Vec<DrmColorLut> {
             let encoded = tf.forward(linear).clamp(0.0, 1.0);
             let q = (encoded * 65535.0 + 0.5) as u32;
             let v = q.min(65535) as u16;
-            DrmColorLut { red: v, green: v, blue: v, reserved: 0 }
+            DrmColorLut {
+                red: v,
+                green: v,
+                blue: v,
+                reserved: 0,
+            }
         })
         .collect()
 }
@@ -257,7 +280,11 @@ fn pq_inverse(e: f32) -> f32 {
     let ep_m2 = e.powf(1.0 / M2);
     let num = (ep_m2 - C1).max(0.0);
     let den = C2 - C3 * ep_m2;
-    if den.abs() < 1e-12 { 0.0 } else { (num / den).powf(1.0 / M1) }
+    if den.abs() < 1e-12 {
+        0.0
+    } else {
+        (num / den).powf(1.0 / M1)
+    }
 }
 
 /// HLG inverse: encoded 0..1 → linear 0..1 (system-relative).
@@ -338,9 +365,8 @@ const IDENTITY_3X3: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
 fn primaries_match(a: &ColorSpacePrimaries, b: &ColorSpacePrimaries) -> bool {
     const TOL: f32 = 0.001;
-    let close = |p: Chromaticity, q: Chromaticity| {
-        (p.x - q.x).abs() < TOL && (p.y - q.y).abs() < TOL
-    };
+    let close =
+        |p: Chromaticity, q: Chromaticity| (p.x - q.x).abs() < TOL && (p.y - q.y).abs() < TOL;
     close(a.r, b.r) && close(a.g, b.g) && close(a.b, b.b) && close(a.w, b.w)
 }
 
@@ -361,9 +387,7 @@ fn rgb_to_xyz_matrix(p: &ColorSpacePrimaries) -> [f32; 9] {
     let (xw, _yw, zw) = to_xyz(p.w);
     // Solve M · [S_r, S_g, S_b]^T = [Xw, Yw=1, Zw]^T where
     //   M = [[xr xg xb], [yr yg yb], [zr zg zb]]
-    let det = xr * (yg * zb - yb * zg)
-        - xg * (yr * zb - yb * zr)
-        + xb * (yr * zg - yg * zr);
+    let det = xr * (yg * zb - yb * zg) - xg * (yr * zb - yb * zr) + xb * (yr * zg - yg * zr);
     if det.abs() < 1e-12 {
         return IDENTITY_3X3;
     }
@@ -385,16 +409,28 @@ fn rgb_to_xyz_matrix(p: &ColorSpacePrimaries) -> [f32; 9] {
     let sg = inv[3] * xw + inv[4] * 1.0 + inv[5] * zw;
     let sb = inv[6] * xw + inv[7] * 1.0 + inv[8] * zw;
     [
-        sr * xr, sg * xg, sb * xb,
-        sr * yr, sg * yg, sb * yb,
-        sr * zr, sg * zg, sb * zb,
+        sr * xr,
+        sg * xg,
+        sb * xb,
+        sr * yr,
+        sg * yg,
+        sb * yb,
+        sr * zr,
+        sg * zg,
+        sb * zb,
     ]
 }
 
 fn invert_3x3(m: &[f32; 9]) -> [f32; 9] {
-    let a = m[0]; let b = m[1]; let c = m[2];
-    let d = m[3]; let e = m[4]; let f = m[5];
-    let g = m[6]; let h = m[7]; let i = m[8];
+    let a = m[0];
+    let b = m[1];
+    let c = m[2];
+    let d = m[3];
+    let e = m[4];
+    let f = m[5];
+    let g = m[6];
+    let h = m[7];
+    let i = m[8];
     let det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
     if det.abs() < 1e-12 {
         return IDENTITY_3X3;
@@ -434,10 +470,7 @@ fn mat3_mul(a: &[f32; 9], b: &[f32; 9]) -> [f32; 9] {
 /// supplies explicit primaries with a different white point, the result is a
 /// pure rotation in XYZ — sufficient correctness for the V1 slice; a future
 /// pass can fold in a Bradford CAT if real clients hit it.
-pub fn rgb_to_rgb_matrix(
-    surface: &ColorSpacePrimaries,
-    output: &ColorSpacePrimaries,
-) -> [f32; 9] {
+pub fn rgb_to_rgb_matrix(surface: &ColorSpacePrimaries, output: &ColorSpacePrimaries) -> [f32; 9] {
     let m_in = rgb_to_xyz_matrix(surface);
     let m_out = rgb_to_xyz_matrix(output);
     let m_out_inv = invert_3x3(&m_out);
@@ -489,8 +522,10 @@ mod tests {
             &ColorSpacePrimaries::BT2020_D65,
         );
         let composed = mat3_mul(&roundtrip, &t.matrix_row_major);
-        assert!(approx_mat(&composed, &IDENTITY_3X3, 1e-3),
-            "BT.2020→sRGB→BT.2020 should round-trip to identity, got {composed:?}");
+        assert!(
+            approx_mat(&composed, &IDENTITY_3X3, 1e-3),
+            "BT.2020→sRGB→BT.2020 should round-trip to identity, got {composed:?}"
+        );
     }
 
     #[test]
@@ -528,7 +563,9 @@ mod tests {
 
     #[test]
     fn power_curve_inverse_round_trips() {
-        let tf = TransferKind::Power { gamma_x10000: 22_000 };
+        let tf = TransferKind::Power {
+            gamma_x10000: 22_000,
+        };
         // Encoding (forward) is x^(1/2.2); inverse is x^2.2. Composition is identity.
         let encoded = 0.5_f32.powf(1.0 / 2.2);
         let linear = tf.inverse(encoded);
@@ -537,12 +574,26 @@ mod tests {
 
     #[test]
     fn transferkind_from_params_resolves_named() {
-        let p = ParametricParams { tf_named: Some(11 /* PQ */), ..Default::default() };
+        let p = ParametricParams {
+            tf_named: Some(11 /* PQ */),
+            ..Default::default()
+        };
         assert_eq!(TransferKind::from_params(&p), TransferKind::St2084Pq);
-        let p = ParametricParams { tf_named: Some(13 /* HLG */), ..Default::default() };
+        let p = ParametricParams {
+            tf_named: Some(13 /* HLG */),
+            ..Default::default()
+        };
         assert_eq!(TransferKind::from_params(&p), TransferKind::Hlg);
-        let p = ParametricParams { tf_power: Some(18_000), ..Default::default() };
-        assert_eq!(TransferKind::from_params(&p), TransferKind::Power { gamma_x10000: 18_000 });
+        let p = ParametricParams {
+            tf_power: Some(18_000),
+            ..Default::default()
+        };
+        assert_eq!(
+            TransferKind::from_params(&p),
+            TransferKind::Power {
+                gamma_x10000: 18_000
+            }
+        );
     }
 
     #[test]
@@ -569,7 +620,13 @@ mod tests {
         // The shader's if-chain in decode_eotf/encode_eotf depends on these
         // exact integer values. Renumbering breaks the GL contract.
         assert_eq!(TransferKind::Linear.shader_id(), 0);
-        assert_eq!(TransferKind::Power { gamma_x10000: 22_000 }.shader_id(), 1);
+        assert_eq!(
+            TransferKind::Power {
+                gamma_x10000: 22_000
+            }
+            .shader_id(),
+            1
+        );
         assert_eq!(TransferKind::Bt1886.shader_id(), 2);
         assert_eq!(TransferKind::Gamma22.shader_id(), 3);
         assert_eq!(TransferKind::St2084Pq.shader_id(), 4);
@@ -584,7 +641,10 @@ mod tests {
         // that never consults the value — undefined-uniform reads are
         // implementation-defined and we don't want stale data leaking in.
         assert_eq!(
-            TransferKind::Power { gamma_x10000: 24_000 }.gamma_for_shader(),
+            TransferKind::Power {
+                gamma_x10000: 24_000
+            }
+            .gamma_for_shader(),
             2.4
         );
         assert_eq!(TransferKind::Linear.gamma_for_shader(), 1.0);
@@ -706,7 +766,11 @@ mod tests {
         assert_eq!(lut[0].red, 0);
         assert_eq!(lut[lut.len() - 1].red, 65535);
         for w in lut.windows(2) {
-            assert!(w[1].red >= w[0].red, "HLG LUT non-monotonic at {}", w[0].red);
+            assert!(
+                w[1].red >= w[0].red,
+                "HLG LUT non-monotonic at {}",
+                w[0].red
+            );
         }
     }
 
@@ -723,7 +787,11 @@ mod tests {
         let ctm = build_ctm(m);
         let entry = ctm.matrix[0];
         assert_eq!(entry >> 63, 1, "sign bit must be set for negative");
-        assert_eq!(entry & 0x7FFF_FFFF_FFFF_FFFF, 1u64 << 31, "magnitude 0.5 → 2^31");
+        assert_eq!(
+            entry & 0x7FFF_FFFF_FFFF_FFFF,
+            1u64 << 31,
+            "magnitude 0.5 → 2^31"
+        );
         // Zero entries stay 0 (no sign bit on +0.0).
         for &v in &ctm.matrix[1..] {
             assert_eq!(v, 0);

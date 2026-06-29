@@ -1,10 +1,10 @@
 // Window constraints: size hints, boundary constraints, and geometry validation
 
+use crate::Jwm;
 use crate::backend::api::Backend;
 use crate::config::CONFIG;
 use crate::core::models::{ClientKey, MonitorGeometry, SizeHints};
 use crate::jwm::geometry::GeometryConstraints;
-use crate::Jwm;
 
 impl Jwm {
     pub(crate) fn applysizehints(
@@ -77,8 +77,21 @@ impl Jwm {
         Ok(())
     }
 
-    pub(crate) fn constrain_to_screen(&self, x: &mut i32, y: &mut i32, total_width: i32, total_height: i32) {
-        GeometryConstraints::constrain_to_screen(x, y, total_width, total_height, self.s_w, self.s_h);
+    pub(crate) fn constrain_to_screen(
+        &self,
+        x: &mut i32,
+        y: &mut i32,
+        total_width: i32,
+        total_height: i32,
+    ) {
+        GeometryConstraints::constrain_to_screen(
+            x,
+            y,
+            total_width,
+            total_height,
+            self.s_w,
+            self.s_h,
+        );
     }
 
     pub(crate) fn constrain_to_monitor(
@@ -89,7 +102,13 @@ impl Jwm {
         total_height: i32,
         monitor_geometry: &MonitorGeometry,
     ) {
-        GeometryConstraints::constrain_to_monitor(x, y, total_width, total_height, monitor_geometry);
+        GeometryConstraints::constrain_to_monitor(
+            x,
+            y,
+            total_width,
+            total_height,
+            monitor_geometry,
+        );
     }
 
     pub(crate) fn apply_size_hints_constraints(
@@ -144,7 +163,12 @@ impl Jwm {
         Ok(())
     }
 
-    pub(crate) fn calculate_constrained_size(&self, w: i32, h: i32, hints: &SizeHints) -> (i32, i32) {
+    pub(crate) fn calculate_constrained_size(
+        &self,
+        w: i32,
+        h: i32,
+        hints: &SizeHints,
+    ) -> (i32, i32) {
         GeometryConstraints::calculate_constrained_size(w, h, hints)
     }
 

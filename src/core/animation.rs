@@ -321,13 +321,22 @@ impl MagneticSnap {
     }
 
     /// Start a snap attraction for a client
-    pub fn start_snap(&mut self, key: ClientKey, edge: SnapEdge, target_pos: f32, current_pos: f32) {
-        self.active_snaps.insert(key, SnapAttraction {
-            edge,
-            target_pos,
-            current_offset: current_pos - target_pos,
-            velocity: 0.0,
-        });
+    pub fn start_snap(
+        &mut self,
+        key: ClientKey,
+        edge: SnapEdge,
+        target_pos: f32,
+        current_pos: f32,
+    ) {
+        self.active_snaps.insert(
+            key,
+            SnapAttraction {
+                edge,
+                target_pos,
+                current_offset: current_pos - target_pos,
+                velocity: 0.0,
+            },
+        );
     }
 
     /// Tick all active snap animations. Returns true if any are still active.
@@ -336,8 +345,7 @@ impl MagneticSnap {
         let mut done_keys = Vec::new();
 
         for (key, snap) in self.active_snaps.iter_mut() {
-            let force = -self.spring_stiffness * snap.current_offset
-                - self.damping * snap.velocity;
+            let force = -self.spring_stiffness * snap.current_offset - self.damping * snap.velocity;
             snap.velocity += force * dt;
             snap.current_offset += snap.velocity * dt;
 
@@ -358,7 +366,9 @@ impl MagneticSnap {
 
     /// Get the snapped position for a client (target + current offset)
     pub fn snapped_position(&self, key: ClientKey) -> Option<f32> {
-        self.active_snaps.get(&key).map(|s| s.target_pos + s.current_offset)
+        self.active_snaps
+            .get(&key)
+            .map(|s| s.target_pos + s.current_offset)
     }
 
     /// Remove snap for a client (e.g., when drag starts)
@@ -485,10 +495,7 @@ mod tests {
     fn easing_boundaries(e: Easing) {
         let at0 = e.apply(0.0);
         let at1 = e.apply(1.0);
-        assert!(
-            at0.abs() < 1e-4,
-            "{e:?}.apply(0.0) = {at0}, expected ~0"
-        );
+        assert!(at0.abs() < 1e-4, "{e:?}.apply(0.0) = {at0}, expected ~0");
         assert!(
             (at1 - 1.0).abs() < 1e-4,
             "{e:?}.apply(1.0) = {at1}, expected ~1"
@@ -539,9 +546,17 @@ mod tests {
     fn test_easing_output_always_in_0_1_range() {
         // For Bounce/Elastic, output may dip slightly but overall stays near [0,1]
         for t in [0.0f32, 0.1, 0.2, 0.5, 0.8, 0.9, 1.0] {
-            for e in [Easing::Linear, Easing::EaseOut, Easing::EaseInOut, Easing::EaseIn] {
+            for e in [
+                Easing::Linear,
+                Easing::EaseOut,
+                Easing::EaseInOut,
+                Easing::EaseIn,
+            ] {
                 let v = e.apply(t);
-                assert!(v >= -0.01 && v <= 1.01, "{e:?}.apply({t}) = {v} out of range");
+                assert!(
+                    v >= -0.01 && v <= 1.01,
+                    "{e:?}.apply({t}) = {v} out of range"
+                );
             }
         }
     }
@@ -625,12 +640,24 @@ mod tests {
         let mut mgr = AnimationManager::new();
         let key = make_key();
         // Insert first
-        mgr.start(key, rect(0,0,100,100), rect(200,200,100,100),
-            Duration::from_millis(300), Easing::Linear, AnimationKind::Layout);
+        mgr.start(
+            key,
+            rect(0, 0, 100, 100),
+            rect(200, 200, 100, 100),
+            Duration::from_millis(300),
+            Easing::Linear,
+            AnimationKind::Layout,
+        );
         assert!(mgr.has_active());
         // Same from == to → should remove
-        mgr.start(key, rect(200,200,100,100), rect(200,200,100,100),
-            Duration::from_millis(300), Easing::Linear, AnimationKind::Layout);
+        mgr.start(
+            key,
+            rect(200, 200, 100, 100),
+            rect(200, 200, 100, 100),
+            Duration::from_millis(300),
+            Easing::Linear,
+            AnimationKind::Layout,
+        );
         assert!(!mgr.has_active());
     }
 
@@ -638,8 +665,14 @@ mod tests {
     fn test_animation_manager_remove() {
         let mut mgr = AnimationManager::new();
         let key = make_key();
-        mgr.start(key, rect(0,0,100,100), rect(200,0,100,100),
-            Duration::from_millis(200), Easing::Linear, AnimationKind::Layout);
+        mgr.start(
+            key,
+            rect(0, 0, 100, 100),
+            rect(200, 0, 100, 100),
+            Duration::from_millis(200),
+            Easing::Linear,
+            AnimationKind::Layout,
+        );
         mgr.remove(key);
         assert!(!mgr.has_active());
     }
@@ -648,14 +681,32 @@ mod tests {
     fn test_animation_manager_remove_if_hide_only_removes_hide() {
         let mut mgr = AnimationManager::new();
         let (k1, k2) = make_two_keys();
-        mgr.start(k1, rect(0,0,100,100), rect(200,0,100,100),
-            Duration::from_millis(200), Easing::Linear, AnimationKind::Layout);
-        mgr.start(k2, rect(0,0,100,100), rect(200,0,100,100),
-            Duration::from_millis(200), Easing::Linear, AnimationKind::Hide);
+        mgr.start(
+            k1,
+            rect(0, 0, 100, 100),
+            rect(200, 0, 100, 100),
+            Duration::from_millis(200),
+            Easing::Linear,
+            AnimationKind::Layout,
+        );
+        mgr.start(
+            k2,
+            rect(0, 0, 100, 100),
+            rect(200, 0, 100, 100),
+            Duration::from_millis(200),
+            Easing::Linear,
+            AnimationKind::Hide,
+        );
         mgr.remove_if_hide(k1); // should NOT remove Layout
         mgr.remove_if_hide(k2); // should remove Hide
-        assert!(mgr.active.contains_key(&k1), "Layout animation should remain");
-        assert!(!mgr.active.contains_key(&k2), "Hide animation should be removed");
+        assert!(
+            mgr.active.contains_key(&k1),
+            "Layout animation should remain"
+        );
+        assert!(
+            !mgr.active.contains_key(&k2),
+            "Hide animation should be removed"
+        );
     }
 
     #[test]
@@ -671,7 +722,14 @@ mod tests {
         let key = make_key();
         let from = rect(0, 0, 100, 100);
         let to = rect(200, 0, 100, 100);
-        mgr.start(key, from, to, Duration::from_millis(500), Easing::Linear, AnimationKind::Layout);
+        mgr.start(
+            key,
+            from,
+            to,
+            Duration::from_millis(500),
+            Easing::Linear,
+            AnimationKind::Layout,
+        );
         // Immediately after start, visual should be near `from`
         let visual = mgr.current_visual_rect(key, Instant::now()).unwrap();
         assert!((visual.x - from.x).abs() <= 5);
@@ -710,7 +768,10 @@ mod tests {
     fn test_magnetic_snap_detect_snap_outside_range() {
         let snap = MagneticSnap::new(10.0);
         let result = snap.detect_snap(50.0, 100.0, &[0.0]);
-        assert!(result.is_none(), "Window edge at 50 is outside snap range 10");
+        assert!(
+            result.is_none(),
+            "Window edge at 50 is outside snap range 10"
+        );
     }
 
     #[test]
@@ -718,7 +779,10 @@ mod tests {
         let snap = MagneticSnap::new(20.0);
         // window at x=181, w=100 → right edge at 281, target=300, dist=19 < 20
         let result = snap.detect_snap(181.0, 100.0, &[300.0]);
-        assert!(result.is_some(), "Right edge at 281 should snap to 300 (dist=19 < 20)");
+        assert!(
+            result.is_some(),
+            "Right edge at 281 should snap to 300 (dist=19 < 20)"
+        );
         let (edge, _) = result.unwrap();
         assert_eq!(edge, SnapEdge::Right);
     }

@@ -49,8 +49,7 @@ impl ShaderCache {
                 let bin_path = self.cache_dir.join(format!("{}.bin", name));
                 if let Ok(data) = fs::read(&bin_path) {
                     if data.len() > 4 {
-                        let format =
-                            u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+                        let format = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
                         let binary = &data[4..];
 
                         let program = gl.CreateProgram();

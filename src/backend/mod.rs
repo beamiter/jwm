@@ -28,9 +28,9 @@ pub mod wayland_udev;
 
 // Backwards-compat alias for older module paths.
 pub mod udev {
-	pub mod backend {
-		pub use crate::backend::wayland_udev::backend::*;
-	}
+    pub mod backend {
+        pub use crate::backend::wayland_udev::backend::*;
+    }
 }
 
 pub mod wayland_x11;

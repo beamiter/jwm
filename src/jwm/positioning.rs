@@ -1,9 +1,9 @@
 use crate::backend::api::Backend;
 use crate::backend::common_define::WindowId;
+use crate::config::CONFIG;
+use crate::core::animation::AnimationKind;
 use crate::core::models::ClientKey;
 use crate::core::types::Rect;
-use crate::core::animation::AnimationKind;
-use crate::config::CONFIG;
 use std::time::Instant;
 
 use super::Jwm;
@@ -123,7 +123,12 @@ impl Jwm {
         Ok((x as i32, y as i32))
     }
 
-    pub(super) fn recttomon(&mut self, backend: &mut dyn Backend, x: i32, y: i32) -> Option<super::MonitorKey> {
+    pub(super) fn recttomon(
+        &mut self,
+        backend: &mut dyn Backend,
+        x: i32,
+        y: i32,
+    ) -> Option<super::MonitorKey> {
         if let Some(output_id) = backend.output_ops().output_at(x, y) {
             for (mon_key, &oid) in &self.state.output_map {
                 if oid == output_id {
@@ -134,7 +139,11 @@ impl Jwm {
         self.state.sel_mon
     }
 
-    pub(super) fn wintomon(&mut self, backend: &mut dyn Backend, w: Option<WindowId>) -> Option<super::MonitorKey> {
+    pub(super) fn wintomon(
+        &mut self,
+        backend: &mut dyn Backend,
+        w: Option<WindowId>,
+    ) -> Option<super::MonitorKey> {
         if w.is_none() || w == backend.root_window() {
             if let Ok((x, y)) = self.getrootptr(backend) {
                 return self.recttomon(backend, x, y);

@@ -70,7 +70,10 @@ impl FrameProfiler {
         }
         if let Some((name, start)) = self.active_zone.take() {
             let duration_ms = start.elapsed().as_secs_f32() * 1000.0;
-            let samples = self.zones.entry(name).or_insert_with(|| Vec::with_capacity(MAX_SAMPLES));
+            let samples = self
+                .zones
+                .entry(name)
+                .or_insert_with(|| Vec::with_capacity(MAX_SAMPLES));
             if samples.len() >= MAX_SAMPLES {
                 samples.remove(0);
             }

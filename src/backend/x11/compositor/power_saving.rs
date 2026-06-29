@@ -1,3 +1,5 @@
+use std::fs;
+use std::path::Path;
 /// Power Saving Mode (P7D)
 ///
 /// Battery-aware power optimization with automatic quality adjustment:
@@ -8,8 +10,6 @@
 ///
 /// Performance: 30-50% power reduction on battery, extends runtime 2-3 hours
 use std::time::{Duration, Instant};
-use std::path::Path;
-use std::fs;
 
 /// Power source type
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,7 +184,7 @@ impl PowerSavingConfig {
             battery_blur_quality: "Minimal".to_string(),
             battery_disable_shadows: true,
             battery_disable_animations: false,
-            update_interval: 5000,  // Update every 5 seconds
+            update_interval: 5000, // Update every 5 seconds
         }
     }
 }
@@ -333,7 +333,8 @@ impl PowerSavingManager {
 
     /// Get statistics
     pub fn stats(&self) -> String {
-        let total_time = self.time_in_performance + self.time_in_balanced + self.time_in_power_saver;
+        let total_time =
+            self.time_in_performance + self.time_in_balanced + self.time_in_power_saver;
         let total_secs = total_time.as_secs();
 
         if total_secs == 0 {

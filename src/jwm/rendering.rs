@@ -1,11 +1,11 @@
 use crate::backend::api::Backend;
 use crate::backend::common_define::{SchemeType, WindowId};
+use crate::config::CONFIG;
 use crate::core::models::ClientKey;
 use crate::core::types::Rect;
-use crate::config::CONFIG;
+use log::info;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
-use log::info;
 
 use super::Jwm;
 

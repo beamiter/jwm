@@ -337,15 +337,25 @@ impl WaylandCompositor {
         let mut textures = Vec::with_capacity(self.overview_entries.len());
 
         for entry in &self.overview_entries {
-            if let Some((pixels, w, h)) = Self::render_title_to_pixels(&entry.title, max_label_width) {
+            if let Some((pixels, w, h)) =
+                Self::render_title_to_pixels(&entry.title, max_label_width)
+            {
                 let mut tex = 0u32;
                 unsafe {
                     gl.GenTextures(1, &mut tex);
                     gl.BindTexture(ffi::TEXTURE_2D, tex);
                     gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
                     gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
-                    gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_S, ffi::CLAMP_TO_EDGE as i32);
-                    gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_T, ffi::CLAMP_TO_EDGE as i32);
+                    gl.TexParameteri(
+                        ffi::TEXTURE_2D,
+                        ffi::TEXTURE_WRAP_S,
+                        ffi::CLAMP_TO_EDGE as i32,
+                    );
+                    gl.TexParameteri(
+                        ffi::TEXTURE_2D,
+                        ffi::TEXTURE_WRAP_T,
+                        ffi::CLAMP_TO_EDGE as i32,
+                    );
                     gl.TexImage2D(
                         ffi::TEXTURE_2D,
                         0,
@@ -399,7 +409,13 @@ impl WaylandCompositor {
             );
 
             if rect_loc >= 0 {
-                gl.Uniform4f(rect_loc, 0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
+                gl.Uniform4f(
+                    rect_loc,
+                    0.0,
+                    0.0,
+                    self.screen_w as f32,
+                    self.screen_h as f32,
+                );
             }
             if proj_loc >= 0 {
                 gl.UniformMatrix4fv(proj_loc, 1, ffi::FALSE as u8, projection.as_ptr());
@@ -488,10 +504,8 @@ impl WaylandCompositor {
             gl.Uniform1f(self.cube_uniforms.aspect, aspect);
             gl.BindVertexArray(self.quad_vao);
 
-            let tex_loc = gl.GetUniformLocation(
-                self.cube_program,
-                b"u_texture\0".as_ptr() as *const _,
-            );
+            let tex_loc =
+                gl.GetUniformLocation(self.cube_program, b"u_texture\0".as_ptr() as *const _);
 
             for face in &faces {
                 let entry = &self.overview_entries[face.index];
@@ -572,7 +586,9 @@ impl WaylandCompositor {
             // ------------------------------------------------------------------
             // 6. Title label below selected window
             // ------------------------------------------------------------------
-            if !self.overview_title_textures.is_empty() && selected_idx < self.overview_title_textures.len() {
+            if !self.overview_title_textures.is_empty()
+                && selected_idx < self.overview_title_textures.len()
+            {
                 let title_tex = self.overview_title_textures[selected_idx];
                 if title_tex != 0 {
                     // Render title centered below the prism using the window program
@@ -609,8 +625,16 @@ impl WaylandCompositor {
 
                     gl.ActiveTexture(ffi::TEXTURE0);
                     gl.BindTexture(ffi::TEXTURE_2D, title_tex);
-                    gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::NEAREST as i32);
-                    gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::NEAREST as i32);
+                    gl.TexParameteri(
+                        ffi::TEXTURE_2D,
+                        ffi::TEXTURE_MIN_FILTER,
+                        ffi::NEAREST as i32,
+                    );
+                    gl.TexParameteri(
+                        ffi::TEXTURE_2D,
+                        ffi::TEXTURE_MAG_FILTER,
+                        ffi::NEAREST as i32,
+                    );
                     gl.Uniform1i(self.win_uniforms.texture, 0);
 
                     gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);

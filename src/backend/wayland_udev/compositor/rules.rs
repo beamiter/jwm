@@ -328,11 +328,7 @@ impl WaylandCompositor {
     ///
     /// # Safety
     /// Caller must ensure `gl` is valid and `current_blur_tex` is a valid texture.
-    pub(crate) unsafe fn copy_blur_to_prev_fbo(
-        &mut self,
-        gl: &ffi::Gles2,
-        current_blur_tex: u32,
-    ) {
+    pub(crate) unsafe fn copy_blur_to_prev_fbo(&mut self, gl: &ffi::Gles2, current_blur_tex: u32) {
         // The blur result lives in blur_fbos[0], which is half-resolution.
         // prev_blur_fbo must match those dims so the temporal-mix pass samples
         // both history and current at identical resolution.
@@ -401,8 +397,10 @@ impl WaylandCompositor {
     ) -> f32 {
         let mut total_disp: u64 = 0;
         for &(id, x, y, _, _) in scene {
-            if let Some(&(_, px, py)) =
-                self.prev_motion_positions.iter().find(|&&(pid, _, _)| pid == id)
+            if let Some(&(_, px, py)) = self
+                .prev_motion_positions
+                .iter()
+                .find(|&&(pid, _, _)| pid == id)
             {
                 total_disp +=
                     u64::from((x - px).unsigned_abs()) + u64::from((y - py).unsigned_abs());
@@ -460,7 +458,13 @@ impl WaylandCompositor {
             gl.Disable(ffi::BLEND);
 
             gl.UseProgram(self.temporal_blur_mix_program);
-            gl.Uniform4f(self.temporal_blur_mix_uniforms.rect, 0.0, 0.0, bw as f32, bh as f32);
+            gl.Uniform4f(
+                self.temporal_blur_mix_uniforms.rect,
+                0.0,
+                0.0,
+                bw as f32,
+                bh as f32,
+            );
             let proj = ortho(0.0, bw as f32, bh as f32, 0.0);
             gl.UniformMatrix4fv(
                 self.temporal_blur_mix_uniforms.projection,
@@ -525,7 +529,10 @@ impl WaylandCompositor {
     pub(crate) fn compute_window_blur_quality(
         &self,
         class_name: &str,
-        x: i32, y: i32, w: u32, h: u32,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
         is_focused: bool,
     ) -> BlurQuality {
         if !self.blur_quality_auto {
@@ -555,7 +562,11 @@ impl WaylandCompositor {
 
         let load = self.last_gpu_load;
         let per_window = if load > 80 {
-            if is_focused { BlurQuality::Full } else { BlurQuality::Minimal }
+            if is_focused {
+                BlurQuality::Full
+            } else {
+                BlurQuality::Minimal
+            }
         } else if load > 70 {
             if is_focused {
                 BlurQuality::Full
@@ -594,9 +605,7 @@ impl WaylandCompositor {
                 continue;
             }
             let is_focused = focused == Some(win_id);
-            let q = self.compute_window_blur_quality(
-                &win.class_name, x, y, w, h, is_focused,
-            );
+            let q = self.compute_window_blur_quality(&win.class_name, x, y, w, h, is_focused);
             best = Some(match best {
                 Some(prev) => BlurQuality::max(prev, q),
                 None => q,
@@ -800,8 +809,14 @@ mod tests {
     fn test_class_matches_exclude_basic() {
         let list = vec!["firefox".to_string(), "chrome".to_string()];
         assert!(WaylandCompositor::class_matches_exclude("Firefox", &list));
-        assert!(WaylandCompositor::class_matches_exclude("Google-Chrome", &list));
-        assert!(!WaylandCompositor::class_matches_exclude("Alacritty", &list));
+        assert!(WaylandCompositor::class_matches_exclude(
+            "Google-Chrome",
+            &list
+        ));
+        assert!(!WaylandCompositor::class_matches_exclude(
+            "Alacritty",
+            &list
+        ));
     }
 
     #[test]
@@ -816,12 +831,27 @@ mod tests {
         use BlurQuality::*;
         // Full = most levels, Minimal = fewest. The "more reduced" of two
         // qualities is the one with fewer levels.
-        assert_eq!(WaylandCompositor::more_reduced_blur_quality(Full, Minimal), Minimal);
-        assert_eq!(WaylandCompositor::more_reduced_blur_quality(Reduced, Full), Reduced);
-        assert_eq!(WaylandCompositor::more_reduced_blur_quality(Reduced, Minimal), Minimal);
-        assert_eq!(WaylandCompositor::more_reduced_blur_quality(Full, Full), Full);
+        assert_eq!(
+            WaylandCompositor::more_reduced_blur_quality(Full, Minimal),
+            Minimal
+        );
+        assert_eq!(
+            WaylandCompositor::more_reduced_blur_quality(Reduced, Full),
+            Reduced
+        );
+        assert_eq!(
+            WaylandCompositor::more_reduced_blur_quality(Reduced, Minimal),
+            Minimal
+        );
+        assert_eq!(
+            WaylandCompositor::more_reduced_blur_quality(Full, Full),
+            Full
+        );
         // Symmetric.
-        assert_eq!(WaylandCompositor::more_reduced_blur_quality(Minimal, Full), Minimal);
+        assert_eq!(
+            WaylandCompositor::more_reduced_blur_quality(Minimal, Full),
+            Minimal
+        );
     }
 
     #[test]
@@ -881,14 +911,23 @@ mod tests {
         let table = WaylandCompositor::parse_blur_strength_by_hz("30:1,60:2,120:3,144:4,240:5");
         // exact match
         assert_eq!(WaylandCompositor::blur_strength_for_hz(&table, 60), Some(2));
-        assert_eq!(WaylandCompositor::blur_strength_for_hz(&table, 144), Some(4));
+        assert_eq!(
+            WaylandCompositor::blur_strength_for_hz(&table, 144),
+            Some(4)
+        );
         // closest entry below
         assert_eq!(WaylandCompositor::blur_strength_for_hz(&table, 75), Some(2));
-        assert_eq!(WaylandCompositor::blur_strength_for_hz(&table, 165), Some(4));
+        assert_eq!(
+            WaylandCompositor::blur_strength_for_hz(&table, 165),
+            Some(4)
+        );
         // below lowest entry -> lowest entry
         assert_eq!(WaylandCompositor::blur_strength_for_hz(&table, 24), Some(1));
         // above highest entry -> highest entry
-        assert_eq!(WaylandCompositor::blur_strength_for_hz(&table, 360), Some(5));
+        assert_eq!(
+            WaylandCompositor::blur_strength_for_hz(&table, 360),
+            Some(5)
+        );
         // empty table -> None
         assert_eq!(WaylandCompositor::blur_strength_for_hz(&[], 60), None);
     }
@@ -901,18 +940,27 @@ mod tests {
         let hz_pairs = [(0u32, 60u32), (1u32, 144u32)];
         let max_hz = hz_pairs.iter().map(|&(_, hz)| hz).max().unwrap();
         assert_eq!(max_hz, 144);
-        assert_eq!(WaylandCompositor::blur_strength_for_hz(&table, max_hz), Some(4));
+        assert_eq!(
+            WaylandCompositor::blur_strength_for_hz(&table, max_hz),
+            Some(4)
+        );
 
         // Single 60Hz primary: strength = 2.
         let hz_pairs = [(0u32, 60u32)];
         let max_hz = hz_pairs.iter().map(|&(_, hz)| hz).max().unwrap();
-        assert_eq!(WaylandCompositor::blur_strength_for_hz(&table, max_hz), Some(2));
+        assert_eq!(
+            WaylandCompositor::blur_strength_for_hz(&table, max_hz),
+            Some(2)
+        );
 
         // Triple-display 60+75+240: strength = 5 (240 entry).
         let hz_pairs = [(0u32, 60u32), (1u32, 75u32), (2u32, 240u32)];
         let max_hz = hz_pairs.iter().map(|&(_, hz)| hz).max().unwrap();
         assert_eq!(max_hz, 240);
-        assert_eq!(WaylandCompositor::blur_strength_for_hz(&table, max_hz), Some(5));
+        assert_eq!(
+            WaylandCompositor::blur_strength_for_hz(&table, max_hz),
+            Some(5)
+        );
     }
 
     #[test]

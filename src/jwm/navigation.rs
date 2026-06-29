@@ -2,12 +2,12 @@
 
 use std::sync::atomic::Ordering;
 
+use crate::Jwm;
 use crate::backend::api::Backend;
 use crate::backend::common_define::{EventMaskBits, StdCursorKind};
 use crate::config::CONFIG;
 use crate::core::models::{ClientKey, MonitorKey};
 use crate::jwm::types::WMArgEnum;
-use crate::Jwm;
 use log::{info, warn};
 
 impl Jwm {
@@ -23,7 +23,9 @@ impl Jwm {
         }
     }
 
-    pub(crate) fn find_next_visible_client(&self) -> Result<Option<ClientKey>, Box<dyn std::error::Error>> {
+    pub(crate) fn find_next_visible_client(
+        &self,
+    ) -> Result<Option<ClientKey>, Box<dyn std::error::Error>> {
         let sel_mon_key = self.state.sel_mon.ok_or("No selected monitor")?;
         let current_sel = self.get_selected_client_key().ok_or("No selected client")?;
         let (tile_clients, floating_clients) = self.grouped_visible_clients(sel_mon_key);
@@ -95,7 +97,10 @@ impl Jwm {
         Ok(None)
     }
 
-    pub(crate) fn grouped_visible_clients(&self, mon_key: MonitorKey) -> (Vec<ClientKey>, Vec<ClientKey>) {
+    pub(crate) fn grouped_visible_clients(
+        &self,
+        mon_key: MonitorKey,
+    ) -> (Vec<ClientKey>, Vec<ClientKey>) {
         let total = self
             .state
             .monitor_clients
@@ -174,7 +179,9 @@ impl Jwm {
             self.mark_bar_update_needed_if_visible(Some(mon_num));
 
             // Reposition the status bar window (hide or show) and update its strut.
-            let bar_info = self.secondary_bars.get(&mon_num)
+            let bar_info = self
+                .secondary_bars
+                .get(&mon_num)
                 .and_then(|bar| bar.client_key.zip(bar.window));
             if let Some((client_key, win)) = bar_info {
                 let _ = self.position_secondary_bar_on_monitor(backend, client_key, win, mon_num);
@@ -186,7 +193,6 @@ impl Jwm {
 
         Ok(())
     }
-
 
     pub fn setcfact(
         &mut self,
@@ -274,7 +280,6 @@ impl Jwm {
 
         Ok(())
     }
-
 
     pub(crate) fn is_tiled_and_visible(&self, client_key: ClientKey) -> bool {
         if let Some(client) = self.state.clients.get(client_key) {
@@ -381,12 +386,6 @@ impl Jwm {
         );
         Ok(())
     }
-
-
-
-
-
-
 
     pub fn zoom(
         &mut self,
@@ -625,8 +624,7 @@ impl Jwm {
         // pertag.sel 可能仍记录着已被移动到其它显示器或已销毁的窗口。若它已不属于
         // 当前显示器,丢弃它,让 focus() 在本显示器内回退选择,避免焦点跳到别的屏。
         if let Some(ck) = client_to_focus {
-            let still_here =
-                self.state.clients.get(ck).and_then(|c| c.mon) == Some(sel_mon_key);
+            let still_here = self.state.clients.get(ck).and_then(|c| c.mon) == Some(sel_mon_key);
             if !still_here {
                 client_to_focus = None;
             }

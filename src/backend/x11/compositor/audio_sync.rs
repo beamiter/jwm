@@ -100,7 +100,9 @@ impl AudioSyncManager {
         let timing = AudioStreamTiming::new(fps, buffer_latency_ms);
         log::info!(
             "audio_sync: registered window 0x{:x} with {} fps, {} ms latency",
-            x11_win, fps, buffer_latency_ms
+            x11_win,
+            fps,
+            buffer_latency_ms
         );
         self.audio_streams.insert(x11_win, timing);
     }

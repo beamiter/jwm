@@ -11,9 +11,16 @@ impl WaylandCompositor {
             gl.BindFramebuffer(ffi::READ_FRAMEBUFFER, self.output_fbo);
             gl.BindFramebuffer(ffi::DRAW_FRAMEBUFFER, self.postprocess_fbo);
             gl.BlitFramebuffer(
-                0, 0, self.screen_w as i32, self.screen_h as i32,
-                0, 0, self.screen_w as i32, self.screen_h as i32,
-                ffi::COLOR_BUFFER_BIT, ffi::NEAREST,
+                0,
+                0,
+                self.screen_w as i32,
+                self.screen_h as i32,
+                0,
+                0,
+                self.screen_w as i32,
+                self.screen_h as i32,
+                ffi::COLOR_BUFFER_BIT,
+                ffi::NEAREST,
             );
 
             // Now render back to output FBO with post-processing shader
@@ -33,33 +40,71 @@ impl WaylandCompositor {
             gl.Uniform1f(self.postprocess_uniforms.saturation, self.saturation);
             gl.Uniform1f(self.postprocess_uniforms.brightness, self.brightness);
             gl.Uniform1f(self.postprocess_uniforms.contrast, self.contrast);
-            gl.Uniform1i(self.postprocess_uniforms.invert, if self.invert_colors { 1 } else { 0 });
-            gl.Uniform1i(self.postprocess_uniforms.grayscale, if self.grayscale { 1 } else { 0 });
+            gl.Uniform1i(
+                self.postprocess_uniforms.invert,
+                if self.invert_colors { 1 } else { 0 },
+            );
+            gl.Uniform1i(
+                self.postprocess_uniforms.grayscale,
+                if self.grayscale { 1 } else { 0 },
+            );
 
             // Magnifier
-            gl.Uniform1i(self.postprocess_uniforms.magnifier_enabled, if self.magnifier_enabled { 1 } else { 0 });
+            gl.Uniform1i(
+                self.postprocess_uniforms.magnifier_enabled,
+                if self.magnifier_enabled { 1 } else { 0 },
+            );
             if self.magnifier_enabled {
                 let center_x = self.mouse_x / self.screen_w as f32;
                 let center_y = self.mouse_y / self.screen_h as f32;
-                gl.Uniform2f(self.postprocess_uniforms.magnifier_center, center_x, center_y);
-                gl.Uniform1f(self.postprocess_uniforms.magnifier_radius, self.magnifier_radius);
-                gl.Uniform1f(self.postprocess_uniforms.magnifier_zoom, self.magnifier_zoom);
+                gl.Uniform2f(
+                    self.postprocess_uniforms.magnifier_center,
+                    center_x,
+                    center_y,
+                );
+                gl.Uniform1f(
+                    self.postprocess_uniforms.magnifier_radius,
+                    self.magnifier_radius,
+                );
+                gl.Uniform1f(
+                    self.postprocess_uniforms.magnifier_zoom,
+                    self.magnifier_zoom,
+                );
             }
 
             // Colorblind correction
-            gl.Uniform1i(self.postprocess_uniforms.colorblind_mode, self.colorblind_mode);
+            gl.Uniform1i(
+                self.postprocess_uniforms.colorblind_mode,
+                self.colorblind_mode,
+            );
 
             // HDR tone mapping
-            gl.Uniform1i(self.postprocess_uniforms.hdr_enabled, if self.hdr_enabled { 1 } else { 0 });
+            gl.Uniform1i(
+                self.postprocess_uniforms.hdr_enabled,
+                if self.hdr_enabled { 1 } else { 0 },
+            );
             gl.Uniform1f(self.postprocess_uniforms.hdr_peak_nits, self.hdr_peak_nits);
-            gl.Uniform1i(self.postprocess_uniforms.tone_mapping_method, self.tone_mapping_method);
+            gl.Uniform1i(
+                self.postprocess_uniforms.tone_mapping_method,
+                self.tone_mapping_method,
+            );
 
             // Draw fullscreen quad
             let proj = ortho(0.0, self.screen_w as f32, self.screen_h as f32, 0.0);
-            let rect_loc = gl.GetUniformLocation(self.postprocess_program, b"u_rect\0".as_ptr() as *const _);
-            let proj_loc = gl.GetUniformLocation(self.postprocess_program, b"u_projection\0".as_ptr() as *const _);
+            let rect_loc =
+                gl.GetUniformLocation(self.postprocess_program, b"u_rect\0".as_ptr() as *const _);
+            let proj_loc = gl.GetUniformLocation(
+                self.postprocess_program,
+                b"u_projection\0".as_ptr() as *const _,
+            );
             if rect_loc >= 0 {
-                gl.Uniform4f(rect_loc, 0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
+                gl.Uniform4f(
+                    rect_loc,
+                    0.0,
+                    0.0,
+                    self.screen_w as f32,
+                    self.screen_h as f32,
+                );
             }
             if proj_loc >= 0 {
                 gl.UniformMatrix4fv(proj_loc, 1, ffi::FALSE as u8, proj.as_ptr());
@@ -80,8 +125,12 @@ impl WaylandCompositor {
 
             gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
             gl.ReadPixels(
-                0, 0, w as i32, h as i32,
-                ffi::RGBA, ffi::UNSIGNED_BYTE,
+                0,
+                0,
+                w as i32,
+                h as i32,
+                ffi::RGBA,
+                ffi::UNSIGNED_BYTE,
                 pixels.as_mut_ptr() as *mut _,
             );
 
@@ -91,7 +140,8 @@ impl WaylandCompositor {
             for y in 0..h as usize {
                 let src_row = (h as usize - 1 - y) * row_size;
                 let dst_row = y * row_size;
-                flipped[dst_row..dst_row + row_size].copy_from_slice(&pixels[src_row..src_row + row_size]);
+                flipped[dst_row..dst_row + row_size]
+                    .copy_from_slice(&pixels[src_row..src_row + row_size]);
             }
 
             // Save as PNG
@@ -111,7 +161,15 @@ impl WaylandCompositor {
 
     /// Capture a region screenshot
     #[allow(dead_code)]
-    pub(crate) fn capture_screenshot_region(&self, gl: &ffi::Gles2, path: &std::path::Path, x: i32, y: i32, w: u32, h: u32) -> bool {
+    pub(crate) fn capture_screenshot_region(
+        &self,
+        gl: &ffi::Gles2,
+        path: &std::path::Path,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+    ) -> bool {
         unsafe {
             let mut pixels = vec![0u8; (w * h * 4) as usize];
 
@@ -119,8 +177,12 @@ impl WaylandCompositor {
             // Convert top-left origin y to OpenGL bottom-left origin
             let gl_y = self.screen_h as i32 - y - h as i32;
             gl.ReadPixels(
-                x, gl_y, w as i32, h as i32,
-                ffi::RGBA, ffi::UNSIGNED_BYTE,
+                x,
+                gl_y,
+                w as i32,
+                h as i32,
+                ffi::RGBA,
+                ffi::UNSIGNED_BYTE,
                 pixels.as_mut_ptr() as *mut _,
             );
 
@@ -130,7 +192,8 @@ impl WaylandCompositor {
             for row in 0..h as usize {
                 let src_row = (h as usize - 1 - row) * row_size;
                 let dst_row = row * row_size;
-                flipped[dst_row..dst_row + row_size].copy_from_slice(&pixels[src_row..src_row + row_size]);
+                flipped[dst_row..dst_row + row_size]
+                    .copy_from_slice(&pixels[src_row..src_row + row_size]);
             }
 
             if let Ok(file) = std::fs::File::create(path) {
@@ -149,7 +212,12 @@ impl WaylandCompositor {
 
     /// Capture a window thumbnail (downsized to max_size)
     #[allow(dead_code)]
-    pub(crate) fn capture_window_thumbnail(&self, gl: &ffi::Gles2, window: u64, max_size: u32) -> Option<(Vec<u8>, u32, u32)> {
+    pub(crate) fn capture_window_thumbnail(
+        &self,
+        gl: &ffi::Gles2,
+        window: u64,
+        max_size: u32,
+    ) -> Option<(Vec<u8>, u32, u32)> {
         let win = self.windows.get(&window)?;
         let tex = win.gl_texture?;
         let w = win.width;
@@ -176,16 +244,28 @@ impl WaylandCompositor {
             gl.GenTextures(1, &mut tmp_tex);
             gl.BindTexture(ffi::TEXTURE_2D, tmp_tex);
             gl.TexImage2D(
-                ffi::TEXTURE_2D, 0, ffi::RGBA8 as i32,
-                thumb_w as i32, thumb_h as i32, 0,
-                ffi::RGBA, ffi::UNSIGNED_BYTE, std::ptr::null(),
+                ffi::TEXTURE_2D,
+                0,
+                ffi::RGBA8 as i32,
+                thumb_w as i32,
+                thumb_h as i32,
+                0,
+                ffi::RGBA,
+                ffi::UNSIGNED_BYTE,
+                std::ptr::null(),
             );
             gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
             gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
 
             gl.GenFramebuffers(1, &mut tmp_fbo);
             gl.BindFramebuffer(ffi::FRAMEBUFFER, tmp_fbo);
-            gl.FramebufferTexture2D(ffi::FRAMEBUFFER, ffi::COLOR_ATTACHMENT0, ffi::TEXTURE_2D, tmp_tex, 0);
+            gl.FramebufferTexture2D(
+                ffi::FRAMEBUFFER,
+                ffi::COLOR_ATTACHMENT0,
+                ffi::TEXTURE_2D,
+                tmp_tex,
+                0,
+            );
 
             // Render window texture to thumbnail FBO
             gl.Viewport(0, 0, thumb_w as i32, thumb_h as i32);
@@ -194,8 +274,19 @@ impl WaylandCompositor {
 
             gl.UseProgram(self.program);
             let proj = ortho(0.0, thumb_w as f32, thumb_h as f32, 0.0);
-            gl.UniformMatrix4fv(self.win_uniforms.projection, 1, ffi::FALSE as u8, proj.as_ptr());
-            gl.Uniform4f(self.win_uniforms.rect, 0.0, 0.0, thumb_w as f32, thumb_h as f32);
+            gl.UniformMatrix4fv(
+                self.win_uniforms.projection,
+                1,
+                ffi::FALSE as u8,
+                proj.as_ptr(),
+            );
+            gl.Uniform4f(
+                self.win_uniforms.rect,
+                0.0,
+                0.0,
+                thumb_w as f32,
+                thumb_h as f32,
+            );
             gl.Uniform1f(self.win_uniforms.opacity, 1.0);
             gl.Uniform1f(self.win_uniforms.radius, 0.0);
             gl.Uniform2f(self.win_uniforms.size, thumb_w as f32, thumb_h as f32);
@@ -214,8 +305,12 @@ impl WaylandCompositor {
             // Read pixels
             let mut pixels = vec![0u8; (thumb_w * thumb_h * 4) as usize];
             gl.ReadPixels(
-                0, 0, thumb_w as i32, thumb_h as i32,
-                ffi::RGBA, ffi::UNSIGNED_BYTE,
+                0,
+                0,
+                thumb_w as i32,
+                thumb_h as i32,
+                ffi::RGBA,
+                ffi::UNSIGNED_BYTE,
                 pixels.as_mut_ptr() as *mut _,
             );
 

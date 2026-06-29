@@ -146,7 +146,10 @@ impl WindowType {
 
     /// Should apply subpixel rendering
     pub fn should_use_subpixel(&self) -> bool {
-        matches!(self, WindowType::TextEditor | WindowType::Terminal | WindowType::Browser)
+        matches!(
+            self,
+            WindowType::TextEditor | WindowType::Terminal | WindowType::Browser
+        )
     }
 }
 
@@ -280,18 +283,16 @@ impl SubpixelRenderManager {
         };
 
         // Pre-populate common kernels
-        manager.blur_kernels.insert(
-            "rgb".to_string(),
-            SubpixelBlurKernel::rgb_kernel(2),
-        );
+        manager
+            .blur_kernels
+            .insert("rgb".to_string(), SubpixelBlurKernel::rgb_kernel(2));
         manager.blur_kernels.insert(
             "standard".to_string(),
             SubpixelBlurKernel::standard_kernel(2),
         );
-        manager.blur_kernels.insert(
-            "text".to_string(),
-            SubpixelBlurKernel::text_optimized(2),
-        );
+        manager
+            .blur_kernels
+            .insert("text".to_string(), SubpixelBlurKernel::text_optimized(2));
 
         manager
     }

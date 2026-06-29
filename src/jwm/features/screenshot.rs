@@ -306,7 +306,11 @@ impl Jwm {
     /// 完成交互式截图选择：捕获选中的区域
     ///
     /// 如果 `to_clipboard` 为 true，图片会复制到系统剪贴板而不是保存到文件
-    pub(crate) fn finish_screenshot_select(&mut self, backend: &mut dyn Backend, to_clipboard: bool) {
+    pub(crate) fn finish_screenshot_select(
+        &mut self,
+        backend: &mut dyn Backend,
+        to_clipboard: bool,
+    ) {
         let path_str = match self.features.screenshot.output_path.take() {
             Some(p) => p,
             None => {

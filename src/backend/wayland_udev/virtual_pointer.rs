@@ -1,7 +1,6 @@
 /// wlr-virtual-pointer-unstable-v1 protocol implementation.
 ///
 /// Allows wayvnc and other remote desktop tools to inject pointer events.
-
 use log::info;
 
 use smithay::reexports::wayland_protocols_wlr::virtual_pointer::v1::server::{
@@ -21,7 +20,10 @@ pub struct VirtualPointerData;
 unsafe impl Send for VirtualPointerData {}
 
 pub fn init_virtual_pointer_manager(dh: &DisplayHandle) {
-    dh.create_global::<JwmWaylandState, ZwlrVirtualPointerManagerV1, _>(2, VirtualPointerManagerData);
+    dh.create_global::<JwmWaylandState, ZwlrVirtualPointerManagerV1, _>(
+        2,
+        VirtualPointerManagerData,
+    );
     info!("[udev/wayland] zwlr-virtual-pointer-unstable-v1 global registered");
 }
 
@@ -52,7 +54,11 @@ impl Dispatch<ZwlrVirtualPointerManagerV1, VirtualPointerManagerData> for JwmWay
             zwlr_virtual_pointer_manager_v1::Request::CreateVirtualPointer { seat: _, id } => {
                 data_init.init(id, VirtualPointerData);
             }
-            zwlr_virtual_pointer_manager_v1::Request::CreateVirtualPointerWithOutput { seat: _, output: _, id } => {
+            zwlr_virtual_pointer_manager_v1::Request::CreateVirtualPointerWithOutput {
+                seat: _,
+                output: _,
+                id,
+            } => {
                 data_init.init(id, VirtualPointerData);
             }
             zwlr_virtual_pointer_manager_v1::Request::Destroy => {}
@@ -77,7 +83,13 @@ impl Dispatch<ZwlrVirtualPointerV1, VirtualPointerData> for JwmWaylandState {
                 state.pointer_location.y += dy;
                 state.needs_redraw = true;
             }
-            zwlr_virtual_pointer_v1::Request::MotionAbsolute { time: _, x, y, x_extent, y_extent } => {
+            zwlr_virtual_pointer_v1::Request::MotionAbsolute {
+                time: _,
+                x,
+                y,
+                x_extent,
+                y_extent,
+            } => {
                 if x_extent > 0 && y_extent > 0 {
                     let nx = (x as f64) / (x_extent as f64);
                     let ny = (y as f64) / (y_extent as f64);
@@ -88,7 +100,11 @@ impl Dispatch<ZwlrVirtualPointerV1, VirtualPointerData> for JwmWaylandState {
                 }
                 state.needs_redraw = true;
             }
-            zwlr_virtual_pointer_v1::Request::Button { time: _, button: _, state: _ } => {
+            zwlr_virtual_pointer_v1::Request::Button {
+                time: _,
+                button: _,
+                state: _,
+            } => {
                 // Input events should be routed through the seat's pointer.
                 // For now, we accept the global but don't inject events into the input pipeline.
             }

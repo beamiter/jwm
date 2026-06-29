@@ -1,9 +1,9 @@
 // Focus management operations: window focus, monitor selection, and EWMH updates
 
+use crate::Jwm;
 use crate::backend::api::Backend;
 use crate::config::CONFIG;
 use crate::core::models::ClientKey;
-use crate::Jwm;
 
 impl Jwm {
     pub(crate) fn find_visible_client(&self) -> Option<ClientKey> {

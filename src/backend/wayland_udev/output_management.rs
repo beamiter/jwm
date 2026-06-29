@@ -1,3 +1,4 @@
+use std::sync::Mutex;
 /// wlr-output-management-unstable-v1 protocol implementation for JWM.
 ///
 /// Allows clients like wlr-randr and kanshi to enumerate outputs (modes, position,
@@ -8,9 +9,7 @@
 /// transform. Apply/Test validate the requested configuration against the live
 /// outputs and (for Apply) route an `OutputConfigure` backend event that performs
 /// the real DRM modeset / layout change on the compositor thread.
-
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Mutex;
 
 use log::{debug, info, warn};
 
@@ -270,13 +269,17 @@ impl Dispatch<ZwlrOutputConfigurationV1, OutputConfigData> for JwmWaylandState {
                         state.pending_output_acks.push_back(
                             crate::backend::wayland::state::PendingOutputAck {
                                 on_complete: Box::new(move |ok| {
-                                    if ok { res.succeeded(); } else { res.failed(); }
+                                    if ok {
+                                        res.succeeded();
+                                    } else {
+                                        res.failed();
+                                    }
                                 }),
                             },
                         );
-                        state.push_event(
-                            crate::backend::api::BackendEvent::OutputConfigure { changes },
-                        );
+                        state.push_event(crate::backend::api::BackendEvent::OutputConfigure {
+                            changes,
+                        });
                     }
                     Err(e) => {
                         warn!("[output-mgmt] apply rejected: {e}");
@@ -301,10 +304,7 @@ impl Dispatch<ZwlrOutputConfigurationV1, OutputConfigData> for JwmWaylandState {
 /// Returns true when the request would actually change the mode (so a real
 /// DRM modeset would be needed). A `refresh` of 0 means "any refresh" — i.e.
 /// only width/height must match.
-fn mode_is_change(
-    current: Option<smithay::output::Mode>,
-    requested: (i32, i32, i32),
-) -> bool {
+fn mode_is_change(current: Option<smithay::output::Mode>, requested: (i32, i32, i32)) -> bool {
     let (w, h, refresh) = requested;
     match current {
         None => true,

@@ -2,7 +2,6 @@
 ///
 /// Enables taskbars (Waybar, sfwbar, etc.) to list, activate, close, maximize,
 /// minimize, and fullscreen windows.
-
 use crate::sync_ext::MutexExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -10,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use log::{debug, info};
 
 use smithay::reexports::wayland_protocols_wlr::foreign_toplevel::v1::server::{
-    zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1, State as ToplevelState},
+    zwlr_foreign_toplevel_handle_v1::{self, State as ToplevelState, ZwlrForeignToplevelHandleV1},
     zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
 };
 use smithay::reexports::wayland_server::{
@@ -62,7 +61,12 @@ impl ForeignToplevelMgmtState {
     }
 
     pub fn add_handle(&self, win: WindowId, handle: ZwlrForeignToplevelHandleV1) {
-        self.inner.lock_safe().handles.entry(win).or_default().push(handle);
+        self.inner
+            .lock_safe()
+            .handles
+            .entry(win)
+            .or_default()
+            .push(handle);
     }
 
     pub fn remove_window(&self, win: WindowId) {
@@ -115,7 +119,10 @@ impl ForeignToplevelMgmtState {
 
 /// Initialize the wlr-foreign-toplevel-manager global.
 pub fn init_foreign_toplevel_management(dh: &DisplayHandle) -> ForeignToplevelMgmtState {
-    dh.create_global::<JwmWaylandState, ZwlrForeignToplevelManagerV1, _>(3, ForeignToplevelManagerData);
+    dh.create_global::<JwmWaylandState, ZwlrForeignToplevelManagerV1, _>(
+        3,
+        ForeignToplevelManagerData,
+    );
     info!("[udev/wayland] zwlr-foreign-toplevel-management-unstable-v1 global registered");
     ForeignToplevelMgmtState::new()
 }
@@ -165,7 +172,11 @@ impl GlobalDispatch<ZwlrForeignToplevelManagerV1, ForeignToplevelManagerData> fo
         // Send existing windows to the newly-bound manager.
         for (&win_id, _) in &state.toplevels {
             let title = state.window_title.get(&win_id).cloned().unwrap_or_default();
-            let app_id = state.window_app_id.get(&win_id).cloned().unwrap_or_default();
+            let app_id = state
+                .window_app_id
+                .get(&win_id)
+                .cloned()
+                .unwrap_or_default();
 
             let Ok(handle) = client.create_resource::<ZwlrForeignToplevelHandleV1, _, Self>(
                 dh,

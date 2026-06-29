@@ -1,7 +1,7 @@
-use crate::sync_ext::MutexExt;
 use crate::backend::wayland::state::JwmWaylandState;
 use crate::backend::wayland_dummy_ops::*;
 use crate::backend::wayland_key_ops::UdevKeyOps;
+use crate::sync_ext::MutexExt;
 
 #[path = "../udev_kms.rs"]
 mod kms;
@@ -26,34 +26,32 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use drm::control::{connector, Device as ControlDevice, ModeTypeFlags};
+use drm::control::{Device as ControlDevice, ModeTypeFlags, connector};
 
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::damage::OutputDamageTracker;
-use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
 use smithay::backend::renderer::element::Kind;
+use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
 use smithay::backend::renderer::gles::GlesTexture;
-use smithay::backend::renderer::utils::{import_surface_tree, RendererSurfaceStateUserData};
+use smithay::backend::renderer::utils::{RendererSurfaceStateUserData, import_surface_tree};
 use smithay::backend::renderer::{
-    buffer_has_alpha, buffer_type, Bind, BufferType, Color32F, Offscreen, Renderer, Texture,
+    Bind, BufferType, Color32F, Offscreen, Renderer, Texture, buffer_has_alpha, buffer_type,
 };
 use smithay::utils::{Physical, Scale, Size, Transform};
 use smithay::wayland::compositor::{get_children, with_states};
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 
 use smithay::backend::input::{
-    AbsolutePositionEvent, Axis, Event as InputEventExt, InputEvent, KeyboardKeyEvent,
-    PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
-    TouchEvent as TouchEventTrait,
-    GestureBeginEvent as GestureBeginEventTrait,
-    GestureEndEvent as GestureEndEventTrait,
-    GestureSwipeUpdateEvent as GestureSwipeUpdateEventTrait,
+    AbsolutePositionEvent, Axis, Event as InputEventExt,
+    GestureBeginEvent as GestureBeginEventTrait, GestureEndEvent as GestureEndEventTrait,
     GesturePinchUpdateEvent as GesturePinchUpdateEventTrait,
+    GestureSwipeUpdateEvent as GestureSwipeUpdateEventTrait, InputEvent, KeyboardKeyEvent,
+    PointerAxisEvent, PointerButtonEvent, PointerMotionEvent, TouchEvent as TouchEventTrait,
 };
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
-use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::Event as SessionEvent;
 use smithay::backend::session::Session;
+use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::udev::{UdevBackend as SmithayUdevBackend, UdevEvent};
 use smithay::desktop::layer_map_for_output;
 use smithay::desktop::utils::bbox_from_surface_tree;
@@ -827,9 +825,9 @@ impl UdevBackend {
                         let mut kms_ref = kms.borrow_mut();
                         let (w, h) = kms_ref.total_screen_size();
                         let hdr_10bit = kms_ref.supports_10bit();
-                        match kms_ref
-                            .with_renderer(|gl| unsafe { WaylandCompositor::new(gl, w, h, hdr_10bit) })
-                        {
+                        match kms_ref.with_renderer(|gl| unsafe {
+                            WaylandCompositor::new(gl, w, h, hdr_10bit)
+                        }) {
                             Ok(Ok(compositor)) => self.compositor = Some(compositor),
                             Ok(Err(e)) => log::error!(
                                 "[udev] compositor recreate after KMS reinit failed: {e}"
@@ -1013,7 +1011,7 @@ impl UdevBackend {
         // ConfigChanged into pending_events whenever the config filename
         // appears with a CLOSE_WRITE / MOVED_TO / CREATE event.
         {
-            use nix::sys::inotify::{AddWatchFlags, Inotify, InitFlags};
+            use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 
             let pending = pending_events.clone();
             let setup = || -> Result<(), BackendError> {
@@ -1024,9 +1022,8 @@ impl UdevBackend {
                     .unwrap_or_else(|| config_path.clone());
                 let config_file_name = config_path.file_name().map(|n| n.to_os_string());
 
-                let inotify = Inotify::init(InitFlags::IN_NONBLOCK).map_err(|e| {
-                    BackendError::Message(format!("inotify init failed: {e}"))
-                })?;
+                let inotify = Inotify::init(InitFlags::IN_NONBLOCK)
+                    .map_err(|e| BackendError::Message(format!("inotify init failed: {e}")))?;
                 inotify
                     .add_watch(
                         &watch_dir,
@@ -1035,40 +1032,28 @@ impl UdevBackend {
                             | AddWatchFlags::IN_CREATE,
                     )
                     .map_err(|e| {
-                        BackendError::Message(format!(
-                            "inotify watch {:?} failed: {e}",
-                            watch_dir
-                        ))
+                        BackendError::Message(format!("inotify watch {:?} failed: {e}", watch_dir))
                     })?;
 
                 event_loop
                     .handle()
                     .insert_source(
-                        calloop::generic::Generic::new(
-                            inotify,
-                            Interest::READ,
-                            Mode::Level,
-                        ),
+                        calloop::generic::Generic::new(inotify, Interest::READ, Mode::Level),
                         move |_, inotify, _state| {
                             let events = inotify.read_events().unwrap_or_default();
-                            let relevant = events.iter().any(|ev| {
-                                match (&config_file_name, &ev.name) {
+                            let relevant =
+                                events.iter().any(|ev| match (&config_file_name, &ev.name) {
                                     (Some(want), Some(got)) => got == want,
                                     _ => true,
-                                }
-                            });
+                                });
                             if relevant {
-                                pending
-                                    .lock_safe()
-                                    .push_back(BackendEvent::ConfigChanged);
+                                pending.lock_safe().push_back(BackendEvent::ConfigChanged);
                             }
                             Ok(PostAction::Continue)
                         },
                     )
                     .map_err(|e| {
-                        BackendError::Message(format!(
-                            "calloop insert_source(inotify) failed: {e}"
-                        ))
+                        BackendError::Message(format!("calloop insert_source(inotify) failed: {e}"))
                     })?;
                 Ok(())
             };
@@ -1111,7 +1096,9 @@ impl UdevBackend {
                 std::env::set_var("XDG_CURRENT_DESKTOP", "jwm");
                 std::env::set_var("XDG_SESSION_TYPE", "wayland");
                 if nested {
-                    log::info!("Nested Wayland session detected: clearing DBUS_SESSION_BUS_ADDRESS to isolate children from parent session bus");
+                    log::info!(
+                        "Nested Wayland session detected: clearing DBUS_SESSION_BUS_ADDRESS to isolate children from parent session bus"
+                    );
                     std::env::set_var("DBUS_SESSION_BUS_ADDRESS", "");
                 }
             }
@@ -1294,15 +1281,14 @@ impl UdevBackend {
                 use smithay::wayland::drm_syncobj::{DrmSyncobjState, supports_syncobj_eventfd};
                 let drm_fd = kms.borrow().drm_device_fd.clone();
                 if supports_syncobj_eventfd(&drm_fd) {
-                    state.drm_syncobj_state = Some(
-                        DrmSyncobjState::new::<crate::backend::wayland::state::JwmWaylandState>(
-                            &display_handle,
-                            drm_fd,
-                        ),
-                    );
+                    state.drm_syncobj_state = Some(DrmSyncobjState::new::<
+                        crate::backend::wayland::state::JwmWaylandState,
+                    >(&display_handle, drm_fd));
                     log::info!("[udev/wayland] wp-linux-drm-syncobj-v1 (explicit sync) enabled");
                 } else {
-                    log::info!("[udev/wayland] DRM syncobj eventfd not supported, explicit sync disabled");
+                    log::info!(
+                        "[udev/wayland] DRM syncobj eventfd not supported, explicit sync disabled"
+                    );
                 }
             }
 
@@ -2563,7 +2549,9 @@ impl Backend for UdevBackend {
     }
 
     fn has_partial_damage(&self) -> bool {
-        self.compositor.as_ref().map_or(false, |c| c.partial_damage_enabled())
+        self.compositor
+            .as_ref()
+            .map_or(false, |c| c.partial_damage_enabled())
     }
 
     fn set_partial_damage(&mut self, enabled: bool) -> Result<bool, BackendError> {
@@ -2586,7 +2574,9 @@ impl Backend for UdevBackend {
                 let mut kms_ref = kms.borrow_mut();
                 let (w, h) = kms_ref.total_screen_size();
                 let hdr_10bit = kms_ref.supports_10bit();
-                match kms_ref.with_renderer(|gl| unsafe { WaylandCompositor::new(gl, w, h, hdr_10bit) }) {
+                match kms_ref
+                    .with_renderer(|gl| unsafe { WaylandCompositor::new(gl, w, h, hdr_10bit) })
+                {
                     Ok(Ok(compositor)) => {
                         self.compositor = Some(compositor);
                         return Ok(true);
@@ -2663,7 +2653,12 @@ impl Backend for UdevBackend {
                 let surface_opt = self.state.surface_for_window(win);
                 if crf_log_this {
                     let is_x11 = self.state.x11_surfaces.contains_key(&win);
-                    let class = self.state.window_app_id.get(&win).map(|s| s.as_str()).unwrap_or("");
+                    let class = self
+                        .state
+                        .window_app_id
+                        .get(&win)
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
                     let children = surface_opt
                         .as_ref()
                         .map(|s| get_children(s).len())
@@ -2760,7 +2755,15 @@ impl Backend for UdevBackend {
                             // render_output flips Y in its projection, so the
                             // offscreen is stored top-to-bottom => y_inverted=false.
                             // Content is already cropped to geometry => full UV.
-                            tex_updates.push((win_id, tid, w, h, true, false, [0.0, 0.0, 1.0, 1.0]));
+                            tex_updates.push((
+                                win_id,
+                                tid,
+                                w,
+                                h,
+                                true,
+                                false,
+                                [0.0, 0.0, 1.0, 1.0],
+                            ));
                         }
                         continue;
                     }
@@ -2821,7 +2824,11 @@ impl Backend for UdevBackend {
                         // Compute content UV sub-rect from xdg geometry offset and texture size
                         let geo_offset = with_states(&surface, |states| {
                             let mut cached = states.cached_state.get::<SurfaceCachedState>();
-                            cached.current().geometry.map(|r| (r.loc.x, r.loc.y)).unwrap_or((0, 0))
+                            cached
+                                .current()
+                                .geometry
+                                .map(|r| (r.loc.x, r.loc.y))
+                                .unwrap_or((0, 0))
                         });
                         let tex_w = tex_size.w as f32;
                         let tex_h = tex_size.h as f32;
@@ -2855,7 +2862,8 @@ impl Backend for UdevBackend {
         if let Some(kms) = &self.kms {
             let mut kms_ref = kms.borrow_mut();
             for (popup_surface, abs_x, abs_y, pw, ph) in &xdg_popups {
-                let popup_win_id = 0xFE00_0000_0000_0000u64 | (popup_surface.id().protocol_id() as u64);
+                let popup_win_id =
+                    0xFE00_0000_0000_0000u64 | (popup_surface.id().protocol_id() as u64);
                 let tid = kms_ref.with_gles_renderer(|renderer| {
                     let _ = import_surface_tree(renderer, popup_surface);
                     let ctx_id = renderer.context_id();
@@ -2880,7 +2888,11 @@ impl Backend for UdevBackend {
                     if w > 0 && h > 0 {
                         let geo_offset = with_states(popup_surface, |states| {
                             let mut cached = states.cached_state.get::<SurfaceCachedState>();
-                            cached.current().geometry.map(|r| (r.loc.x, r.loc.y)).unwrap_or((0, 0))
+                            cached
+                                .current()
+                                .geometry
+                                .map(|r| (r.loc.x, r.loc.y))
+                                .unwrap_or((0, 0))
                         });
                         let tex_w = tex_size.w as f32;
                         let tex_h = tex_size.h as f32;
@@ -2893,7 +2905,15 @@ impl Backend for UdevBackend {
                         } else {
                             [0.0, 0.0, 1.0, 1.0]
                         };
-                        tex_updates.push((popup_win_id, tid, w, h, has_alpha, y_inverted, content_uv));
+                        tex_updates.push((
+                            popup_win_id,
+                            tid,
+                            w,
+                            h,
+                            has_alpha,
+                            y_inverted,
+                            content_uv,
+                        ));
                         full_scene.push((popup_win_id, *abs_x, *abs_y, *pw, *ph));
                     }
                 }
@@ -2933,18 +2953,20 @@ impl Backend for UdevBackend {
                 // near-invisible window. When subsurfaces are present, composite the
                 // whole tree into one offscreen texture, mirroring the toplevel path.
                 if !get_children(im_surface).is_empty() {
-                    let bbox = bbox_from_surface_tree(im_surface, Point::<i32, Logical>::from((0, 0)));
+                    let bbox =
+                        bbox_from_surface_tree(im_surface, Point::<i32, Logical>::from((0, 0)));
                     let (cw, ch) = (bbox.size.w.max(1), bbox.size.h.max(1));
                     let composited = kms_ref.with_gles_renderer(|renderer| {
                         let _ = import_surface_tree(renderer, im_surface);
-                        let elements: Vec<kms::KmsRenderElement> = render_elements_from_surface_tree(
-                            renderer,
-                            im_surface,
-                            Point::<i32, Physical>::from((-bbox.loc.x, -bbox.loc.y)),
-                            Scale::from(1.0f64),
-                            1.0f32,
-                            Kind::Unspecified,
-                        );
+                        let elements: Vec<kms::KmsRenderElement> =
+                            render_elements_from_surface_tree(
+                                renderer,
+                                im_surface,
+                                Point::<i32, Physical>::from((-bbox.loc.x, -bbox.loc.y)),
+                                Scale::from(1.0f64),
+                                1.0f32,
+                                Kind::Unspecified,
+                            );
                         let need_new = match offscreen.get(&im_win_id) {
                             Some((_, ow, oh)) => *ow != cw as u32 || *oh != ch as u32,
                             None => true,
@@ -2959,7 +2981,9 @@ impl Backend for UdevBackend {
                                     offscreen.insert(im_win_id, (t, cw as u32, ch as u32));
                                 }
                                 Err(e) => {
-                                    log::error!("[ime] popup offscreen create {cw}x{ch} failed: {e:?}");
+                                    log::error!(
+                                        "[ime] popup offscreen create {cw}x{ch} failed: {e:?}"
+                                    );
                                     return None;
                                 }
                             }
@@ -2973,7 +2997,8 @@ impl Backend for UdevBackend {
                             }
                         };
                         let phys: Size<i32, Physical> = (cw, ch).into();
-                        let mut dt = OutputDamageTracker::new(phys, Scale::from(1.0f64), Transform::Normal);
+                        let mut dt =
+                            OutputDamageTracker::new(phys, Scale::from(1.0f64), Transform::Normal);
                         if let Err(e) = dt.render_output(
                             renderer,
                             &mut target,
@@ -2996,7 +3021,15 @@ impl Backend for UdevBackend {
                             "[ime] popup composited tex={tid} {cw}x{ch} children={} abs=({sx},{sy})",
                             get_children(im_surface).len()
                         );
-                        tex_updates.push((im_win_id, tid, cw as u32, ch as u32, true, false, [0.0, 0.0, 1.0, 1.0]));
+                        tex_updates.push((
+                            im_win_id,
+                            tid,
+                            cw as u32,
+                            ch as u32,
+                            true,
+                            false,
+                            [0.0, 0.0, 1.0, 1.0],
+                        ));
                         full_scene.push((im_win_id, sx, sy, cw as u32, ch as u32));
                     }
                     continue;
@@ -3027,7 +3060,15 @@ impl Backend for UdevBackend {
                         let (px, py) = place_popup(anchor, w as i32, h as i32, 0, 0);
                         log::info!("[ime] popup texture tex={tid} size={w}x{h} abs=({px},{py})");
                         if w > 0 && h > 0 {
-                            tex_updates.push((im_win_id, tid, w, h, has_alpha, y_inverted, [0.0, 0.0, 1.0, 1.0]));
+                            tex_updates.push((
+                                im_win_id,
+                                tid,
+                                w,
+                                h,
+                                has_alpha,
+                                y_inverted,
+                                [0.0, 0.0, 1.0, 1.0],
+                            ));
                             full_scene.push((im_win_id, px, py, w, h));
                         }
                     }
@@ -3044,7 +3085,8 @@ impl Backend for UdevBackend {
         // Phase 2: Update compositor window textures then render into FBO.
         let result = if let (Some(compositor), Some(kms)) = (&mut self.compositor, &self.kms) {
             for &(win_id, tid, w, h, has_alpha, y_inverted, content_uv) in &tex_updates {
-                compositor.update_window_texture(win_id, tid, w, h, has_alpha, y_inverted, content_uv);
+                compositor
+                    .update_window_texture(win_id, tid, w, h, has_alpha, y_inverted, content_uv);
             }
             // Sync window class/app_id for per-class rules (frosted glass strength, etc.)
             for &(win_id, _, _, _, _) in &full_scene {
@@ -3061,9 +3103,7 @@ impl Backend for UdevBackend {
             // ColorTransform pass below reads `decision.hw_ctm_active` to
             // choose its target params (sRGB when true, the overlapping
             // output's primaries otherwise), so this must run first.
-            let decision = kms
-                .borrow_mut()
-                .refresh_color_pipeline_offload(&self.state);
+            let decision = kms.borrow_mut().refresh_color_pipeline_offload(&self.state);
             let cm_render_gate = crate::config::CONFIG
                 .load()
                 .behavior()
@@ -3102,7 +3142,8 @@ impl Backend for UdevBackend {
                             let scale = o.current_scale().fractional_scale();
                             let logical_size = mode.size.to_f64().to_logical(scale).to_i32_round();
                             let logical_size = o.current_transform().transform_size(logical_size);
-                            let rect = Rectangle::<i32, Logical>::new(o.current_location(), logical_size);
+                            let rect =
+                                Rectangle::<i32, Logical>::new(o.current_location(), logical_size);
                             let params = o
                                 .user_data()
                                 .get::<EdidHdrCapabilities>()
@@ -3484,7 +3525,12 @@ impl Backend for UdevBackend {
         }
     }
 
-    fn compositor_notify_audio_timing(&mut self, window: WindowId, fps: f32, buffer_latency_ms: u32) {
+    fn compositor_notify_audio_timing(
+        &mut self,
+        window: WindowId,
+        fps: f32,
+        buffer_latency_ms: u32,
+    ) {
         if let Some(c) = self.compositor.as_mut() {
             c.notify_audio_timing(window.raw(), fps, buffer_latency_ms);
         }
@@ -3498,7 +3544,11 @@ impl Backend for UdevBackend {
         self.compositor.as_ref().map(|c| c.get_blur_status())
     }
 
-    fn compositor_capture_thumbnail(&self, window: WindowId, max_size: u32) -> Option<(Vec<u8>, u32, u32)> {
+    fn compositor_capture_thumbnail(
+        &self,
+        window: WindowId,
+        max_size: u32,
+    ) -> Option<(Vec<u8>, u32, u32)> {
         let compositor = self.compositor.as_ref()?;
         let kms = self.kms.as_ref()?;
         kms.borrow_mut()
@@ -3506,15 +3556,24 @@ impl Backend for UdevBackend {
             .ok()?
     }
 
-    fn compositor_request_live_thumbnail(&mut self, window: u32, max_size: u32) -> Option<(Vec<u8>, u32, u32)> {
+    fn compositor_request_live_thumbnail(
+        &mut self,
+        window: u32,
+        max_size: u32,
+    ) -> Option<(Vec<u8>, u32, u32)> {
         let compositor = self.compositor.as_ref()?;
         let kms = self.kms.as_ref()?;
         kms.borrow_mut()
-            .with_renderer(|gl| unsafe { compositor.capture_thumbnail(gl, window as u64, max_size) })
+            .with_renderer(|gl| unsafe {
+                compositor.capture_thumbnail(gl, window as u64, max_size)
+            })
             .ok()?
     }
 
-    fn query_vrr_capabilities(&self, output: OutputId) -> Option<crate::backend::api::VrrCapabilities> {
+    fn query_vrr_capabilities(
+        &self,
+        output: OutputId,
+    ) -> Option<crate::backend::api::VrrCapabilities> {
         let kms = self.kms.as_ref()?;
         let shared = self.shared.lock_safe();
         let output_idx = shared.outputs.iter().position(|o| o.id == output)?;
@@ -3530,13 +3589,20 @@ impl Backend for UdevBackend {
         let shared = self.shared.lock_safe();
         let output_idx = shared.outputs.iter().position(|o| o.id == output)?;
         drop(shared);
-        kms.borrow_mut().query_color_pipeline_caps_for_output(output_idx)
+        kms.borrow_mut()
+            .query_color_pipeline_caps_for_output(output_idx)
     }
 
     fn set_vrr_enabled(&mut self, output: OutputId, enabled: bool) -> Result<(), BackendError> {
-        let kms = self.kms.as_ref().ok_or(BackendError::Unsupported("no KMS"))?;
+        let kms = self
+            .kms
+            .as_ref()
+            .ok_or(BackendError::Unsupported("no KMS"))?;
         let shared = self.shared.lock_safe();
-        let output_idx = shared.outputs.iter().position(|o| o.id == output)
+        let output_idx = shared
+            .outputs
+            .iter()
+            .position(|o| o.id == output)
             .ok_or(BackendError::NotFound("output not found"))?;
         drop(shared);
         kms.borrow_mut()
@@ -3545,11 +3611,20 @@ impl Backend for UdevBackend {
     }
 
     fn set_hdr_metadata(&mut self, output: OutputId, enabled: bool) -> Result<(), BackendError> {
-        let kms = self.kms.as_ref().ok_or(BackendError::Unsupported("no KMS"))?;
+        let kms = self
+            .kms
+            .as_ref()
+            .ok_or(BackendError::Unsupported("no KMS"))?;
         let shared = self.shared.lock_safe();
-        let info = shared.outputs.iter().find(|o| o.id == output)
+        let info = shared
+            .outputs
+            .iter()
+            .find(|o| o.id == output)
             .ok_or(BackendError::NotFound("output not found"))?;
-        let output_idx = shared.outputs.iter().position(|o| o.id == output)
+        let output_idx = shared
+            .outputs
+            .iter()
+            .position(|o| o.id == output)
             .ok_or(BackendError::NotFound("output not found"))?;
         let caps = info.hdr_metadata.clone();
         drop(shared);
@@ -3587,26 +3662,30 @@ impl Backend for UdevBackend {
         self.state.session_locked
     }
 
-    fn compositor_color_managed_surfaces(&self) -> Vec<crate::backend::api::ColorManagedSurfaceInfo> {
+    fn compositor_color_managed_surfaces(
+        &self,
+    ) -> Vec<crate::backend::api::ColorManagedSurfaceInfo> {
         let Some(cm) = self.state.color_manager.as_ref() else {
             return Vec::new();
         };
         cm.snapshot_surface_descriptions()
             .into_iter()
-            .map(|(obj_id, record)| crate::backend::api::ColorManagedSurfaceInfo {
-                surface_object_id: format!("{:?}", obj_id),
-                identity: record.identity,
-                tf_named: record.params.tf_named,
-                tf_power: record.params.tf_power,
-                primaries_named: record.params.primaries_named,
-                min_lum: record.params.min_lum,
-                max_lum: record.params.max_lum,
-                reference_lum: record.params.reference_lum,
-                mastering_min_lum: record.params.mastering_min_lum,
-                mastering_max_lum: record.params.mastering_max_lum,
-                max_cll: record.params.max_cll,
-                max_fall: record.params.max_fall,
-            })
+            .map(
+                |(obj_id, record)| crate::backend::api::ColorManagedSurfaceInfo {
+                    surface_object_id: format!("{:?}", obj_id),
+                    identity: record.identity,
+                    tf_named: record.params.tf_named,
+                    tf_power: record.params.tf_power,
+                    primaries_named: record.params.primaries_named,
+                    min_lum: record.params.min_lum,
+                    max_lum: record.params.max_lum,
+                    reference_lum: record.params.reference_lum,
+                    mastering_min_lum: record.params.mastering_min_lum,
+                    mastering_max_lum: record.params.mastering_max_lum,
+                    max_cll: record.params.max_cll,
+                    max_fall: record.params.max_fall,
+                },
+            )
             .collect()
     }
 
@@ -3617,7 +3696,9 @@ impl Backend for UdevBackend {
             if wanted {
                 match self.set_compositor_enabled(true) {
                     Ok(true) => log::info!("[run] Compositor initialized from config"),
-                    Ok(false) => log::warn!("[run] Compositor wanted but set_compositor_enabled returned false (KMS not ready?)"),
+                    Ok(false) => log::warn!(
+                        "[run] Compositor wanted but set_compositor_enabled returned false (KMS not ready?)"
+                    ),
                     Err(e) => log::warn!("[run] Failed to initialize compositor: {e}"),
                 }
             }
@@ -3628,7 +3709,10 @@ impl Backend for UdevBackend {
             loop {
                 let next = { self.pending_events.lock_safe().pop_front() };
                 match next {
-                    Some(BackendEvent::OutputPowerSet { ref output_name, on }) => {
+                    Some(BackendEvent::OutputPowerSet {
+                        ref output_name,
+                        on,
+                    }) => {
                         handled_any = true;
                         if let Some(ref kms) = self.kms {
                             let mut kms = kms.borrow_mut();
@@ -3640,7 +3724,11 @@ impl Backend for UdevBackend {
                             }
                         }
                     }
-                    Some(BackendEvent::GammaSet { ref output_name, gamma_size, ref ramp }) => {
+                    Some(BackendEvent::GammaSet {
+                        ref output_name,
+                        gamma_size,
+                        ref ramp,
+                    }) => {
                         handled_any = true;
                         if let Some(ref kms) = self.kms {
                             let mut kms = kms.borrow_mut();
@@ -3744,9 +3832,10 @@ impl Backend for UdevBackend {
             // accept a new frame. This prevents the GPU from doing expensive
             // rendering that will be discarded because the previous page-flip
             // hasn't completed yet.
-            let can_present = self.kms.as_ref().map_or(true, |k| {
-                !k.borrow().any_frame_pending()
-            });
+            let can_present = self
+                .kms
+                .as_ref()
+                .map_or(true, |k| !k.borrow().any_frame_pending());
 
             let needs_redraw = self.state.needs_redraw;
             if needs_redraw && can_present {

@@ -4,14 +4,14 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
+use smithay::backend::allocator::Format as DmabufFormat;
+use smithay::backend::allocator::Fourcc;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::format::FormatSet;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
-use smithay::backend::allocator::Format as DmabufFormat;
-use smithay::backend::allocator::Fourcc;
 use smithay::backend::drm::compositor::FrameFlags;
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::exporter::gbm::NodeFilter;
@@ -29,37 +29,37 @@ use smithay::backend::renderer::element::surface::{
 };
 use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::{AsRenderElements, Id, Kind};
-use smithay::backend::renderer::gles::ffi as gl_ffi;
 use smithay::backend::renderer::gles::GlesRenderbuffer;
+use smithay::backend::renderer::gles::ffi as gl_ffi;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
 use smithay::backend::renderer::{Bind, ExportMem, Offscreen, Renderer};
-use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::Session;
+use smithay::backend::session::libseat::LibSeatSession;
 use smithay::desktop::layer_map_for_output;
 use smithay::desktop::space::SurfaceTree;
 use smithay::desktop::utils::send_frames_surface_tree;
 use smithay::output::{Mode as WlMode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::channel::Sender;
 use smithay::reexports::calloop::{LoopHandle, RegistrationToken};
-use smithay::reexports::drm::control::{connector, crtc, Device as ControlDevice, ModeTypeFlags};
+use smithay::reexports::drm::control::{Device as ControlDevice, ModeTypeFlags, connector, crtc};
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server;
-use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Buffer as BufferCoord, Size};
 use smithay::utils::{DeviceFd, Physical, Point, Rectangle, Scale, Transform};
-use smithay::wayland::compositor::{with_states, with_surface_tree_downward, TraversalAction};
+use smithay::wayland::compositor::{TraversalAction, with_states, with_surface_tree_downward};
 use smithay::wayland::dmabuf::get_dmabuf;
+use smithay::wayland::presentation::{PresentationFeedbackCachedState, Refresh};
 use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
-use smithay::wayland::presentation::{PresentationFeedbackCachedState, Refresh};
 
 use crate::backend::common_define::StdCursorKind;
 
 use xcursor::{
-    parser::{parse_xcursor, Image},
     CursorTheme,
+    parser::{Image, parse_xcursor},
 };
 
 smithay::backend::renderer::element::render_elements! {
@@ -111,8 +111,10 @@ struct KmsOutputState {
     /// no-op when the desired TF already matches and so teardown / DPMS-off
     /// can `destroy_property_blob` cleanly.
     color_pipeline_caps: Option<crate::backend::api::KmsColorPipelineCaps>,
-    installed_gamma_lut:
-        Option<(u64, crate::backend::wayland_udev::color_pipeline::TransferKind)>,
+    installed_gamma_lut: Option<(
+        u64,
+        crate::backend::wayland_udev::color_pipeline::TransferKind,
+    )>,
     /// Tracked CTM blob id. The installed payload is always
     /// `rgb_to_rgb_matrix(SRGB_D65, output_primaries)` (or identity when the
     /// monitor is sRGB-primaries), derived from EDID at init — constant for
@@ -455,13 +457,16 @@ impl KmsState {
 
     /// Check if 10-bit rendering formats are available.
     pub(super) fn supports_10bit(&self) -> bool {
-        self.dmabuf_render_formats().iter().any(|f| {
-            f.code == Fourcc::Argb2101010 || f.code == Fourcc::Xrgb2101010
-        })
+        self.dmabuf_render_formats()
+            .iter()
+            .any(|f| f.code == Fourcc::Argb2101010 || f.code == Fourcc::Xrgb2101010)
     }
 
     /// Query VRR capabilities for a given output (by index into self.outputs).
-    pub(super) fn query_vrr_for_output(&mut self, output_idx: usize) -> Option<crate::backend::api::VrrCapabilities> {
+    pub(super) fn query_vrr_for_output(
+        &mut self,
+        output_idx: usize,
+    ) -> Option<crate::backend::api::VrrCapabilities> {
         let output = self.outputs.get(output_idx)?;
         let crtc = output.crtc;
         let mgr = self.drm_output_manager.lock();
@@ -515,8 +520,8 @@ impl KmsState {
     where
         H: smithay::reexports::drm::control::ResourceHandle,
     {
-        use smithay::reexports::drm::control::atomic::AtomicModeReq;
         use smithay::reexports::drm::control::AtomicCommitFlags;
+        use smithay::reexports::drm::control::atomic::AtomicModeReq;
         if dev.is_atomic() {
             let mut req = AtomicModeReq::new();
             req.add_raw_property(handle.into(), prop, value);
@@ -534,8 +539,15 @@ impl KmsState {
     }
 
     /// Set VRR enabled/disabled for a given output (by index into self.outputs).
-    pub(super) fn set_vrr_for_output(&mut self, output_idx: usize, enabled: bool) -> Result<(), String> {
-        let output = self.outputs.get(output_idx).ok_or("output index out of range")?;
+    pub(super) fn set_vrr_for_output(
+        &mut self,
+        output_idx: usize,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let output = self
+            .outputs
+            .get(output_idx)
+            .ok_or("output index out of range")?;
         let crtc = output.crtc;
         let mgr = self.drm_output_manager.lock();
         let dev = mgr.device();
@@ -569,7 +581,10 @@ impl KmsState {
         output_idx: usize,
         blob: Option<&[u8; 32]>,
     ) -> Result<(), String> {
-        let output = self.outputs.get(output_idx).ok_or("output index out of range")?;
+        let output = self
+            .outputs
+            .get(output_idx)
+            .ok_or("output index out of range")?;
         let conn_handle = output.connector;
         let mgr = self.drm_output_manager.lock();
         let dev = mgr.device();
@@ -603,8 +618,15 @@ impl KmsState {
         self.outputs.iter().position(|o| o.output.name() == name)
     }
 
-    pub(super) fn set_dpms_for_output(&mut self, output_idx: usize, on: bool) -> Result<(), String> {
-        let output = self.outputs.get(output_idx).ok_or("output index out of range")?;
+    pub(super) fn set_dpms_for_output(
+        &mut self,
+        output_idx: usize,
+        on: bool,
+    ) -> Result<(), String> {
+        let output = self
+            .outputs
+            .get(output_idx)
+            .ok_or("output index out of range")?;
         let conn_handle = output.connector;
         // When powering off, drop any installed GAMMA_LUT and free its blob
         // so the CRTC isn't carrying stale color state while blanked; the next
@@ -614,19 +636,24 @@ impl KmsState {
             // Best-effort: log + continue. DPMS itself is more important than
             // a clean LUT teardown.
             if let Err(e) = self.uninstall_gamma_lut(output_idx) {
-                log::debug!("[kms-cm] DPMS-off LUT teardown failed on {}: {e}",
-                    self.outputs[output_idx].output_name);
+                log::debug!(
+                    "[kms-cm] DPMS-off LUT teardown failed on {}: {e}",
+                    self.outputs[output_idx].output_name
+                );
             }
         }
         if !on && self.outputs[output_idx].installed_ctm.is_some() {
             if let Err(e) = self.uninstall_ctm(output_idx) {
-                log::debug!("[kms-cm] DPMS-off CTM teardown failed on {}: {e}",
-                    self.outputs[output_idx].output_name);
+                log::debug!(
+                    "[kms-cm] DPMS-off CTM teardown failed on {}: {e}",
+                    self.outputs[output_idx].output_name
+                );
             }
         }
         let mgr = self.drm_output_manager.lock();
         let dev = mgr.device();
-        let mut result: Result<(), String> = Err("DPMS property not found on connector".to_string());
+        let mut result: Result<(), String> =
+            Err("DPMS property not found on connector".to_string());
         if let Ok(props) = dev.get_properties(conn_handle) {
             let (handles, _values) = props.as_props_and_values();
             for &prop_handle in handles {
@@ -663,7 +690,10 @@ impl KmsState {
         output_idx: usize,
         tf: crate::backend::wayland_udev::color_pipeline::TransferKind,
     ) -> Result<(), String> {
-        let output = self.outputs.get(output_idx).ok_or("output index out of range")?;
+        let output = self
+            .outputs
+            .get(output_idx)
+            .ok_or("output index out of range")?;
         let crtc = output.crtc;
         let caps = output
             .color_pipeline_caps
@@ -690,9 +720,8 @@ impl KmsState {
             let bytes = unsafe {
                 std::slice::from_raw_parts_mut(
                     lut.as_mut_ptr() as *mut u8,
-                    std::mem::size_of::<
-                        crate::backend::wayland_udev::color_pipeline::DrmColorLut,
-                    >() * lut.len(),
+                    std::mem::size_of::<crate::backend::wayland_udev::color_pipeline::DrmColorLut>(
+                    ) * lut.len(),
                 )
             };
             let blob = drm_ffi::mode::create_property_blob(dev.as_fd(), bytes)
@@ -701,7 +730,8 @@ impl KmsState {
         };
 
         // Locate GAMMA_LUT property handle on the CRTC and set it.
-        let mut set_result: Result<(), String> = Err("GAMMA_LUT property not found on CRTC".to_string());
+        let mut set_result: Result<(), String> =
+            Err("GAMMA_LUT property not found on CRTC".to_string());
         if let Ok(props) = dev.get_properties(crtc) {
             let (handles, _values) = props.as_props_and_values();
             for &prop_handle in handles {
@@ -735,7 +765,10 @@ impl KmsState {
     /// Zero the output's `GAMMA_LUT` (revert to driver default) and destroy
     /// any tracked blob. No-op when nothing is installed.
     pub(super) fn uninstall_gamma_lut(&mut self, output_idx: usize) -> Result<(), String> {
-        let output = self.outputs.get(output_idx).ok_or("output index out of range")?;
+        let output = self
+            .outputs
+            .get(output_idx)
+            .ok_or("output index out of range")?;
         let blob = match output.installed_gamma_lut {
             Some((id, _)) => id,
             None => return Ok(()),
@@ -746,7 +779,8 @@ impl KmsState {
         // Set GAMMA_LUT to 0 first so the CRTC reverts before the blob is
         // destroyed. Best-effort: even if this fails we still try to free the
         // blob (a leaked blob is preferable to a dangling kernel reference).
-        let mut prop_result: Result<(), String> = Err("GAMMA_LUT property not found on CRTC".to_string());
+        let mut prop_result: Result<(), String> =
+            Err("GAMMA_LUT property not found on CRTC".to_string());
         if let Ok(props) = dev.get_properties(crtc) {
             let (handles, _values) = props.as_props_and_values();
             for &prop_handle in handles {
@@ -780,7 +814,10 @@ impl KmsState {
         output_idx: usize,
         matrix: [f32; 9],
     ) -> Result<(), String> {
-        let output = self.outputs.get(output_idx).ok_or("output index out of range")?;
+        let output = self
+            .outputs
+            .get(output_idx)
+            .ok_or("output index out of range")?;
         let crtc = output.crtc;
         let caps = output
             .color_pipeline_caps
@@ -799,9 +836,8 @@ impl KmsState {
             let bytes = unsafe {
                 std::slice::from_raw_parts_mut(
                     &mut ctm as *mut _ as *mut u8,
-                    std::mem::size_of::<
-                        crate::backend::wayland_udev::color_pipeline::DrmColorCtm,
-                    >(),
+                    std::mem::size_of::<crate::backend::wayland_udev::color_pipeline::DrmColorCtm>(
+                    ),
                 )
             };
             let blob = drm_ffi::mode::create_property_blob(dev.as_fd(), bytes)
@@ -841,7 +877,10 @@ impl KmsState {
     /// Zero the output's `CTM` and destroy any tracked blob. No-op when
     /// nothing is installed.
     pub(super) fn uninstall_ctm(&mut self, output_idx: usize) -> Result<(), String> {
-        let output = self.outputs.get(output_idx).ok_or("output index out of range")?;
+        let output = self
+            .outputs
+            .get(output_idx)
+            .ok_or("output index out of range")?;
         let blob = match output.installed_ctm {
             Some(id) => id,
             None => return Ok(()),
@@ -1063,8 +1102,16 @@ impl KmsState {
         decision
     }
 
-    pub(super) fn set_gamma_for_output(&mut self, output_idx: usize, gamma_size: u32, ramp: &[u16]) -> Result<(), String> {
-        let output = self.outputs.get(output_idx).ok_or("output index out of range")?;
+    pub(super) fn set_gamma_for_output(
+        &mut self,
+        output_idx: usize,
+        gamma_size: u32,
+        ramp: &[u16],
+    ) -> Result<(), String> {
+        let output = self
+            .outputs
+            .get(output_idx)
+            .ok_or("output index out of range")?;
         let crtc = output.crtc;
         let mgr = self.drm_output_manager.lock();
         let dev = mgr.device();
@@ -1072,7 +1119,11 @@ impl KmsState {
         let sz = gamma_size as usize;
         let expected_len = sz * 3;
         if ramp.len() != expected_len {
-            return Err(format!("gamma ramp length mismatch: got {} expected {}", ramp.len(), expected_len));
+            return Err(format!(
+                "gamma ramp length mismatch: got {} expected {}",
+                ramp.len(),
+                expected_len
+            ));
         }
 
         let red = &ramp[..sz];
@@ -1157,7 +1208,7 @@ impl KmsState {
                     None => {
                         return Err(format!(
                             "requested mode {w}x{h}@{refresh} not available on '{name}'"
-                        ))
+                        ));
                     }
                 }
             }
@@ -1212,9 +1263,12 @@ impl KmsState {
         let new_transform = transform.map(wl_transform_to_smithay);
         let new_scale = scale.map(smithay::output::Scale::Fractional);
         let new_loc = position.map(Point::from);
-        self.outputs[idx]
-            .output
-            .change_current_state(new_wl_mode, new_transform, new_scale, new_loc);
+        self.outputs[idx].output.change_current_state(
+            new_wl_mode,
+            new_transform,
+            new_scale,
+            new_loc,
+        );
         if let Some((x, y)) = position {
             self.outputs[idx].origin = (x, y);
         }
@@ -1766,11 +1820,12 @@ impl KmsState {
             return;
         }
 
-        let fail_all = |frames: &[crate::backend::wayland_udev::image_copy_capture::PendingImageCapture]| {
-            for f in frames {
-                f.frame.failed(FailureReason::Unknown);
-            }
-        };
+        let fail_all =
+            |frames: &[crate::backend::wayland_udev::image_copy_capture::PendingImageCapture]| {
+                for f in frames {
+                    f.frame.failed(FailureReason::Unknown);
+                }
+            };
 
         let size: Size<i32, BufferCoord> = (width, height).into();
         let renderbuffer =
@@ -1795,7 +1850,8 @@ impl KmsState {
         let mut damage_tracker =
             OutputDamageTracker::new(phys_size, Scale::from(1.0f64), Transform::Normal);
         let clear_color = smithay::backend::renderer::Color32F::new(0.0, 0.0, 0.0, 1.0);
-        if let Err(e) = damage_tracker.render_output(renderer, &mut target, 0, elements, clear_color)
+        if let Err(e) =
+            damage_tracker.render_output(renderer, &mut target, 0, elements, clear_color)
         {
             log::error!("[image-capture] render_output failed: {e:?}");
             fail_all(&frames);
@@ -1944,10 +2000,9 @@ impl KmsState {
             let scale = Scale::from(1.0f64);
             let location: Point<i32, Physical> = (-off_x, -off_y).into();
             let tree = SurfaceTree::from_surface(&surface);
-            let elements: Vec<KmsRenderElement> =
-                AsRenderElements::<GlesRenderer>::render_elements(
-                    &tree, renderer, location, scale, 1.0,
-                );
+            let elements: Vec<KmsRenderElement> = AsRenderElements::<GlesRenderer>::render_elements(
+                &tree, renderer, location, scale, 1.0,
+            );
 
             // dmabuf fast path: render the window straight into the client buffer.
             if let Some(dmabuf) = get_dmabuf(&frame_info.buffer).ok().cloned() {
@@ -1974,18 +2029,14 @@ impl KmsState {
             }
 
             let size: Size<i32, BufferCoord> = (width, height).into();
-            let renderbuffer = match Self::screencopy_offscreen_buffer(
-                renderer,
-                offscreen_cache,
-                width,
-                height,
-            ) {
-                Some(rb) => rb,
-                None => {
-                    frame_info.frame.failed(FailureReason::Unknown);
-                    continue;
-                }
-            };
+            let renderbuffer =
+                match Self::screencopy_offscreen_buffer(renderer, offscreen_cache, width, height) {
+                    Some(rb) => rb,
+                    None => {
+                        frame_info.frame.failed(FailureReason::Unknown);
+                        continue;
+                    }
+                };
 
             let mut target = match renderer.bind(renderbuffer) {
                 Ok(t) => t,
@@ -2307,7 +2358,10 @@ impl KmsState {
                         if let Ok(info) = dev.get_property(prop_handle) {
                             if info.name().to_str() == Ok("VRR_ENABLED") {
                                 match Self::set_drm_property(dev, p.crtc, prop_handle, 1) {
-                                    Err(e) => log::debug!("[kms] failed to enable VRR on crtc {:?}: {e}", p.crtc),
+                                    Err(e) => log::debug!(
+                                        "[kms] failed to enable VRR on crtc {:?}: {e}",
+                                        p.crtc
+                                    ),
                                     Ok(()) => log::info!("[kms] VRR enabled on crtc {:?}", p.crtc),
                                 }
                                 break;
@@ -2341,15 +2395,16 @@ impl KmsState {
                 Some(caps)
             };
 
-            let refresh_interval = p.frame_callback_throttle.unwrap_or(std::time::Duration::from_millis(16));
+            let refresh_interval = p
+                .frame_callback_throttle
+                .unwrap_or(std::time::Duration::from_millis(16));
             let output_name = p.output.name();
             let (output_tf, output_ctm) = {
                 use crate::backend::wayland_udev::color_pipeline::{
                     ColorSpacePrimaries, TransferKind, rgb_to_rgb_matrix,
                 };
-                let params = crate::backend::wayland_udev::color_management::params_for_output(
-                    &p.output,
-                );
+                let params =
+                    crate::backend::wayland_udev::color_management::params_for_output(&p.output);
                 let tf = TransferKind::from_params(&params);
                 let prim = ColorSpacePrimaries::from_params(&params);
                 let ctm = rgb_to_rgb_matrix(&ColorSpacePrimaries::SRGB_D65, &prim);
@@ -2940,15 +2995,14 @@ impl KmsState {
                     } else {
                         Kind::Unspecified
                     };
-                    let window_elements: Vec<KmsRenderElement> =
-                        render_elements_from_surface_tree(
-                            &mut self.renderer,
-                            &surface,
-                            location,
-                            scale,
-                            1.0,
-                            window_kind,
-                        );
+                    let window_elements: Vec<KmsRenderElement> = render_elements_from_surface_tree(
+                        &mut self.renderer,
+                        &surface,
+                        location,
+                        scale,
+                        1.0,
+                        window_kind,
+                    );
                     elements.extend(window_elements);
 
                     // Render window borders (server-side decorations for tiling WM).
@@ -3199,11 +3253,15 @@ impl KmsState {
                         // (re-)activate the DRM backend so subsequent frames can be queued.
                         match self.drm_output_manager.lock().activate(false) {
                             Ok(_) => {
-                                log::info!("drm backend activated after queue_frame failure; will retry rendering");
+                                log::info!(
+                                    "drm backend activated after queue_frame failure; will retry rendering"
+                                );
                                 self.needs_render = true;
                             }
                             Err(act_err) => {
-                                log::warn!("drm backend activate failed after queue_frame failure: {act_err:?}");
+                                log::warn!(
+                                    "drm backend activate failed after queue_frame failure: {act_err:?}"
+                                );
                             }
                         }
                     } else {
@@ -3219,11 +3277,15 @@ impl KmsState {
 
                     match self.drm_output_manager.lock().activate(false) {
                         Ok(_) => {
-                            log::info!("drm backend activated after render_frame failure; will retry rendering");
+                            log::info!(
+                                "drm backend activated after render_frame failure; will retry rendering"
+                            );
                             self.needs_render = true;
                         }
                         Err(act_err) => {
-                            log::warn!("drm backend activate failed after render_frame failure: {act_err:?}");
+                            log::warn!(
+                                "drm backend activate failed after render_frame failure: {act_err:?}"
+                            );
                         }
                     }
                 }
@@ -3267,12 +3329,10 @@ impl KmsState {
         out.frame_pending_since = None;
 
         // Extract precise flip timestamp from DRM metadata for presentation feedback
-        let presentation_time = metadata
-            .as_ref()
-            .and_then(|m| match m.time {
-                smithay::backend::drm::DrmEventTime::Monotonic(t) => Some(t),
-                smithay::backend::drm::DrmEventTime::Realtime(_) => None,
-            });
+        let presentation_time = metadata.as_ref().and_then(|m| match m.time {
+            smithay::backend::drm::DrmEventTime::Monotonic(t) => Some(t),
+            smithay::backend::drm::DrmEventTime::Realtime(_) => None,
+        });
 
         if let Some(vblank_time) = presentation_time {
             out.last_vblank = Some(vblank_time);
@@ -3297,7 +3357,8 @@ impl KmsState {
                         (),
                         |_, _, _| TraversalAction::DoChildren(()),
                         |_surface, states, _| {
-                            let mut cached = states.cached_state.get::<PresentationFeedbackCachedState>();
+                            let mut cached =
+                                states.cached_state.get::<PresentationFeedbackCachedState>();
                             let feedback = cached.current();
                             for cb in feedback.callbacks.drain(..) {
                                 cb.presented(
@@ -3353,7 +3414,9 @@ impl Drop for KmsState {
             .outputs
             .iter()
             .flat_map(|o| {
-                o.installed_gamma_lut.map(|(id, _)| id).into_iter()
+                o.installed_gamma_lut
+                    .map(|(id, _)| id)
+                    .into_iter()
                     .chain(o.installed_ctm.into_iter())
             })
             .collect();

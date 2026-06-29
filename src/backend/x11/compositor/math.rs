@@ -168,7 +168,10 @@ mod tests {
 
         let rotate_90 = rotate_y_matrix(std::f32::consts::PI / 2.0);
         assert!(rotate_90[0] < EPSILON, "cos(90°) should be ~0");
-        assert!((rotate_90[2] + 1.0).abs() < EPSILON, "-sin(90°) should be ~-1");
+        assert!(
+            (rotate_90[2] + 1.0).abs() < EPSILON,
+            "-sin(90°) should be ~-1"
+        );
     }
 
     #[test]
@@ -187,7 +190,10 @@ mod tests {
 
         let rotate_90 = rotate_x_matrix(std::f32::consts::PI / 2.0);
         assert!(rotate_90[5].abs() < EPSILON, "cos(90°) should be ~0");
-        assert!((rotate_90[9] + 1.0).abs() < EPSILON, "-sin(90°) should be ~-1");
+        assert!(
+            (rotate_90[9] + 1.0).abs() < EPSILON,
+            "-sin(90°) should be ~-1"
+        );
     }
 
     #[test]

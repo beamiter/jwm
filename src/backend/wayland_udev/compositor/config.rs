@@ -264,7 +264,14 @@ impl WaylandCompositor {
         }
     }
 
-    pub(crate) fn set_frame_extents(&mut self, window: u64, left: u32, right: u32, top: u32, bottom: u32) {
+    pub(crate) fn set_frame_extents(
+        &mut self,
+        window: u64,
+        left: u32,
+        right: u32,
+        top: u32,
+        bottom: u32,
+    ) {
         if let Some(win) = self.windows.get_mut(&window) {
             win.frame_extents = [left, right, top, bottom];
         }
@@ -277,11 +284,24 @@ impl WaylandCompositor {
         }
     }
 
-    pub(crate) fn set_overview_mode(&mut self, active: bool, windows: &[(u64, f32, f32, f32, f32, bool, String)]) {
+    pub(crate) fn set_overview_mode(
+        &mut self,
+        active: bool,
+        windows: &[(u64, f32, f32, f32, f32, bool, String)],
+    ) {
         self.overview_active = active;
-        self.overview_entries = windows.iter().map(|(id, x, y, w, h, focused, title)| {
-            OverviewEntry { window_id: *id, x: *x, y: *y, w: *w, h: *h, focused: *focused, title: title.clone() }
-        }).collect();
+        self.overview_entries = windows
+            .iter()
+            .map(|(id, x, y, w, h, focused, title)| OverviewEntry {
+                window_id: *id,
+                x: *x,
+                y: *y,
+                w: *w,
+                h: *h,
+                focused: *focused,
+                title: title.clone(),
+            })
+            .collect();
         self.needs_render = true;
     }
 
@@ -294,7 +314,11 @@ impl WaylandCompositor {
         self.overview_monitor = (x, y, w, h);
     }
 
-    pub(crate) fn set_expose_mode(&mut self, active: bool, windows: Vec<(u64, i32, i32, u32, u32)>) {
+    pub(crate) fn set_expose_mode(
+        &mut self,
+        active: bool,
+        windows: Vec<(u64, i32, i32, u32, u32)>,
+    ) {
         if active {
             let n = windows.len();
             if n == 0 {
@@ -480,7 +504,11 @@ impl WaylandCompositor {
             }
         }
         if let Some(wt) = best {
-            let mode = if wt.mode.is_empty() { &behavior.wallpaper_mode } else { &wt.mode };
+            let mode = if wt.mode.is_empty() {
+                &behavior.wallpaper_mode
+            } else {
+                &wt.mode
+            };
             return (&wt.path, mode);
         }
 
@@ -489,8 +517,16 @@ impl WaylandCompositor {
             .iter()
             .find(|wm| wm.monitor == monitor_idx)
         {
-            let path = if pm.path.is_empty() { &behavior.wallpaper } else { &pm.path };
-            let mode = if pm.mode.is_empty() { &behavior.wallpaper_mode } else { &pm.mode };
+            let path = if pm.path.is_empty() {
+                &behavior.wallpaper
+            } else {
+                &pm.path
+            };
+            let mode = if pm.mode.is_empty() {
+                &behavior.wallpaper_mode
+            } else {
+                &pm.mode
+            };
             return (path, mode);
         }
         (&behavior.wallpaper, &behavior.wallpaper_mode)
@@ -605,36 +641,38 @@ impl WaylandCompositor {
     /// Add a window to the compositor
     #[allow(dead_code)]
     pub(crate) fn add_window(&mut self, window_id: u64) {
-        self.windows.entry(window_id).or_insert_with(|| WindowState {
-            gl_texture: None,
-            width: 0,
-            height: 0,
-            has_alpha: false,
-            y_inverted: false,
-            fade_opacity: 0.0, // starts fading in
-            fading_out: false,
-            anim_scale: 1.0,
-            anim_scale_target: 1.0,
-            wobbly: None,
-            motion_trail: std::collections::VecDeque::new(),
-            opacity_override: None,
-            corner_radius_override: None,
-            frame_extents: [0; 4],
-            is_shaped: false,
-            is_fullscreen: false,
-            is_urgent: false,
-            is_pip: false,
-            is_frosted: false,
-            frosted_strength: 0.0,
-            class_name: String::new(),
-            scale: 1.0,
-            audio_sync_target: None,
-            ripple_progress: 0.0,
-            ripple_active: false,
-            content_uv: [0.0, 0.0, 1.0, 1.0],
-            is_genie_minimizing: false,
-            color_transform: None,
-        });
+        self.windows
+            .entry(window_id)
+            .or_insert_with(|| WindowState {
+                gl_texture: None,
+                width: 0,
+                height: 0,
+                has_alpha: false,
+                y_inverted: false,
+                fade_opacity: 0.0, // starts fading in
+                fading_out: false,
+                anim_scale: 1.0,
+                anim_scale_target: 1.0,
+                wobbly: None,
+                motion_trail: std::collections::VecDeque::new(),
+                opacity_override: None,
+                corner_radius_override: None,
+                frame_extents: [0; 4],
+                is_shaped: false,
+                is_fullscreen: false,
+                is_urgent: false,
+                is_pip: false,
+                is_frosted: false,
+                frosted_strength: 0.0,
+                class_name: String::new(),
+                scale: 1.0,
+                audio_sync_target: None,
+                ripple_progress: 0.0,
+                ripple_active: false,
+                content_uv: [0.0, 0.0, 1.0, 1.0],
+                is_genie_minimizing: false,
+                color_transform: None,
+            });
         self.predictive_render_mgr.register_window(window_id);
         self.needs_render = true;
     }
@@ -685,37 +723,49 @@ impl WaylandCompositor {
     }
 
     /// Update window texture info, auto-creating the entry if not yet present
-    pub(crate) fn update_window_texture(&mut self, window_id: u64, tex_id: u32, w: u32, h: u32, has_alpha: bool, y_inverted: bool, content_uv: [f32; 4]) {
-        let win = self.windows.entry(window_id).or_insert_with(|| WindowState {
-            gl_texture: None,
-            width: 0,
-            height: 0,
-            has_alpha: false,
-            y_inverted: false,
-            fade_opacity: 0.0,
-            fading_out: false,
-            anim_scale: 1.0,
-            anim_scale_target: 1.0,
-            wobbly: None,
-            motion_trail: std::collections::VecDeque::new(),
-            opacity_override: None,
-            corner_radius_override: None,
-            frame_extents: [0; 4],
-            is_shaped: false,
-            is_fullscreen: false,
-            is_urgent: false,
-            is_pip: false,
-            is_frosted: false,
-            frosted_strength: 0.0,
-            class_name: String::new(),
-            scale: 1.0,
-            audio_sync_target: None,
-            ripple_progress: 0.0,
-            ripple_active: false,
-            content_uv: [0.0, 0.0, 1.0, 1.0],
-            is_genie_minimizing: false,
-            color_transform: None,
-        });
+    pub(crate) fn update_window_texture(
+        &mut self,
+        window_id: u64,
+        tex_id: u32,
+        w: u32,
+        h: u32,
+        has_alpha: bool,
+        y_inverted: bool,
+        content_uv: [f32; 4],
+    ) {
+        let win = self
+            .windows
+            .entry(window_id)
+            .or_insert_with(|| WindowState {
+                gl_texture: None,
+                width: 0,
+                height: 0,
+                has_alpha: false,
+                y_inverted: false,
+                fade_opacity: 0.0,
+                fading_out: false,
+                anim_scale: 1.0,
+                anim_scale_target: 1.0,
+                wobbly: None,
+                motion_trail: std::collections::VecDeque::new(),
+                opacity_override: None,
+                corner_radius_override: None,
+                frame_extents: [0; 4],
+                is_shaped: false,
+                is_fullscreen: false,
+                is_urgent: false,
+                is_pip: false,
+                is_frosted: false,
+                frosted_strength: 0.0,
+                class_name: String::new(),
+                scale: 1.0,
+                audio_sync_target: None,
+                ripple_progress: 0.0,
+                ripple_active: false,
+                content_uv: [0.0, 0.0, 1.0, 1.0],
+                is_genie_minimizing: false,
+                color_transform: None,
+            });
         win.gl_texture = Some(tex_id);
         win.width = w;
         win.height = h;
@@ -793,7 +843,13 @@ impl WaylandCompositor {
     }
 
     /// Notify a tag/workspace switch for transition animation
-    pub(crate) fn notify_tag_switch(&mut self, duration: std::time::Duration, direction: i32, _exclude_top: u32, _mon_rect: (i32, i32, u32, u32)) {
+    pub(crate) fn notify_tag_switch(
+        &mut self,
+        duration: std::time::Duration,
+        direction: i32,
+        _exclude_top: u32,
+        _mon_rect: (i32, i32, u32, u32),
+    ) {
         if matches!(self.transition_mode, TransitionMode::None) {
             return;
         }
@@ -807,8 +863,10 @@ impl WaylandCompositor {
     /// Expose click - find which window was clicked
     pub(crate) fn expose_click(&self, x: f32, y: f32) -> Option<u64> {
         for entry in &self.expose_entries {
-            if x >= entry.current_x && x <= entry.current_x + entry.current_w
-                && y >= entry.current_y && y <= entry.current_y + entry.current_h
+            if x >= entry.current_x
+                && x <= entry.current_x + entry.current_w
+                && y >= entry.current_y
+                && y <= entry.current_y + entry.current_h
             {
                 return Some(entry.window_id);
             }

@@ -3,7 +3,6 @@
 /// Allows game clients to opt into asynchronous page flips (tearing) for reduced
 /// input latency. The compositor stores the per-surface presentation hint and
 /// checks it during the DRM page flip path.
-
 use crate::sync_ext::MutexExt;
 use smithay::reexports::wayland_protocols::wp::tearing_control::v1::server::{
     wp_tearing_control_manager_v1::{self, WpTearingControlManagerV1},
@@ -33,7 +32,8 @@ impl Default for TearingHint {
 }
 
 /// Shared map of surface ObjectId -> TearingHint, queried during page flip.
-pub type TearingHintMap = Arc<Mutex<HashMap<smithay::reexports::wayland_server::backend::ObjectId, TearingHint>>>;
+pub type TearingHintMap =
+    Arc<Mutex<HashMap<smithay::reexports::wayland_server::backend::ObjectId, TearingHint>>>;
 
 pub fn new_tearing_hint_map() -> TearingHintMap {
     Arc::new(Mutex::new(HashMap::new()))

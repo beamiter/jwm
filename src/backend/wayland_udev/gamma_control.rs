@@ -2,7 +2,6 @@
 ///
 /// Allows color temperature tools like gammastep and wlsunset to adjust
 /// display gamma ramps for night light functionality.
-
 use std::io::Read;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 
@@ -68,9 +67,12 @@ impl Dispatch<ZwlrGammaControlManagerV1, GammaControlManagerData> for JwmWayland
         data_init: &mut DataInit<'_, Self>,
     ) {
         match request {
-            zwlr_gamma_control_manager_v1::Request::GetGammaControl { id, output: wl_output } => {
-                let output = Output::from_resource(&wl_output)
-                    .or_else(|| state.outputs.first().cloned());
+            zwlr_gamma_control_manager_v1::Request::GetGammaControl {
+                id,
+                output: wl_output,
+            } => {
+                let output =
+                    Output::from_resource(&wl_output).or_else(|| state.outputs.first().cloned());
 
                 let output = match output {
                     Some(o) => o,
@@ -190,7 +192,10 @@ impl Dispatch<ZwlrGammaControlV1, GammaControlData> for JwmWaylandState {
                 ramp.push(((i as u64 * 65535) / denom) as u16);
             }
         }
-        info!("[gamma] control destroyed, restoring linear ramp for output={}", data.output.name());
+        info!(
+            "[gamma] control destroyed, restoring linear ramp for output={}",
+            data.output.name()
+        );
         state.push_event(BackendEvent::GammaSet {
             output_name: data.output.name(),
             gamma_size: data.gamma_size,

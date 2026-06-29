@@ -47,10 +47,12 @@ impl EventQueue {
             if q.len() >= self.max_queue_size {
                 // Queue full, drop oldest event
                 q.pop_front();
-                self.dropped_events.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.dropped_events
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             q.push_back(event);
-            self.total_events.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.total_events
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             true
         } else {
             false
@@ -88,7 +90,8 @@ impl EventQueue {
     pub fn stats(&self) -> (u64, u64, usize) {
         (
             self.total_events.load(std::sync::atomic::Ordering::Relaxed),
-            self.dropped_events.load(std::sync::atomic::Ordering::Relaxed),
+            self.dropped_events
+                .load(std::sync::atomic::Ordering::Relaxed),
             self.len(),
         )
     }
@@ -151,7 +154,8 @@ impl DeferredOpQueue {
                 q.pop_front();
             }
             q.push_back(op);
-            self.total_ops.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.total_ops
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             true
         } else {
             false

@@ -143,7 +143,8 @@ impl DirectScanoutManager {
 
         log::info!(
             "[direct_scanout] Enabled for window 0x{:x} (bypass #{}, expect -8-12ms latency)",
-            window_id, self.scanout_count
+            window_id,
+            self.scanout_count
         );
     }
 
@@ -156,7 +157,9 @@ impl DirectScanoutManager {
 
                 log::info!(
                     "[direct_scanout] Disabled for window 0x{:x} (duration: {}ms, total bypass: {}ms)",
-                    window_id, duration_ms, self.bypass_time_ms
+                    window_id,
+                    duration_ms,
+                    self.bypass_time_ms
                 );
             }
         }
@@ -300,10 +303,7 @@ mod tests {
     #[test]
     fn test_scene_check_multiple_windows() {
         let mut mgr = DirectScanoutManager::new(1920, 1080);
-        let scene = vec![
-            make_fullscreen_window(100),
-            make_fullscreen_window(101),
-        ];
+        let scene = vec![make_fullscreen_window(100), make_fullscreen_window(101)];
 
         let (should_scanout, _) = mgr.check_scene(&scene, Some(100));
 

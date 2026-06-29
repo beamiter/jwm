@@ -87,11 +87,19 @@ impl PerfMetrics {
     }
 
     pub fn max_frame_time(&self) -> Duration {
-        self.frame_times.iter().max().copied().unwrap_or(Duration::ZERO)
+        self.frame_times
+            .iter()
+            .max()
+            .copied()
+            .unwrap_or(Duration::ZERO)
     }
 
     pub fn min_frame_time(&self) -> Duration {
-        self.frame_times.iter().min().copied().unwrap_or(Duration::ZERO)
+        self.frame_times
+            .iter()
+            .min()
+            .copied()
+            .unwrap_or(Duration::ZERO)
     }
 
     pub fn estimate_gpu_load(&self, target_fps: f32) -> u32 {

@@ -120,10 +120,8 @@ impl AudioSyncManager {
     /// fallback_timeout + 3 * max_observed_gap, indicating the stream may be stalled.
     pub(crate) fn should_fallback(&self, window_id: u64) -> bool {
         if let Some(stream) = self.streams.get(&window_id) {
-            let timeout_ms =
-                self.fallback_timeout_ms + 3.0 * stream.max_observed_gap_ms;
-            let elapsed_ms =
-                stream.last_frame_time.elapsed().as_secs_f32() * 1000.0;
+            let timeout_ms = self.fallback_timeout_ms + 3.0 * stream.max_observed_gap_ms;
+            let elapsed_ms = stream.last_frame_time.elapsed().as_secs_f32() * 1000.0;
             elapsed_ms > timeout_ms
         } else {
             true

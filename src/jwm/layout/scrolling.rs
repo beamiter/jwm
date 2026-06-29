@@ -3,8 +3,8 @@
 use crate::backend::api::Backend;
 use crate::core::layout::LayoutEnum;
 use crate::core::models::{MonitorKey, ScrollingState};
-use crate::jwm::types::WMArgEnum;
 use crate::jwm::Jwm;
+use crate::jwm::types::WMArgEnum;
 
 impl Jwm {
     /// Get the current monitor's scrolling state (if in scrolling layout)

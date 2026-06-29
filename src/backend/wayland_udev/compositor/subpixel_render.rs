@@ -274,9 +274,7 @@ impl SubpixelRenderManager {
         };
 
         let kernel = match state.subpixel_mode {
-            SubpixelMode::RGB | SubpixelMode::BGR => {
-                SubpixelBlurKernel::rgb_kernel(strength)
-            }
+            SubpixelMode::RGB | SubpixelMode::BGR => SubpixelBlurKernel::rgb_kernel(strength),
             SubpixelMode::VRGB | SubpixelMode::None => {
                 SubpixelBlurKernel::standard_kernel(strength)
             }

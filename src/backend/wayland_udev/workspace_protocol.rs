@@ -4,7 +4,6 @@
 /// - Each monitor = one workspace group
 /// - Each tag bit position = one workspace
 /// - Active tags in the bitmask = active workspaces
-
 use crate::sync_ext::MutexExt;
 use std::sync::{Arc, Mutex};
 
@@ -70,7 +69,10 @@ impl WorkspaceState {
 pub fn init_workspace_protocol(dh: &DisplayHandle, tags_length: usize) -> WorkspaceState {
     let state = WorkspaceState::new(tags_length);
     dh.create_global::<JwmWaylandState, ExtWorkspaceManagerV1, _>(1, WorkspaceManagerData);
-    info!("[udev/wayland] ext-workspace-v1 global registered (tags={})", tags_length);
+    info!(
+        "[udev/wayland] ext-workspace-v1 global registered (tags={})",
+        tags_length
+    );
     state
 }
 
@@ -101,7 +103,9 @@ impl GlobalDispatch<ExtWorkspaceManagerV1, WorkspaceManagerData> for JwmWaylandS
                     .create_resource::<ExtWorkspaceGroupHandleV1, _, JwmWaylandState>(
                         handle,
                         version,
-                        WorkspaceGroupData { monitor_index: mon_idx },
+                        WorkspaceGroupData {
+                            monitor_index: mon_idx,
+                        },
                     )
                 else {
                     continue;

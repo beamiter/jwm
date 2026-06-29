@@ -11,8 +11,8 @@ use crate::backend::api::Backend;
 use crate::config::CONFIG;
 use crate::core::models::ClientKey;
 use crate::core::state::WMState;
-use crate::jwm::types::WMArgEnum;
 use crate::jwm::Jwm;
+use crate::jwm::types::WMArgEnum;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -196,7 +196,10 @@ impl Jwm {
         let json = match std::fs::read_to_string(&path) {
             Ok(j) => j,
             Err(e) => {
-                log::warn!("session restore skipped: cannot read {}: {e}", path.display());
+                log::warn!(
+                    "session restore skipped: cannot read {}: {e}",
+                    path.display()
+                );
                 return Ok(());
             }
         };

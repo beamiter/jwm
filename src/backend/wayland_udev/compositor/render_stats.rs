@@ -120,10 +120,7 @@ impl RenderStats {
 
     pub fn report(&self) -> String {
         let mut out = String::from("=== Render Stats Report ===\n");
-        out.push_str(&format!(
-            "Frames: {}\n",
-            self.frame_count
-        ));
+        out.push_str(&format!("Frames: {}\n", self.frame_count));
         out.push_str(&format!(
             "GL Calls — draw: {}, state_changes: {}, tex_binds: {}, program_changes: {}\n",
             self.draw_calls, self.state_changes, self.texture_binds, self.program_changes

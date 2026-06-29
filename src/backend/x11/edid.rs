@@ -3,7 +3,7 @@ use x11rb::protocol::randr::ConnectionExt as RandrExt;
 use x11rb::protocol::xproto::ConnectionExt;
 use x11rb::rust_connection::RustConnection;
 
-pub use crate::backend::edid::{parse_edid_hdr_from_bytes, EdidHdrCapabilities};
+pub use crate::backend::edid::{EdidHdrCapabilities, parse_edid_hdr_from_bytes};
 
 pub fn query_edid_hdr(conn: &Arc<RustConnection>, output: u32) -> Option<EdidHdrCapabilities> {
     let edid_atom = conn.intern_atom(false, b"EDID").ok()?.reply().ok()?.atom;

@@ -130,11 +130,7 @@ impl GeometryConstraints {
     ///
     /// # 返回
     /// 调整后的 (宽度, 高度)
-    pub fn apply_aspect_ratio_constraints(
-        mut w: i32,
-        mut h: i32,
-        hints: &SizeHints,
-    ) -> (i32, i32) {
+    pub fn apply_aspect_ratio_constraints(mut w: i32, mut h: i32, hints: &SizeHints) -> (i32, i32) {
         if hints.min_aspect > 0.0 && hints.max_aspect > 0.0 {
             let ratio = w as f32 / h as f32;
             if ratio < hints.min_aspect {

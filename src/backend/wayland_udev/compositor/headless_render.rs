@@ -156,10 +156,22 @@ fn link(gl: &glow::Context, vs: &str, fs: &str) -> Result<glow::Program, String>
 /// Column-major orthographic projection mapping pixel coords [0,w]x[0,h] to NDC.
 fn ortho(w: f32, h: f32) -> [f32; 16] {
     [
-        2.0 / w, 0.0, 0.0, 0.0, //
-        0.0, 2.0 / h, 0.0, 0.0, //
-        0.0, 0.0, -1.0, 0.0, //
-        -1.0, -1.0, 0.0, 1.0,
+        2.0 / w,
+        0.0,
+        0.0,
+        0.0, //
+        0.0,
+        2.0 / h,
+        0.0,
+        0.0, //
+        0.0,
+        0.0,
+        -1.0,
+        0.0, //
+        -1.0,
+        -1.0,
+        0.0,
+        1.0,
     ]
 }
 
@@ -224,10 +236,26 @@ fn render_quad(
             glow::UNSIGNED_BYTE,
             glow::PixelUnpackData::Slice(Some(&input_pixels)),
         );
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::NEAREST as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::NEAREST as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_S,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
 
         let out_tex = gl.create_texture().unwrap();
         gl.bind_texture(glow::TEXTURE_2D, Some(out_tex));
@@ -242,8 +270,16 @@ fn render_quad(
             glow::UNSIGNED_BYTE,
             glow::PixelUnpackData::Slice(None),
         );
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::NEAREST as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::NEAREST as i32,
+        );
         let fbo = gl.create_framebuffer().unwrap();
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
         gl.framebuffer_texture_2d(
@@ -294,13 +330,21 @@ fn wayland_shaders() -> Vec<(&'static str, Stage, &'static str)> {
         ("BLUR_UP_FRAGMENT", F, s::BLUR_UP_FRAGMENT),
         ("BOX_BLUR_FRAGMENT", F, s::BOX_BLUR_FRAGMENT),
         ("BORDER_FRAGMENT_SHADER", F, s::BORDER_FRAGMENT_SHADER),
-        ("POSTPROCESS_FRAGMENT_SHADER", F, s::POSTPROCESS_FRAGMENT_SHADER),
+        (
+            "POSTPROCESS_FRAGMENT_SHADER",
+            F,
+            s::POSTPROCESS_FRAGMENT_SHADER,
+        ),
         ("HUD_FRAGMENT_SHADER", F, s::HUD_FRAGMENT_SHADER),
         ("HUD_TEXT_FRAGMENT_SHADER", F, s::HUD_TEXT_FRAGMENT_SHADER),
         ("CUBE_VERTEX_SHADER", V, s::CUBE_VERTEX_SHADER),
         ("CUBE_FRAGMENT_SHADER", F, s::CUBE_FRAGMENT_SHADER),
         ("PORTAL_FRAGMENT_SHADER", F, s::PORTAL_FRAGMENT_SHADER),
-        ("TRANSITION_FRAGMENT_SHADER", F, s::TRANSITION_FRAGMENT_SHADER),
+        (
+            "TRANSITION_FRAGMENT_SHADER",
+            F,
+            s::TRANSITION_FRAGMENT_SHADER,
+        ),
         ("EDGE_GLOW_FRAGMENT_SHADER", F, s::EDGE_GLOW_FRAGMENT_SHADER),
         (
             "MAGNIFIER_POSTPROCESS_FRAGMENT_SHADER",
@@ -312,10 +356,18 @@ fn wayland_shaders() -> Vec<(&'static str, Stage, &'static str)> {
         ("WOBBLY_VERTEX_SHADER", V, s::WOBBLY_VERTEX_SHADER),
         ("PARTICLE_VERTEX_SHADER", V, s::PARTICLE_VERTEX_SHADER),
         ("PARTICLE_FRAGMENT_SHADER", F, s::PARTICLE_FRAGMENT_SHADER),
-        ("OVERVIEW_BG_FRAGMENT_SHADER", F, s::OVERVIEW_BG_FRAGMENT_SHADER),
+        (
+            "OVERVIEW_BG_FRAGMENT_SHADER",
+            F,
+            s::OVERVIEW_BG_FRAGMENT_SHADER,
+        ),
         ("GENIE_VERTEX_SHADER", V, s::GENIE_VERTEX_SHADER),
         ("TEMPORAL_BLUR_MIX_VERTEX", V, s::TEMPORAL_BLUR_MIX_VERTEX),
-        ("TEMPORAL_BLUR_MIX_FRAGMENT", F, s::TEMPORAL_BLUR_MIX_FRAGMENT),
+        (
+            "TEMPORAL_BLUR_MIX_FRAGMENT",
+            F,
+            s::TEMPORAL_BLUR_MIX_FRAGMENT,
+        ),
         ("LINE_VERTEX_SHADER", V, s::LINE_VERTEX_SHADER),
         ("LINE_FRAGMENT_SHADER", F, s::LINE_FRAGMENT_SHADER),
     ]
@@ -336,13 +388,21 @@ fn x11_shaders() -> Vec<(&'static str, Stage, &'static str)> {
         ("BLUR_UP_FRAGMENT", F, s::BLUR_UP_FRAGMENT),
         ("BOX_BLUR_FRAGMENT", F, s::BOX_BLUR_FRAGMENT),
         ("BORDER_FRAGMENT_SHADER", F, s::BORDER_FRAGMENT_SHADER),
-        ("POSTPROCESS_FRAGMENT_SHADER", F, s::POSTPROCESS_FRAGMENT_SHADER),
+        (
+            "POSTPROCESS_FRAGMENT_SHADER",
+            F,
+            s::POSTPROCESS_FRAGMENT_SHADER,
+        ),
         ("HUD_FRAGMENT_SHADER", F, s::HUD_FRAGMENT_SHADER),
         ("HUD_TEXT_FRAGMENT_SHADER", F, s::HUD_TEXT_FRAGMENT_SHADER),
         ("CUBE_VERTEX_SHADER", V, s::CUBE_VERTEX_SHADER),
         ("CUBE_FRAGMENT_SHADER", F, s::CUBE_FRAGMENT_SHADER),
         ("PORTAL_FRAGMENT_SHADER", F, s::PORTAL_FRAGMENT_SHADER),
-        ("TRANSITION_FRAGMENT_SHADER", F, s::TRANSITION_FRAGMENT_SHADER),
+        (
+            "TRANSITION_FRAGMENT_SHADER",
+            F,
+            s::TRANSITION_FRAGMENT_SHADER,
+        ),
         ("EDGE_GLOW_FRAGMENT_SHADER", F, s::EDGE_GLOW_FRAGMENT_SHADER),
         (
             "MAGNIFIER_POSTPROCESS_FRAGMENT_SHADER",
@@ -354,10 +414,18 @@ fn x11_shaders() -> Vec<(&'static str, Stage, &'static str)> {
         ("WOBBLY_VERTEX_SHADER", V, s::WOBBLY_VERTEX_SHADER),
         ("PARTICLE_VERTEX_SHADER", V, s::PARTICLE_VERTEX_SHADER),
         ("PARTICLE_FRAGMENT_SHADER", F, s::PARTICLE_FRAGMENT_SHADER),
-        ("OVERVIEW_BG_FRAGMENT_SHADER", F, s::OVERVIEW_BG_FRAGMENT_SHADER),
+        (
+            "OVERVIEW_BG_FRAGMENT_SHADER",
+            F,
+            s::OVERVIEW_BG_FRAGMENT_SHADER,
+        ),
         ("GENIE_VERTEX_SHADER", V, s::GENIE_VERTEX_SHADER),
         ("TEMPORAL_BLUR_MIX_VERTEX", V, s::TEMPORAL_BLUR_MIX_VERTEX),
-        ("TEMPORAL_BLUR_MIX_FRAGMENT", F, s::TEMPORAL_BLUR_MIX_FRAGMENT),
+        (
+            "TEMPORAL_BLUR_MIX_FRAGMENT",
+            F,
+            s::TEMPORAL_BLUR_MIX_FRAGMENT,
+        ),
     ]
 }
 
@@ -402,8 +470,12 @@ fn main_window_shader_renders_opacity_and_dim() {
     let gl = &h.gl;
 
     unsafe {
-        let prog = link(gl, super::shaders::VERTEX_SHADER, super::shaders::FRAGMENT_SHADER)
-            .expect("main window shaders must link");
+        let prog = link(
+            gl,
+            super::shaders::VERTEX_SHADER,
+            super::shaders::FRAGMENT_SHADER,
+        )
+        .expect("main window shaders must link");
 
         const W: i32 = 16;
         const H: i32 = 16;
@@ -427,10 +499,26 @@ fn main_window_shader_renders_opacity_and_dim() {
             glow::UNSIGNED_BYTE,
             glow::PixelUnpackData::Slice(Some(&input_pixels)),
         );
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::NEAREST as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::NEAREST as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_S,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
 
         // Output FBO (RGBA8, WxH).
         let out_tex = gl.create_texture().unwrap();
@@ -446,8 +534,16 @@ fn main_window_shader_renders_opacity_and_dim() {
             glow::UNSIGNED_BYTE,
             glow::PixelUnpackData::Slice(None),
         );
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::NEAREST as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::NEAREST as i32,
+        );
         let fbo = gl.create_framebuffer().unwrap();
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
         gl.framebuffer_texture_2d(
@@ -488,7 +584,12 @@ fn main_window_shader_renders_opacity_and_dim() {
         gl.clear(glow::COLOR_BUFFER_BIT);
         gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         gl.finish();
-        assert_pixel(read_center(gl, W, H), [200, 100, 50, 255], 2, "opaque/no-dim");
+        assert_pixel(
+            read_center(gl, W, H),
+            [200, 100, 50, 255],
+            2,
+            "opaque/no-dim",
+        );
 
         // Case 2: dim 0.5 -> RGB halved, alpha stays opaque (u_opacity >= 0).
         gl.uniform_1_f32(u("u_dim").as_ref(), 0.5);
@@ -513,8 +614,12 @@ fn main_window_shader_color_management_identity_is_passthrough() {
     let gl = &h.gl;
 
     unsafe {
-        let prog = link(gl, super::shaders::VERTEX_SHADER, super::shaders::FRAGMENT_SHADER)
-            .expect("main window shaders must link");
+        let prog = link(
+            gl,
+            super::shaders::VERTEX_SHADER,
+            super::shaders::FRAGMENT_SHADER,
+        )
+        .expect("main window shaders must link");
 
         const W: i32 = 8;
         const H: i32 = 8;
@@ -537,10 +642,26 @@ fn main_window_shader_color_management_identity_is_passthrough() {
             glow::UNSIGNED_BYTE,
             glow::PixelUnpackData::Slice(Some(&input_pixels)),
         );
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::NEAREST as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::NEAREST as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_S,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
 
         let out_tex = gl.create_texture().unwrap();
         gl.bind_texture(glow::TEXTURE_2D, Some(out_tex));
@@ -555,8 +676,16 @@ fn main_window_shader_color_management_identity_is_passthrough() {
             glow::UNSIGNED_BYTE,
             glow::PixelUnpackData::Slice(None),
         );
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::NEAREST as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::NEAREST as i32,
+        );
         let fbo = gl.create_framebuffer().unwrap();
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
         gl.framebuffer_texture_2d(

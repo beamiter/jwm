@@ -2,63 +2,63 @@
 // Wayland udev backend compositor - GPU-accelerated composition with effects
 // ---------------------------------------------------------------------------
 
-pub mod shaders;
-#[cfg(test)]
-mod headless_render;
-mod render;
-mod effects;
-mod transitions;
+#[allow(dead_code, unreachable_pub)]
+mod audio_sync;
 mod blur;
-mod postprocess;
-mod overview;
-mod expose;
+#[allow(dead_code, unreachable_pub)]
+mod cache_warmup;
 mod config;
 mod damage;
-mod wallpaper;
-mod rules;
-mod font;
 #[allow(dead_code, unreachable_pub)]
-mod texture_pool;
-#[allow(dead_code, unreachable_pub)]
-mod render_stats;
+mod direct_scanout;
 #[allow(dead_code, unreachable_pub)]
 mod dirty_region;
+mod effects;
+mod expose;
+mod font;
+#[allow(dead_code, unreachable_pub)]
+mod frame_rate;
+#[allow(dead_code, unreachable_pub)]
+mod gpu_fence_sync;
+#[cfg(test)]
+mod headless_render;
+mod overview;
+#[allow(dead_code, unreachable_pub)]
+mod pbo_uploader;
 #[allow(dead_code, unreachable_pub)]
 mod per_monitor;
 #[allow(dead_code, unreachable_pub)]
-mod frame_rate;
+mod perf_metrics;
+#[allow(dead_code, unreachable_pub)]
+mod pixel_buffer_pool;
+mod postprocess;
 #[allow(dead_code, unreachable_pub)]
 mod power_saving;
 #[allow(dead_code, unreachable_pub)]
 mod predictive_render;
 #[allow(dead_code, unreachable_pub)]
-mod pixel_buffer_pool;
+mod presentation_timing;
 #[allow(dead_code, unreachable_pub)]
 mod profiler;
 #[allow(dead_code, unreachable_pub)]
-mod perf_metrics;
-#[allow(dead_code, unreachable_pub)]
-mod cache_warmup;
-#[allow(dead_code, unreachable_pub)]
-mod direct_scanout;
-#[allow(dead_code, unreachable_pub)]
-mod gpu_fence_sync;
-#[allow(dead_code, unreachable_pub)]
-mod pbo_uploader;
+mod recording;
+mod render;
 #[allow(dead_code, unreachable_pub)]
 mod render_batcher;
 #[allow(dead_code, unreachable_pub)]
+mod render_stats;
+mod rules;
+#[allow(dead_code, unreachable_pub)]
 mod shader_cache;
 #[allow(dead_code, unreachable_pub)]
-mod recording;
-#[allow(dead_code, unreachable_pub)]
 mod shader_hot_reload;
-#[allow(dead_code, unreachable_pub)]
-mod audio_sync;
+pub mod shaders;
 #[allow(dead_code, unreachable_pub)]
 mod subpixel_render;
 #[allow(dead_code, unreachable_pub)]
-mod presentation_timing;
+mod texture_pool;
+mod transitions;
+mod wallpaper;
 
 use smithay::backend::renderer::gles::ffi;
 use std::collections::HashMap;
@@ -150,7 +150,12 @@ pub(crate) unsafe fn create_program(
             let mut len = 0i32;
             gl.GetProgramiv(program, ffi::INFO_LOG_LENGTH, &mut len);
             let mut buf = vec![0u8; len as usize];
-            gl.GetProgramInfoLog(program, len, std::ptr::null_mut(), buf.as_mut_ptr() as *mut _);
+            gl.GetProgramInfoLog(
+                program,
+                len,
+                std::ptr::null_mut(),
+                buf.as_mut_ptr() as *mut _,
+            );
             gl.DeleteShader(vs);
             gl.DeleteShader(fs);
             gl.DeleteProgram(program);
@@ -991,7 +996,12 @@ unsafe fn create_fbo_texture_fp16(gl: &ffi::Gles2, w: u32, h: u32) -> (u32, u32)
     unsafe { create_fbo_texture_fmt(gl, w, h, GL_RGBA16F) }
 }
 
-unsafe fn create_fbo_texture_fmt(gl: &ffi::Gles2, w: u32, h: u32, internal_format: u32) -> (u32, u32) {
+unsafe fn create_fbo_texture_fmt(
+    gl: &ffi::Gles2,
+    w: u32,
+    h: u32,
+    internal_format: u32,
+) -> (u32, u32) {
     unsafe {
         let mut tex = 0u32;
         gl.GenTextures(1, &mut tex);
@@ -1016,8 +1026,16 @@ unsafe fn create_fbo_texture_fmt(gl: &ffi::Gles2, w: u32, h: u32, internal_forma
         );
         gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
         gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
-        gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_S, ffi::CLAMP_TO_EDGE as i32);
-        gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_T, ffi::CLAMP_TO_EDGE as i32);
+        gl.TexParameteri(
+            ffi::TEXTURE_2D,
+            ffi::TEXTURE_WRAP_S,
+            ffi::CLAMP_TO_EDGE as i32,
+        );
+        gl.TexParameteri(
+            ffi::TEXTURE_2D,
+            ffi::TEXTURE_WRAP_T,
+            ffi::CLAMP_TO_EDGE as i32,
+        );
 
         let mut fbo = 0u32;
         gl.GenFramebuffers(1, &mut fbo);
@@ -1053,649 +1071,680 @@ impl WaylandCompositor {
         hdr_10bit: bool,
     ) -> Result<Self, String> {
         unsafe {
-        let program = create_program(gl, shaders::VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
-        let shadow_program =
-            create_program(gl, shaders::VERTEX_SHADER, shaders::SHADOW_FRAGMENT_SHADER)?;
-        let blur_down_program =
-            create_program(gl, shaders::BLUR_DOWN_VERTEX, shaders::BLUR_DOWN_FRAGMENT)?;
-        let blur_up_program =
-            create_program(gl, shaders::BLUR_DOWN_VERTEX, shaders::BLUR_UP_FRAGMENT)?;
-        let border_program =
-            create_program(gl, shaders::VERTEX_SHADER, shaders::BORDER_FRAGMENT_SHADER)?;
-        let postprocess_program =
-            create_program(gl, shaders::VERTEX_SHADER, shaders::POSTPROCESS_FRAGMENT_SHADER)?;
-        let scene_linear_encode_program = create_program(
-            gl,
-            shaders::BLUR_DOWN_VERTEX,
-            shaders::SCENE_LINEAR_ENCODE_FRAGMENT,
-        )?;
-        let scene_linear_decode_program = create_program(
-            gl,
-            shaders::BLUR_DOWN_VERTEX,
-            shaders::SCENE_LINEAR_DECODE_FRAGMENT,
-        )?;
-        let transition_program =
-            create_program(gl, shaders::VERTEX_SHADER, shaders::TRANSITION_FRAGMENT_SHADER)?;
-        let cube_program =
-            create_program(gl, shaders::CUBE_VERTEX_SHADER, shaders::CUBE_FRAGMENT_SHADER)?;
-        let portal_program =
-            create_program(gl, shaders::VERTEX_SHADER, shaders::PORTAL_FRAGMENT_SHADER)?;
-        let edge_glow_program =
-            create_program(gl, shaders::VERTEX_SHADER, shaders::EDGE_GLOW_FRAGMENT_SHADER)?;
-        let tilt_program =
-            create_program(gl, shaders::TILT_VERTEX_SHADER, shaders::TILT_FRAGMENT_SHADER)?;
-        let wobbly_program =
-            create_program(gl, shaders::WOBBLY_VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
-        let genie_program =
-            create_program(gl, shaders::GENIE_VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
-        let particle_program =
-            create_program(gl, shaders::PARTICLE_VERTEX_SHADER, shaders::PARTICLE_FRAGMENT_SHADER)?;
-        let overview_bg_program =
-            create_program(gl, shaders::VERTEX_SHADER, shaders::OVERVIEW_BG_FRAGMENT_SHADER)?;
-        let hud_program =
-            create_program(gl, shaders::VERTEX_SHADER, shaders::HUD_FRAGMENT_SHADER)?;
-        let temporal_blur_mix_program =
-            create_program(gl, shaders::TEMPORAL_BLUR_MIX_VERTEX, shaders::TEMPORAL_BLUR_MIX_FRAGMENT)?;
-        let temporal_blur_mix_uniforms = TemporalMixUniforms {
-            rect: get_uniform_loc(gl, temporal_blur_mix_program, "u_rect"),
-            projection: get_uniform_loc(gl, temporal_blur_mix_program, "u_projection"),
-            current: get_uniform_loc(gl, temporal_blur_mix_program, "u_current_blur"),
-            previous: get_uniform_loc(gl, temporal_blur_mix_program, "u_previous_blur"),
-            mix: get_uniform_loc(gl, temporal_blur_mix_program, "u_temporal_mix"),
-        };
-        let line_program =
-            create_program(gl, shaders::LINE_VERTEX_SHADER, shaders::LINE_FRAGMENT_SHADER)?;
-        let line_uniform_projection = get_uniform_loc(gl, line_program, "u_projection");
-        let line_uniform_color = get_uniform_loc(gl, line_program, "u_color");
+            let program = create_program(gl, shaders::VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
+            let shadow_program =
+                create_program(gl, shaders::VERTEX_SHADER, shaders::SHADOW_FRAGMENT_SHADER)?;
+            let blur_down_program =
+                create_program(gl, shaders::BLUR_DOWN_VERTEX, shaders::BLUR_DOWN_FRAGMENT)?;
+            let blur_up_program =
+                create_program(gl, shaders::BLUR_DOWN_VERTEX, shaders::BLUR_UP_FRAGMENT)?;
+            let border_program =
+                create_program(gl, shaders::VERTEX_SHADER, shaders::BORDER_FRAGMENT_SHADER)?;
+            let postprocess_program = create_program(
+                gl,
+                shaders::VERTEX_SHADER,
+                shaders::POSTPROCESS_FRAGMENT_SHADER,
+            )?;
+            let scene_linear_encode_program = create_program(
+                gl,
+                shaders::BLUR_DOWN_VERTEX,
+                shaders::SCENE_LINEAR_ENCODE_FRAGMENT,
+            )?;
+            let scene_linear_decode_program = create_program(
+                gl,
+                shaders::BLUR_DOWN_VERTEX,
+                shaders::SCENE_LINEAR_DECODE_FRAGMENT,
+            )?;
+            let transition_program = create_program(
+                gl,
+                shaders::VERTEX_SHADER,
+                shaders::TRANSITION_FRAGMENT_SHADER,
+            )?;
+            let cube_program = create_program(
+                gl,
+                shaders::CUBE_VERTEX_SHADER,
+                shaders::CUBE_FRAGMENT_SHADER,
+            )?;
+            let portal_program =
+                create_program(gl, shaders::VERTEX_SHADER, shaders::PORTAL_FRAGMENT_SHADER)?;
+            let edge_glow_program = create_program(
+                gl,
+                shaders::VERTEX_SHADER,
+                shaders::EDGE_GLOW_FRAGMENT_SHADER,
+            )?;
+            let tilt_program = create_program(
+                gl,
+                shaders::TILT_VERTEX_SHADER,
+                shaders::TILT_FRAGMENT_SHADER,
+            )?;
+            let wobbly_program =
+                create_program(gl, shaders::WOBBLY_VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
+            let genie_program =
+                create_program(gl, shaders::GENIE_VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
+            let particle_program = create_program(
+                gl,
+                shaders::PARTICLE_VERTEX_SHADER,
+                shaders::PARTICLE_FRAGMENT_SHADER,
+            )?;
+            let overview_bg_program = create_program(
+                gl,
+                shaders::VERTEX_SHADER,
+                shaders::OVERVIEW_BG_FRAGMENT_SHADER,
+            )?;
+            let hud_program =
+                create_program(gl, shaders::VERTEX_SHADER, shaders::HUD_FRAGMENT_SHADER)?;
+            let temporal_blur_mix_program = create_program(
+                gl,
+                shaders::TEMPORAL_BLUR_MIX_VERTEX,
+                shaders::TEMPORAL_BLUR_MIX_FRAGMENT,
+            )?;
+            let temporal_blur_mix_uniforms = TemporalMixUniforms {
+                rect: get_uniform_loc(gl, temporal_blur_mix_program, "u_rect"),
+                projection: get_uniform_loc(gl, temporal_blur_mix_program, "u_projection"),
+                current: get_uniform_loc(gl, temporal_blur_mix_program, "u_current_blur"),
+                previous: get_uniform_loc(gl, temporal_blur_mix_program, "u_previous_blur"),
+                mix: get_uniform_loc(gl, temporal_blur_mix_program, "u_temporal_mix"),
+            };
+            let line_program = create_program(
+                gl,
+                shaders::LINE_VERTEX_SHADER,
+                shaders::LINE_FRAGMENT_SHADER,
+            )?;
+            let line_uniform_projection = get_uniform_loc(gl, line_program, "u_projection");
+            let line_uniform_color = get_uniform_loc(gl, line_program, "u_color");
 
-        // ----- Get uniform locations -----
-        let win_uniforms = WindowUniforms {
-            rect: get_uniform_loc(gl, program, "u_rect"),
-            projection: get_uniform_loc(gl, program, "u_projection"),
-            texture: get_uniform_loc(gl, program, "u_texture"),
-            opacity: get_uniform_loc(gl, program, "u_opacity"),
-            radius: get_uniform_loc(gl, program, "u_radius"),
-            size: get_uniform_loc(gl, program, "u_size"),
-            dim: get_uniform_loc(gl, program, "u_dim"),
-            uv_rect: get_uniform_loc(gl, program, "u_uv_rect"),
-            ripple_progress: get_uniform_loc(gl, program, "u_ripple_progress"),
-            ripple_amplitude: get_uniform_loc(gl, program, "u_ripple_amplitude"),
-            color_managed: get_uniform_loc(gl, program, "u_color_managed"),
-            color_matrix: get_uniform_loc(gl, program, "u_color_matrix"),
-            decode_tf: get_uniform_loc(gl, program, "u_decode_tf"),
-            decode_gamma: get_uniform_loc(gl, program, "u_decode_gamma"),
-            encode_tf: get_uniform_loc(gl, program, "u_encode_tf"),
-            encode_gamma: get_uniform_loc(gl, program, "u_encode_gamma"),
-            scene_linear: get_uniform_loc(gl, program, "u_scene_linear"),
-        };
+            // ----- Get uniform locations -----
+            let win_uniforms = WindowUniforms {
+                rect: get_uniform_loc(gl, program, "u_rect"),
+                projection: get_uniform_loc(gl, program, "u_projection"),
+                texture: get_uniform_loc(gl, program, "u_texture"),
+                opacity: get_uniform_loc(gl, program, "u_opacity"),
+                radius: get_uniform_loc(gl, program, "u_radius"),
+                size: get_uniform_loc(gl, program, "u_size"),
+                dim: get_uniform_loc(gl, program, "u_dim"),
+                uv_rect: get_uniform_loc(gl, program, "u_uv_rect"),
+                ripple_progress: get_uniform_loc(gl, program, "u_ripple_progress"),
+                ripple_amplitude: get_uniform_loc(gl, program, "u_ripple_amplitude"),
+                color_managed: get_uniform_loc(gl, program, "u_color_managed"),
+                color_matrix: get_uniform_loc(gl, program, "u_color_matrix"),
+                decode_tf: get_uniform_loc(gl, program, "u_decode_tf"),
+                decode_gamma: get_uniform_loc(gl, program, "u_decode_gamma"),
+                encode_tf: get_uniform_loc(gl, program, "u_encode_tf"),
+                encode_gamma: get_uniform_loc(gl, program, "u_encode_gamma"),
+                scene_linear: get_uniform_loc(gl, program, "u_scene_linear"),
+            };
 
-        let shadow_uniforms = ShadowUniforms {
-            rect: get_uniform_loc(gl, shadow_program, "u_rect"),
-            projection: get_uniform_loc(gl, shadow_program, "u_projection"),
-            shadow_color: get_uniform_loc(gl, shadow_program, "u_shadow_color"),
-            size: get_uniform_loc(gl, shadow_program, "u_size"),
-            radius: get_uniform_loc(gl, shadow_program, "u_radius"),
-            spread: get_uniform_loc(gl, shadow_program, "u_spread"),
-        };
+            let shadow_uniforms = ShadowUniforms {
+                rect: get_uniform_loc(gl, shadow_program, "u_rect"),
+                projection: get_uniform_loc(gl, shadow_program, "u_projection"),
+                shadow_color: get_uniform_loc(gl, shadow_program, "u_shadow_color"),
+                size: get_uniform_loc(gl, shadow_program, "u_size"),
+                radius: get_uniform_loc(gl, shadow_program, "u_radius"),
+                spread: get_uniform_loc(gl, shadow_program, "u_spread"),
+            };
 
-        let blur_uniforms = BlurUniforms {
-            rect: get_uniform_loc(gl, blur_down_program, "u_rect"),
-            projection: get_uniform_loc(gl, blur_down_program, "u_projection"),
-            texture: get_uniform_loc(gl, blur_down_program, "u_texture"),
-            halfpixel: get_uniform_loc(gl, blur_down_program, "u_halfpixel"),
-        };
+            let blur_uniforms = BlurUniforms {
+                rect: get_uniform_loc(gl, blur_down_program, "u_rect"),
+                projection: get_uniform_loc(gl, blur_down_program, "u_projection"),
+                texture: get_uniform_loc(gl, blur_down_program, "u_texture"),
+                halfpixel: get_uniform_loc(gl, blur_down_program, "u_halfpixel"),
+            };
 
-        let border_uniforms = BorderUniforms {
-            rect: get_uniform_loc(gl, border_program, "u_rect"),
-            projection: get_uniform_loc(gl, border_program, "u_projection"),
-            border_color: get_uniform_loc(gl, border_program, "u_border_color"),
-            size: get_uniform_loc(gl, border_program, "u_size"),
-            radius: get_uniform_loc(gl, border_program, "u_radius"),
-            border_width: get_uniform_loc(gl, border_program, "u_border_width"),
-        };
+            let border_uniforms = BorderUniforms {
+                rect: get_uniform_loc(gl, border_program, "u_rect"),
+                projection: get_uniform_loc(gl, border_program, "u_projection"),
+                border_color: get_uniform_loc(gl, border_program, "u_border_color"),
+                size: get_uniform_loc(gl, border_program, "u_size"),
+                radius: get_uniform_loc(gl, border_program, "u_radius"),
+                border_width: get_uniform_loc(gl, border_program, "u_border_width"),
+            };
 
-        let postprocess_uniforms = PostprocessUniforms {
-            texture: get_uniform_loc(gl, postprocess_program, "u_texture"),
-            color_temp: get_uniform_loc(gl, postprocess_program, "u_color_temp"),
-            saturation: get_uniform_loc(gl, postprocess_program, "u_saturation"),
-            brightness: get_uniform_loc(gl, postprocess_program, "u_brightness"),
-            contrast: get_uniform_loc(gl, postprocess_program, "u_contrast"),
-            invert: get_uniform_loc(gl, postprocess_program, "u_invert"),
-            grayscale: get_uniform_loc(gl, postprocess_program, "u_grayscale"),
-            magnifier_enabled: get_uniform_loc(gl, postprocess_program, "u_magnifier_enabled"),
-            magnifier_center: get_uniform_loc(gl, postprocess_program, "u_magnifier_center"),
-            magnifier_radius: get_uniform_loc(gl, postprocess_program, "u_magnifier_radius"),
-            magnifier_zoom: get_uniform_loc(gl, postprocess_program, "u_magnifier_zoom"),
-            colorblind_mode: get_uniform_loc(gl, postprocess_program, "u_colorblind_mode"),
-            hdr_enabled: get_uniform_loc(gl, postprocess_program, "u_hdr_enabled"),
-            hdr_peak_nits: get_uniform_loc(gl, postprocess_program, "u_hdr_peak_nits"),
-            tone_mapping_method: get_uniform_loc(gl, postprocess_program, "u_tone_mapping_method"),
-        };
+            let postprocess_uniforms = PostprocessUniforms {
+                texture: get_uniform_loc(gl, postprocess_program, "u_texture"),
+                color_temp: get_uniform_loc(gl, postprocess_program, "u_color_temp"),
+                saturation: get_uniform_loc(gl, postprocess_program, "u_saturation"),
+                brightness: get_uniform_loc(gl, postprocess_program, "u_brightness"),
+                contrast: get_uniform_loc(gl, postprocess_program, "u_contrast"),
+                invert: get_uniform_loc(gl, postprocess_program, "u_invert"),
+                grayscale: get_uniform_loc(gl, postprocess_program, "u_grayscale"),
+                magnifier_enabled: get_uniform_loc(gl, postprocess_program, "u_magnifier_enabled"),
+                magnifier_center: get_uniform_loc(gl, postprocess_program, "u_magnifier_center"),
+                magnifier_radius: get_uniform_loc(gl, postprocess_program, "u_magnifier_radius"),
+                magnifier_zoom: get_uniform_loc(gl, postprocess_program, "u_magnifier_zoom"),
+                colorblind_mode: get_uniform_loc(gl, postprocess_program, "u_colorblind_mode"),
+                hdr_enabled: get_uniform_loc(gl, postprocess_program, "u_hdr_enabled"),
+                hdr_peak_nits: get_uniform_loc(gl, postprocess_program, "u_hdr_peak_nits"),
+                tone_mapping_method: get_uniform_loc(
+                    gl,
+                    postprocess_program,
+                    "u_tone_mapping_method",
+                ),
+            };
 
-        let scene_linear_encode_uniforms = SceneLinearEncodeUniforms {
-            rect: get_uniform_loc(gl, scene_linear_encode_program, "u_rect"),
-            projection: get_uniform_loc(gl, scene_linear_encode_program, "u_projection"),
-            texture: get_uniform_loc(gl, scene_linear_encode_program, "u_texture"),
-            encode_tf: get_uniform_loc(gl, scene_linear_encode_program, "u_encode_tf"),
-            encode_gamma: get_uniform_loc(gl, scene_linear_encode_program, "u_encode_gamma"),
-        };
+            let scene_linear_encode_uniforms = SceneLinearEncodeUniforms {
+                rect: get_uniform_loc(gl, scene_linear_encode_program, "u_rect"),
+                projection: get_uniform_loc(gl, scene_linear_encode_program, "u_projection"),
+                texture: get_uniform_loc(gl, scene_linear_encode_program, "u_texture"),
+                encode_tf: get_uniform_loc(gl, scene_linear_encode_program, "u_encode_tf"),
+                encode_gamma: get_uniform_loc(gl, scene_linear_encode_program, "u_encode_gamma"),
+            };
 
-        let scene_linear_decode_uniforms = SceneLinearDecodeUniforms {
-            rect: get_uniform_loc(gl, scene_linear_decode_program, "u_rect"),
-            projection: get_uniform_loc(gl, scene_linear_decode_program, "u_projection"),
-            texture: get_uniform_loc(gl, scene_linear_decode_program, "u_texture"),
-        };
+            let scene_linear_decode_uniforms = SceneLinearDecodeUniforms {
+                rect: get_uniform_loc(gl, scene_linear_decode_program, "u_rect"),
+                projection: get_uniform_loc(gl, scene_linear_decode_program, "u_projection"),
+                texture: get_uniform_loc(gl, scene_linear_decode_program, "u_texture"),
+            };
 
-        let transition_uniforms = TransitionUniforms {
-            rect: get_uniform_loc(gl, transition_program, "u_rect"),
-            projection: get_uniform_loc(gl, transition_program, "u_projection"),
-            texture: get_uniform_loc(gl, transition_program, "u_texture"),
-            opacity: get_uniform_loc(gl, transition_program, "u_opacity"),
-            uv_rect: get_uniform_loc(gl, transition_program, "u_uv_rect"),
-        };
+            let transition_uniforms = TransitionUniforms {
+                rect: get_uniform_loc(gl, transition_program, "u_rect"),
+                projection: get_uniform_loc(gl, transition_program, "u_projection"),
+                texture: get_uniform_loc(gl, transition_program, "u_texture"),
+                opacity: get_uniform_loc(gl, transition_program, "u_opacity"),
+                uv_rect: get_uniform_loc(gl, transition_program, "u_uv_rect"),
+            };
 
-        let cube_uniforms = CubeUniforms {
-            mvp: get_uniform_loc(gl, cube_program, "u_mvp"),
-            texture: get_uniform_loc(gl, cube_program, "u_texture"),
-            brightness: get_uniform_loc(gl, cube_program, "u_brightness"),
-            uv_rect: get_uniform_loc(gl, cube_program, "u_uv_rect"),
-            aspect: get_uniform_loc(gl, cube_program, "u_aspect"),
-        };
+            let cube_uniforms = CubeUniforms {
+                mvp: get_uniform_loc(gl, cube_program, "u_mvp"),
+                texture: get_uniform_loc(gl, cube_program, "u_texture"),
+                brightness: get_uniform_loc(gl, cube_program, "u_brightness"),
+                uv_rect: get_uniform_loc(gl, cube_program, "u_uv_rect"),
+                aspect: get_uniform_loc(gl, cube_program, "u_aspect"),
+            };
 
-        let portal_uniforms = PortalUniforms {
-            rect: get_uniform_loc(gl, portal_program, "u_rect"),
-            projection: get_uniform_loc(gl, portal_program, "u_projection"),
-            texture: get_uniform_loc(gl, portal_program, "u_texture"),
-            progress: get_uniform_loc(gl, portal_program, "u_progress"),
-            glow: get_uniform_loc(gl, portal_program, "u_glow"),
-            center: get_uniform_loc(gl, portal_program, "u_center"),
-            uv_rect: get_uniform_loc(gl, portal_program, "u_uv_rect"),
-        };
+            let portal_uniforms = PortalUniforms {
+                rect: get_uniform_loc(gl, portal_program, "u_rect"),
+                projection: get_uniform_loc(gl, portal_program, "u_projection"),
+                texture: get_uniform_loc(gl, portal_program, "u_texture"),
+                progress: get_uniform_loc(gl, portal_program, "u_progress"),
+                glow: get_uniform_loc(gl, portal_program, "u_glow"),
+                center: get_uniform_loc(gl, portal_program, "u_center"),
+                uv_rect: get_uniform_loc(gl, portal_program, "u_uv_rect"),
+            };
 
-        let tilt_uniforms = TiltUniforms {
-            rect: get_uniform_loc(gl, tilt_program, "u_rect"),
-            projection: get_uniform_loc(gl, tilt_program, "u_projection"),
-            texture: get_uniform_loc(gl, tilt_program, "u_texture"),
-            opacity: get_uniform_loc(gl, tilt_program, "u_opacity"),
-            radius: get_uniform_loc(gl, tilt_program, "u_radius"),
-            size: get_uniform_loc(gl, tilt_program, "u_size"),
-            dim: get_uniform_loc(gl, tilt_program, "u_dim"),
-            uv_rect: get_uniform_loc(gl, tilt_program, "u_uv_rect"),
-            tilt: get_uniform_loc(gl, tilt_program, "u_tilt"),
-            perspective: get_uniform_loc(gl, tilt_program, "u_perspective"),
-            grid_size: get_uniform_loc(gl, tilt_program, "u_grid_size"),
-            light_dir: get_uniform_loc(gl, tilt_program, "u_light_dir"),
-        };
+            let tilt_uniforms = TiltUniforms {
+                rect: get_uniform_loc(gl, tilt_program, "u_rect"),
+                projection: get_uniform_loc(gl, tilt_program, "u_projection"),
+                texture: get_uniform_loc(gl, tilt_program, "u_texture"),
+                opacity: get_uniform_loc(gl, tilt_program, "u_opacity"),
+                radius: get_uniform_loc(gl, tilt_program, "u_radius"),
+                size: get_uniform_loc(gl, tilt_program, "u_size"),
+                dim: get_uniform_loc(gl, tilt_program, "u_dim"),
+                uv_rect: get_uniform_loc(gl, tilt_program, "u_uv_rect"),
+                tilt: get_uniform_loc(gl, tilt_program, "u_tilt"),
+                perspective: get_uniform_loc(gl, tilt_program, "u_perspective"),
+                grid_size: get_uniform_loc(gl, tilt_program, "u_grid_size"),
+                light_dir: get_uniform_loc(gl, tilt_program, "u_light_dir"),
+            };
 
-        let wobbly_uniforms = WobblyUniforms {
-            rect: get_uniform_loc(gl, wobbly_program, "u_rect"),
-            projection: get_uniform_loc(gl, wobbly_program, "u_projection"),
-            texture: get_uniform_loc(gl, wobbly_program, "u_texture"),
-            opacity: get_uniform_loc(gl, wobbly_program, "u_opacity"),
-            radius: get_uniform_loc(gl, wobbly_program, "u_radius"),
-            size: get_uniform_loc(gl, wobbly_program, "u_size"),
-            dim: get_uniform_loc(gl, wobbly_program, "u_dim"),
-            uv_rect: get_uniform_loc(gl, wobbly_program, "u_uv_rect"),
-            grid_offsets: get_uniform_loc(gl, wobbly_program, "u_grid_offsets"),
-            grid_n: get_uniform_loc(gl, wobbly_program, "u_grid_n"),
-        };
+            let wobbly_uniforms = WobblyUniforms {
+                rect: get_uniform_loc(gl, wobbly_program, "u_rect"),
+                projection: get_uniform_loc(gl, wobbly_program, "u_projection"),
+                texture: get_uniform_loc(gl, wobbly_program, "u_texture"),
+                opacity: get_uniform_loc(gl, wobbly_program, "u_opacity"),
+                radius: get_uniform_loc(gl, wobbly_program, "u_radius"),
+                size: get_uniform_loc(gl, wobbly_program, "u_size"),
+                dim: get_uniform_loc(gl, wobbly_program, "u_dim"),
+                uv_rect: get_uniform_loc(gl, wobbly_program, "u_uv_rect"),
+                grid_offsets: get_uniform_loc(gl, wobbly_program, "u_grid_offsets"),
+                grid_n: get_uniform_loc(gl, wobbly_program, "u_grid_n"),
+            };
 
-        let genie_uniforms = GenieUniforms {
-            rect: get_uniform_loc(gl, genie_program, "u_rect"),
-            projection: get_uniform_loc(gl, genie_program, "u_projection"),
-            texture: get_uniform_loc(gl, genie_program, "u_texture"),
-            opacity: get_uniform_loc(gl, genie_program, "u_opacity"),
-            radius: get_uniform_loc(gl, genie_program, "u_radius"),
-            size: get_uniform_loc(gl, genie_program, "u_size"),
-            dim: get_uniform_loc(gl, genie_program, "u_dim"),
-            uv_rect: get_uniform_loc(gl, genie_program, "u_uv_rect"),
-            progress: get_uniform_loc(gl, genie_program, "u_progress"),
-            dock_pos: get_uniform_loc(gl, genie_program, "u_dock_pos"),
-            grid_size: get_uniform_loc(gl, genie_program, "u_grid_size"),
-        };
+            let genie_uniforms = GenieUniforms {
+                rect: get_uniform_loc(gl, genie_program, "u_rect"),
+                projection: get_uniform_loc(gl, genie_program, "u_projection"),
+                texture: get_uniform_loc(gl, genie_program, "u_texture"),
+                opacity: get_uniform_loc(gl, genie_program, "u_opacity"),
+                radius: get_uniform_loc(gl, genie_program, "u_radius"),
+                size: get_uniform_loc(gl, genie_program, "u_size"),
+                dim: get_uniform_loc(gl, genie_program, "u_dim"),
+                uv_rect: get_uniform_loc(gl, genie_program, "u_uv_rect"),
+                progress: get_uniform_loc(gl, genie_program, "u_progress"),
+                dock_pos: get_uniform_loc(gl, genie_program, "u_dock_pos"),
+                grid_size: get_uniform_loc(gl, genie_program, "u_grid_size"),
+            };
 
-        let edge_glow_uniforms = EdgeGlowUniforms {
-            rect: get_uniform_loc(gl, edge_glow_program, "u_rect"),
-            projection: get_uniform_loc(gl, edge_glow_program, "u_projection"),
-            glow_color: get_uniform_loc(gl, edge_glow_program, "u_glow_color"),
-            glow_width: get_uniform_loc(gl, edge_glow_program, "u_glow_width"),
-            mouse: get_uniform_loc(gl, edge_glow_program, "u_mouse"),
-            screen_size: get_uniform_loc(gl, edge_glow_program, "u_screen_size"),
-            time: get_uniform_loc(gl, edge_glow_program, "u_time"),
-        };
+            let edge_glow_uniforms = EdgeGlowUniforms {
+                rect: get_uniform_loc(gl, edge_glow_program, "u_rect"),
+                projection: get_uniform_loc(gl, edge_glow_program, "u_projection"),
+                glow_color: get_uniform_loc(gl, edge_glow_program, "u_glow_color"),
+                glow_width: get_uniform_loc(gl, edge_glow_program, "u_glow_width"),
+                mouse: get_uniform_loc(gl, edge_glow_program, "u_mouse"),
+                screen_size: get_uniform_loc(gl, edge_glow_program, "u_screen_size"),
+                time: get_uniform_loc(gl, edge_glow_program, "u_time"),
+            };
 
-        // ----- Create quad VAO (empty, using gl_VertexID) -----
-        let mut quad_vao = 0u32;
-        gl.GenVertexArrays(1, &mut quad_vao);
+            // ----- Create quad VAO (empty, using gl_VertexID) -----
+            let mut quad_vao = 0u32;
+            gl.GenVertexArrays(1, &mut quad_vao);
 
-        // ----- Create output FBO + texture -----
-        let (output_fbo, output_texture) = if hdr_10bit {
-            create_fbo_texture_10bit(gl, screen_w, screen_h)
-        } else {
-            create_fbo_texture(gl, screen_w, screen_h)
-        };
-
-        // ----- SOTA #2 Phase 2.1: optional FP16 linear-scene FBO -----
-        // Allocated only when behavior.scene_linear_compositing is on.
-        // Zero/zero sentinel when off; the render path (Phase 2.2) checks
-        // for linear_fbo != 0 to decide whether to take the linear path.
-        let scene_linear_enabled = crate::config::CONFIG
-            .load()
-            .behavior()
-            .scene_linear_compositing;
-        let (linear_fbo, linear_texture) = if scene_linear_enabled {
-            create_fbo_texture_fp16(gl, screen_w, screen_h)
-        } else {
-            (0, 0)
-        };
-
-        // When the output is 10-bit, keep the whole offscreen chain (scene
-        // capture, blur, postprocess, transition) at 10-bit too — an 8-bit
-        // intermediate would reintroduce banding before the final 10-bit blit.
-        let mk_fbo = |w: u32, h: u32| {
-            if hdr_10bit {
-                create_fbo_texture_10bit(gl, w, h)
+            // ----- Create output FBO + texture -----
+            let (output_fbo, output_texture) = if hdr_10bit {
+                create_fbo_texture_10bit(gl, screen_w, screen_h)
             } else {
-                create_fbo_texture(gl, w, h)
+                create_fbo_texture(gl, screen_w, screen_h)
+            };
+
+            // ----- SOTA #2 Phase 2.1: optional FP16 linear-scene FBO -----
+            // Allocated only when behavior.scene_linear_compositing is on.
+            // Zero/zero sentinel when off; the render path (Phase 2.2) checks
+            // for linear_fbo != 0 to decide whether to take the linear path.
+            let scene_linear_enabled = crate::config::CONFIG
+                .load()
+                .behavior()
+                .scene_linear_compositing;
+            let (linear_fbo, linear_texture) = if scene_linear_enabled {
+                create_fbo_texture_fp16(gl, screen_w, screen_h)
+            } else {
+                (0, 0)
+            };
+
+            // When the output is 10-bit, keep the whole offscreen chain (scene
+            // capture, blur, postprocess, transition) at 10-bit too — an 8-bit
+            // intermediate would reintroduce banding before the final 10-bit blit.
+            let mk_fbo = |w: u32, h: u32| {
+                if hdr_10bit {
+                    create_fbo_texture_10bit(gl, w, h)
+                } else {
+                    create_fbo_texture(gl, w, h)
+                }
+            };
+
+            // ----- Create scene FBO + texture -----
+            let (scene_fbo, scene_texture) = mk_fbo(screen_w, screen_h);
+
+            // ----- Create blur FBO chain (6 levels, each half the previous) -----
+            let mut blur_fbos = Vec::with_capacity(6);
+            let mut bw = screen_w / 2;
+            let mut bh = screen_h / 2;
+            for _ in 0..6 {
+                if bw < 1 {
+                    bw = 1;
+                }
+                if bh < 1 {
+                    bh = 1;
+                }
+                let (fbo, texture) = mk_fbo(bw, bh);
+                blur_fbos.push(BlurFboLevel {
+                    fbo,
+                    texture,
+                    width: bw,
+                    height: bh,
+                });
+                bw /= 2;
+                bh /= 2;
             }
-        };
 
-        // ----- Create scene FBO + texture -----
-        let (scene_fbo, scene_texture) = mk_fbo(screen_w, screen_h);
+            // ----- Create postprocess FBO + texture -----
+            let (postprocess_fbo, postprocess_texture) = mk_fbo(screen_w, screen_h);
 
-        // ----- Create blur FBO chain (6 levels, each half the previous) -----
-        let mut blur_fbos = Vec::with_capacity(6);
-        let mut bw = screen_w / 2;
-        let mut bh = screen_h / 2;
-        for _ in 0..6 {
-            if bw < 1 {
-                bw = 1;
-            }
-            if bh < 1 {
-                bh = 1;
-            }
-            let (fbo, texture) = mk_fbo(bw, bh);
-            blur_fbos.push(BlurFboLevel {
-                fbo,
-                texture,
-                width: bw,
-                height: bh,
-            });
-            bw /= 2;
-            bh /= 2;
-        }
+            // ----- Create transition FBO + texture -----
+            let (transition_fbo, transition_texture) = mk_fbo(screen_w, screen_h);
 
-        // ----- Create postprocess FBO + texture -----
-        let (postprocess_fbo, postprocess_texture) = mk_fbo(screen_w, screen_h);
+            // ----- Create particle VAO + VBO -----
+            let mut particle_vao = 0u32;
+            gl.GenVertexArrays(1, &mut particle_vao);
+            let mut particle_vbo = 0u32;
+            gl.GenBuffers(1, &mut particle_vbo);
 
-        // ----- Create transition FBO + texture -----
-        let (transition_fbo, transition_texture) = mk_fbo(screen_w, screen_h);
+            // ----- Unbind -----
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+            gl.BindTexture(ffi::TEXTURE_2D, 0);
 
-        // ----- Create particle VAO + VBO -----
-        let mut particle_vao = 0u32;
-        gl.GenVertexArrays(1, &mut particle_vao);
-        let mut particle_vbo = 0u32;
-        gl.GenBuffers(1, &mut particle_vbo);
+            let now = Instant::now();
 
-        // ----- Unbind -----
-        gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
-        gl.BindTexture(ffi::TEXTURE_2D, 0);
+            Ok(Self {
+                // Shader programs
+                program,
+                shadow_program,
+                blur_down_program,
+                blur_up_program,
+                border_program,
+                postprocess_program,
+                scene_linear_encode_program,
+                scene_linear_decode_program,
+                scene_linear_encode_uniforms,
+                scene_linear_decode_uniforms,
+                transition_program,
+                cube_program,
+                portal_program,
+                edge_glow_program,
+                tilt_program,
+                wobbly_program,
+                genie_program,
+                particle_program,
+                overview_bg_program,
+                hud_program,
+                temporal_blur_mix_program,
 
-        let now = Instant::now();
+                // Uniform locations
+                win_uniforms,
+                shadow_uniforms,
+                blur_uniforms,
+                border_uniforms,
+                postprocess_uniforms,
+                transition_uniforms,
+                cube_uniforms,
+                portal_uniforms,
+                tilt_uniforms,
+                wobbly_uniforms,
+                genie_uniforms,
+                edge_glow_uniforms,
 
-        Ok(Self {
-            // Shader programs
-            program,
-            shadow_program,
-            blur_down_program,
-            blur_up_program,
-            border_program,
-            postprocess_program,
-            scene_linear_encode_program,
-            scene_linear_decode_program,
-            scene_linear_encode_uniforms,
-            scene_linear_decode_uniforms,
-            transition_program,
-            cube_program,
-            portal_program,
-            edge_glow_program,
-            tilt_program,
-            wobbly_program,
-            genie_program,
-            particle_program,
-            overview_bg_program,
-            hud_program,
-            temporal_blur_mix_program,
+                // GL resources
+                quad_vao,
+                output_fbo,
+                output_texture,
+                linear_fbo,
+                linear_texture,
+                scene_fbo,
+                scene_texture,
+                blur_fbos,
+                postprocess_fbo,
+                postprocess_texture,
+                transition_fbo,
+                transition_texture,
+                particle_vao,
+                particle_vbo,
 
-            // Uniform locations
-            win_uniforms,
-            shadow_uniforms,
-            blur_uniforms,
-            border_uniforms,
-            postprocess_uniforms,
-            transition_uniforms,
-            cube_uniforms,
-            portal_uniforms,
-            tilt_uniforms,
-            wobbly_uniforms,
-            genie_uniforms,
-            edge_glow_uniforms,
+                // Dimensions
+                screen_w,
+                screen_h,
 
-            // GL resources
-            quad_vao,
-            output_fbo,
-            output_texture,
-            linear_fbo,
-            linear_texture,
-            scene_fbo,
-            scene_texture,
-            blur_fbos,
-            postprocess_fbo,
-            postprocess_texture,
-            transition_fbo,
-            transition_texture,
-            particle_vao,
-            particle_vbo,
+                // Per-window state
+                windows: HashMap::new(),
+                any_color_transform_active: false,
 
-            // Dimensions
-            screen_w,
-            screen_h,
+                // Config defaults — intentionally conservative; apply_config() reads config.toml
+                corner_radius: 0.0,
+                shadow_enabled: false,
+                shadow_radius: 24.0,
+                shadow_offset: [4.0, 4.0],
+                shadow_color: [0.0, 0.0, 0.0, 0.5],
+                shadow_spread: 20.0,
+                inactive_opacity: 1.0,
+                active_opacity: 1.0,
+                inactive_dim: 1.0,
+                blur_enabled: false,
+                blur_strength: 3,
+                fade_in_step: 0.03,
+                fade_out_step: 0.03,
 
-            // Per-window state
-            windows: HashMap::new(),
-            any_color_transform_active: false,
+                // Animation feature flags — all off until config.toml enables them
+                fading_enabled: false,
+                window_animation_enabled: false,
+                edge_glow_enabled: false,
+                attention_animation_enabled: false,
+                wobbly_enabled: false,
+                motion_trail_enabled: false,
+                genie_minimize_enabled: false,
+                ripple_on_open_enabled: false,
+                focus_highlight_enabled: false,
+                particle_effects_enabled: false,
+                window_tilt_enabled: false,
 
-            // Config defaults — intentionally conservative; apply_config() reads config.toml
-            corner_radius: 0.0,
-            shadow_enabled: false,
-            shadow_radius: 24.0,
-            shadow_offset: [4.0, 4.0],
-            shadow_color: [0.0, 0.0, 0.0, 0.5],
-            shadow_spread: 20.0,
-            inactive_opacity: 1.0,
-            active_opacity: 1.0,
-            inactive_dim: 1.0,
-            blur_enabled: false,
-            blur_strength: 3,
-            fade_in_step: 0.03,
-            fade_out_step: 0.03,
+                // Animation state
+                transition_active: false,
+                transition_start: None,
+                transition_duration: Duration::from_millis(300),
+                transition_mode: TransitionMode::None,
+                transition_direction: 0,
 
-            // Animation feature flags — all off until config.toml enables them
-            fading_enabled: false,
-            window_animation_enabled: false,
-            edge_glow_enabled: false,
-            attention_animation_enabled: false,
-            wobbly_enabled: false,
-            motion_trail_enabled: false,
-            genie_minimize_enabled: false,
-            ripple_on_open_enabled: false,
-            focus_highlight_enabled: false,
-            particle_effects_enabled: false,
-            window_tilt_enabled: false,
+                // Overview
+                overview_active: false,
+                overview_opacity: 0.0,
+                overview_entries: Vec::new(),
+                overview_selection: None,
+                overview_monitor: (0, 0, screen_w, screen_h),
+                overview_rotation: 0.0,
+                overview_target_rotation: 0.0,
+                overview_title_textures: Vec::new(),
 
-            // Animation state
-            transition_active: false,
-            transition_start: None,
-            transition_duration: Duration::from_millis(300),
-            transition_mode: TransitionMode::None,
-            transition_direction: 0,
+                // Expose
+                expose_active: false,
+                expose_opacity: 0.0,
+                expose_entries: Vec::new(),
 
-            // Overview
-            overview_active: false,
-            overview_opacity: 0.0,
-            overview_entries: Vec::new(),
-            overview_selection: None,
-            overview_monitor: (0, 0, screen_w, screen_h),
-            overview_rotation: 0.0,
-            overview_target_rotation: 0.0,
-            overview_title_textures: Vec::new(),
+                // Snap preview
+                snap_preview: None,
+                snap_preview_opacity: 0.0,
 
-            // Expose
-            expose_active: false,
-            expose_opacity: 0.0,
-            expose_entries: Vec::new(),
+                // Peek mode
+                peek_active: false,
 
-            // Snap preview
-            snap_preview: None,
-            snap_preview_opacity: 0.0,
+                // Particles
+                particle_systems: Vec::new(),
 
-            // Peek mode
-            peek_active: false,
+                // Edge glow
+                edge_glow_active: false,
+                edge_glow_suppressed: false,
 
-            // Particles
-            particle_systems: Vec::new(),
+                // Mouse position
+                mouse_x: 0.0,
+                mouse_y: 0.0,
 
-            // Edge glow
-            edge_glow_active: false,
-            edge_glow_suppressed: false,
+                // Tilt
+                tilt_x: 0.0,
+                tilt_y: 0.0,
+                tilt_target_x: 0.0,
+                tilt_target_y: 0.0,
 
-            // Mouse position
-            mouse_x: 0.0,
-            mouse_y: 0.0,
+                // Post-processing
+                postprocess_active: false,
+                color_temperature: 0.0,
+                saturation: 1.0,
+                brightness: 1.0,
+                contrast: 1.0,
+                invert_colors: false,
+                grayscale: false,
+                magnifier_enabled: false,
+                magnifier_zoom: 2.0,
+                magnifier_radius: 100.0,
+                colorblind_mode: 0,
+                hdr_enabled: hdr_10bit,
+                hdr_peak_nits: 1000.0,
+                tone_mapping_method: 0,
 
-            // Tilt
-            tilt_x: 0.0,
-            tilt_y: 0.0,
-            tilt_target_x: 0.0,
-            tilt_target_y: 0.0,
+                // Debug HUD
+                debug_hud_enabled: false,
+                sys_stats: crate::backend::sys_stats::SysStatsSampler::new(),
 
-            // Post-processing
-            postprocess_active: false,
-            color_temperature: 0.0,
-            saturation: 1.0,
-            brightness: 1.0,
-            contrast: 1.0,
-            invert_colors: false,
-            grayscale: false,
-            magnifier_enabled: false,
-            magnifier_zoom: 2.0,
-            magnifier_radius: 100.0,
-            colorblind_mode: 0,
-            hdr_enabled: hdr_10bit,
-            hdr_peak_nits: 1000.0,
-            tone_mapping_method: 0,
+                // Optimization
+                needs_render: true,
+                last_frame_time: now,
+                frame_count: 0,
+                fps: 0.0,
+                prev_scene: Vec::new(),
+                scratch_curr_ids: HashSet::new(),
+                scratch_prev_geom: HashMap::new(),
+                scratch_scanout: Vec::new(),
+                scratch_wobbly_flat: Vec::new(),
 
-            // Debug HUD
-            debug_hud_enabled: false,
-            sys_stats: crate::backend::sys_stats::SysStatsSampler::new(),
+                // Dock position
+                dock_x: 0.0,
+                dock_y: 0.0,
 
-            // Optimization
-            needs_render: true,
-            last_frame_time: now,
-            frame_count: 0,
-            fps: 0.0,
-            prev_scene: Vec::new(),
-            scratch_curr_ids: HashSet::new(),
-            scratch_prev_geom: HashMap::new(),
-            scratch_scanout: Vec::new(),
-            scratch_wobbly_flat: Vec::new(),
+                // Genie animations
+                genie_active: Vec::new(),
 
-            // Dock position
-            dock_x: 0.0,
-            dock_y: 0.0,
+                // Window groups
+                window_groups: Vec::new(),
 
-            // Genie animations
-            genie_active: Vec::new(),
+                // Monitors
+                monitors: Vec::new(),
 
-            // Window groups
-            window_groups: Vec::new(),
+                // Zoom to fit
+                zoom_to_fit_window: None,
 
-            // Monitors
-            monitors: Vec::new(),
+                // Annotations
+                annotation_active: false,
+                annotation_strokes: Vec::new(),
+                annotation_color: [1.0, 0.0, 0.0, 1.0],
+                annotation_line_width: 3.0,
+                line_program,
+                line_uniform_projection,
+                line_uniform_color,
 
-            // Zoom to fit
-            zoom_to_fit_window: None,
+                // Performance infrastructure
+                dirty_region_tracker: dirty_region::DirtyRegionTracker::new(screen_w, screen_h),
+                per_monitor_renderer: per_monitor::PerMonitorRenderer::new(),
+                frame_rate_limiter: frame_rate::FrameRateLimiter::new(60),
+                adaptive_frame_rate: frame_rate::AdaptiveFrameRate::new(15, 60),
+                power_saving_mgr: power_saving::PowerSavingManager::new(
+                    power_saving::PowerSavingConfig::default(),
+                ),
+                predictive_render_mgr: predictive_render::PredictiveRenderManager::new(),
+                pixel_buffer_pool: pixel_buffer_pool::PixelBufferPool::new(),
+                frame_profiler: profiler::FrameProfiler::new(),
+                perf_metrics: perf_metrics::PerfMetrics::new(),
+                cache_warmup_mgr: cache_warmup::CacheWarmupManager::new(),
+                direct_scanout_mgr: direct_scanout::DirectScanoutManager::new(screen_w, screen_h),
+                gpu_fence_sync_mgr: gpu_fence_sync::GpuFenceSyncManager::new(),
+                pbo_uploader: pbo_uploader::PBOUploader::new(4 * 1024 * 1024, 4),
+                gl_state_tracker: render_batcher::GLStateTracker::new(),
+                render_batcher: render_batcher::RenderBatcher::new(),
+                presentation_timing_mgr: presentation_timing::PresentationTimingManager::new(),
+                adaptive_scheduler: presentation_timing::AdaptiveFrameScheduler::new(60),
 
-            // Annotations
-            annotation_active: false,
-            annotation_strokes: Vec::new(),
-            annotation_color: [1.0, 0.0, 0.0, 1.0],
-            annotation_line_width: 3.0,
-            line_program,
-            line_uniform_projection,
-            line_uniform_color,
+                // Feature modules
+                recording: recording::RecordingState::new(),
+                shader_hot_reload: shader_hot_reload::ShaderHotReload::new(),
+                audio_sync_mgr: audio_sync::AudioSyncManager::new(),
+                subpixel_mgr: subpixel_render::SubpixelRenderManager::new(),
 
-            // Performance infrastructure
-            dirty_region_tracker: dirty_region::DirtyRegionTracker::new(screen_w, screen_h),
-            per_monitor_renderer: per_monitor::PerMonitorRenderer::new(),
-            frame_rate_limiter: frame_rate::FrameRateLimiter::new(60),
-            adaptive_frame_rate: frame_rate::AdaptiveFrameRate::new(15, 60),
-            power_saving_mgr: power_saving::PowerSavingManager::new(
-                power_saving::PowerSavingConfig::default(),
-            ),
-            predictive_render_mgr: predictive_render::PredictiveRenderManager::new(),
-            pixel_buffer_pool: pixel_buffer_pool::PixelBufferPool::new(),
-            frame_profiler: profiler::FrameProfiler::new(),
-            perf_metrics: perf_metrics::PerfMetrics::new(),
-            cache_warmup_mgr: cache_warmup::CacheWarmupManager::new(),
-            direct_scanout_mgr: direct_scanout::DirectScanoutManager::new(screen_w, screen_h),
-            gpu_fence_sync_mgr: gpu_fence_sync::GpuFenceSyncManager::new(),
-            pbo_uploader: pbo_uploader::PBOUploader::new(4 * 1024 * 1024, 4),
-            gl_state_tracker: render_batcher::GLStateTracker::new(),
-            render_batcher: render_batcher::RenderBatcher::new(),
-            presentation_timing_mgr: presentation_timing::PresentationTimingManager::new(),
-            adaptive_scheduler: presentation_timing::AdaptiveFrameScheduler::new(60),
+                // Wallpaper
+                wallpaper_texture: None,
+                wallpaper_mode: WallpaperMode::Fill,
+                wallpaper_path: String::new(),
+                wallpaper_img_w: 0,
+                wallpaper_img_h: 0,
+                monitor_wallpapers: Vec::new(),
+                pending_wallpaper: None,
+                pending_monitor_wallpapers: Vec::new(),
+                wallpaper_crossfade: true,
+                wallpaper_crossfade_duration_ms: 500,
+                old_wallpaper_texture: None,
+                old_wallpaper_img_w: 0,
+                old_wallpaper_img_h: 0,
+                old_wallpaper_mode: WallpaperMode::Fill,
+                wallpaper_transition_start: None,
 
-            // Feature modules
-            recording: recording::RecordingState::new(),
-            shader_hot_reload: shader_hot_reload::ShaderHotReload::new(),
-            audio_sync_mgr: audio_sync::AudioSyncManager::new(),
-            subpixel_mgr: subpixel_render::SubpixelRenderManager::new(),
+                // Per-window rules
+                opacity_rules: Vec::new(),
+                corner_radius_rules: Vec::new(),
+                scale_rules: Vec::new(),
+                frosted_glass_rules: Vec::new(),
+                shadow_exclude: Vec::new(),
+                blur_exclude: Vec::new(),
+                rounded_corners_exclude: Vec::new(),
+                detect_client_opacity: true,
+                blur_use_frame_extents: false,
 
-            // Wallpaper
-            wallpaper_texture: None,
-            wallpaper_mode: WallpaperMode::Fill,
-            wallpaper_path: String::new(),
-            wallpaper_img_w: 0,
-            wallpaper_img_h: 0,
-            monitor_wallpapers: Vec::new(),
-            pending_wallpaper: None,
-            pending_monitor_wallpapers: Vec::new(),
-            wallpaper_crossfade: true,
-            wallpaper_crossfade_duration_ms: 500,
-            old_wallpaper_texture: None,
-            old_wallpaper_img_w: 0,
-            old_wallpaper_img_h: 0,
-            old_wallpaper_mode: WallpaperMode::Fill,
-            wallpaper_transition_start: None,
+                // Partial-damage redraw: on by default. The allow_partial gate
+                // (render.rs) only engages it on calm frames (no animation, no blur,
+                // no overview/peek/annotation) and the damage box is always a
+                // superset of changed pixels, so a fully-correct output_fbo is
+                // presented in full — stale pixels can't appear. Toggle off at
+                // runtime with Mod1+Shift+d if a regression is seen on hardware.
+                partial_damage_enabled: true,
+                force_full_damage_next: true,
+                content_dirty_ids: HashSet::new(),
+                prev_focused: None,
 
-            // Per-window rules
-            opacity_rules: Vec::new(),
-            corner_radius_rules: Vec::new(),
-            scale_rules: Vec::new(),
-            frosted_glass_rules: Vec::new(),
-            shadow_exclude: Vec::new(),
-            blur_exclude: Vec::new(),
-            rounded_corners_exclude: Vec::new(),
-            detect_client_opacity: true,
-            blur_use_frame_extents: false,
+                // VRR
+                is_game_window: HashMap::new(),
+                vrr_active: false,
+                vrr_last_check: now,
 
-            // Partial-damage redraw: on by default. The allow_partial gate
-            // (render.rs) only engages it on calm frames (no animation, no blur,
-            // no overview/peek/annotation) and the damage box is always a
-            // superset of changed pixels, so a fully-correct output_fbo is
-            // presented in full — stale pixels can't appear. Toggle off at
-            // runtime with Mod1+Shift+d if a regression is seen on hardware.
-            partial_damage_enabled: true,
-            force_full_damage_next: true,
-            content_dirty_ids: HashSet::new(),
-            prev_focused: None,
+                // Temporal blur (default-on; config may override via apply_config)
+                temporal_blur_enabled: true,
+                temporal_blur_mix_ratio: 0.8,
+                temporal_blur_mix_uniforms,
+                prev_blur_fbo: None,
+                temporal_mix_fbo: None,
+                blur_blit_src_fbo: 0,
+                prev_motion_positions: Vec::new(),
+                prev_window_positions_hash: 0,
+                temporal_blur_reuse_count: 0,
+                temporal_blur_total_count: 0,
 
-            // VRR
-            is_game_window: HashMap::new(),
-            vrr_active: false,
-            vrr_last_check: now,
+                // Blur quality
+                blur_quality: BlurQuality::Full,
+                blur_quality_auto: false,
+                blur_quality_by_monitor: HashMap::new(),
+                blur_strength_by_hz: Vec::new(),
+                monitor_refresh_rates: HashMap::new(),
+                last_gpu_load: 0,
+                last_gpu_load_update: now,
 
-            // Temporal blur (default-on; config may override via apply_config)
-            temporal_blur_enabled: true,
-            temporal_blur_mix_ratio: 0.8,
-            temporal_blur_mix_uniforms,
-            prev_blur_fbo: None,
-            temporal_mix_fbo: None,
-            blur_blit_src_fbo: 0,
-            prev_motion_positions: Vec::new(),
-            prev_window_positions_hash: 0,
-            temporal_blur_reuse_count: 0,
-            temporal_blur_total_count: 0,
+                // Window tabs
+                window_tabs_enabled: false,
+                tab_bar_height: 24.0,
+                tab_bar_color: [0.2, 0.2, 0.2, 0.9],
+                tab_active_color: [0.3, 0.5, 0.8, 1.0],
 
-            // Blur quality
-            blur_quality: BlurQuality::Full,
-            blur_quality_auto: false,
-            blur_quality_by_monitor: HashMap::new(),
-            blur_strength_by_hz: Vec::new(),
-            monitor_refresh_rates: HashMap::new(),
-            last_gpu_load: 0,
-            last_gpu_load_update: now,
+                // Border config
+                border_enabled: true,
+                border_width: 2.0,
+                border_color_focused: [0.3, 0.6, 1.0, 0.8],
+                border_color_unfocused: [0.3, 0.3, 0.3, 0.5],
 
-            // Window tabs
-            window_tabs_enabled: false,
-            tab_bar_height: 24.0,
-            tab_bar_color: [0.2, 0.2, 0.2, 0.9],
-            tab_active_color: [0.3, 0.5, 0.8, 1.0],
+                // Screenshot
+                pending_screenshot: None,
+                pending_screenshot_region: None,
 
-            // Border config
-            border_enabled: true,
-            border_width: 2.0,
-            border_color_focused: [0.3, 0.6, 1.0, 0.8],
-            border_color_unfocused: [0.3, 0.3, 0.3, 0.5],
+                // Recording control
+                pending_recording_start: None,
+                pending_recording_stop: false,
 
-            // Screenshot
-            pending_screenshot: None,
-            pending_screenshot_region: None,
+                // Debug HUD extended
+                debug_hud_extended: false,
+                hud_text_texture: None,
+                hud_text_width: 0,
+                hud_text_height: 0,
+                hud_text_cache: String::new(),
+                compositor_start_time: now,
 
-            // Recording control
-            pending_recording_start: None,
-            pending_recording_stop: false,
+                // Animation parameters
+                shadow_bottom_extra: 0.0,
+                edge_glow_color: [0.3, 0.6, 1.0, 0.6],
+                edge_glow_width: 20.0,
+                attention_color: [1.0, 0.5, 0.0, 0.8],
+                snap_preview_color: [0.3, 0.6, 1.0, 0.3],
+                snap_animation_duration_ms: 200,
+                peek_exclude: Vec::new(),
+                peek_opacity: 0.0,
+                peek_start: None,
+                expose_gap: 20.0,
+                expose_start: None,
+                particle_count: 30,
+                particle_lifetime: 1.0,
+                particle_gravity: 400.0,
+                motion_trail_frames: 5,
+                motion_trail_opacity: 0.3,
+                tilt_speed: 8.0,
+                tilt_grid: 12,
+                wobbly_stiffness: 600.0,
+                wobbly_damping: 30.0,
+                wobbly_restore_stiffness: 200.0,
+                wobbly_grid_size: 6,
+                genie_duration_ms: 300,
+                ripple_duration: 0.4,
+                ripple_amplitude: 0.03,
+                focus_highlight_color: [0.3, 0.6, 1.0, 0.8],
+                focus_highlight_duration_ms: 300,
+                focus_highlight_start: None,
+                last_focused_window: None,
+                pip_border_color: [1.0, 0.8, 0.0, 0.9],
+                pip_border_width: 3.0,
+                window_animation_scale: 0.92,
 
-            // Debug HUD extended
-            debug_hud_extended: false,
-            hud_text_texture: None,
-            hud_text_width: 0,
-            hud_text_height: 0,
-            hud_text_cache: String::new(),
-            compositor_start_time: now,
+                // Transition per-monitor
+                transition_mon: None,
 
-            // Animation parameters
-            shadow_bottom_extra: 0.0,
-            edge_glow_color: [0.3, 0.6, 1.0, 0.6],
-            edge_glow_width: 20.0,
-            attention_color: [1.0, 0.5, 0.0, 0.8],
-            snap_preview_color: [0.3, 0.6, 1.0, 0.3],
-            snap_animation_duration_ms: 200,
-            peek_exclude: Vec::new(),
-            peek_opacity: 0.0,
-            peek_start: None,
-            expose_gap: 20.0,
-            expose_start: None,
-            particle_count: 30,
-            particle_lifetime: 1.0,
-            particle_gravity: 400.0,
-            motion_trail_frames: 5,
-            motion_trail_opacity: 0.3,
-            tilt_speed: 8.0,
-            tilt_grid: 12,
-            wobbly_stiffness: 600.0,
-            wobbly_damping: 30.0,
-            wobbly_restore_stiffness: 200.0,
-            wobbly_grid_size: 6,
-            genie_duration_ms: 300,
-            ripple_duration: 0.4,
-            ripple_amplitude: 0.03,
-            focus_highlight_color: [0.3, 0.6, 1.0, 0.8],
-            focus_highlight_duration_ms: 300,
-            focus_highlight_start: None,
-            last_focused_window: None,
-            pip_border_color: [1.0, 0.8, 0.0, 0.9],
-            pip_border_width: 3.0,
-            window_animation_scale: 0.92,
-
-            // Transition per-monitor
-            transition_mon: None,
-
-            // Render stats & texture pool
-            render_stats: render_stats::RenderStats::new(),
-            texture_pool: texture_pool::TexturePool::new(),
-        })
+                // Render stats & texture pool
+                render_stats: render_stats::RenderStats::new(),
+                texture_pool: texture_pool::TexturePool::new(),
+            })
         }
     }
 }
@@ -1775,7 +1824,8 @@ impl WaylandCompositor {
 
     /// Notify audio timing for a window (feeds AudioSyncManager).
     pub(crate) fn notify_audio_timing(&mut self, window_id: u64, fps: f32, buffer_latency_ms: u32) {
-        self.audio_sync_mgr.register_stream(window_id, fps, buffer_latency_ms);
+        self.audio_sync_mgr
+            .register_stream(window_id, fps, buffer_latency_ms);
     }
 
     /// Capture a scaled-down thumbnail of a window's texture.
@@ -1807,9 +1857,15 @@ impl WaylandCompositor {
             gl.GenTextures(1, &mut tmp_tex);
             gl.BindTexture(ffi::TEXTURE_2D, tmp_tex);
             gl.TexImage2D(
-                ffi::TEXTURE_2D, 0, ffi::RGBA8 as i32,
-                tw as i32, th as i32, 0,
-                ffi::RGBA, ffi::UNSIGNED_BYTE, std::ptr::null(),
+                ffi::TEXTURE_2D,
+                0,
+                ffi::RGBA8 as i32,
+                tw as i32,
+                th as i32,
+                0,
+                ffi::RGBA,
+                ffi::UNSIGNED_BYTE,
+                std::ptr::null(),
             );
             gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
             gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
@@ -1818,7 +1874,11 @@ impl WaylandCompositor {
             gl.GenFramebuffers(1, &mut tmp_fbo);
             gl.BindFramebuffer(ffi::FRAMEBUFFER, tmp_fbo);
             gl.FramebufferTexture2D(
-                ffi::FRAMEBUFFER, ffi::COLOR_ATTACHMENT0, ffi::TEXTURE_2D, tmp_tex, 0,
+                ffi::FRAMEBUFFER,
+                ffi::COLOR_ATTACHMENT0,
+                ffi::TEXTURE_2D,
+                tmp_tex,
+                0,
             );
 
             gl.Viewport(0, 0, tw as i32, th as i32);
@@ -1827,7 +1887,12 @@ impl WaylandCompositor {
 
             gl.UseProgram(self.program);
             let projection = ortho(0.0, tw as f32, th as f32, 0.0);
-            gl.UniformMatrix4fv(self.win_uniforms.projection, 1, ffi::FALSE as u8, projection.as_ptr());
+            gl.UniformMatrix4fv(
+                self.win_uniforms.projection,
+                1,
+                ffi::FALSE as u8,
+                projection.as_ptr(),
+            );
             gl.Uniform1i(self.win_uniforms.texture, 0);
             gl.Uniform1f(self.win_uniforms.opacity, 1.0);
             gl.Uniform1f(self.win_uniforms.dim, 1.0);
@@ -1852,8 +1917,12 @@ impl WaylandCompositor {
             let buffer_size = (tw * th * 4) as usize;
             let mut pixels = vec![0u8; buffer_size];
             gl.ReadPixels(
-                0, 0, tw as i32, th as i32,
-                ffi::RGBA, ffi::UNSIGNED_BYTE,
+                0,
+                0,
+                tw as i32,
+                th as i32,
+                ffi::RGBA,
+                ffi::UNSIGNED_BYTE,
                 pixels.as_mut_ptr() as *mut _,
             );
 
@@ -1954,7 +2023,6 @@ impl WaylandCompositor {
             dirty_region_merge_count: 0,
         }
     }
-
 }
 
 // ---------------------------------------------------------------------------

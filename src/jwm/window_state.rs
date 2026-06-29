@@ -1,6 +1,6 @@
 use crate::backend::api::Backend;
+use crate::backend::api::{StackMode, WindowChanges, WindowType};
 use crate::backend::common_define::{SchemeType, WindowId};
-use crate::backend::api::{WindowChanges, StackMode, WindowType};
 use crate::core::models::ClientKey;
 
 use super::Jwm;

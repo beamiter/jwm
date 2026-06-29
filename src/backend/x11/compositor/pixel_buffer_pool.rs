@@ -1,6 +1,6 @@
 /// Pixel buffer pool for reusing memory allocations
 use std::collections::HashMap;
-use std::sync::{Mutex, Arc};
+use std::sync::{Arc, Mutex};
 
 /// Manages reusable pixel buffers to reduce allocation overhead
 pub struct PixelBufferPool {
@@ -49,9 +49,7 @@ impl PixelBufferPool {
     pub fn release(&self, buffer: Vec<u8>) {
         let size = buffer.capacity();
         if let Ok(mut buffers) = self.buffers.lock() {
-            buffers.entry(size)
-                .or_insert_with(Vec::new)
-                .push(buffer);
+            buffers.entry(size).or_insert_with(Vec::new).push(buffer);
         }
     }
 
@@ -67,7 +65,8 @@ impl PixelBufferPool {
 
     /// Get pool statistics
     pub fn stats(&self) -> PixelBufferStats {
-        self.stats.lock()
+        self.stats
+            .lock()
             .ok()
             .map(|s| s.clone())
             .unwrap_or_default()
@@ -75,7 +74,8 @@ impl PixelBufferPool {
 
     /// Get number of available buffers for a given size
     pub fn available_for_size(&self, size: usize) -> usize {
-        self.buffers.lock()
+        self.buffers
+            .lock()
             .ok()
             .and_then(|b| Some(b.get(&size)?.len()))
             .unwrap_or(0)
@@ -83,7 +83,8 @@ impl PixelBufferPool {
 
     /// Get total number of buffered items
     pub fn total_buffered(&self) -> usize {
-        self.buffers.lock()
+        self.buffers
+            .lock()
             .ok()
             .map(|b| b.values().map(|v| v.len()).sum())
             .unwrap_or(0)

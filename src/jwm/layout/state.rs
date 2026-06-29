@@ -4,8 +4,8 @@ use crate::backend::api::Backend;
 use crate::config::CONFIG;
 use crate::core::layout::LayoutEnum;
 use crate::core::models::{ClientKey, MonitorKey};
-use crate::jwm::types::WMArgEnum;
 use crate::jwm::Jwm;
+use crate::jwm::types::WMArgEnum;
 use log::info;
 use std::rc::Rc;
 

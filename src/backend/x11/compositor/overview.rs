@@ -154,7 +154,7 @@ impl Compositor {
                         0,
                         glow::RGBA,
                         glow::UNSIGNED_BYTE,
-                        glow::PixelUnpackData::Slice(None),  // Allocate without data
+                        glow::PixelUnpackData::Slice(None), // Allocate without data
                     );
                     self.gl.tex_parameter_i32(
                         glow::TEXTURE_2D,
@@ -179,7 +179,8 @@ impl Compositor {
                     self.gl.bind_texture(glow::TEXTURE_2D, None);
 
                     // P6C: Upload data via PBO (async, reduces CPU stall)
-                    self.pbo_uploader.upload_texture(&self.gl, tex, w, h, glow::RGBA, &pixels);
+                    self.pbo_uploader
+                        .upload_texture(&self.gl, tex, w, h, glow::RGBA, &pixels);
 
                     Some((tex, w, h))
                 }
@@ -192,7 +193,7 @@ impl Compositor {
     }
 
     pub(super) fn upload_overview_snapshot_texture(
-        &mut self,  // P6C: mut needed for pbo_uploader
+        &mut self, // P6C: mut needed for pbo_uploader
         pixels: &[u8],
         width: u32,
         height: u32,
@@ -210,7 +211,7 @@ impl Compositor {
                 0,
                 glow::RGBA,
                 glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(None),  // Allocate without data
+                glow::PixelUnpackData::Slice(None), // Allocate without data
             );
             self.gl.tex_parameter_i32(
                 glow::TEXTURE_2D,
@@ -235,14 +236,15 @@ impl Compositor {
             self.gl.bind_texture(glow::TEXTURE_2D, None);
 
             // P6C: Upload data via PBO (async, reduces CPU stall)
-            self.pbo_uploader.upload_texture(&self.gl, texture, width, height, glow::RGBA, pixels);
+            self.pbo_uploader
+                .upload_texture(&self.gl, texture, width, height, glow::RGBA, pixels);
 
             Some(texture)
         }
     }
 
     pub(super) fn create_overview_snapshot_texture(
-        &mut self,  // P6C: mut needed for pbo_uploader
+        &mut self, // P6C: mut needed for pbo_uploader
         x11_win: u32,
         max_size: u32,
     ) -> Option<glow::Texture> {

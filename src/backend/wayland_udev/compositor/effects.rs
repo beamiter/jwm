@@ -47,7 +47,8 @@ impl WaylandCompositor {
             }
         }
         // Remove fully faded-out windows
-        self.windows.retain(|_id, win| !(win.fading_out && win.fade_opacity <= 0.0));
+        self.windows
+            .retain(|_id, win| !(win.fading_out && win.fade_opacity <= 0.0));
     }
 
     /// Tick genie minimize animations. Returns true if any are still active.
@@ -109,9 +110,17 @@ impl WaylandCompositor {
                         // Neighbor spring forces
                         let neighbors = [
                             if col > 0 { Some(idx - 1) } else { None },
-                            if col < grid_n - 1 { Some(idx + 1) } else { None },
+                            if col < grid_n - 1 {
+                                Some(idx + 1)
+                            } else {
+                                None
+                            },
                             if row > 0 { Some(idx - grid_n) } else { None },
-                            if row < grid_n - 1 { Some(idx + grid_n) } else { None },
+                            if row < grid_n - 1 {
+                                Some(idx + grid_n)
+                            } else {
+                                None
+                            },
                         ];
 
                         for neighbor_idx in neighbors.iter().flatten() {
@@ -150,9 +159,13 @@ impl WaylandCompositor {
 
             // Check if wobbly has settled (all velocities and offsets near zero)
             if !wobbly.dragging {
-                let settled = wobbly.offsets.iter().zip(wobbly.velocities.iter()).all(|(o, v)| {
-                    o[0].abs() < 0.1 && o[1].abs() < 0.1 && v[0].abs() < 0.5 && v[1].abs() < 0.5
-                });
+                let settled = wobbly
+                    .offsets
+                    .iter()
+                    .zip(wobbly.velocities.iter())
+                    .all(|(o, v)| {
+                        o[0].abs() < 0.1 && o[1].abs() < 0.1 && v[0].abs() < 0.5 && v[1].abs() < 0.5
+                    });
                 if settled {
                     // Clear wobbly state
                     win.wobbly = None;
@@ -239,11 +252,19 @@ impl WaylandCompositor {
                 y: cy + (i as f32 * 2.3).cos() * h as f32 * 0.3,
                 vx: angle.cos() * speed,
                 vy: angle.sin() * speed - 150.0,
-                color: [0.6 + (i as f32 * 0.01) % 0.4, 0.3 + (i as f32 * 0.007) % 0.3, 0.8, 1.0],
+                color: [
+                    0.6 + (i as f32 * 0.01) % 0.4,
+                    0.3 + (i as f32 * 0.007) % 0.3,
+                    0.8,
+                    1.0,
+                ],
                 life: 1.0,
             });
         }
-        self.particle_systems.push(ParticleSystem { particles, age: 0.0 });
+        self.particle_systems.push(ParticleSystem {
+            particles,
+            age: 0.0,
+        });
     }
 
     /// Render particle systems
@@ -254,11 +275,19 @@ impl WaylandCompositor {
         unsafe {
             gl.UseProgram(self.particle_program);
             gl.UniformMatrix4fv(
-                gl.GetUniformLocation(self.particle_program, b"u_projection\0".as_ptr() as *const _),
-                1, ffi::FALSE as u8, projection.as_ptr(),
+                gl.GetUniformLocation(
+                    self.particle_program,
+                    b"u_projection\0".as_ptr() as *const _,
+                ),
+                1,
+                ffi::FALSE as u8,
+                projection.as_ptr(),
             );
             gl.Uniform1f(
-                gl.GetUniformLocation(self.particle_program, b"u_point_size\0".as_ptr() as *const _),
+                gl.GetUniformLocation(
+                    self.particle_program,
+                    b"u_point_size\0".as_ptr() as *const _,
+                ),
                 8.0,
             );
 

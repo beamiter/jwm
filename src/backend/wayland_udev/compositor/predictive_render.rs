@@ -197,11 +197,7 @@ impl PredictiveRenderManager {
 
     pub fn get_window_budget(&self, window_id: u64) -> f32 {
         if let Some(activity) = self.windows.get(&window_id) {
-            if activity.is_focused {
-                16.6
-            } else {
-                33.3
-            }
+            if activity.is_focused { 16.6 } else { 33.3 }
         } else {
             33.3
         }

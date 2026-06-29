@@ -104,7 +104,12 @@ pub fn parse_edid_hdr_from_bytes(edid: &[u8]) -> Option<EdidHdrCapabilities> {
 mod tests {
     use super::*;
 
-    fn build_edid_with_hdr_block(eotf: u8, max_lum_cv: u8, min_lum_cv: u8, colorimetry: u8) -> Vec<u8> {
+    fn build_edid_with_hdr_block(
+        eotf: u8,
+        max_lum_cv: u8,
+        min_lum_cv: u8,
+        colorimetry: u8,
+    ) -> Vec<u8> {
         let mut edid = vec![0u8; 256];
         edid[0..8].copy_from_slice(&[0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]);
         edid[126] = 1;

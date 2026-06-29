@@ -3,8 +3,7 @@
 /// This module provides example integration patterns for GLStateTracker and RenderBatcher.
 /// Full integration into the existing render_frame is deferred to avoid disrupting
 /// the stable 7000+ line rendering pipeline.
-
-use super::{GLStateTracker, RenderBatcher, QuadInstance};
+use super::{GLStateTracker, QuadInstance, RenderBatcher};
 use glow::HasContext;
 
 /// Example: Batched window rendering with state tracking
@@ -22,7 +21,7 @@ pub fn render_batched_windows_example<C: HasContext>(
         <C as HasContext>::Program,
         <C as HasContext>::Texture,
         <C as HasContext>::VertexArray,
-        <C as HasContext>::Framebuffer
+        <C as HasContext>::Framebuffer,
     >,
     batcher: &mut RenderBatcher,
     program: <C as HasContext>::Program,
@@ -109,7 +108,12 @@ pub fn render_batched_windows_example<C: HasContext>(
 ///
 /// Call this periodically to log GLStateTracker and RenderBatcher statistics
 pub fn log_optimization_stats(
-    state_tracker: &GLStateTracker<impl Copy + PartialEq, impl Copy + PartialEq, impl Copy + PartialEq, impl Copy + PartialEq>,
+    state_tracker: &GLStateTracker<
+        impl Copy + PartialEq,
+        impl Copy + PartialEq,
+        impl Copy + PartialEq,
+        impl Copy + PartialEq,
+    >,
     batcher: &RenderBatcher,
 ) {
     log::info!(

@@ -47,7 +47,7 @@ impl WindowActivity {
             damage_count_1s: 0,
             is_focused: false,
             activity_level: SceneActivity::Static,
-            render_budget_ms: 5.0,  // Default 5ms budget
+            render_budget_ms: 5.0, // Default 5ms budget
         }
     }
 
@@ -74,9 +74,9 @@ impl WindowActivity {
 
         // Allocate render budget based on activity
         self.render_budget_ms = match self.activity_level {
-            SceneActivity::Static => 2.0,       // Low budget for static
-            SceneActivity::Idle => 5.0,         // Normal budget
-            SceneActivity::Animating => 10.0,   // High budget for animation
+            SceneActivity::Static => 2.0,        // Low budget for static
+            SceneActivity::Idle => 5.0,          // Normal budget
+            SceneActivity::Animating => 10.0,    // High budget for animation
             SceneActivity::HighActivity => 15.0, // Max budget for gaming/video
         };
 
@@ -143,7 +143,8 @@ impl PredictiveRenderManager {
         self.total_damage_1s += 1;
 
         // Update per-window activity
-        let activity = self.window_activities
+        let activity = self
+            .window_activities
             .entry(window_id)
             .or_insert_with(|| WindowActivity::new(window_id));
         activity.record_damage();
@@ -158,7 +159,8 @@ impl PredictiveRenderManager {
 
         // Set focus on new window
         if let Some(wid) = window_id {
-            let activity = self.window_activities
+            let activity = self
+                .window_activities
                 .entry(wid)
                 .or_insert_with(|| WindowActivity::new(wid));
             activity.is_focused = true;
@@ -204,12 +206,12 @@ impl PredictiveRenderManager {
 
         // Update recommended FPS based on scene activity
         self.recommended_fps = if !self.power_saving_enabled {
-            60  // Always 60fps if power saving disabled
+            60 // Always 60fps if power saving disabled
         } else {
             match self.scene_activity {
-                SceneActivity::Static => 10,       // 10fps for static
-                SceneActivity::Idle => 30,         // 30fps for idle
-                SceneActivity::Animating => 60,    // 60fps for animation
+                SceneActivity::Static => 10,        // 10fps for static
+                SceneActivity::Idle => 30,          // 30fps for idle
+                SceneActivity::Animating => 60,     // 60fps for animation
                 SceneActivity::HighActivity => 120, // 120fps for gaming (if VRR)
             }
         };
@@ -257,8 +259,9 @@ impl PredictiveRenderManager {
     /// Get statistics
     pub fn stats(&self) -> (SceneActivity, u32, u64, u64, f32) {
         let skip_rate = if self.total_frames_rendered > 0 {
-            self.total_frames_skipped as f32 /
-            (self.total_frames_rendered + self.total_frames_skipped) as f32 * 100.0
+            self.total_frames_skipped as f32
+                / (self.total_frames_rendered + self.total_frames_skipped) as f32
+                * 100.0
         } else {
             0.0
         };

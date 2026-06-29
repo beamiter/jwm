@@ -110,16 +110,16 @@ pub struct GPUFenceSyncManager {
     /// Statistics
     total_fences_created: u64,
     total_fences_cleaned: u64,
-    blocked_waits: u64,  // Count of blocking waits (should be minimal)
+    blocked_waits: u64, // Count of blocking waits (should be minimal)
 }
 
 impl GPUFenceSyncManager {
     pub fn new() -> Self {
         Self {
             window_fences: HashMap::new(),
-            cleanup_timeout: Duration::from_millis(100),  // 6 frames at 60Hz
+            cleanup_timeout: Duration::from_millis(100), // 6 frames at 60Hz
             last_cleanup: Instant::now(),
-            cleanup_interval: Duration::from_millis(50),  // Cleanup every 50ms
+            cleanup_interval: Duration::from_millis(50), // Cleanup every 50ms
             total_fences_created: 0,
             total_fences_cleaned: 0,
             blocked_waits: 0,
@@ -155,7 +155,7 @@ impl GPUFenceSyncManager {
     /// Requires valid GL context
     pub unsafe fn cleanup_old_fences(&mut self, gl: &glow::Context) {
         if self.last_cleanup.elapsed() < self.cleanup_interval {
-            return;  // Too soon, skip cleanup pass
+            return; // Too soon, skip cleanup pass
         }
 
         let now = Instant::now();

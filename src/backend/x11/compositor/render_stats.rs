@@ -2,7 +2,6 @@
 ///
 /// Tracks detailed statistics about the rendering pipeline to identify
 /// bottlenecks and optimization opportunities
-
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -55,8 +54,13 @@ impl RenderStats {
 
     /// Start timing a render pass
     pub fn begin_pass(&mut self, pass_name: &'static str) {
-        let count = self.current_frame.get(pass_name).map(|(_, c)| *c).unwrap_or(0);
-        self.current_frame.insert(pass_name, (Instant::now(), count + 1));
+        let count = self
+            .current_frame
+            .get(pass_name)
+            .map(|(_, c)| *c)
+            .unwrap_or(0);
+        self.current_frame
+            .insert(pass_name, (Instant::now(), count + 1));
     }
 
     /// End timing a render pass
@@ -166,15 +170,30 @@ impl RenderStats {
 
         // GL call stats
         if self.frame_count > 0 {
-            lines.push(format!("\nGL Calls (total over {} frames):", self.frame_count));
-            lines.push(format!("  Draw calls: {} ({:.1}/frame)",
-                self.draw_calls, self.draw_calls as f32 / self.frame_count as f32));
-            lines.push(format!("  State changes: {} ({:.1}/frame)",
-                self.state_changes, self.state_changes as f32 / self.frame_count as f32));
-            lines.push(format!("  Texture binds: {} ({:.1}/frame)",
-                self.texture_binds, self.texture_binds as f32 / self.frame_count as f32));
-            lines.push(format!("  Program changes: {} ({:.1}/frame)",
-                self.program_changes, self.program_changes as f32 / self.frame_count as f32));
+            lines.push(format!(
+                "\nGL Calls (total over {} frames):",
+                self.frame_count
+            ));
+            lines.push(format!(
+                "  Draw calls: {} ({:.1}/frame)",
+                self.draw_calls,
+                self.draw_calls as f32 / self.frame_count as f32
+            ));
+            lines.push(format!(
+                "  State changes: {} ({:.1}/frame)",
+                self.state_changes,
+                self.state_changes as f32 / self.frame_count as f32
+            ));
+            lines.push(format!(
+                "  Texture binds: {} ({:.1}/frame)",
+                self.texture_binds,
+                self.texture_binds as f32 / self.frame_count as f32
+            ));
+            lines.push(format!(
+                "  Program changes: {} ({:.1}/frame)",
+                self.program_changes,
+                self.program_changes as f32 / self.frame_count as f32
+            ));
         }
 
         lines.join("\n")

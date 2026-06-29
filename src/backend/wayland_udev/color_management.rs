@@ -8,7 +8,6 @@
 ///
 /// Bound at version 1, so the v1 `ready` / `preferred_changed` events are sent
 /// (the v2 `ready2` / `preferred_changed2` variants will be added when we bump).
-
 use crate::backend::edid::EdidHdrCapabilities;
 use crate::backend::wayland::state::JwmWaylandState;
 use crate::sync_ext::MutexExt;
@@ -240,7 +239,6 @@ impl ColorManagerState {
             bucket.last_preferred = None;
         }
     }
-
 }
 
 pub(crate) fn params_for_output(output: &Output) -> ParametricParams {
@@ -428,7 +426,9 @@ impl Dispatch<WpColorManagerV1, ()> for JwmWaylandState {
             wp_color_manager_v1::Request::GetSurfaceFeedback { id, surface } => {
                 let resource = data_init.init(
                     id,
-                    SurfaceFeedbackData { surface: surface.clone() },
+                    SurfaceFeedbackData {
+                        surface: surface.clone(),
+                    },
                 );
                 // Initial preferred: sRGB ride-along until the render loop
                 // observes the surface on a specific output and re-emits with
@@ -454,8 +454,7 @@ impl Dispatch<WpColorManagerV1, ()> for JwmWaylandState {
                 data_init.init(obj, data);
             }
             wp_color_manager_v1::Request::CreateParametricCreator { obj } => {
-                let data: ParametricCreatorData =
-                    Arc::new(Mutex::new(ParametricParams::default()));
+                let data: ParametricCreatorData = Arc::new(Mutex::new(ParametricParams::default()));
                 data_init.init(obj, data);
             }
             wp_color_manager_v1::Request::CreateWindowsScrgb { .. } => {
@@ -825,12 +824,21 @@ impl Dispatch<WpImageDescriptionCreatorParamsV1, ParametricCreatorData> for JwmW
                 data.lock_safe().primaries_named = Some(primaries.into());
             }
             wp_image_description_creator_params_v1::Request::SetPrimaries {
-                r_x, r_y, g_x, g_y, b_x, b_y, w_x, w_y,
+                r_x,
+                r_y,
+                g_x,
+                g_y,
+                b_x,
+                b_y,
+                w_x,
+                w_y,
             } => {
                 data.lock_safe().primaries = Some([r_x, r_y, g_x, g_y, b_x, b_y, w_x, w_y]);
             }
             wp_image_description_creator_params_v1::Request::SetLuminances {
-                min_lum, max_lum, reference_lum,
+                min_lum,
+                max_lum,
+                reference_lum,
             } => {
                 let mut g = data.lock_safe();
                 g.min_lum = Some(min_lum);
@@ -838,13 +846,21 @@ impl Dispatch<WpImageDescriptionCreatorParamsV1, ParametricCreatorData> for JwmW
                 g.reference_lum = Some(reference_lum);
             }
             wp_image_description_creator_params_v1::Request::SetMasteringDisplayPrimaries {
-                r_x, r_y, g_x, g_y, b_x, b_y, w_x, w_y,
+                r_x,
+                r_y,
+                g_x,
+                g_y,
+                b_x,
+                b_y,
+                w_x,
+                w_y,
             } => {
                 data.lock_safe().mastering_primaries =
                     Some([r_x, r_y, g_x, g_y, b_x, b_y, w_x, w_y]);
             }
             wp_image_description_creator_params_v1::Request::SetMasteringLuminance {
-                min_lum, max_lum,
+                min_lum,
+                max_lum,
             } => {
                 let mut g = data.lock_safe();
                 g.mastering_min_lum = Some(min_lum);
@@ -878,7 +894,10 @@ impl Dispatch<WpImageDescriptionV1, ImageDescriptionData> for JwmWaylandState {
             wp_image_description_v1::Request::GetInformation { information } => {
                 let snapshot = data.lock_safe().clone();
                 let info = data_init.init(information, ());
-                if let ImageDescriptionState::Ready { params, allow_info, .. } = snapshot {
+                if let ImageDescriptionState::Ready {
+                    params, allow_info, ..
+                } = snapshot
+                {
                     if allow_info {
                         emit_image_description_info(&info, &params);
                     }
@@ -907,9 +926,7 @@ fn emit_image_description_info(info: &WpImageDescriptionInfoV1, params: &Paramet
             info.tf_named(v);
         }
     }
-    if let (Some(mn), Some(mx), Some(rw)) =
-        (params.min_lum, params.max_lum, params.reference_lum)
-    {
+    if let (Some(mn), Some(mx), Some(rw)) = (params.min_lum, params.max_lum, params.reference_lum) {
         info.luminances(mn, mx, rw);
     }
     if let Some(p) = params.mastering_primaries {
@@ -962,7 +979,13 @@ impl Dispatch<WpImageDescriptionReferenceV1, ()> for JwmWaylandState {
 mod tests {
     use super::*;
 
-    fn caps(pq: bool, hlg: bool, bt2020: bool, max_nits: f32, min_nits: f32) -> EdidHdrCapabilities {
+    fn caps(
+        pq: bool,
+        hlg: bool,
+        bt2020: bool,
+        max_nits: f32,
+        min_nits: f32,
+    ) -> EdidHdrCapabilities {
         EdidHdrCapabilities {
             max_luminance_nits: max_nits,
             min_luminance_nits: min_nits,
@@ -1024,5 +1047,4 @@ mod tests {
         let p_sdr = srgb_params();
         assert!(!params_match(&a, &p_sdr));
     }
-
 }

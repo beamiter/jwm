@@ -1,8 +1,8 @@
-use log::info;
 use crate::backend::api::Backend;
 use crate::backend::common_define::WindowId;
 use crate::core::models::MonitorKey;
 use crate::jwm::Jwm;
+use log::info;
 
 impl Jwm {
     pub fn get_strut_reserved(&self, mon_key: MonitorKey) -> (i32, i32, i32, i32) {
@@ -135,4 +135,3 @@ impl Jwm {
         }
     }
 }
-

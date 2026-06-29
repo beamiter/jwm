@@ -41,23 +41,23 @@ impl LauncherProber {
         Self {
             wayland_candidates: vec![
                 ("fuzzel", vec![]),
-                ("wofi",   vec!["--show", "run"]),
+                ("wofi", vec!["--show", "run"]),
                 ("tofi-run", vec![]),
-                ("tofi",   vec!["--prompt", "run: "]),
+                ("tofi", vec!["--prompt", "run: "]),
                 ("bemenu-run", vec![]),
                 // rofi with wayland backend works via -display-backend wayland
-                ("rofi",   vec!["-show", "run"]),
+                ("rofi", vec!["-show", "run"]),
                 // last resort: dmenu_run via XWayland
                 ("dmenu_run", vec![]),
             ],
             x11_candidates: vec![
                 ("dmenu_run", vec![]),
-                ("rofi",      vec!["-show", "run"]),
-                ("gmrun",     vec![]),
+                ("rofi", vec!["-show", "run"]),
+                ("gmrun", vec![]),
                 ("xfce4-appfinder", vec!["--collapsed"]),
                 // Wayland-native launchers still work on X11 if installed
-                ("fuzzel",    vec![]),
-                ("wofi",      vec!["--show", "run"]),
+                ("fuzzel", vec![]),
+                ("wofi", vec!["--show", "run"]),
             ],
             cache: RwLock::new(HashMap::new()),
         }

@@ -1,5 +1,6 @@
 // Client management operations: window management, lifecycle, and configuration
 
+use crate::Jwm;
 use crate::backend::api::{Backend, Geometry, StackMode, WindowChanges, WindowType};
 use crate::backend::common_define::{EventMaskBits, Mods, WindowId};
 use crate::config::CONFIG;
@@ -8,15 +9,13 @@ use crate::core::models::{ClientKey, MonitorKey, WMClient, WMMonitor};
 use crate::core::types::Rect;
 use crate::jwm::geometry::GeometryConstraints;
 use crate::jwm::rules::RuleMatcher;
-use crate::jwm::types::{WMRule, WMClickType};
-use crate::Jwm;
+use crate::jwm::types::{WMClickType, WMRule};
 use log::{debug, error, info, warn};
 
 const NORMAL_STATE: u32 = 1;
 const WITHDRAWN_STATE: u32 = 0;
 
 impl Jwm {
-
     pub(crate) fn manage(
         &mut self,
         backend: &mut dyn Backend,
@@ -380,7 +379,12 @@ impl Jwm {
         Ok(())
     }
 
-    pub(crate) fn grabbuttons(&mut self, backend: &mut dyn Backend, client_key: ClientKey, focused: bool) {
+    pub(crate) fn grabbuttons(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+        focused: bool,
+    ) {
         let win = if let Some(c) = self.state.clients.get(client_key) {
             c.win
         } else {
@@ -536,7 +540,13 @@ impl Jwm {
         }
     }
 
-    pub(crate) fn rule_matches(&self, rule: &WMRule, name: &str, class: &str, instance: &str) -> bool {
+    pub(crate) fn rule_matches(
+        &self,
+        rule: &WMRule,
+        name: &str,
+        class: &str,
+        instance: &str,
+    ) -> bool {
         RuleMatcher::matches(rule, name, class, instance)
     }
 
@@ -977,7 +987,11 @@ impl Jwm {
         RuleMatcher::is_popup_like(backend, client.win)
     }
 
-    pub(crate) fn adjust_client_position(&mut self, backend: &mut dyn Backend, client_key: ClientKey) {
+    pub(crate) fn adjust_client_position(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+    ) {
         info!("[adjust_client_position]");
         let (client_total_width, client_mon_key_opt, win) =
             if let Some(client) = self.state.clients.get(client_key) {
@@ -1047,7 +1061,8 @@ impl Jwm {
         // bars.  Skip all workarea clamping so they are not shifted into the
         // workarea.
         if let Some(monitor) = self.state.monitors.get(client_mon_key) {
-            let window_rect = Rect::new(client_x, client_y, client_total_width, client_total_height);
+            let window_rect =
+                Rect::new(client_x, client_y, client_total_width, client_total_height);
             let monitor_rect = Rect::new(
                 monitor.geometry.m_x,
                 monitor.geometry.m_y,
@@ -1100,7 +1115,9 @@ impl Jwm {
                     );
 
                     // Intersect clamp rect with parent rect.
-                    if let Some(intersection) = GeometryConstraints::rect_intersection(&clamp, &parent_rect) {
+                    if let Some(intersection) =
+                        GeometryConstraints::rect_intersection(&clamp, &parent_rect)
+                    {
                         clamp = intersection;
                         info!(
                             "Dialog transient clamp: parent=({},{} {}x{}) clamp=({},{} {}x{})",
@@ -1170,17 +1187,9 @@ impl Jwm {
         self.try_unswallow(backend, client_key);
         // If this client itself was swallowed, drop the dangling pointer from
         // its swallowing child (the child is still alive).
-        let was_swallowed_by: Option<ClientKey> = self
-            .state
-            .client_order
-            .iter()
-            .copied()
-            .find(|&k| {
-                self.state
-                    .clients
-                    .get(k)
-                    .and_then(|c| c.swallowing)
-                    == Some(client_key)
+        let was_swallowed_by: Option<ClientKey> =
+            self.state.client_order.iter().copied().find(|&k| {
+                self.state.clients.get(k).and_then(|c| c.swallowing) == Some(client_key)
             });
         if let Some(parent_holder) = was_swallowed_by {
             if let Some(c) = self.state.clients.get_mut(parent_holder) {

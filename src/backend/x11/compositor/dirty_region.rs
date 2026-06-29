@@ -82,7 +82,7 @@ impl DirtyRegionTracker {
             screen_w,
             screen_h,
             max_regions: 16,
-            min_rect_area: 100, // 10x10 pixels minimum
+            min_rect_area: 100,           // 10x10 pixels minimum
             merge_distance_threshold: 50, // Merge rects within 50px of each other
         }
     }
@@ -302,7 +302,10 @@ mod tests {
         assert!(!r1.intersects(&r2), "Adjacent rects should not intersect");
 
         let r3 = DirtyRect::new(99, 0, 100, 100);
-        assert!(r1.intersects(&r3), "Overlapping by 1 pixel should intersect");
+        assert!(
+            r1.intersects(&r3),
+            "Overlapping by 1 pixel should intersect"
+        );
     }
 
     #[test]
@@ -429,7 +432,10 @@ mod tests {
         tracker.mark_dirty(DirtyRect::new(100, 100, 200, 200));
 
         let test_r1 = DirtyRect::new(150, 150, 50, 50);
-        assert!(tracker.is_region_dirty(&test_r1), "Overlapping region should be dirty");
+        assert!(
+            tracker.is_region_dirty(&test_r1),
+            "Overlapping region should be dirty"
+        );
 
         let test_r2 = DirtyRect::new(0, 0, 50, 50);
         assert!(

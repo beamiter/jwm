@@ -1,13 +1,13 @@
 use crate::backend::api::Backend;
-use crate::core::models::{MonitorKey, WMMonitor, Pertag};
-use crate::core::layout::LayoutEnum;
 use crate::config::CONFIG;
+use crate::core::layout::LayoutEnum;
+use crate::core::models::{MonitorKey, Pertag, WMMonitor};
+use log::{error, info};
+use shared_structures::SharedRingBuffer;
+use std::collections::HashSet;
+use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::time::Instant;
-use std::process::{Command, Stdio};
-use std::collections::HashSet;
-use log::{info, error};
-use shared_structures::SharedRingBuffer;
 
 use super::Jwm;
 

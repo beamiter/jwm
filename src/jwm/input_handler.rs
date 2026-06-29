@@ -1,12 +1,12 @@
 // Input event handling: keyboard, mouse, and configure request processing
 
+use crate::Jwm;
 use crate::backend::api::{AllowMode, Backend, HitTarget, WindowChanges, WindowType};
-use crate::backend::common_define::{keys, ConfigWindowBits, Mods, MouseButton, WindowId};
+use crate::backend::common_define::{ConfigWindowBits, Mods, MouseButton, WindowId, keys};
 use crate::config::CONFIG;
 use crate::core::models::ClientKey;
 use crate::core::types::Rect;
 use crate::jwm::types::{WMArgEnum, WMClickType};
-use crate::Jwm;
 use log::{error, info};
 
 impl Jwm {
@@ -162,8 +162,7 @@ impl Jwm {
                 }
                 // Allow the leader itself to re-arm (Mod+Space then Mod+Space).
                 if chord.leader == (clean_state, keysym) {
-                    self.chord_armed_until =
-                        Some(std::time::Instant::now() + chord.timeout);
+                    self.chord_armed_until = Some(std::time::Instant::now() + chord.timeout);
                     if let Some(root) = backend.root_window() {
                         let _ = backend.key_ops().grab_keyboard(root);
                     }
@@ -172,8 +171,7 @@ impl Jwm {
                 // Otherwise fall through so the second key gets normal dispatch.
             } else if chord.leader == (clean_state, keysym) {
                 // Arm the chord and capture next key.
-                self.chord_armed_until =
-                    Some(std::time::Instant::now() + chord.timeout);
+                self.chord_armed_until = Some(std::time::Instant::now() + chord.timeout);
                 if let Some(root) = backend.root_window() {
                     let _ = backend.key_ops().grab_keyboard(root);
                 }
@@ -456,7 +454,9 @@ impl Jwm {
                     border_width: Some(client.geometry.border_w.max(0) as u32),
                     ..Default::default()
                 };
-                backend.window_ops().apply_window_changes(client.win, changes)?;
+                backend
+                    .window_ops()
+                    .apply_window_changes(client.win, changes)?;
             }
             return Ok(());
         }
@@ -735,5 +735,4 @@ impl Jwm {
         backend.window_ops().apply_window_changes(window, changes)?;
         Ok(())
     }
-
 }

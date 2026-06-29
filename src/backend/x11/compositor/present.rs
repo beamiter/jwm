@@ -21,7 +21,8 @@ impl PresentManager {
 
         log::info!(
             "compositor: Present extension available - version {}.{}",
-            reply.major_version, reply.minor_version
+            reply.major_version,
+            reply.minor_version
         );
 
         // Get extension information for event base
@@ -35,7 +36,8 @@ impl PresentManager {
 
         log::info!(
             "compositor: Present event base: {}, first_error: {}",
-            ext_info.first_event, ext_info.first_error
+            ext_info.first_event,
+            ext_info.first_error
         );
 
         Some(PresentManager {
@@ -64,12 +66,19 @@ impl PresentManager {
         match self.conn.generate_id() {
             Ok(event_id) => {
                 // Register for Present events: CompleteNotify and IdleNotify
-                let event_mask = present::EventMask::COMPLETE_NOTIFY | present::EventMask::IDLE_NOTIFY;
+                let event_mask =
+                    present::EventMask::COMPLETE_NOTIFY | present::EventMask::IDLE_NOTIFY;
 
-                match self.conn.present_select_input(event_id, x11_win, event_mask) {
+                match self
+                    .conn
+                    .present_select_input(event_id, x11_win, event_mask)
+                {
                     Ok(_cookie) => {
                         if let Err(e) = self.conn.flush() {
-                            log::error!("compositor: flush failed after Present select_input: {}", e);
+                            log::error!(
+                                "compositor: flush failed after Present select_input: {}",
+                                e
+                            );
                             return Err(format!("flush failed: {}", e));
                         }
                         log::info!(
@@ -95,7 +104,10 @@ impl PresentManager {
     /// Unregister a window
     pub fn unregister_window(&mut self, x11_win: u32) {
         if let Some(_event_id) = self.window_events.remove(&x11_win) {
-            log::info!("compositor: Present events unregistered for window 0x{:x}", x11_win);
+            log::info!(
+                "compositor: Present events unregistered for window 0x{:x}",
+                x11_win
+            );
         }
     }
 
@@ -118,26 +130,28 @@ impl PresentManager {
         // MSC = 0 means present immediately
         // For advanced use: would specify target_msc, divisor, remainder for precise timing
         match self.conn.present_pixmap(
-            x11_win,                   // window
-            pixmap,                    // pixmap to present
-            serial,                    // serial number for tracking
-            0,                         // valid region (0 = entire pixmap)
-            0,                         // update region (0 = entire pixmap)
-            0,                         // x_off
-            0,                         // y_off
-            0,                         // target_crtc
-            0,                         // wait_fence
-            0,                         // idle_fence
-            0,                         // options
-            target_msc,                // target MSC (0 for immediate)
-            1,                         // divisor (1 = any MSC)
-            0,                         // remainder
-            &[],                       // notifies (empty for now)
+            x11_win,    // window
+            pixmap,     // pixmap to present
+            serial,     // serial number for tracking
+            0,          // valid region (0 = entire pixmap)
+            0,          // update region (0 = entire pixmap)
+            0,          // x_off
+            0,          // y_off
+            0,          // target_crtc
+            0,          // wait_fence
+            0,          // idle_fence
+            0,          // options
+            target_msc, // target MSC (0 for immediate)
+            1,          // divisor (1 = any MSC)
+            0,          // remainder
+            &[],        // notifies (empty for now)
         ) {
             Ok(_) => {
                 log::debug!(
                     "compositor: presented pixmap for 0x{:x} serial={} msc={}",
-                    x11_win, serial, target_msc
+                    x11_win,
+                    serial,
+                    target_msc
                 );
                 Ok(())
             }
@@ -155,11 +169,11 @@ impl PresentManager {
         }
 
         match self.conn.present_notify_msc(
-            x11_win,       // window
-            serial,        // serial for identification
-            target_msc,    // target MSC
-            1,             // divisor
-            0,             // remainder
+            x11_win,    // window
+            serial,     // serial for identification
+            target_msc, // target MSC
+            1,          // divisor
+            0,          // remainder
         ) {
             Ok(_) => Ok(()),
             Err(e) => {

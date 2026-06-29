@@ -1,5 +1,7 @@
 // Config rule lookups, VRR, monitor, blur quality
 #[allow(unused_imports)]
+use super::math::ortho;
+#[allow(unused_imports)]
 use super::*;
 #[allow(unused_imports)]
 use glow::HasContext;
@@ -14,21 +16,19 @@ use std::sync::mpsc;
 #[allow(unused_imports)]
 use x11rb::connection::{Connection, RequestConnection};
 #[allow(unused_imports)]
-use x11rb::wrapper::ConnectionExt as WrapperExt;
-#[allow(unused_imports)]
 use x11rb::protocol::composite::ConnectionExt as CompositeExt;
 #[allow(unused_imports)]
 use x11rb::protocol::damage::{self, ConnectionExt as DamageExt};
+#[allow(unused_imports)]
+use x11rb::protocol::randr::ConnectionExt as RandrExt;
 #[allow(unused_imports)]
 use x11rb::protocol::xfixes::ConnectionExt as XFixesExt;
 #[allow(unused_imports)]
 use x11rb::protocol::xproto::{self, ConnectionExt as XProtoExt};
 #[allow(unused_imports)]
-use x11rb::protocol::randr::ConnectionExt as RandrExt;
-#[allow(unused_imports)]
 use x11rb::rust_connection::RustConnection;
 #[allow(unused_imports)]
-use super::math::ortho;
+use x11rb::wrapper::ConnectionExt as WrapperExt;
 
 /// ASCII case-insensitive substring test that performs no heap allocation.
 /// Window class names are ASCII identifiers in practice, so ASCII case folding
@@ -72,7 +72,9 @@ impl Compositor {
         if class_name.eq_ignore_ascii_case("flameshot") {
             return true;
         }
-        exclude_list.iter().any(|ex| ex.eq_ignore_ascii_case(class_name))
+        exclude_list
+            .iter()
+            .any(|ex| ex.eq_ignore_ascii_case(class_name))
     }
 
     /// Look up per-window opacity from opacity_rules.
@@ -106,7 +108,9 @@ impl Compositor {
         if class_name.is_empty() {
             return false;
         }
-        self.frosted_glass_rules.iter().any(|r| r.eq_ignore_ascii_case(class_name))
+        self.frosted_glass_rules
+            .iter()
+            .any(|r| r.eq_ignore_ascii_case(class_name))
     }
 
     /// Detect if window is a game (for VRR)
@@ -126,8 +130,18 @@ impl Compositor {
 
         // Built-in game/emulator detection (exact match).
         const BUILTIN_GAME_CLASSES: &[&str] = &[
-            "steam", "steamapps", "proton", "dxvk", "lutris", "wine",
-            "minecraft", "dosbox", "mgba", "pcsx2", "yuzu", "dolphin",
+            "steam",
+            "steamapps",
+            "proton",
+            "dxvk",
+            "lutris",
+            "wine",
+            "minecraft",
+            "dosbox",
+            "mgba",
+            "pcsx2",
+            "yuzu",
+            "dolphin",
         ];
         BUILTIN_GAME_CLASSES
             .iter()
@@ -173,7 +187,7 @@ impl Compositor {
             let behavior = cfg.behavior();
             behavior.vrr_max_fps
         } else {
-            60  // Default refresh rate for non-game windows
+            60 // Default refresh rate for non-game windows
         }
     }
 
@@ -193,10 +207,10 @@ impl Compositor {
                 // If OML available, estimate remaining time to vblank
                 if let Some((ust, _msc, _sbc)) = oml.get_sync_values() {
                     // Assume 60Hz default; in practice, would query RandR for actual refresh rate
-                    let vblank_interval_ns = 16_666_667u64;  // 60Hz = 16.67ms
+                    let vblank_interval_ns = 16_666_667u64; // 60Hz = 16.67ms
                     let frame_age_ns = ust % vblank_interval_ns;
                     let time_to_next_vblank_ns = vblank_interval_ns - frame_age_ns;
-                    (time_to_next_vblank_ns as f32 / 1_000_000.0) + 1.0  // +1ms buffer for display pipeline
+                    (time_to_next_vblank_ns as f32 / 1_000_000.0) + 1.0 // +1ms buffer for display pipeline
                 } else {
                     // Fallback: assume 1 frame time (~16.67ms at 60Hz)
                     16.67
@@ -219,12 +233,16 @@ impl Compositor {
             if total_latency_ms > 100.0 {
                 log::warn!(
                     "compositor: high input latency detected: {:.1}ms (input→render: {:.1}ms, gpu→display: {:.1}ms)",
-                    total_latency_ms, input_to_render_ms, gpu_to_display_ms
+                    total_latency_ms,
+                    input_to_render_ms,
+                    gpu_to_display_ms
                 );
             } else if total_latency_ms > 50.0 {
                 log::debug!(
                     "compositor: elevated input latency: {:.1}ms (input→render: {:.1}ms, gpu→display: {:.1}ms)",
-                    total_latency_ms, input_to_render_ms, gpu_to_display_ms
+                    total_latency_ms,
+                    input_to_render_ms,
+                    gpu_to_display_ms
                 );
             }
 
@@ -252,7 +270,10 @@ impl Compositor {
     }
 
     /// P5B: Build monitor rectangles from RandR outputs
-    pub(super) fn build_monitor_rects(conn: &Arc<RustConnection>, root: u32) -> Vec<(u32, i32, i32, u32, u32)> {
+    pub(super) fn build_monitor_rects(
+        conn: &Arc<RustConnection>,
+        root: u32,
+    ) -> Vec<(u32, i32, i32, u32, u32)> {
         // Query RandR for outputs to get monitor positions and dimensions
         let mut rects = Vec::new();
 
@@ -264,7 +285,13 @@ impl Compositor {
                         if let Ok(reply) = mon_cookie.reply() {
                             for (idx, mon) in reply.monitors.iter().enumerate() {
                                 if mon.width > 0 && mon.height > 0 {
-                                    rects.push((idx as u32, mon.x as i32, mon.y as i32, mon.width as u32, mon.height as u32));
+                                    rects.push((
+                                        idx as u32,
+                                        mon.x as i32,
+                                        mon.y as i32,
+                                        mon.width as u32,
+                                        mon.height as u32,
+                                    ));
                                 }
                             }
                             if !rects.is_empty() {
@@ -283,7 +310,13 @@ impl Compositor {
                     if let Ok(info_cookie) = conn.as_ref().randr_get_crtc_info(*crtc_id, 0) {
                         if let Ok(info) = info_cookie.reply() {
                             if info.width > 0 && info.height > 0 {
-                                rects.push((idx as u32, info.x as i32, info.y as i32, info.width as u32, info.height as u32));
+                                rects.push((
+                                    idx as u32,
+                                    info.x as i32,
+                                    info.y as i32,
+                                    info.width as u32,
+                                    info.height as u32,
+                                ));
                             }
                         }
                     }
@@ -299,7 +332,10 @@ impl Compositor {
     }
 
     /// P5B Phase 2: Build monitor refresh rates from RandR outputs
-    pub(super) fn build_monitor_refresh_rates(conn: &Arc<RustConnection>, root: u32) -> HashMap<u32, u32> {
+    pub(super) fn build_monitor_refresh_rates(
+        conn: &Arc<RustConnection>,
+        root: u32,
+    ) -> HashMap<u32, u32> {
         let mut rates = HashMap::new();
 
         // Helper to calculate refresh rate from mode info
@@ -327,16 +363,31 @@ impl Compositor {
                                     for (idx, mon) in reply.monitors.iter().enumerate() {
                                         // Get first output's current mode to determine refresh rate
                                         if let Some(&output_id) = mon.outputs.first() {
-                                            if let Ok(output_cookie) = conn.as_ref().randr_get_output_info(output_id, 0) {
+                                            if let Ok(output_cookie) =
+                                                conn.as_ref().randr_get_output_info(output_id, 0)
+                                            {
                                                 if let Ok(output_info) = output_cookie.reply() {
                                                     if output_info.crtc != 0 {
-                                                        if let Ok(crtc_cookie) = conn.as_ref().randr_get_crtc_info(output_info.crtc, 0) {
-                                                            if let Ok(crtc_info) = crtc_cookie.reply() {
-                                                                let refresh = modes.iter()
-                                                                    .find(|m| m.id == crtc_info.mode)
+                                                        if let Ok(crtc_cookie) =
+                                                            conn.as_ref().randr_get_crtc_info(
+                                                                output_info.crtc,
+                                                                0,
+                                                            )
+                                                        {
+                                                            if let Ok(crtc_info) =
+                                                                crtc_cookie.reply()
+                                                            {
+                                                                let refresh = modes
+                                                                    .iter()
+                                                                    .find(|m| {
+                                                                        m.id == crtc_info.mode
+                                                                    })
                                                                     .map(calc_refresh_mhz)
                                                                     .unwrap_or(60000);
-                                                                rates.insert(idx as u32, refresh / 1000); // mHz -> Hz
+                                                                rates.insert(
+                                                                    idx as u32,
+                                                                    refresh / 1000,
+                                                                ); // mHz -> Hz
                                                             }
                                                         }
                                                     }
@@ -363,7 +414,8 @@ impl Compositor {
                     if let Ok(info_cookie) = conn.as_ref().randr_get_crtc_info(*crtc_id, 0) {
                         if let Ok(info) = info_cookie.reply() {
                             if info.width > 0 && info.height > 0 {
-                                let refresh = modes.iter()
+                                let refresh = modes
+                                    .iter()
                                     .find(|m| m.id == info.mode)
                                     .map(calc_refresh_mhz)
                                     .unwrap_or(60000);
@@ -381,8 +433,16 @@ impl Compositor {
     /// P5B Phase 1: Map window position to monitor index using real RandR geometry.
     /// Picks the monitor with the largest rectangular overlap area; falls back
     /// to center-point containment, then to the first monitor (primary).
-    pub(super) fn get_window_monitor_id(&self, window_x: i32, window_y: i32, window_w: u32, window_h: u32) -> u32 {
-        if let Some(id) = Self::monitor_id_by_overlap(&self.monitor_rects, window_x, window_y, window_w, window_h) {
+    pub(super) fn get_window_monitor_id(
+        &self,
+        window_x: i32,
+        window_y: i32,
+        window_w: u32,
+        window_h: u32,
+    ) -> u32 {
+        if let Some(id) =
+            Self::monitor_id_by_overlap(&self.monitor_rects, window_x, window_y, window_w, window_h)
+        {
             return id;
         }
         self.monitor_rects.first().map(|r| r.0).unwrap_or(0)
@@ -450,7 +510,11 @@ impl Compositor {
     }
 
     /// Compute blur quality for a specific window (Task 10: Adaptive Blur + Per-Monitor)
-    pub(super) fn compute_window_blur_quality(&self, wt: &WindowTexture, focused: Option<u32>) -> BlurQuality {
+    pub(super) fn compute_window_blur_quality(
+        &self,
+        wt: &WindowTexture,
+        focused: Option<u32>,
+    ) -> BlurQuality {
         let cfg = crate::config::CONFIG.load();
         let behavior = cfg.behavior();
 
@@ -473,7 +537,8 @@ impl Compositor {
 
         // Status bar should not have adaptive blur quality changes
         let status_bar_name = cfg.status_bar_name();
-        let is_statusbar = wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name);
+        let is_statusbar =
+            wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name);
         if is_statusbar {
             return self.blur_quality;
         }
@@ -490,9 +555,9 @@ impl Compositor {
         // Estimate GPU load from recent frame times (naive approach)
         // Assume 60Hz = 16.67ms ideal frame time; if actual is higher, GPU is under pressure
         let current_gpu_load = {
-            let target_frame_time_ms = 1000.0 / 60.0;  // 60Hz baseline
+            let target_frame_time_ms = 1000.0 / 60.0; // 60Hz baseline
             if self.frame_stats.frame_times.is_empty() {
-                0  // No data yet
+                0 // No data yet
             } else {
                 let avg_frame_time_ms = self.frame_stats.frame_times.iter().sum::<f32>()
                     / self.frame_stats.frame_times.len() as f32;
@@ -521,18 +586,18 @@ impl Compositor {
         let per_window_quality = if gpu_load > 80 {
             // Critical load: protect focused window, minimize others
             if is_focused {
-                BlurQuality::Full  // Focused: maintain full quality
+                BlurQuality::Full // Focused: maintain full quality
             } else {
-                BlurQuality::Minimal  // Unfocused/off-screen: minimal
+                BlurQuality::Minimal // Unfocused/off-screen: minimal
             }
         } else if gpu_load > 70 {
             // Moderate load: reduce unfocused windows only
             if is_focused {
-                BlurQuality::Full  // Focused: full quality
+                BlurQuality::Full // Focused: full quality
             } else if !is_onscreen {
-                BlurQuality::Minimal  // Off-screen: minimal
+                BlurQuality::Minimal // Off-screen: minimal
             } else {
-                BlurQuality::Reduced  // Inactive but visible: reduced
+                BlurQuality::Reduced // Inactive but visible: reduced
             }
         } else {
             // Low load: normal priority-based tiering
@@ -565,18 +630,24 @@ impl Compositor {
         for pair in config_str.split(',') {
             let parts: Vec<&str> = pair.trim().split(':').collect();
             if parts.len() == 2 {
-                if let (Ok(hz), Ok(strength_f)) = (parts[0].trim().parse::<u32>(), parts[1].trim().parse::<f32>()) {
+                if let (Ok(hz), Ok(strength_f)) = (
+                    parts[0].trim().parse::<u32>(),
+                    parts[1].trim().parse::<f32>(),
+                ) {
                     result.push((hz, strength_f as u32));
                 }
             }
         }
-        result.sort_by_key(|p| p.0);  // Sort by Hz ascending
+        result.sort_by_key(|p| p.0); // Sort by Hz ascending
         result
     }
 
     /// Get blur strength for a given refresh rate Hz (static version for use during init).
     /// If exact Hz not found, returns closest lower, or if none, closest higher.
-    pub(super) fn new_get_blur_strength_for_hz_static(blur_strength_by_hz: &[(u32, u32)], hz: u32) -> Option<u32> {
+    pub(super) fn new_get_blur_strength_for_hz_static(
+        blur_strength_by_hz: &[(u32, u32)],
+        hz: u32,
+    ) -> Option<u32> {
         if blur_strength_by_hz.is_empty() {
             return None;
         }
@@ -663,7 +734,7 @@ impl Compositor {
 
         for (_, wt) in sorted_windows {
             if wt.dirty || wt.fading_out {
-                continue;  // Skip dirty/fading windows for stability
+                continue; // Skip dirty/fading windows for stability
             }
             wt.x.hash(&mut hasher);
             wt.y.hash(&mut hasher);
@@ -686,7 +757,9 @@ impl Compositor {
             return;
         }
         if self.prev_blur_fbo.is_none() {
-            if let Ok((fbo, tex)) = unsafe { Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h) } {
+            if let Ok((fbo, tex)) =
+                unsafe { Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h) }
+            {
                 self.prev_blur_fbo = Some((fbo, tex));
             }
         }
@@ -708,29 +781,48 @@ impl Compositor {
             // No previous frame yet - just save current for next frame
             unsafe {
                 self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-                self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(prev_fbo));
+                self.gl
+                    .bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(prev_fbo));
                 self.gl.blit_framebuffer(
-                    0, 0, self.screen_w as i32, self.screen_h as i32,
-                    0, 0, self.screen_w as i32, self.screen_h as i32,
-                    glow::COLOR_BUFFER_BIT, glow::NEAREST,
+                    0,
+                    0,
+                    self.screen_w as i32,
+                    self.screen_h as i32,
+                    0,
+                    0,
+                    self.screen_w as i32,
+                    self.screen_h as i32,
+                    glow::COLOR_BUFFER_BIT,
+                    glow::NEAREST,
                 );
             }
             return current_blur_tex;
         }
 
         // Perform temporal mix: blend current with previous
-        let proj = math::ortho(0.0, self.screen_w as f32, self.screen_h as f32, 0.0, -1.0, 1.0);
+        let proj = math::ortho(
+            0.0,
+            self.screen_w as f32,
+            self.screen_h as f32,
+            0.0,
+            -1.0,
+            1.0,
+        );
 
         unsafe {
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(prev_fbo));
             self.gl.use_program(Some(self.temporal_blur_mix_program));
-            self.gl.viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            self.gl
+                .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
 
             // Bind current blur as input
             self.gl.active_texture(glow::TEXTURE0);
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(current_blur_tex));
+            self.gl
+                .bind_texture(glow::TEXTURE_2D, Some(current_blur_tex));
             self.gl.uniform_1_i32(
-                self.gl.get_uniform_location(self.temporal_blur_mix_program, "u_current_blur").as_ref(),
+                self.gl
+                    .get_uniform_location(self.temporal_blur_mix_program, "u_current_blur")
+                    .as_ref(),
                 0,
             );
 
@@ -738,13 +830,17 @@ impl Compositor {
             self.gl.active_texture(glow::TEXTURE1);
             self.gl.bind_texture(glow::TEXTURE_2D, Some(prev_tex));
             self.gl.uniform_1_i32(
-                self.gl.get_uniform_location(self.temporal_blur_mix_program, "u_previous_blur").as_ref(),
+                self.gl
+                    .get_uniform_location(self.temporal_blur_mix_program, "u_previous_blur")
+                    .as_ref(),
                 1,
             );
 
             // Set temporal mix ratio
             self.gl.uniform_1_f32(
-                self.gl.get_uniform_location(self.temporal_blur_mix_program, "u_temporal_mix").as_ref(),
+                self.gl
+                    .get_uniform_location(self.temporal_blur_mix_program, "u_temporal_mix")
+                    .as_ref(),
                 self.temporal_blur_mix_ratio,
             );
 
@@ -756,7 +852,8 @@ impl Compositor {
             );
             self.gl.uniform_4_f32(
                 self.temporal_blur_mix_uniforms.rect.as_ref(),
-                0.0, 0.0,
+                0.0,
+                0.0,
                 self.screen_w as f32,
                 self.screen_h as f32,
             );
@@ -785,7 +882,9 @@ impl Compositor {
         if self.prev_window_positions_hash == 0 {
             if let Some((_, _scene_tex)) = &self.scene_fbo {
                 if self.prev_blur_fbo.is_none() {
-                    if let Ok((fbo, tex)) = unsafe { Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h) } {
+                    if let Ok((fbo, tex)) =
+                        unsafe { Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h) }
+                    {
                         self.prev_blur_fbo = Some((fbo, tex));
                     }
                 }
@@ -796,9 +895,16 @@ impl Compositor {
                         self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
                         self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(*fbo));
                         self.gl.blit_framebuffer(
-                            0, 0, self.screen_w as i32, self.screen_h as i32,
-                            0, 0, self.screen_w as i32, self.screen_h as i32,
-                            glow::COLOR_BUFFER_BIT, glow::NEAREST,
+                            0,
+                            0,
+                            self.screen_w as i32,
+                            self.screen_h as i32,
+                            0,
+                            0,
+                            self.screen_w as i32,
+                            self.screen_h as i32,
+                            glow::COLOR_BUFFER_BIT,
+                            glow::NEAREST,
                         );
                     }
                 }
@@ -823,19 +929,18 @@ impl Compositor {
         //
         // "Large" = covers at least 80 % of any single monitor in both dimensions.
         if wt.is_override_redirect && wt.has_rgba {
-            let dominated = self.monitor_wallpapers.iter().any(|mw| {
-                wt.w >= mw.mon_w * 4 / 5 && wt.h >= mw.mon_h * 4 / 5
-            });
+            let dominated = self
+                .monitor_wallpapers
+                .iter()
+                .any(|mw| wt.w >= mw.mon_w * 4 / 5 && wt.h >= mw.mon_h * 4 / 5);
             if dominated {
                 return false;
             }
         }
-        let explicit_translucency = wt.fade_opacity < 1.0
-            || wt.opacity_override.map_or(false, |o| o < 1.0);
+        let explicit_translucency =
+            wt.fade_opacity < 1.0 || wt.opacity_override.map_or(false, |o| o < 1.0);
 
-        wt.is_frosted
-            || explicit_translucency
-            || wt.has_rgba
+        wt.is_frosted || explicit_translucency || wt.has_rgba
     }
 
     /// Look up per-window scale (feature 4).
@@ -850,7 +955,6 @@ impl Compositor {
         }
         None
     }
-
 }
 
 #[cfg(test)]
@@ -957,43 +1061,70 @@ mod tests {
 
     #[test]
     fn test_blur_strength_for_hz_empty_returns_none() {
-        assert_eq!(Compositor::new_get_blur_strength_for_hz_static(&[], 60), None);
+        assert_eq!(
+            Compositor::new_get_blur_strength_for_hz_static(&[], 60),
+            None
+        );
     }
 
     #[test]
     fn test_blur_strength_for_hz_exact_match() {
         let table = vec![(60, 2), (144, 4)];
-        assert_eq!(Compositor::new_get_blur_strength_for_hz_static(&table, 60), Some(2));
-        assert_eq!(Compositor::new_get_blur_strength_for_hz_static(&table, 144), Some(4));
+        assert_eq!(
+            Compositor::new_get_blur_strength_for_hz_static(&table, 60),
+            Some(2)
+        );
+        assert_eq!(
+            Compositor::new_get_blur_strength_for_hz_static(&table, 144),
+            Some(4)
+        );
     }
 
     #[test]
     fn test_blur_strength_for_hz_closest_lower() {
         let table = vec![(60, 2), (144, 4)];
         // 75Hz: no exact match; closest lower is 60Hz → strength 2
-        assert_eq!(Compositor::new_get_blur_strength_for_hz_static(&table, 75), Some(2));
+        assert_eq!(
+            Compositor::new_get_blur_strength_for_hz_static(&table, 75),
+            Some(2)
+        );
     }
 
     #[test]
     fn test_blur_strength_for_hz_below_all_uses_first() {
         let table = vec![(60, 2), (144, 4)];
         // 30Hz: below all entries → use first (60Hz)
-        assert_eq!(Compositor::new_get_blur_strength_for_hz_static(&table, 30), Some(2));
+        assert_eq!(
+            Compositor::new_get_blur_strength_for_hz_static(&table, 30),
+            Some(2)
+        );
     }
 
     #[test]
     fn test_blur_strength_for_hz_above_all_uses_last() {
         let table = vec![(60, 2), (144, 4)];
         // 240Hz: above all → use last (144Hz)
-        assert_eq!(Compositor::new_get_blur_strength_for_hz_static(&table, 240), Some(4));
+        assert_eq!(
+            Compositor::new_get_blur_strength_for_hz_static(&table, 240),
+            Some(4)
+        );
     }
 
     #[test]
     fn test_blur_strength_for_hz_single_entry() {
         let table = vec![(60, 3)];
-        assert_eq!(Compositor::new_get_blur_strength_for_hz_static(&table, 30), Some(3));
-        assert_eq!(Compositor::new_get_blur_strength_for_hz_static(&table, 60), Some(3));
-        assert_eq!(Compositor::new_get_blur_strength_for_hz_static(&table, 120), Some(3));
+        assert_eq!(
+            Compositor::new_get_blur_strength_for_hz_static(&table, 30),
+            Some(3)
+        );
+        assert_eq!(
+            Compositor::new_get_blur_strength_for_hz_static(&table, 60),
+            Some(3)
+        );
+        assert_eq!(
+            Compositor::new_get_blur_strength_for_hz_static(&table, 120),
+            Some(3)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1062,7 +1193,12 @@ mod tests {
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let len = sorted.len();
             let avg = sorted.iter().sum::<f32>() / len as f32;
-            (avg, sorted[len * 50 / 100], sorted[len * 95 / 100], sorted[len * 99 / 100])
+            (
+                avg,
+                sorted[len * 50 / 100],
+                sorted[len * 95 / 100],
+                sorted[len * 99 / 100],
+            )
         };
         assert_eq!(avg, 0.0);
         assert_eq!(p50, 0.0);
@@ -1107,11 +1243,20 @@ mod tests {
             (1u32, 1920i32, 0i32, 1920u32, 1080u32),
         ];
         // Window entirely on monitor 1.
-        assert_eq!(Compositor::monitor_id_by_overlap(&monitors, 2000, 100, 400, 300), Some(1));
+        assert_eq!(
+            Compositor::monitor_id_by_overlap(&monitors, 2000, 100, 400, 300),
+            Some(1)
+        );
         // Straddling, more area on monitor 0.
-        assert_eq!(Compositor::monitor_id_by_overlap(&monitors, 1340, 100, 1000, 500), Some(0));
+        assert_eq!(
+            Compositor::monitor_id_by_overlap(&monitors, 1340, 100, 1000, 500),
+            Some(0)
+        );
         // Off-screen below: no overlap, no center hit.
-        assert_eq!(Compositor::monitor_id_by_overlap(&monitors, 100, 5000, 200, 200), None);
+        assert_eq!(
+            Compositor::monitor_id_by_overlap(&monitors, 100, 5000, 200, 200),
+            None
+        );
         // Empty monitors.
         assert_eq!(Compositor::monitor_id_by_overlap(&[], 0, 0, 100, 100), None);
     }

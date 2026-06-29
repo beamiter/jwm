@@ -215,7 +215,12 @@ impl<'a, C: Connection> BatchedPropertyRequest<'a, C> {
 
     /// Queue a property request for a window
     pub fn queue_property(&mut self, window: u32, atom: Atom, prop_type: Atom, max_len: u32) {
-        self.queries.push(PropertyQuery { window, atom, prop_type, max_len });
+        self.queries.push(PropertyQuery {
+            window,
+            atom,
+            prop_type,
+            max_len,
+        });
     }
 
     /// Send all requests and collect results
@@ -226,7 +231,12 @@ impl<'a, C: Connection> BatchedPropertyRequest<'a, C> {
         // Send all requests
         for query in &self.queries {
             let cookie = self.conn.get_property(
-                false, query.window, query.atom, query.prop_type, 0, query.max_len
+                false,
+                query.window,
+                query.atom,
+                query.prop_type,
+                0,
+                query.max_len,
             )?;
             cookies.push(((query.window, query.atom), cookie));
         }
@@ -242,8 +252,12 @@ impl<'a, C: Connection> BatchedPropertyRequest<'a, C> {
                     results.insert(key, reply.value);
                 }
                 Err(e) => {
-                    log::debug!("Failed to get property for window 0x{:x} atom {}: {}",
-                        key.0, key.1, e);
+                    log::debug!(
+                        "Failed to get property for window 0x{:x} atom {}: {}",
+                        key.0,
+                        key.1,
+                        e
+                    );
                 }
             }
         }
@@ -405,11 +419,7 @@ mod tests {
         let batcher = X11RequestBatcher::new();
 
         batcher.adjust_thresholds(150);
-        assert_eq!(
-            batcher.system_load(),
-            100,
-            "Load should be clamped to 100"
-        );
+        assert_eq!(batcher.system_load(), 100, "Load should be clamped to 100");
     }
 
     #[test]

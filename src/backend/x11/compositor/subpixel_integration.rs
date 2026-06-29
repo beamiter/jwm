@@ -2,7 +2,6 @@
 ///
 /// This module shows how to integrate SubpixelRenderManager into the rendering pipeline.
 /// This is an example implementation reference.
-
 use super::subpixel_render::SubpixelRenderManager;
 
 /// Integration example: Window property tracking for subpixel rendering
@@ -139,7 +138,10 @@ impl SubpixelRenderIntegration for SubpixelCompositorIntegration {
         cpu_load: f32,
         gpu_load: f32,
     ) -> SubpixelRenderParams {
-        if let Some(kernel) = self.manager.get_adaptive_kernel(window_id, cpu_load, gpu_load) {
+        if let Some(kernel) = self
+            .manager
+            .get_adaptive_kernel(window_id, cpu_load, gpu_load)
+        {
             let wt = self.manager.get_subpixel_mode(window_id);
             SubpixelRenderParams {
                 enabled: wt != super::subpixel_render::SubpixelMode::None,

@@ -109,7 +109,12 @@ impl Jwm {
         }
         if Self::is_smithay_backend(backend) {
             for (bin, args) in [("fuzzel", vec![]), ("wofi", vec!["--show", "run"])] {
-                if std::process::Command::new("which").arg(bin).output().map(|o| o.status.success()).unwrap_or(false) {
+                if std::process::Command::new("which")
+                    .arg(bin)
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false)
+                {
                     let mut v = vec![bin.to_string()];
                     v.extend(args.iter().map(|s| s.to_string()));
                     return v;

@@ -185,9 +185,12 @@ impl WaylandCompositor {
             });
         }
         let win_rect = |id: u64| -> Option<DirtyRect> {
-            scene.iter().find(|&&(wid, ..)| wid == id).map(|&(_, x, y, w, h)| {
-                DirtyRect::new(x as f32, y as f32, w as f32, h as f32).expand(margin)
-            })
+            scene
+                .iter()
+                .find(|&&(wid, ..)| wid == id)
+                .map(|&(_, x, y, w, h)| {
+                    DirtyRect::new(x as f32, y as f32, w as f32, h as f32).expand(margin)
+                })
         };
 
         let mut acc: Option<DirtyRect> = None;
@@ -272,13 +275,18 @@ impl WaylandCompositor {
         // Power saving: periodic update (every 5s)
         if self.power_saving_mgr.update() {
             let recs = self.power_saving_mgr.get_recommendations();
-            self.adaptive_frame_rate.limiter_mut().set_target_fps(recs.fps_limit);
+            self.adaptive_frame_rate
+                .limiter_mut()
+                .set_target_fps(recs.fps_limit);
         }
 
         // Shader hot-reload: check for modified shader files
         let reloaded_shaders = self.shader_hot_reload.poll();
         if !reloaded_shaders.is_empty() {
-            log::info!("[compositor] Shader hot-reload: {} shaders changed", reloaded_shaders.len());
+            log::info!(
+                "[compositor] Shader hot-reload: {} shaders changed",
+                reloaded_shaders.len()
+            );
         }
 
         // Direct scanout eligibility tracking (stats only).
@@ -296,23 +304,35 @@ impl WaylandCompositor {
         // the fast path (e.g. cursor moved between this decision and the
         // KMS render), smithay would scan out a stale FBO. SOTA #4 Phase 4.1
         // removed the early return; we now only track eligibility for metrics.
-        if !self.transition_active && !self.overview_active && !self.expose_active && !self.postprocess_active {
+        if !self.transition_active
+            && !self.overview_active
+            && !self.expose_active
+            && !self.postprocess_active
+        {
             let mut scanout_windows = std::mem::take(&mut self.scratch_scanout);
             scanout_windows.clear();
             for &(win_id, x, y, w, h) in scene {
                 if let Some(ws) = self.windows.get(&win_id) {
-                    scanout_windows.push((win_id, direct_scanout::WindowScanoutInfo {
-                        x, y, width: w, height: h,
-                        is_fullscreen: ws.is_fullscreen,
-                        has_alpha: ws.has_alpha,
-                        has_blur: ws.is_frosted,
-                        has_shadow: self.shadow_enabled,
-                        corner_radius: ws.corner_radius_override.unwrap_or(self.corner_radius),
-                        opacity: ws.fade_opacity,
-                    }));
+                    scanout_windows.push((
+                        win_id,
+                        direct_scanout::WindowScanoutInfo {
+                            x,
+                            y,
+                            width: w,
+                            height: h,
+                            is_fullscreen: ws.is_fullscreen,
+                            has_alpha: ws.has_alpha,
+                            has_blur: ws.is_frosted,
+                            has_shadow: self.shadow_enabled,
+                            corner_radius: ws.corner_radius_override.unwrap_or(self.corner_radius),
+                            opacity: ws.fade_opacity,
+                        },
+                    ));
                 }
             }
-            let _ = self.direct_scanout_mgr.check_scene(&scanout_windows, focused);
+            let _ = self
+                .direct_scanout_mgr
+                .check_scene(&scanout_windows, focused);
             self.scratch_scanout = scanout_windows;
         }
 
@@ -328,7 +348,8 @@ impl WaylandCompositor {
         if self.frame_count % 60 == 0 {
             self.fps = if dt > 0.0 { 1.0 / dt } else { 0.0 };
         }
-        self.perf_metrics.record_frame(std::time::Duration::from_secs_f32(dt));
+        self.perf_metrics
+            .record_frame(std::time::Duration::from_secs_f32(dt));
 
         // =================================================================
         // 1b. Dirty region tracking: compare current scene vs previous frame
@@ -338,7 +359,8 @@ impl WaylandCompositor {
             // geometry-by-id map. Avoids two per-frame HashSet allocations and
             // turns the move/resize lookup from O(N^2) linear scan into O(N).
             self.scratch_curr_ids.clear();
-            self.scratch_curr_ids.extend(scene.iter().map(|&(id, _, _, _, _)| id));
+            self.scratch_curr_ids
+                .extend(scene.iter().map(|&(id, _, _, _, _)| id));
 
             self.scratch_prev_geom.clear();
             for &(id, x, y, w, h) in &self.prev_scene {
@@ -348,9 +370,10 @@ impl WaylandCompositor {
             // Windows that disappeared — mark their old rect dirty
             for &(id, x, y, w, h) in &self.prev_scene {
                 if !self.scratch_curr_ids.contains(&id) {
-                    self.dirty_region_tracker.mark_dirty(
-                        dirty_region::DirtyRect::new(x as f32, y as f32, w as f32, h as f32),
-                    );
+                    self.dirty_region_tracker
+                        .mark_dirty(dirty_region::DirtyRect::new(
+                            x as f32, y as f32, w as f32, h as f32,
+                        ));
                 }
             }
 
@@ -359,19 +382,22 @@ impl WaylandCompositor {
                 match self.scratch_prev_geom.get(&id) {
                     None => {
                         // New window
-                        self.dirty_region_tracker.mark_dirty(
-                            dirty_region::DirtyRect::new(x as f32, y as f32, w as f32, h as f32),
-                        );
+                        self.dirty_region_tracker
+                            .mark_dirty(dirty_region::DirtyRect::new(
+                                x as f32, y as f32, w as f32, h as f32,
+                            ));
                     }
                     Some(&(px, py, pw, ph)) => {
                         if x != px || y != py || w != pw || h != ph {
                             // Moved or resized — mark both old and new rects
-                            self.dirty_region_tracker.mark_dirty(
-                                dirty_region::DirtyRect::new(px as f32, py as f32, pw as f32, ph as f32),
-                            );
-                            self.dirty_region_tracker.mark_dirty(
-                                dirty_region::DirtyRect::new(x as f32, y as f32, w as f32, h as f32),
-                            );
+                            self.dirty_region_tracker
+                                .mark_dirty(dirty_region::DirtyRect::new(
+                                    px as f32, py as f32, pw as f32, ph as f32,
+                                ));
+                            self.dirty_region_tracker
+                                .mark_dirty(dirty_region::DirtyRect::new(
+                                    x as f32, y as f32, w as f32, h as f32,
+                                ));
                         }
                     }
                 }
@@ -430,8 +456,8 @@ impl WaylandCompositor {
                 .unwrap_or(false);
         // Motion trail keeps the loop ticking until trails drain to empty,
         // even if the user has stopped moving the window.
-        let motion_trail_active = self.motion_trail_enabled
-            && self.windows.values().any(|w| !w.motion_trail.is_empty());
+        let motion_trail_active =
+            self.motion_trail_enabled && self.windows.values().any(|w| !w.motion_trail.is_empty());
 
         // Determine if anything needs rendering
         let any_animating = self.has_active_animations()
@@ -486,8 +512,12 @@ impl WaylandCompositor {
             );
             for &(win_id, x, y, w, h) in scene {
                 if let Some(ws) = self.windows.get(&win_id) {
-                    log::info!("[rf] win={win_id:#x} tex={:?} fade={:.3} pos=({x},{y}) size={w}x{h} y_inv={}",
-                        ws.gl_texture, ws.fade_opacity, ws.y_inverted);
+                    log::info!(
+                        "[rf] win={win_id:#x} tex={:?} fade={:.3} pos=({x},{y}) size={w}x{h} y_inv={}",
+                        ws.gl_texture,
+                        ws.fade_opacity,
+                        ws.y_inverted
+                    );
                 } else {
                     log::info!(
                         "[rf] win={win_id:#x} NOT in compositor.windows pos=({x},{y}) size={w}x{h}"
@@ -503,9 +533,9 @@ impl WaylandCompositor {
         // effect overlays, no tilt. Everything excluded here either redraws the
         // whole screen continuously or samples regions outside any damage box.
         let blur_would_run = self.blur_enabled
-            && scene.iter().any(|&(win_id, ..)| {
-                self.windows.get(&win_id).map_or(false, |ws| ws.is_frosted)
-            });
+            && scene
+                .iter()
+                .any(|&(win_id, ..)| self.windows.get(&win_id).map_or(false, |ws| ws.is_frosted));
         let allow_partial = self.partial_damage_enabled
             && !self.force_full_damage_next
             && !any_animating
@@ -713,7 +743,8 @@ impl WaylandCompositor {
                 self.run_blur_passes(gl, self.scene_texture, &projection, blur_quality);
 
                 // Record blur operation for cache warmup statistics
-                self.cache_warmup_mgr.record_blur_operation(self.screen_w, self.screen_h);
+                self.cache_warmup_mgr
+                    .record_blur_operation(self.screen_w, self.screen_h);
 
                 let result = self.blur_fbos[0].texture;
 
@@ -833,7 +864,8 @@ impl WaylandCompositor {
                 } else {
                     self.inactive_opacity
                 };
-                let rule_opacity = wt.opacity_override
+                let rule_opacity = wt
+                    .opacity_override
                     .or_else(|| self.lookup_opacity_rule(&wt.class_name))
                     .unwrap_or(base_opacity);
                 let has_explicit_transparency = rule_opacity < 1.0;
@@ -857,10 +889,7 @@ impl WaylandCompositor {
                 let radius = if wt.is_shaped || wt.is_fullscreen {
                     0.0
                 } else if !wt.class_name.is_empty()
-                    && Self::class_matches_exclude(
-                        &wt.class_name,
-                        &self.rounded_corners_exclude,
-                    )
+                    && Self::class_matches_exclude(&wt.class_name, &self.rounded_corners_exclude)
                 {
                     0.0
                 } else {
@@ -929,10 +958,7 @@ impl WaylandCompositor {
                 // Skips wobbly/tilt windows because the ghost would not match the
                 // deformed shader output; trails on plain moving windows are the
                 // common case and visually consistent with X11.
-                if self.motion_trail_enabled
-                    && !wt.motion_trail.is_empty()
-                    && wt.wobbly.is_none()
-                {
+                if self.motion_trail_enabled && !wt.motion_trail.is_empty() && wt.wobbly.is_none() {
                     let trail_len = wt.motion_trail.len();
                     gl.Uniform4f(self.win_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
                     gl.ActiveTexture(ffi::TEXTURE0);
@@ -1076,18 +1102,12 @@ impl WaylandCompositor {
                             ffi::TRUE,
                             t.matrix_row_major.as_ptr(),
                         );
-                        gl.Uniform1i(
-                            self.win_uniforms.decode_tf,
-                            t.inverse_eotf.shader_id(),
-                        );
+                        gl.Uniform1i(self.win_uniforms.decode_tf, t.inverse_eotf.shader_id());
                         gl.Uniform1f(
                             self.win_uniforms.decode_gamma,
                             t.inverse_eotf.gamma_for_shader(),
                         );
-                        gl.Uniform1i(
-                            self.win_uniforms.encode_tf,
-                            t.forward_eotf.shader_id(),
-                        );
+                        gl.Uniform1i(self.win_uniforms.encode_tf, t.forward_eotf.shader_id());
                         gl.Uniform1f(
                             self.win_uniforms.encode_gamma,
                             t.forward_eotf.gamma_for_shader(),
@@ -1178,96 +1198,103 @@ impl WaylandCompositor {
         // =================================================================
         self.frame_profiler.zone_start("borders");
         if self.border_enabled {
-        unsafe {
-            gl.UseProgram(self.border_program);
-            self.set_projection_uniform(gl, self.border_uniforms.projection, &projection);
-            gl.BindVertexArray(self.quad_vao);
+            unsafe {
+                gl.UseProgram(self.border_program);
+                self.set_projection_uniform(gl, self.border_uniforms.projection, &projection);
+                gl.BindVertexArray(self.quad_vao);
 
-            for &(win_id, x, y, w, h) in visible_scene {
-                let wt = match self.windows.get(&win_id) {
-                    Some(wt) => wt,
-                    None => continue,
-                };
+                for &(win_id, x, y, w, h) in visible_scene {
+                    let wt = match self.windows.get(&win_id) {
+                        Some(wt) => wt,
+                        None => continue,
+                    };
 
-                let is_focused = focused == Some(win_id);
-                if !is_focused && !wt.is_urgent {
-                    continue;
+                    let is_focused = focused == Some(win_id);
+                    if !is_focused && !wt.is_urgent {
+                        continue;
+                    }
+
+                    let fade = wt.fade_opacity;
+                    if fade <= 0.0 {
+                        continue;
+                    }
+
+                    let radius = if wt.is_shaped || wt.is_fullscreen {
+                        0.0
+                    } else {
+                        wt.corner_radius_override.unwrap_or(self.corner_radius)
+                    };
+
+                    let scale = wt.anim_scale;
+                    let (draw_x, draw_y, draw_w, draw_h) = if (scale - 1.0).abs() > f32::EPSILON {
+                        let cw = w as f32 * scale;
+                        let ch = h as f32 * scale;
+                        let cx = x as f32 + (w as f32 - cw) * 0.5;
+                        let cy = y as f32 + (h as f32 - ch) * 0.5;
+                        (cx, cy, cw, ch)
+                    } else {
+                        (x as f32, y as f32, w as f32, h as f32)
+                    };
+
+                    // Focus highlight: temporary pulse + thicker border on the
+                    // window that just became focused. Mirrors the X11 behavior
+                    // (effects.rs::tick_focus_highlight) so the visual is the same
+                    // on both backends.
+                    let highlight_for_win = focus_highlight_active
+                        && self
+                            .focus_highlight_start
+                            .map(|(hw, _)| hw == win_id)
+                            .unwrap_or(false);
+
+                    let border_color = if highlight_for_win {
+                        let (_, start) = self.focus_highlight_start.unwrap();
+                        let elapsed_ms = start.elapsed().as_millis() as f32;
+                        let dur = self.focus_highlight_duration_ms.max(1) as f32;
+                        let pulse = ((elapsed_ms / dur * std::f32::consts::PI).sin()).abs();
+                        let [r, g, b, a] = self.focus_highlight_color;
+                        [r, g, b, a * pulse * fade]
+                    } else if wt.is_urgent {
+                        [1.0f32, 0.2, 0.2, 0.9 * fade]
+                    } else {
+                        let c = self.border_color_focused;
+                        [c[0], c[1], c[2], c[3] * fade]
+                    };
+                    let border_width = if highlight_for_win {
+                        (self.border_width + 2.0).max(3.0)
+                    } else {
+                        self.border_width
+                    };
+
+                    let bdr_x = draw_x - border_width;
+                    let bdr_y = draw_y - border_width;
+                    let bdr_w = draw_w + 2.0 * border_width;
+                    let bdr_h = draw_h + 2.0 * border_width;
+
+                    gl.Uniform4f(
+                        self.border_uniforms.border_color,
+                        border_color[0],
+                        border_color[1],
+                        border_color[2],
+                        border_color[3],
+                    );
+                    gl.Uniform1f(self.border_uniforms.border_width, border_width);
+                    gl.Uniform1f(self.border_uniforms.radius, radius);
+                    gl.Uniform2f(self.border_uniforms.size, bdr_w, bdr_h);
+                    self.set_rect_uniform(
+                        gl,
+                        self.border_uniforms.rect,
+                        bdr_x,
+                        bdr_y,
+                        bdr_w,
+                        bdr_h,
+                    );
+
+                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
                 }
 
-                let fade = wt.fade_opacity;
-                if fade <= 0.0 {
-                    continue;
-                }
-
-                let radius = if wt.is_shaped || wt.is_fullscreen {
-                    0.0
-                } else {
-                    wt.corner_radius_override.unwrap_or(self.corner_radius)
-                };
-
-                let scale = wt.anim_scale;
-                let (draw_x, draw_y, draw_w, draw_h) = if (scale - 1.0).abs() > f32::EPSILON {
-                    let cw = w as f32 * scale;
-                    let ch = h as f32 * scale;
-                    let cx = x as f32 + (w as f32 - cw) * 0.5;
-                    let cy = y as f32 + (h as f32 - ch) * 0.5;
-                    (cx, cy, cw, ch)
-                } else {
-                    (x as f32, y as f32, w as f32, h as f32)
-                };
-
-                // Focus highlight: temporary pulse + thicker border on the
-                // window that just became focused. Mirrors the X11 behavior
-                // (effects.rs::tick_focus_highlight) so the visual is the same
-                // on both backends.
-                let highlight_for_win = focus_highlight_active
-                    && self
-                        .focus_highlight_start
-                        .map(|(hw, _)| hw == win_id)
-                        .unwrap_or(false);
-
-                let border_color = if highlight_for_win {
-                    let (_, start) = self.focus_highlight_start.unwrap();
-                    let elapsed_ms = start.elapsed().as_millis() as f32;
-                    let dur = self.focus_highlight_duration_ms.max(1) as f32;
-                    let pulse = ((elapsed_ms / dur * std::f32::consts::PI).sin()).abs();
-                    let [r, g, b, a] = self.focus_highlight_color;
-                    [r, g, b, a * pulse * fade]
-                } else if wt.is_urgent {
-                    [1.0f32, 0.2, 0.2, 0.9 * fade]
-                } else {
-                    let c = self.border_color_focused;
-                    [c[0], c[1], c[2], c[3] * fade]
-                };
-                let border_width = if highlight_for_win {
-                    (self.border_width + 2.0).max(3.0)
-                } else {
-                    self.border_width
-                };
-
-                let bdr_x = draw_x - border_width;
-                let bdr_y = draw_y - border_width;
-                let bdr_w = draw_w + 2.0 * border_width;
-                let bdr_h = draw_h + 2.0 * border_width;
-
-                gl.Uniform4f(
-                    self.border_uniforms.border_color,
-                    border_color[0],
-                    border_color[1],
-                    border_color[2],
-                    border_color[3],
-                );
-                gl.Uniform1f(self.border_uniforms.border_width, border_width);
-                gl.Uniform1f(self.border_uniforms.radius, radius);
-                gl.Uniform2f(self.border_uniforms.size, bdr_w, bdr_h);
-                self.set_rect_uniform(gl, self.border_uniforms.rect, bdr_x, bdr_y, bdr_w, bdr_h);
-
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                gl.BindVertexArray(0);
+                gl.UseProgram(0);
             }
-
-            gl.BindVertexArray(0);
-            gl.UseProgram(0);
-        }
         } // border_enabled
         self.frame_profiler.zone_end();
 
@@ -1352,7 +1379,13 @@ impl WaylandCompositor {
                     self.screen_h as f32,
                 );
                 let egc = self.edge_glow_color;
-                gl.Uniform4f(self.edge_glow_uniforms.glow_color, egc[0], egc[1], egc[2], egc[3]);
+                gl.Uniform4f(
+                    self.edge_glow_uniforms.glow_color,
+                    egc[0],
+                    egc[1],
+                    egc[2],
+                    egc[3],
+                );
                 gl.Uniform1f(self.edge_glow_uniforms.glow_width, self.edge_glow_width);
                 gl.Uniform2f(self.edge_glow_uniforms.mouse, self.mouse_x, self.mouse_y);
                 gl.Uniform2f(
@@ -1487,7 +1520,10 @@ impl WaylandCompositor {
         // =================================================================
         if let Some(path) = self.pending_recording_start.take() {
             unsafe {
-                if let Err(e) = self.recording.start(gl, self.screen_w, self.screen_h, &path, 30) {
+                if let Err(e) = self
+                    .recording
+                    .start(gl, self.screen_w, self.screen_h, &path, 30)
+                {
                     log::error!("[compositor] Failed to start recording: {}", e);
                 }
             }
@@ -1508,8 +1544,10 @@ impl WaylandCompositor {
         // 22. Performance infrastructure - frame end
         // =================================================================
         let frame_ms = self.frame_profiler.end_frame();
-        self.perf_metrics.record_compositor(std::time::Duration::from_secs_f32(frame_ms / 1000.0));
-        self.adaptive_scheduler.on_frame_completed(std::time::Duration::from_secs_f32(frame_ms / 1000.0));
+        self.perf_metrics
+            .record_compositor(std::time::Duration::from_secs_f32(frame_ms / 1000.0));
+        self.adaptive_scheduler
+            .on_frame_completed(std::time::Duration::from_secs_f32(frame_ms / 1000.0));
         self.dirty_region_tracker.clear();
         self.content_dirty_ids.clear();
         self.prev_focused = focused;
@@ -1560,7 +1598,8 @@ impl WaylandCompositor {
                 }
                 // Save in background thread
                 std::thread::spawn(move || {
-                    if let Err(e) = image::save_buffer(&path, &pixels, w, h, image::ColorType::Rgba8)
+                    if let Err(e) =
+                        image::save_buffer(&path, &pixels, w, h, image::ColorType::Rgba8)
                     {
                         log::warn!("[compositor] screenshot failed: {}", e);
                     } else {
@@ -1608,7 +1647,11 @@ impl WaylandCompositor {
         self.sys_stats.maybe_sample();
 
         let uptime = self.compositor_start_time.elapsed().as_secs();
-        let frame_ms = if self.fps > 0.0 { 1000.0 / self.fps } else { 0.0 };
+        let frame_ms = if self.fps > 0.0 {
+            1000.0 / self.fps
+        } else {
+            0.0
+        };
         let mut hud_text = format!(
             "JWM debug HUD (Alt+Shift+F12)\n\
              Backend: wayland_udev\n\
@@ -1646,8 +1689,7 @@ impl WaylandCompositor {
         }
 
         if hud_text != self.hud_text_cache {
-            let (pixels, w, h) =
-                font::render_text_to_rgba(&hud_text, 2, [255, 255, 255, 220]);
+            let (pixels, w, h) = font::render_text_to_rgba(&hud_text, 2, [255, 255, 255, 220]);
             if w > 0 && h > 0 {
                 unsafe {
                     // Delete old texture

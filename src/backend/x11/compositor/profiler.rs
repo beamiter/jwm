@@ -72,7 +72,10 @@ impl FrameProfiler {
             return;
         }
         let duration = start.elapsed();
-        *self.current_frame.entry(zone_name).or_insert(Duration::ZERO) += duration;
+        *self
+            .current_frame
+            .entry(zone_name)
+            .or_insert(Duration::ZERO) += duration;
     }
 
     /// Record a zone duration (called automatically by ProfileZone drop)
@@ -80,7 +83,10 @@ impl FrameProfiler {
         if !self.enabled {
             return;
         }
-        *self.current_frame.entry(zone_name).or_insert(Duration::ZERO) += duration;
+        *self
+            .current_frame
+            .entry(zone_name)
+            .or_insert(Duration::ZERO) += duration;
     }
 
     /// End frame and store results in history
@@ -114,7 +120,11 @@ impl FrameProfiler {
         let min = samples.iter().copied().fold(f32::MAX, f32::min);
         let max = samples.iter().copied().fold(0.0, f32::max);
 
-        Some(ZoneStats { avg_ms: avg, min_ms: min, max_ms: max })
+        Some(ZoneStats {
+            avg_ms: avg,
+            min_ms: min,
+            max_ms: max,
+        })
     }
 
     /// Get all zone statistics

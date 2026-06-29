@@ -2,7 +2,6 @@
 ///
 /// This module provides a trait-based abstraction over GPU rendering APIs,
 /// allowing the compositor to work with different backends (GLX, Vulkan).
-
 pub mod types;
 pub use types::*;
 

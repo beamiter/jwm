@@ -1,10 +1,10 @@
-use crate::sync_ext::MutexExt;
 use crate::backend::api::{BackendEvent, Geometry, LayerSurfaceInfo, PropertyKind};
 use crate::backend::common_define::WindowId;
+use crate::sync_ext::MutexExt;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
@@ -296,7 +296,8 @@ pub struct JwmWaylandState {
 
     /// Shared queue for pending wlr-screencopy copy requests (filled by screencopy Dispatch,
     /// drained during KMS render).
-    pub screencopy_pending: Option<crate::backend::wayland_udev::screencopy::PendingScreencopyQueue>,
+    pub screencopy_pending:
+        Option<crate::backend::wayland_udev::screencopy::PendingScreencopyQueue>,
 
     /// Per-surface tearing hint map (from wp-tearing-control-v1).
     pub tearing_hints: Option<crate::backend::wayland_udev::tearing_control::TearingHintMap>,
@@ -305,10 +306,12 @@ pub struct JwmWaylandState {
     pub workspace_state: Option<crate::backend::wayland_udev::workspace_protocol::WorkspaceState>,
 
     /// Pending ext-image-copy-capture frames (drained during render, like screencopy).
-    pub image_capture_pending: Option<crate::backend::wayland_udev::image_copy_capture::PendingImageCaptureQueue>,
+    pub image_capture_pending:
+        Option<crate::backend::wayland_udev::image_copy_capture::PendingImageCaptureQueue>,
 
     /// wlr-foreign-toplevel-management state (taskbar window list + control).
-    pub foreign_toplevel_mgmt: Option<crate::backend::wayland_udev::foreign_toplevel_management::ForeignToplevelMgmtState>,
+    pub foreign_toplevel_mgmt:
+        Option<crate::backend::wayland_udev::foreign_toplevel_management::ForeignToplevelMgmtState>,
 
     /// wp-color-management-v1 state (per-surface image description registry).
     pub color_manager: Option<crate::backend::wayland_udev::color_management::ColorManagerState>,
@@ -426,7 +429,9 @@ impl JwmWaylandState {
                 );
             }
             Err(e) => {
-                warn!("[udev/wayland] dmabuf feedback build failed: {e:?}, falling back to basic global");
+                warn!(
+                    "[udev/wayland] dmabuf feedback build failed: {e:?}, falling back to basic global"
+                );
                 let global = self
                     .dmabuf_state
                     .create_global::<JwmWaylandState>(display_handle, render_fmts);
@@ -466,7 +471,8 @@ impl PointerConstraintsHandler for JwmWaylandState {
     ) {
         if let Some(win) = self.surface_to_window.get(&surface.id()).copied() {
             if let Some(geo) = self.window_geometry.get(&win) {
-                self.pointer_location = (geo.x as f64 + location.x, geo.y as f64 + location.y).into();
+                self.pointer_location =
+                    (geo.x as f64 + location.x, geo.y as f64 + location.y).into();
             }
         }
     }
@@ -540,7 +546,10 @@ impl IdleInhibitHandler for JwmWaylandState {
 // Fractional Scale Handler
 // ---------------------------------------------------------------------------
 impl FractionalScaleHandler for JwmWaylandState {
-    fn new_fractional_scale(&mut self, surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface) {
+    fn new_fractional_scale(
+        &mut self,
+        surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    ) {
         // Deliver an initial preferred scale so HiDPI clients render at the
         // right resolution instead of being upscaled (blurry). We default to the
         // primary output's scale here; the per-window map path refines it for the
@@ -579,12 +588,17 @@ impl smithay::wayland::idle_notify::IdleNotifierHandler for JwmWaylandState {
 // ---------------------------------------------------------------------------
 // Keyboard Shortcuts Inhibit Handler
 // ---------------------------------------------------------------------------
-impl smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitHandler for JwmWaylandState {
+impl smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitHandler
+    for JwmWaylandState
+{
     fn keyboard_shortcuts_inhibit_state(&mut self) -> &mut KeyboardShortcutsInhibitState {
         &mut self.keyboard_shortcuts_inhibit_state
     }
 
-    fn new_inhibitor(&mut self, _inhibitor: smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitor) {
+    fn new_inhibitor(
+        &mut self,
+        _inhibitor: smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitor,
+    ) {
     }
 }
 
@@ -592,7 +606,11 @@ impl smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitHandl
 // Tablet Seat Handler – drawing tablet support
 // ---------------------------------------------------------------------------
 impl smithay::wayland::tablet_manager::TabletSeatHandler for JwmWaylandState {
-    fn tablet_tool_image(&mut self, _tool: &smithay::backend::input::TabletToolDescriptor, _image: smithay::input::pointer::CursorImageStatus) {
+    fn tablet_tool_image(
+        &mut self,
+        _tool: &smithay::backend::input::TabletToolDescriptor,
+        _image: smithay::input::pointer::CursorImageStatus,
+    ) {
     }
 }
 
@@ -679,9 +697,9 @@ impl XWaylandKeyboardGrabHandler for JwmWaylandState {
         &self,
         surface: &WlSurface,
     ) -> Option<<Self as SeatHandler>::KeyboardFocus> {
-        self.surface_to_window.get(&surface.id()).and_then(|win| {
-            self.toplevels.get(win).map(|t| t.wl_surface().clone())
-        })
+        self.surface_to_window
+            .get(&surface.id())
+            .and_then(|win| self.toplevels.get(win).map(|t| t.wl_surface().clone()))
     }
 }
 
@@ -734,7 +752,10 @@ impl XdgActivationHandler for JwmWaylandState {
         if token_data.timestamp.elapsed().as_secs() < 10 {
             // Find the window that corresponds to this surface and activate it.
             if let Some(&win_id) = self.surface_to_window.get(&surface.id()) {
-                debug!("[xdg_activation] activating window {:?} (app_id={:?})", win_id, token_data.app_id);
+                debug!(
+                    "[xdg_activation] activating window {:?} (app_id={:?})",
+                    win_id, token_data.app_id
+                );
                 self.active_toplevel = Some(win_id);
                 self.needs_redraw = true;
             }
@@ -750,12 +771,7 @@ impl XWaylandShellHandler for JwmWaylandState {
         &mut self.xwayland_shell_state
     }
 
-    fn surface_associated(
-        &mut self,
-        _xwm: XwmId,
-        wl_surface: WlSurface,
-        window: X11Surface,
-    ) {
+    fn surface_associated(&mut self, _xwm: XwmId, wl_surface: WlSurface, window: X11Surface) {
         let x11_id = window.window_id();
         debug!(
             "[xwayland] surface_associated: x11={} wl={:?} title={:?}",
@@ -815,8 +831,16 @@ impl XwmHandler for JwmWaylandState {
 
         // Send a configure with the requested geometry (or a reasonable default).
         let geo = window.geometry();
-        let w = if geo.size.w > 0 { geo.size.w as u32 } else { 800 };
-        let h = if geo.size.h > 0 { geo.size.h as u32 } else { 600 };
+        let w = if geo.size.w > 0 {
+            geo.size.w as u32
+        } else {
+            800
+        };
+        let h = if geo.size.h > 0 {
+            geo.size.h as u32
+        } else {
+            600
+        };
         let _ = window.configure(Some(smithay::utils::Rectangle::new(
             (geo.loc.x, geo.loc.y).into(),
             (w as i32, h as i32).into(),
@@ -841,10 +865,8 @@ impl XwmHandler for JwmWaylandState {
                 border: 0,
             },
         );
-        self.window_title
-            .insert(win_id, window.title());
-        self.window_app_id
-            .insert(win_id, window.class());
+        self.window_title.insert(win_id, window.title());
+        self.window_app_id.insert(win_id, window.class());
         self.window_is_fullscreen
             .insert(win_id, window.is_fullscreen());
         self.window_stack.push(win_id);
@@ -886,10 +908,8 @@ impl XwmHandler for JwmWaylandState {
                 border: 0,
             },
         );
-        self.window_title
-            .insert(win_id, window.title());
-        self.window_app_id
-            .insert(win_id, window.class());
+        self.window_title.insert(win_id, window.title());
+        self.window_app_id.insert(win_id, window.class());
         self.window_is_fullscreen.insert(win_id, false);
         self.window_stack.push(win_id);
 
@@ -1035,12 +1055,7 @@ impl XwmHandler for JwmWaylandState {
         // Interactive move not yet supported for X11 windows.
     }
 
-    fn property_notify(
-        &mut self,
-        _xwm: XwmId,
-        window: X11Surface,
-        property: WmWindowProperty,
-    ) {
+    fn property_notify(&mut self, _xwm: XwmId, window: X11Surface, property: WmWindowProperty) {
         let x11_id = window.window_id();
         if let Some(win_id) = self.x11_surface_to_window.get(&x11_id).copied() {
             match property {
@@ -1151,7 +1166,10 @@ impl JwmWaylandState {
 
         if let Some(prev_win) = prev {
             if let Some(toplevel) = self.toplevels.get(&prev_win).cloned() {
-                let size = self.window_geometry.get(&prev_win).map(|g| (g.w as i32, g.h as i32).into());
+                let size = self
+                    .window_geometry
+                    .get(&prev_win)
+                    .map(|g| (g.w as i32, g.h as i32).into());
                 toplevel.with_pending_state(|s| {
                     s.states.unset(xdg_toplevel::State::Activated);
                     // Preserve the configured size. smithay clears s.size after each
@@ -1167,7 +1185,10 @@ impl JwmWaylandState {
 
         self.active_toplevel = win;
         if let Some(new_win) = win {
-            let size = self.window_geometry.get(&new_win).map(|g| (g.w as i32, g.h as i32).into());
+            let size = self
+                .window_geometry
+                .get(&new_win)
+                .map(|g| (g.w as i32, g.h as i32).into());
             if let Some(toplevel) = self.toplevels.get(&new_win).cloned() {
                 toplevel.with_pending_state(|s| {
                     s.states.set(xdg_toplevel::State::Activated);
@@ -1237,13 +1258,16 @@ impl JwmWaylandState {
         let xwayland_shell_state = XWaylandShellState::new::<JwmWaylandState>(dh);
 
         // wlr-screencopy-unstable-v1 – allows grim and similar tools to capture screen content.
-        let screencopy_pending = crate::backend::wayland_udev::screencopy::init_screencopy_manager(dh);
+        let screencopy_pending =
+            crate::backend::wayland_udev::screencopy::init_screencopy_manager(dh);
 
         // wp-tearing-control-v1 – allows games to opt into async page flips.
-        let tearing_hints = crate::backend::wayland_udev::tearing_control::init_tearing_control_manager(dh);
+        let tearing_hints =
+            crate::backend::wayland_udev::tearing_control::init_tearing_control_manager(dh);
 
         // wp-color-management-v1 – HDR / color-space surface metadata.
-        let color_manager = crate::backend::wayland_udev::color_management::init_color_management(dh);
+        let color_manager =
+            crate::backend::wayland_udev::color_management::init_color_management(dh);
 
         // wlr-output-management-unstable-v1 – output config for kanshi/wlr-randr.
         crate::backend::wayland_udev::output_management::init_output_management(dh);
@@ -1252,10 +1276,12 @@ impl JwmWaylandState {
         crate::backend::wayland_udev::output_power::init_output_power_management(dh);
 
         // ext-workspace-v1 – workspace/tag state for taskbars (Waybar etc.).
-        let workspace_state = crate::backend::wayland_udev::workspace_protocol::init_workspace_protocol(dh, 9);
+        let workspace_state =
+            crate::backend::wayland_udev::workspace_protocol::init_workspace_protocol(dh, 9);
 
         // ext-image-copy-capture-v1 – modern screen capture (replaces wlr-screencopy).
-        let image_capture_pending = crate::backend::wayland_udev::image_copy_capture::init_image_copy_capture(dh);
+        let image_capture_pending =
+            crate::backend::wayland_udev::image_copy_capture::init_image_copy_capture(dh);
 
         // wlr-gamma-control-unstable-v1 – night light (gammastep/wlsunset).
         crate::backend::wayland_udev::gamma_control::init_gamma_control(dh);
@@ -1277,12 +1303,14 @@ impl JwmWaylandState {
         // --- SOTA protocols ---
         let pointer_constraints_state = PointerConstraintsState::new::<JwmWaylandState>(dh);
         let relative_pointer_state = RelativePointerManagerState::new::<JwmWaylandState>(dh);
-        let session_lock_state = SessionLockManagerState::new::<JwmWaylandState, _>(dh, |_client| true);
+        let session_lock_state =
+            SessionLockManagerState::new::<JwmWaylandState, _>(dh, |_client| true);
         let idle_inhibit_state = IdleInhibitManagerState::new::<JwmWaylandState>(dh);
         let idle_notifier_state = IdleNotifierState::<JwmWaylandState>::new(&dh, handle.clone());
         let fractional_scale_state = FractionalScaleManagerState::new::<JwmWaylandState>(dh);
         let cursor_shape_state = CursorShapeManagerState::new::<JwmWaylandState>(dh);
-        let presentation_state = PresentationState::new::<JwmWaylandState>(dh, libc::CLOCK_MONOTONIC as u32);
+        let presentation_state =
+            PresentationState::new::<JwmWaylandState>(dh, libc::CLOCK_MONOTONIC as u32);
         let pointer_gestures_state = PointerGesturesState::new::<JwmWaylandState>(dh);
         let single_pixel_buffer_state = SinglePixelBufferState::new::<JwmWaylandState>(dh);
         let content_type_state = ContentTypeState::new::<JwmWaylandState>(dh);
@@ -1290,8 +1318,10 @@ impl JwmWaylandState {
         let foreign_toplevel_list_state = ForeignToplevelListState::new::<JwmWaylandState>(dh);
         let tablet_manager_state = TabletManagerState::new::<JwmWaylandState>(dh);
         let fifo_state = FifoManagerState::new::<JwmWaylandState>(dh);
-        let keyboard_shortcuts_inhibit_state = KeyboardShortcutsInhibitState::new::<JwmWaylandState>(dh);
-        let security_context_state = SecurityContextState::new::<JwmWaylandState, _>(dh, |_client| true);
+        let keyboard_shortcuts_inhibit_state =
+            KeyboardShortcutsInhibitState::new::<JwmWaylandState>(dh);
+        let security_context_state =
+            SecurityContextState::new::<JwmWaylandState, _>(dh, |_client| true);
         let commit_timing_state = CommitTimingManagerState::new::<JwmWaylandState>(dh);
         let xdg_dialog_state = XdgDialogState::new::<JwmWaylandState>(dh);
         let xdg_foreign_state = XdgForeignState::new::<JwmWaylandState>(dh);
@@ -1301,10 +1331,14 @@ impl JwmWaylandState {
         XdgToplevelIconManager::new::<JwmWaylandState>(dh);
         XdgToplevelTagManager::new::<JwmWaylandState>(dh);
         let data_control_state = DataControlState::new::<JwmWaylandState, _>(
-            dh, Some(&primary_selection_state), |_client| true,
+            dh,
+            Some(&primary_selection_state),
+            |_client| true,
         );
         let ext_data_control_state = ExtDataControlState::new::<JwmWaylandState, _>(
-            dh, Some(&primary_selection_state), |_client| true,
+            dh,
+            Some(&primary_selection_state),
+            |_client| true,
         );
         let kde_decoration_state = KdeDecorationState::new::<JwmWaylandState>(dh, KdeMode::Server);
         // ext-background-effect-v1: advertise the global so clients can request
@@ -1486,8 +1520,7 @@ impl JwmWaylandState {
     /// falling back to the primary output (then 1.0).
     fn preferred_scale_for_window(&self, win: WindowId) -> f64 {
         if let Some(g) = self.window_geometry.get(&win) {
-            let center: Point<i32, Logical> =
-                (g.x + g.w as i32 / 2, g.y + g.h as i32 / 2).into();
+            let center: Point<i32, Logical> = (g.x + g.w as i32 / 2, g.y + g.h as i32 / 2).into();
             for (idx, rect) in self.output_rects.iter().enumerate() {
                 if center.x >= rect.loc.x
                     && center.y >= rect.loc.y
@@ -1516,11 +1549,7 @@ impl JwmWaylandState {
                 continue;
             };
             let scale = output.current_scale().fractional_scale();
-            let logical_size = mode
-                .size
-                .to_f64()
-                .to_logical(scale)
-                .to_i32_round();
+            let logical_size = mode.size.to_f64().to_logical(scale).to_i32_round();
             let logical_size = output.current_transform().transform_size(logical_size);
             let rect = Rectangle::<i32, Logical>::new(output.current_location(), logical_size);
             if !rect.to_f64().contains(location) {
@@ -1533,7 +1562,8 @@ impl JwmWaylandState {
             for layer in [Layer::Overlay, Layer::Top] {
                 if let Some(ls) = map.layer_under(layer, location) {
                     if let Some(geo) = map.layer_geometry(ls) {
-                        let origin: Point<f64, Logical> = (geo.loc.x as f64, geo.loc.y as f64).into();
+                        let origin: Point<f64, Logical> =
+                            (geo.loc.x as f64, geo.loc.y as f64).into();
                         return Some((None, ls.wl_surface().clone(), origin));
                     }
                 }
@@ -1578,7 +1608,9 @@ impl JwmWaylandState {
             let x1 = geo.x as f64 + geo.w as f64 + bw;
             let y1 = geo.y as f64 + geo.h as f64 + bw;
             if location.x >= x0 && location.y >= y0 && location.x < x1 && location.y < y1 {
-                let origin = self.toplevel_buffer_origin(*win).unwrap_or((geo.x, geo.y).into());
+                let origin = self
+                    .toplevel_buffer_origin(*win)
+                    .unwrap_or((geo.x, geo.y).into());
                 // For X11 windows, descend into subsurfaces so DnD enter/motion/drop
                 // target the correct child surface (xdnd drop targeting).
                 if let Some(x11) = self.x11_surfaces.get(win) {
@@ -1723,9 +1755,19 @@ impl JwmWaylandState {
                 .find(|r| contains(r, window_center))
                 .copied()
                 // 2) contains pointer
-                .or_else(|| self.output_rects.iter().find(|r| contains(r, pointer)).copied())
+                .or_else(|| {
+                    self.output_rects
+                        .iter()
+                        .find(|r| contains(r, pointer))
+                        .copied()
+                })
                 // 3) max overlap with parent window rect
-                .or_else(|| self.output_rects.iter().copied().max_by_key(|r| overlap_area(*r, window_rect)))
+                .or_else(|| {
+                    self.output_rects
+                        .iter()
+                        .copied()
+                        .max_by_key(|r| overlap_area(*r, window_rect))
+                })
         };
 
         if let Some(rect) = best_output {
@@ -1768,7 +1810,10 @@ impl JwmWaylandState {
         self.needs_redraw = true;
     }
 
-    pub fn popup_rects_for_toplevel(&self, win: WindowId) -> Vec<(WlSurface, Rectangle<i32, Logical>)> {
+    pub fn popup_rects_for_toplevel(
+        &self,
+        win: WindowId,
+    ) -> Vec<(WlSurface, Rectangle<i32, Logical>)> {
         // Front-to-back order: newest popups first.
         let mut out = Vec::new();
 
@@ -1841,7 +1886,10 @@ impl JwmWaylandState {
         None
     }
 
-    pub fn hit_test(&self, location: Point<f64, Logical>) -> Option<(WindowId, WlSurface, Point<f64, Logical>)> {
+    pub fn hit_test(
+        &self,
+        location: Point<f64, Logical>,
+    ) -> Option<(WindowId, WlSurface, Point<f64, Logical>)> {
         self.surface_under(location)
             .and_then(|(win, surface, origin)| win.map(|w| (w, surface, origin)))
     }
@@ -1881,7 +1929,10 @@ impl JwmWaylandState {
             let parent = match popup.get_parent() {
                 Some(p) => p,
                 None => {
-                    log::warn!("[ime-pos] popup {:?} has no parent", popup.wl_surface().id());
+                    log::warn!(
+                        "[ime-pos] popup {:?} has no parent",
+                        popup.wl_surface().id()
+                    );
                     continue;
                 }
             };
@@ -1980,10 +2031,13 @@ impl CompositorHandler for JwmWaylandState {
                         return;
                     }
                 };
-                let Some(client) = surface.client() else { return };
+                let Some(client) = surface.client() else {
+                    return;
+                };
                 let registered = state.loop_handle.insert_source(source, move |_, _, data| {
                     let dh = data.display_handle.clone();
-                    data.client_compositor_state(&client).blocker_cleared(data, &dh);
+                    data.client_compositor_state(&client)
+                        .blocker_cleared(data, &dh);
                     Ok(())
                 });
                 if registered.is_err() {
@@ -2045,7 +2099,9 @@ impl CompositorHandler for JwmWaylandState {
                 pid,
             );
             if let Some(win_id) = matched {
-                info!("[xwayland] legacy WL_SURFACE_ID association: win={win_id:?} wl_surface={pid}");
+                info!(
+                    "[xwayland] legacy WL_SURFACE_ID association: win={win_id:?} wl_surface={pid}"
+                );
                 self.surface_to_window.insert(surface.id(), win_id);
                 self.x11_wl_surfaces.insert(win_id, surface.clone());
                 self.needs_redraw = true;
@@ -2132,14 +2188,19 @@ impl CompositorHandler for JwmWaylandState {
             }
 
             // Update tracked geometry for JWM and emit a configure notify when it changes.
-            if let (Some(win), Some(layer)) = (win, map.layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)) {
-                let layer_info = layer.layer_surface().with_cached_state(|data| LayerSurfaceInfo {
-                    exclusive_zone: data.exclusive_zone.into(),
-                    anchor_top: data.anchor.contains(Anchor::TOP),
-                    anchor_bottom: data.anchor.contains(Anchor::BOTTOM),
-                    anchor_left: data.anchor.contains(Anchor::LEFT),
-                    anchor_right: data.anchor.contains(Anchor::RIGHT),
-                });
+            if let (Some(win), Some(layer)) = (
+                win,
+                map.layer_for_surface(surface, WindowSurfaceType::TOPLEVEL),
+            ) {
+                let layer_info = layer
+                    .layer_surface()
+                    .with_cached_state(|data| LayerSurfaceInfo {
+                        exclusive_zone: data.exclusive_zone.into(),
+                        anchor_top: data.anchor.contains(Anchor::TOP),
+                        anchor_bottom: data.anchor.contains(Anchor::BOTTOM),
+                        anchor_left: data.anchor.contains(Anchor::LEFT),
+                        anchor_right: data.anchor.contains(Anchor::RIGHT),
+                    });
                 self.window_layer_info.insert(win, layer_info);
 
                 if let Some(geo) = map.layer_geometry(layer) {
@@ -2154,21 +2215,25 @@ impl CompositorHandler for JwmWaylandState {
                     let changed = self
                         .window_geometry
                         .get(&win)
-                        .map(|old| old.x != new_geo.x || old.y != new_geo.y || old.w != new_geo.w || old.h != new_geo.h)
+                        .map(|old| {
+                            old.x != new_geo.x
+                                || old.y != new_geo.y
+                                || old.w != new_geo.w
+                                || old.h != new_geo.h
+                        })
                         .unwrap_or(true);
 
                     if changed {
                         self.window_geometry.insert(win, new_geo);
-                        self.pending_events
-                            .lock()
-                            .unwrap()
-                            .push_back(BackendEvent::WindowConfigured {
+                        self.pending_events.lock().unwrap().push_back(
+                            BackendEvent::WindowConfigured {
                                 window: win,
                                 x: new_geo.x,
                                 y: new_geo.y,
                                 width: new_geo.w,
                                 height: new_geo.h,
-                            });
+                            },
+                        );
                     }
                 }
             }
@@ -2185,7 +2250,9 @@ impl CompositorHandler for JwmWaylandState {
         }
 
         if let Some(win) = self.surface_to_window.remove(&surface.id()) {
-            log::info!("[udev/wayland] surface_destroyed win={win:?} (client disconnected abruptly)");
+            log::info!(
+                "[udev/wayland] surface_destroyed win={win:?} (client disconnected abruptly)"
+            );
             // If this surface is a layer-shell surface, ensure it is also removed from the layer map.
             for output in &self.outputs {
                 let map = layer_map_for_output(output);
@@ -2233,7 +2300,10 @@ impl ShmHandler for JwmWaylandState {
 }
 
 impl BufferHandler for JwmWaylandState {
-    fn buffer_destroyed(&mut self, _buffer: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer) {
+    fn buffer_destroyed(
+        &mut self,
+        _buffer: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
+    ) {
     }
 }
 
@@ -2285,7 +2355,10 @@ impl InputMethodHandler for JwmWaylandState {
     }
 
     fn dismiss_popup(&mut self, surface: ImPopupSurface) {
-        log::info!("[ime] dismiss_popup surface={:?}", surface.wl_surface().id());
+        log::info!(
+            "[ime] dismiss_popup surface={:?}",
+            surface.wl_surface().id()
+        );
         self.im_popups.retain(|p| p != &surface && p.alive());
         self.needs_redraw = true;
     }
@@ -2477,9 +2550,10 @@ impl XdgShellHandler for JwmWaylandState {
 
         // Don't let IME client toplevels be managed by the WM — managing them
         // triggers focus changes that kill the input method popup.
-        let is_ime_client = self.im_client_id.as_ref().map_or(false, |im_id| {
-            obj_id.same_client_as(im_id)
-        });
+        let is_ime_client = self
+            .im_client_id
+            .as_ref()
+            .map_or(false, |im_id| obj_id.same_client_as(im_id));
 
         info!("[udev/wayland] new_toplevel win={win:?} surface_id={obj_id:?} ime={is_ime_client}");
 
@@ -2508,13 +2582,19 @@ impl XdgShellHandler for JwmWaylandState {
         }
 
         // Announce to ext-foreign-toplevel-list clients.
-        let handle = self.foreign_toplevel_list_state.new_toplevel::<JwmWaylandState>("", "");
+        let handle = self
+            .foreign_toplevel_list_state
+            .new_toplevel::<JwmWaylandState>("", "");
         self.foreign_toplevel_handles.insert(win, handle);
 
         // Announce to wlr-foreign-toplevel-management clients.
         if let Some(ref ftm) = self.foreign_toplevel_mgmt {
             crate::backend::wayland_udev::foreign_toplevel_management::announce_new_toplevel(
-                &self.display_handle, ftm, win, "", "",
+                &self.display_handle,
+                ftm,
+                win,
+                "",
+                "",
             );
         }
 
@@ -2542,13 +2622,16 @@ impl XdgShellHandler for JwmWaylandState {
         self.needs_redraw = true;
     }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat, _serial: Serial) {
+    fn grab(
+        &mut self,
+        _surface: PopupSurface,
+        _seat: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat,
+        _serial: Serial,
+    ) {
         // Record the toplevel this grab belongs to, and remember current keyboard focus.
         if self.popup_grab_prev_kbd_focus.is_none() {
-            self.popup_grab_prev_kbd_focus = self
-                .seat
-                .get_keyboard()
-                .and_then(|k| k.current_focus());
+            self.popup_grab_prev_kbd_focus =
+                self.seat.get_keyboard().and_then(|k| k.current_focus());
         }
 
         let toplevel = if let Some(existing) = self.popups.get(&_surface.wl_surface().id()) {
@@ -2566,7 +2649,12 @@ impl XdgShellHandler for JwmWaylandState {
         }
     }
 
-    fn reposition_request(&mut self, surface: PopupSurface, positioner: PositionerState, token: u32) {
+    fn reposition_request(
+        &mut self,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
+    ) {
         surface.with_pending_state(|state| {
             state.positioner = positioner;
             state.geometry = state.positioner.get_geometry();
@@ -2641,7 +2729,10 @@ impl XdgShellHandler for JwmWaylandState {
                 .unwrap_or_default()
         });
 
-        info!("[udev/wayland] app_id_changed win={win:?} app_id={}", app_id);
+        info!(
+            "[udev/wayland] app_id_changed win={win:?} app_id={}",
+            app_id
+        );
 
         self.window_app_id.insert(win, app_id.clone());
 
@@ -2737,11 +2828,7 @@ impl WlrLayerShellHandler for JwmWaylandState {
                         return None;
                     };
                     let scale = o.current_scale().fractional_scale();
-                    let logical_size = mode
-                        .size
-                        .to_f64()
-                        .to_logical(scale)
-                        .to_i32_round();
+                    let logical_size = mode.size.to_f64().to_logical(scale).to_i32_round();
                     let logical_size = o.current_transform().transform_size(logical_size);
                     let rect = Rectangle::<i32, Logical>::new(o.current_location(), logical_size);
                     if rect.to_f64().contains(location) {
@@ -2868,12 +2955,12 @@ mod xwayland_legacy_assoc_tests {
         let a = WindowId::from_raw(1);
         let b = WindowId::from_raw(2);
         let candidates = vec![(a, None), (b, Some(0u32))];
-        assert_eq!(match_x11_window_by_surface_id(candidates.clone(), 0), Some(b));
-        // And a None candidate alone never matches.
         assert_eq!(
-            match_x11_window_by_surface_id(vec![(a, None)], 0),
-            None
+            match_x11_window_by_surface_id(candidates.clone(), 0),
+            Some(b)
         );
+        // And a None candidate alone never matches.
+        assert_eq!(match_x11_window_by_surface_id(vec![(a, None)], 0), None);
     }
 
     #[test]

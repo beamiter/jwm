@@ -2,5 +2,5 @@
 //!
 //! See [`crate::backend::compositor_font`] for the implementation and tests.
 pub(super) use crate::backend::compositor_font::{
-    render_text_to_rgba, FONT_6X10, GLYPH_H, GLYPH_W,
+    FONT_6X10, GLYPH_H, GLYPH_W, render_text_to_rgba,
 };

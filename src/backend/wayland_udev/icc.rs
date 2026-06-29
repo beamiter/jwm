@@ -113,7 +113,9 @@ pub fn parse_icc(bytes: &[u8]) -> Result<IccParsed, IccError> {
 
     // Tag table starts at byte 128: 4-byte count, then 12-byte entries.
     let tag_count = read_u32(bytes, 128).ok_or(IccError::TooShort)? as usize;
-    let table_end = 128usize.checked_add(4 + tag_count * 12).ok_or(IccError::TooShort)?;
+    let table_end = 128usize
+        .checked_add(4 + tag_count * 12)
+        .ok_or(IccError::TooShort)?;
     if bytes.len() < table_end {
         return Err(IccError::TooShort);
     }
@@ -168,7 +170,9 @@ pub fn parse_icc(bytes: &[u8]) -> Result<IccParsed, IccError> {
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
-    bytes.get(offset..offset + 4).map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
+    bytes
+        .get(offset..offset + 4)
+        .map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
 }
 
 fn read_s15fixed16(bytes: &[u8], offset: usize) -> Option<f64> {
@@ -205,7 +209,10 @@ fn scale_xy(v: f64) -> i32 {
 
 /// Map an rTRC/gTRC/bTRC curve into either a named TF (Bt1886/Gamma22/ExtLinear)
 /// or a tf_power gamma (× 10_000). Returns (tf_named, tf_power) — exactly one Some.
-fn read_trc_tag(bytes: &[u8], (off, len): (usize, usize)) -> Result<(Option<u32>, Option<u32>), IccError> {
+fn read_trc_tag(
+    bytes: &[u8],
+    (off, len): (usize, usize),
+) -> Result<(Option<u32>, Option<u32>), IccError> {
     if len < 12 || off.checked_add(len).map_or(true, |e| e > bytes.len()) {
         return Err(IccError::TagOutOfBounds);
     }
@@ -231,7 +238,10 @@ fn read_trc_tag(bytes: &[u8], (off, len): (usize, usize)) -> Result<(Option<u32>
             // 16-bit entries, big-endian, normalized so 0xFFFF = 1.0.
             let entries_offset = off + 12;
             let entries_bytes = 2usize.checked_mul(count).ok_or(IccError::TagOutOfBounds)?;
-            if entries_offset.checked_add(entries_bytes).map_or(true, |e| e > bytes.len()) {
+            if entries_offset
+                .checked_add(entries_bytes)
+                .map_or(true, |e| e > bytes.len())
+            {
                 return Err(IccError::TagOutOfBounds);
             }
             let mid_idx = count / 2;
@@ -387,7 +397,11 @@ mod tests {
     #[test]
     fn bad_magic_rejected() {
         let mut profile = build_min_profile(
-            (0.4, 0.2, 0.0), (0.4, 0.7, 0.1), (0.1, 0.1, 0.7), (0.95, 1.0, 1.09), 2.2,
+            (0.4, 0.2, 0.0),
+            (0.4, 0.7, 0.1),
+            (0.1, 0.1, 0.7),
+            (0.95, 1.0, 1.09),
+            2.2,
         );
         profile[36] = b'X';
         assert_eq!(parse_icc(&profile), Err(IccError::BadMagic));
@@ -396,7 +410,11 @@ mod tests {
     #[test]
     fn wrong_class_rejected() {
         let mut profile = build_min_profile(
-            (0.4, 0.2, 0.0), (0.4, 0.7, 0.1), (0.1, 0.1, 0.7), (0.95, 1.0, 1.09), 2.2,
+            (0.4, 0.2, 0.0),
+            (0.4, 0.7, 0.1),
+            (0.1, 0.1, 0.7),
+            (0.95, 1.0, 1.09),
+            2.2,
         );
         profile[12..16].copy_from_slice(b"prtr"); // printer, not display
         assert_eq!(parse_icc(&profile), Err(IccError::UnsupportedClass));
@@ -405,7 +423,11 @@ mod tests {
     #[test]
     fn wrong_color_space_rejected() {
         let mut profile = build_min_profile(
-            (0.4, 0.2, 0.0), (0.4, 0.7, 0.1), (0.1, 0.1, 0.7), (0.95, 1.0, 1.09), 2.2,
+            (0.4, 0.2, 0.0),
+            (0.4, 0.7, 0.1),
+            (0.1, 0.1, 0.7),
+            (0.95, 1.0, 1.09),
+            2.2,
         );
         profile[16..20].copy_from_slice(b"CMYK");
         assert_eq!(parse_icc(&profile), Err(IccError::UnsupportedColorSpace));
@@ -414,7 +436,11 @@ mod tests {
     #[test]
     fn gamma_24_classified_as_bt1886() {
         let profile = build_min_profile(
-            (0.4, 0.2, 0.0), (0.4, 0.7, 0.1), (0.1, 0.1, 0.7), (0.95, 1.0, 1.09), 2.4,
+            (0.4, 0.2, 0.0),
+            (0.4, 0.7, 0.1),
+            (0.1, 0.1, 0.7),
+            (0.95, 1.0, 1.09),
+            2.4,
         );
         let p = parse_icc(&profile).unwrap();
         assert_eq!(p.tf_named, Some(1 /* Bt1886 */));
@@ -423,7 +449,11 @@ mod tests {
     #[test]
     fn unusual_gamma_exposed_as_tf_power() {
         let profile = build_min_profile(
-            (0.4, 0.2, 0.0), (0.4, 0.7, 0.1), (0.1, 0.1, 0.7), (0.95, 1.0, 1.09), 1.8,
+            (0.4, 0.2, 0.0),
+            (0.4, 0.7, 0.1),
+            (0.1, 0.1, 0.7),
+            (0.95, 1.0, 1.09),
+            1.8,
         );
         let p = parse_icc(&profile).unwrap();
         assert!(p.tf_named.is_none());

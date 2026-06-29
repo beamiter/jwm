@@ -153,12 +153,21 @@ impl BenchmarkHarness {
         self.target_frames = target_frames;
         self.frame_times_us.reserve(target_frames as usize);
         self.state = if warmup_frames > 0 {
-            BenchmarkState::Warmup { remaining: warmup_frames }
+            BenchmarkState::Warmup {
+                remaining: warmup_frames,
+            }
         } else {
-            BenchmarkState::Running { target_frames, collected: 0 }
+            BenchmarkState::Running {
+                target_frames,
+                collected: 0,
+            }
         };
         self.start_time = Some(Instant::now());
-        log::info!("benchmark: started (warmup={}, target={})", warmup_frames, target_frames);
+        log::info!(
+            "benchmark: started (warmup={}, target={})",
+            warmup_frames,
+            target_frames
+        );
     }
 
     pub fn stop(&mut self) -> Option<BenchmarkReport> {
@@ -171,7 +180,10 @@ impl BenchmarkHarness {
     }
 
     pub fn is_running(&self) -> bool {
-        matches!(self.state, BenchmarkState::Warmup { .. } | BenchmarkState::Running { .. })
+        matches!(
+            self.state,
+            BenchmarkState::Warmup { .. } | BenchmarkState::Running { .. }
+        )
     }
 
     pub fn is_complete(&self) -> bool {
@@ -185,17 +197,26 @@ impl BenchmarkHarness {
                     *remaining -= 1;
                 } else {
                     let target = self.target_frames;
-                    self.state = BenchmarkState::Running { target_frames: target, collected: 0 };
+                    self.state = BenchmarkState::Running {
+                        target_frames: target,
+                        collected: 0,
+                    };
                     self.start_time = Some(Instant::now());
                     log::info!("benchmark: warmup complete, collecting {} frames", target);
                 }
             }
-            BenchmarkState::Running { target_frames, collected } => {
+            BenchmarkState::Running {
+                target_frames,
+                collected,
+            } => {
                 self.frame_times_us.push(dt_us);
                 *collected += 1;
                 if *target_frames > 0 && *collected >= *target_frames {
                     let c = *collected;
-                    let elapsed = self.start_time.map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0);
+                    let elapsed = self
+                        .start_time
+                        .map(|t| t.elapsed().as_secs_f32())
+                        .unwrap_or(0.0);
                     self.state = BenchmarkState::Complete;
                     log::info!("benchmark: complete ({} frames in {:.1}s)", c, elapsed);
                 }
@@ -205,24 +226,38 @@ impl BenchmarkHarness {
     }
 
     pub fn record_zone(&mut self, name: &str, time_ms: f32) {
-        if !self.is_collecting() { return; }
-        self.zone_times.entry(name.to_string()).or_default().push(time_ms);
+        if !self.is_collecting() {
+            return;
+        }
+        self.zone_times
+            .entry(name.to_string())
+            .or_default()
+            .push(time_ms);
     }
 
     pub fn record_blur_cost(&mut self, pixel_count: u64, time_ms: f32) {
-        if !self.is_collecting() { return; }
-        self.blur_cost_samples.push(BlurCostSample { pixel_count, time_ms });
+        if !self.is_collecting() {
+            return;
+        }
+        self.blur_cost_samples.push(BlurCostSample {
+            pixel_count,
+            time_ms,
+        });
     }
 
     pub fn record_input_latency(&mut self, latency_ms: f32) {
-        if !self.is_collecting() { return; }
+        if !self.is_collecting() {
+            return;
+        }
         if latency_ms > 0.0 {
             self.input_latency_samples.push(latency_ms);
         }
     }
 
     pub fn record_gl_stats(&mut self, draw_calls: u32, state_changes: u32, texture_binds: u32) {
-        if !self.is_collecting() { return; }
+        if !self.is_collecting() {
+            return;
+        }
         self.gl_draw_calls.push(draw_calls);
         self.gl_state_changes.push(state_changes);
         self.gl_texture_binds.push(texture_binds);
@@ -249,18 +284,30 @@ impl BenchmarkHarness {
     fn compute_frame_time_stats(&self) -> FrameTimeStats {
         if self.frame_times_us.is_empty() {
             return FrameTimeStats {
-                count: 0, avg_ms: 0.0, min_ms: 0.0, max_ms: 0.0,
-                p50_ms: 0.0, p95_ms: 0.0, p99_ms: 0.0, stddev_ms: 0.0, fps_avg: 0.0,
+                count: 0,
+                avg_ms: 0.0,
+                min_ms: 0.0,
+                max_ms: 0.0,
+                p50_ms: 0.0,
+                p95_ms: 0.0,
+                p99_ms: 0.0,
+                stddev_ms: 0.0,
+                fps_avg: 0.0,
             };
         }
 
-        let mut sorted: Vec<f64> = self.frame_times_us.iter().map(|&us| us as f64 / 1000.0).collect();
+        let mut sorted: Vec<f64> = self
+            .frame_times_us
+            .iter()
+            .map(|&us| us as f64 / 1000.0)
+            .collect();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
         let count = sorted.len() as u32;
         let sum: f64 = sorted.iter().sum();
         let avg = sum / sorted.len() as f64;
-        let variance: f64 = sorted.iter().map(|&x| (x - avg).powi(2)).sum::<f64>() / sorted.len() as f64;
+        let variance: f64 =
+            sorted.iter().map(|&x| (x - avg).powi(2)).sum::<f64>() / sorted.len() as f64;
 
         FrameTimeStats {
             count,
@@ -277,10 +324,20 @@ impl BenchmarkHarness {
 
     fn compute_latency_stats(&self) -> LatencyStats {
         if self.input_latency_samples.is_empty() {
-            return LatencyStats { count: 0, avg_ms: 0.0, p50_ms: 0.0, p95_ms: 0.0, p99_ms: 0.0 };
+            return LatencyStats {
+                count: 0,
+                avg_ms: 0.0,
+                p50_ms: 0.0,
+                p95_ms: 0.0,
+                p99_ms: 0.0,
+            };
         }
 
-        let mut sorted: Vec<f64> = self.input_latency_samples.iter().map(|&x| x as f64).collect();
+        let mut sorted: Vec<f64> = self
+            .input_latency_samples
+            .iter()
+            .map(|&x| x as f64)
+            .collect();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
         let avg = sorted.iter().sum::<f64>() / sorted.len() as f64;
@@ -297,18 +354,42 @@ impl BenchmarkHarness {
     fn compute_blur_stats(&self) -> BlurStats {
         if self.blur_cost_samples.is_empty() {
             let total = self.blur_cache_hits + self.blur_cache_misses;
-            let hit_rate = if total > 0 { self.blur_cache_hits as f64 / total as f64 * 100.0 } else { 0.0 };
-            return BlurStats { cost_per_megapixel_ms: 0.0, avg_total_ms: 0.0, cache_hit_rate: hit_rate };
+            let hit_rate = if total > 0 {
+                self.blur_cache_hits as f64 / total as f64 * 100.0
+            } else {
+                0.0
+            };
+            return BlurStats {
+                cost_per_megapixel_ms: 0.0,
+                avg_total_ms: 0.0,
+                cache_hit_rate: hit_rate,
+            };
         }
 
-        let total_pixels: f64 = self.blur_cost_samples.iter().map(|s| s.pixel_count as f64).sum();
-        let total_time: f64 = self.blur_cost_samples.iter().map(|s| s.time_ms as f64).sum();
+        let total_pixels: f64 = self
+            .blur_cost_samples
+            .iter()
+            .map(|s| s.pixel_count as f64)
+            .sum();
+        let total_time: f64 = self
+            .blur_cost_samples
+            .iter()
+            .map(|s| s.time_ms as f64)
+            .sum();
         let megapixels = total_pixels / 1_000_000.0;
-        let cost_per_mp = if megapixels > 0.0 { total_time / megapixels } else { 0.0 };
+        let cost_per_mp = if megapixels > 0.0 {
+            total_time / megapixels
+        } else {
+            0.0
+        };
         let avg_total = total_time / self.blur_cost_samples.len() as f64;
 
         let total_cache = self.blur_cache_hits + self.blur_cache_misses;
-        let hit_rate = if total_cache > 0 { self.blur_cache_hits as f64 / total_cache as f64 * 100.0 } else { 0.0 };
+        let hit_rate = if total_cache > 0 {
+            self.blur_cache_hits as f64 / total_cache as f64 * 100.0
+        } else {
+            0.0
+        };
 
         BlurStats {
             cost_per_megapixel_ms: cost_per_mp,
@@ -320,23 +401,32 @@ impl BenchmarkHarness {
     fn compute_zone_reports(&self) -> HashMap<String, ZoneReport> {
         let mut reports = HashMap::new();
         for (name, samples) in &self.zone_times {
-            if samples.is_empty() { continue; }
+            if samples.is_empty() {
+                continue;
+            }
             let mut sorted: Vec<f64> = samples.iter().map(|&x| x as f64).collect();
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let avg = sorted.iter().sum::<f64>() / sorted.len() as f64;
-            reports.insert(name.clone(), ZoneReport {
-                avg_ms: avg,
-                min_ms: sorted[0],
-                max_ms: sorted[sorted.len() - 1],
-                p99_ms: percentile(&sorted, 0.99),
-            });
+            reports.insert(
+                name.clone(),
+                ZoneReport {
+                    avg_ms: avg,
+                    min_ms: sorted[0],
+                    max_ms: sorted[sorted.len() - 1],
+                    p99_ms: percentile(&sorted, 0.99),
+                },
+            );
         }
         reports
     }
 
     fn compute_gl_stats(&self) -> GLStatsReport {
         let avg = |v: &[u32]| -> f64 {
-            if v.is_empty() { 0.0 } else { v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 }
+            if v.is_empty() {
+                0.0
+            } else {
+                v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64
+            }
         };
         GLStatsReport {
             draw_calls_per_frame: avg(&self.gl_draw_calls),
@@ -347,11 +437,15 @@ impl BenchmarkHarness {
 }
 
 impl Default for BenchmarkHarness {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 fn percentile(sorted: &[f64], p: f64) -> f64 {
-    if sorted.is_empty() { return 0.0; }
+    if sorted.is_empty() {
+        return 0.0;
+    }
     let idx = (p * (sorted.len() - 1) as f64).round() as usize;
     sorted[idx.min(sorted.len() - 1)]
 }

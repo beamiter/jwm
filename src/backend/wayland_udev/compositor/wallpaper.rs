@@ -73,18 +73,12 @@ impl WaylandCompositor {
             let img = match image::open(&path) {
                 Ok(img) => img,
                 Err(e) => {
-                    log::warn!(
-                        "[wallpaper] failed to load '{}': {}",
-                        path, e
-                    );
+                    log::warn!("[wallpaper] failed to load '{}': {}", path, e);
                     return;
                 }
             };
 
-            let img = if max_w > 0
-                && max_h > 0
-                && (img.width() > max_w || img.height() > max_h)
-            {
+            let img = if max_w > 0 && max_h > 0 && (img.width() > max_w || img.height() > max_h) {
                 log::info!(
                     "[wallpaper] downscaling '{}' from {}x{} to fit {}x{}",
                     path,
@@ -150,16 +144,8 @@ impl WaylandCompositor {
                 data.rgba.as_ptr() as *const _,
             );
 
-            gl.TexParameteri(
-                ffi::TEXTURE_2D,
-                ffi::TEXTURE_MIN_FILTER,
-                ffi::LINEAR as i32,
-            );
-            gl.TexParameteri(
-                ffi::TEXTURE_2D,
-                ffi::TEXTURE_MAG_FILTER,
-                ffi::LINEAR as i32,
-            );
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
             gl.TexParameteri(
                 ffi::TEXTURE_2D,
                 ffi::TEXTURE_WRAP_S,
@@ -398,7 +384,12 @@ impl WaylandCompositor {
                 let (tex, img_w, img_h, mode) = if let Some(t) = mw.texture {
                     (t, mw.img_w, mw.img_h, mw.mode)
                 } else if let Some(t) = self.wallpaper_texture {
-                    (t, self.wallpaper_img_w, self.wallpaper_img_h, self.wallpaper_mode)
+                    (
+                        t,
+                        self.wallpaper_img_w,
+                        self.wallpaper_img_h,
+                        self.wallpaper_mode,
+                    )
                 } else {
                     // No wallpaper available for this monitor
                     continue;
@@ -435,7 +426,11 @@ impl WaylandCompositor {
                 gl.Uniform2f(self.win_uniforms.size, rw, rh);
                 gl.Uniform1f(
                     self.win_uniforms.opacity,
-                    if crossfade_alpha < 1.0 { crossfade_alpha } else { 1.0 },
+                    if crossfade_alpha < 1.0 {
+                        crossfade_alpha
+                    } else {
+                        1.0
+                    },
                 );
                 gl.BindTexture(ffi::TEXTURE_2D, tex);
                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
@@ -477,7 +472,11 @@ impl WaylandCompositor {
                         gl.Uniform2f(self.win_uniforms.size, rw, rh);
                         gl.Uniform1f(
                             self.win_uniforms.opacity,
-                            if crossfade_alpha < 1.0 { crossfade_alpha } else { 1.0 },
+                            if crossfade_alpha < 1.0 {
+                                crossfade_alpha
+                            } else {
+                                1.0
+                            },
                         );
                         gl.BindTexture(ffi::TEXTURE_2D, tex);
                         gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);

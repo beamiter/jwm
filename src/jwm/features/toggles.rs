@@ -8,8 +8,8 @@ use crate::config::CONFIG;
 use crate::core::animation::AnimationKind;
 use crate::core::models::ClientKey;
 use crate::core::types::Rect;
-use crate::jwm::types::WMArgEnum;
 use crate::jwm::Jwm;
+use crate::jwm::types::WMArgEnum;
 use log::{error, info, warn};
 use std::process::Command;
 
@@ -139,10 +139,7 @@ impl Jwm {
         self.debug_hud_on = !self.debug_hud_on;
         backend.compositor_set_debug_hud(self.debug_hud_on);
         backend.compositor_set_debug_hud_extended(self.debug_hud_on);
-        log::info!(
-            "Debug HUD {}",
-            if self.debug_hud_on { "ON" } else { "OFF" }
-        );
+        log::info!("Debug HUD {}", if self.debug_hud_on { "ON" } else { "OFF" });
         Ok(())
     }
 

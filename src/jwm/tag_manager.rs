@@ -5,8 +5,8 @@
 use crate::backend::api::Backend;
 use crate::config::CONFIG;
 use crate::core::models::{ClientKey, MonitorKey};
-use crate::jwm::types::WMArgEnum;
 use crate::jwm::Jwm;
+use crate::jwm::types::WMArgEnum;
 
 impl Jwm {
     /// 将当前选中的窗口移动到指定标签

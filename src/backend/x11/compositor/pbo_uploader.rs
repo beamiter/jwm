@@ -103,7 +103,11 @@ impl PBOUploader {
     /// `pbo_size`: Size of each PBO in bytes (e.g., 1024*1024*4 = 4MB for 1024x1024 RGBA)
     /// `max_pool_size`: Max number of PBOs to cache
     pub fn new(pbo_size: usize, max_pool_size: usize) -> Self {
-        log::info!("pbo_uploader: initialized with {}MB PBOs, pool size {}", pbo_size / 1024 / 1024, max_pool_size);
+        log::info!(
+            "pbo_uploader: initialized with {}MB PBOs, pool size {}",
+            pbo_size / 1024 / 1024,
+            max_pool_size
+        );
 
         Self {
             pool: VecDeque::with_capacity(max_pool_size),
@@ -131,7 +135,10 @@ impl PBOUploader {
         if required_size > self.pbo_size {
             log::warn!(
                 "pbo_uploader: texture {}x{} ({} bytes) exceeds PBO size ({} bytes), using sync upload",
-                width, height, required_size, self.pbo_size
+                width,
+                height,
+                required_size,
+                self.pbo_size
             );
             return unsafe { self.upload_texture_sync(gl, texture, width, height, format, data) };
         }
@@ -141,7 +148,9 @@ impl PBOUploader {
             Some(p) => p,
             None => {
                 log::warn!("pbo_uploader: PBO allocation failed, falling back to sync upload");
-                return unsafe { self.upload_texture_sync(gl, texture, width, height, format, data) };
+                return unsafe {
+                    self.upload_texture_sync(gl, texture, width, height, format, data)
+                };
             }
         };
 
@@ -284,9 +293,7 @@ impl PBOUploader {
         if let Some(mut pbo) = self.pool.pop_front() {
             // Quick fence check (non-blocking)
             if let Some(fence) = pbo.fence {
-                let status = unsafe {
-                    gl.get_sync_status(fence)
-                };
+                let status = unsafe { gl.get_sync_status(fence) };
                 if status != glow::SIGNALED {
                     // GPU still using this PBO, return it and fail
                     self.pool.push_front(pbo);
@@ -303,9 +310,14 @@ impl PBOUploader {
                     gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(pbo.pbo));
                     gl.bind_texture(glow::TEXTURE_2D, Some(texture));
                     gl.tex_sub_image_2d(
-                        glow::TEXTURE_2D, 0, 0, 0,
-                        width as i32, height as i32,
-                        format, glow::UNSIGNED_BYTE,
+                        glow::TEXTURE_2D,
+                        0,
+                        0,
+                        0,
+                        width as i32,
+                        height as i32,
+                        format,
+                        glow::UNSIGNED_BYTE,
                         glow::PixelUnpackData::BufferOffset(0),
                     );
                     gl.bind_texture(glow::TEXTURE_2D, None);

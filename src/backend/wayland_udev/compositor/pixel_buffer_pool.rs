@@ -87,10 +87,7 @@ impl PixelBufferPool {
 
     /// Return the total number of bytes held across all pooled buffers.
     pub fn total_buffered(&self) -> usize {
-        self.pool
-            .iter()
-            .map(|(cap, bufs)| cap * bufs.len())
-            .sum()
+        self.pool.iter().map(|(cap, bufs)| cap * bufs.len()).sum()
     }
 }
 

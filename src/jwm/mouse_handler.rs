@@ -3,8 +3,8 @@
 //! 这个模块包含鼠标拖动窗口和调整窗口大小的功能
 
 use crate::backend::api::{Backend, ResizeEdge};
-use crate::jwm::types::WMArgEnum;
 use crate::jwm::Jwm;
+use crate::jwm::types::WMArgEnum;
 use log::debug;
 
 impl Jwm {

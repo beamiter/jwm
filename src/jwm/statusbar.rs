@@ -160,12 +160,8 @@ impl StatusBarBuilder {
             let is_urgent_tag = (urgent_tags_mask & tag_bit) != 0;
             let is_occupied_tag = (occupied_tags_mask & tag_bit) != 0;
 
-            let tag_status = TagStatus::new(
-                is_selected_tag,
-                is_urgent_tag,
-                is_filled,
-                is_occupied_tag,
-            );
+            let tag_status =
+                TagStatus::new(is_selected_tag, is_urgent_tag, is_filled, is_occupied_tag);
             monitor_info.set_tag_status(i, tag_status);
         }
 

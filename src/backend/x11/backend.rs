@@ -31,7 +31,7 @@ use calloop::{
 
 use crate::backend::api::{
     Backend, Capabilities, ColorAllocator, CursorProvider, EwmhFacade, InputOps, KeyOps, OutputOps,
-    PropertyOps, WindowOps, VrrCapabilities,
+    PropertyOps, VrrCapabilities, WindowOps,
 };
 
 use self::{
@@ -115,7 +115,12 @@ impl X11Backend {
             None => return false,
         };
         match ev {
-            BackendEvent::ClientMessage { window: _, type_, data, .. } => {
+            BackendEvent::ClientMessage {
+                window: _,
+                type_,
+                data,
+                ..
+            } => {
                 if *type_ == u32::from(self.atoms._NET_SYSTEM_TRAY_OPCODE) {
                     return systray.handle_client_message(self.root_x11, data);
                 }
@@ -276,10 +281,20 @@ impl X11Backend {
 
         // P4: Query primary monitor refresh rate before compositor init
         let outputs = OutputOps::enumerate_outputs(output_ops.as_ref());
-        let primary_refresh_hz = outputs.iter()
-            .find_map(|o| if o.refresh_rate > 0 { Some(o.refresh_rate) } else { None })
+        let primary_refresh_hz = outputs
+            .iter()
+            .find_map(|o| {
+                if o.refresh_rate > 0 {
+                    Some(o.refresh_rate)
+                } else {
+                    None
+                }
+            })
             .unwrap_or(60);
-        log::info!("backend: primary monitor refresh rate: {}Hz", primary_refresh_hz);
+        log::info!(
+            "backend: primary monitor refresh rate: {}Hz",
+            primary_refresh_hz
+        );
 
         let compositor = if compositor_enabled {
             match super::compositor::Compositor::new(
@@ -345,20 +360,18 @@ impl X11Backend {
             backend.root_x11,
             screen_num,
         ) {
-            Ok(mut tray) => {
-                match tray.acquire_selection() {
-                    Ok(true) => {
-                        log::info!("[systray] Acquired system tray selection");
-                        backend.systray = Some(tray);
-                    }
-                    Ok(false) => {
-                        log::info!("[systray] Another tray owner exists, skipping");
-                    }
-                    Err(e) => {
-                        log::warn!("[systray] Failed to acquire selection: {}", e);
-                    }
+            Ok(mut tray) => match tray.acquire_selection() {
+                Ok(true) => {
+                    log::info!("[systray] Acquired system tray selection");
+                    backend.systray = Some(tray);
                 }
-            }
+                Ok(false) => {
+                    log::info!("[systray] Another tray owner exists, skipping");
+                }
+                Err(e) => {
+                    log::warn!("[systray] Failed to acquire selection: {}", e);
+                }
+            },
             Err(e) => {
                 log::warn!("[systray] Failed to create system tray: {}", e);
             }
@@ -457,7 +470,12 @@ impl X11Backend {
                     }
                 }
             }
-            BackendEvent::PresentComplete { window, serial, msc, ust } => {
+            BackendEvent::PresentComplete {
+                window,
+                serial,
+                msc,
+                ust,
+            } => {
                 if let Ok(x11w) = self.ids.x11(*window) {
                     // Update OML sync tracking with actual presentation MSC
                     if let Some(oml) = compositor.oml_mut() {
@@ -467,7 +485,11 @@ impl X11Backend {
                     compositor.on_present_complete(x11w, *serial, *msc, *ust);
                 }
             }
-            BackendEvent::PresentIdle { window, serial, pixmap } => {
+            BackendEvent::PresentIdle {
+                window,
+                serial,
+                pixmap,
+            } => {
                 if let Ok(x11w) = self.ids.x11(*window) {
                     compositor.on_present_idle(x11w, *serial, *pixmap);
                 }
@@ -518,7 +540,10 @@ impl X11Backend {
         for output in &outputs {
             // Assume refresh_rate is already populated by RandR query
             if output.refresh_rate > 0 {
-                log::info!("backend: primary monitor refresh rate: {}Hz", output.refresh_rate);
+                log::info!(
+                    "backend: primary monitor refresh rate: {}Hz",
+                    output.refresh_rate
+                );
                 return output.refresh_rate;
             }
         }
@@ -539,8 +564,11 @@ impl X11Backend {
             if let Some(caps) = super::edid::query_edid_hdr(&self.conn, output_id) {
                 log::info!(
                     "HDR EDID: max={:.0} nits, min={:.2} nits, PQ={}, HLG={}, BT.2020={}",
-                    caps.max_luminance_nits, caps.min_luminance_nits,
-                    caps.supports_pq, caps.supports_hlg, caps.supports_bt2020
+                    caps.max_luminance_nits,
+                    caps.min_luminance_nits,
+                    caps.supports_pq,
+                    caps.supports_hlg,
+                    caps.supports_bt2020
                 );
 
                 if let Some(c) = self.compositor.as_mut() {
@@ -630,9 +658,19 @@ impl X11Backend {
     }
 
     fn query_primary_randr_output(&self) -> Option<u32> {
-        let resources = self.conn.randr_get_screen_resources(self.root_x11).ok()?.reply().ok()?;
+        let resources = self
+            .conn
+            .randr_get_screen_resources(self.root_x11)
+            .ok()?
+            .reply()
+            .ok()?;
         for &output in resources.outputs.iter() {
-            let oi = self.conn.randr_get_output_info(output, 0).ok()?.reply().ok()?;
+            let oi = self
+                .conn
+                .randr_get_output_info(output, 0)
+                .ok()?
+                .reply()
+                .ok()?;
             if oi.crtc != 0 && oi.connection == x11rb::protocol::randr::Connection::CONNECTED {
                 return Some(output);
             }
@@ -705,13 +743,21 @@ impl Backend for X11Backend {
                             Ok(geometries) => {
                                 for (x11w, _) in windows {
                                     if let Some((x, y, w, h)) = geometries.get(&x11w) {
-                                        compositor.add_window(x11w, *x as i32, *y as i32, *w as u32, *h as u32);
+                                        compositor.add_window(
+                                            x11w, *x as i32, *y as i32, *w as u32, *h as u32,
+                                        );
                                     }
                                 }
-                                log::info!("Compositor enabled at runtime (batched {} windows)", geometries.len());
+                                log::info!(
+                                    "Compositor enabled at runtime (batched {} windows)",
+                                    geometries.len()
+                                );
                             }
                             Err(e) => {
-                                log::warn!("Batched geometry request failed: {:?}, falling back to individual queries", e);
+                                log::warn!(
+                                    "Batched geometry request failed: {:?}, falling back to individual queries",
+                                    e
+                                );
                                 // Fallback to individual queries
                                 for (x11w, wid) in self.ids.all_x11_windows() {
                                     if x11w == self.root_x11 || x11w == overlay {
@@ -907,14 +953,19 @@ impl Backend for X11Backend {
     }
 
     fn compositor_benchmark_is_complete(&self) -> bool {
-        self.compositor.as_ref().map_or(false, |c| c.benchmark_is_complete())
+        self.compositor
+            .as_ref()
+            .map_or(false, |c| c.benchmark_is_complete())
     }
 
     fn compositor_benchmark_set_auto_exit(&mut self, enabled: bool) {
         self.benchmark_auto_exit = enabled;
     }
 
-    fn query_vrr_capabilities(&self, output: crate::backend::common_define::OutputId) -> Option<VrrCapabilities> {
+    fn query_vrr_capabilities(
+        &self,
+        output: crate::backend::common_define::OutputId,
+    ) -> Option<VrrCapabilities> {
         let cfg = crate::config::CONFIG.load();
         let behavior = cfg.behavior();
 
@@ -935,8 +986,8 @@ impl Backend for X11Backend {
             // In production, would query "vrr_capable" property more explicitly
 
             return Some(VrrCapabilities {
-                supported: true,  // Optimistic: assume VRR supported for active outputs
-                current_enabled: false,  // Would need to query CRTC property dynamically
+                supported: true,        // Optimistic: assume VRR supported for active outputs
+                current_enabled: false, // Would need to query CRTC property dynamically
                 min_refresh_hz: behavior.vrr_min_fps,
                 max_refresh_hz: behavior.vrr_max_fps,
             });
@@ -945,13 +996,19 @@ impl Backend for X11Backend {
         None
     }
 
-    fn set_vrr_enabled(&mut self, _output: crate::backend::common_define::OutputId, _enabled: bool) -> Result<(), BackendError> {
+    fn set_vrr_enabled(
+        &mut self,
+        _output: crate::backend::common_define::OutputId,
+        _enabled: bool,
+    ) -> Result<(), BackendError> {
         // X11 has no portable per-output VRR toggle: drivers expose it via
         // either the `VRR_CAPABLE`/`vrr_enabled` CRTC properties (amdgpu, nouveau)
         // or vendor-specific bits (NVIDIA G-SYNC). Wiring this up requires the
         // RandR `change_crtc_property` path with driver-specific atom lookup,
         // which is not implemented yet — fail loudly instead of silently lying.
-        Err(BackendError::Unsupported("X11 set_vrr_enabled not implemented"))
+        Err(BackendError::Unsupported(
+            "X11 set_vrr_enabled not implemented",
+        ))
     }
 
     fn compositor_capture_thumbnail(
@@ -1044,7 +1101,12 @@ impl Backend for X11Backend {
         }
     }
 
-    fn compositor_notify_audio_timing(&mut self, window: crate::backend::common_define::WindowId, fps: f32, buffer_latency_ms: u32) {
+    fn compositor_notify_audio_timing(
+        &mut self,
+        window: crate::backend::common_define::WindowId,
+        fps: f32,
+        buffer_latency_ms: u32,
+    ) {
         if let Some(c) = self.compositor.as_mut() {
             if let Ok(x11w) = self.ids.x11(window) {
                 c.notify_audio_timing(x11w, fps, buffer_latency_ms);
@@ -1637,7 +1699,7 @@ impl Backend for X11Backend {
         // Generic 源拥有 Inotify(实现 AsFd),回调中用 read_events() 解析并按
         // 文件名过滤,避免目录内其它文件的无关事件。
         let setup_inotify = || -> Result<(), BackendError> {
-            use nix::sys::inotify::{AddWatchFlags, Inotify, InitFlags};
+            use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 
             let config_path = crate::config::Config::get_default_config_path();
             let watch_dir = config_path
@@ -1673,11 +1735,12 @@ impl Backend for X11Backend {
                     move |_, inotify, data| {
                         let events = inotify.read_events().unwrap_or_default();
                         // 仅当配置文件本身发生写入/移入时才触发重载。
-                        let relevant = events.iter().any(|ev| match (&config_file_name, &ev.name) {
-                            (Some(want), Some(got)) => got == want,
-                            // 无文件名(理论上不应出现在目录 watch)时保守地触发一次。
-                            _ => true,
-                        });
+                        let relevant =
+                            events.iter().any(|ev| match (&config_file_name, &ev.name) {
+                                (Some(want), Some(got)) => got == want,
+                                // 无文件名(理论上不应出现在目录 watch)时保守地触发一次。
+                                _ => true,
+                            });
                         if relevant {
                             if let Err(e) = data.handler.handle_event(
                                 data.backend,
@@ -1689,13 +1752,18 @@ impl Backend for X11Backend {
                         Ok(calloop::PostAction::Continue)
                     },
                 )
-                .map_err(|e| BackendError::Message(format!("Failed to insert inotify source: {}", e)))?;
+                .map_err(|e| {
+                    BackendError::Message(format!("Failed to insert inotify source: {}", e))
+                })?;
 
             Ok(())
         };
 
         if let Err(e) = setup_inotify() {
-            log::warn!("Failed to set up config file watching: {}. Falling back to polling.", e);
+            log::warn!(
+                "Failed to set up config file watching: {}. Falling back to polling.",
+                e
+            );
         } else {
             log::info!("Config file hot-reload enabled via inotify");
         }
@@ -3708,10 +3776,10 @@ mod output_ops {
                             output,
                             vrr_atom,
                             x11rb::protocol::xproto::AtomEnum::ANY,
-                            0,  // offset
-                            1,  // length (single value)
-                            false,  // delete
-                            false,  // pending
+                            0,     // offset
+                            1,     // length (single value)
+                            false, // delete
+                            false, // pending
                         ) {
                             if let Ok(prop) = prop_cookie.reply() {
                                 if prop.format == 8 && prop.num_items > 0 {
@@ -3728,9 +3796,19 @@ mod output_ops {
         }
 
         /// Read the connector's EDID blob via RandR and parse HDR Static Metadata.
-        fn query_output_edid_hdr(&self, output: u32) -> Option<crate::backend::edid::EdidHdrCapabilities> {
-            let edid_atom = self.conn.intern_atom(false, b"EDID").ok()?.reply().ok()?.atom;
-            let prop = self.conn
+        fn query_output_edid_hdr(
+            &self,
+            output: u32,
+        ) -> Option<crate::backend::edid::EdidHdrCapabilities> {
+            let edid_atom = self
+                .conn
+                .intern_atom(false, b"EDID")
+                .ok()?
+                .reply()
+                .ok()?
+                .atom;
+            let prop = self
+                .conn
                 .randr_get_output_property(output, edid_atom, 0u32, 0, 256, false, false)
                 .ok()?
                 .reply()
@@ -3754,10 +3832,10 @@ mod output_ops {
                             output,
                             max_bpc_atom,
                             x11rb::protocol::xproto::AtomEnum::INTEGER,
-                            0,  // offset
-                            1,  // length (single value)
-                            false,  // delete
-                            false,  // pending
+                            0,     // offset
+                            1,     // length (single value)
+                            false, // delete
+                            false, // pending
                         ) {
                             if let Ok(prop) = prop_cookie.reply() {
                                 // x11rb un-swaps format=32 property data to host
@@ -3853,13 +3931,15 @@ mod output_ops {
                                             })
                                             .unwrap_or(60000);
 
-                                        let (hdr_capable, hdr_metadata) = if let Some(&first_output) = m.outputs.first() {
-                                            let caps = self.query_output_edid_hdr(first_output);
-                                            let bpc_capable = self.query_output_hdr_capable(first_output);
-                                            (bpc_capable || caps.is_some(), caps)
-                                        } else {
-                                            (true, None)
-                                        };
+                                        let (hdr_capable, hdr_metadata) =
+                                            if let Some(&first_output) = m.outputs.first() {
+                                                let caps = self.query_output_edid_hdr(first_output);
+                                                let bpc_capable =
+                                                    self.query_output_hdr_capable(first_output);
+                                                (bpc_capable || caps.is_some(), caps)
+                                            } else {
+                                                (true, None)
+                                            };
 
                                         out.push(OutputInfo {
                                             id: OutputId(i as u64),
@@ -3877,9 +3957,14 @@ mod output_ops {
                                         // Check for VRR support on this output
                                         if let Some(&first_output) = m.outputs.first() {
                                             if self.query_output_vrr_capable(first_output) {
-                                                if let Ok(mut vrr_map) = self.vrr_capable_outputs.lock() {
+                                                if let Ok(mut vrr_map) =
+                                                    self.vrr_capable_outputs.lock()
+                                                {
                                                     vrr_map.insert(i as u32, true);
-                                                    log::info!("backend: Output {} supports VRR", i);
+                                                    log::info!(
+                                                        "backend: Output {} supports VRR",
+                                                        i
+                                                    );
                                                 }
                                             }
                                         }
@@ -3988,20 +4073,15 @@ mod output_ops {
             if let Some(crtc_id) = crtc {
                 self.conn
                     .randr_set_crtc_gamma(crtc_id, red, green, blue)
-                    .map_err(|e| {
-                        crate::backend::error::BackendError::Message(e.to_string())
-                    })?;
-                self.conn.flush().map_err(|e| {
-                    crate::backend::error::BackendError::Message(e.to_string())
-                })?;
+                    .map_err(|e| crate::backend::error::BackendError::Message(e.to_string()))?;
+                self.conn
+                    .flush()
+                    .map_err(|e| crate::backend::error::BackendError::Message(e.to_string()))?;
             }
             Ok(())
         }
 
-        fn get_gamma_ramp(
-            &self,
-            output: OutputId,
-        ) -> Option<(Vec<u16>, Vec<u16>, Vec<u16>)> {
+        fn get_gamma_ramp(&self, output: OutputId) -> Option<(Vec<u16>, Vec<u16>, Vec<u16>)> {
             let crtc = self.output_to_crtc(output.0 as u32)?;
             let gamma_size = self
                 .conn
@@ -4009,23 +4089,32 @@ mod output_ops {
                 .ok()?
                 .reply()
                 .ok()?;
-            let reply = self
-                .conn
-                .randr_get_crtc_gamma(crtc)
-                .ok()?
-                .reply()
-                .ok()?;
+            let reply = self.conn.randr_get_crtc_gamma(crtc).ok()?.reply().ok()?;
             let _ = gamma_size;
-            Some((reply.red.to_vec(), reply.green.to_vec(), reply.blue.to_vec()))
+            Some((
+                reply.red.to_vec(),
+                reply.green.to_vec(),
+                reply.blue.to_vec(),
+            ))
         }
     }
 
     impl<C: Connection + Send + Sync + 'static> X11OutputOps<C> {
         fn output_to_crtc(&self, output_id: u32) -> Option<u32> {
-            let resources = self.conn.randr_get_screen_resources(self.root).ok()?.reply().ok()?;
+            let resources = self
+                .conn
+                .randr_get_screen_resources(self.root)
+                .ok()?
+                .reply()
+                .ok()?;
             for &output in &resources.outputs {
                 if output == output_id {
-                    let info = self.conn.randr_get_output_info(output, 0).ok()?.reply().ok()?;
+                    let info = self
+                        .conn
+                        .randr_get_output_info(output, 0)
+                        .ok()?
+                        .reply()
+                        .ok()?;
                     if info.crtc != 0 {
                         return Some(info.crtc);
                     }
@@ -4052,8 +4141,8 @@ mod property_ops {
     use x11rb::connection::Connection;
     use x11rb::properties::WmSizeHints;
     use x11rb::protocol::xproto::*;
-    use x11rb::x11_utils::Serialize;
     use x11rb::wrapper::ConnectionExt as _;
+    use x11rb::x11_utils::Serialize;
 
     // Caps for client-supplied property fetches. A hostile or buggy client can
     // set an arbitrarily large property on its own windows; reading without a
@@ -4689,7 +4778,14 @@ mod property_ops {
             let w = self.ids.x11(win).ok()?;
             let reply = self
                 .conn
-                .get_property(false, w, self.atoms._NET_WM_USER_TIME, AtomEnum::CARDINAL, 0, 1)
+                .get_property(
+                    false,
+                    w,
+                    self.atoms._NET_WM_USER_TIME,
+                    AtomEnum::CARDINAL,
+                    0,
+                    1,
+                )
                 .ok()?
                 .reply()
                 .ok()?;
@@ -4728,10 +4824,12 @@ mod property_ops {
                 // multiplications driven by client-supplied data. On 32-bit
                 // hosts usize is u32, so either can wrap silently. Bail on
                 // overflow rather than corrupting the parse cursor.
-                let Some(pixel_count) =
-                    (width as usize).checked_mul(height as usize)
-                else { break };
-                let Some(rgba_bytes) = pixel_count.checked_mul(4) else { break };
+                let Some(pixel_count) = (width as usize).checked_mul(height as usize) else {
+                    break;
+                };
+                let Some(rgba_bytes) = pixel_count.checked_mul(4) else {
+                    break;
+                };
                 offset += 2;
                 if offset + pixel_count > data.len() {
                     break;
@@ -4751,11 +4849,7 @@ mod property_ops {
                 });
                 offset += pixel_count;
             }
-            if icons.is_empty() {
-                None
-            } else {
-                Some(icons)
-            }
+            if icons.is_empty() { None } else { Some(icons) }
         }
 
         fn get_bypass_compositor(&self, win: WindowId) -> Option<u32> {
@@ -4813,14 +4907,7 @@ mod property_ops {
             let w = self.ids.x11(win).ok()?;
             let reply = self
                 .conn
-                .get_property(
-                    false,
-                    w,
-                    self.atoms._MOTIF_WM_HINTS,
-                    AtomEnum::ANY,
-                    0,
-                    5,
-                )
+                .get_property(false, w, self.atoms._MOTIF_WM_HINTS, AtomEnum::ANY, 0, 5)
                 .ok()?
                 .reply()
                 .ok()?;
@@ -4887,7 +4974,12 @@ mod property_ops {
             data.first().copied()
         }
 
-        fn send_sync_request(&self, win: WindowId, _counter: u32, value: u64) -> Result<(), BackendError> {
+        fn send_sync_request(
+            &self,
+            win: WindowId,
+            _counter: u32,
+            value: u64,
+        ) -> Result<(), BackendError> {
             let w = self.ids.x11(win)?;
             let lo = (value & 0xFFFF_FFFF) as u32;
             let hi = (value >> 32) as u32;
@@ -4903,7 +4995,8 @@ mod property_ops {
                     0,
                 ],
             );
-            self.conn.send_event(false, w, EventMask::NO_EVENT, event.serialize())?;
+            self.conn
+                .send_event(false, w, EventMask::NO_EVENT, event.serialize())?;
             self.conn.flush()?;
             Ok(())
         }
@@ -4943,7 +5036,6 @@ mod property_ops {
 }
 
 mod window_ops {
-    use crate::sync_ext::MutexExt;
     use super::adapter::{event_mask_from_generic, mods_to_x11};
     use super::ids::X11IdRegistry;
     use crate::backend::api::{CloseResult, Geometry, WindowAttributes, WindowOps};
@@ -4952,6 +5044,7 @@ mod window_ops {
     use crate::backend::error::BackendError;
     use crate::backend::x11::Atoms;
     use crate::backend::x11::batch::X11RequestBatcher;
+    use crate::sync_ext::MutexExt;
     use log::debug;
     use std::env;
     use std::sync::Arc;

@@ -1,11 +1,11 @@
 // Lifecycle management: cleanup, config reload, and resource management
 
+use crate::Jwm;
 use crate::backend::api::{Backend, WindowChanges};
 use crate::backend::common_define::{ArgbColor, ColorScheme, EventMaskBits, SchemeType, WindowId};
 use crate::config::CONFIG;
 use crate::core::models::{ClientKey, MonitorKey};
 use crate::ipc::IpcResponse;
-use crate::Jwm;
 use log::{info, warn};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
@@ -45,7 +45,12 @@ impl Jwm {
                 self.features.recording.segments.push(seg);
             }
             let n = self.features.recording.segments.len();
-            let target = self.features.recording.output_path.as_deref().unwrap_or("(unset)");
+            let target = self
+                .features
+                .recording
+                .output_path
+                .as_deref()
+                .unwrap_or("(unset)");
             info!(
                 "[cleanup_x11_resources] Recording stopped on shutdown: {n} segment(s) on /tmp/jwm-rec-*, target was {target}"
             );
@@ -201,7 +206,9 @@ impl Jwm {
         Ok(())
     }
 
-    pub(crate) fn cleanup_shared_memory_resources(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub(crate) fn cleanup_shared_memory_resources(
+        &mut self,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Clean up all monitor bars shared memory
         for (mon_id, bar) in self.secondary_bars.drain() {
             drop(bar.shmem);

@@ -679,13 +679,13 @@ fn default_vrr_max_fps() -> u32 {
     240
 }
 fn default_hdr_peak_nits() -> f32 {
-    400.0  // Conservative HDR400 baseline
+    400.0 // Conservative HDR400 baseline
 }
 fn default_tone_mapping_method() -> String {
-    "aces".to_string()  // ACES filmic tone mapping (best quality)
+    "aces".to_string() // ACES filmic tone mapping (best quality)
 }
 fn default_temporal_blur_ratio() -> f32 {
-    0.8  // 80% previous frame + 20% new
+    0.8 // 80% previous frame + 20% new
 }
 fn default_blur_strength_by_hz() -> String {
     // Default: 60Hz→2, 75Hz→2.5, 90Hz→3, 120Hz→3.5, 144Hz→4
@@ -1039,7 +1039,7 @@ impl Default for Config {
                     contrast: default_one(),
                     invert_colors: false,
                     grayscale: false,
-                    hdr_enabled: false,  // Disabled by default (requires HDR display)
+                    hdr_enabled: false, // Disabled by default (requires HDR display)
                     hdr_peak_nits: default_hdr_peak_nits(),
                     tone_mapping_method: default_tone_mapping_method(),
                     color_management_render_path: false,
@@ -1661,8 +1661,20 @@ impl Config {
                 problems.push(format!("{label}={v} out of [{lo}, {hi}]"));
             }
         };
-        in_range("behavior.active_opacity", b.active_opacity, 0.0, 1.0, &mut problems);
-        in_range("behavior.inactive_opacity", b.inactive_opacity, 0.0, 1.0, &mut problems);
+        in_range(
+            "behavior.active_opacity",
+            b.active_opacity,
+            0.0,
+            1.0,
+            &mut problems,
+        );
+        in_range(
+            "behavior.inactive_opacity",
+            b.inactive_opacity,
+            0.0,
+            1.0,
+            &mut problems,
+        );
         in_range(
             "behavior.blur_temporal_mix_ratio",
             b.blur_temporal_mix_ratio,
@@ -1683,8 +1695,14 @@ impl Config {
             ));
         }
 
-        const KNOWN_EASINGS: &[&str] =
-            &["linear", "ease-in", "ease-out", "ease-in-out", "bounce", "elastic"];
+        const KNOWN_EASINGS: &[&str] = &[
+            "linear",
+            "ease-in",
+            "ease-out",
+            "ease-in-out",
+            "bounce",
+            "elastic",
+        ];
         if !KNOWN_EASINGS.contains(&self.inner.animation.easing.as_str()) {
             problems.push(format!(
                 "animation.easing='{}' is not one of {:?} (falling back to ease-out)",
@@ -2186,8 +2204,7 @@ impl Config {
             _ => return vec![],
         };
 
-        let modkey =
-            self.parse_modifiers(std::slice::from_ref(&self.inner.keybindings.modkey));
+        let modkey = self.parse_modifiers(std::slice::from_ref(&self.inner.keybindings.modkey));
         vec![
             WMKey::new(modkey, key, Some(Jwm::view), jwm::WMArgEnum::UInt(1 << tag)),
             WMKey::new(
@@ -2488,7 +2505,10 @@ pub static CONFIG: Lazy<ArcSwap<Config>> = Lazy::new(|| {
             }
         }
         let config = Config::load_default();
-        println!("Configuration loaded from: {}", Config::resolve_load_path().display());
+        println!(
+            "Configuration loaded from: {}",
+            Config::resolve_load_path().display()
+        );
         config
     };
     ArcSwap::from_pointee(config)

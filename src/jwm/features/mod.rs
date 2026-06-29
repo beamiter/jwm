@@ -7,16 +7,16 @@
 //! - magnifier: 放大镜
 //! - toggles: 所有特性的切换函数
 
-pub mod screenshot;
+pub mod magnifier;
 pub mod overview;
 pub mod recording;
-pub mod magnifier;
+pub mod screenshot;
 pub mod toggles;
 
-pub use screenshot::ScreenshotState;
+pub use magnifier::MagnifierState;
 pub use overview::OverviewState;
 pub use recording::RecordingState;
-pub use magnifier::MagnifierState;
+pub use screenshot::ScreenshotState;
 
 /// 所有特性的组合状态
 #[derive(Debug, Default, Clone)]
