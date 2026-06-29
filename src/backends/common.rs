@@ -279,9 +279,7 @@ mod tests {
     #[test]
     #[cfg(feature = "semaphore")]
     fn test_semaphore_size_ge_align() {
-        assert!(
-            SyncStrategy::Semaphore.backend_size() >= SyncStrategy::Semaphore.backend_align()
-        );
+        assert!(SyncStrategy::Semaphore.backend_size() >= SyncStrategy::Semaphore.backend_align());
     }
 
     // ── 各策略 backend_size 互不相同（验证每个 match 分支各自生效）────────────

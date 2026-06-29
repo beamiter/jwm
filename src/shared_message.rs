@@ -1,5 +1,5 @@
-use serde::Serialize;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use serde::Serialize;
 use serde_big_array::BigArray;
 use std::time::{SystemTime, UNIX_EPOCH};
 

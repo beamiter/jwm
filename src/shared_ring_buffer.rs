@@ -574,7 +574,9 @@ impl Drop for SharedRingBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared_message::{CommandType, MonitorInfo, SharedCommand, SharedMessage, TagStatus};
+    use crate::shared_message::{
+        CommandType, MonitorInfo, SharedCommand, SharedMessage, TagStatus,
+    };
     use std::sync::{Arc, Barrier, Mutex};
     use std::time::Duration;
 
@@ -695,7 +697,10 @@ mod tests {
         assert_eq!(got_mi.monitor_height, 1080);
         assert_eq!(got_mi.get_client_name(), "test_wm");
         assert_eq!(got_mi.get_ltsymbol(), "[M]");
-        assert_eq!(got_mi.get_tag_status(0), Some(TagStatus::new(true, false, true, false)));
+        assert_eq!(
+            got_mi.get_tag_status(0),
+            Some(TagStatus::new(true, false, true, false))
+        );
     }
 
     #[test]
@@ -893,7 +898,9 @@ mod tests {
         let path = mk_path("wait_msg_present");
         let buf = SharedRingBuffer::create_aux(&path, Some(16), Some(0)).unwrap();
         buf.try_write_message(&make_msg(1)).unwrap();
-        let result = buf.wait_for_message(Some(Duration::from_millis(50))).unwrap();
+        let result = buf
+            .wait_for_message(Some(Duration::from_millis(50)))
+            .unwrap();
         assert!(result);
     }
 
@@ -921,13 +928,9 @@ mod tests {
     #[test]
     fn test_spsc_producer_consumer() {
         let path = mk_path("spsc");
-        let producer = Arc::new(
-            SharedRingBuffer::create_aux(&path, Some(64), Some(0)).unwrap(),
-        );
+        let producer = Arc::new(SharedRingBuffer::create_aux(&path, Some(64), Some(0)).unwrap());
         std::thread::sleep(Duration::from_millis(5));
-        let consumer = Arc::new(
-            SharedRingBuffer::open_aux(&path, Some(0)).unwrap(),
-        );
+        let consumer = Arc::new(SharedRingBuffer::open_aux(&path, Some(0)).unwrap());
 
         let total = 500usize;
         let barrier = Arc::new(Barrier::new(2));
@@ -964,13 +967,9 @@ mod tests {
     #[test]
     fn test_spsc_command_producer_consumer() {
         let path = mk_path("spsc_cmd");
-        let sender = Arc::new(
-            SharedRingBuffer::create_aux(&path, Some(64), Some(0)).unwrap(),
-        );
+        let sender = Arc::new(SharedRingBuffer::create_aux(&path, Some(64), Some(0)).unwrap());
         std::thread::sleep(Duration::from_millis(5));
-        let receiver = Arc::new(
-            SharedRingBuffer::open_aux(&path, Some(0)).unwrap(),
-        );
+        let receiver = Arc::new(SharedRingBuffer::open_aux(&path, Some(0)).unwrap());
 
         let total = 200usize;
         let barrier = Arc::new(Barrier::new(2));
@@ -1074,8 +1073,7 @@ mod tests {
     #[cfg(feature = "futex")]
     fn test_futex_write_read_roundtrip() {
         let path = mk_path("futex_rw");
-        let buf =
-            SharedRingBuffer::create(&path, SyncStrategy::Futex, Some(16), Some(0)).unwrap();
+        let buf = SharedRingBuffer::create(&path, SyncStrategy::Futex, Some(16), Some(0)).unwrap();
         buf.try_write_message(&make_msg(11)).unwrap();
         let got = buf.try_read_next_message().unwrap().unwrap();
         assert_eq!(got.get_monitor_info().monitor_num, 11);
@@ -1089,9 +1087,8 @@ mod tests {
             SharedRingBuffer::create(&path, SyncStrategy::Futex, Some(64), Some(0)).unwrap(),
         );
         std::thread::sleep(Duration::from_millis(5));
-        let consumer = Arc::new(
-            SharedRingBuffer::open(&path, SyncStrategy::Futex, Some(0)).unwrap(),
-        );
+        let consumer =
+            Arc::new(SharedRingBuffer::open(&path, SyncStrategy::Futex, Some(0)).unwrap());
         let total = 300usize;
         let b = Arc::new(Barrier::new(2));
         let p = producer.clone();
@@ -1126,8 +1123,7 @@ mod tests {
     #[cfg(feature = "semaphore")]
     fn test_explicit_semaphore_strategy_create_open() {
         let path = mk_path("sem_explicit");
-        let creator =
-            SharedRingBuffer::create(&path, SyncStrategy::Semaphore, Some(16), Some(0));
+        let creator = SharedRingBuffer::create(&path, SyncStrategy::Semaphore, Some(16), Some(0));
         assert!(creator.is_ok());
         let opener = SharedRingBuffer::open(&path, SyncStrategy::Semaphore, Some(0));
         assert!(opener.is_ok());
@@ -1152,9 +1148,8 @@ mod tests {
             SharedRingBuffer::create(&path, SyncStrategy::Semaphore, Some(64), Some(0)).unwrap(),
         );
         std::thread::sleep(Duration::from_millis(5));
-        let consumer = Arc::new(
-            SharedRingBuffer::open(&path, SyncStrategy::Semaphore, Some(0)).unwrap(),
-        );
+        let consumer =
+            Arc::new(SharedRingBuffer::open(&path, SyncStrategy::Semaphore, Some(0)).unwrap());
         let total = 300usize;
         let b = Arc::new(Barrier::new(2));
         let p = producer.clone();
@@ -1190,8 +1185,7 @@ mod tests {
     fn test_explicit_eventfd_strategy_create_open() {
         let _lock = EVENTFD_LOCK.lock().unwrap();
         let path = mk_path("efd_explicit");
-        let creator =
-            SharedRingBuffer::create(&path, SyncStrategy::EventFd, Some(16), Some(0));
+        let creator = SharedRingBuffer::create(&path, SyncStrategy::EventFd, Some(16), Some(0));
         assert!(creator.is_ok());
         std::thread::sleep(Duration::from_millis(10));
         let opener = SharedRingBuffer::open(&path, SyncStrategy::EventFd, Some(0));
@@ -1207,9 +1201,8 @@ mod tests {
             SharedRingBuffer::create(&path, SyncStrategy::EventFd, Some(64), Some(0)).unwrap(),
         );
         std::thread::sleep(Duration::from_millis(20));
-        let consumer = Arc::new(
-            SharedRingBuffer::open(&path, SyncStrategy::EventFd, Some(0)).unwrap(),
-        );
+        let consumer =
+            Arc::new(SharedRingBuffer::open(&path, SyncStrategy::EventFd, Some(0)).unwrap());
 
         let total = 200usize;
         let b = Arc::new(Barrier::new(2));
@@ -1365,19 +1358,17 @@ mod tests {
     #[test]
     fn test_wait_for_message_wakes_on_signal() {
         let path = mk_path("wake_msg");
-        let producer = Arc::new(
-            SharedRingBuffer::create_aux(&path, Some(16), Some(100)).unwrap(),
-        );
+        let producer = Arc::new(SharedRingBuffer::create_aux(&path, Some(16), Some(100)).unwrap());
         std::thread::sleep(Duration::from_millis(5));
-        let consumer = Arc::new(
-            SharedRingBuffer::open_aux(&path, Some(100)).unwrap(),
-        );
+        let consumer = Arc::new(SharedRingBuffer::open_aux(&path, Some(100)).unwrap());
 
         // 消费者线程先等待，生产者延迟 30ms 后写入
         let c = consumer.clone();
         let waiter = std::thread::spawn(move || {
             // 最多等 500ms
-            let got = c.wait_for_message(Some(Duration::from_millis(500))).unwrap();
+            let got = c
+                .wait_for_message(Some(Duration::from_millis(500)))
+                .unwrap();
             got
         });
 
@@ -1391,17 +1382,14 @@ mod tests {
     #[test]
     fn test_wait_for_command_wakes_on_signal() {
         let path = mk_path("wake_cmd");
-        let sender = Arc::new(
-            SharedRingBuffer::create_aux(&path, Some(16), Some(100)).unwrap(),
-        );
+        let sender = Arc::new(SharedRingBuffer::create_aux(&path, Some(16), Some(100)).unwrap());
         std::thread::sleep(Duration::from_millis(5));
-        let receiver = Arc::new(
-            SharedRingBuffer::open_aux(&path, Some(100)).unwrap(),
-        );
+        let receiver = Arc::new(SharedRingBuffer::open_aux(&path, Some(100)).unwrap());
 
         let r = receiver.clone();
         let waiter = std::thread::spawn(move || {
-            r.wait_for_command(Some(Duration::from_millis(500))).unwrap()
+            r.wait_for_command(Some(Duration::from_millis(500)))
+                .unwrap()
         });
 
         std::thread::sleep(Duration::from_millis(30));
@@ -1442,10 +1430,11 @@ mod tests {
         let sender =
             SharedRingBuffer::create(&path, SyncStrategy::Futex, Some(16), Some(0)).unwrap();
         std::thread::sleep(Duration::from_millis(5));
-        let receiver =
-            SharedRingBuffer::open(&path, SyncStrategy::Futex, Some(0)).unwrap();
+        let receiver = SharedRingBuffer::open(&path, SyncStrategy::Futex, Some(0)).unwrap();
 
-        sender.send_command(SharedCommand::toggle_tag(0b011, 1)).unwrap();
+        sender
+            .send_command(SharedCommand::toggle_tag(0b011, 1))
+            .unwrap();
         let got = receiver.receive_command().unwrap();
         assert_eq!(got.get_command_type(), CommandType::ToggleTag);
         assert_eq!(got.get_parameter(), 0b011);
@@ -1459,10 +1448,11 @@ mod tests {
         let sender =
             SharedRingBuffer::create(&path, SyncStrategy::Semaphore, Some(16), Some(0)).unwrap();
         std::thread::sleep(Duration::from_millis(5));
-        let receiver =
-            SharedRingBuffer::open(&path, SyncStrategy::Semaphore, Some(0)).unwrap();
+        let receiver = SharedRingBuffer::open(&path, SyncStrategy::Semaphore, Some(0)).unwrap();
 
-        sender.send_command(SharedCommand::set_layout(2, 0)).unwrap();
+        sender
+            .send_command(SharedCommand::set_layout(2, 0))
+            .unwrap();
         let got = receiver.receive_command().unwrap();
         assert_eq!(got.get_command_type(), CommandType::SetLayout);
         assert_eq!(got.get_parameter(), 2);
@@ -1501,7 +1491,9 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         let opener = SharedRingBuffer::open_aux(&path, Some(0)).unwrap();
 
-        opener.send_command(SharedCommand::toggle_tag(0b110, 2)).unwrap();
+        opener
+            .send_command(SharedCommand::toggle_tag(0b110, 2))
+            .unwrap();
         let got = creator.receive_command().unwrap();
         assert_eq!(got.get_command_type(), CommandType::ToggleTag);
         assert_eq!(got.get_parameter(), 0b110);
@@ -1543,7 +1535,8 @@ mod tests {
     fn test_create_shared_ring_buffer_opens_existing_with_strategy() {
         let path = mk_path("csrb_open_existing");
         // 先用 create 建立
-        let _first = SharedRingBuffer::create(&path, SyncStrategy::Futex, Some(16), Some(0)).unwrap();
+        let _first =
+            SharedRingBuffer::create(&path, SyncStrategy::Futex, Some(16), Some(0)).unwrap();
         // create_shared_ring_buffer 应打开已有的
         let second = SharedRingBuffer::create_shared_ring_buffer(&path, SyncStrategy::Futex);
         assert!(second.is_some());
@@ -1620,7 +1613,9 @@ mod tests {
         let buf = SharedRingBuffer::create_aux(&path, Some(16), Some(100_000)).unwrap();
         buf.try_write_message(&make_msg(42)).unwrap();
         // wait_for_message 应能在有消息时立即返回（自旋命中）
-        let ready = buf.wait_for_message(Some(Duration::from_millis(100))).unwrap();
+        let ready = buf
+            .wait_for_message(Some(Duration::from_millis(100)))
+            .unwrap();
         assert!(ready);
         let got = buf.try_read_next_message().unwrap().unwrap();
         assert_eq!(got.get_monitor_info().monitor_num, 42);
@@ -1669,7 +1664,9 @@ mod tests {
         creator.try_write_message(&make_msg(10)).unwrap();
         creator.try_write_message(&make_msg(20)).unwrap();
         opener.send_command(SharedCommand::view_tag(1, 0)).unwrap();
-        opener.send_command(SharedCommand::toggle_tag(2, 1)).unwrap();
+        opener
+            .send_command(SharedCommand::toggle_tag(2, 1))
+            .unwrap();
 
         // 消息和命令独立计数
         assert_eq!(creator.available_messages(), 2);
@@ -1710,7 +1707,9 @@ mod tests {
         for pass in 0..3 {
             // 恰好写满 cap 条
             for i in 0..cap {
-                assert!(buf.try_write_message(&make_msg((pass * cap + i) as i32)).unwrap());
+                assert!(buf
+                    .try_write_message(&make_msg((pass * cap + i) as i32))
+                    .unwrap());
             }
             // 第 cap+1 条写入失败
             assert!(!buf.try_write_message(&make_msg(-1)).unwrap());
@@ -1756,14 +1755,18 @@ mod tests {
     #[test]
     fn test_destroyed_wait_for_message_returns_false() {
         let opener = make_destroyed_opener("dest_wait_msg");
-        let result = opener.wait_for_message(Some(Duration::from_millis(5))).unwrap();
+        let result = opener
+            .wait_for_message(Some(Duration::from_millis(5)))
+            .unwrap();
         assert!(!result);
     }
 
     #[test]
     fn test_destroyed_wait_for_command_returns_false() {
         let opener = make_destroyed_opener("dest_wait_cmd");
-        let result = opener.wait_for_command(Some(Duration::from_millis(5))).unwrap();
+        let result = opener
+            .wait_for_command(Some(Duration::from_millis(5)))
+            .unwrap();
         assert!(!result);
     }
 
@@ -1894,7 +1897,8 @@ mod tests {
         let path = mk_path("incr_cmd_avail");
         let buf = SharedRingBuffer::create_aux(&path, Some(16), Some(0)).unwrap();
         for i in 1..=8usize {
-            buf.send_command(SharedCommand::view_tag(i as u32, 0)).unwrap();
+            buf.send_command(SharedCommand::view_tag(i as u32, 0))
+                .unwrap();
             assert_eq!(buf.available_commands(), i);
         }
     }
@@ -1927,9 +1931,8 @@ mod tests {
                 .unwrap(),
         );
         std::thread::sleep(Duration::from_millis(5));
-        let consumer = Arc::new(
-            SharedRingBuffer::open(&path, SyncStrategy::Semaphore, Some(10_000)).unwrap(),
-        );
+        let consumer =
+            Arc::new(SharedRingBuffer::open(&path, SyncStrategy::Semaphore, Some(10_000)).unwrap());
         let total = 200usize;
         let b = Arc::new(Barrier::new(2));
         let p = producer.clone();
@@ -1951,7 +1954,9 @@ mod tests {
                 let _ = c.wait_for_message(Some(Duration::from_millis(5)));
                 while let Ok(Some(_)) = c.try_read_next_message() {
                     n += 1;
-                    if n >= total { break; }
+                    if n >= total {
+                        break;
+                    }
                 }
             }
             n
@@ -2006,18 +2011,42 @@ mod tests {
 
         // creator → opener
         creator.try_write_message(&make_msg(10)).unwrap();
-        assert_eq!(opener.try_read_next_message().unwrap().unwrap().get_monitor_info().monitor_num, 10);
+        assert_eq!(
+            opener
+                .try_read_next_message()
+                .unwrap()
+                .unwrap()
+                .get_monitor_info()
+                .monitor_num,
+            10
+        );
 
         // opener → creator
         opener.try_write_message(&make_msg(20)).unwrap();
-        assert_eq!(creator.try_read_next_message().unwrap().unwrap().get_monitor_info().monitor_num, 20);
+        assert_eq!(
+            creator
+                .try_read_next_message()
+                .unwrap()
+                .unwrap()
+                .get_monitor_info()
+                .monitor_num,
+            20
+        );
 
         // creator → opener（多条）
         for i in 0..4i32 {
             creator.try_write_message(&make_msg(100 + i)).unwrap();
         }
         for i in 0..4i32 {
-            assert_eq!(opener.try_read_next_message().unwrap().unwrap().get_monitor_info().monitor_num, 100 + i);
+            assert_eq!(
+                opener
+                    .try_read_next_message()
+                    .unwrap()
+                    .unwrap()
+                    .get_monitor_info()
+                    .monitor_num,
+                100 + i
+            );
         }
     }
 
@@ -2029,7 +2058,9 @@ mod tests {
         let opener = SharedRingBuffer::open_aux(&path, Some(0)).unwrap();
 
         creator.send_command(SharedCommand::view_tag(1, 0)).unwrap();
-        opener.send_command(SharedCommand::toggle_tag(2, 1)).unwrap();
+        opener
+            .send_command(SharedCommand::toggle_tag(2, 1))
+            .unwrap();
 
         let from_creator = opener.receive_command().unwrap();
         let from_opener = creator.receive_command().unwrap();
@@ -2168,7 +2199,8 @@ mod tests {
     fn test_same_instance_send_and_receive_command() {
         let path = mk_path("same_inst_cmd");
         let buf = SharedRingBuffer::create_aux(&path, Some(16), Some(0)).unwrap();
-        buf.send_command(SharedCommand::view_tag(0b1010, 0)).unwrap();
+        buf.send_command(SharedCommand::view_tag(0b1010, 0))
+            .unwrap();
         buf.send_command(SharedCommand::set_layout(1, 2)).unwrap();
         let a = buf.receive_command().unwrap();
         let b = buf.receive_command().unwrap();
@@ -2187,7 +2219,9 @@ mod tests {
         // 多轮写满 + 读空，写索引应持续增加
         let header_ptr = buf.header;
         let initial_widx = unsafe {
-            (*header_ptr).write_idx.load(std::sync::atomic::Ordering::Acquire)
+            (*header_ptr)
+                .write_idx
+                .load(std::sync::atomic::Ordering::Acquire)
         };
         assert_eq!(initial_widx, 0);
 
@@ -2196,7 +2230,9 @@ mod tests {
                 buf.try_write_message(&make_msg(0)).unwrap();
             }
             let widx = unsafe {
-                (*header_ptr).write_idx.load(std::sync::atomic::Ordering::Acquire)
+                (*header_ptr)
+                    .write_idx
+                    .load(std::sync::atomic::Ordering::Acquire)
             };
             assert_eq!(widx, (round + 1) * 8);
             while buf.try_read_next_message().unwrap().is_some() {}
@@ -2214,7 +2250,9 @@ mod tests {
 
         for i in 0..10i32 {
             creator.try_write_message(&make_msg(i)).unwrap();
-            opener.send_command(SharedCommand::view_tag(i as u32, 0)).unwrap();
+            opener
+                .send_command(SharedCommand::view_tag(i as u32, 0))
+                .unwrap();
 
             let msg = opener.try_read_next_message().unwrap().unwrap();
             assert_eq!(msg.get_monitor_info().monitor_num, i);

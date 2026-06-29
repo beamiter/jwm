@@ -431,8 +431,7 @@ fn bench_command_throughput(c: &mut Criterion) {
             |b, &count| {
                 let test_path = mk_path(&format!("bench_cmd_tp_{}", count));
                 let _ = std::fs::remove_file(&test_path);
-                let buffer =
-                    SharedRingBuffer::create_aux(&test_path, Some(2048), Some(0)).unwrap();
+                let buffer = SharedRingBuffer::create_aux(&test_path, Some(2048), Some(0)).unwrap();
 
                 b.iter(|| {
                     while buffer.receive_command().is_some() {}
@@ -458,11 +457,7 @@ fn bench_create_destroy_cost(c: &mut Criterion) {
     let mut counter = 0u64;
     c.bench_function("create_destroy_ring_buffer", |b| {
         b.iter(|| {
-            let path = format!(
-                "/tmp/bench_cd_{}_{}",
-                std::process::id(),
-                counter
-            );
+            let path = format!("/tmp/bench_cd_{}_{}", std::process::id(), counter);
             counter += 1;
             let _ = std::fs::remove_file(&path);
             let buf = SharedRingBuffer::create_aux(&path, Some(64), Some(0)).unwrap();
@@ -478,29 +473,24 @@ fn bench_small_buffer_wraparound(c: &mut Criterion) {
     let mut group = c.benchmark_group("small_buffer_wraparound");
 
     for &size in &[1usize, 2, 4] {
-        group.bench_with_input(
-            BenchmarkId::new("capacity", size),
-            &size,
-            |b, &size| {
-                let test_path = mk_path(&format!("bench_small_{}", size));
-                let _ = std::fs::remove_file(&test_path);
-                let buffer =
-                    SharedRingBuffer::create_aux(&test_path, Some(size), Some(0)).unwrap();
-                let msg = create_test_message(77);
+        group.bench_with_input(BenchmarkId::new("capacity", size), &size, |b, &size| {
+            let test_path = mk_path(&format!("bench_small_{}", size));
+            let _ = std::fs::remove_file(&test_path);
+            let buffer = SharedRingBuffer::create_aux(&test_path, Some(size), Some(0)).unwrap();
+            let msg = create_test_message(77);
 
-                b.iter(|| {
-                    for _ in 0..50 {
-                        while !buffer.try_write_message(black_box(&msg)).unwrap_or(false) {
-                            let _ = buffer.try_read_next_message();
-                        }
-                        black_box(buffer.try_read_next_message().unwrap());
+            b.iter(|| {
+                for _ in 0..50 {
+                    while !buffer.try_write_message(black_box(&msg)).unwrap_or(false) {
+                        let _ = buffer.try_read_next_message();
                     }
-                });
+                    black_box(buffer.try_read_next_message().unwrap());
+                }
+            });
 
-                drop(buffer);
-                let _ = std::fs::remove_file(&test_path);
-            },
-        );
+            drop(buffer);
+            let _ = std::fs::remove_file(&test_path);
+        });
     }
     group.finish();
 }
@@ -667,9 +657,8 @@ fn bench_strategy_spsc_throughput(c: &mut Criterion) {
                         SharedRingBuffer::create(&path, strategy, Some(2048), Some(400)).unwrap(),
                     );
                     thread::sleep(Duration::from_millis(5));
-                    let consumer = Arc::new(
-                        SharedRingBuffer::open(&path, strategy, Some(400)).unwrap(),
-                    );
+                    let consumer =
+                        Arc::new(SharedRingBuffer::open(&path, strategy, Some(400)).unwrap());
 
                     let per_round = 1000usize;
                     let total = (iters as usize) * per_round;

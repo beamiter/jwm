@@ -454,15 +454,13 @@ fn bench_ping_pong_latency(c: &mut Criterion) {
             let ping_writer =
                 Arc::new(SharedRingBuffer::create_aux(&path_a, Some(4), Some(0)).unwrap());
             thread::sleep(Duration::from_millis(2));
-            let ping_reader =
-                Arc::new(SharedRingBuffer::open_aux(&path_a, Some(0)).unwrap());
+            let ping_reader = Arc::new(SharedRingBuffer::open_aux(&path_a, Some(0)).unwrap());
 
             // 通道 B：pong 写，main 读
             let pong_writer =
                 Arc::new(SharedRingBuffer::create_aux(&path_b, Some(4), Some(0)).unwrap());
             thread::sleep(Duration::from_millis(2));
-            let pong_reader =
-                Arc::new(SharedRingBuffer::open_aux(&path_b, Some(0)).unwrap());
+            let pong_reader = Arc::new(SharedRingBuffer::open_aux(&path_b, Some(0)).unwrap());
 
             let stop = Arc::new(AtomicBool::new(false));
             let stop_c = stop.clone();
@@ -524,12 +522,10 @@ fn bench_mixed_message_command(c: &mut Criterion) {
             let test_path = mk_path("stress_mixed");
             let _ = std::fs::remove_file(&test_path);
 
-            let writer = Arc::new(
-                SharedRingBuffer::create_aux(&test_path, Some(1024), Some(2000)).unwrap(),
-            );
+            let writer =
+                Arc::new(SharedRingBuffer::create_aux(&test_path, Some(1024), Some(2000)).unwrap());
             thread::sleep(Duration::from_millis(5));
-            let reader =
-                Arc::new(SharedRingBuffer::open_aux(&test_path, Some(2000)).unwrap());
+            let reader = Arc::new(SharedRingBuffer::open_aux(&test_path, Some(2000)).unwrap());
 
             let stop = Arc::new(AtomicBool::new(false));
             let msg_recv = Arc::new(AtomicUsize::new(0));
@@ -617,8 +613,7 @@ fn bench_backpressure_handling(c: &mut Criterion) {
                 let _ = std::fs::remove_file(&test_path);
 
                 let cap = 256usize;
-                let buffer =
-                    SharedRingBuffer::create_aux(&test_path, Some(cap), Some(0)).unwrap();
+                let buffer = SharedRingBuffer::create_aux(&test_path, Some(cap), Some(0)).unwrap();
                 let fill_count = cap * ratio / 100;
                 let msg = create_base_message(0);
 
@@ -655,9 +650,8 @@ fn bench_read_latest_under_load(c: &mut Criterion) {
             let test_path = mk_path("stress_read_latest");
             let _ = std::fs::remove_file(&test_path);
 
-            let writer = Arc::new(
-                SharedRingBuffer::create_aux(&test_path, Some(256), Some(0)).unwrap(),
-            );
+            let writer =
+                Arc::new(SharedRingBuffer::create_aux(&test_path, Some(256), Some(0)).unwrap());
             let reader = writer.clone();
 
             let stop = Arc::new(AtomicBool::new(false));
