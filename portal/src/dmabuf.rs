@@ -26,17 +26,14 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use gbm::{BufferObject, BufferObjectFlags, Device as GbmDevice, Format as GbmFormat, Modifier};
 use log::{debug, info, warn};
-use wayland_client::{
-    Dispatch, QueueHandle,
-    protocol::wl_buffer::WlBuffer,
-};
+use wayland_client::{Dispatch, QueueHandle, protocol::wl_buffer::WlBuffer};
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
-    zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1,
+    zwp_linux_buffer_params_v1::{Flags as BufferParamsFlags, ZwpLinuxBufferParamsV1},
     zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
 };
 
@@ -104,7 +101,10 @@ impl GbmContext {
             .open(&path)?;
         let device = GbmDevice::new(file)?;
         info!("dmabuf: opened GBM device on {}", path.display());
-        Ok(Self { node_path: path, device })
+        Ok(Self {
+            node_path: path,
+            device,
+        })
     }
 
     /// Allocate one LINEAR buffer for the given dimensions + format. Fails
@@ -186,7 +186,7 @@ where
         buffer.width as i32,
         buffer.height as i32,
         buffer.fourcc,
-        wayland_protocols::wp::linux_dmabuf::zv1::client::zwp_linux_buffer_params_v1::Flags::empty(),
+        BufferParamsFlags::empty(),
         qh,
         (),
     );
@@ -197,7 +197,12 @@ where
 /// Resolve a usable DRM render node. Prefers the one matching the
 /// compositor's announced dev_t; otherwise scans for any renderD* node.
 fn pick_render_node(want: Option<u64>) -> io::Result<PathBuf> {
-    let dir = std::fs::read_dir("/dev/dri")?;
+    pick_render_node_in_dir("/dev/dri", want)
+}
+
+fn pick_render_node_in_dir(dir_path: impl AsRef<Path>, want: Option<u64>) -> io::Result<PathBuf> {
+    let dir_path = dir_path.as_ref();
+    let dir = std::fs::read_dir(&dir_path)?;
     let mut candidates: Vec<PathBuf> = Vec::new();
     for entry in dir.flatten() {
         let name = entry.file_name();
@@ -223,10 +228,12 @@ fn pick_render_node(want: Option<u64>) -> io::Result<PathBuf> {
         );
     }
     candidates.sort();
-    candidates
-        .into_iter()
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no /dev/dri/renderD* node"))
+    candidates.into_iter().next().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no renderD* node in {}", dir_path.display()),
+        )
+    })
 }
 
 /// State of one pool slot.
@@ -260,7 +267,11 @@ impl DmabufPool {
     pub fn new(buffers: Vec<DmabufBuffer>) -> Self {
         let slots = buffers
             .into_iter()
-            .map(|buf| PoolSlot { buf, state: SlotState::Free, seq: 0 })
+            .map(|buf| PoolSlot {
+                buf,
+                state: SlotState::Free,
+                seq: 0,
+            })
             .collect();
         Self { slots, next_seq: 1 }
     }
@@ -341,6 +352,47 @@ impl DmabufPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_render_dir(test_name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "jwm-dmabuf-{test_name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before UNIX_EPOCH")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).expect("create temp render dir");
+        dir
+    }
+
+    #[test]
+    fn pick_render_node_in_dir_ignores_non_render_nodes_and_sorts() {
+        let dir = temp_render_dir("sorts");
+        std::fs::write(dir.join("card0"), b"not a render node").expect("write card0");
+        std::fs::write(dir.join("renderD129"), b"second").expect("write renderD129");
+        std::fs::write(dir.join("renderD128"), b"first").expect("write renderD128");
+
+        let picked = pick_render_node_in_dir(dir.clone(), None).expect("pick render node");
+
+        assert_eq!(
+            picked.file_name().and_then(|n| n.to_str()),
+            Some("renderD128")
+        );
+        std::fs::remove_dir_all(dir).expect("remove temp render dir");
+    }
+
+    #[test]
+    fn pick_render_node_in_dir_reports_not_found_without_render_nodes() {
+        let dir = temp_render_dir("empty");
+        std::fs::write(dir.join("card0"), b"not a render node").expect("write card0");
+
+        let err = pick_render_node_in_dir(dir.clone(), None).expect_err("no render node");
+
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(err.to_string().contains("no renderD* node"));
+        std::fs::remove_dir_all(dir).expect("remove temp render dir");
+    }
 
     /// True iff the machine has at least one /dev/dri/renderD* node we can open.
     /// Tests that need actual GBM allocation skip themselves when this is false

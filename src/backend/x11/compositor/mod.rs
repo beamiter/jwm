@@ -863,7 +863,7 @@ pub(super) struct Compositor {
     blur_exclude: Vec<String>,
     rounded_corners_exclude: Vec<String>,
     detect_client_opacity: bool,
-    // Fullscreen optimisation
+    // Fullscreen optimization
     fullscreen_unredirect: bool,
     /// Currently unredirected fullscreen window (if any)
     unredirected_window: Option<u32>,

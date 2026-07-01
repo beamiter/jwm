@@ -13,8 +13,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockW
 
 pub trait MutexExt<T: ?Sized> {
     /// Lock, recovering the guard even if the mutex was poisoned by a panicking
-    /// thread. Use instead of `.lock().unwrap()` on any mutex shared across
-    /// threads.
+    /// thread. Use for shared mutexes on crash-sensitive compositor/render paths
+    /// where a worker panic should not cascade into a full process crash.
     fn lock_safe(&self) -> MutexGuard<'_, T>;
 }
 

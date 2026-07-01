@@ -3,9 +3,6 @@
 
 set -e
 
-BASELINE_FILE="${1:-baseline.json}"
-CURRENT_FILE="${2:-current.json}"
-
 # 获取当前指标
 get_metrics() {
     jwm-tool msg get_metrics --raw 2>/dev/null | jq '.data' || echo '{}'
@@ -21,15 +18,18 @@ save_metrics() {
 
 # 性能对比
 compare_metrics() {
-    if [ ! -f "$BASELINE_FILE" ] || [ ! -f "$CURRENT_FILE" ]; then
+    local baseline_file=$1
+    local current_file=$2
+
+    if [ ! -f "$baseline_file" ] || [ ! -f "$current_file" ]; then
         echo "❌ 错误：基线文件或当前文件不存在"
         echo "使用: $0 save <baseline-file>"
         echo "      $0 compare <baseline-file> <current-file>"
         exit 1
     fi
 
-    local baseline=$(cat "$BASELINE_FILE")
-    local current=$(cat "$CURRENT_FILE")
+    local baseline=$(cat "$baseline_file")
+    local current=$(cat "$current_file")
 
     # 提取指标
     local baseline_fps=$(echo "$baseline" | jq '.fps')
