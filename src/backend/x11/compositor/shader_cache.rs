@@ -376,11 +376,10 @@ mod tests {
 
     #[test]
     fn test_create_program_from_binary_too_short_fails() {
-        let cache = ShaderCache::new(tmp_cache_dir());
         // create a fake context that would panic — we test purely the length guard
         // by passing a slice shorter than 4 bytes without calling gl
         // We test the length validation logic directly
-        let short = vec![0u8; 3];
+        let short = [0u8; 3];
         // We can't call create_program_from_binary without a real GL context,
         // but the function returns Err for short data before touching GL.
         // Use a raw check of the guard condition instead.

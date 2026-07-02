@@ -142,20 +142,27 @@ impl Jwm {
         }
     }
 
-    pub(crate) fn setlayout(
+    fn current_selected_layout(
+        &self,
+        mon_key: MonitorKey,
+    ) -> Result<Rc<LayoutEnum>, Box<dyn std::error::Error>> {
+        self.state
+            .monitors
+            .get(mon_key)
+            .map(|m| m.lt[m.sel_lt].clone())
+            .ok_or_else(|| "No monitor".into())
+    }
+
+    fn apply_layout_change<F>(
         &mut self,
         backend: &mut dyn Backend,
-        arg: &WMArgEnum,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        info!("[setlayout]");
-        let sel_mon_key = self.state.sel_mon.ok_or("No selected monitor")?;
-
-        let old_layout = self
-            .state
-            .monitors
-            .get(sel_mon_key)
-            .map(|m| m.lt[m.sel_lt].clone())
-            .ok_or("No monitor")?;
+        sel_mon_key: MonitorKey,
+        change_layout: F,
+    ) -> Result<Rc<LayoutEnum>, Box<dyn std::error::Error>>
+    where
+        F: FnOnce(&mut Self, MonitorKey) -> Result<Rc<LayoutEnum>, Box<dyn std::error::Error>>,
+    {
+        let old_layout = self.current_selected_layout(sel_mon_key)?;
 
         // Leaving vstack: promote the focused client to master so it stays
         // master in the new layout.
@@ -164,19 +171,11 @@ impl Jwm {
         }
 
         self.exit_fullscreen_on_monitor(backend, sel_mon_key);
-        self.update_layout_selection(sel_mon_key, arg)?;
 
-        let new_layout = self
-            .state
-            .monitors
-            .get(sel_mon_key)
-            .map(|m| m.lt[m.sel_lt].clone())
-            .ok_or("No monitor")?;
-
+        let new_layout = change_layout(self, sel_mon_key)?;
         self.handle_fullscreen_layout_transition(backend, sel_mon_key, &old_layout, &new_layout)?;
 
         let (should_arrange, mon_num) = self.finalize_layout_update(sel_mon_key);
-
         if should_arrange {
             self.arrange(backend, Some(sel_mon_key));
         } else {
@@ -190,6 +189,22 @@ impl Jwm {
             }),
         );
 
+        Ok(new_layout)
+    }
+
+    pub(crate) fn setlayout(
+        &mut self,
+        backend: &mut dyn Backend,
+        arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        info!("[setlayout]");
+        let sel_mon_key = self.state.sel_mon.ok_or("No selected monitor")?;
+
+        self.apply_layout_change(backend, sel_mon_key, |this, mon_key| {
+            this.update_layout_selection(mon_key, arg)?;
+            this.current_selected_layout(mon_key)
+        })?;
+
         Ok(())
     }
 
@@ -201,63 +216,31 @@ impl Jwm {
         info!("[cyclelayout]");
         let sel_mon_key = self.state.sel_mon.ok_or("No selected monitor")?;
 
-        let old_layout = self
-            .state
-            .monitors
-            .get(sel_mon_key)
-            .map(|m| m.lt[m.sel_lt].clone())
-            .ok_or("No monitor")?;
-
-        if *old_layout == LayoutEnum::VSTACK {
-            self.promote_focused_to_master(sel_mon_key);
-        }
-
-        self.exit_fullscreen_on_monitor(backend, sel_mon_key);
-
         let dir = match arg {
             WMArgEnum::Int(i) => *i,
             _ => 1,
         };
 
-        let cur_tag = self
-            .state
-            .monitors
-            .get(sel_mon_key)
-            .and_then(|m| m.pertag.as_ref())
-            .map(|p| p.cur_tag)
-            .ok_or("No pertag")?;
+        self.apply_layout_change(backend, sel_mon_key, |this, mon_key| {
+            let cur_tag = this
+                .state
+                .monitors
+                .get(mon_key)
+                .and_then(|m| m.pertag.as_ref())
+                .map(|p| p.cur_tag)
+                .ok_or("No pertag")?;
 
-        let current = self
-            .state
-            .monitors
-            .get(sel_mon_key)
-            .map(|m| m.lt[m.sel_lt].clone())
-            .ok_or("No monitor")?;
+            let current = this.current_selected_layout(mon_key)?;
+            let next = if dir >= 0 {
+                current.cycle_next()
+            } else {
+                current.cycle_prev()
+            };
 
-        let next = if dir >= 0 {
-            current.cycle_next()
-        } else {
-            current.cycle_prev()
-        };
-
-        let next_rc = Rc::new(next.clone());
-        self.set_new_layout(sel_mon_key, &next_rc, cur_tag);
-
-        self.handle_fullscreen_layout_transition(backend, sel_mon_key, &old_layout, &next_rc)?;
-
-        let (should_arrange, mon_num) = self.finalize_layout_update(sel_mon_key);
-        if should_arrange {
-            self.arrange(backend, Some(sel_mon_key));
-        } else {
-            self.mark_bar_update_needed_if_visible(mon_num);
-        }
-
-        self.broadcast_ipc_event(
-            "layout/set",
-            serde_json::json!({
-                "layout": format!("{:?}", next),
-            }),
-        );
+            let next_rc = Rc::new(next.clone());
+            this.set_new_layout(mon_key, &next_rc, cur_tag);
+            Ok(next_rc)
+        })?;
 
         Ok(())
     }

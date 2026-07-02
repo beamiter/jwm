@@ -203,7 +203,7 @@ impl Compositor {
             let py = y as f32 + (row as f32 + 0.5) / rows as f32 * h as f32;
 
             // Random velocity (using simple deterministic hash)
-            let hash = ((i * 2654435761) ^ (col as usize * 1597334677)) as f32;
+            let hash = ((i * 2_654_435_761) ^ (col as usize * 1_597_334_677)) as f32;
             let vx = (hash % 200.0) - 100.0;
             let vy = -((hash / 200.0) % 300.0) - 50.0; // upward bias
 

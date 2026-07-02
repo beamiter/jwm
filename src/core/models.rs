@@ -502,12 +502,14 @@ mod tests {
 
     #[test]
     fn test_client_geometry_display() {
-        let mut g = ClientGeometry::default();
-        g.w = 1280;
-        g.h = 720;
-        g.x = 100;
-        g.y = 50;
-        let s = format!("{}", g);
+        let g = ClientGeometry {
+            w: 1280,
+            h: 720,
+            x: 100,
+            y: 50,
+            ..Default::default()
+        };
+        let s = format!("{g}");
         assert!(s.contains("1280"), "expected width in display: {s}");
         assert!(s.contains("720"), "expected height in display: {s}");
         assert!(s.contains("100"), "expected x in display: {s}");
@@ -669,7 +671,7 @@ mod tests {
         assert!(p.n_masters.iter().all(|&n| n == 0));
         assert!(p.m_facts.iter().all(|&f| f == 0.0));
         assert!(p.sel_lts.iter().all(|&s| s == 0));
-        assert!(p.sel.iter().all(|s| s.is_none()));
+        assert!(p.sel.iter().all(Option::is_none));
     }
 
     // -----------------------------------------------------------------------

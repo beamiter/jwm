@@ -57,7 +57,7 @@ pub trait Renderer: Send {
     // === Framebuffer Objects (FBOs) ===
 
     /// Create an FBO with attached color texture
-    /// Returns (fbo_id, texture_id)
+    /// Returns (`fbo_id`, `texture_id`)
     fn create_fbo(&mut self, w: u32, h: u32) -> (FboId, TextureId);
 
     /// Delete an FBO

@@ -32,7 +32,6 @@ toml = "0.9.12"
 xbar_core = { git = "https://github.com/beamiter/xbar_core.git" }
 nix = { version = "0.30.1", features = ["signal", "inotify", "fs", "poll"] }
 lazy_static = "1.5.0"
-once_cell = "1.21.4"
 arc-swap = "1"
 rand = "0.9.4"
 xkbcommon = "0.9.0"

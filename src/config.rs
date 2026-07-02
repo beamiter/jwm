@@ -1,10 +1,8 @@
 use arc_swap::ArcSwap;
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::{Arc, LazyLock, OnceLock};
 
 use std::fmt;
 use std::rc::Rc;
@@ -1929,7 +1927,7 @@ impl Config {
             .get_available_terminal()
             .map(|config| vec![config.command.clone()])
             .unwrap_or_else(|| {
-                println!("terminator fallback");
+                log::warn!("terminal fallback to x-terminal-emulator");
                 vec!["x-terminal-emulator".to_string()]
             })
     }
@@ -1947,7 +1945,7 @@ impl Config {
             .get_available_terminal_with_priority(Some("jterm4"))
             .map(|config| vec![config.command.clone()])
             .unwrap_or_else(|| {
-                println!("scratchpad terminal fallback to terminator");
+                log::warn!("scratchpad terminal fallback to x-terminal-emulator");
                 vec!["x-terminal-emulator".to_string()]
             })
     }
@@ -2487,7 +2485,7 @@ impl From<toml::ser::Error> for ConfigError {
     }
 }
 
-pub static CONFIG: Lazy<ArcSwap<Config>> = Lazy::new(|| {
+pub static CONFIG: LazyLock<ArcSwap<Config>> = LazyLock::new(|| {
     let config = if !LOAD_LOCAL_CONFIG {
         Config::default()
     } else {

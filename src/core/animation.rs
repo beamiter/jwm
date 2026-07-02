@@ -554,7 +554,7 @@ mod tests {
             ] {
                 let v = e.apply(t);
                 assert!(
-                    v >= -0.01 && v <= 1.01,
+                    (-0.01..=1.01).contains(&v),
                     "{e:?}.apply({t}) = {v} out of range"
                 );
             }
@@ -740,7 +740,9 @@ mod tests {
         let anim = ClientAnimation {
             from: rect(0, 0, 100, 100),
             to: rect(200, 0, 100, 100),
-            started_at: Instant::now() - Duration::from_secs(10),
+            started_at: Instant::now()
+                .checked_sub(Duration::from_secs(10))
+                .expect("test offset should be representable"),
             duration: Duration::from_millis(300),
             easing: Easing::Linear,
             kind: AnimationKind::Layout,

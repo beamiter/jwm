@@ -1,9 +1,39 @@
 use crate::sync_ext::RwLockExt;
-use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::env;
 use std::process::Command;
-use std::sync::RwLock;
+use std::sync::{LazyLock, RwLock};
+
+type CommandCandidate = (&'static str, &'static [&'static str]);
+
+const WAYLAND_LAUNCHERS: &[CommandCandidate] = &[
+    ("fuzzel", &[]),
+    ("wofi", &["--show", "run"]),
+    ("tofi-run", &[]),
+    ("tofi", &["--prompt", "run: "]),
+    ("bemenu-run", &[]),
+    // rofi with wayland backend works via -display-backend wayland
+    ("rofi", &["-show", "run"]),
+    // last resort: dmenu_run via XWayland
+    ("dmenu_run", &[]),
+];
+
+const X11_LAUNCHERS: &[CommandCandidate] = &[
+    ("dmenu_run", &[]),
+    ("rofi", &["-show", "run"]),
+    ("gmrun", &[]),
+    ("xfce4-appfinder", &["--collapsed"]),
+    // Wayland-native launchers still work on X11 if installed
+    ("fuzzel", &[]),
+    ("wofi", &["--show", "run"]),
+];
+
+fn command_exists(cmd: &str) -> bool {
+    Command::new("which")
+        .arg(cmd)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
 
 // ---------------------------------------------------------------------------
 // Session type detection
@@ -11,17 +41,14 @@ use std::sync::RwLock;
 
 /// Returns true if running in a Wayland session (no X11 display available).
 /// Used by both terminal and launcher probers to pick the right tool set.
+#[must_use]
 pub fn is_wayland_session() -> bool {
     let has_wayland = env::var("WAYLAND_DISPLAY").is_ok()
-        || env::var("XDG_SESSION_TYPE")
-            .map(|v| v.eq_ignore_ascii_case("wayland"))
-            .unwrap_or(false);
+        || env::var("XDG_SESSION_TYPE").is_ok_and(|v| v.eq_ignore_ascii_case("wayland"));
     let has_display = env::var("DISPLAY").is_ok();
     // Pure Wayland: WAYLAND_DISPLAY set and no X11 DISPLAY (or explicitly wayland type)
     has_wayland && !has_display
-        || env::var("XDG_SESSION_TYPE")
-            .map(|v| v.eq_ignore_ascii_case("wayland"))
-            .unwrap_or(false)
+        || env::var("XDG_SESSION_TYPE").is_ok_and(|v| v.eq_ignore_ascii_case("wayland"))
 }
 
 // ---------------------------------------------------------------------------
@@ -29,36 +56,18 @@ pub fn is_wayland_session() -> bool {
 // ---------------------------------------------------------------------------
 
 pub struct LauncherProber {
-    /// Ordered list of (binary, extra_args) to try in Wayland sessions.
-    wayland_candidates: Vec<(&'static str, Vec<&'static str>)>,
-    /// Ordered list of (binary, extra_args) to try in X11 sessions.
-    x11_candidates: Vec<(&'static str, Vec<&'static str>)>,
+    /// Ordered list of (`binary`, `extra_args`) to try in Wayland sessions.
+    wayland_candidates: &'static [CommandCandidate],
+    /// Ordered list of (`binary`, `extra_args`) to try in X11 sessions.
+    x11_candidates: &'static [CommandCandidate],
     cache: RwLock<HashMap<String, bool>>,
 }
 
 impl LauncherProber {
     fn new() -> Self {
         Self {
-            wayland_candidates: vec![
-                ("fuzzel", vec![]),
-                ("wofi", vec!["--show", "run"]),
-                ("tofi-run", vec![]),
-                ("tofi", vec!["--prompt", "run: "]),
-                ("bemenu-run", vec![]),
-                // rofi with wayland backend works via -display-backend wayland
-                ("rofi", vec!["-show", "run"]),
-                // last resort: dmenu_run via XWayland
-                ("dmenu_run", vec![]),
-            ],
-            x11_candidates: vec![
-                ("dmenu_run", vec![]),
-                ("rofi", vec!["-show", "run"]),
-                ("gmrun", vec![]),
-                ("xfce4-appfinder", vec!["--collapsed"]),
-                // Wayland-native launchers still work on X11 if installed
-                ("fuzzel", vec![]),
-                ("wofi", vec!["--show", "run"]),
-            ],
+            wayland_candidates: WAYLAND_LAUNCHERS,
+            x11_candidates: X11_LAUNCHERS,
             cache: RwLock::new(HashMap::new()),
         }
     }
@@ -70,11 +79,7 @@ impl LauncherProber {
                 return v;
             }
         }
-        let result = Command::new("which")
-            .arg(cmd)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+        let result = command_exists(cmd);
         self.cache.write_safe().insert(cmd.to_string(), result);
         result
     }
@@ -83,15 +88,15 @@ impl LauncherProber {
     /// Falls back to `["dmenu_run"]` if nothing is found.
     pub fn probe_launcher(&self) -> Vec<String> {
         let candidates = if is_wayland_session() {
-            &self.wayland_candidates
+            self.wayland_candidates
         } else {
-            &self.x11_candidates
+            self.x11_candidates
         };
         for (bin, args) in candidates {
             if self.is_command_available(bin) {
-                log::debug!("[LauncherProber] selected launcher: {}", bin);
+                log::debug!("[LauncherProber] selected launcher: {bin}");
                 let mut cmd = vec![bin.to_string()];
-                cmd.extend(args.iter().map(|a| a.to_string()));
+                cmd.extend(args.iter().map(std::string::ToString::to_string));
                 return cmd;
             }
         }
@@ -104,7 +109,7 @@ impl LauncherProber {
     }
 }
 
-pub static LAUNCHER_PROBER: Lazy<LauncherProber> = Lazy::new(LauncherProber::new);
+pub static LAUNCHER_PROBER: LazyLock<LauncherProber> = LazyLock::new(LauncherProber::new);
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -122,157 +127,153 @@ pub struct AdvancedTerminalProber {
     cache: RwLock<HashMap<String, bool>>,
 }
 
+struct TerminalDefinition {
+    name: &'static str,
+    command: &'static str,
+    execute_flag: &'static str,
+    title_flag: Option<&'static str>,
+    geometry_flag: Option<&'static str>,
+    working_dir_flag: Option<&'static str>,
+}
+
+impl TerminalDefinition {
+    fn config(&self) -> TerminalConfig {
+        TerminalConfig {
+            command: self.command.to_string(),
+            execute_flag: self.execute_flag.to_string(),
+            title_flag: self.title_flag.map(str::to_string),
+            geometry_flag: self.geometry_flag.map(str::to_string),
+            working_dir_flag: self.working_dir_flag.map(str::to_string),
+        }
+    }
+}
+
+const TERMINAL_DEFINITIONS: &[TerminalDefinition] = &[
+    TerminalDefinition {
+        name: "terminal_emulator",
+        command: "terminal_emulator",
+        execute_flag: "-e",
+        title_flag: None,
+        geometry_flag: None,
+        working_dir_flag: None,
+    },
+    TerminalDefinition {
+        name: "foot",
+        command: "foot",
+        execute_flag: "-e",
+        title_flag: Some("-T"),
+        geometry_flag: None,
+        working_dir_flag: Some("-D"),
+    },
+    TerminalDefinition {
+        name: "wezterm",
+        command: "wezterm",
+        execute_flag: "start",
+        title_flag: Some("--class"),
+        geometry_flag: None,
+        working_dir_flag: Some("--cwd"),
+    },
+    TerminalDefinition {
+        name: "alacritty",
+        command: "alacritty",
+        execute_flag: "-e",
+        title_flag: Some("--title"),
+        geometry_flag: None,
+        working_dir_flag: Some("--working-directory"),
+    },
+    TerminalDefinition {
+        name: "kitty",
+        command: "kitty",
+        execute_flag: "--",
+        title_flag: Some("--title"),
+        geometry_flag: Some("--geometry"),
+        working_dir_flag: Some("--directory"),
+    },
+    TerminalDefinition {
+        name: "weston-terminal",
+        command: "weston-terminal",
+        execute_flag: "--",
+        title_flag: None,
+        geometry_flag: None,
+        working_dir_flag: None,
+    },
+    TerminalDefinition {
+        name: "warp-terminal",
+        command: "warp-terminal",
+        execute_flag: "-e",
+        title_flag: Some("--title"),
+        geometry_flag: None,
+        working_dir_flag: Some("--working-directory"),
+    },
+    TerminalDefinition {
+        name: "terminator",
+        command: "terminator",
+        execute_flag: "-e",
+        title_flag: Some("-T"),
+        geometry_flag: Some("-g"),
+        working_dir_flag: Some("--working-directory"),
+    },
+    TerminalDefinition {
+        name: "gnome-terminal",
+        command: "gnome-terminal",
+        execute_flag: "--",
+        title_flag: Some("--title"),
+        geometry_flag: Some("--geometry"),
+        working_dir_flag: Some("--working-directory"),
+    },
+    TerminalDefinition {
+        name: "jterm4",
+        command: "jterm4",
+        execute_flag: "-e",
+        title_flag: Some("--title"),
+        geometry_flag: None,
+        working_dir_flag: Some("--workdir"),
+    },
+];
+
+const WAYLAND_TERMINAL_PRIORITY: &[&str] = &[
+    "terminal_emulator",
+    "jterm4",
+    "foot",
+    "wezterm",
+    "alacritty",
+    "kitty",
+    "weston-terminal",
+    // Keep Warp last: it may depend on X11/desktop services.
+    "warp-terminal",
+    "terminator",
+    "gnome-terminal",
+];
+
+const X11_TERMINAL_PRIORITY: &[&str] = &[
+    "terminal_emulator",
+    "jterm4",
+    "warp-terminal",
+    "terminator",
+    "gnome-terminal",
+    "alacritty",
+    "kitty",
+    "wezterm",
+    "foot",
+    "weston-terminal",
+];
+
 impl AdvancedTerminalProber {
     fn new() -> Self {
-        let mut configs = HashMap::new();
-
-        // terminal_emulator - preferred terminal
-        configs.insert(
-            "terminal_emulator".to_string(),
-            TerminalConfig {
-                command: "terminal_emulator".to_string(),
-                execute_flag: "-e".to_string(),
-                title_flag: None,
-                geometry_flag: None,
-                working_dir_flag: None,
-            },
-        );
-
-        // Wayland-first terminals (often needed for DRM/udev compositors)
-        configs.insert(
-            "foot".to_string(),
-            TerminalConfig {
-                command: "foot".to_string(),
-                execute_flag: "-e".to_string(),
-                title_flag: Some("-T".to_string()),
-                geometry_flag: None,
-                working_dir_flag: Some("-D".to_string()),
-            },
-        );
-
-        configs.insert(
-            "wezterm".to_string(),
-            TerminalConfig {
-                command: "wezterm".to_string(),
-                execute_flag: "start".to_string(),
-                title_flag: Some("--class".to_string()),
-                geometry_flag: None,
-                working_dir_flag: Some("--cwd".to_string()),
-            },
-        );
-
-        configs.insert(
-            "alacritty".to_string(),
-            TerminalConfig {
-                command: "alacritty".to_string(),
-                execute_flag: "-e".to_string(),
-                title_flag: Some("--title".to_string()),
-                geometry_flag: None,
-                working_dir_flag: Some("--working-directory".to_string()),
-            },
-        );
-
-        configs.insert(
-            "kitty".to_string(),
-            TerminalConfig {
-                command: "kitty".to_string(),
-                execute_flag: "--".to_string(),
-                title_flag: Some("--title".to_string()),
-                geometry_flag: Some("--geometry".to_string()),
-                working_dir_flag: Some("--directory".to_string()),
-            },
-        );
-
-        configs.insert(
-            "weston-terminal".to_string(),
-            TerminalConfig {
-                command: "weston-terminal".to_string(),
-                execute_flag: "--".to_string(),
-                title_flag: None,
-                geometry_flag: None,
-                working_dir_flag: None,
-            },
-        );
-
-        // Warp Terminal
-        configs.insert(
-            "warp-terminal".to_string(),
-            TerminalConfig {
-                command: "warp-terminal".to_string(),
-                execute_flag: "-e".to_string(),
-                title_flag: Some("--title".to_string()),
-                geometry_flag: None,
-                working_dir_flag: Some("--working-directory".to_string()),
-            },
-        );
-
-        // Terminator
-        configs.insert(
-            "terminator".to_string(),
-            TerminalConfig {
-                command: "terminator".to_string(),
-                execute_flag: "-e".to_string(),
-                title_flag: Some("-T".to_string()),
-                geometry_flag: Some("-g".to_string()),
-                working_dir_flag: Some("--working-directory".to_string()),
-            },
-        );
-
-        // GNOME Terminal
-        configs.insert(
-            "gnome-terminal".to_string(),
-            TerminalConfig {
-                command: "gnome-terminal".to_string(),
-                execute_flag: "--".to_string(),
-                title_flag: Some("--title".to_string()),
-                geometry_flag: Some("--geometry".to_string()),
-                working_dir_flag: Some("--working-directory".to_string()),
-            },
-        );
-
-        // JTerm4
-        configs.insert(
-            "jterm4".to_string(),
-            TerminalConfig {
-                command: "jterm4".to_string(),
-                execute_flag: "-e".to_string(),
-                title_flag: Some("--title".to_string()),
-                geometry_flag: None,
-                working_dir_flag: Some("--workdir".to_string()),
-            },
-        );
+        let configs = TERMINAL_DEFINITIONS
+            .iter()
+            .map(|definition| (definition.name.to_string(), definition.config()))
+            .collect();
 
         // Choose priority based on session hints.
         // - In udev/DRM (Wayland compositor) sessions, X11 terminals often won't show.
         // - In X11 sessions, Warp/Terminator/Gnome-terminal are usually fine.
-        let priority_order = if is_wayland_session() {
-            vec![
-                "terminal_emulator".to_string(),
-                "jterm4".to_string(),
-                "foot".to_string(),
-                "wezterm".to_string(),
-                "alacritty".to_string(),
-                "kitty".to_string(),
-                "weston-terminal".to_string(),
-                // Keep Warp last: it may depend on X11/desktop services.
-                "warp-terminal".to_string(),
-                "terminator".to_string(),
-                "gnome-terminal".to_string(),
-            ]
+        let priority = if is_wayland_session() {
+            WAYLAND_TERMINAL_PRIORITY
         } else {
-            vec![
-                "terminal_emulator".to_string(),
-                "jterm4".to_string(),
-                "warp-terminal".to_string(),
-                "terminator".to_string(),
-                "gnome-terminal".to_string(),
-                "alacritty".to_string(),
-                "kitty".to_string(),
-                "wezterm".to_string(),
-                "foot".to_string(),
-                "weston-terminal".to_string(),
-            ]
+            X11_TERMINAL_PRIORITY
         };
+        let priority_order = priority.iter().map(|name| (*name).to_string()).collect();
 
         Self {
             configs,
@@ -283,11 +284,11 @@ impl AdvancedTerminalProber {
 
     pub fn get_available_terminal(&self) -> Option<&TerminalConfig> {
         for terminal_name in &self.priority_order {
-            if let Some(config) = self.configs.get(terminal_name) {
-                if self.is_command_available(&config.command) {
-                    println!("[get_available_terminal] {:?}", config);
-                    return Some(config);
-                }
+            if let Some(config) = self.configs.get(terminal_name)
+                && self.is_command_available(&config.command)
+            {
+                log::debug!("[get_available_terminal] {config:?}");
+                return Some(config);
             }
         }
         None
@@ -298,16 +299,14 @@ impl AdvancedTerminalProber {
         preferred: Option<&str>,
     ) -> Option<&TerminalConfig> {
         // If a preferred terminal is specified and available, use it first
-        if let Some(pref) = preferred {
-            if let Some(config) = self.configs.get(pref) {
-                if self.is_command_available(&config.command) {
-                    println!(
-                        "[get_available_terminal_with_priority] Using preferred terminal: {:?}",
-                        config
-                    );
-                    return Some(config);
-                }
-            }
+        if let Some(pref) = preferred
+            && let Some(config) = self.configs.get(pref)
+            && self.is_command_available(&config.command)
+        {
+            log::debug!(
+                "[get_available_terminal_with_priority] using preferred terminal: {config:?}"
+            );
+            return Some(config);
         }
         // Fall back to the default priority order
         self.get_available_terminal()
@@ -320,20 +319,12 @@ impl AdvancedTerminalProber {
                 return cached_result;
             }
         }
-        let result = self.check_command_exists(cmd);
+        let result = command_exists(cmd);
         {
             let mut cache_writer = self.cache.write_safe();
             cache_writer.insert(cmd.to_string(), result);
         }
         result
-    }
-
-    fn check_command_exists(&self, cmd: &str) -> bool {
-        Command::new("which")
-            .arg(cmd)
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
     }
 
     #[allow(dead_code)]
@@ -365,5 +356,5 @@ impl AdvancedTerminalProber {
     }
 }
 
-pub static ADVANCED_TERMINAL_PROBER: Lazy<AdvancedTerminalProber> =
-    Lazy::new(|| AdvancedTerminalProber::new());
+pub static ADVANCED_TERMINAL_PROBER: LazyLock<AdvancedTerminalProber> =
+    LazyLock::new(AdvancedTerminalProber::new);

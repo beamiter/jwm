@@ -1362,18 +1362,13 @@ impl Jwm {
     fn update_bar_message_for_monitor(&mut self, mon_key_opt: Option<MonitorKey>) {
         // info!("[update_bar_message_for_monitor]");
 
-        let mon_key = match mon_key_opt {
-            Some(key) => key,
-            None => {
-                error!("Monitor key is None, cannot update bar message.");
-                return;
-            }
+        let Some(mon_key) = mon_key_opt else {
+            error!("Monitor key is None, cannot update bar message.");
+            return;
         };
 
-        let monitor = if let Some(monitor) = self.state.monitors.get(mon_key) {
-            monitor
-        } else {
-            error!("Monitor {:?} not found", mon_key);
+        let Some(monitor) = self.state.monitors.get(mon_key) else {
+            error!("Monitor {mon_key:?} not found");
             return;
         };
 
@@ -1388,17 +1383,13 @@ impl Jwm {
         monitor_info_for_message.set_ltsymbol(&monitor.lt_symbol);
 
         let (occupied_tags_mask, urgent_tags_mask) = self.calculate_tag_masks(mon_key);
+        let active_tagset = monitor.get_active_tags();
 
         for i in 0..CONFIG.load().tags_length() {
             let tag_bit = 1 << i;
 
             let is_filled_tag = self.is_filled_tag(mon_key, tag_bit);
 
-            let monitor = match self.state.monitors.get(mon_key) {
-                Some(m) => m,
-                None => break,
-            };
-            let active_tagset = monitor.get_active_tags();
             let is_selected_tag = (active_tagset & tag_bit) != 0;
             let is_urgent_tag = (urgent_tags_mask & tag_bit) != 0;
             let is_occupied_tag = (occupied_tags_mask & tag_bit) != 0;
@@ -1416,12 +1407,12 @@ impl Jwm {
     }
 
     fn calculate_tag_masks(&self, mon_key: MonitorKey) -> (u32, u32) {
+        const EMPTY_CLIENTS: &[ClientKey] = &[];
         let monitor_clients = self
             .state
             .monitor_clients
             .get(mon_key)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
+            .map_or(EMPTY_CLIENTS, Vec::as_slice);
         StatusBarBuilder::calculate_tag_masks(&self.state.clients, monitor_clients)
     }
 

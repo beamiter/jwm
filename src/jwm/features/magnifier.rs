@@ -82,6 +82,13 @@ impl MagnifierState {
 mod tests {
     use super::*;
 
+    fn assert_zoom(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < f32::EPSILON,
+            "expected zoom {expected}, got {actual}"
+        );
+    }
+
     #[test]
     fn test_magnifier_toggle() {
         let mut mag = MagnifierState::new();
@@ -97,24 +104,24 @@ mod tests {
     #[test]
     fn test_zoom_levels() {
         let mut mag = MagnifierState::new();
-        assert_eq!(mag.zoom_level, 2.0);
+        assert_zoom(mag.zoom_level, 2.0);
 
         mag.zoom_in();
-        assert_eq!(mag.zoom_level, 2.5);
+        assert_zoom(mag.zoom_level, 2.5);
 
         mag.zoom_in();
-        assert_eq!(mag.zoom_level, 3.0);
+        assert_zoom(mag.zoom_level, 3.0);
 
         mag.zoom_out();
-        assert_eq!(mag.zoom_level, 2.5);
+        assert_zoom(mag.zoom_level, 2.5);
 
         // 测试上限
         mag.set_zoom_level(15.0);
-        assert_eq!(mag.zoom_level, 10.0);
+        assert_zoom(mag.zoom_level, 10.0);
 
         // 测试下限
         mag.set_zoom_level(0.5);
-        assert_eq!(mag.zoom_level, 1.0);
+        assert_zoom(mag.zoom_level, 1.0);
     }
 
     #[test]

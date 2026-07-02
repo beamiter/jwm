@@ -316,7 +316,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    /// Helper: create an IpcServer bound to a unique temp path.
+    /// Helper: create an `IpcServer` bound to a unique temp path.
     fn make_test_server() -> IpcServer {
         let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir();

@@ -107,64 +107,6 @@ impl ScreenshotState {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_screenshot_workflow() {
-        let mut state = ScreenshotState::new();
-
-        // 开始截图
-        state.start();
-        assert!(state.active);
-        assert!(!state.committed);
-
-        // 开始拖动
-        state.begin_drag(100.0, 100.0);
-        assert!(state.dragging);
-
-        // 更新位置
-        state.update_drag(200.0, 200.0);
-        assert_eq!(state.end, (200.0, 200.0));
-
-        // 完成选择
-        state.commit();
-        assert!(!state.dragging);
-        assert!(state.committed);
-
-        // 获取选择区域
-        let rect = state.get_selection_rect().unwrap();
-        assert_eq!(rect.x, 100);
-        assert_eq!(rect.y, 100);
-        assert_eq!(rect.w, 100);
-        assert_eq!(rect.h, 100);
-    }
-
-    #[test]
-    fn test_cancel() {
-        let mut state = ScreenshotState::new();
-        state.start();
-        state.begin_drag(10.0, 10.0);
-
-        state.cancel();
-        assert!(!state.active);
-        assert!(!state.dragging);
-    }
-
-    #[test]
-    fn test_empty_selection() {
-        let mut state = ScreenshotState::new();
-        state.start();
-        state.begin_drag(100.0, 100.0);
-        state.update_drag(100.0, 100.0); // 同一点
-        state.commit();
-
-        // 零尺寸选择应该返回 None
-        assert!(state.get_selection_rect().is_none());
-    }
-}
-
 // =================================================================================
 // 截图处理函数（Jwm 方法扩展）
 // =================================================================================
@@ -224,12 +166,8 @@ impl Jwm {
             "[take_screenshot] entering interactive region selection mode → {}",
             screenshot_path
         );
-        self.features.screenshot.active = true;
-        self.features.screenshot.dragging = false;
-        self.features.screenshot.committed = false;
-        self.features.screenshot.start = (0.0, 0.0);
-        self.features.screenshot.end = (0.0, 0.0);
-        self.features.screenshot.output_path = Some(screenshot_path);
+        self.features.screenshot.start();
+        self.features.screenshot.set_output_path(screenshot_path);
 
         // Grab keyboard (to intercept Escape)
         if let Some(root) = backend.root_window() {
@@ -286,10 +224,7 @@ impl Jwm {
     /// 取消交互式截图选择模式
     pub(crate) fn cancel_screenshot_select(&mut self, backend: &mut dyn Backend) {
         info!("[take_screenshot] cancelling region selection");
-        self.features.screenshot.active = false;
-        self.features.screenshot.dragging = false;
-        self.features.screenshot.committed = false;
-        self.features.screenshot.output_path = None;
+        self.features.screenshot.cancel();
         if backend.has_compositor() {
             backend.compositor_set_snap_preview(None);
         }
@@ -329,9 +264,7 @@ impl Jwm {
         let h = (sy - ey).abs() as u32;
 
         // Clear state before capturing
-        self.features.screenshot.active = false;
-        self.features.screenshot.dragging = false;
-        self.features.screenshot.committed = false;
+        self.features.screenshot.cancel();
         if backend.has_compositor() {
             backend.compositor_clear_snap_preview_immediate();
         }
@@ -355,7 +288,7 @@ impl Jwm {
         let save_path = if to_clipboard {
             format!("/tmp/.jwm-screenshot-clipboard-{}.png", std::process::id())
         } else {
-            path_str.clone()
+            path_str
         };
 
         let path = std::path::PathBuf::from(&save_path);
@@ -423,5 +356,63 @@ impl Jwm {
                 error!("[take_screenshot] failed to spawn clipboard helper: {e}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_screenshot_workflow() {
+        let mut state = ScreenshotState::new();
+
+        // 开始截图
+        state.start();
+        assert!(state.active);
+        assert!(!state.committed);
+
+        // 开始拖动
+        state.begin_drag(100.0, 100.0);
+        assert!(state.dragging);
+
+        // 更新位置
+        state.update_drag(200.0, 200.0);
+        assert_eq!(state.end, (200.0, 200.0));
+
+        // 完成选择
+        state.commit();
+        assert!(!state.dragging);
+        assert!(state.committed);
+
+        // 获取选择区域
+        let rect = state.get_selection_rect().unwrap();
+        assert_eq!(rect.x, 100);
+        assert_eq!(rect.y, 100);
+        assert_eq!(rect.w, 100);
+        assert_eq!(rect.h, 100);
+    }
+
+    #[test]
+    fn test_cancel() {
+        let mut state = ScreenshotState::new();
+        state.start();
+        state.begin_drag(10.0, 10.0);
+
+        state.cancel();
+        assert!(!state.active);
+        assert!(!state.dragging);
+    }
+
+    #[test]
+    fn test_empty_selection() {
+        let mut state = ScreenshotState::new();
+        state.start();
+        state.begin_drag(100.0, 100.0);
+        state.update_drag(100.0, 100.0); // 同一点
+        state.commit();
+
+        // 零尺寸选择应该返回 None
+        assert!(state.get_selection_rect().is_none());
     }
 }

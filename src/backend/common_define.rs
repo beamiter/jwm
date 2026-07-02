@@ -8,6 +8,8 @@ impl WindowId {
     pub(crate) fn from_raw(id: u64) -> Self {
         Self(id)
     }
+
+    #[must_use]
     pub fn raw(self) -> u64 {
         self.0
     }
@@ -56,6 +58,7 @@ pub enum MouseButton {
 }
 
 impl MouseButton {
+    #[must_use]
     pub fn from_u8(v: u8) -> Self {
         match v {
             1 => MouseButton::Left,
@@ -64,6 +67,8 @@ impl MouseButton {
             x => MouseButton::Other(x),
         }
     }
+
+    #[must_use]
     pub fn to_u8(self) -> u8 {
         match self {
             MouseButton::Left => 1,
@@ -100,12 +105,14 @@ pub struct ArgbColor {
 }
 
 impl ArgbColor {
+    #[must_use]
     pub fn new(alpha: u8, red: u8, green: u8, blue: u8) -> Self {
         let value =
             ((alpha as u32) << 24) | ((red as u32) << 16) | ((green as u32) << 8) | (blue as u32);
         Self { value }
     }
 
+    #[must_use]
     pub fn from_rgb(red: u8, green: u8, blue: u8) -> Self {
         Self::new(255, red, green, blue)
     }
@@ -115,6 +122,7 @@ impl ArgbColor {
         Ok(Self::new(alpha, r, g, b))
     }
 
+    #[must_use]
     pub fn components(&self) -> (u8, u8, u8, u8) {
         let alpha = (self.value >> 24) as u8;
         let red = (self.value >> 16) as u8;
@@ -123,20 +131,24 @@ impl ArgbColor {
         (alpha, red, green, blue)
     }
 
+    #[must_use]
     pub fn rgb(&self) -> (u8, u8, u8) {
         let (_, r, g, b) = self.components();
         (r, g, b)
     }
 
+    #[must_use]
     pub fn alpha(&self) -> u8 {
         (self.value >> 24) as u8
     }
 
+    #[must_use]
     pub fn with_alpha(&self, alpha: u8) -> Self {
         let (_, r, g, b) = self.components();
         Self::new(alpha, r, g, b)
     }
 
+    #[must_use]
     pub fn to_rgba_f64(&self) -> (f64, f64, f64, f64) {
         let (a, r, g, b) = self.components();
         (
@@ -147,8 +159,9 @@ impl ArgbColor {
         )
     }
 
+    #[must_use]
     pub fn to_x11_pixel(&self) -> u32 {
-        self.value & 0x00FFFFFF
+        self.value & 0x00FF_FFFF
     }
 }
 
@@ -160,6 +173,7 @@ pub struct ColorScheme {
 }
 
 impl ColorScheme {
+    #[must_use]
     pub fn new(fg: ArgbColor, bg: ArgbColor, border: ArgbColor) -> Self {
         Self { fg, bg, border }
     }
@@ -177,14 +191,17 @@ impl ColorScheme {
         ))
     }
 
+    #[must_use]
     pub fn foreground(&self) -> ArgbColor {
         self.fg
     }
 
+    #[must_use]
     pub fn background(&self) -> ArgbColor {
         self.bg
     }
 
+    #[must_use]
     pub fn border_color(&self) -> ArgbColor {
         self.border
     }
@@ -222,15 +239,15 @@ fn parse_hex_color(hex: &str) -> Result<(u8, u8, u8), Box<dyn std::error::Error>
 }
 
 impl ArgbColor {
-    pub const TRANSPARENT: ArgbColor = ArgbColor { value: 0x00000000 };
-    pub const BLACK: ArgbColor = ArgbColor { value: 0xFF000000 };
-    pub const WHITE: ArgbColor = ArgbColor { value: 0xFFFFFFFF };
-    pub const RED: ArgbColor = ArgbColor { value: 0xFFFF0000 };
-    pub const GREEN: ArgbColor = ArgbColor { value: 0xFF00FF00 };
-    pub const BLUE: ArgbColor = ArgbColor { value: 0xFF0000FF };
-    pub const YELLOW: ArgbColor = ArgbColor { value: 0xFFFFFF00 };
-    pub const CYAN: ArgbColor = ArgbColor { value: 0xFF00FFFF };
-    pub const MAGENTA: ArgbColor = ArgbColor { value: 0xFFFF00FF };
+    pub const TRANSPARENT: ArgbColor = ArgbColor { value: 0x0000_0000 };
+    pub const BLACK: ArgbColor = ArgbColor { value: 0xFF00_0000 };
+    pub const WHITE: ArgbColor = ArgbColor { value: 0xFFFF_FFFF };
+    pub const RED: ArgbColor = ArgbColor { value: 0xFFFF_0000 };
+    pub const GREEN: ArgbColor = ArgbColor { value: 0xFF00_FF00 };
+    pub const BLUE: ArgbColor = ArgbColor { value: 0xFF00_00FF };
+    pub const YELLOW: ArgbColor = ArgbColor { value: 0xFFFF_FF00 };
+    pub const CYAN: ArgbColor = ArgbColor { value: 0xFF00_FFFF };
+    pub const MAGENTA: ArgbColor = ArgbColor { value: 0xFFFF_00FF };
 }
 
 bitflags! {

@@ -24,29 +24,30 @@ pub fn init_auto_start() {
             dirs::home_dir().map(|p| p.join(".jwm").join("autostart.sh"))
         });
 
-    if let Some(path) = config_path {
-        if path.exists() {
-            info!("Found autostart script at: {:?}", path);
+    let Some(path) = config_path else {
+        error!("Could not determine configuration directory.");
+        return;
+    };
 
-            // 2. 执行脚本
-            // 使用 "sh" 来执行，这样即使用户忘记 chmod +x 也能运行
-            match Command::new("sh")
-                .arg(&path)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            {
-                Ok(_) => info!("Autostart script spawned successfully"),
-                Err(e) => error!("Failed to execute autostart script: {}", e),
-            }
-        } else {
-            info!(
-                "No autostart script found at {:?}, skipping auto start tasks.",
-                path
-            );
+    if path.exists() {
+        info!("Found autostart script at: {}", path.display());
+
+        // 2. 执行脚本
+        // 使用 "sh" 来执行，这样即使用户忘记 chmod +x 也能运行
+        match Command::new("sh")
+            .arg(&path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(_) => info!("Autostart script spawned successfully"),
+            Err(e) => error!("Failed to execute autostart script: {e}"),
         }
     } else {
-        error!("Could not determine configuration directory.");
+        info!(
+            "No autostart script found at {}, skipping auto start tasks.",
+            path.display()
+        );
     }
 }

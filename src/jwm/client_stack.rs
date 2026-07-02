@@ -3,43 +3,51 @@ use crate::jwm::Jwm;
 
 impl Jwm {
     pub fn get_monitor_stack(&self, mon_key: MonitorKey) -> &[ClientKey] {
+        const EMPTY_STACK: &[ClientKey] = &[];
         self.state
             .monitor_stack
             .get(mon_key)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+            .map_or(EMPTY_STACK, Vec::as_slice)
     }
 
     pub fn attach_front(&mut self, client_key: ClientKey) {
-        if let Some(client) = self.state.clients.get(client_key) {
-            if let Some(mon_key) = client.mon {
-                if let Some(client_list) = self.state.monitor_clients.get_mut(mon_key) {
-                    client_list.insert(0, client_key);
-                }
-            }
-        }
+        let Some(mon_key) = self
+            .state
+            .clients
+            .get(client_key)
+            .and_then(|client| client.mon)
+        else {
+            return;
+        };
+        let Some(client_list) = self.state.monitor_clients.get_mut(mon_key) else {
+            return;
+        };
+        client_list.insert(0, client_key);
     }
 
     pub fn attach_back(&mut self, client_key: ClientKey) {
-        if let Some(client) = self.state.clients.get(client_key) {
-            if let Some(mon_key) = client.mon {
-                if let Some(client_list) = self.state.monitor_clients.get_mut(mon_key) {
-                    client_list.push(client_key);
-                }
-            }
+        if let Some(mon_key) = self
+            .state
+            .clients
+            .get(client_key)
+            .and_then(|client| client.mon)
+            && let Some(client_list) = self.state.monitor_clients.get_mut(mon_key)
+        {
+            client_list.push(client_key);
         }
         self.reorder_client_in_monitor_groups(client_key);
     }
 
     pub fn detach(&mut self, client_key: ClientKey) {
-        if let Some(client) = self.state.clients.get(client_key) {
-            if let Some(mon_key) = client.mon {
-                if let Some(client_list) = self.state.monitor_clients.get_mut(mon_key) {
-                    if let Some(pos) = client_list.iter().position(|&k| k == client_key) {
-                        client_list.remove(pos);
-                    }
-                }
-            }
+        if let Some(mon_key) = self
+            .state
+            .clients
+            .get(client_key)
+            .and_then(|client| client.mon)
+            && let Some(client_list) = self.state.monitor_clients.get_mut(mon_key)
+            && let Some(pos) = client_list.iter().position(|&key| key == client_key)
+        {
+            client_list.remove(pos);
         }
     }
 
@@ -85,12 +93,14 @@ impl Jwm {
     }
 
     pub fn attachstack(&mut self, client_key: ClientKey) {
-        if let Some(client) = self.state.clients.get(client_key) {
-            if let Some(mon_key) = client.mon {
-                if let Some(stack_list) = self.state.monitor_stack.get_mut(mon_key) {
-                    stack_list.insert(0, client_key);
-                }
-            }
+        if let Some(mon_key) = self
+            .state
+            .clients
+            .get(client_key)
+            .and_then(|client| client.mon)
+            && let Some(stack_list) = self.state.monitor_stack.get_mut(mon_key)
+        {
+            stack_list.insert(0, client_key);
         }
     }
 
@@ -117,20 +127,26 @@ impl Jwm {
     }
 
     pub fn detachstack(&mut self, client_key: ClientKey) {
-        if let Some(client) = self.state.clients.get(client_key) {
-            if let Some(mon_key) = client.mon {
-                if let Some(stack_list) = self.state.monitor_stack.get_mut(mon_key) {
-                    if let Some(pos) = stack_list.iter().position(|&k| k == client_key) {
-                        stack_list.remove(pos);
-                    }
-                }
-                let next_visible_client = self.find_next_visible_client_by_mon(mon_key);
-                if let Some(monitor) = self.state.monitors.get_mut(mon_key) {
-                    if monitor.sel == Some(client_key) {
-                        monitor.sel = next_visible_client;
-                    }
-                }
-            }
+        let Some(mon_key) = self
+            .state
+            .clients
+            .get(client_key)
+            .and_then(|client| client.mon)
+        else {
+            return;
+        };
+
+        if let Some(stack_list) = self.state.monitor_stack.get_mut(mon_key)
+            && let Some(pos) = stack_list.iter().position(|&key| key == client_key)
+        {
+            stack_list.remove(pos);
+        }
+
+        let next_visible_client = self.find_next_visible_client_by_mon(mon_key);
+        if let Some(monitor) = self.state.monitors.get_mut(mon_key)
+            && monitor.sel == Some(client_key)
+        {
+            monitor.sel = next_visible_client;
         }
     }
 }

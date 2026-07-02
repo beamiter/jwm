@@ -382,7 +382,7 @@ mod tests {
     #[test]
     fn test_power_profile_switching() {
         let config = PowerSavingConfig::new();
-        let mut mgr = PowerSavingManager::new(config);
+        let mgr = PowerSavingManager::new(config);
 
         assert_eq!(mgr.current_profile(), PowerProfile::Performance);
     }

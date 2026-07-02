@@ -329,21 +329,6 @@ impl<'a, C: Connection> BatchedAttributesRequest<'a, C> {
 mod tests {
     use super::*;
 
-    struct MockConnection {
-        flush_count: usize,
-    }
-
-    impl MockConnection {
-        fn new() -> Self {
-            Self { flush_count: 0 }
-        }
-
-        fn flush(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-            self.flush_count += 1;
-            Ok(())
-        }
-    }
-
     #[test]
     fn test_batcher_creation() {
         let batcher = X11RequestBatcher::new();

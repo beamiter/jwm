@@ -27,6 +27,7 @@ pub struct Rect {
 }
 
 impl Rect {
+    #[must_use]
     pub fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
         Self { x, y, w, h }
     }
@@ -42,18 +43,22 @@ pub struct Color {
 }
 
 impl Color {
+    #[must_use]
     pub fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
         Self { r, g, b, a }
     }
 
+    #[must_use]
     pub fn black() -> Self {
         Self::new(0.0, 0.0, 0.0, 1.0)
     }
 
+    #[must_use]
     pub fn white() -> Self {
         Self::new(1.0, 1.0, 1.0, 1.0)
     }
 
+    #[must_use]
     pub fn transparent() -> Self {
         Self::new(0.0, 0.0, 0.0, 0.0)
     }
