@@ -3,7 +3,7 @@
 /// This module provides example integration patterns for GLStateTracker and RenderBatcher.
 /// Full integration into the existing render_frame is deferred to avoid disrupting
 /// the stable 7000+ line rendering pipeline.
-use super::{GLStateTracker, QuadInstance, RenderBatcher};
+use super::render_batcher::{GLStateTracker, QuadInstance, RenderBatcher};
 use glow::HasContext;
 
 /// Example: Batched window rendering with state tracking

@@ -1,0 +1,34 @@
+//! Backend-independent compositor building blocks shared by X11 backends.
+
+pub mod annotations;
+pub mod async_x11;
+pub mod audio_sync;
+pub mod benchmark;
+pub mod blur_optimize;
+pub mod cache_warmup;
+pub mod direct_scanout;
+pub mod dirty_region;
+pub mod effects;
+pub mod event_coalescer;
+pub mod expose;
+pub mod frame_rate;
+pub mod gpu_fence_sync;
+pub mod integration_helpers;
+pub mod math;
+pub mod oml_sync;
+pub mod optimization_manager;
+pub mod pbo_uploader;
+pub mod per_monitor;
+pub mod perf_metrics;
+pub mod pixel_buffer_pool;
+pub mod power_saving;
+pub mod predictive_render;
+pub mod profiler;
+pub mod render_batcher;
+pub mod render_stats;
+pub mod shader_cache;
+pub mod shaders;
+pub mod subpixel_integration;
+pub mod subpixel_render;
+pub mod texture_pool;
+pub mod transitions;

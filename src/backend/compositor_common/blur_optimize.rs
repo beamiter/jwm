@@ -1,4 +1,4 @@
-use super::BlurQuality;
+use crate::renderer::types::BlurQuality;
 use std::sync::Arc;
 /// Blur effect optimizations including adaptive quality and dual-pass Gaussian
 use std::sync::atomic::{AtomicU32, Ordering};

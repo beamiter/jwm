@@ -12,6 +12,9 @@ pub mod compositor_font;
 // Backend-independent process RSS + CPU sampler used by the debug HUD.
 pub mod sys_stats;
 
+// Backend-independent compositor state, profiling and diagnostics helpers.
+pub mod compositor_common;
+
 // Shared Smithay Wayland compositor state (used by udev/KMS and windowed X11 backend).
 pub mod wayland;
 

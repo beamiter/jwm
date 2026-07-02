@@ -2,8 +2,11 @@ pub mod backend;
 pub mod batch;
 pub mod compositor;
 pub mod edid;
-pub mod event_coalescer;
 pub mod systray;
+
+pub mod event_coalescer {
+    pub use crate::backend::compositor_common::event_coalescer::*;
+}
 
 x11rb::atom_manager! {
     pub Atoms: AtomsCookie {

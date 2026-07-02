@@ -1,19 +1,6 @@
 use super::Compositor;
+use crate::backend::compositor_common::annotations::{AnnotationPoint, AnnotationStroke};
 use glow::HasContext;
-
-/// A point in an annotation stroke.
-#[derive(Clone, Copy)]
-pub(super) struct AnnotationPoint {
-    pub x: f32,
-    pub y: f32,
-}
-
-/// A single annotation stroke (line segment sequence).
-pub(super) struct AnnotationStroke {
-    pub points: Vec<AnnotationPoint>,
-    pub color: [f32; 4],
-    pub width: f32,
-}
 
 impl Compositor {
     pub(crate) fn set_annotation_mode(&mut self, active: bool) {

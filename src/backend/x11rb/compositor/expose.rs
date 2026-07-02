@@ -1,4 +1,5 @@
-use super::{Compositor, ExposeEntry, SnapPreview, WindowTab};
+use super::{Compositor, SnapPreview, WindowTab};
+use crate::backend::compositor_common::expose::{build_expose_entries, tick_expose_entries};
 use glow::HasContext;
 
 impl Compositor {
@@ -26,59 +27,12 @@ impl Compositor {
                 return;
             }
 
-            let sw = self.screen_w as f32;
-            let sh = self.screen_h as f32;
-            let gap = self.expose_gap;
-            let screen_aspect = sw / sh;
-
-            // Compute grid layout
-            let cols = ((n as f32 * screen_aspect).sqrt()).ceil() as u32;
-            let cols = cols.max(1);
-            let rows = ((n as u32 + cols - 1) / cols).max(1);
-
-            let cell_w = (sw - gap * (cols as f32 + 1.0)) / cols as f32;
-            let cell_h = (sh - gap * (rows as f32 + 1.0)) / rows as f32;
-
-            self.expose_entries = windows
-                .iter()
-                .enumerate()
-                .map(|(i, &(win, x, y, w, h))| {
-                    let col = i as u32 % cols;
-                    let row = i as u32 / cols;
-
-                    let cell_x = gap + col as f32 * (cell_w + gap);
-                    let cell_y = gap + row as f32 * (cell_h + gap);
-
-                    // Scale window to fit cell preserving aspect ratio
-                    let win_aspect = w as f32 / h.max(1) as f32;
-                    let cell_aspect = cell_w / cell_h;
-                    let (tw, th) = if win_aspect > cell_aspect {
-                        (cell_w, cell_w / win_aspect)
-                    } else {
-                        (cell_h * win_aspect, cell_h)
-                    };
-                    // Center in cell
-                    let tx = cell_x + (cell_w - tw) * 0.5;
-                    let ty = cell_y + (cell_h - th) * 0.5;
-
-                    ExposeEntry {
-                        x11_win: win,
-                        orig_x: x as f32,
-                        orig_y: y as f32,
-                        orig_w: w as f32,
-                        orig_h: h as f32,
-                        target_x: tx,
-                        target_y: ty,
-                        target_w: tw,
-                        target_h: th,
-                        current_x: x as f32,
-                        current_y: y as f32,
-                        current_w: w as f32,
-                        current_h: h as f32,
-                        is_hovered: false,
-                    }
-                })
-                .collect();
+            self.expose_entries = build_expose_entries(
+                self.screen_w as f32,
+                self.screen_h as f32,
+                self.expose_gap,
+                &windows,
+            );
 
             self.expose_active = true;
             self.expose_opacity = 0.0;
@@ -97,77 +51,17 @@ impl Compositor {
             return false;
         }
 
-        let dt = 1.0 / 60.0_f32;
-        let ease_speed = 12.0_f32;
-        let t = 1.0 - (-ease_speed * dt).exp();
-        let mut any_moving = false;
-
-        if self.expose_active {
-            // Fade in
-            self.expose_opacity = (self.expose_opacity + dt * 4.0).min(1.0);
-            if self.expose_opacity < 1.0 {
-                any_moving = true;
-            }
-
-            // Animate current -> target
-            for entry in &mut self.expose_entries {
-                let dx = entry.target_x - entry.current_x;
-                let dy = entry.target_y - entry.current_y;
-                let dw = entry.target_w - entry.current_w;
-                let dh = entry.target_h - entry.current_h;
-
-                if dx.abs() > 0.5 || dy.abs() > 0.5 || dw.abs() > 0.5 || dh.abs() > 0.5 {
-                    entry.current_x += dx * t;
-                    entry.current_y += dy * t;
-                    entry.current_w += dw * t;
-                    entry.current_h += dh * t;
-                    any_moving = true;
-                } else {
-                    entry.current_x = entry.target_x;
-                    entry.current_y = entry.target_y;
-                    entry.current_w = entry.target_w;
-                    entry.current_h = entry.target_h;
-                }
-            }
-        } else {
-            // Animate current -> orig
-            for entry in &mut self.expose_entries {
-                let dx = entry.orig_x - entry.current_x;
-                let dy = entry.orig_y - entry.current_y;
-                let dw = entry.orig_w - entry.current_w;
-                let dh = entry.orig_h - entry.current_h;
-
-                if dx.abs() > 0.5 || dy.abs() > 0.5 || dw.abs() > 0.5 || dh.abs() > 0.5 {
-                    entry.current_x += dx * t;
-                    entry.current_y += dy * t;
-                    entry.current_w += dw * t;
-                    entry.current_h += dh * t;
-                    any_moving = true;
-                } else {
-                    entry.current_x = entry.orig_x;
-                    entry.current_y = entry.orig_y;
-                    entry.current_w = entry.orig_w;
-                    entry.current_h = entry.orig_h;
-                }
-            }
-
-            // Fade out the dark overlay faster than the position animation,
-            // so it disappears before windows reach their original positions.
-            // This avoids a visible flash of dark overlay at the end.
-            let fade_speed = if any_moving { 8.0 } else { 20.0 };
-            self.expose_opacity = (self.expose_opacity - dt * fade_speed).max(0.0);
-            if self.expose_opacity > 0.0 {
-                any_moving = true;
-            }
-
-            // Clean up when animation finishes
-            if self.expose_opacity <= 0.0 && !any_moving {
-                self.expose_entries.clear();
-                return false;
-            }
+        let result = tick_expose_entries(
+            &mut self.expose_entries,
+            self.expose_active,
+            &mut self.expose_opacity,
+            1.0 / 60.0_f32,
+        );
+        if result.clear_entries {
+            self.expose_entries.clear();
         }
 
-        any_moving || self.expose_opacity > 0.0 && self.expose_opacity < 1.0
+        result.keep_animating
     }
 
     /// Render expose overlay. Called from render_frame after borders, before post-process.

@@ -2,45 +2,113 @@ mod annotations;
 mod effects;
 mod expose;
 mod font;
-pub mod math;
 mod overview;
 mod pipeline;
 mod postprocess;
-pub mod shaders;
 mod tfp;
 mod transitions;
 
 // Optimization modules
-pub mod async_x11;
-pub mod blur_optimize;
-pub mod cache_warmup;
-pub mod direct_scanout;
-pub mod dirty_region;
-pub mod frame_rate;
-pub mod gpu_fence_sync;
-pub mod integration_helpers;
-pub mod optimization_manager;
-pub mod pbo_uploader;
-pub mod per_monitor;
-pub mod perf_metrics;
-pub mod pixel_buffer_pool;
-pub mod power_saving;
-pub mod predictive_render;
-pub mod profiler;
-pub mod render_batcher;
-pub mod render_stats;
-pub mod shader_cache;
-pub mod subpixel_integration;
-pub mod subpixel_render;
-pub mod texture_pool;
 
 // Sync control modules
-pub mod audio_sync;
 pub mod oml_sync_control;
 pub mod present;
 
-// Benchmark
-pub mod benchmark;
+// Backend-independent modules kept under the old x11rb::compositor path as
+// compatibility facades while xcb starts using the common layer directly.
+pub mod benchmark {
+    pub use crate::backend::compositor_common::benchmark::*;
+}
+pub mod blur_optimize {
+    pub use crate::backend::compositor_common::blur_optimize::*;
+}
+pub mod cache_warmup {
+    pub use crate::backend::compositor_common::cache_warmup::*;
+}
+pub mod direct_scanout {
+    pub use crate::backend::compositor_common::direct_scanout::*;
+}
+pub mod dirty_region {
+    pub use crate::backend::compositor_common::dirty_region::*;
+}
+pub mod frame_rate {
+    pub use crate::backend::compositor_common::frame_rate::*;
+}
+pub mod gpu_fence_sync {
+    pub use crate::backend::compositor_common::gpu_fence_sync::*;
+}
+pub mod math {
+    pub use crate::backend::compositor_common::math::*;
+}
+pub mod pbo_uploader {
+    pub use crate::backend::compositor_common::pbo_uploader::*;
+}
+pub mod per_monitor {
+    pub use crate::backend::compositor_common::per_monitor::*;
+}
+pub mod perf_metrics {
+    pub use crate::backend::compositor_common::perf_metrics::*;
+}
+pub mod pixel_buffer_pool {
+    pub use crate::backend::compositor_common::pixel_buffer_pool::*;
+}
+pub mod power_saving {
+    pub use crate::backend::compositor_common::power_saving::*;
+}
+pub mod predictive_render {
+    pub use crate::backend::compositor_common::predictive_render::*;
+}
+pub mod profiler {
+    pub use crate::backend::compositor_common::profiler::*;
+}
+pub mod render_batcher {
+    pub use crate::backend::compositor_common::render_batcher::*;
+}
+pub mod render_stats {
+    pub use crate::backend::compositor_common::render_stats::*;
+}
+pub mod shader_cache {
+    pub use crate::backend::compositor_common::shader_cache::*;
+}
+pub mod subpixel_integration {
+    pub use crate::backend::compositor_common::subpixel_integration::*;
+}
+pub mod subpixel_render {
+    pub use crate::backend::compositor_common::subpixel_render::*;
+}
+pub mod texture_pool {
+    pub use crate::backend::compositor_common::texture_pool::*;
+}
+pub mod async_x11 {
+    pub use crate::backend::compositor_common::async_x11::*;
+}
+pub mod annotations_common {
+    pub use crate::backend::compositor_common::annotations::*;
+}
+pub mod audio_sync {
+    pub use crate::backend::compositor_common::audio_sync::*;
+}
+pub mod effects_common {
+    pub use crate::backend::compositor_common::effects::*;
+}
+pub mod expose_common {
+    pub use crate::backend::compositor_common::expose::*;
+}
+pub mod integration_helpers {
+    pub use crate::backend::compositor_common::integration_helpers::*;
+}
+pub mod optimization_manager {
+    pub use crate::backend::compositor_common::optimization_manager::*;
+}
+pub mod oml_sync_common {
+    pub use crate::backend::compositor_common::oml_sync::*;
+}
+pub mod shaders {
+    pub use crate::backend::compositor_common::shaders::*;
+}
+pub mod transitions_common {
+    pub use crate::backend::compositor_common::transitions::*;
+}
 
 mod config;
 mod features;
@@ -329,19 +397,7 @@ struct PortalUniforms {
     uv_rect: Option<glow::UniformLocation>,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum TransitionMode {
-    Slide,
-    Cube,
-    Fade,
-    Flip,
-    Zoom,
-    Stack,
-    Blinds,
-    CoverFlow,
-    Helix,
-    Portal,
-}
+use transitions_common::TransitionMode;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum WallpaperMode {
@@ -482,57 +538,8 @@ struct OverviewEntry {
     face_index: usize,
 }
 
-/// Single particle for close animation.
-struct Particle {
-    x: f32,
-    y: f32,
-    vx: f32,
-    vy: f32,
-    color: [f32; 4],
-    lifetime: f32,
-    max_lifetime: f32,
-}
-
-/// Entry for Expose/Mission Control mode.
-struct ExposeEntry {
-    x11_win: u32,
-    orig_x: f32,
-    orig_y: f32,
-    orig_w: f32,
-    orig_h: f32,
-    target_x: f32,
-    target_y: f32,
-    target_w: f32,
-    target_h: f32,
-    current_x: f32,
-    current_y: f32,
-    current_w: f32,
-    current_h: f32,
-    is_hovered: bool,
-}
-
-/// Snap preview state.
-struct SnapPreview {
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    opacity: f32,
-    start: std::time::Instant,
-    fading_out: bool,
-}
-
-/// Single tab in a window group.
-struct WindowTab {
-    x11_win: u32,
-    title: String,
-    is_active: bool,
-}
-
-/// Active particle system (one per closing window).
-struct ParticleSystem {
-    particles: Vec<Particle>,
-}
+use effects_common::{Particle, ParticleSystem, RippleState};
+use expose_common::{ExposeEntry, SnapPreview, WindowTab};
 
 /// Cached uniform locations for edge glow shader.
 struct EdgeGlowUniforms {
@@ -783,11 +790,6 @@ struct GenieAnimation {
 // ---------------------------------------------------------------------------
 // Phase 3.3: Window open ripple
 // ---------------------------------------------------------------------------
-
-struct RippleState {
-    x11_win: u32,
-    start: std::time::Instant,
-}
 
 // ---------------------------------------------------------------------------
 // Compositor
@@ -1115,7 +1117,7 @@ pub(crate) struct Compositor {
 
     // --- Phase 6.2: Screen annotations ---
     annotation_active: bool,
-    annotation_strokes: Vec<annotations::AnnotationStroke>,
+    annotation_strokes: Vec<annotations_common::AnnotationStroke>,
     annotation_color: [f32; 4],
     annotation_line_width: f32,
 

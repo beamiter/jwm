@@ -87,15 +87,7 @@ impl Compositor {
         }
 
         // Create new-scene FBO for modes that need both old and new textures
-        let needs_new_fbo = matches!(
-            self.transition_mode,
-            TransitionMode::Cube
-                | TransitionMode::Flip
-                | TransitionMode::Blinds
-                | TransitionMode::CoverFlow
-                | TransitionMode::Helix
-                | TransitionMode::Portal
-        );
+        let needs_new_fbo = self.transition_mode.needs_new_scene_fbo();
         if needs_new_fbo && self.transition_new_fbo.is_none() {
             self.transition_new_fbo =
                 unsafe { Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok() };
@@ -182,19 +174,7 @@ impl Compositor {
     // Feature 11: Debug HUD toggle
     // =====================================================================
     pub(crate) fn set_transition_mode(&mut self, mode: &str) {
-        let new_mode = match mode {
-            "cube" => TransitionMode::Cube,
-            "fade" => TransitionMode::Fade,
-            "flip" => TransitionMode::Flip,
-            "zoom" => TransitionMode::Zoom,
-            "stack" => TransitionMode::Stack,
-            "blinds" => TransitionMode::Blinds,
-            "coverflow" => TransitionMode::CoverFlow,
-            "helix" => TransitionMode::Helix,
-            "portal" => TransitionMode::Portal,
-            _ => TransitionMode::Slide,
-        };
-        self.transition_mode = new_mode;
+        self.transition_mode = TransitionMode::from_name(mode);
     }
 
     pub(crate) fn set_debug_hud(&mut self, enabled: bool) {
