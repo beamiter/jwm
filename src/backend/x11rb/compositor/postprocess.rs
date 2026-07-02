@@ -153,7 +153,7 @@ impl Compositor {
 
     /// Render a specific window to an off-screen FBO and return RGBA pixel data.
     /// Returns None if the window isn't tracked. Dimensions are (width, height).
-    pub(in crate::backend::x11) fn capture_window_thumbnail(
+    pub(in crate::backend::x11rb) fn capture_window_thumbnail(
         &self,
         x11_win: u32,
         max_size: u32,

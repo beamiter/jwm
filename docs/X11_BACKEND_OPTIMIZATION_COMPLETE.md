@@ -148,7 +148,7 @@
 ### 新增模块架构
 
 ```
-src/backend/x11/compositor/
+src/backend/x11rb/compositor/
 ├── pbo_uploader.rs        (P6C: 零拷贝上传)
 ├── gpu_fence_sync.rs      (P6B: 非阻塞同步)
 ├── async_x11.rs           (P6A: 事件队列)

@@ -765,7 +765,8 @@ fn install_jwm(jwm_dir: &str) -> io::Result<()> {
     let files_to_check: &[(&str, PathBuf)] = &[
         ("jwm", jwm_dir.join("target/release/jwm")),
         ("jwm-tool", jwm_dir.join("target/release/jwm-tool")),
-        ("jwm-x11.desktop", jwm_dir.join("jwm-x11.desktop")),
+        ("jwm-x11rb.desktop", jwm_dir.join("jwm-x11rb.desktop")),
+        ("jwm-xcb.desktop", jwm_dir.join("jwm-xcb.desktop")),
         ("jwm-wayland.desktop", jwm_dir.join("jwm-wayland.desktop")),
     ];
 

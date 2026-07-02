@@ -64,6 +64,7 @@ drm-ffi = "0.9.1"
 libseat = "0.2.4"
 gbm = "0.18.0"
 egl = "0.2.7"
+xcb = "1.7.0"
 
 [[bench]]
 name = "wm_benchmark"

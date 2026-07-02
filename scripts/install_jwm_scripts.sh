@@ -342,8 +342,10 @@ build_and_install_jwm() {
     ok "jwm, jwm-tool 安装完成"
 
     info "安装 desktop 文件 ..."
-    [[ -f jwm-x11.desktop ]]           && sudo install -m644 jwm-x11.desktop           /usr/share/xsessions/
-    [[ -f jwm-x11-debug.desktop ]]     && sudo install -m644 jwm-x11-debug.desktop     /usr/share/xsessions/
+    [[ -f jwm-x11rb.desktop ]]         && sudo install -m644 jwm-x11rb.desktop         /usr/share/xsessions/
+    [[ -f jwm-x11rb-debug.desktop ]]   && sudo install -m644 jwm-x11rb-debug.desktop   /usr/share/xsessions/
+    [[ -f jwm-xcb.desktop ]]           && sudo install -m644 jwm-xcb.desktop           /usr/share/xsessions/
+    [[ -f jwm-xcb-debug.desktop ]]     && sudo install -m644 jwm-xcb-debug.desktop     /usr/share/xsessions/
     [[ -f jwm-wayland.desktop ]]       && sudo install -m644 jwm-wayland.desktop       /usr/share/wayland-sessions/
     [[ -f jwm-wayland-debug.desktop ]] && sudo install -m644 jwm-wayland-debug.desktop /usr/share/wayland-sessions/
     ok "desktop 文件安装完成"

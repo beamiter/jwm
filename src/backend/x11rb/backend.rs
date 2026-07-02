@@ -1,5 +1,5 @@
 use crate::backend::api::BackendEvent;
-// src/backend/x11/backend.rs
+// src/backend/x11rb/backend.rs
 use self::ids::X11IdRegistry;
 use crate::backend::api::EventHandler;
 use crate::backend::api::EwmhFeature;
@@ -41,14 +41,14 @@ use self::{
 };
 use super::Atoms;
 
-pub struct X11LoopData<'a> {
-    pub backend: &'a mut X11Backend,
+pub struct X11rbLoopData<'a> {
+    pub backend: &'a mut X11rbBackend,
     pub handler: &'a mut dyn EventHandler,
     pub should_exit: bool,
 }
 
 #[allow(dead_code)]
-pub struct X11Backend {
+pub struct X11rbBackend {
     conn: Arc<RustConnection>,
     screen: Screen,
     screen_num: usize,
@@ -97,7 +97,7 @@ struct X11Interaction {
     current_h: u32,
 }
 
-impl X11Backend {
+impl X11rbBackend {
     fn debug_drag_enabled() -> bool {
         // Cached: this is read on every MotionNotify during a drag, so the
         // env lookup (process-wide env lock + alloc) must not run per-event.
@@ -679,7 +679,7 @@ impl X11Backend {
     }
 }
 
-impl Backend for X11Backend {
+impl Backend for X11rbBackend {
     fn capabilities(&self) -> Capabilities {
         self.caps
     }
@@ -732,7 +732,7 @@ impl Backend for X11Backend {
                         .collect();
 
                     if !windows.is_empty() {
-                        use crate::backend::x11::batch::BatchedGeometryRequest;
+                        use crate::backend::x11rb::batch::BatchedGeometryRequest;
                         let mut batch = BatchedGeometryRequest::new(&*self.conn);
 
                         for &(x11w, _) in &windows {
@@ -1629,7 +1629,7 @@ impl Backend for X11Backend {
     }
 
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError> {
-        let mut event_loop: EventLoop<X11LoopData> = EventLoop::try_new()?;
+        let mut event_loop: EventLoop<X11rbLoopData> = EventLoop::try_new()?;
         let handle = event_loop.handle();
 
         // 1. 注册 X11 事件源
@@ -1769,7 +1769,7 @@ impl Backend for X11Backend {
         }
 
         // 5. 运行事件循环
-        let mut loop_data = X11LoopData {
+        let mut loop_data = X11rbLoopData {
             backend: self,
             handler,
             should_exit: false,
@@ -2560,7 +2560,7 @@ mod event_source {
     };
     use crate::backend::api::{HitTarget, NotifyMode};
     use crate::backend::error::BackendError;
-    use crate::backend::x11::Atoms;
+    use crate::backend::x11rb::Atoms;
 
     use calloop::{EventSource, Interest, Mode, Poll, PostAction, Readiness, Token, TokenFactory};
 
@@ -3047,7 +3047,7 @@ mod ewmh_facade {
     use crate::backend::api::{EwmhFacade, EwmhFeature};
     use crate::backend::common_define::WindowId;
     use crate::backend::error::BackendError;
-    use crate::backend::x11::Atoms;
+    use crate::backend::x11rb::Atoms;
     use std::sync::Arc;
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::ConnectionExt as _;
@@ -4136,7 +4136,7 @@ mod property_ops {
     };
     use crate::backend::common_define::WindowId;
     use crate::backend::error::BackendError;
-    use crate::backend::x11::Atoms;
+    use crate::backend::x11rb::Atoms;
     use std::sync::Arc;
     use x11rb::connection::Connection;
     use x11rb::properties::WmSizeHints;
@@ -5042,8 +5042,8 @@ mod window_ops {
     use crate::backend::api::{StackMode, WindowChanges};
     use crate::backend::common_define::{Mods, Pixel, WindowId};
     use crate::backend::error::BackendError;
-    use crate::backend::x11::Atoms;
-    use crate::backend::x11::batch::X11RequestBatcher;
+    use crate::backend::x11rb::Atoms;
+    use crate::backend::x11rb::batch::X11RequestBatcher;
     use crate::sync_ext::MutexExt;
     use log::debug;
     use std::env;
@@ -5064,7 +5064,7 @@ mod window_ops {
 
     impl<C: Connection> X11WindowOps<C> {
         fn debug_drag_enabled() -> bool {
-            // Cached: read per MotionNotify during a drag (see X11Backend copy).
+            // Cached: read per MotionNotify during a drag (see X11rbBackend copy).
             static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
             *CACHE.get_or_init(|| {
                 env::var("JWM_DEBUG_DRAG")

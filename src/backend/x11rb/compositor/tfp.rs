@@ -13,7 +13,7 @@ impl Compositor {
     // =====================================================================
     // Feature 13: Set frame extents for blur mask
     // =====================================================================
-    pub(in crate::backend::x11) fn set_frame_extents(
+    pub(in crate::backend::x11rb) fn set_frame_extents(
         &mut self,
         x11_win: u32,
         left: u32,
@@ -29,7 +29,7 @@ impl Compositor {
     // =====================================================================
     // Feature 14: Set shaped window
     // =====================================================================
-    pub(in crate::backend::x11) fn set_window_shaped(&mut self, x11_win: u32, shaped: bool) {
+    pub(in crate::backend::x11rb) fn set_window_shaped(&mut self, x11_win: u32, shaped: bool) {
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             wt.is_shaped = shaped;
         }
@@ -38,7 +38,7 @@ impl Compositor {
     // =====================================================================
     // Mark window as override-redirect (unmanaged overlay)
     // =====================================================================
-    pub(in crate::backend::x11) fn set_window_override_redirect(
+    pub(in crate::backend::x11rb) fn set_window_override_redirect(
         &mut self,
         x11_win: u32,
         is_or: bool,
@@ -50,7 +50,7 @@ impl Compositor {
 
     // ----- Window management -----
 
-    pub(in crate::backend::x11) fn add_window(
+    pub(in crate::backend::x11rb) fn add_window(
         &mut self,
         x11_win: u32,
         x: i32,
@@ -348,7 +348,7 @@ impl Compositor {
     /// Update the compositor's screen dimensions (e.g. after a RandR hotplug).
     /// The overlay window is resized automatically by the X server, but we need
     /// to update our GL viewport and projection matrix dimensions.
-    pub(in crate::backend::x11) fn resize(&mut self, new_w: u32, new_h: u32) {
+    pub(in crate::backend::x11rb) fn resize(&mut self, new_w: u32, new_h: u32) {
         if new_w == self.screen_w && new_h == self.screen_h {
             return;
         }
@@ -401,7 +401,7 @@ impl Compositor {
         }
     }
 
-    pub(in crate::backend::x11) fn remove_window(&mut self, x11_win: u32) {
+    pub(in crate::backend::x11rb) fn remove_window(&mut self, x11_win: u32) {
         // Spawn particles for closing window
         if self.particle_effects {
             if let Some(wt) = self.windows.get(&x11_win) {
@@ -473,7 +473,7 @@ impl Compositor {
         log::debug!("compositor: remove_window 0x{:x}", x11_win);
     }
 
-    pub(in crate::backend::x11) fn update_geometry(
+    pub(in crate::backend::x11rb) fn update_geometry(
         &mut self,
         x11_win: u32,
         x: i32,
@@ -639,7 +639,7 @@ impl Compositor {
         }
     }
 
-    pub(in crate::backend::x11) fn mark_damaged(&mut self, x11_win: u32) {
+    pub(in crate::backend::x11rb) fn mark_damaged(&mut self, x11_win: u32) {
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             wt.dirty = true;
             self.needs_render = true;
@@ -658,7 +658,7 @@ impl Compositor {
     }
 
     /// Set the window class name (for per-window rules).
-    pub(in crate::backend::x11) fn set_window_class(&mut self, x11_win: u32, class_name: &str) {
+    pub(in crate::backend::x11rb) fn set_window_class(&mut self, x11_win: u32, class_name: &str) {
         // Look up per-window rules before borrowing windows mutably
         let opacity_override = self.lookup_opacity_rule(class_name);
         let corner_radius_override = self.lookup_corner_radius_rule(class_name);
@@ -728,7 +728,7 @@ impl Compositor {
     }
 
     /// Set/unset fullscreen state for a window (for fullscreen unredirect).
-    pub(in crate::backend::x11) fn set_window_fullscreen(
+    pub(in crate::backend::x11rb) fn set_window_fullscreen(
         &mut self,
         x11_win: u32,
         fullscreen: bool,

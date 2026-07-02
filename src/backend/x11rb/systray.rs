@@ -1,4 +1,4 @@
-use crate::backend::x11::Atoms;
+use crate::backend::x11rb::Atoms;
 use std::sync::Arc;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;

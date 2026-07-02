@@ -11,7 +11,8 @@ use jwm::config::{BackendFamily, set_backend_family};
 use jwm::backend::wayland_udev::backend::UdevBackend;
 use jwm::backend::wayland_winit::backend::WaylandWinitBackend;
 use jwm::backend::wayland_x11::backend::WaylandX11Backend;
-use jwm::backend::x11::backend::X11Backend;
+use jwm::backend::x11rb::backend::X11rbBackend;
+use jwm::backend::xcb::backend::XcbBackend;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Suppress verbose third-party crate spam unless the caller already set RUST_LOG.
@@ -157,7 +158,8 @@ fn run_jwm() -> Result<(), Box<dyn std::error::Error>> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BackendChoice {
-    X11,
+    X11RB,
+    XCB,
     WaylandUdev,
     WaylandX11,
     WaylandWinit,
@@ -166,28 +168,29 @@ enum BackendChoice {
 fn select_backend() -> Result<Box<dyn jwm::backend::api::Backend>, Box<dyn std::error::Error>> {
     // Selection rule:
     // - If JWM_BACKEND is set, honor it.
-    // - Otherwise, default to x11.
+    // - Otherwise, default to x11rb.
     let resolved = if let Ok(val) = env::var("JWM_BACKEND") {
         let val = val.to_lowercase();
         match val.as_str() {
-            "x11" => BackendChoice::X11,
+            "x11rb" => BackendChoice::X11RB,
+            "xcb" | "x11-xcb" => BackendChoice::XCB,
             "wayland-udev" | "udev" | "wayland" => BackendChoice::WaylandUdev,
             "wayland-x11" | "x11-wayland" | "windowed" => BackendChoice::WaylandX11,
             "wayland-winit" | "winit" => BackendChoice::WaylandWinit,
             other => {
                 return Err(format!(
-                    "Unknown JWM_BACKEND={other:?}; expected 'x11'|'wayland-udev'|'wayland-x11'|'wayland-winit'"
+                    "Unknown JWM_BACKEND={other:?}; expected 'x11rb'|'xcb'|'wayland-udev'|'wayland-x11'|'wayland-winit'"
                 )
                 .into());
             }
         }
     } else {
-        BackendChoice::X11
+        BackendChoice::X11RB
     };
 
     // Register backend family with the config system BEFORE CONFIG is first accessed.
     let family = match resolved {
-        BackendChoice::X11 => BackendFamily::X11,
+        BackendChoice::X11RB | BackendChoice::XCB => BackendFamily::X11,
         BackendChoice::WaylandUdev | BackendChoice::WaylandX11 | BackendChoice::WaylandWinit => {
             BackendFamily::Wayland
         }
@@ -195,9 +198,13 @@ fn select_backend() -> Result<Box<dyn jwm::backend::api::Backend>, Box<dyn std::
     set_backend_family(family);
 
     match resolved {
-        BackendChoice::X11 => {
-            info!("Initializing X11 Backend (config: config_x11.toml)");
-            Ok(Box::new(X11Backend::new()?))
+        BackendChoice::X11RB => {
+            info!("Initializing X11RB Backend (config: config_x11.toml)");
+            Ok(Box::new(X11rbBackend::new()?))
+        }
+        BackendChoice::XCB => {
+            info!("Initializing XCB Backend (config: config_x11.toml)");
+            Ok(Box::new(XcbBackend::new()?))
         }
         BackendChoice::WaylandUdev => {
             info!("Initializing Wayland/Udev Backend (config: config_wayland.toml)");

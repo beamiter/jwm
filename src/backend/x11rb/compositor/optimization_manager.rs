@@ -8,7 +8,7 @@ use super::perf_metrics::PerfMetrics;
 use super::pixel_buffer_pool::PixelBufferPool;
 use super::shader_cache::ShaderCache;
 use super::texture_pool::TexturePool;
-use crate::backend::x11::event_coalescer::EventCoalescer;
+use crate::backend::x11rb::event_coalescer::EventCoalescer;
 use std::path::PathBuf;
 use std::time::Instant;
 

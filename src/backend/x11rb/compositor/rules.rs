@@ -500,7 +500,7 @@ impl Compositor {
     /// Map-only (no GL): the global Hz->blur_strength FBO rebuild is left to the
     /// config-apply path, which runs with a current GL context — recreating FBOs
     /// here (event-dispatch context) cannot assume the GL context is bound.
-    pub(in crate::backend::x11) fn refresh_monitor_layout(&mut self, root: u32) {
+    pub(in crate::backend::x11rb) fn refresh_monitor_layout(&mut self, root: u32) {
         self.monitor_rects = Self::build_monitor_rects(&self.conn, root);
         self.monitor_refresh_rates = Self::build_monitor_refresh_rates(&self.conn, root);
         log::info!(
