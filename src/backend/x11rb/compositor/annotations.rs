@@ -16,7 +16,7 @@ pub(super) struct AnnotationStroke {
 }
 
 impl Compositor {
-    pub(in crate::backend::x11rb) fn set_annotation_mode(&mut self, active: bool) {
+    pub(crate) fn set_annotation_mode(&mut self, active: bool) {
         self.annotation_active = active;
         if !active {
             self.annotation_strokes.clear();
@@ -24,7 +24,7 @@ impl Compositor {
         self.needs_render = true;
     }
 
-    pub(in crate::backend::x11rb) fn annotation_add_point(&mut self, x: f32, y: f32) {
+    pub(crate) fn annotation_add_point(&mut self, x: f32, y: f32) {
         if !self.annotation_active {
             return;
         }
@@ -41,7 +41,7 @@ impl Compositor {
         self.needs_render = true;
     }
 
-    pub(in crate::backend::x11rb) fn annotation_new_stroke(&mut self) {
+    pub(crate) fn annotation_new_stroke(&mut self) {
         if !self.annotation_active {
             return;
         }

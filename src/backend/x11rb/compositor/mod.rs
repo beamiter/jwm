@@ -793,7 +793,7 @@ struct RippleState {
 // Compositor
 // ---------------------------------------------------------------------------
 
-pub(super) struct Compositor {
+pub(crate) struct Compositor {
     conn: Arc<RustConnection>,
     xlib_display: *mut x11::xlib::Display,
     tfp: TfpFunctions,

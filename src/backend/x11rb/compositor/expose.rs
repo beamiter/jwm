@@ -8,7 +8,7 @@ impl Compositor {
 
     /// Activate or deactivate expose mode.
     /// `windows` contains (x11_win, x, y, w, h) for each window to arrange.
-    pub(in crate::backend::x11rb) fn set_expose_mode(
+    pub(crate) fn set_expose_mode(
         &mut self,
         active: bool,
         windows: Vec<(u32, i32, i32, u32, u32)>,
@@ -304,7 +304,7 @@ impl Compositor {
     }
 
     /// Handle click in expose mode. Returns the x11_win of the clicked window.
-    pub(in crate::backend::x11rb) fn expose_click(&mut self, x: f32, y: f32) -> Option<u32> {
+    pub(crate) fn expose_click(&mut self, x: f32, y: f32) -> Option<u32> {
         let result = self.expose_entries.iter().find_map(|entry| {
             if x >= entry.current_x
                 && x <= entry.current_x + entry.current_w
@@ -328,15 +328,12 @@ impl Compositor {
 
     /// Set or clear the snap preview rectangle.
     /// Instantly remove the snap preview (no fade-out animation).
-    pub(in crate::backend::x11rb) fn clear_snap_preview_immediate(&mut self) {
+    pub(crate) fn clear_snap_preview_immediate(&mut self) {
         self.snap_target = None;
         self.needs_render = true;
     }
 
-    pub(in crate::backend::x11rb) fn set_snap_preview(
-        &mut self,
-        preview: Option<(f32, f32, f32, f32)>,
-    ) {
+    pub(crate) fn set_snap_preview(&mut self, preview: Option<(f32, f32, f32, f32)>) {
         if !self.snap_preview_enabled {
             return;
         }
@@ -453,7 +450,7 @@ impl Compositor {
     // =========================================================================
 
     /// Toggle peek mode. When active, all windows fade to transparent.
-    pub(in crate::backend::x11rb) fn set_peek_mode(&mut self, active: bool) {
+    pub(crate) fn set_peek_mode(&mut self, active: bool) {
         if !self.peek_enabled {
             return;
         }
@@ -510,10 +507,7 @@ impl Compositor {
     // =========================================================================
 
     /// Set window tab groups from the WM.
-    pub(in crate::backend::x11rb) fn set_window_groups(
-        &mut self,
-        groups: Vec<(u32, Vec<(u32, String, bool)>)>,
-    ) {
+    pub(crate) fn set_window_groups(&mut self, groups: Vec<(u32, Vec<(u32, String, bool)>)>) {
         self.window_groups.clear();
         for (group_id, tabs) in groups {
             let tab_entries: Vec<WindowTab> = tabs
@@ -692,7 +686,7 @@ impl Compositor {
 
     /// Request a live thumbnail for a window. Delegates to capture_window_thumbnail.
     /// Future: add caching logic.
-    pub(in crate::backend::x11rb) fn request_live_thumbnail(
+    pub(crate) fn request_live_thumbnail(
         &self,
         x11_win: u32,
         max_size: u32,

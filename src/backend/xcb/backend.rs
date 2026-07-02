@@ -1,9 +1,10 @@
 //! Native X11 backend implemented with the `xcb` crate.
 //!
 //! This backend owns a real `xcb::Connection` and implements the same JWM
-//! backend traits as the x11rb backend.  It intentionally starts without the
-//! GLX texture-from-pixmap compositor path; window management, EWMH, input and
-//! event dispatch are handled directly through XCB.
+//! backend traits as the x11rb backend. Window management, EWMH, input,
+//! systray, and primary event dispatch are handled directly through XCB. The
+//! compositor path still reuses the shared x11rb implementation through a helper
+//! connection so both X11 backends expose the same higher-level feature surface.
 
 use crate::backend::api::{
     AllowMode, AllowedAction, Backend, BackendEvent, Capabilities, CloseResult, ColorAllocator,
@@ -38,12 +39,16 @@ use calloop::{
 };
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
+use std::env;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::sync::{
     Arc, Mutex, RwLock,
     atomic::{AtomicU64, Ordering},
 };
 use std::time::Duration;
+use x11rb::connection::Connection as X11rbConnection;
+use x11rb::protocol::Event as X11rbEvent;
+use x11rb::rust_connection::RustConnection;
 use xcb::{Xid, XidNew, x};
 
 type XcbResult<T> = Result<T, BackendError>;
@@ -124,6 +129,11 @@ struct XcbAtoms {
     net_wm_action_above: x::Atom,
     net_wm_action_below: x::Atom,
     net_workarea: x::Atom,
+    net_system_tray_opcode: x::Atom,
+    net_system_tray_orientation: x::Atom,
+    manager: x::Atom,
+    xembed: x::Atom,
+    xembed_info: x::Atom,
     motif_wm_hints: x::Atom,
     gtk_frame_extents: x::Atom,
 }
@@ -221,6 +231,11 @@ impl XcbAtoms {
             net_wm_action_above: Self::intern(conn, b"_NET_WM_ACTION_ABOVE")?,
             net_wm_action_below: Self::intern(conn, b"_NET_WM_ACTION_BELOW")?,
             net_workarea: Self::intern(conn, b"_NET_WORKAREA")?,
+            net_system_tray_opcode: Self::intern(conn, b"_NET_SYSTEM_TRAY_OPCODE")?,
+            net_system_tray_orientation: Self::intern(conn, b"_NET_SYSTEM_TRAY_ORIENTATION")?,
+            manager: Self::intern(conn, b"MANAGER")?,
+            xembed: Self::intern(conn, b"_XEMBED")?,
+            xembed_info: Self::intern(conn, b"_XEMBED_INFO")?,
             motif_wm_hints: Self::intern(conn, b"_MOTIF_WM_HINTS")?,
             gtk_frame_extents: Self::intern(conn, b"_GTK_FRAME_EXTENTS")?,
         })
@@ -394,8 +409,36 @@ impl XcbIdRegistry {
             .ok_or(BackendError::NotFound("WindowId not mapped to XCB window"))
     }
 
+    fn x11(&self, id: WindowId) -> XcbResult<u32> {
+        self.wid_to_x
+            .read()
+            .unwrap()
+            .get(&id)
+            .copied()
+            .ok_or(BackendError::NotFound("WindowId not mapped to X11 window"))
+    }
+
+    fn intern_raw(&self, raw: u32) -> WindowId {
+        self.intern(x::Window::new(raw))
+    }
+
+    fn all_x11_windows(&self) -> Vec<(u32, WindowId)> {
+        self.x_to_wid
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(&raw, &id)| (raw, id))
+            .collect()
+    }
+
     fn remove(&self, win: x::Window) {
         let raw = win.resource_id();
+        if let Some(id) = self.x_to_wid.write().unwrap().remove(&raw) {
+            self.wid_to_x.write().unwrap().remove(&id);
+        }
+    }
+
+    fn remove_raw(&self, raw: u32) {
         if let Some(id) = self.x_to_wid.write().unwrap().remove(&raw) {
             self.wid_to_x.write().unwrap().remove(&id);
         }
@@ -419,6 +462,12 @@ pub struct XcbBackend {
     color_allocator: Box<dyn ColorAllocator>,
     pending: VecDeque<BackendEvent>,
     interaction: Option<XcbInteraction>,
+    compositor_conn: Option<Arc<RustConnection>>,
+    compositor_screen_num: Option<usize>,
+    compositor: Option<crate::backend::x11rb::compositor::Compositor>,
+    systray: Option<XcbSystemTray>,
+    benchmark_auto_exit: bool,
+    scratch_x11_scene: Vec<(u32, i32, i32, u32, u32)>,
 }
 
 struct XcbInteraction {
@@ -433,10 +482,357 @@ struct XcbInteraction {
     current_h: u32,
 }
 
+#[derive(Debug, Clone)]
+struct XcbTrayIcon {
+    window: x::Window,
+    mapped: bool,
+}
+
+struct XcbSystemTray {
+    conn: Arc<xcb::Connection>,
+    atoms: XcbAtoms,
+    tray_window: x::Window,
+    selection_atom: x::Atom,
+    root: x::Window,
+    icon_size: u32,
+    icons: Vec<XcbTrayIcon>,
+    active: bool,
+}
+
+impl XcbSystemTray {
+    fn new(
+        conn: Arc<xcb::Connection>,
+        atoms: XcbAtoms,
+        root: x::Window,
+        screen_num: usize,
+    ) -> XcbResult<Self> {
+        let selection_name = format!("_NET_SYSTEM_TRAY_S{screen_num}");
+        let selection_atom = XcbAtoms::intern(&conn, selection_name.as_bytes())?;
+        let tray_window: x::Window = conn.generate_id();
+        conn.send_and_check_request(&x::CreateWindow {
+            depth: x::COPY_FROM_PARENT as u8,
+            wid: tray_window,
+            parent: root,
+            x: -1,
+            y: -1,
+            width: 1,
+            height: 1,
+            border_width: 0,
+            class: x::WindowClass::InputOutput,
+            visual: x::COPY_FROM_PARENT,
+            value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
+        })
+        .map_err(xcb_err)?;
+
+        Ok(Self {
+            conn,
+            atoms,
+            tray_window,
+            selection_atom,
+            root,
+            icon_size: 24,
+            icons: Vec::new(),
+            active: false,
+        })
+    }
+
+    fn acquire_selection(&mut self) -> XcbResult<bool> {
+        let owner = self
+            .conn
+            .wait_for_reply(self.conn.send_request(&x::GetSelectionOwner {
+                selection: self.selection_atom,
+            }))
+            .map_err(xcb_err)?
+            .owner();
+        if owner != x::WINDOW_NONE {
+            return Ok(false);
+        }
+
+        self.conn
+            .send_and_check_request(&x::SetSelectionOwner {
+                owner: self.tray_window,
+                selection: self.selection_atom,
+                time: x::CURRENT_TIME,
+            })
+            .map_err(xcb_err)?;
+
+        let owner = self
+            .conn
+            .wait_for_reply(self.conn.send_request(&x::GetSelectionOwner {
+                selection: self.selection_atom,
+            }))
+            .map_err(xcb_err)?
+            .owner();
+        if owner != self.tray_window {
+            return Ok(false);
+        }
+
+        let manager_event = x::ClientMessageEvent::new(
+            self.root,
+            self.atoms.manager,
+            x::ClientMessageData::Data32([
+                x::CURRENT_TIME,
+                self.selection_atom.resource_id(),
+                self.tray_window.resource_id(),
+                0,
+                0,
+            ]),
+        );
+        self.conn
+            .send_and_check_request(&x::SendEvent {
+                propagate: false,
+                destination: x::SendEventDest::Window(self.root),
+                event_mask: x::EventMask::STRUCTURE_NOTIFY,
+                event: &manager_event,
+            })
+            .map_err(xcb_err)?;
+
+        change_u32s(
+            &self.conn,
+            self.tray_window,
+            self.atoms.net_system_tray_orientation,
+            self.atoms.cardinal,
+            &[0],
+        )?;
+        self.conn.flush().map_err(xcb_err)?;
+        self.active = true;
+        Ok(true)
+    }
+
+    fn handle_client_message(&mut self, data: &[u32; 5]) -> bool {
+        if !self.active {
+            return false;
+        }
+        if data[1] == 0 && data[2] != 0 {
+            let _ = self.dock_icon(x::Window::new(data[2]));
+            return true;
+        }
+        false
+    }
+
+    fn dock_icon(&mut self, icon_window: x::Window) -> XcbResult<()> {
+        if self.is_tray_icon(icon_window) {
+            return Ok(());
+        }
+
+        self.conn
+            .send_and_check_request(&x::ChangeWindowAttributes {
+                window: icon_window,
+                value_list: &[x::Cw::EventMask(
+                    x::EventMask::STRUCTURE_NOTIFY | x::EventMask::PROPERTY_CHANGE,
+                )],
+            })
+            .map_err(xcb_err)?;
+        self.conn
+            .send_and_check_request(&x::ReparentWindow {
+                window: icon_window,
+                parent: self.tray_window,
+                x: 0,
+                y: 0,
+            })
+            .map_err(xcb_err)?;
+        self.configure_icon(icon_window, 0)?;
+        self.conn
+            .send_and_check_request(&x::MapWindow {
+                window: icon_window,
+            })
+            .map_err(xcb_err)?;
+
+        let xembed_event = x::ClientMessageEvent::new(
+            icon_window,
+            self.atoms.xembed,
+            x::ClientMessageData::Data32([
+                x::CURRENT_TIME,
+                0,
+                0,
+                self.tray_window.resource_id(),
+                0,
+            ]),
+        );
+        self.conn
+            .send_and_check_request(&x::SendEvent {
+                propagate: false,
+                destination: x::SendEventDest::Window(icon_window),
+                event_mask: x::EventMask::NO_EVENT,
+                event: &xembed_event,
+            })
+            .map_err(xcb_err)?;
+
+        self.icons.push(XcbTrayIcon {
+            window: icon_window,
+            mapped: true,
+        });
+        self.layout_icons()?;
+        self.conn.flush().map_err(xcb_err)
+    }
+
+    fn handle_destroy(&mut self, window: x::Window) {
+        if let Some(pos) = self.icons.iter().position(|i| i.window == window) {
+            self.icons.remove(pos);
+            let _ = self.layout_icons();
+            let _ = self.conn.flush();
+        }
+    }
+
+    fn handle_unmap(&mut self, window: x::Window) {
+        if let Some(icon) = self.icons.iter_mut().find(|i| i.window == window) {
+            icon.mapped = false;
+            let _ = self.layout_icons();
+            let _ = self.conn.flush();
+        }
+    }
+
+    fn handle_map(&mut self, window: x::Window) {
+        if let Some(icon) = self.icons.iter_mut().find(|i| i.window == window) {
+            icon.mapped = true;
+            let _ = self.layout_icons();
+            let _ = self.conn.flush();
+        }
+    }
+
+    fn handle_xembed_info_change(&mut self, window: x::Window) {
+        let mapped = self.read_xembed_mapped(window);
+        if let Some(icon) = self.icons.iter_mut().find(|i| i.window == window) {
+            if mapped && !icon.mapped {
+                icon.mapped = true;
+                let _ = self.conn.send_and_check_request(&x::MapWindow { window });
+            } else if !mapped && icon.mapped {
+                icon.mapped = false;
+                let _ = self.conn.send_and_check_request(&x::UnmapWindow { window });
+            }
+            let _ = self.layout_icons();
+            let _ = self.conn.flush();
+        }
+    }
+
+    fn is_tray_icon(&self, window: x::Window) -> bool {
+        self.icons.iter().any(|i| i.window == window)
+    }
+
+    fn cleanup(&self) {
+        if !self.active {
+            return;
+        }
+        for icon in &self.icons {
+            let _ = self.conn.send_and_check_request(&x::ReparentWindow {
+                window: icon.window,
+                parent: self.root,
+                x: 0,
+                y: 0,
+            });
+            let _ = self.conn.send_and_check_request(&x::UnmapWindow {
+                window: icon.window,
+            });
+        }
+        let _ = self.conn.send_and_check_request(&x::DestroyWindow {
+            window: self.tray_window,
+        });
+        let _ = self.conn.flush();
+    }
+
+    fn layout_icons(&self) -> XcbResult<()> {
+        let mut x_offset: u32 = 0;
+        for icon in &self.icons {
+            if !icon.mapped {
+                continue;
+            }
+            self.configure_icon(icon.window, x_offset)?;
+            x_offset += self.icon_size;
+        }
+        self.conn
+            .send_and_check_request(&x::ConfigureWindow {
+                window: self.tray_window,
+                value_list: &[
+                    x::ConfigWindow::Width(x_offset.max(1)),
+                    x::ConfigWindow::Height(self.icon_size),
+                ],
+            })
+            .map_err(xcb_err)
+    }
+
+    fn configure_icon(&self, window: x::Window, x_offset: u32) -> XcbResult<()> {
+        self.conn
+            .send_and_check_request(&x::ConfigureWindow {
+                window,
+                value_list: &[
+                    x::ConfigWindow::X(x_offset as i32),
+                    x::ConfigWindow::Y(0),
+                    x::ConfigWindow::Width(self.icon_size),
+                    x::ConfigWindow::Height(self.icon_size),
+                ],
+            })
+            .map_err(xcb_err)
+    }
+
+    fn read_xembed_mapped(&self, window: x::Window) -> bool {
+        let cookie = self.conn.send_request(&x::GetProperty {
+            delete: false,
+            window,
+            property: self.atoms.xembed_info,
+            r#type: x::ATOM_ANY,
+            long_offset: 0,
+            long_length: 2,
+        });
+        let Ok(reply) = self.conn.wait_for_reply(cookie) else {
+            return true;
+        };
+        if reply.format() != 32 {
+            return true;
+        }
+        let data = reply.value::<u32>();
+        data.len() < 2 || data[1] & 1 != 0
+    }
+}
+
 struct XcbLoopData<'a> {
     backend: &'a mut XcbBackend,
     handler: &'a mut dyn EventHandler,
     should_exit: bool,
+}
+
+impl XcbLoopData<'_> {
+    fn dispatch_backend_event(
+        &mut self,
+        event: BackendEvent,
+        pending_motion: &mut Option<BackendEvent>,
+        context: &str,
+    ) {
+        match &event {
+            BackendEvent::MotionNotify { target, .. } => {
+                if let Some(BackendEvent::MotionNotify {
+                    target: prev_target,
+                    ..
+                }) = pending_motion
+                {
+                    if prev_target != target {
+                        self.flush_pending_motion(pending_motion, context);
+                    }
+                }
+                *pending_motion = Some(event);
+            }
+            _ => {
+                self.flush_pending_motion(pending_motion, context);
+                self.deliver_backend_event(event, context);
+            }
+        }
+    }
+
+    fn flush_pending_motion(&mut self, pending_motion: &mut Option<BackendEvent>, context: &str) {
+        if let Some(event) = pending_motion.take() {
+            self.deliver_backend_event(event, context);
+        }
+    }
+
+    fn deliver_backend_event(&mut self, event: BackendEvent, context: &str) {
+        self.backend.compositor_handle_event(&event);
+        if self.backend.systray_handle_event(&event) {
+            return;
+        }
+        let event = self.backend.enrich_event_with_output(event);
+        if let Err(err) = self.handler.handle_event(self.backend, event) {
+            log::error!("Error handling {context}: {err:?}");
+        }
+    }
 }
 
 impl XcbBackend {
@@ -500,7 +896,69 @@ impl XcbBackend {
                 | xcb::randr::NotifyMask::CRTC_CHANGE,
         }));
 
-        Ok(Self {
+        let compositor_enabled = env::var("JWM_COMPOSITOR")
+            .map(|v| v == "1")
+            .unwrap_or_else(|_| crate::config::CONFIG.load().compositor_enabled());
+
+        let primary_refresh_hz = output_ops
+            .enumerate_outputs()
+            .into_iter()
+            .find_map(|o| (o.refresh_rate > 0).then_some(o.refresh_rate))
+            .unwrap_or(60);
+        log::info!(
+            "xcb backend: primary monitor refresh rate: {}Hz",
+            primary_refresh_hz
+        );
+
+        let (compositor_conn, compositor, compositor_screen_num) = if compositor_enabled {
+            match RustConnection::connect(None) {
+                Ok((raw_conn, comp_screen_num)) => {
+                    let comp_conn = Arc::new(raw_conn);
+                    let comp_root = comp_conn
+                        .setup()
+                        .roots
+                        .get(comp_screen_num)
+                        .map(|screen| screen.root)
+                        .unwrap_or(root.resource_id());
+                    if comp_root != root.resource_id() {
+                        log::warn!(
+                            "xcb compositor helper connected to a different root (xcb=0x{:x}, x11rb=0x{:x}); disabling compositor",
+                            root.resource_id(),
+                            comp_root
+                        );
+                        (Some(comp_conn), None, Some(comp_screen_num))
+                    } else {
+                        match crate::backend::x11rb::compositor::Compositor::new(
+                            comp_conn.clone(),
+                            root.resource_id(),
+                            screen_width as u32,
+                            screen_height as u32,
+                            primary_refresh_hz,
+                        ) {
+                            Ok(c) => {
+                                log::info!("XCB backend: GPU compositor initialized successfully");
+                                (Some(comp_conn), Some(c), Some(comp_screen_num))
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "XCB backend: compositor init failed, falling back to non-composited mode: {e}"
+                                );
+                                (Some(comp_conn), None, Some(comp_screen_num))
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("XCB backend: failed to open compositor helper connection: {e}");
+                    (None, None, None)
+                }
+            }
+        } else {
+            log::info!("XCB backend: compositor disabled (set JWM_COMPOSITOR=1 to enable)");
+            (None, None, None)
+        };
+
+        let mut backend = Self {
             conn,
             root,
             root_id,
@@ -517,21 +975,355 @@ impl XcbBackend {
             color_allocator,
             pending: VecDeque::new(),
             interaction: None,
-        })
+            compositor_conn,
+            compositor_screen_num,
+            compositor,
+            systray: None,
+            benchmark_auto_exit: false,
+            scratch_x11_scene: Vec::new(),
+        };
+        backend.init_systray(screen_num as usize);
+        backend.compositor_auto_configure_hdr();
+        Ok(backend)
+    }
+
+    fn compositor_overlay_raw(&self) -> Option<u32> {
+        self.compositor.as_ref().map(|c| c.overlay_window())
+    }
+
+    fn is_compositor_overlay(&self, window: x::Window) -> bool {
+        self.compositor_overlay_raw()
+            .is_some_and(|overlay| overlay == window.resource_id())
+    }
+
+    fn get_primary_monitor_refresh_rate(&self) -> u32 {
+        self.output_ops
+            .enumerate_outputs()
+            .into_iter()
+            .find_map(|o| (o.refresh_rate > 0).then_some(o.refresh_rate))
+            .unwrap_or(60)
+    }
+
+    fn init_systray(&mut self, screen_num: usize) {
+        match XcbSystemTray::new(self.conn.clone(), self.atoms, self.root, screen_num) {
+            Ok(mut tray) => match tray.acquire_selection() {
+                Ok(true) => {
+                    log::info!("[systray] Acquired system tray selection");
+                    self.systray = Some(tray);
+                }
+                Ok(false) => {
+                    log::info!("[systray] Another tray owner exists, skipping");
+                }
+                Err(e) => {
+                    log::warn!("[systray] Failed to acquire selection: {e}");
+                }
+            },
+            Err(e) => {
+                log::warn!("[systray] Failed to create system tray: {e}");
+            }
+        }
+    }
+
+    fn systray_handle_event(&mut self, ev: &BackendEvent) -> bool {
+        let systray = match self.systray.as_mut() {
+            Some(s) => s,
+            None => return false,
+        };
+        match ev {
+            BackendEvent::ClientMessage { type_, data, .. } => {
+                if *type_ == self.atoms.net_system_tray_opcode.resource_id() {
+                    return systray.handle_client_message(data);
+                }
+                false
+            }
+            BackendEvent::WindowDestroyed(win) => {
+                let x11w = x::Window::new(self.ids.x11(*win).unwrap_or(0));
+                if systray.is_tray_icon(x11w) {
+                    systray.handle_destroy(x11w);
+                    return true;
+                }
+                false
+            }
+            BackendEvent::WindowUnmapped(win) => {
+                let x11w = x::Window::new(self.ids.x11(*win).unwrap_or(0));
+                if systray.is_tray_icon(x11w) {
+                    systray.handle_unmap(x11w);
+                    return true;
+                }
+                false
+            }
+            BackendEvent::WindowMapped(win) => {
+                let x11w = x::Window::new(self.ids.x11(*win).unwrap_or(0));
+                if systray.is_tray_icon(x11w) {
+                    systray.handle_map(x11w);
+                    return true;
+                }
+                false
+            }
+            BackendEvent::PropertyChanged { window, kind } => {
+                if matches!(kind, PropertyKind::Other) {
+                    let x11w = x::Window::new(self.ids.x11(*window).unwrap_or(0));
+                    if systray.is_tray_icon(x11w) {
+                        systray.handle_xembed_info_change(x11w);
+                        return true;
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn compositor_auto_configure_hdr(&mut self) {
+        let cfg = crate::config::CONFIG.load();
+        let behavior = cfg.behavior();
+        if !behavior.hdr_enabled {
+            return;
+        }
+
+        if let Some(output_id) = self.query_primary_randr_output() {
+            if let Some(caps) = self.query_output_edid_hdr(xcb::randr::Output::new(output_id)) {
+                log::info!(
+                    "HDR EDID: max={:.0} nits, min={:.2} nits, PQ={}, HLG={}, BT.2020={}",
+                    caps.max_luminance_nits,
+                    caps.min_luminance_nits,
+                    caps.supports_pq,
+                    caps.supports_hlg,
+                    caps.supports_bt2020
+                );
+
+                if let Some(c) = self.compositor.as_mut() {
+                    if caps.max_luminance_nits > 0.0 {
+                        c.set_hdr_peak_nits(caps.max_luminance_nits);
+                    }
+                    if caps.supports_pq {
+                        c.set_eotf_mode(1);
+                    } else if caps.supports_hlg {
+                        c.set_eotf_mode(2);
+                    }
+                    if caps.supports_bt2020 {
+                        c.set_output_colorspace(1);
+                    }
+                    c.set_hdr_output_10bit(true);
+                }
+
+                let _ = self.set_output_hdr_properties(output_id, true);
+            } else {
+                log::info!("HDR enabled but display EDID has no HDR metadata; using SDR EOTF");
+            }
+        }
+    }
+
+    fn query_primary_randr_output(&self) -> Option<u32> {
+        let cookie = self
+            .conn
+            .send_request(&xcb::randr::GetScreenResources { window: self.root });
+        let resources = self.conn.wait_for_reply(cookie).ok()?;
+
+        for output in resources.outputs() {
+            let cookie = self.conn.send_request(&xcb::randr::GetOutputInfo {
+                output: *output,
+                config_timestamp: 0,
+            });
+            let info = self.conn.wait_for_reply(cookie).ok()?;
+            if info.crtc() != xcb::randr::Crtc::none()
+                && info.connection() == xcb::randr::Connection::Connected
+            {
+                return Some(output.resource_id());
+            }
+        }
+
+        None
+    }
+
+    fn query_output_edid_hdr(
+        &self,
+        output: xcb::randr::Output,
+    ) -> Option<crate::backend::edid::EdidHdrCapabilities> {
+        let atom = XcbAtoms::intern(&self.conn, b"EDID").ok()?;
+        let cookie = self.conn.send_request(&xcb::randr::GetOutputProperty {
+            output,
+            property: atom,
+            r#type: x::ATOM_ANY,
+            long_offset: 0,
+            long_length: 256,
+            delete: false,
+            pending: false,
+        });
+        let reply = self.conn.wait_for_reply(cookie).ok()?;
+        let data = reply.data::<u8>();
+        if data.len() < 128 {
+            return None;
+        }
+        crate::backend::edid::parse_edid_hdr_from_bytes(data)
+    }
+
+    fn register_existing_windows_with_compositor(
+        &mut self,
+        compositor: &mut crate::backend::x11rb::compositor::Compositor,
+    ) {
+        let overlay = compositor.overlay_window();
+        for (x11w, wid) in self.ids.all_x11_windows() {
+            if x11w == self.root.resource_id() || x11w == overlay {
+                continue;
+            }
+            if let Ok(geom) = self.window_ops.get_geometry(wid) {
+                compositor.add_window(x11w, geom.x, geom.y, geom.w, geom.h);
+                let (_, cls) = self.property_ops.get_class(wid);
+                if !cls.is_empty() {
+                    compositor.set_window_class(x11w, &cls);
+                }
+                if let Ok(attr) = self.window_ops.get_window_attributes(wid) {
+                    if attr.override_redirect {
+                        compositor.set_window_override_redirect(x11w, true);
+                    }
+                }
+            }
+        }
+    }
+
+    fn compositor_handle_event(&mut self, event: &BackendEvent) {
+        let compositor = match self.compositor.as_mut() {
+            Some(c) => c,
+            None => return,
+        };
+        let overlay = compositor.overlay_window();
+        match event {
+            BackendEvent::WindowMapped(win) => {
+                if let Ok(x11w) = self.ids.x11(*win) {
+                    if x11w != self.root.resource_id() && x11w != overlay {
+                        if let Ok(geom) = self.window_ops.get_geometry(*win) {
+                            compositor.add_window(x11w, geom.x, geom.y, geom.w, geom.h);
+                        }
+                        let (_, cls) = self.property_ops.get_class(*win);
+                        if !cls.is_empty() {
+                            compositor.set_window_class(x11w, &cls);
+                        }
+                        if let Ok(attr) = self.window_ops.get_window_attributes(*win) {
+                            if attr.override_redirect {
+                                compositor.set_window_override_redirect(x11w, true);
+                            }
+                        }
+                    }
+                }
+            }
+            BackendEvent::WindowUnmapped(win) | BackendEvent::WindowDestroyed(win) => {
+                if let Ok(x11w) = self.ids.x11(*win) {
+                    compositor.remove_window(x11w);
+                }
+            }
+            BackendEvent::WindowConfigured {
+                window,
+                x,
+                y,
+                width,
+                height,
+            } => {
+                if let Ok(x11w) = self.ids.x11(*window) {
+                    if x11w != overlay {
+                        compositor.update_geometry(x11w, *x, *y, *width, *height);
+                    }
+                }
+            }
+            BackendEvent::WindowStateRequest {
+                window,
+                state,
+                action,
+            } => {
+                if *state == NetWmState::Fullscreen {
+                    if let Ok(x11w) = self.ids.x11(*window) {
+                        let is_fs = matches!(
+                            action,
+                            crate::backend::api::NetWmAction::Add
+                                | crate::backend::api::NetWmAction::Toggle
+                        );
+                        compositor.set_window_fullscreen(x11w, is_fs);
+                    }
+                }
+            }
+            BackendEvent::PropertyChanged { window, kind } => {
+                if matches!(kind, PropertyKind::Class) {
+                    if let Ok(x11w) = self.ids.x11(*window) {
+                        let (_, cls) = self.property_ops.get_class(*window);
+                        if !cls.is_empty() {
+                            compositor.set_window_class(x11w, &cls);
+                        }
+                    }
+                }
+            }
+            BackendEvent::DamageNotify { drawable } => {
+                if let Ok(x11w) = self.ids.x11(*drawable) {
+                    if x11w != overlay {
+                        compositor.mark_damaged(x11w);
+                    }
+                }
+            }
+            BackendEvent::PresentComplete {
+                window,
+                serial,
+                msc,
+                ust,
+            } => {
+                if let Ok(x11w) = self.ids.x11(*window) {
+                    if let Some(oml) = compositor.oml_mut() {
+                        oml.on_window_presented(x11w, *msc, *ust);
+                    }
+                    compositor.on_present_complete(x11w, *serial, *msc, *ust);
+                }
+            }
+            BackendEvent::PresentIdle {
+                window,
+                serial,
+                pixmap,
+            } => {
+                if let Ok(x11w) = self.ids.x11(*window) {
+                    compositor.on_present_idle(x11w, *serial, *pixmap);
+                }
+            }
+            BackendEvent::MotionNotify { root_x, root_y, .. } => {
+                compositor.set_mouse_position(*root_x as f32, *root_y as f32);
+                compositor.record_input_event();
+            }
+            BackendEvent::ButtonPress { .. } | BackendEvent::ButtonRelease { .. } => {
+                compositor.record_input_event();
+            }
+            BackendEvent::ScreenLayoutChanged => {
+                let cookie = self.conn.send_request(&x::GetGeometry {
+                    drawable: x::Drawable::Window(self.root),
+                });
+                if let Ok(geo) = self.conn.wait_for_reply(cookie) {
+                    compositor.resize(geo.width() as u32, geo.height() as u32);
+                }
+                compositor.refresh_monitor_layout(self.root.resource_id());
+            }
+            _ => {}
+        }
     }
 
     fn map_event(&mut self, event: xcb::Event) -> Option<BackendEvent> {
         match event {
             xcb::Event::X(x::Event::MapRequest(ev)) => {
+                if self.is_compositor_overlay(ev.window()) {
+                    return None;
+                }
                 Some(BackendEvent::WindowCreated(self.ids.intern(ev.window())))
             }
             xcb::Event::X(x::Event::MapNotify(ev)) => {
+                if self.is_compositor_overlay(ev.window()) {
+                    return None;
+                }
                 Some(BackendEvent::WindowMapped(self.ids.intern(ev.window())))
             }
             xcb::Event::X(x::Event::UnmapNotify(ev)) => {
+                if self.is_compositor_overlay(ev.window()) {
+                    return None;
+                }
                 Some(BackendEvent::WindowUnmapped(self.ids.intern(ev.window())))
             }
             xcb::Event::X(x::Event::DestroyNotify(ev)) => {
+                if self.is_compositor_overlay(ev.window()) {
+                    return None;
+                }
                 let id = self.ids.intern(ev.window());
                 self.ids.remove(ev.window());
                 Some(BackendEvent::WindowDestroyed(id))
@@ -560,13 +1352,18 @@ impl XcbBackend {
                     changes,
                 })
             }
-            xcb::Event::X(x::Event::ConfigureNotify(ev)) => Some(BackendEvent::WindowConfigured {
-                window: self.ids.intern(ev.window()),
-                x: ev.x() as i32,
-                y: ev.y() as i32,
-                width: ev.width() as u32,
-                height: ev.height() as u32,
-            }),
+            xcb::Event::X(x::Event::ConfigureNotify(ev)) => {
+                if self.is_compositor_overlay(ev.window()) {
+                    return None;
+                }
+                Some(BackendEvent::WindowConfigured {
+                    window: self.ids.intern(ev.window()),
+                    x: ev.x() as i32,
+                    y: ev.y() as i32,
+                    width: ev.width() as u32,
+                    height: ev.height() as u32,
+                })
+            }
             xcb::Event::X(x::Event::ButtonPress(ev)) => Some(BackendEvent::ButtonPress {
                 target: self.hit_target(ev.event()),
                 state: ev.state().bits() as u16,
@@ -609,10 +1406,15 @@ impl XcbBackend {
             xcb::Event::X(x::Event::Expose(ev)) => Some(BackendEvent::Expose {
                 window: self.ids.intern(ev.window()),
             }),
-            xcb::Event::X(x::Event::PropertyNotify(ev)) => Some(BackendEvent::PropertyChanged {
-                window: self.ids.intern(ev.window()),
-                kind: self.property_kind(ev.atom()),
-            }),
+            xcb::Event::X(x::Event::PropertyNotify(ev)) => {
+                if ev.state() == x::Property::Delete {
+                    return None;
+                }
+                Some(BackendEvent::PropertyChanged {
+                    window: self.ids.intern(ev.window()),
+                    kind: self.property_kind(ev.atom()),
+                })
+            }
             xcb::Event::X(x::Event::KeyPress(ev)) => Some(BackendEvent::KeyPress {
                 keycode: ev.detail(),
                 state: ev.state().bits() as u16,
@@ -627,6 +1429,10 @@ impl XcbBackend {
             | xcb::Event::RandR(xcb::randr::Event::Notify(_)) => {
                 Some(BackendEvent::ScreenLayoutChanged)
             }
+            xcb::Event::Shape(xcb::shape::Event::Notify(ev)) => Some(BackendEvent::ShapeChanged {
+                window: self.ids.intern(ev.affected_window()),
+                shaped: ev.shaped(),
+            }),
             xcb::Event::X(x::Event::MappingNotify(_)) => Some(BackendEvent::MappingNotify),
             xcb::Event::X(x::Event::ClientMessage(ev)) => self.map_client_message(ev),
             _ => None,
@@ -710,6 +1516,75 @@ impl XcbBackend {
         }
     }
 
+    fn map_compositor_x11_event(&mut self, event: X11rbEvent) -> Option<BackendEvent> {
+        match event {
+            X11rbEvent::MapNotify(e) => {
+                if self.compositor_overlay_raw() == Some(e.window) {
+                    return None;
+                }
+                Some(BackendEvent::WindowMapped(self.ids.intern_raw(e.window)))
+            }
+            X11rbEvent::UnmapNotify(e) => {
+                if self.compositor_overlay_raw() == Some(e.window) {
+                    return None;
+                }
+                Some(BackendEvent::WindowUnmapped(self.ids.intern_raw(e.window)))
+            }
+            X11rbEvent::DestroyNotify(e) => {
+                if self.compositor_overlay_raw() == Some(e.window) {
+                    return None;
+                }
+                let id = self.ids.intern_raw(e.window);
+                self.ids.remove_raw(e.window);
+                Some(BackendEvent::WindowDestroyed(id))
+            }
+            X11rbEvent::ConfigureNotify(e) => {
+                if self.compositor_overlay_raw() == Some(e.window) {
+                    return None;
+                }
+                Some(BackendEvent::WindowConfigured {
+                    window: self.ids.intern_raw(e.window),
+                    x: e.x as i32,
+                    y: e.y as i32,
+                    width: e.width as u32,
+                    height: e.height as u32,
+                })
+            }
+            X11rbEvent::PropertyNotify(e) => {
+                if e.state == x11rb::protocol::xproto::Property::DELETE.into() {
+                    return None;
+                }
+                Some(BackendEvent::PropertyChanged {
+                    window: self.ids.intern_raw(e.window),
+                    kind: self.property_kind(x::Atom::new(e.atom)),
+                })
+            }
+            X11rbEvent::DamageNotify(e) => Some(BackendEvent::DamageNotify {
+                drawable: self.ids.intern_raw(e.drawable),
+            }),
+            X11rbEvent::PresentCompleteNotify(e) => Some(BackendEvent::PresentComplete {
+                window: self.ids.intern_raw(e.window),
+                serial: e.serial,
+                msc: e.msc,
+                ust: e.ust,
+            }),
+            X11rbEvent::PresentIdleNotify(e) => Some(BackendEvent::PresentIdle {
+                window: self.ids.intern_raw(e.window),
+                serial: e.serial,
+                pixmap: e.pixmap,
+            }),
+            X11rbEvent::ShapeNotify(e) => Some(BackendEvent::ShapeChanged {
+                window: self.ids.intern_raw(e.affected_window),
+                shaped: e.shaped,
+            }),
+            X11rbEvent::Expose(e) => Some(BackendEvent::Expose {
+                window: self.ids.intern_raw(e.window),
+            }),
+            X11rbEvent::MappingNotify(_) => Some(BackendEvent::MappingNotify),
+            _ => None,
+        }
+    }
+
     fn enrich_event_with_output(&self, mut event: BackendEvent) -> BackendEvent {
         let fill_output = |x: f64, y: f64| self.output_ops.output_at(x as i32, y as i32);
 
@@ -765,11 +1640,16 @@ impl XcbBackend {
         }
     }
 
-    fn set_output_hdr_properties(&self, output: u32, enable: bool) -> XcbResult<()> {
+    fn set_output_hdr_properties(&self, output: u32, enable: bool) {
         let output = xcb::randr::Output::new(output);
-        let max_bpc_atom = XcbAtoms::intern(&self.conn, b"max_bpc")?;
+        let Ok(max_bpc_atom) = XcbAtoms::intern(&self.conn, b"max_bpc") else {
+            log::warn!("HDR: failed to intern max_bpc atom");
+            let _ = self.conn.flush();
+            return;
+        };
         let max_bpc_value = if enable { 10u32 } else { 8u32 };
-        self.conn
+        if let Err(err) = self
+            .conn
             .send_and_check_request(&xcb::randr::ChangeOutputProperty {
                 output,
                 property: max_bpc_atom,
@@ -777,23 +1657,57 @@ impl XcbBackend {
                 mode: x::PropMode::Replace,
                 data: &[max_bpc_value],
             })
-            .map_err(xcb_err)?;
-
-        if enable {
-            let colorspace_atom = XcbAtoms::intern(&self.conn, b"Colorspace")?;
-            let bt2020_atom = XcbAtoms::intern(&self.conn, b"BT2020_RGB")?;
-            self.conn
-                .send_and_check_request(&xcb::randr::ChangeOutputProperty {
-                    output,
-                    property: colorspace_atom,
-                    r#type: x::ATOM_ATOM,
-                    mode: x::PropMode::Replace,
-                    data: &[bt2020_atom.resource_id()],
-                })
-                .map_err(xcb_err)?;
+        {
+            log::warn!(
+                "HDR: failed to set max_bpc={} on output 0x{:x}: {:?}",
+                max_bpc_value,
+                output.resource_id(),
+                err
+            );
+        } else if enable {
+            log::info!("HDR: set max_bpc=10 on output 0x{:x}", output.resource_id());
+        } else {
+            log::info!(
+                "HDR: restored max_bpc=8 on output 0x{:x}",
+                output.resource_id()
+            );
         }
 
-        self.conn.flush().map_err(xcb_err)
+        if enable {
+            match (
+                XcbAtoms::intern(&self.conn, b"Colorspace"),
+                XcbAtoms::intern(&self.conn, b"BT2020_RGB"),
+            ) {
+                (Ok(colorspace_atom), Ok(bt2020_atom)) => {
+                    if let Err(err) =
+                        self.conn
+                            .send_and_check_request(&xcb::randr::ChangeOutputProperty {
+                                output,
+                                property: colorspace_atom,
+                                r#type: x::ATOM_ATOM,
+                                mode: x::PropMode::Replace,
+                                data: &[bt2020_atom.resource_id()],
+                            })
+                    {
+                        log::warn!(
+                            "HDR: failed to set Colorspace=BT2020_RGB on output 0x{:x}: {:?}",
+                            output.resource_id(),
+                            err
+                        );
+                    } else {
+                        log::info!(
+                            "HDR: set Colorspace=BT2020_RGB on output 0x{:x}",
+                            output.resource_id()
+                        );
+                    }
+                }
+                _ => {
+                    log::warn!("HDR: failed to intern Colorspace/BT2020_RGB atoms");
+                }
+            }
+        }
+
+        let _ = self.conn.flush();
     }
 }
 
@@ -812,7 +1726,7 @@ impl Backend for XcbBackend {
 
     fn check_existing_wm(&self) -> XcbResult<()> {
         self.window_ops
-            .change_event_mask(self.root_id, root_event_mask().bits())
+            .change_event_mask(self.root_id, EventMaskBits::SUBSTRUCTURE_REDIRECT.bits())
             .map_err(|e| {
                 BackendError::Message(format!("Another window manager is already running: {e}"))
             })
@@ -820,6 +1734,495 @@ impl Backend for XcbBackend {
 
     fn request_render(&mut self) {
         let _ = self.conn.flush();
+    }
+
+    fn has_compositor(&self) -> bool {
+        self.compositor.is_some()
+    }
+
+    fn set_compositor_enabled(&mut self, enabled: bool) -> XcbResult<bool> {
+        let currently_enabled = self.compositor.is_some();
+        if enabled == currently_enabled {
+            return Ok(false);
+        }
+
+        if !enabled {
+            log::info!("XCB backend: compositor disabled at runtime");
+            self.compositor.take();
+            return Ok(true);
+        }
+
+        if self.compositor_conn.is_none() {
+            let (raw_conn, screen_num) = RustConnection::connect(None)?;
+            let comp_conn = Arc::new(raw_conn);
+            let comp_root = comp_conn
+                .setup()
+                .roots
+                .get(screen_num)
+                .map(|screen| screen.root)
+                .unwrap_or(self.root.resource_id());
+            if comp_root != self.root.resource_id() {
+                return Err(BackendError::Message(format!(
+                    "compositor helper connected to a different root (xcb=0x{:x}, x11rb=0x{:x})",
+                    self.root.resource_id(),
+                    comp_root
+                )));
+            }
+            self.compositor_conn = Some(comp_conn);
+            self.compositor_screen_num = Some(screen_num);
+        }
+
+        let screen = self.output_ops.screen_info();
+        let comp_conn = self
+            .compositor_conn
+            .as_ref()
+            .ok_or(BackendError::NotFound("compositor helper connection"))?
+            .clone();
+        let mut compositor = crate::backend::x11rb::compositor::Compositor::new(
+            comp_conn,
+            self.root.resource_id(),
+            screen.width as u32,
+            screen.height as u32,
+            self.get_primary_monitor_refresh_rate(),
+        )
+        .map_err(|e| BackendError::Message(format!("compositor init failed: {e}")))?;
+        self.register_existing_windows_with_compositor(&mut compositor);
+        self.compositor = Some(compositor);
+        self.compositor_auto_configure_hdr();
+        Ok(true)
+    }
+
+    fn compositor_needs_render(&self) -> bool {
+        self.compositor.as_ref().is_some_and(|c| c.needs_render())
+    }
+
+    fn compositor_overlay_window(&self) -> Option<WindowId> {
+        self.compositor
+            .as_ref()
+            .map(|c| self.ids.intern_raw(c.overlay_window()))
+    }
+
+    fn compositor_render_frame(
+        &mut self,
+        scene: &[(u64, i32, i32, u32, u32)],
+        focused_window: Option<u64>,
+    ) -> XcbResult<bool> {
+        if self.compositor.is_none() {
+            return Ok(false);
+        }
+
+        let mut x11_scene = std::mem::take(&mut self.scratch_x11_scene);
+        x11_scene.clear();
+        x11_scene.extend(scene.iter().filter_map(|&(wid_raw, x, y, w, h)| {
+            let wid = WindowId::from_raw(wid_raw);
+            self.ids.x11(wid).ok().map(|x11w| (x11w, x, y, w, h))
+        }));
+        let focused_x11 = focused_window.and_then(|raw| self.ids.x11(WindowId::from_raw(raw)).ok());
+        let root = self.root.resource_id();
+        let compositor = self.compositor.as_mut().unwrap();
+
+        for &(x11w, x, y, w, h) in &x11_scene {
+            if !compositor.has_window(x11w) && x11w != root {
+                compositor.add_window(x11w, x, y, w, h);
+            }
+        }
+
+        let _ = self.conn.flush();
+        if let Some(conn) = self.compositor_conn.as_ref() {
+            let _ = conn.flush();
+        }
+        let rendered = compositor.render_frame(&x11_scene, focused_x11);
+        compositor.clear_needs_render();
+        self.scratch_x11_scene = x11_scene;
+        Ok(rendered)
+    }
+
+    fn take_screenshot_to_file(&mut self, path: &std::path::Path) -> XcbResult<bool> {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.request_screenshot(path.to_path_buf());
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn take_screenshot_region_to_file(
+        &mut self,
+        path: &std::path::Path,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+    ) -> XcbResult<bool> {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.request_screenshot_region(path.to_path_buf(), x, y, w, h);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn compositor_set_color_temperature(&mut self, temp: f32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_color_temperature(temp);
+        }
+    }
+
+    fn compositor_set_saturation(&mut self, sat: f32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_saturation(sat);
+        }
+    }
+
+    fn compositor_set_brightness(&mut self, val: f32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_brightness(val);
+        }
+    }
+
+    fn compositor_set_contrast(&mut self, val: f32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_contrast(val);
+        }
+    }
+
+    fn compositor_set_invert_colors(&mut self, invert: bool) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_invert_colors(invert);
+        }
+    }
+
+    fn compositor_set_grayscale(&mut self, gs: bool) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_grayscale(gs);
+        }
+    }
+
+    fn compositor_set_debug_hud(&mut self, enabled: bool) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_debug_hud(enabled);
+        }
+    }
+
+    fn compositor_set_debug_hud_extended(&mut self, enabled: bool) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_debug_hud_extended(enabled);
+        }
+    }
+
+    fn compositor_set_transition_mode(&mut self, mode: &str) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_transition_mode(mode);
+        }
+    }
+
+    fn compositor_apply_config(&mut self) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.apply_config();
+        }
+    }
+
+    fn compositor_fps(&self) -> f32 {
+        self.compositor
+            .as_ref()
+            .map_or(0.0, |c| c.frame_stats_fps())
+    }
+
+    fn compositor_get_metrics(&self) -> Option<crate::backend::api::CompositorMetrics> {
+        self.compositor.as_ref().map(|c| c.get_metrics())
+    }
+
+    fn compositor_benchmark_start(&mut self, frames: u32, warmup: u32) -> bool {
+        if let Some(c) = self.compositor.as_mut() {
+            c.benchmark_start(frames, warmup);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn compositor_benchmark_stop(&mut self) -> Option<String> {
+        self.compositor.as_mut().and_then(|c| c.benchmark_stop())
+    }
+
+    fn compositor_benchmark_report(&self) -> Option<String> {
+        self.compositor.as_ref().and_then(|c| c.benchmark_report())
+    }
+
+    fn compositor_benchmark_is_complete(&self) -> bool {
+        self.compositor
+            .as_ref()
+            .is_some_and(|c| c.benchmark_is_complete())
+    }
+
+    fn compositor_benchmark_set_auto_exit(&mut self, enabled: bool) {
+        self.benchmark_auto_exit = enabled;
+    }
+
+    fn compositor_capture_thumbnail(
+        &self,
+        window: WindowId,
+        max_size: u32,
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        let x11w = self.ids.x11(window).ok()?;
+        self.compositor
+            .as_ref()?
+            .capture_window_thumbnail(x11w, max_size)
+    }
+
+    fn compositor_set_frame_extents(
+        &mut self,
+        window: WindowId,
+        left: u32,
+        right: u32,
+        top: u32,
+        bottom: u32,
+    ) {
+        if let Some(c) = self.compositor.as_mut() {
+            if let Ok(x11w) = self.ids.x11(window) {
+                c.set_frame_extents(x11w, left, right, top, bottom);
+            }
+        }
+    }
+
+    fn compositor_set_window_shaped(&mut self, window: WindowId, shaped: bool) {
+        if let Some(c) = self.compositor.as_mut() {
+            if let Ok(x11w) = self.ids.x11(window) {
+                c.set_window_shaped(x11w, shaped);
+            }
+        }
+    }
+
+    fn compositor_notify_tag_switch(
+        &mut self,
+        duration: Duration,
+        direction: i32,
+        exclude_top: u32,
+        mon_rect: (i32, i32, u32, u32),
+    ) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.notify_tag_switch(duration, direction, exclude_top, mon_rect);
+        }
+    }
+
+    fn compositor_force_full_redraw(&mut self) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.force_full_redraw();
+        }
+    }
+
+    fn compositor_set_mouse_position(&mut self, x: f32, y: f32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_mouse_position(x, y);
+        }
+    }
+
+    fn compositor_deactivate_edge_glow(&mut self) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.deactivate_edge_glow();
+        }
+    }
+
+    fn compositor_unsuppress_edge_glow(&mut self) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.unsuppress_edge_glow();
+        }
+    }
+
+    fn compositor_set_window_urgent(&mut self, window: WindowId, urgent: bool) {
+        if let Some(c) = self.compositor.as_mut() {
+            if let Ok(x11w) = self.ids.x11(window) {
+                c.set_window_urgent(x11w, urgent);
+            }
+        }
+    }
+
+    fn compositor_set_window_pip(&mut self, window: WindowId, pip: bool) {
+        if let Some(c) = self.compositor.as_mut() {
+            if let Ok(x11w) = self.ids.x11(window) {
+                c.set_window_pip(x11w, pip);
+            }
+        }
+    }
+
+    fn compositor_set_magnifier(&mut self, enabled: bool) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_magnifier(enabled);
+        }
+    }
+
+    fn compositor_notify_audio_timing(&mut self, window: WindowId, fps: f32, latency_ms: u32) {
+        if let Some(c) = self.compositor.as_mut() {
+            if let Ok(x11w) = self.ids.x11(window) {
+                c.notify_audio_timing(x11w, fps, latency_ms);
+            }
+        }
+    }
+
+    fn compositor_set_overview_mode(
+        &mut self,
+        active: bool,
+        windows: &[(WindowId, f32, f32, f32, f32, bool, String)],
+    ) {
+        if let Some(c) = self.compositor.as_mut() {
+            let x11_windows = windows
+                .iter()
+                .filter_map(|(wid, x, y, w, h, sel, title)| {
+                    self.ids
+                        .x11(*wid)
+                        .ok()
+                        .map(|x11w| (x11w, *x, *y, *w, *h, *sel, title.clone()))
+                })
+                .collect();
+            c.set_overview_mode(active, x11_windows);
+        }
+    }
+
+    fn compositor_set_overview_monitor(&mut self, x: i32, y: i32, w: u32, h: u32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_overview_monitor(x, y, w, h);
+        }
+    }
+
+    fn compositor_set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32, u32)]) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_monitors(monitors);
+        }
+    }
+
+    fn compositor_set_overview_selection(&mut self, window: WindowId) {
+        if let Some(c) = self.compositor.as_mut() {
+            if let Ok(x11w) = self.ids.x11(window) {
+                c.set_overview_selection(x11w);
+            }
+        }
+    }
+
+    fn compositor_notify_window_move_start(&mut self, window: WindowId) {
+        if let Some(c) = self.compositor.as_mut() {
+            if let Ok(x11w) = self.ids.x11(window) {
+                c.notify_window_move_start(x11w);
+            }
+        }
+    }
+
+    fn compositor_notify_window_move_delta(&mut self, window: WindowId, dx: f32, dy: f32) {
+        if let Some(c) = self.compositor.as_mut() {
+            if let Ok(x11w) = self.ids.x11(window) {
+                c.notify_window_move_delta(x11w, dx, dy);
+            }
+        }
+    }
+
+    fn compositor_notify_window_move_end(&mut self, window: WindowId) {
+        if let Some(c) = self.compositor.as_mut() {
+            if let Ok(x11w) = self.ids.x11(window) {
+                c.notify_window_move_end(x11w);
+            }
+        }
+    }
+
+    fn compositor_set_dock_position(&mut self, x: f32, y: f32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_dock_position(x, y);
+        }
+    }
+
+    fn compositor_set_expose_mode(
+        &mut self,
+        active: bool,
+        windows: Vec<(WindowId, i32, i32, u32, u32)>,
+    ) {
+        if let Some(c) = self.compositor.as_mut() {
+            let x11_windows = windows
+                .iter()
+                .filter_map(|(wid, x, y, w, h)| {
+                    self.ids.x11(*wid).ok().map(|x11w| (x11w, *x, *y, *w, *h))
+                })
+                .collect();
+            c.set_expose_mode(active, x11_windows);
+        }
+    }
+
+    fn compositor_set_snap_preview(&mut self, preview: Option<(f32, f32, f32, f32)>) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_snap_preview(preview);
+        }
+    }
+
+    fn compositor_clear_snap_preview_immediate(&mut self) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.clear_snap_preview_immediate();
+        }
+    }
+
+    fn compositor_set_peek_mode(&mut self, active: bool) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_peek_mode(active);
+        }
+    }
+
+    fn compositor_set_window_groups(&mut self, groups: Vec<(u32, Vec<(u32, String, bool)>)>) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_window_groups(groups);
+        }
+    }
+
+    fn compositor_request_live_thumbnail(
+        &mut self,
+        window: u32,
+        max_size: u32,
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        self.compositor
+            .as_ref()?
+            .request_live_thumbnail(window, max_size)
+    }
+
+    fn compositor_zoom_to_fit(&mut self, window: Option<u32>) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.zoom_to_fit(window);
+        }
+    }
+
+    fn compositor_expose_click(&mut self, x: f32, y: f32) -> Option<WindowId> {
+        let x11_win = self.compositor.as_mut()?.expose_click(x, y)?;
+        Some(self.ids.intern_raw(x11_win))
+    }
+
+    fn compositor_set_colorblind_mode(&mut self, mode: &str) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_colorblind_mode(mode);
+        }
+    }
+
+    fn compositor_set_annotation_mode(&mut self, active: bool) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_annotation_mode(active);
+        }
+    }
+
+    fn compositor_annotation_add_point(&mut self, x: f32, y: f32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.annotation_add_point(x, y);
+        }
+    }
+
+    fn compositor_annotation_begin_stroke(&mut self) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.annotation_new_stroke();
+        }
+    }
+
+    fn compositor_start_recording(&mut self, path: &str) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.start_recording(path);
+        }
+    }
+
+    fn compositor_stop_recording(&mut self) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.stop_recording();
+        }
     }
 
     fn window_ops(&self) -> &dyn WindowOps {
@@ -856,6 +2259,11 @@ impl Backend for XcbBackend {
     }
 
     fn cleanup(&mut self) -> XcbResult<()> {
+        self.compositor.take();
+        if let Some(ref tray) = self.systray {
+            tray.cleanup();
+        }
+        self.systray.take();
         self.cursor_provider.cleanup()?;
         self.color_allocator.free_all_theme_pixels()?;
         if let Some(ewmh) = self.ewmh.as_ref() {
@@ -884,6 +2292,9 @@ impl Backend for XcbBackend {
                 Some(w) => ewmh.set_active_window(w)?,
                 None => ewmh.clear_active_window()?,
             }
+        }
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.force_full_redraw();
         }
         Ok(())
     }
@@ -945,7 +2356,8 @@ impl Backend for XcbBackend {
     }
 
     fn set_hdr_metadata(&mut self, output: OutputId, enabled: bool) -> XcbResult<()> {
-        self.set_output_hdr_properties(output.0 as u32, enabled)
+        self.set_output_hdr_properties(output.0 as u32, enabled);
+        Ok(())
     }
 
     fn begin_move(&mut self, win: WindowId) -> XcbResult<()> {
@@ -1056,32 +2468,85 @@ impl Backend for XcbBackend {
                     calloop::Mode::Level,
                 ),
                 |_, _, data| {
+                    let mut pending_motion = None;
                     loop {
                         let event = match data.backend.conn.poll_for_event() {
                             Ok(Some(event)) => event,
                             Ok(None) => break,
                             Err(err) => {
                                 log::error!("XCB event error: {err}");
-                                break;
+                                return Err(std::io::Error::other(format!(
+                                    "XCB event error: {err}"
+                                )));
                             }
                         };
                         if let Some(mapped) = data.backend.map_event(event) {
-                            let mapped = data.backend.enrich_event_with_output(mapped);
-                            if let Err(err) = data.handler.handle_event(data.backend, mapped) {
-                                log::error!("Error handling XCB event: {err:?}");
-                            }
+                            data.dispatch_backend_event(mapped, &mut pending_motion, "XCB event");
                         }
                         while let Some(mapped) = data.backend.pending.pop_front() {
-                            let mapped = data.backend.enrich_event_with_output(mapped);
-                            if let Err(err) = data.handler.handle_event(data.backend, mapped) {
-                                log::error!("Error handling queued XCB event: {err:?}");
-                            }
+                            data.dispatch_backend_event(
+                                mapped,
+                                &mut pending_motion,
+                                "queued XCB event",
+                            );
                         }
                     }
+                    data.flush_pending_motion(&mut pending_motion, "XCB event");
                     Ok(calloop::PostAction::Continue)
                 },
             )
             .map_err(|e| BackendError::Message(format!("Failed to insert XCB source: {e}")))?;
+
+        if let Some(comp_conn) = self.compositor_conn.clone() {
+            let comp_fd = comp_conn.stream().as_raw_fd();
+            handle
+                .insert_source(
+                    calloop::generic::Generic::new(
+                        unsafe { BorrowedFd::borrow_raw(comp_fd) },
+                        calloop::Interest::READ,
+                        calloop::Mode::Level,
+                    ),
+                    move |_, _, data| {
+                        let mut pending_motion = None;
+                        loop {
+                            let event = match comp_conn.poll_for_event() {
+                                Ok(Some(event)) => event,
+                                Ok(None) => break,
+                                Err(err) => {
+                                    log::error!("XCB compositor helper event error: {err}");
+                                    return Err(std::io::Error::other(format!(
+                                        "XCB compositor helper event error: {err}"
+                                    )));
+                                }
+                            };
+                            if let Some(mapped) = data.backend.map_compositor_x11_event(event) {
+                                data.dispatch_backend_event(
+                                    mapped,
+                                    &mut pending_motion,
+                                    "XCB compositor helper event",
+                                );
+                            }
+                            while let Some(mapped) = data.backend.pending.pop_front() {
+                                data.dispatch_backend_event(
+                                    mapped,
+                                    &mut pending_motion,
+                                    "queued XCB compositor helper event",
+                                );
+                            }
+                        }
+                        data.flush_pending_motion(
+                            &mut pending_motion,
+                            "XCB compositor helper event",
+                        );
+                        Ok(calloop::PostAction::Continue)
+                    },
+                )
+                .map_err(|e| {
+                    BackendError::Message(format!(
+                        "Failed to insert XCB compositor helper source: {e}"
+                    ))
+                })?;
+        }
 
         let signals = Signals::new(&[Signal::SIGCHLD])?;
         handle
@@ -1177,12 +2642,21 @@ impl Backend for XcbBackend {
             should_exit: false,
         };
         while !data.should_exit {
-            let timeout = if data.handler.needs_tick() {
+            let timeout = if data.handler.needs_tick() || data.backend.compositor_needs_render() {
                 Some(Duration::from_millis(1))
             } else {
                 None
             };
             event_loop.dispatch(timeout, &mut data)?;
+            if !data.should_exit {
+                data.handler.render_compositor_immediate(data.backend);
+            }
+            if data.backend.benchmark_auto_exit && data.backend.compositor_benchmark_is_complete() {
+                if let Some(report) = data.backend.compositor_benchmark_report() {
+                    println!("{report}");
+                }
+                data.should_exit = true;
+            }
         }
         Ok(())
     }
@@ -1256,7 +2730,7 @@ impl XcbWindowOps {
                 .saturating_add(1),
         });
         let Ok(mapping) = self.conn.wait_for_reply(cookie) else {
-            return x::ModMask::N2;
+            return x::ModMask::empty();
         };
         let per = mapping.keysyms_per_keycode() as usize;
         let mut numlock_keys = Vec::new();
@@ -1271,12 +2745,12 @@ impl XcbWindowOps {
             }
         }
         if numlock_keys.is_empty() {
-            return x::ModMask::N2;
+            return x::ModMask::empty();
         }
 
         let cookie = self.conn.send_request(&x::GetModifierMapping {});
         let Ok(reply) = self.conn.wait_for_reply(cookie) else {
-            return x::ModMask::N2;
+            return x::ModMask::empty();
         };
         let per = reply.keycodes_per_modifier() as usize;
         for (idx, chunk) in reply.keycodes().chunks(per).enumerate() {
@@ -1295,7 +2769,7 @@ impl XcbWindowOps {
                 };
             }
         }
-        x::ModMask::N2
+        x::ModMask::empty()
     }
 }
 
@@ -1517,7 +2991,8 @@ impl WindowOps for XcbWindowOps {
                 grab_window: self.win(win)?,
                 modifiers: x::ModMask::ANY,
             })
-            .map_err(xcb_err)
+            .map_err(xcb_err)?;
+        self.conn.flush().map_err(xcb_err)
     }
 
     fn grab_button_any_anymod(&self, win: WindowId, mask: u32) -> XcbResult<()> {
@@ -1533,7 +3008,8 @@ impl WindowOps for XcbWindowOps {
                 button: x::ButtonIndex::Any,
                 modifiers: x::ModMask::ANY,
             })
-            .map_err(xcb_err)
+            .map_err(xcb_err)?;
+        self.conn.flush().map_err(xcb_err)
     }
 
     fn grab_button(&self, win: WindowId, btn: u8, mask: u32, mods: Mods) -> XcbResult<()> {
@@ -1556,7 +3032,7 @@ impl WindowOps for XcbWindowOps {
                 })
                 .map_err(xcb_err)?;
         }
-        Ok(())
+        self.conn.flush().map_err(xcb_err)
     }
 
     fn change_event_mask(&self, win: WindowId, mask: u32) -> XcbResult<()> {
@@ -1608,7 +3084,9 @@ impl WindowOps for XcbWindowOps {
 
     fn restack_windows(&self, windows: &[WindowId]) -> XcbResult<()> {
         for (window, changes) in restack_window_changes(windows) {
-            self.apply_window_changes(window, changes)?;
+            if self.ids.window(window).is_ok() {
+                self.apply_window_changes(window, changes)?;
+            }
         }
         Ok(())
     }
@@ -1642,85 +3120,17 @@ struct XcbInputOps {
     conn: Arc<xcb::Connection>,
     ids: XcbIdRegistry,
     root: x::Window,
-    cursor_font: x::Font,
-    cursors: Mutex<HashMap<StdCursorKind, x::Cursor>>,
 }
 
 impl XcbInputOps {
     fn new(conn: Arc<xcb::Connection>, ids: XcbIdRegistry, root: x::Window) -> Self {
-        let cursor_font: x::Font = conn.generate_id();
-        let _ = conn.send_and_check_request(&x::OpenFont {
-            fid: cursor_font,
-            name: b"cursor",
-        });
-        Self {
-            conn,
-            ids,
-            root,
-            cursor_font,
-            cursors: Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn cursor_glyph(kind: StdCursorKind) -> u16 {
-        match kind {
-            StdCursorKind::LeftPtr => 68,
-            StdCursorKind::Hand => 58,
-            StdCursorKind::XTerm => 152,
-            StdCursorKind::Watch => 150,
-            StdCursorKind::Crosshair => 34,
-            StdCursorKind::Fleur => 52,
-            StdCursorKind::HDoubleArrow => 108,
-            StdCursorKind::VDoubleArrow => 116,
-            StdCursorKind::TopLeftCorner => 134,
-            StdCursorKind::TopRightCorner => 136,
-            StdCursorKind::BottomLeftCorner => 12,
-            StdCursorKind::BottomRightCorner => 14,
-            StdCursorKind::Sizing => 120,
-        }
-    }
-
-    fn ensure_cursor(&self, kind: StdCursorKind) -> XcbResult<x::Cursor> {
-        if let Ok(cache) = self.cursors.lock() {
-            if let Some(cursor) = cache.get(&kind).copied() {
-                return Ok(cursor);
-            }
-        }
-
-        let cursor: x::Cursor = self.conn.generate_id();
-        let glyph = Self::cursor_glyph(kind);
-        self.conn
-            .send_and_check_request(&x::CreateGlyphCursor {
-                cid: cursor,
-                source_font: self.cursor_font,
-                mask_font: self.cursor_font,
-                source_char: glyph,
-                mask_char: glyph + 1,
-                fore_red: 0,
-                fore_green: 0,
-                fore_blue: 0,
-                back_red: 65535,
-                back_green: 65535,
-                back_blue: 65535,
-            })
-            .map_err(xcb_err)?;
-
-        if let Ok(mut cache) = self.cursors.lock() {
-            cache.insert(kind, cursor);
-        }
-        Ok(cursor)
+        Self { conn, ids, root }
     }
 }
 
 impl InputOps for XcbInputOps {
-    fn set_cursor(&self, kind: StdCursorKind) -> XcbResult<()> {
-        let cursor = self.ensure_cursor(kind)?;
-        self.conn
-            .send_and_check_request(&x::ChangeWindowAttributes {
-                window: self.root,
-                value_list: &[x::Cw::Cursor(cursor)],
-            })
-            .map_err(xcb_err)
+    fn set_cursor(&self, _kind: StdCursorKind) -> XcbResult<()> {
+        Ok(())
     }
 
     fn get_pointer_position(&self) -> XcbResult<(f64, f64)> {
@@ -1984,6 +3394,13 @@ impl PropertyOps for XcbPropertyOps {
         change_u32s(
             &self.conn,
             w,
+            self.atoms.net_wm_strut,
+            self.atoms.cardinal,
+            &[0, 0, top, 0],
+        )?;
+        change_u32s(
+            &self.conn,
+            w,
             self.atoms.net_wm_strut_partial,
             self.atoms.cardinal,
             &[0, 0, top, 0, 0, 0, 0, 0, start_x, end_x, 0, 0],
@@ -2022,7 +3439,8 @@ impl PropertyOps for XcbPropertyOps {
             get_u32s(&self.conn, w, self.atoms.wm_state, self.atoms.wm_state)
                 .first()
                 .copied()
-                .unwrap_or(0) as i64,
+                .map(|state| state as i64)
+                .unwrap_or(-1),
         )
     }
 
@@ -2677,7 +4095,7 @@ impl XcbKeyOps {
             return mask;
         }
 
-        let mask = self.detect_numlock_mask().unwrap_or(x::ModMask::N2);
+        let mask = self.detect_numlock_mask().unwrap_or(x::ModMask::empty());
         *self.numlock_mask.write().unwrap() = Some(mask);
         mask
     }
@@ -2690,7 +4108,7 @@ impl XcbKeyOps {
             .cloned()
             .unwrap_or_default();
         if numlock_keys.is_empty() {
-            return Ok(x::ModMask::N2);
+            return Ok(x::ModMask::empty());
         }
 
         let cookie = self.conn.send_request(&x::GetModifierMapping {});
@@ -2713,7 +4131,7 @@ impl XcbKeyOps {
             }
         }
 
-        Ok(x::ModMask::N2)
+        Ok(x::ModMask::empty())
     }
 }
 
@@ -2737,17 +4155,26 @@ impl KeyOps for XcbKeyOps {
                 let base = mods_to_xcb(mods);
                 let combos = lock_modifier_combinations(base, x::ModMask::LOCK, numlock);
                 for modifiers in combos {
-                    let _ = self.conn.send_and_check_request(&x::GrabKey {
+                    if let Err(err) = self.conn.send_and_check_request(&x::GrabKey {
                         owner_events: false,
                         grab_window: root,
                         modifiers,
                         key,
                         pointer_mode: x::GrabMode::Async,
                         keyboard_mode: x::GrabMode::Async,
-                    });
+                    }) {
+                        log::warn!(
+                            "XCB grab_key failed (keysym=0x{:x}, keycode={}, mods=0x{:x}): {:?}",
+                            keysym,
+                            key,
+                            modifiers.bits(),
+                            err
+                        );
+                    }
                 }
             }
         }
+        self.conn.flush().map_err(xcb_err)?;
         Ok(())
     }
 
@@ -2770,6 +4197,7 @@ impl KeyOps for XcbKeyOps {
             keyboard_mode: x::GrabMode::Async,
         });
         let _ = self.conn.wait_for_reply(cookie).map_err(xcb_err)?;
+        self.conn.flush().map_err(xcb_err)?;
         Ok(())
     }
 
@@ -2778,7 +4206,8 @@ impl KeyOps for XcbKeyOps {
             .send_and_check_request(&x::UngrabKeyboard {
                 time: x::CURRENT_TIME,
             })
-            .map_err(xcb_err)
+            .map_err(xcb_err)?;
+        self.conn.flush().map_err(xcb_err)
     }
 
     fn clean_mods(&self, raw_state: u16) -> Mods {
@@ -2787,11 +4216,7 @@ impl KeyOps for XcbKeyOps {
 
     fn keysym_from_keycode(&mut self, keycode: u8) -> XcbResult<KeySym> {
         let keymap = self.load_keymap()?;
-        keymap
-            .keycode_to_keysym
-            .get(&keycode)
-            .copied()
-            .ok_or(BackendError::NotFound("keycode not found in XCB keymap"))
+        Ok(keymap.keycode_to_keysym.get(&keycode).copied().unwrap_or(0))
     }
 
     fn clear_cache(&mut self) {
@@ -2835,13 +4260,12 @@ impl EwmhFacade for XcbEwmh {
     }
 
     fn clear_active_window(&self) -> XcbResult<()> {
-        change_u32s(
-            &self.conn,
-            self.root,
-            self.atoms.net_active_window,
-            self.atoms.window,
-            &[0],
-        )
+        self.conn
+            .send_and_check_request(&x::DeleteProperty {
+                window: self.root,
+                property: self.atoms.net_active_window,
+            })
+            .map_err(xcb_err)
     }
 
     fn set_client_list(&self, list: &[WindowId]) -> XcbResult<()> {
@@ -2888,7 +4312,10 @@ impl EwmhFacade for XcbEwmh {
                 border_width: 0,
                 class: x::WindowClass::InputOutput,
                 visual: x::COPY_FROM_PARENT,
-                value_list: &[],
+                value_list: &[
+                    x::Cw::EventMask(x::EventMask::EXPOSURE | x::EventMask::KEY_PRESS),
+                    x::Cw::OverrideRedirect(true),
+                ],
             })
             .map_err(xcb_err)?;
         change_u32s(
@@ -2910,6 +4337,13 @@ impl EwmhFacade for XcbEwmh {
             win,
             self.atoms.net_wm_name,
             self.atoms.utf8_string,
+            wm_name.as_bytes(),
+        )?;
+        change_bytes(
+            &self.conn,
+            win,
+            x::ATOM_WM_NAME,
+            self.atoms.string,
             wm_name.as_bytes(),
         )?;
         Ok(self.ids.intern(win))
@@ -2965,13 +4399,25 @@ impl EwmhFacade for XcbEwmh {
             self.atoms.cardinal,
             &[total],
         )?;
-        let joined = names.join("\0");
+        let mut name_bytes = Vec::new();
+        for name in names {
+            name_bytes.extend_from_slice(name.as_bytes());
+            name_bytes.push(0);
+        }
         change_bytes(
             &self.conn,
             self.root,
             self.atoms.net_desktop_names,
             self.atoms.utf8_string,
-            joined.as_bytes(),
+            &name_bytes,
+        )?;
+        let viewports = vec![0; total as usize * 2];
+        change_u32s(
+            &self.conn,
+            self.root,
+            self.atoms.net_desktop_viewport,
+            self.atoms.cardinal,
+            &viewports,
         )
     }
 
@@ -3051,6 +4497,17 @@ impl ColorAllocator for XcbColorAllocator {
     }
 
     fn free_all_theme_pixels(&mut self) -> XcbResult<()> {
+        if self.cache.is_empty() {
+            return Ok(());
+        }
+        let pixels: Vec<u32> = self.cache.values().map(|p| p.0).collect();
+        self.conn
+            .send_and_check_request(&x::FreeColors {
+                cmap: self.colormap,
+                plane_mask: 0,
+                pixels: &pixels,
+            })
+            .map_err(xcb_err)?;
         self.cache.clear();
         Ok(())
     }
@@ -3164,20 +4621,6 @@ impl CursorProvider for XcbCursorProvider {
             .send_and_check_request(&x::CloseFont { font: self.font });
         Ok(())
     }
-}
-
-fn root_event_mask() -> x::EventMask {
-    x::EventMask::SUBSTRUCTURE_REDIRECT
-        | x::EventMask::SUBSTRUCTURE_NOTIFY
-        | x::EventMask::PROPERTY_CHANGE
-        | x::EventMask::BUTTON_PRESS
-        | x::EventMask::BUTTON_RELEASE
-        | x::EventMask::POINTER_MOTION
-        | x::EventMask::ENTER_WINDOW
-        | x::EventMask::LEAVE_WINDOW
-        | x::EventMask::FOCUS_CHANGE
-        | x::EventMask::KEY_PRESS
-        | x::EventMask::KEY_RELEASE
 }
 
 fn event_mask_from_bits(bits: u32) -> x::EventMask {
