@@ -21,6 +21,7 @@ pub mod wayland_key_ops;
 // Shared dummy ops used by Smithay-backed backends.
 pub mod wayland_dummy_ops;
 
+pub mod x11_shared;
 pub mod x11rb;
 pub mod xcb;
 

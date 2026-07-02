@@ -6,17 +6,30 @@
 //! event dispatch are handled directly through XCB.
 
 use crate::backend::api::{
-    AllowMode, Backend, BackendEvent, Capabilities, CloseResult, ColorAllocator, CursorProvider,
-    EventHandler, EwmhFacade, EwmhFeature, Geometry, HitTarget, InputOps, KeyOps, LayerSurfaceInfo,
-    NetWmAction, NetWmState, NormalHints, NotifyMode, OutputInfo, OutputOps, PropertyKind,
-    PropertyOps, ResizeEdge, ScreenInfo, StackMode, StrutPartial, WindowAttributes, WindowChanges,
-    WindowOps, WindowType, WmHints,
+    AllowMode, AllowedAction, Backend, BackendEvent, Capabilities, CloseResult, ColorAllocator,
+    CursorProvider, EventHandler, EwmhFacade, EwmhFeature, Geometry, HitTarget, IconData, InputOps,
+    KeyOps, LayerSurfaceInfo, MotifWmHints, NetWmState, NormalHints, NotifyMode, OutputInfo,
+    OutputOps, PropertyKind, PropertyOps, ResizeEdge, ScreenInfo, StackMode, StrutPartial,
+    VrrCapabilities, WindowAttributes, WindowChanges, WindowOps, WindowType, WmHints,
 };
 use crate::backend::common_define::{
     ArgbColor, ColorScheme, CursorHandle, EventMaskBits, KeySym, Mods, OutputId, Pixel, SchemeType,
     StdCursorKind, WindowId,
 };
 use crate::backend::error::BackendError;
+use crate::backend::x11_shared::{
+    AllowedActionAtoms, ClientMessageAtoms, ClientMessageKind, DEFAULT_OUTPUT_REFRESH_MHZ,
+    EwmhFeatureAtoms, NetWmStateAtoms, PropertyKindAtoms, SUPPORTED_EWMH_FEATURES, WindowTypeAtoms,
+    atom_for_allowed_action, atom_for_ewmh_feature, atom_for_net_wm_state, build_output_info,
+    classify_client_message, decode_text_property, expand_net_wm_state_requests, fallback_output,
+    lock_modifier_combinations, net_wm_ping_message, net_wm_state_from_atom,
+    net_wm_sync_request_message, output_at, parse_gtk_frame_extents, parse_icon_data,
+    parse_motif_hints, parse_normal_hints, parse_opaque_region, parse_strut, parse_strut_partial,
+    parse_wm_class, parse_wm_hints, property_kind_from_atom, protocol_supported,
+    restack_window_changes, stack_mode_from_index, stack_mode_to_index,
+    window_changes_from_configure_request_parts, window_type_from_atom, wm_delete_window_message,
+    wm_take_focus_message,
+};
 use crate::jwm::InteractionAction;
 use calloop::signals::{Signal, Signals};
 use calloop::{
@@ -27,7 +40,7 @@ use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::sync::{
-    Arc, RwLock,
+    Arc, Mutex, RwLock,
     atomic::{AtomicU64, Ordering},
 };
 use std::time::Duration;
@@ -89,6 +102,8 @@ struct XcbAtoms {
     net_close_window: x::Atom,
     net_restack_window: x::Atom,
     net_wm_ping: x::Atom,
+    net_wm_sync_request: x::Atom,
+    net_wm_sync_request_counter: x::Atom,
     net_wm_user_time: x::Atom,
     net_wm_icon: x::Atom,
     net_wm_bypass_compositor: x::Atom,
@@ -98,6 +113,16 @@ struct XcbAtoms {
     net_wm_moveresize: x::Atom,
     net_frame_extents: x::Atom,
     net_wm_allowed_actions: x::Atom,
+    net_wm_action_move: x::Atom,
+    net_wm_action_resize: x::Atom,
+    net_wm_action_minimize: x::Atom,
+    net_wm_action_maximize_horz: x::Atom,
+    net_wm_action_maximize_vert: x::Atom,
+    net_wm_action_fullscreen: x::Atom,
+    net_wm_action_close: x::Atom,
+    net_wm_action_stick: x::Atom,
+    net_wm_action_above: x::Atom,
+    net_wm_action_below: x::Atom,
     net_workarea: x::Atom,
     motif_wm_hints: x::Atom,
     gtk_frame_extents: x::Atom,
@@ -174,6 +199,8 @@ impl XcbAtoms {
             net_close_window: Self::intern(conn, b"_NET_CLOSE_WINDOW")?,
             net_restack_window: Self::intern(conn, b"_NET_RESTACK_WINDOW")?,
             net_wm_ping: Self::intern(conn, b"_NET_WM_PING")?,
+            net_wm_sync_request: Self::intern(conn, b"_NET_WM_SYNC_REQUEST")?,
+            net_wm_sync_request_counter: Self::intern(conn, b"_NET_WM_SYNC_REQUEST_COUNTER")?,
             net_wm_user_time: Self::intern(conn, b"_NET_WM_USER_TIME")?,
             net_wm_icon: Self::intern(conn, b"_NET_WM_ICON")?,
             net_wm_bypass_compositor: Self::intern(conn, b"_NET_WM_BYPASS_COMPOSITOR")?,
@@ -183,6 +210,16 @@ impl XcbAtoms {
             net_wm_moveresize: Self::intern(conn, b"_NET_WM_MOVERESIZE")?,
             net_frame_extents: Self::intern(conn, b"_NET_FRAME_EXTENTS")?,
             net_wm_allowed_actions: Self::intern(conn, b"_NET_WM_ALLOWED_ACTIONS")?,
+            net_wm_action_move: Self::intern(conn, b"_NET_WM_ACTION_MOVE")?,
+            net_wm_action_resize: Self::intern(conn, b"_NET_WM_ACTION_RESIZE")?,
+            net_wm_action_minimize: Self::intern(conn, b"_NET_WM_ACTION_MINIMIZE")?,
+            net_wm_action_maximize_horz: Self::intern(conn, b"_NET_WM_ACTION_MAXIMIZE_HORZ")?,
+            net_wm_action_maximize_vert: Self::intern(conn, b"_NET_WM_ACTION_MAXIMIZE_VERT")?,
+            net_wm_action_fullscreen: Self::intern(conn, b"_NET_WM_ACTION_FULLSCREEN")?,
+            net_wm_action_close: Self::intern(conn, b"_NET_WM_ACTION_CLOSE")?,
+            net_wm_action_stick: Self::intern(conn, b"_NET_WM_ACTION_STICK")?,
+            net_wm_action_above: Self::intern(conn, b"_NET_WM_ACTION_ABOVE")?,
+            net_wm_action_below: Self::intern(conn, b"_NET_WM_ACTION_BELOW")?,
             net_workarea: Self::intern(conn, b"_NET_WORKAREA")?,
             motif_wm_hints: Self::intern(conn, b"_MOTIF_WM_HINTS")?,
             gtk_frame_extents: Self::intern(conn, b"_GTK_FRAME_EXTENTS")?,
@@ -190,34 +227,129 @@ impl XcbAtoms {
     }
 
     fn atom_for_state(&self, state: NetWmState) -> x::Atom {
-        match state {
-            NetWmState::Fullscreen => self.net_wm_state_fullscreen,
-            NetWmState::MaximizedVert => self.net_wm_state_maximized_vert,
-            NetWmState::MaximizedHorz => self.net_wm_state_maximized_horz,
-            NetWmState::Hidden => self.net_wm_state_hidden,
-            NetWmState::Above => self.net_wm_state_above,
-            NetWmState::Below => self.net_wm_state_below,
-            NetWmState::DemandsAttention => self.net_wm_state_demands_attention,
-            NetWmState::Sticky => self.net_wm_state_sticky,
-            NetWmState::SkipTaskbar => self.net_wm_state_skip_taskbar,
-            NetWmState::SkipPager => self.net_wm_state_skip_pager,
-        }
+        atom_for_net_wm_state(state, self.state_atoms())
     }
 
     fn state_from_atom(&self, atom: x::Atom) -> Option<NetWmState> {
-        Some(match atom {
-            a if a == self.net_wm_state_fullscreen => NetWmState::Fullscreen,
-            a if a == self.net_wm_state_maximized_vert => NetWmState::MaximizedVert,
-            a if a == self.net_wm_state_maximized_horz => NetWmState::MaximizedHorz,
-            a if a == self.net_wm_state_hidden => NetWmState::Hidden,
-            a if a == self.net_wm_state_above => NetWmState::Above,
-            a if a == self.net_wm_state_below => NetWmState::Below,
-            a if a == self.net_wm_state_demands_attention => NetWmState::DemandsAttention,
-            a if a == self.net_wm_state_sticky => NetWmState::Sticky,
-            a if a == self.net_wm_state_skip_taskbar => NetWmState::SkipTaskbar,
-            a if a == self.net_wm_state_skip_pager => NetWmState::SkipPager,
-            _ => return None,
-        })
+        net_wm_state_from_atom(atom, self.state_atoms())
+    }
+
+    fn state_atoms(&self) -> NetWmStateAtoms<x::Atom> {
+        NetWmStateAtoms {
+            fullscreen: self.net_wm_state_fullscreen,
+            maximized_vert: self.net_wm_state_maximized_vert,
+            maximized_horz: self.net_wm_state_maximized_horz,
+            hidden: self.net_wm_state_hidden,
+            above: self.net_wm_state_above,
+            below: self.net_wm_state_below,
+            demands_attention: self.net_wm_state_demands_attention,
+            sticky: self.net_wm_state_sticky,
+            skip_taskbar: self.net_wm_state_skip_taskbar,
+            skip_pager: self.net_wm_state_skip_pager,
+        }
+    }
+
+    fn window_type_atoms(&self) -> WindowTypeAtoms<x::Atom> {
+        WindowTypeAtoms {
+            desktop: self.net_wm_window_type_desktop,
+            dock: self.net_wm_window_type_dock,
+            toolbar: self.net_wm_window_type_toolbar,
+            menu: self.net_wm_window_type_menu,
+            utility: self.net_wm_window_type_utility,
+            splash: self.net_wm_window_type_splash,
+            dialog: self.net_wm_window_type_dialog,
+            dropdown_menu: self.net_wm_window_type_dropdown_menu,
+            popup_menu: self.net_wm_window_type_popup_menu,
+            tooltip: self.net_wm_window_type_tooltip,
+            notification: self.net_wm_window_type_notification,
+            combo: self.net_wm_window_type_combo,
+        }
+    }
+
+    fn allowed_action_atoms(&self) -> AllowedActionAtoms<x::Atom> {
+        AllowedActionAtoms {
+            move_: self.net_wm_action_move,
+            resize: self.net_wm_action_resize,
+            minimize: self.net_wm_action_minimize,
+            maximize_horz: self.net_wm_action_maximize_horz,
+            maximize_vert: self.net_wm_action_maximize_vert,
+            fullscreen: self.net_wm_action_fullscreen,
+            close: self.net_wm_action_close,
+            stick: self.net_wm_action_stick,
+            above: self.net_wm_action_above,
+            below: self.net_wm_action_below,
+        }
+    }
+
+    fn feature_atoms(&self) -> EwmhFeatureAtoms<x::Atom> {
+        EwmhFeatureAtoms {
+            active_window: self.net_active_window,
+            supported: self.net_supported,
+            wm_name: self.net_wm_name,
+            wm_state: self.net_wm_state,
+            supporting_wm_check: self.net_supporting_wm_check,
+            wm_state_fullscreen: self.net_wm_state_fullscreen,
+            wm_state_maximized_vert: self.net_wm_state_maximized_vert,
+            wm_state_maximized_horz: self.net_wm_state_maximized_horz,
+            wm_state_hidden: self.net_wm_state_hidden,
+            wm_state_above: self.net_wm_state_above,
+            wm_state_below: self.net_wm_state_below,
+            wm_state_demands_attention: self.net_wm_state_demands_attention,
+            wm_state_sticky: self.net_wm_state_sticky,
+            wm_state_skip_taskbar: self.net_wm_state_skip_taskbar,
+            wm_state_skip_pager: self.net_wm_state_skip_pager,
+            client_list: self.net_client_list,
+            client_info: self.net_client_info,
+            wm_window_type: self.net_wm_window_type,
+            wm_window_type_dialog: self.net_wm_window_type_dialog,
+            current_desktop: self.net_current_desktop,
+            number_of_desktops: self.net_number_of_desktops,
+            desktop_names: self.net_desktop_names,
+            desktop_viewport: self.net_desktop_viewport,
+            wm_moveresize: self.net_wm_moveresize,
+            frame_extents: self.net_frame_extents,
+            wm_allowed_actions: self.net_wm_allowed_actions,
+            workarea: self.net_workarea,
+            close_window: self.net_close_window,
+            restack_window: self.net_restack_window,
+            wm_ping: self.net_wm_ping,
+            wm_user_time: self.net_wm_user_time,
+            wm_icon: self.net_wm_icon,
+            wm_bypass_compositor: self.net_wm_bypass_compositor,
+            wm_opaque_region: self.net_wm_opaque_region,
+        }
+    }
+
+    fn property_kind_atoms(&self) -> PropertyKindAtoms<x::Atom> {
+        PropertyKindAtoms {
+            wm_transient_for: self.wm_transient_for,
+            wm_normal_hints: self.wm_normal_hints,
+            wm_hints: self.wm_hints,
+            wm_name: x::ATOM_WM_NAME,
+            net_wm_name: self.net_wm_name,
+            wm_class: self.wm_class,
+            net_wm_window_type: self.net_wm_window_type,
+            wm_protocols: self.wm_protocols,
+            net_wm_strut: self.net_wm_strut,
+            net_wm_strut_partial: self.net_wm_strut_partial,
+            motif_wm_hints: self.motif_wm_hints,
+            gtk_frame_extents: self.gtk_frame_extents,
+            net_wm_bypass_compositor: self.net_wm_bypass_compositor,
+            net_wm_opaque_region: self.net_wm_opaque_region,
+            net_wm_icon: self.net_wm_icon,
+            net_wm_user_time: self.net_wm_user_time,
+        }
+    }
+
+    fn client_message_atoms(&self) -> ClientMessageAtoms<u32> {
+        ClientMessageAtoms {
+            net_wm_state: self.net_wm_state.resource_id(),
+            net_active_window: self.net_active_window.resource_id(),
+            net_close_window: self.net_close_window.resource_id(),
+            net_wm_moveresize: self.net_wm_moveresize.resource_id(),
+            wm_protocols: self.wm_protocols.resource_id(),
+            net_wm_ping: self.net_wm_ping.resource_id(),
+        }
     }
 }
 
@@ -309,7 +441,12 @@ struct XcbLoopData<'a> {
 
 impl XcbBackend {
     pub fn new() -> XcbResult<Self> {
-        let (conn, screen_num) = xcb::Connection::connect(None).map_err(xcb_err)?;
+        let (conn, screen_num) = xcb::Connection::connect_with_extensions(
+            None,
+            &[],
+            &[xcb::Extension::RandR, xcb::Extension::Shape],
+        )
+        .map_err(xcb_err)?;
         let conn = Arc::new(conn);
         let (root, screen_width, screen_height, default_colormap, min_keycode, max_keycode) = {
             let setup = conn.get_setup();
@@ -335,10 +472,15 @@ impl XcbBackend {
             supports_client_list: true,
         };
 
-        let window_ops = Box::new(XcbWindowOps::new(conn.clone(), ids.clone(), atoms));
+        let window_ops = Box::new(XcbWindowOps::new(conn.clone(), ids.clone(), atoms, root));
         let input_ops = Box::new(XcbInputOps::new(conn.clone(), ids.clone(), root));
         let property_ops = Box::new(XcbPropertyOps::new(conn.clone(), ids.clone(), atoms));
-        let output_ops = Box::new(XcbOutputOps::new(screen_width, screen_height));
+        let output_ops = Box::new(XcbOutputOps::new(
+            conn.clone(),
+            root,
+            screen_width,
+            screen_height,
+        ));
         let key_ops = Box::new(XcbKeyOps::new(
             conn.clone(),
             ids.clone(),
@@ -350,6 +492,13 @@ impl XcbBackend {
         );
         let cursor_provider = Box::new(XcbCursorProvider::new(conn.clone(), ids.clone())?);
         let color_allocator = Box::new(XcbColorAllocator::new(conn.clone(), default_colormap));
+
+        let _ = conn.check_request(conn.send_request_checked(&xcb::randr::SelectInput {
+            window: root,
+            enable: xcb::randr::NotifyMask::SCREEN_CHANGE
+                | xcb::randr::NotifyMask::OUTPUT_CHANGE
+                | xcb::randr::NotifyMask::CRTC_CHANGE,
+        }));
 
         Ok(Self {
             conn,
@@ -388,29 +537,23 @@ impl XcbBackend {
                 Some(BackendEvent::WindowDestroyed(id))
             }
             xcb::Event::X(x::Event::ConfigureRequest(ev)) => {
-                let mut changes = WindowChanges::default();
                 let mask = ev.value_mask();
-                if mask.contains(x::ConfigWindowMask::X) {
-                    changes.x = Some(ev.x() as i32);
-                }
-                if mask.contains(x::ConfigWindowMask::Y) {
-                    changes.y = Some(ev.y() as i32);
-                }
-                if mask.contains(x::ConfigWindowMask::WIDTH) {
-                    changes.width = Some(ev.width() as u32);
-                }
-                if mask.contains(x::ConfigWindowMask::HEIGHT) {
-                    changes.height = Some(ev.height() as u32);
-                }
-                if mask.contains(x::ConfigWindowMask::BORDER_WIDTH) {
-                    changes.border_width = Some(ev.border_width() as u32);
-                }
-                if mask.contains(x::ConfigWindowMask::SIBLING) {
-                    changes.sibling = Some(self.ids.intern(ev.sibling()));
-                }
-                if mask.contains(x::ConfigWindowMask::STACK_MODE) {
-                    changes.stack_mode = Some(stack_mode_from_xcb(ev.stack_mode()));
-                }
+                let changes = window_changes_from_configure_request_parts(
+                    mask.contains(x::ConfigWindowMask::X)
+                        .then_some(ev.x() as i32),
+                    mask.contains(x::ConfigWindowMask::Y)
+                        .then_some(ev.y() as i32),
+                    mask.contains(x::ConfigWindowMask::WIDTH)
+                        .then_some(ev.width() as u32),
+                    mask.contains(x::ConfigWindowMask::HEIGHT)
+                        .then_some(ev.height() as u32),
+                    mask.contains(x::ConfigWindowMask::BORDER_WIDTH)
+                        .then_some(ev.border_width() as u32),
+                    mask.contains(x::ConfigWindowMask::SIBLING)
+                        .then_some(self.ids.intern(ev.sibling())),
+                    mask.contains(x::ConfigWindowMask::STACK_MODE)
+                        .then_some(stack_mode_from_xcb(ev.stack_mode())),
+                );
                 Some(BackendEvent::ConfigureRequest {
                     window: self.ids.intern(ev.window()),
                     mask_bits: ev.value_mask().bits() as u16,
@@ -480,6 +623,10 @@ impl XcbBackend {
                 state: ev.state().bits() as u16,
                 time: ev.time(),
             }),
+            xcb::Event::RandR(xcb::randr::Event::ScreenChangeNotify(_))
+            | xcb::Event::RandR(xcb::randr::Event::Notify(_)) => {
+                Some(BackendEvent::ScreenLayoutChanged)
+            }
             xcb::Event::X(x::Event::MappingNotify(_)) => Some(BackendEvent::MappingNotify),
             xcb::Event::X(x::Event::ClientMessage(ev)) => self.map_client_message(ev),
             _ => None,
@@ -497,33 +644,7 @@ impl XcbBackend {
     }
 
     fn property_kind(&self, atom: x::Atom) -> PropertyKind {
-        if atom == self.atoms.net_wm_name || atom == x::ATOM_WM_NAME {
-            PropertyKind::Title
-        } else if atom == self.atoms.wm_class {
-            PropertyKind::Class
-        } else if atom == self.atoms.wm_transient_for {
-            PropertyKind::TransientFor
-        } else if atom == self.atoms.net_wm_window_type {
-            PropertyKind::WindowType
-        } else if atom == self.atoms.wm_protocols {
-            PropertyKind::Protocols
-        } else if atom == self.atoms.net_wm_strut || atom == self.atoms.net_wm_strut_partial {
-            PropertyKind::Strut
-        } else if atom == self.atoms.motif_wm_hints {
-            PropertyKind::MotifHints
-        } else if atom == self.atoms.gtk_frame_extents {
-            PropertyKind::GtkFrameExtents
-        } else if atom == self.atoms.net_wm_bypass_compositor {
-            PropertyKind::BypassCompositor
-        } else if atom == self.atoms.net_wm_opaque_region {
-            PropertyKind::OpaqueRegion
-        } else if atom == self.atoms.net_wm_icon {
-            PropertyKind::NetWmIcon
-        } else if atom == self.atoms.net_wm_user_time {
-            PropertyKind::UserTime
-        } else {
-            PropertyKind::Other
-        }
+        property_kind_from_atom(atom, self.atoms.property_kind_atoms())
     }
 
     fn map_client_message(&mut self, ev: x::ClientMessageEvent) -> Option<BackendEvent> {
@@ -539,54 +660,140 @@ impl XcbBackend {
                 });
             }
         };
-
-        if ev.r#type() == self.atoms.net_wm_state {
-            let action = match data[0] {
-                0 => NetWmAction::Remove,
-                1 => NetWmAction::Add,
-                2 => NetWmAction::Toggle,
-                _ => NetWmAction::Toggle,
-            };
-            if let Some(state) = self.atoms.state_from_atom(x::Atom::new(data[1])) {
-                if let Some(second) = self.atoms.state_from_atom(x::Atom::new(data[2])) {
-                    self.pending.push_back(BackendEvent::WindowStateRequest {
-                        window,
-                        state: second,
-                        action,
-                    });
-                }
-                return Some(BackendEvent::WindowStateRequest {
-                    window,
-                    state,
-                    action,
-                });
-            }
-        }
-        if ev.r#type() == self.atoms.net_active_window {
-            return Some(BackendEvent::ActiveWindowMessage { window });
-        }
-        if ev.r#type() == self.atoms.net_close_window {
-            return Some(BackendEvent::CloseWindowRequest { window });
-        }
-        if ev.r#type() == self.atoms.net_wm_moveresize {
-            return Some(BackendEvent::MoveResizeRequest {
-                window,
-                direction: data[2],
-                button: data[3],
-            });
-        }
-        if ev.r#type() == self.atoms.wm_protocols && data[0] == self.atoms.net_wm_ping.resource_id()
-        {
-            return Some(BackendEvent::PingResponse {
-                window: self.ids.intern(x::Window::new(data[2])),
-            });
-        }
-        Some(BackendEvent::ClientMessage {
-            window,
-            type_: ev.r#type().resource_id(),
+        match classify_client_message(
+            ev.r#type().resource_id(),
+            ev.format(),
             data,
-            format: ev.format(),
-        })
+            self.atoms.client_message_atoms(),
+        ) {
+            ClientMessageKind::WindowState {
+                action,
+                first,
+                second,
+            } => {
+                let mut events =
+                    expand_net_wm_state_requests(window, action, first, second, |atom| {
+                        self.atoms.state_from_atom(x::Atom::new(atom))
+                    });
+                if events.is_empty() {
+                    Some(BackendEvent::ClientMessage {
+                        window,
+                        type_: ev.r#type().resource_id(),
+                        data,
+                        format: ev.format(),
+                    })
+                } else {
+                    for event in events.drain(1..) {
+                        self.pending.push_back(event);
+                    }
+                    events.into_iter().next()
+                }
+            }
+            ClientMessageKind::ActiveWindow => Some(BackendEvent::ActiveWindowMessage { window }),
+            ClientMessageKind::CloseWindow => Some(BackendEvent::CloseWindowRequest { window }),
+            ClientMessageKind::MoveResize { direction, button } => {
+                Some(BackendEvent::MoveResizeRequest {
+                    window,
+                    direction,
+                    button,
+                })
+            }
+            ClientMessageKind::PingResponse { window } => Some(BackendEvent::PingResponse {
+                window: self.ids.intern(x::Window::new(window)),
+            }),
+            ClientMessageKind::Other => Some(BackendEvent::ClientMessage {
+                window,
+                type_: ev.r#type().resource_id(),
+                data,
+                format: ev.format(),
+            }),
+        }
+    }
+
+    fn enrich_event_with_output(&self, mut event: BackendEvent) -> BackendEvent {
+        let fill_output = |x: f64, y: f64| self.output_ops.output_at(x as i32, y as i32);
+
+        match &mut event {
+            BackendEvent::ButtonPress {
+                target,
+                root_x,
+                root_y,
+                ..
+            }
+            | BackendEvent::MotionNotify {
+                target,
+                root_x,
+                root_y,
+                ..
+            } => {
+                if matches!(target, HitTarget::Background { .. }) {
+                    *target = HitTarget::Background {
+                        output: fill_output(*root_x, *root_y),
+                    };
+                }
+            }
+            BackendEvent::ScreenLayoutChanged => {
+                self.output_ops.invalidate_output_cache();
+            }
+            _ => {}
+        }
+
+        event
+    }
+
+    fn query_output_vrr_capable(&self, output: u32) -> bool {
+        let atom = match XcbAtoms::intern(&self.conn, b"vrr_capable") {
+            Ok(atom) => atom,
+            Err(_) => return false,
+        };
+        let cookie = self.conn.send_request(&xcb::randr::GetOutputProperty {
+            output: xcb::randr::Output::new(output),
+            property: atom,
+            r#type: x::ATOM_ANY,
+            long_offset: 0,
+            long_length: 1,
+            delete: false,
+            pending: false,
+        });
+        let Ok(reply) = self.conn.wait_for_reply(cookie) else {
+            return false;
+        };
+        match reply.format() {
+            8 => reply.data::<u8>().first().copied().unwrap_or(0) != 0,
+            32 => reply.data::<u32>().first().copied().unwrap_or(0) != 0,
+            _ => false,
+        }
+    }
+
+    fn set_output_hdr_properties(&self, output: u32, enable: bool) -> XcbResult<()> {
+        let output = xcb::randr::Output::new(output);
+        let max_bpc_atom = XcbAtoms::intern(&self.conn, b"max_bpc")?;
+        let max_bpc_value = if enable { 10u32 } else { 8u32 };
+        self.conn
+            .send_and_check_request(&xcb::randr::ChangeOutputProperty {
+                output,
+                property: max_bpc_atom,
+                r#type: x::ATOM_INTEGER,
+                mode: x::PropMode::Replace,
+                data: &[max_bpc_value],
+            })
+            .map_err(xcb_err)?;
+
+        if enable {
+            let colorspace_atom = XcbAtoms::intern(&self.conn, b"Colorspace")?;
+            let bt2020_atom = XcbAtoms::intern(&self.conn, b"BT2020_RGB")?;
+            self.conn
+                .send_and_check_request(&xcb::randr::ChangeOutputProperty {
+                    output,
+                    property: colorspace_atom,
+                    r#type: x::ATOM_ATOM,
+                    mode: x::PropMode::Replace,
+                    data: &[bt2020_atom.resource_id()],
+                })
+                .map_err(xcb_err)?;
+        }
+
+        self.conn.flush().map_err(xcb_err)
     }
 }
 
@@ -609,6 +816,10 @@ impl Backend for XcbBackend {
             .map_err(|e| {
                 BackendError::Message(format!("Another window manager is already running: {e}"))
             })
+    }
+
+    fn request_render(&mut self) {
+        let _ = self.conn.flush();
     }
 
     fn window_ops(&self) -> &dyn WindowOps {
@@ -647,10 +858,27 @@ impl Backend for XcbBackend {
     fn cleanup(&mut self) -> XcbResult<()> {
         self.cursor_provider.cleanup()?;
         self.color_allocator.free_all_theme_pixels()?;
+        if let Some(ewmh) = self.ewmh.as_ref() {
+            let _ = ewmh.reset_root_properties();
+        }
         self.conn.flush().map_err(xcb_err)
     }
 
     fn on_focused_client_changed(&mut self, win: Option<WindowId>) -> XcbResult<()> {
+        if let Some(w) = win {
+            let wants_input = self
+                .property_ops
+                .get_wm_hints(w)
+                .and_then(|h| h.input)
+                .unwrap_or(true);
+            if wants_input {
+                self.window_ops.set_input_focus(w)?;
+            }
+            let _ = self.window_ops.send_take_focus(w);
+        } else {
+            self.window_ops.set_input_focus_root()?;
+        }
+
         if let Some(ewmh) = self.ewmh.as_ref() {
             match win {
                 Some(w) => ewmh.set_active_window(w)?,
@@ -686,16 +914,52 @@ impl Backend for XcbBackend {
         Ok(())
     }
 
+    fn query_vrr_capabilities(&self, output: OutputId) -> Option<VrrCapabilities> {
+        let cfg = crate::config::CONFIG.load();
+        let behavior = cfg.behavior();
+        if !behavior.vrr_enabled {
+            return None;
+        }
+
+        let output_exists = self
+            .output_ops
+            .enumerate_outputs()
+            .into_iter()
+            .any(|o| o.id == output);
+        if !output_exists {
+            return None;
+        }
+
+        Some(VrrCapabilities {
+            supported: self.query_output_vrr_capable(output.0 as u32),
+            current_enabled: false,
+            min_refresh_hz: behavior.vrr_min_fps,
+            max_refresh_hz: behavior.vrr_max_fps,
+        })
+    }
+
+    fn set_vrr_enabled(&mut self, _output: OutputId, _enabled: bool) -> XcbResult<()> {
+        Err(BackendError::Unsupported(
+            "X11 set_vrr_enabled not implemented",
+        ))
+    }
+
+    fn set_hdr_metadata(&mut self, output: OutputId, enabled: bool) -> XcbResult<()> {
+        self.set_output_hdr_properties(output.0 as u32, enabled)
+    }
+
     fn begin_move(&mut self, win: WindowId) -> XcbResult<()> {
         let geom = self.window_ops.get_geometry(win)?;
-        let (rx, ry, _, _) = self.input_ops.query_pointer_root()?;
+        let (rx, ry) = self.input_ops.get_pointer_position()?;
+        let cursor = self.cursor_provider.get(StdCursorKind::Hand)?.0;
+        self.input_ops.set_cursor(StdCursorKind::Hand)?;
         let mask = (EventMaskBits::BUTTON_RELEASE | EventMaskBits::POINTER_MOTION).bits();
-        if self.input_ops.grab_pointer(mask, None)? {
+        if self.input_ops.grab_pointer(mask, Some(cursor))? {
             self.interaction = Some(XcbInteraction {
                 win,
                 start_geom: geom,
-                start_root_x: rx as f64,
-                start_root_y: ry as f64,
+                start_root_x: rx,
+                start_root_y: ry,
                 action: InteractionAction::Move,
                 current_x: geom.x,
                 current_y: geom.y,
@@ -708,14 +972,24 @@ impl Backend for XcbBackend {
 
     fn begin_resize(&mut self, win: WindowId, edge: ResizeEdge) -> XcbResult<()> {
         let geom = self.window_ops.get_geometry(win)?;
-        let (rx, ry, _, _) = self.input_ops.query_pointer_root()?;
+        let (rx, ry) = self.input_ops.get_pointer_position()?;
+        let cursor_kind = match edge {
+            ResizeEdge::Top | ResizeEdge::Bottom => StdCursorKind::VDoubleArrow,
+            ResizeEdge::Left | ResizeEdge::Right => StdCursorKind::HDoubleArrow,
+            ResizeEdge::TopLeft => StdCursorKind::TopLeftCorner,
+            ResizeEdge::TopRight => StdCursorKind::TopRightCorner,
+            ResizeEdge::BottomLeft => StdCursorKind::BottomLeftCorner,
+            ResizeEdge::BottomRight => StdCursorKind::BottomRightCorner,
+        };
+        let cursor = self.cursor_provider.get(cursor_kind)?.0;
+        self.input_ops.set_cursor(cursor_kind)?;
         let mask = (EventMaskBits::BUTTON_RELEASE | EventMaskBits::POINTER_MOTION).bits();
-        if self.input_ops.grab_pointer(mask, None)? {
+        if self.input_ops.grab_pointer(mask, Some(cursor))? {
             self.interaction = Some(XcbInteraction {
                 win,
                 start_geom: geom,
-                start_root_x: rx as f64,
-                start_root_y: ry as f64,
+                start_root_x: rx,
+                start_root_y: ry,
                 action: InteractionAction::Resize(edge),
                 current_x: geom.x,
                 current_y: geom.y,
@@ -758,6 +1032,7 @@ impl Backend for XcbBackend {
     fn handle_button_release(&mut self, _time: u32) -> XcbResult<bool> {
         if self.interaction.take().is_some() {
             self.input_ops.ungrab_pointer()?;
+            self.input_ops.set_cursor(StdCursorKind::LeftPtr)?;
             return Ok(true);
         }
         Ok(false)
@@ -791,11 +1066,13 @@ impl Backend for XcbBackend {
                             }
                         };
                         if let Some(mapped) = data.backend.map_event(event) {
+                            let mapped = data.backend.enrich_event_with_output(mapped);
                             if let Err(err) = data.handler.handle_event(data.backend, mapped) {
                                 log::error!("Error handling XCB event: {err:?}");
                             }
                         }
                         while let Some(mapped) = data.backend.pending.pop_front() {
+                            let mapped = data.backend.enrich_event_with_output(mapped);
                             if let Err(err) = data.handler.handle_event(data.backend, mapped) {
                                 log::error!("Error handling queued XCB event: {err:?}");
                             }
@@ -834,6 +1111,66 @@ impl Backend for XcbBackend {
             })
             .map_err(|e| BackendError::Message(format!("Failed to insert Timer source: {e}")))?;
 
+        let setup_inotify = || -> Result<(), BackendError> {
+            use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
+
+            let config_path = crate::config::Config::get_default_config_path();
+            let watch_dir = config_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| config_path.clone());
+            let config_file_name = config_path.file_name().map(|n| n.to_os_string());
+
+            let inotify = Inotify::init(InitFlags::IN_NONBLOCK)
+                .map_err(|e| BackendError::Message(format!("Failed to init inotify: {e}")))?;
+            inotify
+                .add_watch(
+                    &watch_dir,
+                    AddWatchFlags::IN_CLOSE_WRITE
+                        | AddWatchFlags::IN_MOVED_TO
+                        | AddWatchFlags::IN_CREATE,
+                )
+                .map_err(|e| {
+                    BackendError::Message(format!("Failed to watch config dir {watch_dir:?}: {e}"))
+                })?;
+
+            handle
+                .insert_source(
+                    calloop::generic::Generic::new(
+                        inotify,
+                        calloop::Interest::READ,
+                        calloop::Mode::Level,
+                    ),
+                    move |_, inotify, data| {
+                        let events = inotify.read_events().unwrap_or_default();
+                        let relevant =
+                            events.iter().any(|ev| match (&config_file_name, &ev.name) {
+                                (Some(want), Some(got)) => got == want,
+                                _ => true,
+                            });
+                        if relevant {
+                            if let Err(e) = data
+                                .handler
+                                .handle_event(data.backend, BackendEvent::ConfigChanged)
+                            {
+                                log::error!("Error handling ConfigChanged: {e:?}");
+                            }
+                        }
+                        Ok(calloop::PostAction::Continue)
+                    },
+                )
+                .map_err(|e| {
+                    BackendError::Message(format!("Failed to insert inotify source: {e}"))
+                })?;
+            Ok(())
+        };
+
+        if let Err(e) = setup_inotify() {
+            log::warn!("Failed to set up config file watching: {e}. Falling back to polling.");
+        } else {
+            log::info!("Config file hot-reload enabled via inotify");
+        }
+
         let mut data = XcbLoopData {
             backend: self,
             handler,
@@ -855,15 +1192,110 @@ struct XcbWindowOps {
     conn: Arc<xcb::Connection>,
     ids: XcbIdRegistry,
     atoms: XcbAtoms,
+    root: x::Window,
 }
 
 impl XcbWindowOps {
-    fn new(conn: Arc<xcb::Connection>, ids: XcbIdRegistry, atoms: XcbAtoms) -> Self {
-        Self { conn, ids, atoms }
+    fn new(
+        conn: Arc<xcb::Connection>,
+        ids: XcbIdRegistry,
+        atoms: XcbAtoms,
+        root: x::Window,
+    ) -> Self {
+        Self {
+            conn,
+            ids,
+            atoms,
+            root,
+        }
     }
 
     fn win(&self, win: WindowId) -> XcbResult<x::Window> {
         self.ids.window(win)
+    }
+
+    fn send_configure_notify(
+        &self,
+        win: WindowId,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+        border: u32,
+    ) -> XcbResult<()> {
+        let window = self.win(win)?;
+        let event = x::ConfigureNotifyEvent::new(
+            window,
+            window,
+            x::WINDOW_NONE,
+            x as i16,
+            y as i16,
+            w as u16,
+            h as u16,
+            border as u16,
+            false,
+        );
+        self.conn
+            .send_and_check_request(&x::SendEvent {
+                propagate: false,
+                destination: x::SendEventDest::Window(window),
+                event_mask: x::EventMask::STRUCTURE_NOTIFY,
+                event: &event,
+            })
+            .map_err(xcb_err)
+    }
+
+    fn detect_numlock_mask(&self) -> x::ModMask {
+        let cookie = self.conn.send_request(&x::GetKeyboardMapping {
+            first_keycode: self.conn.get_setup().min_keycode(),
+            count: self
+                .conn
+                .get_setup()
+                .max_keycode()
+                .saturating_sub(self.conn.get_setup().min_keycode())
+                .saturating_add(1),
+        });
+        let Ok(mapping) = self.conn.wait_for_reply(cookie) else {
+            return x::ModMask::N2;
+        };
+        let per = mapping.keysyms_per_keycode() as usize;
+        let mut numlock_keys = Vec::new();
+        for (idx, symbols) in mapping.keysyms().chunks(per).enumerate() {
+            if symbols.contains(&0xff7f) {
+                numlock_keys.push(
+                    self.conn
+                        .get_setup()
+                        .min_keycode()
+                        .saturating_add(idx as u8),
+                );
+            }
+        }
+        if numlock_keys.is_empty() {
+            return x::ModMask::N2;
+        }
+
+        let cookie = self.conn.send_request(&x::GetModifierMapping {});
+        let Ok(reply) = self.conn.wait_for_reply(cookie) else {
+            return x::ModMask::N2;
+        };
+        let per = reply.keycodes_per_modifier() as usize;
+        for (idx, chunk) in reply.keycodes().chunks(per).enumerate() {
+            if chunk
+                .iter()
+                .filter(|&&code| code != 0)
+                .any(|code| numlock_keys.contains(code))
+            {
+                return match idx {
+                    3 => x::ModMask::N1,
+                    4 => x::ModMask::N2,
+                    5 => x::ModMask::N3,
+                    6 => x::ModMask::N4,
+                    7 => x::ModMask::N5,
+                    _ => x::ModMask::N2,
+                };
+            }
+        }
+        x::ModMask::N2
     }
 }
 
@@ -898,7 +1330,8 @@ impl WindowOps for XcbWindowOps {
                 border_width: Some(border),
                 ..Default::default()
             },
-        )
+        )?;
+        self.send_configure_notify(win, x, y, w, h, border)
     }
 
     fn set_decoration_style(
@@ -952,17 +1385,13 @@ impl WindowOps for XcbWindowOps {
     fn close_window(&self, win: WindowId) -> XcbResult<CloseResult> {
         let w = self.win(win)?;
         let protocols = get_atoms(&self.conn, w, self.atoms.wm_protocols, self.atoms.atom);
-        if protocols.contains(&self.atoms.wm_delete_window) {
+        if protocol_supported(&protocols, self.atoms.wm_delete_window) {
             let event = x::ClientMessageEvent::new(
                 w,
                 self.atoms.wm_protocols,
-                x::ClientMessageData::Data32([
+                x::ClientMessageData::Data32(wm_delete_window_message(
                     self.atoms.wm_delete_window.resource_id(),
-                    0,
-                    0,
-                    0,
-                    0,
-                ]),
+                )),
             );
             self.conn
                 .send_and_check_request(&x::SendEvent {
@@ -972,6 +1401,7 @@ impl WindowOps for XcbWindowOps {
                     event: &event,
                 })
                 .map_err(xcb_err)?;
+            self.conn.flush().map_err(xcb_err)?;
             Ok(CloseResult::Graceful)
         } else {
             self.kill_client(win)?;
@@ -982,7 +1412,7 @@ impl WindowOps for XcbWindowOps {
     fn set_input_focus(&self, win: WindowId) -> XcbResult<()> {
         self.conn
             .send_and_check_request(&x::SetInputFocus {
-                revert_to: x::InputFocus::PointerRoot,
+                revert_to: x::InputFocus::Parent,
                 focus: self.win(win)?,
                 time: x::CURRENT_TIME,
             })
@@ -990,7 +1420,13 @@ impl WindowOps for XcbWindowOps {
     }
 
     fn set_input_focus_root(&self) -> XcbResult<()> {
-        Ok(())
+        self.conn
+            .send_and_check_request(&x::SetInputFocus {
+                revert_to: x::InputFocus::PointerRoot,
+                focus: self.root,
+                time: x::CURRENT_TIME,
+            })
+            .map_err(xcb_err)
     }
 
     fn get_window_attributes(&self, win: WindowId) -> XcbResult<WindowAttributes> {
@@ -1019,17 +1455,7 @@ impl WindowOps for XcbWindowOps {
     }
 
     fn scan_windows(&self) -> XcbResult<Vec<WindowId>> {
-        let root = self
-            .ids
-            .x_to_wid
-            .read()
-            .unwrap()
-            .keys()
-            .next()
-            .copied()
-            .map(x::Window::new)
-            .ok_or(BackendError::NotFound("root window"))?;
-        let cookie = self.conn.send_request(&x::QueryTree { window: root });
+        let cookie = self.conn.send_request(&x::QueryTree { window: self.root });
         let reply = self.conn.wait_for_reply(cookie).map_err(xcb_err)?;
         Ok(reply
             .children()
@@ -1111,19 +1537,26 @@ impl WindowOps for XcbWindowOps {
     }
 
     fn grab_button(&self, win: WindowId, btn: u8, mask: u32, mods: Mods) -> XcbResult<()> {
-        self.conn
-            .send_and_check_request(&x::GrabButton {
-                owner_events: false,
-                grab_window: self.win(win)?,
-                event_mask: event_mask_from_bits(mask),
-                pointer_mode: x::GrabMode::Async,
-                keyboard_mode: x::GrabMode::Async,
-                confine_to: x::WINDOW_NONE,
-                cursor: x::CURSOR_NONE,
-                button: button_index(btn),
-                modifiers: mods_to_xcb(mods),
-            })
-            .map_err(xcb_err)
+        let window = self.win(win)?;
+        let base = mods_to_xcb(mods);
+        let numlock = self.detect_numlock_mask();
+        let combos = lock_modifier_combinations(base, x::ModMask::LOCK, numlock);
+        for modifiers in combos {
+            self.conn
+                .send_and_check_request(&x::GrabButton {
+                    owner_events: false,
+                    grab_window: window,
+                    event_mask: event_mask_from_bits(mask),
+                    pointer_mode: x::GrabMode::Async,
+                    keyboard_mode: x::GrabMode::Async,
+                    confine_to: x::WINDOW_NONE,
+                    cursor: x::CURSOR_NONE,
+                    button: button_index(btn),
+                    modifiers,
+                })
+                .map_err(xcb_err)?;
+        }
+        Ok(())
     }
 
     fn change_event_mask(&self, win: WindowId, mask: u32) -> XcbResult<()> {
@@ -1150,19 +1583,16 @@ impl WindowOps for XcbWindowOps {
     fn send_take_focus(&self, win: WindowId) -> XcbResult<bool> {
         let w = self.win(win)?;
         let protocols = get_atoms(&self.conn, w, self.atoms.wm_protocols, self.atoms.atom);
-        if !protocols.contains(&self.atoms.wm_take_focus) {
+        if !protocol_supported(&protocols, self.atoms.wm_take_focus) {
             return Ok(false);
         }
         let event = x::ClientMessageEvent::new(
             w,
             self.atoms.wm_protocols,
-            x::ClientMessageData::Data32([
+            x::ClientMessageData::Data32(wm_take_focus_message(
                 self.atoms.wm_take_focus.resource_id(),
                 x::CURRENT_TIME,
-                0,
-                0,
-                0,
-            ]),
+            )),
         );
         self.conn
             .send_and_check_request(&x::SendEvent {
@@ -1172,7 +1602,39 @@ impl WindowOps for XcbWindowOps {
                 event: &event,
             })
             .map_err(xcb_err)?;
+        self.conn.flush().map_err(xcb_err)?;
         Ok(true)
+    }
+
+    fn restack_windows(&self, windows: &[WindowId]) -> XcbResult<()> {
+        for (window, changes) in restack_window_changes(windows) {
+            self.apply_window_changes(window, changes)?;
+        }
+        Ok(())
+    }
+
+    fn shape_select_input(&self, win: WindowId) -> XcbResult<()> {
+        let w = self.win(win)?;
+        self.conn
+            .send_and_check_request(&xcb::shape::SelectInput {
+                destination_window: w,
+                enable: true,
+            })
+            .map_err(xcb_err)
+    }
+
+    fn get_window_shaped(&self, win: WindowId) -> bool {
+        let w = match self.win(win) {
+            Ok(w) => w,
+            Err(_) => return false,
+        };
+        let cookie = self.conn.send_request(&xcb::shape::QueryExtents {
+            destination_window: w,
+        });
+        match self.conn.wait_for_reply(cookie) {
+            Ok(reply) => reply.bounding_shaped(),
+            Err(_) => false,
+        }
     }
 }
 
@@ -1180,17 +1642,85 @@ struct XcbInputOps {
     conn: Arc<xcb::Connection>,
     ids: XcbIdRegistry,
     root: x::Window,
+    cursor_font: x::Font,
+    cursors: Mutex<HashMap<StdCursorKind, x::Cursor>>,
 }
 
 impl XcbInputOps {
     fn new(conn: Arc<xcb::Connection>, ids: XcbIdRegistry, root: x::Window) -> Self {
-        Self { conn, ids, root }
+        let cursor_font: x::Font = conn.generate_id();
+        let _ = conn.send_and_check_request(&x::OpenFont {
+            fid: cursor_font,
+            name: b"cursor",
+        });
+        Self {
+            conn,
+            ids,
+            root,
+            cursor_font,
+            cursors: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn cursor_glyph(kind: StdCursorKind) -> u16 {
+        match kind {
+            StdCursorKind::LeftPtr => 68,
+            StdCursorKind::Hand => 58,
+            StdCursorKind::XTerm => 152,
+            StdCursorKind::Watch => 150,
+            StdCursorKind::Crosshair => 34,
+            StdCursorKind::Fleur => 52,
+            StdCursorKind::HDoubleArrow => 108,
+            StdCursorKind::VDoubleArrow => 116,
+            StdCursorKind::TopLeftCorner => 134,
+            StdCursorKind::TopRightCorner => 136,
+            StdCursorKind::BottomLeftCorner => 12,
+            StdCursorKind::BottomRightCorner => 14,
+            StdCursorKind::Sizing => 120,
+        }
+    }
+
+    fn ensure_cursor(&self, kind: StdCursorKind) -> XcbResult<x::Cursor> {
+        if let Ok(cache) = self.cursors.lock() {
+            if let Some(cursor) = cache.get(&kind).copied() {
+                return Ok(cursor);
+            }
+        }
+
+        let cursor: x::Cursor = self.conn.generate_id();
+        let glyph = Self::cursor_glyph(kind);
+        self.conn
+            .send_and_check_request(&x::CreateGlyphCursor {
+                cid: cursor,
+                source_font: self.cursor_font,
+                mask_font: self.cursor_font,
+                source_char: glyph,
+                mask_char: glyph + 1,
+                fore_red: 0,
+                fore_green: 0,
+                fore_blue: 0,
+                back_red: 65535,
+                back_green: 65535,
+                back_blue: 65535,
+            })
+            .map_err(xcb_err)?;
+
+        if let Ok(mut cache) = self.cursors.lock() {
+            cache.insert(kind, cursor);
+        }
+        Ok(cursor)
     }
 }
 
 impl InputOps for XcbInputOps {
-    fn set_cursor(&self, _kind: StdCursorKind) -> XcbResult<()> {
-        Ok(())
+    fn set_cursor(&self, kind: StdCursorKind) -> XcbResult<()> {
+        let cursor = self.ensure_cursor(kind)?;
+        self.conn
+            .send_and_check_request(&x::ChangeWindowAttributes {
+                window: self.root,
+                value_list: &[x::Cw::Cursor(cursor)],
+            })
+            .map_err(xcb_err)
     }
 
     fn get_pointer_position(&self) -> XcbResult<(f64, f64)> {
@@ -1199,10 +1729,15 @@ impl InputOps for XcbInputOps {
     }
 
     fn grab_pointer(&self, mask: u32, cursor: Option<u64>) -> XcbResult<bool> {
+        let event_mask = if mask != 0 {
+            event_mask_from_bits(mask)
+        } else {
+            x::EventMask::BUTTON_RELEASE | x::EventMask::POINTER_MOTION
+        };
         let cookie = self.conn.send_request(&x::GrabPointer {
             owner_events: false,
             grab_window: self.root,
-            event_mask: event_mask_from_bits(mask),
+            event_mask,
             pointer_mode: x::GrabMode::Async,
             keyboard_mode: x::GrabMode::Async,
             confine_to: x::WINDOW_NONE,
@@ -1298,25 +1833,29 @@ impl XcbPropertyOps {
         self.ids.window(win)
     }
 
-    fn get_string(&self, win: WindowId, property: x::Atom, ty: x::Atom) -> String {
+    fn get_text_property(&self, win: WindowId, property: x::Atom, ty: x::Atom) -> Option<String> {
         let Ok(w) = self.win(win) else {
-            return String::new();
+            return None;
         };
         let cookie = self.conn.send_request(&x::GetProperty {
             delete: false,
             window: w,
             property,
-            r#type: ty,
+            r#type: x::ATOM_ANY,
             long_offset: 0,
             long_length: 4096,
         });
-        self.conn
-            .wait_for_reply(cookie)
-            .ok()
-            .and_then(|r| String::from_utf8(r.value::<u8>().to_vec()).ok())
+        self.conn.wait_for_reply(cookie).ok().and_then(|r| {
+            if r.format() != 8 {
+                return None;
+            }
+            decode_text_property(r.value::<u8>(), r.r#type(), ty, self.atoms.string)
+        })
+    }
+
+    fn get_string(&self, win: WindowId, property: x::Atom, ty: x::Atom) -> String {
+        self.get_text_property(win, property, ty)
             .unwrap_or_default()
-            .trim_end_matches('\0')
-            .to_string()
     }
 
     fn states(&self, win: WindowId) -> Vec<x::Atom> {
@@ -1338,17 +1877,14 @@ impl PropertyOps for XcbPropertyOps {
     }
 
     fn get_class(&self, win: WindowId) -> (String, String) {
-        let raw = self.get_string(win, self.atoms.wm_class, self.atoms.string);
-        let mut parts = raw.split('\0');
-        (
-            parts.next().unwrap_or_default().to_string(),
-            parts.next().unwrap_or_default().to_string(),
-        )
+        self.get_text_property(win, self.atoms.wm_class, self.atoms.string)
+            .map(|raw| parse_wm_class(raw.as_bytes()))
+            .unwrap_or_default()
     }
 
     fn get_window_types(&self, win: WindowId) -> Vec<WindowType> {
         let Ok(w) = self.win(win) else {
-            return vec![WindowType::Normal];
+            return Vec::new();
         };
         let atoms = get_atoms(
             &self.conn,
@@ -1356,27 +1892,19 @@ impl PropertyOps for XcbPropertyOps {
             self.atoms.net_wm_window_type,
             self.atoms.atom,
         );
-        if atoms.is_empty() {
-            return vec![WindowType::Normal];
-        }
-        atoms
+        let mut result = atoms
             .into_iter()
-            .map(|a| match a {
-                a if a == self.atoms.net_wm_window_type_desktop => WindowType::Desktop,
-                a if a == self.atoms.net_wm_window_type_dock => WindowType::Dock,
-                a if a == self.atoms.net_wm_window_type_toolbar => WindowType::Toolbar,
-                a if a == self.atoms.net_wm_window_type_menu => WindowType::Menu,
-                a if a == self.atoms.net_wm_window_type_utility => WindowType::Utility,
-                a if a == self.atoms.net_wm_window_type_splash => WindowType::Splash,
-                a if a == self.atoms.net_wm_window_type_dialog => WindowType::Dialog,
-                a if a == self.atoms.net_wm_window_type_dropdown_menu => WindowType::DropdownMenu,
-                a if a == self.atoms.net_wm_window_type_popup_menu => WindowType::PopupMenu,
-                a if a == self.atoms.net_wm_window_type_tooltip => WindowType::Tooltip,
-                a if a == self.atoms.net_wm_window_type_notification => WindowType::Notification,
-                a if a == self.atoms.net_wm_window_type_combo => WindowType::Combo,
-                _ => WindowType::Unknown,
-            })
-            .collect()
+            .map(|a| window_type_from_atom(a, self.atoms.window_type_atoms()))
+            .filter(|wt| *wt != WindowType::Unknown)
+            .collect::<Vec<_>>();
+        if result.is_empty() {
+            if self.transient_for(win).is_some() {
+                result.push(WindowType::Dialog);
+            } else {
+                result.push(WindowType::Normal);
+            }
+        }
+        result
     }
 
     fn is_fullscreen(&self, win: WindowId) -> bool {
@@ -1398,28 +1926,40 @@ impl PropertyOps for XcbPropertyOps {
         )
         .first()
         .copied()
-        .map(|w| self.ids.intern(w))
+        .and_then(|transient| {
+            if transient.resource_id() == 0 || transient == w {
+                None
+            } else {
+                Some(self.ids.intern(transient))
+            }
+        })
     }
 
     fn get_wm_hints(&self, win: WindowId) -> Option<WmHints> {
         let w = self.win(win).ok()?;
         let values = get_u32s(&self.conn, w, self.atoms.wm_hints, self.atoms.wm_hints);
-        if values.is_empty() {
-            return None;
-        }
-        let flags = values[0];
-        Some(WmHints {
-            urgent: flags & (1 << 8) != 0,
-            input: if flags & 1 != 0 {
-                Some(values.get(1).copied().unwrap_or(0) != 0)
-            } else {
-                None
-            },
-        })
+        parse_wm_hints(&values)
     }
 
-    fn set_urgent_hint(&self, _win: WindowId, _urgent: bool) -> XcbResult<()> {
-        Ok(())
+    fn set_urgent_hint(&self, win: WindowId, urgent: bool) -> XcbResult<()> {
+        const X_URGENCY_HINT: u32 = 1 << 8;
+        let w = self.win(win)?;
+        let mut data = get_u32s(&self.conn, w, self.atoms.wm_hints, self.atoms.wm_hints);
+        if data.is_empty() {
+            data.push(0);
+        }
+        if urgent {
+            data[0] |= X_URGENCY_HINT;
+        } else {
+            data[0] &= !X_URGENCY_HINT;
+        }
+        change_u32s(
+            &self.conn,
+            w,
+            self.atoms.wm_hints,
+            self.atoms.wm_hints,
+            &data,
+        )
     }
 
     fn fetch_normal_hints(&self, win: WindowId) -> XcbResult<Option<NormalHints>> {
@@ -1430,20 +1970,7 @@ impl PropertyOps for XcbPropertyOps {
             self.atoms.wm_normal_hints,
             self.atoms.wm_normal_hints,
         );
-        if v.len() < 18 {
-            return Ok(None);
-        }
-        Ok(Some(NormalHints {
-            min_w: v[5] as i32,
-            min_h: v[6] as i32,
-            max_w: v[7] as i32,
-            max_h: v[8] as i32,
-            inc_w: v[9] as i32,
-            inc_h: v[10] as i32,
-            base_w: v.get(15).copied().unwrap_or(0) as i32,
-            base_h: v.get(16).copied().unwrap_or(0) as i32,
-            ..Default::default()
-        }))
+        Ok(parse_normal_hints(&v))
     }
 
     fn set_window_strut_top(
@@ -1527,23 +2054,11 @@ impl PropertyOps for XcbPropertyOps {
             self.atoms.net_wm_strut_partial,
             self.atoms.cardinal,
         );
-        if v.len() < 12 {
-            return None;
+        if let Some(strut) = parse_strut_partial(&v) {
+            return Some(strut);
         }
-        Some(StrutPartial {
-            left: v[0],
-            right: v[1],
-            top: v[2],
-            bottom: v[3],
-            left_start_y: v[4],
-            left_end_y: v[5],
-            right_start_y: v[6],
-            right_end_y: v[7],
-            top_start_x: v[8],
-            top_end_x: v[9],
-            bottom_start_x: v[10],
-            bottom_end_x: v[11],
-        })
+        let fallback = get_u32s(&self.conn, w, self.atoms.net_wm_strut, self.atoms.cardinal);
+        parse_strut(&fallback)
     }
 
     fn get_layer_surface_info(&self, _win: WindowId) -> Option<LayerSurfaceInfo> {
@@ -1594,32 +2109,36 @@ impl PropertyOps for XcbPropertyOps {
         )
     }
 
-    fn set_allowed_actions(
-        &self,
-        win: WindowId,
-        _actions: &[crate::backend::api::AllowedAction],
-    ) -> XcbResult<()> {
+    fn set_allowed_actions(&self, win: WindowId, actions: &[AllowedAction]) -> XcbResult<()> {
+        let raw = actions
+            .iter()
+            .map(|action| {
+                atom_for_allowed_action(*action, self.atoms.allowed_action_atoms()).resource_id()
+            })
+            .collect::<Vec<_>>();
         change_u32s(
             &self.conn,
             self.win(win)?,
             self.atoms.net_wm_allowed_actions,
             self.atoms.atom,
-            &[],
+            &raw,
         )
     }
 
     fn send_ping(&self, win: WindowId, timestamp: u32) -> XcbResult<bool> {
         let w = self.win(win)?;
+        let protocols = get_atoms(&self.conn, w, self.atoms.wm_protocols, self.atoms.atom);
+        if !protocol_supported(&protocols, self.atoms.net_wm_ping) {
+            return Ok(false);
+        }
         let event = x::ClientMessageEvent::new(
             w,
             self.atoms.wm_protocols,
-            x::ClientMessageData::Data32([
+            x::ClientMessageData::Data32(net_wm_ping_message(
                 self.atoms.net_wm_ping.resource_id(),
                 timestamp,
                 w.resource_id(),
-                0,
-                0,
-            ]),
+            )),
         );
         self.conn
             .send_and_check_request(&x::SendEvent {
@@ -1629,6 +2148,7 @@ impl PropertyOps for XcbPropertyOps {
                 event: &event,
             })
             .map_err(xcb_err)?;
+        self.conn.flush().map_err(xcb_err)?;
         Ok(true)
     }
 
@@ -1643,33 +2163,398 @@ impl PropertyOps for XcbPropertyOps {
         .first()
         .copied()
     }
+
+    fn get_net_wm_icon(&self, win: WindowId) -> Option<Vec<IconData>> {
+        let w = self.win(win).ok()?;
+        let values = get_u32s_with_length(
+            &self.conn,
+            w,
+            self.atoms.net_wm_icon,
+            self.atoms.cardinal,
+            MAX_ICON_ITEMS_U32,
+        );
+        parse_icon_data(&values)
+    }
+
+    fn get_bypass_compositor(&self, win: WindowId) -> Option<u32> {
+        let w = self.win(win).ok()?;
+        get_u32s(
+            &self.conn,
+            w,
+            self.atoms.net_wm_bypass_compositor,
+            self.atoms.cardinal,
+        )
+        .first()
+        .copied()
+    }
+
+    fn get_opaque_region(&self, win: WindowId) -> Option<Vec<(i32, i32, u32, u32)>> {
+        let w = self.win(win).ok()?;
+        let values = get_u32s_with_length(
+            &self.conn,
+            w,
+            self.atoms.net_wm_opaque_region,
+            self.atoms.cardinal,
+            MAX_OPAQUE_REGION_ITEMS_U32,
+        );
+        parse_opaque_region(&values)
+    }
+
+    fn get_motif_hints(&self, win: WindowId) -> Option<MotifWmHints> {
+        let w = self.win(win).ok()?;
+        let values = get_u32s(
+            &self.conn,
+            w,
+            self.atoms.motif_wm_hints,
+            self.atoms.motif_wm_hints,
+        );
+        parse_motif_hints(&values)
+    }
+
+    fn get_gtk_frame_extents(&self, win: WindowId) -> Option<[u32; 4]> {
+        let w = self.win(win).ok()?;
+        let values = get_u32s(
+            &self.conn,
+            w,
+            self.atoms.gtk_frame_extents,
+            self.atoms.cardinal,
+        );
+        parse_gtk_frame_extents(&values)
+    }
+
+    fn get_sync_counter(&self, win: WindowId) -> Option<u32> {
+        let w = self.win(win).ok()?;
+        get_u32s(
+            &self.conn,
+            w,
+            self.atoms.net_wm_sync_request_counter,
+            self.atoms.cardinal,
+        )
+        .first()
+        .copied()
+    }
+
+    fn send_sync_request(&self, win: WindowId, _counter: u32, value: u64) -> XcbResult<()> {
+        let w = self.win(win)?;
+        let event = x::ClientMessageEvent::new(
+            w,
+            self.atoms.wm_protocols,
+            x::ClientMessageData::Data32(net_wm_sync_request_message(
+                self.atoms.net_wm_sync_request.resource_id(),
+                x::CURRENT_TIME,
+                value,
+            )),
+        );
+        self.conn
+            .send_and_check_request(&x::SendEvent {
+                propagate: false,
+                destination: x::SendEventDest::Window(w),
+                event_mask: x::EventMask::NO_EVENT,
+                event: &event,
+            })
+            .map_err(xcb_err)?;
+        self.conn.flush().map_err(xcb_err)
+    }
 }
 
 struct XcbOutputOps {
+    conn: Arc<xcb::Connection>,
+    root: x::Window,
     width: i32,
     height: i32,
+    cached_outputs: Mutex<Option<Vec<OutputInfo>>>,
 }
 
 impl XcbOutputOps {
-    fn new(width: i32, height: i32) -> Self {
-        Self { width, height }
+    fn new(conn: Arc<xcb::Connection>, root: x::Window, width: i32, height: i32) -> Self {
+        Self {
+            conn,
+            root,
+            width,
+            height,
+            cached_outputs: Mutex::new(None),
+        }
+    }
+
+    fn calc_refresh_mhz(mode: &xcb::randr::ModeInfo) -> u32 {
+        if mode.htotal == 0 || mode.vtotal == 0 {
+            return 60000;
+        }
+        let mut vtotal = mode.vtotal as u64;
+        let flags = mode.mode_flags.bits();
+        if flags & (1 << 4) != 0 {
+            vtotal *= 2;
+        }
+        if flags & (1 << 0) != 0 {
+            vtotal /= 2;
+        }
+        let denom = mode.htotal as u64 * vtotal;
+        if denom == 0 {
+            return 60000;
+        }
+        ((mode.dot_clock as u64 * 1000) / denom) as u32
+    }
+
+    fn query_output_hdr_capable(&self, output: xcb::randr::Output) -> bool {
+        let atom = match XcbAtoms::intern(&self.conn, b"max_bpc") {
+            Ok(atom) => atom,
+            Err(_) => return false,
+        };
+        let cookie = self.conn.send_request(&xcb::randr::GetOutputProperty {
+            output,
+            property: atom,
+            r#type: x::ATOM_INTEGER,
+            long_offset: 0,
+            long_length: 1,
+            delete: false,
+            pending: false,
+        });
+        let Ok(reply) = self.conn.wait_for_reply(cookie) else {
+            return false;
+        };
+        if reply.format() != 32 || reply.data::<u32>().is_empty() {
+            return false;
+        }
+        reply.data::<u32>()[0] >= 10
+    }
+
+    fn query_output_edid_hdr(
+        &self,
+        output: xcb::randr::Output,
+    ) -> Option<crate::backend::edid::EdidHdrCapabilities> {
+        let atom = XcbAtoms::intern(&self.conn, b"EDID").ok()?;
+        let cookie = self.conn.send_request(&xcb::randr::GetOutputProperty {
+            output,
+            property: atom,
+            r#type: x::ATOM_ANY,
+            long_offset: 0,
+            long_length: 256,
+            delete: false,
+            pending: false,
+        });
+        let reply = self.conn.wait_for_reply(cookie).ok()?;
+        let data = reply.data::<u8>();
+        if data.len() < 128 {
+            return None;
+        }
+        crate::backend::edid::parse_edid_hdr_from_bytes(data)
+    }
+
+    fn get_cached_or_query(&self) -> Vec<OutputInfo> {
+        if let Ok(cache) = self.cached_outputs.lock() {
+            if let Some(outputs) = cache.as_ref() {
+                return outputs.clone();
+            }
+        }
+
+        let outputs = self.query_outputs_internal();
+        if let Ok(mut cache) = self.cached_outputs.lock() {
+            *cache = Some(outputs.clone());
+        }
+        outputs
+    }
+
+    fn query_outputs_internal(&self) -> Vec<OutputInfo> {
+        let version_cookie = self.conn.send_request(&xcb::randr::QueryVersion {
+            major_version: 1,
+            minor_version: 5,
+        });
+        if let Ok(version) = self.conn.wait_for_reply(version_cookie) {
+            if version.major_version() > 1
+                || (version.major_version() == 1 && version.minor_version() >= 5)
+            {
+                let cookie = self.conn.send_request(&xcb::randr::GetMonitors {
+                    window: self.root,
+                    get_active: true,
+                });
+                if let Ok(reply) = self.conn.wait_for_reply(cookie) {
+                    let resources_cookie = self
+                        .conn
+                        .send_request(&xcb::randr::GetScreenResources { window: self.root });
+                    let modes = self
+                        .conn
+                        .wait_for_reply(resources_cookie)
+                        .ok()
+                        .map(|r| r.modes().to_vec())
+                        .unwrap_or_default();
+
+                    let mut outputs = Vec::new();
+                    for (idx, monitor) in reply.monitors().enumerate() {
+                        if monitor.width() == 0 || monitor.height() == 0 {
+                            continue;
+                        }
+                        let first_output = monitor.outputs().first().copied();
+                        let refresh = first_output
+                            .and_then(|output| {
+                                let output_info = self
+                                    .conn
+                                    .wait_for_reply(self.conn.send_request(
+                                        &xcb::randr::GetOutputInfo {
+                                            output,
+                                            config_timestamp: 0,
+                                        },
+                                    ))
+                                    .ok()?;
+                                if output_info.crtc() == xcb::randr::Crtc::none() {
+                                    return None;
+                                }
+                                self.conn
+                                    .wait_for_reply(self.conn.send_request(
+                                        &xcb::randr::GetCrtcInfo {
+                                            crtc: output_info.crtc(),
+                                            config_timestamp: 0,
+                                        },
+                                    ))
+                                    .ok()
+                            })
+                            .and_then(|crtc_info| {
+                                modes
+                                    .iter()
+                                    .find(|mode| mode.id == crtc_info.mode().resource_id())
+                                    .map(Self::calc_refresh_mhz)
+                            })
+                            .unwrap_or(DEFAULT_OUTPUT_REFRESH_MHZ);
+
+                        let (hdr_capable, hdr_metadata) = if let Some(output) = first_output {
+                            let caps = self.query_output_edid_hdr(output);
+                            (
+                                self.query_output_hdr_capable(output) || caps.is_some(),
+                                caps,
+                            )
+                        } else {
+                            (false, None)
+                        };
+
+                        let id = first_output
+                            .map(|output| OutputId(output.resource_id() as u64))
+                            .unwrap_or(OutputId(idx as u64));
+                        let name = first_output
+                            .and_then(|output| {
+                                self.conn
+                                    .wait_for_reply(self.conn.send_request(
+                                        &xcb::randr::GetOutputInfo {
+                                            output,
+                                            config_timestamp: 0,
+                                        },
+                                    ))
+                                    .ok()
+                                    .and_then(|info| String::from_utf8(info.name().to_vec()).ok())
+                            })
+                            .filter(|name| !name.is_empty())
+                            .unwrap_or_else(|| format!("Monitor-{}", idx));
+
+                        outputs.push(build_output_info(
+                            id,
+                            name,
+                            monitor.x() as i32,
+                            monitor.y() as i32,
+                            monitor.width() as i32,
+                            monitor.height() as i32,
+                            refresh,
+                            hdr_capable,
+                            hdr_metadata,
+                        ));
+                    }
+                    if !outputs.is_empty() {
+                        return outputs;
+                    }
+                }
+            }
+        }
+
+        let cookie = self
+            .conn
+            .send_request(&xcb::randr::GetScreenResources { window: self.root });
+        if let Ok(resources) = self.conn.wait_for_reply(cookie) {
+            let modes = resources.modes().to_vec();
+            let mut outputs = Vec::new();
+            for (idx, crtc) in resources.crtcs().iter().enumerate() {
+                let info_cookie = self.conn.send_request(&xcb::randr::GetCrtcInfo {
+                    crtc: *crtc,
+                    config_timestamp: 0,
+                });
+                if let Ok(info) = self.conn.wait_for_reply(info_cookie) {
+                    if info.width() == 0 || info.height() == 0 {
+                        continue;
+                    }
+                    let refresh = modes
+                        .iter()
+                        .find(|mode| mode.id == info.mode().resource_id())
+                        .map(Self::calc_refresh_mhz)
+                        .unwrap_or(DEFAULT_OUTPUT_REFRESH_MHZ);
+                    let first_output = info.outputs().first().copied();
+                    let id = first_output
+                        .map(|output| OutputId(output.resource_id() as u64))
+                        .unwrap_or(OutputId(crtc.resource_id() as u64));
+                    let name = first_output
+                        .and_then(|output| {
+                            self.conn
+                                .wait_for_reply(self.conn.send_request(
+                                    &xcb::randr::GetOutputInfo {
+                                        output,
+                                        config_timestamp: 0,
+                                    },
+                                ))
+                                .ok()
+                                .and_then(|info| String::from_utf8(info.name().to_vec()).ok())
+                        })
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or_else(|| format!("CRTC-{}", idx));
+                    outputs.push(build_output_info(
+                        id,
+                        name,
+                        info.x() as i32,
+                        info.y() as i32,
+                        info.width() as i32,
+                        info.height() as i32,
+                        refresh,
+                        false,
+                        None,
+                    ));
+                }
+            }
+            if !outputs.is_empty() {
+                return outputs;
+            }
+        }
+
+        vec![fallback_output("Default", self.width, self.height)]
+    }
+
+    fn output_to_crtc(&self, output_id: u32) -> Option<xcb::randr::Crtc> {
+        let cookie = self
+            .conn
+            .send_request(&xcb::randr::GetScreenResources { window: self.root });
+        let resources = self.conn.wait_for_reply(cookie).ok()?;
+        if resources
+            .crtcs()
+            .iter()
+            .any(|crtc| crtc.resource_id() == output_id)
+        {
+            return Some(xcb::randr::Crtc::new(output_id));
+        }
+        for output in resources.outputs() {
+            if output.resource_id() != output_id {
+                continue;
+            }
+            let info = self
+                .conn
+                .wait_for_reply(self.conn.send_request(&xcb::randr::GetOutputInfo {
+                    output: *output,
+                    config_timestamp: 0,
+                }))
+                .ok()?;
+            if info.crtc() != xcb::randr::Crtc::none() {
+                return Some(info.crtc());
+            }
+        }
+        None
     }
 }
 
 impl OutputOps for XcbOutputOps {
     fn enumerate_outputs(&self) -> Vec<OutputInfo> {
-        vec![OutputInfo {
-            id: OutputId(1),
-            name: "XCB Screen".into(),
-            x: 0,
-            y: 0,
-            width: self.width,
-            height: self.height,
-            scale: 1.0,
-            refresh_rate: 60,
-            hdr_capable: false,
-            hdr_metadata: None,
-        }]
+        self.get_cached_or_query()
     }
 
     fn screen_info(&self) -> ScreenInfo {
@@ -1680,11 +2565,48 @@ impl OutputOps for XcbOutputOps {
     }
 
     fn output_at(&self, x: i32, y: i32) -> Option<OutputId> {
-        if x >= 0 && y >= 0 && x < self.width && y < self.height {
-            Some(OutputId(1))
-        } else {
-            None
+        let outputs = self.get_cached_or_query();
+        output_at(&outputs, x, y)
+    }
+
+    fn invalidate_output_cache(&self) {
+        if let Ok(mut cache) = self.cached_outputs.lock() {
+            *cache = None;
         }
+    }
+
+    fn set_gamma_ramp(
+        &self,
+        output: OutputId,
+        red: &[u16],
+        green: &[u16],
+        blue: &[u16],
+    ) -> Result<(), BackendError> {
+        if let Some(crtc) = self.output_to_crtc(output.0 as u32) {
+            self.conn
+                .send_and_check_request(&xcb::randr::SetCrtcGamma {
+                    crtc,
+                    red,
+                    green,
+                    blue,
+                })
+                .map_err(xcb_err)?;
+            self.conn.flush().map_err(xcb_err)?;
+        }
+        Ok(())
+    }
+
+    fn get_gamma_ramp(&self, output: OutputId) -> Option<(Vec<u16>, Vec<u16>, Vec<u16>)> {
+        let crtc = self.output_to_crtc(output.0 as u32)?;
+        let reply = self
+            .conn
+            .wait_for_reply(self.conn.send_request(&xcb::randr::GetCrtcGamma { crtc }))
+            .ok()?;
+        Some((
+            reply.red().to_vec(),
+            reply.green().to_vec(),
+            reply.blue().to_vec(),
+        ))
     }
 }
 
@@ -1694,6 +2616,7 @@ struct XcbKeyOps {
     min_keycode: u8,
     max_keycode: u8,
     keymap: RwLock<Option<XcbKeymap>>,
+    numlock_mask: RwLock<Option<x::ModMask>>,
 }
 
 impl XcbKeyOps {
@@ -1709,6 +2632,7 @@ impl XcbKeyOps {
             min_keycode,
             max_keycode,
             keymap: RwLock::new(None),
+            numlock_mask: RwLock::new(None),
         }
     }
 
@@ -1747,6 +2671,50 @@ impl XcbKeyOps {
         *self.keymap.write().unwrap() = Some(map.clone());
         Ok(map)
     }
+
+    fn numlock_mask(&self) -> x::ModMask {
+        if let Some(mask) = *self.numlock_mask.read().unwrap() {
+            return mask;
+        }
+
+        let mask = self.detect_numlock_mask().unwrap_or(x::ModMask::N2);
+        *self.numlock_mask.write().unwrap() = Some(mask);
+        mask
+    }
+
+    fn detect_numlock_mask(&self) -> XcbResult<x::ModMask> {
+        let keymap = self.load_keymap()?;
+        let numlock_keys = keymap
+            .keysym_to_keycodes
+            .get(&0xff7f)
+            .cloned()
+            .unwrap_or_default();
+        if numlock_keys.is_empty() {
+            return Ok(x::ModMask::N2);
+        }
+
+        let cookie = self.conn.send_request(&x::GetModifierMapping {});
+        let reply = self.conn.wait_for_reply(cookie).map_err(xcb_err)?;
+        let per = reply.keycodes_per_modifier() as usize;
+        for (idx, chunk) in reply.keycodes().chunks(per).enumerate() {
+            if chunk
+                .iter()
+                .filter(|&&code| code != 0)
+                .any(|code| numlock_keys.contains(code))
+            {
+                return Ok(match idx {
+                    3 => x::ModMask::N1,
+                    4 => x::ModMask::N2,
+                    5 => x::ModMask::N3,
+                    6 => x::ModMask::N4,
+                    7 => x::ModMask::N5,
+                    _ => x::ModMask::N2,
+                });
+            }
+        }
+
+        Ok(x::ModMask::N2)
+    }
 }
 
 #[derive(Clone)]
@@ -1759,20 +2727,25 @@ impl KeyOps for XcbKeyOps {
     fn grab_keys(&self, root: WindowId, bindings: &[(Mods, KeySym)]) -> XcbResult<()> {
         let root = self.ids.window(root)?;
         let keymap = self.load_keymap()?;
+        let numlock = self.numlock_mask();
         for &(mods, keysym) in bindings {
             let Some(keycodes) = keymap.keysym_to_keycodes.get(&keysym) else {
                 log::warn!("XCB: no keycode found for keysym 0x{keysym:x}");
                 continue;
             };
             for &key in keycodes {
-                let _ = self.conn.send_and_check_request(&x::GrabKey {
-                    owner_events: false,
-                    grab_window: root,
-                    modifiers: mods_to_xcb(mods),
-                    key,
-                    pointer_mode: x::GrabMode::Async,
-                    keyboard_mode: x::GrabMode::Async,
-                });
+                let base = mods_to_xcb(mods);
+                let combos = lock_modifier_combinations(base, x::ModMask::LOCK, numlock);
+                for modifiers in combos {
+                    let _ = self.conn.send_and_check_request(&x::GrabKey {
+                        owner_events: false,
+                        grab_window: root,
+                        modifiers,
+                        key,
+                        pointer_mode: x::GrabMode::Async,
+                        keyboard_mode: x::GrabMode::Async,
+                    });
+                }
             }
         }
         Ok(())
@@ -1809,7 +2782,7 @@ impl KeyOps for XcbKeyOps {
     }
 
     fn clean_mods(&self, raw_state: u16) -> Mods {
-        mods_from_bits(raw_state)
+        mods_from_bits_with_numlock(raw_state, self.numlock_mask())
     }
 
     fn keysym_from_keycode(&mut self, keycode: u8) -> XcbResult<KeySym> {
@@ -1823,6 +2796,7 @@ impl KeyOps for XcbKeyOps {
 
     fn clear_cache(&mut self) {
         *self.keymap.write().unwrap() = None;
+        *self.numlock_mask.write().unwrap() = None;
     }
 }
 
@@ -1957,6 +2931,22 @@ impl EwmhFacade for XcbEwmh {
     }
 
     fn reset_root_properties(&self) -> XcbResult<()> {
+        for property in [
+            self.atoms.net_active_window,
+            self.atoms.net_client_list,
+            self.atoms.net_supported,
+            self.atoms.net_client_list_stacking,
+            self.atoms.net_supporting_wm_check,
+            self.atoms.net_current_desktop,
+            self.atoms.net_number_of_desktops,
+            self.atoms.net_desktop_names,
+            self.atoms.net_desktop_viewport,
+        ] {
+            let _ = self.conn.send_and_check_request(&x::DeleteProperty {
+                window: self.root,
+                property,
+            });
+        }
         Ok(())
     }
 
@@ -2257,7 +3247,7 @@ fn mods_to_xcb(mods: Mods) -> x::ModMask {
     mask
 }
 
-fn mods_from_bits(bits: u16) -> Mods {
+fn mods_from_bits_with_numlock(bits: u16, numlock_mask: x::ModMask) -> Mods {
     let bits = bits as u32;
     let mut mods = Mods::empty();
     if bits & x::ModMask::SHIFT.bits() != 0 {
@@ -2269,20 +3259,23 @@ fn mods_from_bits(bits: u16) -> Mods {
     if bits & x::ModMask::N1.bits() != 0 {
         mods |= Mods::ALT;
     }
-    if bits & x::ModMask::N2.bits() != 0 {
+    if bits & x::ModMask::N2.bits() != 0 && !numlock_mask.contains(x::ModMask::N2) {
         mods |= Mods::MOD2;
     }
-    if bits & x::ModMask::N3.bits() != 0 {
+    if bits & x::ModMask::N3.bits() != 0 && !numlock_mask.contains(x::ModMask::N3) {
         mods |= Mods::MOD3;
     }
     if bits & x::ModMask::N4.bits() != 0 {
         mods |= Mods::SUPER;
     }
-    if bits & x::ModMask::N5.bits() != 0 {
+    if bits & x::ModMask::N5.bits() != 0 && !numlock_mask.contains(x::ModMask::N5) {
         mods |= Mods::MOD5;
     }
     if bits & x::ModMask::LOCK.bits() != 0 {
         mods |= Mods::CAPS;
+    }
+    if bits & numlock_mask.bits() != 0 {
+        mods |= Mods::NUMLOCK;
     }
     mods
 }
@@ -2299,23 +3292,25 @@ fn button_index(btn: u8) -> x::ButtonIndex {
 }
 
 fn stack_mode_to_xcb(mode: StackMode) -> x::StackMode {
-    match mode {
-        StackMode::Above => x::StackMode::Above,
-        StackMode::Below => x::StackMode::Below,
-        StackMode::TopIf => x::StackMode::TopIf,
-        StackMode::BottomIf => x::StackMode::BottomIf,
-        StackMode::Opposite => x::StackMode::Opposite,
+    match stack_mode_to_index(mode) {
+        0 => x::StackMode::Above,
+        1 => x::StackMode::Below,
+        2 => x::StackMode::TopIf,
+        3 => x::StackMode::BottomIf,
+        4 => x::StackMode::Opposite,
+        _ => x::StackMode::Above,
     }
 }
 
 fn stack_mode_from_xcb(mode: x::StackMode) -> StackMode {
-    match mode {
-        x::StackMode::Above => StackMode::Above,
-        x::StackMode::Below => StackMode::Below,
-        x::StackMode::TopIf => StackMode::TopIf,
-        x::StackMode::BottomIf => StackMode::BottomIf,
-        x::StackMode::Opposite => StackMode::Opposite,
-    }
+    stack_mode_from_index(match mode {
+        x::StackMode::Above => 0,
+        x::StackMode::Below => 1,
+        x::StackMode::TopIf => 2,
+        x::StackMode::BottomIf => 3,
+        x::StackMode::Opposite => 4,
+    })
+    .unwrap_or(StackMode::Above)
 }
 
 fn notify_mode_from_xcb(mode: x::NotifyMode) -> NotifyMode {
@@ -2350,16 +3345,32 @@ fn get_windows(
         .collect()
 }
 
+const MAX_U32_PROPERTY_ITEMS: u32 = 4096;
+const MAX_ICON_ITEMS_U32: u32 = 4 * 1024 * 1024;
+const MAX_OPAQUE_REGION_ITEMS_U32: u32 = 1024 * 1024;
+
 fn get_u32s(conn: &xcb::Connection, window: x::Window, property: x::Atom, ty: x::Atom) -> Vec<u32> {
+    get_u32s_with_length(conn, window, property, ty, MAX_U32_PROPERTY_ITEMS)
+}
+
+fn get_u32s_with_length(
+    conn: &xcb::Connection,
+    window: x::Window,
+    property: x::Atom,
+    ty: x::Atom,
+    long_length: u32,
+) -> Vec<u32> {
     let cookie = conn.send_request(&x::GetProperty {
         delete: false,
         window,
         property,
         r#type: ty,
         long_offset: 0,
-        long_length: 4096,
+        long_length,
     });
     conn.wait_for_reply(cookie)
+        .ok()
+        .filter(|r| r.format() == 32)
         .map(|r| r.value::<u32>().to_vec())
         .unwrap_or_default()
 }
@@ -2399,80 +3410,11 @@ fn change_bytes(
 }
 
 fn supported_features() -> Vec<EwmhFeature> {
-    vec![
-        EwmhFeature::ActiveWindow,
-        EwmhFeature::Supported,
-        EwmhFeature::WmName,
-        EwmhFeature::WmState,
-        EwmhFeature::SupportingWmCheck,
-        EwmhFeature::WmStateFullscreen,
-        EwmhFeature::WmStateMaximizedVert,
-        EwmhFeature::WmStateMaximizedHorz,
-        EwmhFeature::WmStateHidden,
-        EwmhFeature::WmStateAbove,
-        EwmhFeature::WmStateBelow,
-        EwmhFeature::WmStateDemandsAttention,
-        EwmhFeature::WmStateSticky,
-        EwmhFeature::WmStateSkipTaskbar,
-        EwmhFeature::WmStateSkipPager,
-        EwmhFeature::ClientList,
-        EwmhFeature::ClientInfo,
-        EwmhFeature::WmWindowType,
-        EwmhFeature::WmWindowTypeDialog,
-        EwmhFeature::CurrentDesktop,
-        EwmhFeature::NumberOfDesktops,
-        EwmhFeature::DesktopNames,
-        EwmhFeature::DesktopViewport,
-        EwmhFeature::FrameExtents,
-        EwmhFeature::WmAllowedActions,
-        EwmhFeature::Workarea,
-        EwmhFeature::CloseWindow,
-        EwmhFeature::RestackWindow,
-        EwmhFeature::WmPing,
-        EwmhFeature::WmUserTime,
-        EwmhFeature::WmIcon,
-        EwmhFeature::WmBypassCompositor,
-        EwmhFeature::WmOpaqueRegion,
-    ]
+    SUPPORTED_EWMH_FEATURES.to_vec()
 }
 
 fn feature_atom(atoms: XcbAtoms, feature: EwmhFeature) -> Option<x::Atom> {
-    Some(match feature {
-        EwmhFeature::ActiveWindow => atoms.net_active_window,
-        EwmhFeature::Supported => atoms.net_supported,
-        EwmhFeature::WmName => atoms.net_wm_name,
-        EwmhFeature::WmState => atoms.net_wm_state,
-        EwmhFeature::SupportingWmCheck => atoms.net_supporting_wm_check,
-        EwmhFeature::WmStateFullscreen => atoms.net_wm_state_fullscreen,
-        EwmhFeature::WmStateMaximizedVert => atoms.net_wm_state_maximized_vert,
-        EwmhFeature::WmStateMaximizedHorz => atoms.net_wm_state_maximized_horz,
-        EwmhFeature::WmStateHidden => atoms.net_wm_state_hidden,
-        EwmhFeature::WmStateAbove => atoms.net_wm_state_above,
-        EwmhFeature::WmStateBelow => atoms.net_wm_state_below,
-        EwmhFeature::WmStateDemandsAttention => atoms.net_wm_state_demands_attention,
-        EwmhFeature::WmStateSticky => atoms.net_wm_state_sticky,
-        EwmhFeature::WmStateSkipTaskbar => atoms.net_wm_state_skip_taskbar,
-        EwmhFeature::WmStateSkipPager => atoms.net_wm_state_skip_pager,
-        EwmhFeature::ClientList => atoms.net_client_list,
-        EwmhFeature::ClientInfo => atoms.net_client_info,
-        EwmhFeature::WmWindowType => atoms.net_wm_window_type,
-        EwmhFeature::WmWindowTypeDialog => atoms.net_wm_window_type_dialog,
-        EwmhFeature::CurrentDesktop => atoms.net_current_desktop,
-        EwmhFeature::NumberOfDesktops => atoms.net_number_of_desktops,
-        EwmhFeature::DesktopNames => atoms.net_desktop_names,
-        EwmhFeature::DesktopViewport => atoms.net_desktop_viewport,
-        EwmhFeature::FrameExtents => atoms.net_frame_extents,
-        EwmhFeature::WmAllowedActions => atoms.net_wm_allowed_actions,
-        EwmhFeature::Workarea => atoms.net_workarea,
-        EwmhFeature::CloseWindow => atoms.net_close_window,
-        EwmhFeature::RestackWindow => atoms.net_restack_window,
-        EwmhFeature::WmPing => atoms.net_wm_ping,
-        EwmhFeature::WmUserTime => atoms.net_wm_user_time,
-        EwmhFeature::WmIcon => atoms.net_wm_icon,
-        EwmhFeature::WmBypassCompositor => atoms.net_wm_bypass_compositor,
-        EwmhFeature::WmOpaqueRegion => atoms.net_wm_opaque_region,
-        EwmhFeature::WmMoveResize => return None,
-    })
+    Some(atom_for_ewmh_feature(feature, atoms.feature_atoms()))
 }
 
 fn xcb_err<E>(err: E) -> BackendError
