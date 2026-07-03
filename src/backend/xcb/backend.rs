@@ -837,7 +837,12 @@ impl XcbBackend {
         let (conn, screen_num) = xcb::Connection::connect_with_extensions(
             None,
             &[],
-            &[xcb::Extension::RandR, xcb::Extension::Shape],
+            &[
+                xcb::Extension::RandR,
+                xcb::Extension::Shape,
+                xcb::Extension::Damage,
+                xcb::Extension::Present,
+            ],
         )
         .map_err(xcb_err)?;
         let conn = Arc::new(conn);
@@ -4273,8 +4278,8 @@ impl EwmhFacade for XcbEwmh {
                 class: x::WindowClass::InputOutput,
                 visual: x::COPY_FROM_PARENT,
                 value_list: &[
-                    x::Cw::EventMask(x::EventMask::EXPOSURE | x::EventMask::KEY_PRESS),
                     x::Cw::OverrideRedirect(true),
+                    x::Cw::EventMask(x::EventMask::EXPOSURE | x::EventMask::KEY_PRESS),
                 ],
             })
             .map_err(xcb_err)?;
