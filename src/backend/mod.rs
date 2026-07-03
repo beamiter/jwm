@@ -6,6 +6,9 @@ pub mod edid;
 pub mod error;
 pub mod hdr_metadata;
 
+// Protocol-independent compositor helpers shared by Wayland and X11 backends.
+pub mod compositor_common;
+
 // Backend-independent CPU bitmap text rasterizer shared by both compositors.
 pub mod compositor_font;
 

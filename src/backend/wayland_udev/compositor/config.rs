@@ -1,5 +1,5 @@
 use super::*;
-use crate::backend::x11::compositor_common::wallpaper::{
+use crate::backend::compositor_common::wallpaper::{
     parse_wallpaper_mode, resolve_wallpaper_for_tag,
 };
 use crate::config::CONFIG;

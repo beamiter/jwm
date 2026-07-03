@@ -212,7 +212,7 @@ pub(crate) fn load_present_manager<C: CompositorConnection>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use x11rb_protocol::protocol::present;
 
     #[test]
     fn test_present_manager_creation() {

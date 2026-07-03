@@ -68,8 +68,10 @@ use std::ffi::CString;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::backend::compositor_common::math;
+use crate::backend::compositor_common::rules::{CornerRadiusRule, OpacityRule, ScaleRule};
+use crate::backend::compositor_common::wallpaper::{WallpaperImageData, WallpaperMode};
 use crate::backend::x11::compositor_common::transitions::TransitionMode;
-use crate::backend::x11::compositor_common::wallpaper::{WallpaperImageData, WallpaperMode};
 use crate::backend::x11::compositor_common::wobbly::WobblyState;
 
 // ---------------------------------------------------------------------------
@@ -78,19 +80,7 @@ use crate::backend::x11::compositor_common::wobbly::WobblyState;
 
 /// Orthographic projection matrix (column-major for OpenGL).
 pub(crate) fn ortho(l: f32, r: f32, b: f32, t: f32) -> [f32; 16] {
-    let near = -1.0f32;
-    let far = 1.0f32;
-    let tx = -(r + l) / (r - l);
-    let ty = -(t + b) / (t - b);
-    let tz = -(far + near) / (far - near);
-    #[rustfmt::skip]
-    let m = [
-        2.0 / (r - l), 0.0,            0.0,                 0.0,
-        0.0,           2.0 / (t - b),   0.0,                 0.0,
-        0.0,           0.0,            -2.0 / (far - near),  0.0,
-        tx,            ty,              tz,                  1.0,
-    ];
-    m
+    math::ortho(l, r, b, t, -1.0, 1.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -789,9 +779,9 @@ pub(crate) struct WaylandCompositor {
     wallpaper_transition_start: Option<Instant>,
 
     // --- Per-window rules ---
-    opacity_rules: Vec<(f32, String)>,
-    corner_radius_rules: Vec<(f32, String)>,
-    scale_rules: Vec<(f32, String)>,
+    opacity_rules: Vec<OpacityRule>,
+    corner_radius_rules: Vec<CornerRadiusRule>,
+    scale_rules: Vec<ScaleRule>,
     frosted_glass_rules: Vec<(String, f32)>,
     shadow_exclude: Vec<String>,
     blur_exclude: Vec<String>,
