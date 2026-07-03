@@ -138,6 +138,7 @@ mod render;
 mod rules;
 mod wallpaper;
 
+pub use crate::backend::x11::compositor_common::present::PresentController;
 pub use async_x11::{DeferredOpQueue, EventQueue, InputPriority, PriorityEventQueue};
 pub use blur_optimize::{AdaptiveBlur, BlurCache, BlurCacheStats, GaussianBlurParams};
 pub use cache_warmup::{BlurSizeStats, CacheWarmupManager};
@@ -154,7 +155,6 @@ pub use pbo_uploader::PBOUploader;
 pub use per_monitor::{MonitorRenderRegion, PerMonitorRenderer};
 pub use perf_metrics::PerfMetrics;
 pub use pixel_buffer_pool::PixelBufferPool;
-pub use crate::backend::x11::compositor_common::present::PresentController;
 pub use power_saving::{BatteryStatus, PowerProfile, PowerSavingConfig, PowerSavingManager};
 pub use predictive_render::{PredictiveRenderManager, SceneActivity};
 pub use profiler::{FrameProfiler, ProfileZone, ZoneStats};
@@ -172,19 +172,19 @@ pub use shader_cache::ShaderCache;
 pub use subpixel_integration::{SubpixelCompositorIntegration, SubpixelRenderParams};
 pub use subpixel_render::{SubpixelMetrics, SubpixelMode, SubpixelRenderManager, WindowType};
 pub use texture_pool::TexturePool;
+use types::*;
 pub(crate) use vsync::VsyncMethod;
 pub(crate) use wallpaper_common::{
     WallpaperImageData, WallpaperMode, compute_wallpaper_rect, parse_wallpaper_mode,
     resolve_wallpaper_for_tag,
 };
 pub(crate) use wobbly::WobblyState;
-use types::*;
 
-use glow::HasContext;
 use crate::backend::x11::compositor_common::{
     X11BootstrapOps, X11CompositeRedirectOps, X11ConnectionOps, X11PresentOps, X11RandrOps,
     X11TextureSourceOps, X11WindowResourceOps,
 };
+use glow::HasContext;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -220,8 +220,7 @@ pub(crate) trait CompositorConnection:
 {
 }
 
-impl<T> CompositorConnection for T
-where
+impl<T> CompositorConnection for T where
     T: X11BootstrapOps
         + X11ConnectionOps
         + X11CompositeRedirectOps
@@ -231,7 +230,7 @@ where
         + X11WindowResourceOps
         + Send
         + Sync
-        + 'static,
+        + 'static
 {
 }
 

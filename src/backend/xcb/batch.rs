@@ -50,7 +50,8 @@ impl XcbRequestBatcher {
     }
 
     fn do_flush(&self, conn: &xcb::Connection) -> Result<(), BackendError> {
-        conn.flush().map_err(|e| BackendError::Message(format!("xcb flush failed: {e}")))?;
+        conn.flush()
+            .map_err(|e| BackendError::Message(format!("xcb flush failed: {e}")))?;
         self.pending_ops.store(0, Ordering::SeqCst);
         if let Ok(mut last) = self.last_flush.lock() {
             *last = Instant::now();

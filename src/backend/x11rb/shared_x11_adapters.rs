@@ -65,7 +65,8 @@ where
         .map_err(|e| format!("set_window_shape_region: {e}"))?;
         self.xfixes_destroy_region(region)
             .map_err(|e| format!("destroy_region: {e}"))?;
-        self.flush().map_err(|e| format!("flush after shape: {e}"))?;
+        self.flush()
+            .map_err(|e| format!("flush after shape: {e}"))?;
         self.get_input_focus()
             .map_err(|e| format!("sync after shape: {e}"))?
             .reply()
@@ -240,9 +241,25 @@ where
         target_msc: u64,
         serial: u32,
     ) -> Result<(), String> {
-        self.present_pixmap(window, pixmap, serial, 0, 0, 0, 0, 0, 0, 0, 0, target_msc, 1, 0, &[])
-            .map(|_| ())
-            .map_err(|e| format!("present_pixmap failed: {e}"))
+        self.present_pixmap(
+            window,
+            pixmap,
+            serial,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            target_msc,
+            1,
+            0,
+            &[],
+        )
+        .map(|_| ())
+        .map_err(|e| format!("present_pixmap failed: {e}"))
     }
 
     fn notify_present_msc(&self, window: u32, serial: u32, target_msc: u64) -> Result<(), String> {
@@ -392,11 +409,8 @@ where
                                         {
                                             if let Ok(output_info) = output_cookie.reply() {
                                                 if output_info.crtc != 0 {
-                                                    if let Ok(crtc_cookie) =
-                                                        conn.randr_get_crtc_info(
-                                                            output_info.crtc,
-                                                            0,
-                                                        )
+                                                    if let Ok(crtc_cookie) = conn
+                                                        .randr_get_crtc_info(output_info.crtc, 0)
                                                     {
                                                         if let Ok(crtc_info) = crtc_cookie.reply() {
                                                             let refresh = modes
@@ -404,7 +418,8 @@ where
                                                                 .find(|m| m.id == crtc_info.mode)
                                                                 .map(calc_refresh_mhz)
                                                                 .unwrap_or(60000);
-                                                            rates.insert(idx as u32, refresh / 1000);
+                                                            rates
+                                                                .insert(idx as u32, refresh / 1000);
                                                         }
                                                     }
                                                 }

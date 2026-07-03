@@ -1,9 +1,9 @@
 // Compositor::new() constructor
-use crate::backend::x11::compositor_common::BootstrapState;
 #[allow(unused_imports)]
 use super::math::ortho;
 #[allow(unused_imports)]
 use super::*;
+use crate::backend::x11::compositor_common::BootstrapState;
 #[allow(unused_imports)]
 use glow::HasContext;
 #[allow(unused_imports)]

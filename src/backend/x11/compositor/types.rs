@@ -1,6 +1,10 @@
-pub(super) use crate::backend::x11::compositor_common::effects::{Particle, ParticleSystem, RippleState};
-pub(super) use crate::backend::x11::compositor_common::expose::{ExposeEntry, SnapPreview, WindowTab};
 use crate::backend::x11::compositor::{WallpaperMode, WobblyState};
+pub(super) use crate::backend::x11::compositor_common::effects::{
+    Particle, ParticleSystem, RippleState,
+};
+pub(super) use crate::backend::x11::compositor_common::expose::{
+    ExposeEntry, SnapPreview, WindowTab,
+};
 use std::collections::VecDeque;
 
 pub(super) type GlXBindTexImageEXT =

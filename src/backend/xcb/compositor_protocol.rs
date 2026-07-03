@@ -38,10 +38,9 @@ impl<'a> XcbCompositorProtocol<'a> {
             client_major_version: 0,
             client_minor_version: 4,
         });
-        let _ = self
-            .conn
-            .wait_for_reply(composite_cookie)
-            .map_err(|e| BackendError::Message(format!("failed to query XComposite version: {e}")))?;
+        let _ = self.conn.wait_for_reply(composite_cookie).map_err(|e| {
+            BackendError::Message(format!("failed to query XComposite version: {e}"))
+        })?;
 
         let damage_cookie = self.conn.send_request(&xcb::damage::QueryVersion {
             client_major_version: 1,
@@ -205,9 +204,9 @@ impl<'a> XcbCompositorProtocol<'a> {
             .map_err(|e| {
                 BackendError::Message(format!("set compositor selection owner failed: {e}"))
             })?;
-        self.conn
-            .flush()
-            .map_err(|e| BackendError::Message(format!("xcb flush after selection owner failed: {e}")))?;
+        self.conn.flush().map_err(|e| {
+            BackendError::Message(format!("xcb flush after selection owner failed: {e}"))
+        })?;
         Ok(owner_window)
     }
 
@@ -253,9 +252,13 @@ impl X11BootstrapOps for XcbCompositorProtocol<'_> {
     }
 
     fn claim_compositor_selection_owner(&self, root: u32, screen_num: i32) -> Result<u32, String> {
-        XcbCompositorProtocol::claim_compositor_selection(self, x::Window::new(root), screen_num as usize)
-            .map(|win| win.resource_id())
-            .map_err(|e| e.to_string())
+        XcbCompositorProtocol::claim_compositor_selection(
+            self,
+            x::Window::new(root),
+            screen_num as usize,
+        )
+        .map(|win| win.resource_id())
+        .map_err(|e| e.to_string())
     }
 }
 
@@ -417,9 +420,9 @@ impl X11RandrOps for XcbCompositorProtocol<'_> {
             }
         }
 
-        let res_cookie = self.conn.send_request(&xcb::randr::GetScreenResources {
-            window: root,
-        });
+        let res_cookie = self
+            .conn
+            .send_request(&xcb::randr::GetScreenResources { window: root });
         if let Ok(resources) = self.conn.wait_for_reply(res_cookie) {
             for (idx, crtc_id) in resources.crtcs().iter().enumerate() {
                 let info_cookie = self.conn.send_request(&xcb::randr::GetCrtcInfo {
@@ -460,9 +463,9 @@ impl X11RandrOps for XcbCompositorProtocol<'_> {
         });
         if let Ok(ver) = self.conn.wait_for_reply(ver_cookie) {
             if ver.major_version() > 1 || (ver.major_version() == 1 && ver.minor_version() >= 5) {
-                let res_cookie = self.conn.send_request(&xcb::randr::GetScreenResources {
-                    window: root,
-                });
+                let res_cookie = self
+                    .conn
+                    .send_request(&xcb::randr::GetScreenResources { window: root });
                 if let Ok(resources) = self.conn.wait_for_reply(res_cookie) {
                     let modes = resources.modes();
                     let mon_cookie = self.conn.send_request(&xcb::randr::GetMonitors {
@@ -472,10 +475,11 @@ impl X11RandrOps for XcbCompositorProtocol<'_> {
                     if let Ok(reply) = self.conn.wait_for_reply(mon_cookie) {
                         for (idx, mon) in reply.monitors().enumerate() {
                             if let Some(output_id) = mon.outputs().first() {
-                                let output_cookie = self.conn.send_request(&xcb::randr::GetOutputInfo {
-                                    output: *output_id,
-                                    config_timestamp: 0,
-                                });
+                                let output_cookie =
+                                    self.conn.send_request(&xcb::randr::GetOutputInfo {
+                                        output: *output_id,
+                                        config_timestamp: 0,
+                                    });
                                 if let Ok(output_info) = self.conn.wait_for_reply(output_cookie) {
                                     if !output_info.crtc().is_none() {
                                         let crtc_cookie =
@@ -483,16 +487,13 @@ impl X11RandrOps for XcbCompositorProtocol<'_> {
                                                 crtc: output_info.crtc(),
                                                 config_timestamp: 0,
                                             });
-                                        if let Ok(crtc_info) = self.conn.wait_for_reply(crtc_cookie) {
+                                        if let Ok(crtc_info) = self.conn.wait_for_reply(crtc_cookie)
+                                        {
                                             let refresh = modes
                                                 .iter()
                                                 .find(|m| m.id == crtc_info.mode().resource_id())
                                                 .map(|m| {
-                                                    calc_refresh_hz(
-                                                        m.dot_clock,
-                                                        m.htotal,
-                                                        m.vtotal,
-                                                    )
+                                                    calc_refresh_hz(m.dot_clock, m.htotal, m.vtotal)
                                                 })
                                                 .unwrap_or(60);
                                             rates.insert(idx as u32, refresh);
@@ -509,9 +510,9 @@ impl X11RandrOps for XcbCompositorProtocol<'_> {
             }
         }
 
-        let res_cookie = self.conn.send_request(&xcb::randr::GetScreenResources {
-            window: root,
-        });
+        let res_cookie = self
+            .conn
+            .send_request(&xcb::randr::GetScreenResources { window: root });
         if let Ok(resources) = self.conn.wait_for_reply(res_cookie) {
             let modes = resources.modes();
             for (idx, crtc_id) in resources.crtcs().iter().enumerate() {
@@ -566,8 +567,12 @@ impl X11TextureSourceOps for XcbCompositorProtocol<'_> {
     }
 
     fn name_window_pixmap(&self, window: u32, pixmap: u32) -> Result<(), String> {
-        XcbCompositorProtocol::name_window_pixmap(self, x::Window::new(window), x::Pixmap::new(pixmap))
-            .map_err(|e| e.to_string())
+        XcbCompositorProtocol::name_window_pixmap(
+            self,
+            x::Window::new(window),
+            x::Pixmap::new(pixmap),
+        )
+        .map_err(|e| e.to_string())
     }
 
     fn free_window_pixmap(&self, pixmap: u32) -> Result<(), String> {
@@ -639,9 +644,7 @@ impl X11BootstrapOps for XcbSharedCompositorConnection {
     fn claim_compositor_selection_owner(&self, root: u32, screen_num: i32) -> Result<u32, String> {
         let protocol = self.protocol();
         <XcbCompositorProtocol<'_> as X11BootstrapOps>::claim_compositor_selection_owner(
-            &protocol,
-            root,
-            screen_num,
+            &protocol, root, screen_num,
         )
     }
 }
@@ -728,21 +731,14 @@ impl X11PresentOps for XcbSharedCompositorConnection {
     ) -> Result<(), String> {
         let protocol = self.protocol();
         <XcbCompositorProtocol<'_> as X11PresentOps>::present_pixmap_for_window(
-            &protocol,
-            window,
-            pixmap,
-            target_msc,
-            serial,
+            &protocol, window, pixmap, target_msc, serial,
         )
     }
 
     fn notify_present_msc(&self, window: u32, serial: u32, target_msc: u64) -> Result<(), String> {
         let protocol = self.protocol();
         <XcbCompositorProtocol<'_> as X11PresentOps>::notify_present_msc(
-            &protocol,
-            window,
-            serial,
-            target_msc,
+            &protocol, window, serial, target_msc,
         )
     }
 }
@@ -753,10 +749,7 @@ impl X11RandrOps for XcbSharedCompositorConnection {
         <XcbCompositorProtocol<'_> as X11RandrOps>::query_monitor_rects(&protocol, root)
     }
 
-    fn query_monitor_refresh_rates(
-        &self,
-        root: u32,
-    ) -> std::collections::HashMap<u32, u32> {
+    fn query_monitor_refresh_rates(&self, root: u32) -> std::collections::HashMap<u32, u32> {
         let protocol = self.protocol();
         <XcbCompositorProtocol<'_> as X11RandrOps>::query_monitor_refresh_rates(&protocol, root)
     }

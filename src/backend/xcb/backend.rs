@@ -440,7 +440,6 @@ impl XcbIdRegistry {
             self.wid_to_x.write().unwrap().remove(&id);
         }
     }
-
 }
 
 pub struct XcbBackend {
@@ -833,6 +832,15 @@ impl XcbLoopData<'_> {
 }
 
 impl XcbBackend {
+    fn debug_drag_enabled() -> bool {
+        static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *CACHE.get_or_init(|| {
+            env::var("JWM_DEBUG_DRAG")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(true)
+        })
+    }
+
     pub fn new() -> XcbResult<Self> {
         let (conn, screen_num) = xcb::Connection::connect_with_extensions(
             None,
@@ -1003,9 +1011,7 @@ impl XcbBackend {
         XcbCompositorProtocol::new(conn).prime_extensions()
     }
 
-    fn shared_compositor_connection(
-        &mut self,
-    ) -> XcbResult<Arc<XcbSharedCompositorConnection>> {
+    fn shared_compositor_connection(&mut self) -> XcbResult<Arc<XcbSharedCompositorConnection>> {
         if let Some(conn) = &self.shared_compositor_conn {
             return Ok(conn.clone());
         }
@@ -1169,10 +1175,7 @@ impl XcbBackend {
         crate::backend::edid::parse_edid_hdr_from_bytes(data)
     }
 
-    fn register_existing_windows_with_compositor(
-        &mut self,
-        compositor: &mut XcbSharedCompositor,
-    ) {
+    fn register_existing_windows_with_compositor(&mut self, compositor: &mut XcbSharedCompositor) {
         let overlay = compositor.overlay_window();
         let windows: Vec<_> = self
             .ids
@@ -1488,14 +1491,16 @@ impl XcbBackend {
             | xcb::Event::RandR(xcb::randr::Event::Notify(_)) => {
                 Some(BackendEvent::ScreenLayoutChanged)
             }
-            xcb::Event::Damage(xcb::damage::Event::Notify(ev)) => Some(BackendEvent::DamageNotify {
-                // xcb's generated DAMAGE bindings keep `drawable` private because
-                // it is encoded as a Drawable union on the wire; read the raw
-                // 32-bit XID directly from the fixed event layout.
-                drawable: self.ids.intern_raw(unsafe {
-                    *(ev.as_raw() as *const u8).add(4).cast::<u32>()
-                }),
-            }),
+            xcb::Event::Damage(xcb::damage::Event::Notify(ev)) => {
+                Some(BackendEvent::DamageNotify {
+                    // xcb's generated DAMAGE bindings keep `drawable` private because
+                    // it is encoded as a Drawable union on the wire; read the raw
+                    // 32-bit XID directly from the fixed event layout.
+                    drawable: self
+                        .ids
+                        .intern_raw(unsafe { *(ev.as_raw() as *const u8).add(4).cast::<u32>() }),
+                })
+            }
             xcb::Event::Present(xcb::present::Event::CompleteNotify(ev)) => {
                 Some(BackendEvent::PresentComplete {
                     window: self.ids.intern_raw(ev.window().resource_id()),
@@ -2379,6 +2384,15 @@ impl Backend for XcbBackend {
     fn begin_move(&mut self, win: WindowId) -> XcbResult<()> {
         let geom = self.window_ops.get_geometry(win)?;
         let (rx, ry) = self.input_ops.get_pointer_position()?;
+        if Self::debug_drag_enabled() {
+            log::info!(
+                "[drag] begin_move win={:?} geom={:?} pointer=({:.1},{:.1})",
+                win,
+                geom,
+                rx,
+                ry
+            );
+        }
         let cursor = self.cursor_provider.get(StdCursorKind::Hand)?.0;
         self.input_ops.set_cursor(StdCursorKind::Hand)?;
         let mask = (EventMaskBits::BUTTON_RELEASE | EventMaskBits::POINTER_MOTION).bits();
@@ -2394,6 +2408,8 @@ impl Backend for XcbBackend {
                 current_w: geom.w,
                 current_h: geom.h,
             });
+        } else if Self::debug_drag_enabled() {
+            log::info!("[drag] begin_move grab_pointer failed win={:?}", win);
         }
         Ok(())
     }
@@ -2401,6 +2417,14 @@ impl Backend for XcbBackend {
     fn begin_resize(&mut self, win: WindowId, edge: ResizeEdge) -> XcbResult<()> {
         let geom = self.window_ops.get_geometry(win)?;
         let (rx, ry) = self.input_ops.get_pointer_position()?;
+        if Self::debug_drag_enabled() {
+            log::info!(
+                "[drag] begin_resize win={:?} edge={:?} geom={:?}",
+                win,
+                edge,
+                geom
+            );
+        }
         let cursor_kind = match edge {
             ResizeEdge::Top | ResizeEdge::Bottom => StdCursorKind::VDoubleArrow,
             ResizeEdge::Left | ResizeEdge::Right => StdCursorKind::HDoubleArrow,
@@ -2424,6 +2448,8 @@ impl Backend for XcbBackend {
                 current_w: geom.w,
                 current_h: geom.h,
             });
+        } else if Self::debug_drag_enabled() {
+            log::info!("[drag] begin_resize grab_pointer failed win={:?}", win);
         }
         Ok(())
     }
@@ -2436,12 +2462,41 @@ impl Backend for XcbBackend {
                 InteractionAction::Move => {
                     state.current_x = state.start_geom.x + dx;
                     state.current_y = state.start_geom.y + dy;
+                    if Self::debug_drag_enabled() {
+                        log::debug!(
+                            "[drag] motion(move) win={:?} start=({},{}) dxdy=({},{}) -> pos=({},{}) keep_size=({}x{})",
+                            state.win,
+                            state.start_geom.x,
+                            state.start_geom.y,
+                            dx,
+                            dy,
+                            state.current_x,
+                            state.current_y,
+                            state.start_geom.w,
+                            state.start_geom.h
+                        );
+                    }
                     self.window_ops
                         .set_position(state.win, state.current_x, state.current_y)?;
                 }
                 InteractionAction::Resize(_) => {
                     state.current_w = (state.start_geom.w as i32 + dx).max(1) as u32;
                     state.current_h = (state.start_geom.h as i32 + dy).max(1) as u32;
+                    if Self::debug_drag_enabled() {
+                        log::debug!(
+                            "[drag] motion(resize) win={:?} start_size=({}x{}) dxdy=({},{}) -> size=({}x{}) pos=({},{}) border={}",
+                            state.win,
+                            state.start_geom.w,
+                            state.start_geom.h,
+                            dx,
+                            dy,
+                            state.current_w,
+                            state.current_h,
+                            state.start_geom.x,
+                            state.start_geom.y,
+                            state.start_geom.border
+                        );
+                    }
                     self.window_ops.configure(
                         state.win,
                         state.start_geom.x,
@@ -2458,7 +2513,19 @@ impl Backend for XcbBackend {
     }
 
     fn handle_button_release(&mut self, _time: u32) -> XcbResult<bool> {
-        if self.interaction.take().is_some() {
+        if self.interaction.is_some() {
+            if Self::debug_drag_enabled() {
+                if let Some(state) = self.interaction.as_ref() {
+                    log::info!(
+                        "[drag] end_interaction win={:?} action={:?}",
+                        state.win,
+                        state.action
+                    );
+                } else {
+                    log::info!("[drag] end_interaction");
+                }
+            }
+            self.interaction.take();
             self.input_ops.ungrab_pointer()?;
             self.input_ops.set_cursor(StdCursorKind::LeftPtr)?;
             return Ok(true);
@@ -2740,6 +2807,9 @@ impl XcbWindowOps {
 
 impl WindowOps for XcbWindowOps {
     fn set_position(&self, win: WindowId, x: i32, y: i32) -> XcbResult<()> {
+        if XcbBackend::debug_drag_enabled() {
+            log::debug!("[drag] x11 set_position win={:?} x={} y={}", win, x, y);
+        }
         self.apply_window_changes(
             win,
             WindowChanges {
@@ -2759,6 +2829,17 @@ impl WindowOps for XcbWindowOps {
         h: u32,
         border: u32,
     ) -> XcbResult<()> {
+        if XcbBackend::debug_drag_enabled() {
+            log::debug!(
+                "[drag] x11 configure win={:?} x={} y={} w={} h={} border={}",
+                win,
+                x,
+                y,
+                w,
+                h,
+                border
+            );
+        }
         self.apply_window_changes(
             win,
             WindowChanges {
@@ -2823,7 +2904,13 @@ impl WindowOps for XcbWindowOps {
 
     fn close_window(&self, win: WindowId) -> XcbResult<CloseResult> {
         let w = self.win(win)?;
-        let protocols = get_atoms(&self.conn, w, self.atoms.wm_protocols, self.atoms.atom);
+        let protocols = get_atoms_with_length(
+            &self.conn,
+            w,
+            self.atoms.wm_protocols,
+            self.atoms.atom,
+            MAX_PROTOCOL_ATOMS,
+        );
         if protocol_supported(&protocols, self.atoms.wm_delete_window) {
             let event = x::ClientMessageEvent::new(
                 w,
@@ -3023,7 +3110,13 @@ impl WindowOps for XcbWindowOps {
 
     fn send_take_focus(&self, win: WindowId) -> XcbResult<bool> {
         let w = self.win(win)?;
-        let protocols = get_atoms(&self.conn, w, self.atoms.wm_protocols, self.atoms.atom);
+        let protocols = get_atoms_with_length(
+            &self.conn,
+            w,
+            self.atoms.wm_protocols,
+            self.atoms.atom,
+            MAX_PROTOCOL_ATOMS,
+        );
         if !protocol_supported(&protocols, self.atoms.wm_take_focus) {
             return Ok(false);
         }
@@ -3218,7 +3311,7 @@ impl XcbPropertyOps {
             property,
             r#type: x::ATOM_ANY,
             long_offset: 0,
-            long_length: 4096,
+            long_length: MAX_TEXT_PROPERTY_BYTES,
         });
         self.conn.wait_for_reply(cookie).ok().and_then(|r| {
             if r.format() != 8 {
@@ -3236,7 +3329,18 @@ impl XcbPropertyOps {
     fn states(&self, win: WindowId) -> Vec<x::Atom> {
         self.win(win)
             .ok()
-            .map(|w| get_atoms(&self.conn, w, self.atoms.net_wm_state, self.atoms.atom))
+            .map(|w| {
+                get_u32s_with_length(
+                    &self.conn,
+                    w,
+                    self.atoms.net_wm_state,
+                    self.atoms.atom,
+                    MAX_ATOM_LIST_ITEMS,
+                )
+                .into_iter()
+                .map(x::Atom::new)
+                .collect()
+            })
             .unwrap_or_default()
     }
 }
@@ -3252,21 +3356,44 @@ impl PropertyOps for XcbPropertyOps {
     }
 
     fn get_class(&self, win: WindowId) -> (String, String) {
-        self.get_text_property(win, self.atoms.wm_class, self.atoms.string)
-            .map(|raw| parse_wm_class(raw.as_bytes()))
-            .unwrap_or_default()
+        let Ok(w) = self.win(win) else {
+            return (String::new(), String::new());
+        };
+        let cookie = self.conn.send_request(&x::GetProperty {
+            delete: false,
+            window: w,
+            property: self.atoms.wm_class,
+            r#type: self.atoms.string,
+            long_offset: 0,
+            long_length: 256,
+        });
+        let Ok(reply) = self.conn.wait_for_reply(cookie) else {
+            return (String::new(), String::new());
+        };
+        if reply.r#type() == self.atoms.string
+            && reply.format() == 8
+            && !reply.value::<u8>().is_empty()
+        {
+            parse_wm_class(reply.value::<u8>())
+        } else {
+            (String::new(), String::new())
+        }
     }
 
     fn get_window_types(&self, win: WindowId) -> Vec<WindowType> {
         let Ok(w) = self.win(win) else {
             return Vec::new();
         };
-        let atoms = get_atoms(
+        let atoms: Vec<x::Atom> = get_u32s_with_length(
             &self.conn,
             w,
             self.atoms.net_wm_window_type,
             self.atoms.atom,
-        );
+            MAX_ATOM_LIST_ITEMS,
+        )
+        .into_iter()
+        .map(x::Atom::new)
+        .collect();
         let mut result = atoms
             .into_iter()
             .map(|a| window_type_from_atom(a, self.atoms.window_type_atoms()))
@@ -3312,14 +3439,26 @@ impl PropertyOps for XcbPropertyOps {
 
     fn get_wm_hints(&self, win: WindowId) -> Option<WmHints> {
         let w = self.win(win).ok()?;
-        let values = get_u32s(&self.conn, w, self.atoms.wm_hints, self.atoms.wm_hints);
+        let values = get_u32s_with_length(
+            &self.conn,
+            w,
+            self.atoms.wm_hints,
+            self.atoms.wm_hints,
+            MAX_WM_HINTS_ITEMS,
+        );
         parse_wm_hints(&values)
     }
 
     fn set_urgent_hint(&self, win: WindowId, urgent: bool) -> XcbResult<()> {
         const X_URGENCY_HINT: u32 = 1 << 8;
         let w = self.win(win)?;
-        let mut data = get_u32s(&self.conn, w, self.atoms.wm_hints, self.atoms.wm_hints);
+        let mut data = get_u32s_with_length(
+            &self.conn,
+            w,
+            self.atoms.wm_hints,
+            self.atoms.wm_hints,
+            MAX_WM_HINTS_ITEMS,
+        );
         if data.is_empty() {
             data.push(0);
         }
@@ -3339,11 +3478,12 @@ impl PropertyOps for XcbPropertyOps {
 
     fn fetch_normal_hints(&self, win: WindowId) -> XcbResult<Option<NormalHints>> {
         let w = self.win(win)?;
-        let v = get_u32s(
+        let v = get_u32s_with_length(
             &self.conn,
             w,
             self.atoms.wm_normal_hints,
             self.atoms.wm_normal_hints,
+            MAX_WM_NORMAL_HINTS_ITEMS,
         );
         Ok(parse_normal_hints(&v))
     }
@@ -3400,13 +3540,17 @@ impl PropertyOps for XcbPropertyOps {
 
     fn get_wm_state(&self, win: WindowId) -> XcbResult<i64> {
         let w = self.win(win)?;
-        Ok(
-            get_u32s(&self.conn, w, self.atoms.wm_state, self.atoms.wm_state)
-                .first()
-                .copied()
-                .map(|state| state as i64)
-                .unwrap_or(-1),
+        Ok(get_u32s_with_length(
+            &self.conn,
+            w,
+            self.atoms.wm_state,
+            self.atoms.wm_state,
+            MAX_WM_STATE_ITEMS,
         )
+        .first()
+        .copied()
+        .map(|state| state as i64)
+        .unwrap_or(-1))
     }
 
     fn set_wm_state(&self, win: WindowId, state: i64) -> XcbResult<()> {
@@ -3431,16 +3575,23 @@ impl PropertyOps for XcbPropertyOps {
 
     fn get_window_strut_partial(&self, win: WindowId) -> Option<StrutPartial> {
         let w = self.win(win).ok()?;
-        let v = get_u32s(
+        let v = get_u32s_with_length(
             &self.conn,
             w,
             self.atoms.net_wm_strut_partial,
             self.atoms.cardinal,
+            MAX_STRUT_PARTIAL_ITEMS,
         );
         if let Some(strut) = parse_strut_partial(&v) {
             return Some(strut);
         }
-        let fallback = get_u32s(&self.conn, w, self.atoms.net_wm_strut, self.atoms.cardinal);
+        let fallback = get_u32s_with_length(
+            &self.conn,
+            w,
+            self.atoms.net_wm_strut,
+            self.atoms.cardinal,
+            MAX_STRUT_ITEMS,
+        );
         parse_strut(&fallback)
     }
 
@@ -3450,9 +3601,15 @@ impl PropertyOps for XcbPropertyOps {
 
     fn get_window_pid(&self, win: WindowId) -> Option<u32> {
         let w = self.win(win).ok()?;
-        get_u32s(&self.conn, w, self.atoms.net_wm_pid, self.atoms.cardinal)
-            .first()
-            .copied()
+        get_u32s_with_length(
+            &self.conn,
+            w,
+            self.atoms.net_wm_pid,
+            self.atoms.cardinal,
+            MAX_SINGLE_U32_ITEMS,
+        )
+        .first()
+        .copied()
     }
 
     fn set_net_wm_state_flag(&self, win: WindowId, state: NetWmState, on: bool) -> XcbResult<()> {
@@ -3510,7 +3667,13 @@ impl PropertyOps for XcbPropertyOps {
 
     fn send_ping(&self, win: WindowId, timestamp: u32) -> XcbResult<bool> {
         let w = self.win(win)?;
-        let protocols = get_atoms(&self.conn, w, self.atoms.wm_protocols, self.atoms.atom);
+        let protocols = get_atoms_with_length(
+            &self.conn,
+            w,
+            self.atoms.wm_protocols,
+            self.atoms.atom,
+            MAX_PROTOCOL_ATOMS,
+        );
         if !protocol_supported(&protocols, self.atoms.net_wm_ping) {
             return Ok(false);
         }
@@ -3537,11 +3700,12 @@ impl PropertyOps for XcbPropertyOps {
 
     fn get_user_time(&self, win: WindowId) -> Option<u32> {
         let w = self.win(win).ok()?;
-        get_u32s(
+        get_u32s_with_length(
             &self.conn,
             w,
             self.atoms.net_wm_user_time,
             self.atoms.cardinal,
+            MAX_SINGLE_U32_ITEMS,
         )
         .first()
         .copied()
@@ -3561,11 +3725,12 @@ impl PropertyOps for XcbPropertyOps {
 
     fn get_bypass_compositor(&self, win: WindowId) -> Option<u32> {
         let w = self.win(win).ok()?;
-        get_u32s(
+        get_u32s_with_length(
             &self.conn,
             w,
             self.atoms.net_wm_bypass_compositor,
             self.atoms.cardinal,
+            MAX_SINGLE_U32_ITEMS,
         )
         .first()
         .copied()
@@ -3585,33 +3750,36 @@ impl PropertyOps for XcbPropertyOps {
 
     fn get_motif_hints(&self, win: WindowId) -> Option<MotifWmHints> {
         let w = self.win(win).ok()?;
-        let values = get_u32s(
+        let values = get_u32s_with_length(
             &self.conn,
             w,
             self.atoms.motif_wm_hints,
-            self.atoms.motif_wm_hints,
+            x::ATOM_ANY,
+            MAX_MOTIF_HINTS_ITEMS,
         );
         parse_motif_hints(&values)
     }
 
     fn get_gtk_frame_extents(&self, win: WindowId) -> Option<[u32; 4]> {
         let w = self.win(win).ok()?;
-        let values = get_u32s(
+        let values = get_u32s_with_length(
             &self.conn,
             w,
             self.atoms.gtk_frame_extents,
             self.atoms.cardinal,
+            MAX_GTK_FRAME_EXTENTS_ITEMS,
         );
         parse_gtk_frame_extents(&values)
     }
 
     fn get_sync_counter(&self, win: WindowId) -> Option<u32> {
         let w = self.win(win).ok()?;
-        get_u32s(
+        get_u32s_with_length(
             &self.conn,
             w,
             self.atoms.net_wm_sync_request_counter,
             self.atoms.cardinal,
+            MAX_SINGLE_U32_ITEMS,
         )
         .first()
         .copied()
@@ -3883,6 +4051,15 @@ impl XcbOutputOps {
                         })
                         .filter(|name| !name.is_empty())
                         .unwrap_or_else(|| format!("CRTC-{}", idx));
+                    let (hdr_capable, hdr_metadata) = if let Some(output) = first_output {
+                        let caps = self.query_output_edid_hdr(output);
+                        (
+                            self.query_output_hdr_capable(output) || caps.is_some(),
+                            caps,
+                        )
+                    } else {
+                        (false, None)
+                    };
                     outputs.push(build_output_info(
                         id,
                         name,
@@ -3891,8 +4068,8 @@ impl XcbOutputOps {
                         info.width() as i32,
                         info.height() as i32,
                         refresh,
-                        false,
-                        None,
+                        hdr_capable,
+                        hdr_metadata,
                     ));
                 }
             }
@@ -4039,7 +4216,7 @@ impl XcbKeyOps {
 
         for (idx, symbols) in reply.keysyms().chunks(per).enumerate() {
             let keycode = self.min_keycode.saturating_add(idx as u8);
-            if let Some(&primary) = symbols.iter().find(|&&sym| sym != 0) {
+            if let Some(&primary) = symbols.first().filter(|&&sym| sym != 0) {
                 keycode_to_keysym.insert(keycode, primary);
             }
             for &sym in symbols.iter().filter(|&&sym| sym != 0) {
@@ -4112,11 +4289,16 @@ impl KeyOps for XcbKeyOps {
         let keymap = self.load_keymap()?;
         let numlock = self.numlock_mask();
         for &(mods, keysym) in bindings {
-            let Some(keycodes) = keymap.keysym_to_keycodes.get(&keysym) else {
+            let keycodes = keymap
+                .keycode_to_keysym
+                .iter()
+                .filter_map(|(&keycode, &primary)| (primary == keysym).then_some(keycode))
+                .collect::<Vec<_>>();
+            if keycodes.is_empty() {
                 log::warn!("XCB: no keycode found for keysym 0x{keysym:x}");
                 continue;
-            };
-            for &key in keycodes {
+            }
+            for key in keycodes {
                 let base = mods_to_xcb(mods);
                 let combos = lock_modifier_combinations(base, x::ModMask::LOCK, numlock);
                 for modifiers in combos {
@@ -4756,9 +4938,33 @@ fn get_windows(
 const MAX_U32_PROPERTY_ITEMS: u32 = 4096;
 const MAX_ICON_ITEMS_U32: u32 = 4 * 1024 * 1024;
 const MAX_OPAQUE_REGION_ITEMS_U32: u32 = 1024 * 1024;
+const MAX_TEXT_PROPERTY_BYTES: u32 = 256 * 1024;
+const MAX_ATOM_LIST_ITEMS: u32 = 4096;
+const MAX_PROTOCOL_ATOMS: u32 = 1024;
+const MAX_WM_HINTS_ITEMS: u32 = 20;
+const MAX_WM_NORMAL_HINTS_ITEMS: u32 = 18;
+const MAX_WM_STATE_ITEMS: u32 = 2;
+const MAX_STRUT_ITEMS: u32 = 4;
+const MAX_STRUT_PARTIAL_ITEMS: u32 = 12;
+const MAX_MOTIF_HINTS_ITEMS: u32 = 5;
+const MAX_GTK_FRAME_EXTENTS_ITEMS: u32 = 4;
+const MAX_SINGLE_U32_ITEMS: u32 = 1;
 
 fn get_u32s(conn: &xcb::Connection, window: x::Window, property: x::Atom, ty: x::Atom) -> Vec<u32> {
     get_u32s_with_length(conn, window, property, ty, MAX_U32_PROPERTY_ITEMS)
+}
+
+fn get_atoms_with_length(
+    conn: &xcb::Connection,
+    window: x::Window,
+    property: x::Atom,
+    ty: x::Atom,
+    long_length: u32,
+) -> Vec<x::Atom> {
+    get_u32s_with_length(conn, window, property, ty, long_length)
+        .into_iter()
+        .map(x::Atom::new)
+        .collect()
 }
 
 fn get_u32s_with_length(

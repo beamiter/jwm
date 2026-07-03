@@ -179,18 +179,12 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     /// P5B: Build monitor rectangles from RandR outputs
-    pub(super) fn build_monitor_rects(
-        conn: &Arc<C>,
-        root: u32,
-    ) -> Vec<(u32, i32, i32, u32, u32)> {
+    pub(super) fn build_monitor_rects(conn: &Arc<C>, root: u32) -> Vec<(u32, i32, i32, u32, u32)> {
         conn.query_monitor_rects(root)
     }
 
     /// P5B Phase 2: Build monitor refresh rates from RandR outputs
-    pub(super) fn build_monitor_refresh_rates(
-        conn: &Arc<C>,
-        root: u32,
-    ) -> HashMap<u32, u32> {
+    pub(super) fn build_monitor_refresh_rates(conn: &Arc<C>, root: u32) -> HashMap<u32, u32> {
         conn.query_monitor_refresh_rates(root)
     }
 
