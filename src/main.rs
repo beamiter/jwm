@@ -77,7 +77,9 @@ const ICON_M1: &str = "\u{F02DB}";
 const ICON_SUN: &str = "\u{F0599}";
 const ICON_MOON: &str = "\u{F0594}";
 
-const TAB_WIDTH: f64 = 38.0;
+const DEFAULT_TAB_WIDTH: f64 = 42.0;
+const MIN_TAB_WIDTH: f64 = 40.0;
+const MAX_TAB_WIDTH: f64 = 56.0;
 const TAB_SPACING: f64 = 4.0;
 const TAB_FONT_SIZE: f32 = 12.0;
 const PILL_FONT_SIZE: f32 = 11.0;
@@ -248,7 +250,11 @@ impl XilemBar {
                     return (with_alpha(tag_color, 0.7), 1.5, tag_color);
                 }
                 if s.is_occ {
-                    return (with_alpha(tag_color, 0.35), 1.0, with_alpha(tag_color, 0.7));
+                    return (
+                        with_alpha(tag_color, 0.22),
+                        1.5,
+                        with_alpha(tag_color, 0.95),
+                    );
                 }
             }
         }
@@ -259,8 +265,25 @@ impl XilemBar {
         self.monitor_info_opt
             .as_ref()
             .and_then(|m| m.tag_status_vec.get(index))
-            .map(|s| s.is_filled || s.is_selected || s.is_urg)
+            .map(|s| s.is_filled || s.is_selected || s.is_urg || s.is_occ)
             .unwrap_or(false)
+    }
+
+    fn workspace_tab_width(&self) -> f64 {
+        let Some(monitor_width) = self
+            .monitor_info_opt
+            .as_ref()
+            .map(|m| m.monitor_width)
+            .filter(|w| *w > 0)
+        else {
+            return DEFAULT_TAB_WIDTH;
+        };
+
+        // Keep the left workspace group proportional to the monitor width,
+        // while clamping individual tab width to avoid extreme sizes.
+        let group_width = (monitor_width as f64 * 0.23).clamp(396.0, 540.0);
+        let total_spacing = TAB_SPACING * (TAG_ICONS.len().saturating_sub(1) as f64);
+        ((group_width - total_spacing) / TAG_ICONS.len() as f64).clamp(MIN_TAB_WIDTH, MAX_TAB_WIDTH)
     }
 }
 
@@ -437,6 +460,7 @@ fn workspace_tag(state: &mut XilemBar, index: usize) -> impl WidgetView<XilemBar
     let label_str = TAG_ICONS[index].to_string();
     let (bg, border_w, border_c) = state.tag_visuals(index);
     let is_active = state.is_tag_active(index);
+    let tab_width = state.workspace_tab_width();
     let text_color = if is_active {
         state.theme.tag_active_text
     } else {
@@ -449,7 +473,7 @@ fn workspace_tag(state: &mut XilemBar, index: usize) -> impl WidgetView<XilemBar
         s.send_tag_command(true);
     }))
     .dims(Dimensions::new(
-        Dim::Fixed(Length::px(TAB_WIDTH)),
+        Dim::Fixed(Length::px(tab_width)),
         Dim::Stretch,
     ))
     .background(bg)
