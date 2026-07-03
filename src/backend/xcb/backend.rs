@@ -2568,10 +2568,8 @@ impl Backend for XcbBackend {
                             Ok(Some(event)) => event,
                             Ok(None) => break,
                             Err(err) => {
-                                log::error!("XCB event error: {err}");
-                                return Err(std::io::Error::other(format!(
-                                    "XCB event error: {err}"
-                                )));
+                                log::error!("XCB event error (continuing): {err}");
+                                continue;
                             }
                         };
                         if let Some(mapped) = data.backend.map_event(event) {
