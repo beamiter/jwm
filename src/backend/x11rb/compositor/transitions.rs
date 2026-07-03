@@ -1,4 +1,5 @@
 use super::Compositor;
+use super::compute_wallpaper_rect;
 use super::math::{
     mat4_mul, perspective_matrix, rotate_x_matrix, rotate_y_matrix, translate_matrix,
 };
@@ -63,7 +64,7 @@ impl Compositor {
         };
 
         let area = (mon_x as f32, mon_y as f32, mon_w as f32, mon_h as f32);
-        let (rx, ry, rw, rh) = Self::compute_wallpaper_rect(mode, area, iw, ih);
+        let (rx, ry, rw, rh) = compute_wallpaper_rect(mode, area, iw, ih);
 
         unsafe {
             self.gl.use_program(Some(self.program));

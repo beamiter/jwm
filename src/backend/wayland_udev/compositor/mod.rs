@@ -68,6 +68,10 @@ use std::ffi::CString;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::backend::compositor_common::transitions::TransitionMode;
+use crate::backend::compositor_common::wallpaper::{WallpaperImageData, WallpaperMode};
+use crate::backend::compositor_common::wobbly::WobblyState;
+
 // ---------------------------------------------------------------------------
 // Matrix math
 // ---------------------------------------------------------------------------
@@ -362,25 +366,6 @@ pub(crate) struct BlurFboLevel {
     pub height: u32,
 }
 
-// ---------------------------------------------------------------------------
-// Wallpaper types
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum WallpaperMode {
-    Fill,
-    Fit,
-    Stretch,
-    Center,
-}
-
-pub(crate) struct WallpaperImageData {
-    pub rgba: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
-    pub mode: WallpaperMode,
-}
-
 pub(crate) struct MonitorWallpaper {
     pub mon_x: i32,
     pub mon_y: i32,
@@ -476,38 +461,6 @@ pub(crate) struct GenieAnimation {
     pub h: f32,
     pub gl_texture: u32,
     pub has_alpha: bool,
-}
-
-// ---------------------------------------------------------------------------
-// Wobbly windows state
-// ---------------------------------------------------------------------------
-
-pub(crate) struct WobblyState {
-    pub grid_n: usize,
-    pub offsets: Vec<[f32; 2]>,
-    pub velocities: Vec<[f32; 2]>,
-    pub dragging: bool,
-    pub anchor_row: usize,
-    pub anchor_col: usize,
-}
-
-// ---------------------------------------------------------------------------
-// Transition mode
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub(crate) enum TransitionMode {
-    None,
-    Slide,
-    Cube,
-    Flip,
-    Fade,
-    Zoom,
-    Stack,
-    Blinds,
-    CoverFlow,
-    Helix,
-    Portal,
 }
 
 // ---------------------------------------------------------------------------

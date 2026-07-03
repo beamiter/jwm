@@ -3,6 +3,7 @@
 
 #[allow(unused_imports)]
 use super::*;
+use crate::backend::compositor_common::wallpaper::{compute_wallpaper_rect, parse_wallpaper_mode};
 use smithay::backend::renderer::gles::ffi;
 use std::sync::mpsc;
 use std::sync::{Condvar, Mutex, OnceLock};
@@ -166,60 +167,6 @@ impl WaylandCompositor {
                 data.height
             );
             Some((tex, data.width, data.height))
-        }
-    }
-
-    // =========================================================================
-    // 3. Compute wallpaper draw rect (pure geometry)
-    // =========================================================================
-
-    /// Compute the draw rectangle (x, y, w, h) for a wallpaper within a target area.
-    ///
-    /// Modes:
-    /// - `Fill`: scale to cover the entire area (max scale), crop centered.
-    /// - `Fit`: scale to fit entirely within the area (min scale), letterboxed.
-    /// - `Stretch`: fill the area exactly, ignoring aspect ratio.
-    /// - `Center`: draw at 1:1 pixel size, centered in the area.
-    pub(crate) fn compute_wallpaper_rect(
-        mode: WallpaperMode,
-        area: (f32, f32, f32, f32),
-        img_w: u32,
-        img_h: u32,
-    ) -> (f32, f32, f32, f32) {
-        let (ax, ay, aw, ah) = area;
-        let iw = img_w as f32;
-        let ih = img_h as f32;
-
-        if iw <= 0.0 || ih <= 0.0 {
-            return (ax, ay, aw, ah);
-        }
-
-        match mode {
-            WallpaperMode::Stretch => (ax, ay, aw, ah),
-            WallpaperMode::Fill => {
-                // Scale up so image covers the entire area; excess is cropped.
-                let scale = (aw / iw).max(ah / ih);
-                let dw = iw * scale;
-                let dh = ih * scale;
-                let dx = ax + (aw - dw) * 0.5;
-                let dy = ay + (ah - dh) * 0.5;
-                (dx, dy, dw, dh)
-            }
-            WallpaperMode::Fit => {
-                // Scale down so entire image fits within area; letterboxed.
-                let scale = (aw / iw).min(ah / ih);
-                let dw = iw * scale;
-                let dh = ih * scale;
-                let dx = ax + (aw - dw) * 0.5;
-                let dy = ay + (ah - dh) * 0.5;
-                (dx, dy, dw, dh)
-            }
-            WallpaperMode::Center => {
-                // Draw at native resolution, centered.
-                let dx = ax + (aw - iw) * 0.5;
-                let dy = ay + (ah - ih) * 0.5;
-                (dx, dy, iw, ih)
-            }
         }
     }
 
@@ -399,7 +346,7 @@ impl WaylandCompositor {
                     continue;
                 }
 
-                let (rx, ry, rw, rh) = Self::compute_wallpaper_rect(mode, area, img_w, img_h);
+                let (rx, ry, rw, rh) = compute_wallpaper_rect(mode, area, img_w, img_h);
 
                 // Set size uniform for the shader
                 gl.Uniform2f(self.win_uniforms.size, rw, rh);
@@ -407,7 +354,7 @@ impl WaylandCompositor {
                 // --- Draw old wallpaper (crossfade out) ---
                 if crossfade_alpha < 1.0 {
                     if let Some(old_tex) = self.old_wallpaper_texture {
-                        let (orx, ory, orw, orh) = Self::compute_wallpaper_rect(
+                        let (orx, ory, orw, orh) = compute_wallpaper_rect(
                             self.old_wallpaper_mode,
                             area,
                             self.old_wallpaper_img_w,
@@ -442,7 +389,7 @@ impl WaylandCompositor {
                 if let Some(tex) = self.wallpaper_texture {
                     if self.wallpaper_img_w > 0 && self.wallpaper_img_h > 0 {
                         let area = (0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
-                        let (rx, ry, rw, rh) = Self::compute_wallpaper_rect(
+                        let (rx, ry, rw, rh) = compute_wallpaper_rect(
                             self.wallpaper_mode,
                             area,
                             self.wallpaper_img_w,
@@ -454,7 +401,7 @@ impl WaylandCompositor {
                         // Old wallpaper crossfade
                         if crossfade_alpha < 1.0 {
                             if let Some(old_tex) = self.old_wallpaper_texture {
-                                let (orx, ory, orw, orh) = Self::compute_wallpaper_rect(
+                                let (orx, ory, orw, orh) = compute_wallpaper_rect(
                                     self.old_wallpaper_mode,
                                     area,
                                     self.old_wallpaper_img_w,
@@ -497,7 +444,7 @@ impl WaylandCompositor {
     /// and spawns a background thread to decode the image. The texture will be
     /// uploaded on the next frame via `poll_pending_wallpapers`.
     pub(crate) fn set_wallpaper(&mut self, path: &str, mode: &str) {
-        let wp_mode = Self::parse_wallpaper_mode(mode);
+        let wp_mode = parse_wallpaper_mode(mode);
         self.wallpaper_path = path.to_string();
         self.wallpaper_mode = wp_mode;
 
@@ -515,22 +462,6 @@ impl WaylandCompositor {
         self.pending_wallpaper = Some(rx);
         self.needs_render = true;
     }
-
-    // =========================================================================
-    // 7. Parse wallpaper mode string
-    // =========================================================================
-
-    /// Parse a mode string into a `WallpaperMode` enum value.
-    /// Recognized values: "fill", "fit", "stretch", "center".
-    /// Defaults to `Fill` for unrecognized strings.
-    pub(crate) fn parse_wallpaper_mode(s: &str) -> WallpaperMode {
-        match s.to_ascii_lowercase().as_str() {
-            "fit" => WallpaperMode::Fit,
-            "stretch" => WallpaperMode::Stretch,
-            "center" => WallpaperMode::Center,
-            _ => WallpaperMode::Fill,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -543,65 +474,31 @@ mod tests {
 
     #[test]
     fn test_parse_wallpaper_mode_variants() {
-        assert_eq!(
-            WaylandCompositor::parse_wallpaper_mode("fill"),
-            WallpaperMode::Fill
-        );
-        assert_eq!(
-            WaylandCompositor::parse_wallpaper_mode("fit"),
-            WallpaperMode::Fit
-        );
-        assert_eq!(
-            WaylandCompositor::parse_wallpaper_mode("stretch"),
-            WallpaperMode::Stretch
-        );
-        assert_eq!(
-            WaylandCompositor::parse_wallpaper_mode("center"),
-            WallpaperMode::Center
-        );
+        assert_eq!(parse_wallpaper_mode("fill"), WallpaperMode::Fill);
+        assert_eq!(parse_wallpaper_mode("fit"), WallpaperMode::Fit);
+        assert_eq!(parse_wallpaper_mode("stretch"), WallpaperMode::Stretch);
+        assert_eq!(parse_wallpaper_mode("center"), WallpaperMode::Center);
     }
 
     #[test]
     fn test_parse_wallpaper_mode_case_insensitive() {
-        assert_eq!(
-            WaylandCompositor::parse_wallpaper_mode("Fill"),
-            WallpaperMode::Fill
-        );
-        assert_eq!(
-            WaylandCompositor::parse_wallpaper_mode("FIT"),
-            WallpaperMode::Fit
-        );
-        assert_eq!(
-            WaylandCompositor::parse_wallpaper_mode("STRETCH"),
-            WallpaperMode::Stretch
-        );
-        assert_eq!(
-            WaylandCompositor::parse_wallpaper_mode("Center"),
-            WallpaperMode::Center
-        );
+        assert_eq!(parse_wallpaper_mode("Fill"), WallpaperMode::Fill);
+        assert_eq!(parse_wallpaper_mode("FIT"), WallpaperMode::Fit);
+        assert_eq!(parse_wallpaper_mode("STRETCH"), WallpaperMode::Stretch);
+        assert_eq!(parse_wallpaper_mode("Center"), WallpaperMode::Center);
     }
 
     #[test]
     fn test_parse_wallpaper_mode_unknown_defaults_fill() {
-        assert_eq!(
-            WaylandCompositor::parse_wallpaper_mode(""),
-            WallpaperMode::Fill
-        );
-        assert_eq!(
-            WaylandCompositor::parse_wallpaper_mode("unknown"),
-            WallpaperMode::Fill
-        );
-        assert_eq!(
-            WaylandCompositor::parse_wallpaper_mode("tile"),
-            WallpaperMode::Fill
-        );
+        assert_eq!(parse_wallpaper_mode(""), WallpaperMode::Fill);
+        assert_eq!(parse_wallpaper_mode("unknown"), WallpaperMode::Fill);
+        assert_eq!(parse_wallpaper_mode("tile"), WallpaperMode::Fill);
     }
 
     #[test]
     fn test_compute_rect_stretch() {
         let area = (0.0, 0.0, 1920.0, 1080.0);
-        let (x, y, w, h) =
-            WaylandCompositor::compute_wallpaper_rect(WallpaperMode::Stretch, area, 800, 600);
+        let (x, y, w, h) = compute_wallpaper_rect(WallpaperMode::Stretch, area, 800, 600);
         assert!((x - 0.0).abs() < 0.01);
         assert!((y - 0.0).abs() < 0.01);
         assert!((w - 1920.0).abs() < 0.01);
@@ -611,8 +508,7 @@ mod tests {
     #[test]
     fn test_compute_rect_fill_covers_area() {
         let area = (0.0, 0.0, 1920.0, 1080.0);
-        let (_, _, w, h) =
-            WaylandCompositor::compute_wallpaper_rect(WallpaperMode::Fill, area, 3840, 1080);
+        let (_, _, w, h) = compute_wallpaper_rect(WallpaperMode::Fill, area, 3840, 1080);
         // Fill must cover the area entirely
         assert!(w >= 1920.0 - 0.01);
         assert!(h >= 1080.0 - 0.01);
@@ -622,8 +518,7 @@ mod tests {
     fn test_compute_rect_fill_centered() {
         let area = (0.0, 0.0, 1920.0, 1080.0);
         // Uniform aspect ratio image (half size) -> scale 2x -> exact fit
-        let (x, y, w, h) =
-            WaylandCompositor::compute_wallpaper_rect(WallpaperMode::Fill, area, 960, 540);
+        let (x, y, w, h) = compute_wallpaper_rect(WallpaperMode::Fill, area, 960, 540);
         assert!((w - 1920.0).abs() < 0.01);
         assert!((h - 1080.0).abs() < 0.01);
         assert!((x - 0.0).abs() < 0.01);
@@ -635,8 +530,7 @@ mod tests {
         let area = (0.0, 0.0, 1920.0, 1080.0);
         // Wide image 1920x400 -> scale = min(1.0, 2.7) = 1.0
         // dw = 1920, dh = 400
-        let (_, y, w, h) =
-            WaylandCompositor::compute_wallpaper_rect(WallpaperMode::Fit, area, 1920, 400);
+        let (_, y, w, h) = compute_wallpaper_rect(WallpaperMode::Fit, area, 1920, 400);
         assert!((w - 1920.0).abs() < 0.01);
         assert!((h - 400.0).abs() < 0.01);
         // Centered vertically: (1080-400)/2 = 340
@@ -646,8 +540,7 @@ mod tests {
     #[test]
     fn test_compute_rect_center_native_size() {
         let area = (0.0, 0.0, 1920.0, 1080.0);
-        let (x, y, w, h) =
-            WaylandCompositor::compute_wallpaper_rect(WallpaperMode::Center, area, 800, 600);
+        let (x, y, w, h) = compute_wallpaper_rect(WallpaperMode::Center, area, 800, 600);
         assert!((w - 800.0).abs() < 0.01);
         assert!((h - 600.0).abs() < 0.01);
         // Centered: (1920-800)/2=560, (1080-600)/2=240
@@ -658,8 +551,7 @@ mod tests {
     #[test]
     fn test_compute_rect_center_large_image_overflows() {
         let area = (0.0, 0.0, 1920.0, 1080.0);
-        let (x, y, w, h) =
-            WaylandCompositor::compute_wallpaper_rect(WallpaperMode::Center, area, 2560, 1440);
+        let (x, y, w, h) = compute_wallpaper_rect(WallpaperMode::Center, area, 2560, 1440);
         assert!((w - 2560.0).abs() < 0.01);
         assert!((h - 1440.0).abs() < 0.01);
         // Negative offsets (extends beyond area)
@@ -670,8 +562,7 @@ mod tests {
     #[test]
     fn test_compute_rect_zero_image_returns_area() {
         let area = (10.0, 20.0, 400.0, 300.0);
-        let (x, y, w, h) =
-            WaylandCompositor::compute_wallpaper_rect(WallpaperMode::Fill, area, 0, 0);
+        let (x, y, w, h) = compute_wallpaper_rect(WallpaperMode::Fill, area, 0, 0);
         assert!((x - 10.0).abs() < 0.01);
         assert!((y - 20.0).abs() < 0.01);
         assert!((w - 400.0).abs() < 0.01);
@@ -682,8 +573,7 @@ mod tests {
     fn test_compute_rect_non_origin_area() {
         // Second monitor at (1920, 0)
         let area = (1920.0, 0.0, 1920.0, 1080.0);
-        let (x, y, w, h) =
-            WaylandCompositor::compute_wallpaper_rect(WallpaperMode::Stretch, area, 800, 600);
+        let (x, y, w, h) = compute_wallpaper_rect(WallpaperMode::Stretch, area, 800, 600);
         assert!((x - 1920.0).abs() < 0.01);
         assert!((y - 0.0).abs() < 0.01);
         assert!((w - 1920.0).abs() < 0.01);

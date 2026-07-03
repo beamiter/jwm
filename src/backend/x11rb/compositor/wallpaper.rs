@@ -31,6 +31,8 @@ use x11rb::rust_connection::RustConnection;
 #[allow(unused_imports)]
 use x11rb::wrapper::ConnectionExt as WrapperExt;
 
+use crate::backend::compositor_common::wallpaper::parse_wallpaper_mode;
+
 /// Process-wide gate bounding how many wallpaper images decode concurrently.
 /// Each decode does `image::open` + a Lanczos3 downscale (heavy CPU, transient
 /// full-image allocation); rapid wallpaper changes or per-monitor setup would
@@ -183,56 +185,6 @@ impl Compositor {
         }
     }
 
-    /// Compute the draw rect (x, y, w, h) for a wallpaper within a target area.
-    /// `area`: (x, y, w, h) of the target area in screen coords.
-    /// `img_w`, `img_h`: source image dimensions.
-    pub(super) fn compute_wallpaper_rect(
-        mode: WallpaperMode,
-        area: (f32, f32, f32, f32),
-        img_w: u32,
-        img_h: u32,
-    ) -> (f32, f32, f32, f32) {
-        let (ax, ay, aw, ah) = area;
-        let iw = img_w as f32;
-        let ih = img_h as f32;
-        if iw <= 0.0 || ih <= 0.0 {
-            return (ax, ay, aw, ah);
-        }
-        match mode {
-            WallpaperMode::Stretch => (ax, ay, aw, ah),
-            WallpaperMode::Fill => {
-                let scale = (aw / iw).max(ah / ih);
-                let dw = iw * scale;
-                let dh = ih * scale;
-                let dx = ax + (aw - dw) * 0.5;
-                let dy = ay + (ah - dh) * 0.5;
-                (dx, dy, dw, dh)
-            }
-            WallpaperMode::Fit => {
-                let scale = (aw / iw).min(ah / ih);
-                let dw = iw * scale;
-                let dh = ih * scale;
-                let dx = ax + (aw - dw) * 0.5;
-                let dy = ay + (ah - dh) * 0.5;
-                (dx, dy, dw, dh)
-            }
-            WallpaperMode::Center => {
-                let dx = ax + (aw - iw) * 0.5;
-                let dy = ay + (ah - ih) * 0.5;
-                (dx, dy, iw, ih)
-            }
-        }
-    }
-
-    pub(super) fn parse_wallpaper_mode(s: &str) -> WallpaperMode {
-        match s {
-            "fit" => WallpaperMode::Fit,
-            "stretch" => WallpaperMode::Stretch,
-            "center" => WallpaperMode::Center,
-            _ => WallpaperMode::Fill,
-        }
-    }
-
     /// Update monitor geometries and per-monitor wallpaper textures.
     /// Called when monitors are added/removed/changed AND when the active
     /// tag mask changes on a monitor (per-tag wallpaper resolution).
@@ -276,9 +228,9 @@ impl Compositor {
         let behavior = cfg.behavior();
 
         for &(idx, x, y, w, h, active_tags) in monitors {
-            let (path, mode_str) = Self::resolve_wallpaper_for_tag(behavior, idx, active_tags);
+            let (path, mode_str) = resolve_wallpaper_for_tag(behavior, idx, active_tags);
             let path = path.to_string();
-            let mode = Self::parse_wallpaper_mode(mode_str);
+            let mode = parse_wallpaper_mode(mode_str);
 
             if geometry_changed {
                 let mon_idx = self.monitor_wallpapers.len();
@@ -319,222 +271,5 @@ impl Compositor {
                 behavior.wallpaper_tags.len(),
             );
         }
-    }
-
-    /// Resolve wallpaper (path, mode) for a monitor given its currently-active tag mask.
-    /// Priority: tag-specific (this monitor) > tag-specific (any monitor) >
-    /// monitor override > global.
-    fn resolve_wallpaper_for_tag<'a>(
-        behavior: &'a crate::config::BehaviorConfig,
-        monitor_idx: u32,
-        active_tags: u32,
-    ) -> (&'a str, &'a str) {
-        let mut best: Option<&'a crate::config::WallpaperTagConfig> = None;
-        let mut best_specific = false;
-        for wt in &behavior.wallpaper_tags {
-            if wt.path.is_empty() {
-                continue;
-            }
-            if active_tags & (1u32 << wt.tag) == 0 {
-                continue;
-            }
-            let specific = wt.monitor == monitor_idx as i32;
-            let any = wt.monitor < 0;
-            if !specific && !any {
-                continue;
-            }
-            if best.is_none() || (specific && !best_specific) {
-                best = Some(wt);
-                best_specific = specific;
-                if specific {
-                    break;
-                }
-            }
-        }
-        if let Some(wt) = best {
-            let mode = if wt.mode.is_empty() {
-                &behavior.wallpaper_mode
-            } else {
-                &wt.mode
-            };
-            return (&wt.path, mode);
-        }
-
-        if let Some(pm) = behavior
-            .wallpaper_monitors
-            .iter()
-            .find(|wm| wm.monitor == monitor_idx)
-        {
-            let path = if pm.path.is_empty() {
-                &behavior.wallpaper
-            } else {
-                &pm.path
-            };
-            let mode = if pm.mode.is_empty() {
-                &behavior.wallpaper_mode
-            } else {
-                &pm.mode
-            };
-            return (path, mode);
-        }
-        (&behavior.wallpaper, &behavior.wallpaper_mode)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // -----------------------------------------------------------------------
-    // parse_wallpaper_mode
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_parse_wallpaper_mode_fill_default() {
-        assert_eq!(
-            Compositor::parse_wallpaper_mode("fill"),
-            WallpaperMode::Fill
-        );
-        assert_eq!(Compositor::parse_wallpaper_mode(""), WallpaperMode::Fill);
-        assert_eq!(
-            Compositor::parse_wallpaper_mode("unknown"),
-            WallpaperMode::Fill
-        );
-    }
-
-    #[test]
-    fn test_parse_wallpaper_mode_fit() {
-        assert_eq!(Compositor::parse_wallpaper_mode("fit"), WallpaperMode::Fit);
-    }
-
-    #[test]
-    fn test_parse_wallpaper_mode_stretch() {
-        assert_eq!(
-            Compositor::parse_wallpaper_mode("stretch"),
-            WallpaperMode::Stretch
-        );
-    }
-
-    #[test]
-    fn test_parse_wallpaper_mode_center() {
-        assert_eq!(
-            Compositor::parse_wallpaper_mode("center"),
-            WallpaperMode::Center
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // compute_wallpaper_rect
-    // -----------------------------------------------------------------------
-
-    // Area: x=0, y=0, w=1920, h=1080
-    fn screen() -> (f32, f32, f32, f32) {
-        (0.0, 0.0, 1920.0, 1080.0)
-    }
-
-    #[test]
-    fn test_wallpaper_rect_stretch_fills_area() {
-        let (x, y, w, h) =
-            Compositor::compute_wallpaper_rect(WallpaperMode::Stretch, screen(), 800, 600);
-        assert!((x - 0.0).abs() < 1.0);
-        assert!((y - 0.0).abs() < 1.0);
-        assert!((w - 1920.0).abs() < 1.0);
-        assert!((h - 1080.0).abs() < 1.0);
-    }
-
-    #[test]
-    fn test_wallpaper_rect_fill_wider_image_covers_area() {
-        // Image 3840x1080, area 1920x1080
-        // scale = max(1920/3840, 1080/1080) = max(0.5, 1.0) = 1.0
-        // dw = 3840, dh = 1080
-        let (_, _, w, h) =
-            Compositor::compute_wallpaper_rect(WallpaperMode::Fill, screen(), 3840, 1080);
-        // w and h should be >= area dimensions
-        assert!(w >= 1920.0 - 1.0);
-        assert!(h >= 1080.0 - 1.0);
-    }
-
-    #[test]
-    fn test_wallpaper_rect_fill_centered() {
-        // Uniform scale: image 960x540 (half of screen)
-        // scale = max(1920/960, 1080/540) = max(2.0, 2.0) = 2.0
-        // dw = 1920, dh = 1080 → dx = 0, dy = 0
-        let (x, y, w, h) =
-            Compositor::compute_wallpaper_rect(WallpaperMode::Fill, screen(), 960, 540);
-        assert!((w - 1920.0).abs() < 1.0);
-        assert!((h - 1080.0).abs() < 1.0);
-        assert!((x - 0.0).abs() < 1.0);
-        assert!((y - 0.0).abs() < 1.0);
-    }
-
-    #[test]
-    fn test_wallpaper_rect_fit_smaller_than_area() {
-        // Image 960x540 (half screen), Fit mode
-        // scale = min(1920/960, 1080/540) = min(2.0, 2.0) = 2.0
-        // dw = 1920, dh = 1080 → fits exactly
-        let (_, _, w, h) =
-            Compositor::compute_wallpaper_rect(WallpaperMode::Fit, screen(), 960, 540);
-        assert!((w - 1920.0).abs() < 1.0);
-        assert!((h - 1080.0).abs() < 1.0);
-    }
-
-    #[test]
-    fn test_wallpaper_rect_fit_aspect_ratio_preserved() {
-        // Wide image 1920x400 into 1920x1080
-        // scale = min(1920/1920, 1080/400) = min(1.0, 2.7) = 1.0
-        // dw = 1920, dh = 400 → fits horizontally, centered vertically
-        let (_, y, w, h) =
-            Compositor::compute_wallpaper_rect(WallpaperMode::Fit, screen(), 1920, 400);
-        assert!((w - 1920.0).abs() < 1.0);
-        assert!((h - 400.0).abs() < 1.0);
-        // Centered: dy = (1080 - 400) / 2 = 340
-        assert!((y - 340.0).abs() < 1.0);
-    }
-
-    #[test]
-    fn test_wallpaper_rect_center_preserves_image_size() {
-        // Image 800x600 centered in 1920x1080
-        let (x, y, w, h) =
-            Compositor::compute_wallpaper_rect(WallpaperMode::Center, screen(), 800, 600);
-        assert!((w - 800.0).abs() < 1.0);
-        assert!((h - 600.0).abs() < 1.0);
-        // Centered: dx = (1920 - 800) / 2 = 560
-        assert!((x - 560.0).abs() < 1.0);
-        // dy = (1080 - 600) / 2 = 240
-        assert!((y - 240.0).abs() < 1.0);
-    }
-
-    #[test]
-    fn test_wallpaper_rect_center_large_image_extends_beyond() {
-        // Image 2560x1440 centered in 1920x1080 → overflows
-        let (x, _, w, h) =
-            Compositor::compute_wallpaper_rect(WallpaperMode::Center, screen(), 2560, 1440);
-        assert!((w - 2560.0).abs() < 1.0);
-        assert!((h - 1440.0).abs() < 1.0);
-        // dx = (1920 - 2560) / 2 = -320 (negative → extends left)
-        assert!((x - (-320.0)).abs() < 1.0);
-    }
-
-    #[test]
-    fn test_wallpaper_rect_zero_image_falls_back_to_area() {
-        // Zero-size image should return area unchanged
-        let area = (10.0, 20.0, 400.0, 300.0);
-        let (x, y, w, h) = Compositor::compute_wallpaper_rect(WallpaperMode::Fill, area, 0, 0);
-        assert!((x - 10.0).abs() < 1.0);
-        assert!((y - 20.0).abs() < 1.0);
-        assert!((w - 400.0).abs() < 1.0);
-        assert!((h - 300.0).abs() < 1.0);
-    }
-
-    #[test]
-    fn test_wallpaper_rect_non_zero_origin_area() {
-        // Monitor at (1920, 0, 1920, 1080) - second monitor
-        let area = (1920.0, 0.0, 1920.0, 1080.0);
-        let (x, y, w, h) =
-            Compositor::compute_wallpaper_rect(WallpaperMode::Stretch, area, 800, 600);
-        assert!((x - 1920.0).abs() < 1.0);
-        assert!((y - 0.0).abs() < 1.0);
-        assert!((w - 1920.0).abs() < 1.0);
-        assert!((h - 1080.0).abs() < 1.0);
     }
 }

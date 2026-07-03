@@ -1,4 +1,7 @@
 use super::*;
+use crate::backend::compositor_common::wallpaper::{
+    parse_wallpaper_mode, resolve_wallpaper_for_tag,
+};
 use crate::config::CONFIG;
 
 impl WaylandCompositor {
@@ -68,19 +71,7 @@ impl WaylandCompositor {
         self.window_tilt_enabled = b.window_tilt;
 
         // --- Transition mode ---
-        self.transition_mode = match b.transition_mode.as_str() {
-            "slide" => TransitionMode::Slide,
-            "cube" => TransitionMode::Cube,
-            "flip" => TransitionMode::Flip,
-            "fade" => TransitionMode::Fade,
-            "zoom" => TransitionMode::Zoom,
-            "stack" => TransitionMode::Stack,
-            "blinds" => TransitionMode::Blinds,
-            "coverflow" => TransitionMode::CoverFlow,
-            "helix" => TransitionMode::Helix,
-            "portal" => TransitionMode::Portal,
-            _ => TransitionMode::None,
-        };
+        self.transition_mode = TransitionMode::from_name_or_none(b.transition_mode.as_str());
 
         // --- Border config ---
         self.border_enabled = b.border_enabled;
@@ -212,19 +203,7 @@ impl WaylandCompositor {
     }
 
     pub(crate) fn set_transition_mode(&mut self, mode: &str) {
-        self.transition_mode = match mode {
-            "slide" => TransitionMode::Slide,
-            "cube" => TransitionMode::Cube,
-            "flip" => TransitionMode::Flip,
-            "fade" => TransitionMode::Fade,
-            "zoom" => TransitionMode::Zoom,
-            "stack" => TransitionMode::Stack,
-            "blinds" => TransitionMode::Blinds,
-            "coverflow" => TransitionMode::CoverFlow,
-            "helix" => TransitionMode::Helix,
-            "portal" => TransitionMode::Portal,
-            _ => TransitionMode::Slide,
-        };
+        self.transition_mode = TransitionMode::from_name(mode);
     }
 
     pub(crate) fn set_magnifier(&mut self, enabled: bool) {
@@ -437,9 +416,9 @@ impl WaylandCompositor {
         }
 
         for &(idx, x, y, w, h, active_tags) in monitors {
-            let (path, mode_str) = Self::resolve_wallpaper_for_tag(behavior, idx, active_tags);
+            let (path, mode_str) = resolve_wallpaper_for_tag(behavior, idx, active_tags);
             let path = path.to_string();
-            let mode = Self::parse_wallpaper_mode(mode_str);
+            let mode = parse_wallpaper_mode(mode_str);
 
             if geometry_changed {
                 let mon_idx = self.monitor_wallpapers.len();
@@ -473,88 +452,20 @@ impl WaylandCompositor {
         self.needs_render = true;
     }
 
-    /// Resolve wallpaper (path, mode) for a monitor given its currently-active tag mask.
-    /// Priority: tag-specific (this monitor) > tag-specific (any monitor) >
-    /// monitor override > global.
-    fn resolve_wallpaper_for_tag<'a>(
-        behavior: &'a crate::config::BehaviorConfig,
-        monitor_idx: u32,
-        active_tags: u32,
-    ) -> (&'a str, &'a str) {
-        let mut best: Option<&'a crate::config::WallpaperTagConfig> = None;
-        let mut best_specific = false;
-        for wt in &behavior.wallpaper_tags {
-            if wt.path.is_empty() {
-                continue;
-            }
-            if active_tags & (1u32 << wt.tag) == 0 {
-                continue;
-            }
-            let specific = wt.monitor == monitor_idx as i32;
-            let any = wt.monitor < 0;
-            if !specific && !any {
-                continue;
-            }
-            if best.is_none() || (specific && !best_specific) {
-                best = Some(wt);
-                best_specific = specific;
-                if specific {
-                    break;
-                }
-            }
-        }
-        if let Some(wt) = best {
-            let mode = if wt.mode.is_empty() {
-                &behavior.wallpaper_mode
-            } else {
-                &wt.mode
-            };
-            return (&wt.path, mode);
-        }
-
-        if let Some(pm) = behavior
-            .wallpaper_monitors
-            .iter()
-            .find(|wm| wm.monitor == monitor_idx)
-        {
-            let path = if pm.path.is_empty() {
-                &behavior.wallpaper
-            } else {
-                &pm.path
-            };
-            let mode = if pm.mode.is_empty() {
-                &behavior.wallpaper_mode
-            } else {
-                &pm.mode
-            };
-            return (path, mode);
-        }
-        (&behavior.wallpaper, &behavior.wallpaper_mode)
-    }
-
     pub(crate) fn notify_window_move_start(&mut self, window: u64) {
         if !self.wobbly_enabled {
             return;
         }
         if let Some(win) = self.windows.get_mut(&window) {
             let grid_n = 9;
-            win.wobbly = Some(WobblyState {
-                grid_n,
-                offsets: vec![[0.0, 0.0]; grid_n * grid_n],
-                velocities: vec![[0.0, 0.0]; grid_n * grid_n],
-                dragging: true,
-                anchor_row: 0,
-                anchor_col: grid_n / 2,
-            });
+            win.wobbly = Some(WobblyState::new(grid_n, 0, grid_n / 2));
         }
     }
 
     pub(crate) fn notify_window_move_delta(&mut self, window: u64, dx: f32, dy: f32) {
         if let Some(win) = self.windows.get_mut(&window) {
             if let Some(wobbly) = win.wobbly.as_mut() {
-                let anchor_idx = wobbly.anchor_row * wobbly.grid_n + wobbly.anchor_col;
-                wobbly.offsets[anchor_idx][0] += dx;
-                wobbly.offsets[anchor_idx][1] += dy;
+                wobbly.apply_anchor_delta(dx, dy);
             }
         }
     }
@@ -562,7 +473,7 @@ impl WaylandCompositor {
     pub(crate) fn notify_window_move_end(&mut self, window: u64) {
         if let Some(win) = self.windows.get_mut(&window) {
             if let Some(wobbly) = win.wobbly.as_mut() {
-                wobbly.dragging = false;
+                wobbly.end_drag();
             }
         }
     }

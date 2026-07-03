@@ -31,8 +31,14 @@ pub mod direct_scanout {
 pub mod dirty_region {
     pub use crate::backend::compositor_common::dirty_region::*;
 }
+pub(crate) mod damage_tracker {
+    pub(crate) use crate::backend::compositor_common::damage_tracker::*;
+}
 pub mod frame_rate {
     pub use crate::backend::compositor_common::frame_rate::*;
+}
+pub(crate) mod frame_stats {
+    pub(crate) use crate::backend::compositor_common::frame_stats::*;
 }
 pub mod gpu_fence_sync {
     pub use crate::backend::compositor_common::gpu_fence_sync::*;
@@ -67,6 +73,9 @@ pub mod render_batcher {
 pub mod render_stats {
     pub use crate::backend::compositor_common::render_stats::*;
 }
+pub(crate) mod rules_common {
+    pub(crate) use crate::backend::compositor_common::rules::*;
+}
 pub mod shader_cache {
     pub use crate::backend::compositor_common::shader_cache::*;
 }
@@ -97,6 +106,9 @@ pub mod expose_common {
 pub mod integration_helpers {
     pub use crate::backend::compositor_common::integration_helpers::*;
 }
+pub(crate) mod latency {
+    pub(crate) use crate::backend::compositor_common::latency::*;
+}
 pub mod optimization_manager {
     pub use crate::backend::compositor_common::optimization_manager::*;
 }
@@ -109,6 +121,15 @@ pub mod shaders {
 pub mod transitions_common {
     pub use crate::backend::compositor_common::transitions::*;
 }
+pub(crate) mod wallpaper_common {
+    pub(crate) use crate::backend::compositor_common::wallpaper::*;
+}
+pub(crate) mod vsync {
+    pub(crate) use crate::backend::compositor_common::vsync::*;
+}
+pub(crate) mod wobbly {
+    pub(crate) use crate::backend::compositor_common::wobbly::*;
+}
 
 mod config;
 mod features;
@@ -120,10 +141,13 @@ mod wallpaper;
 pub use async_x11::{DeferredOpQueue, EventQueue, InputPriority, PriorityEventQueue};
 pub use blur_optimize::{AdaptiveBlur, BlurCache, BlurCacheStats, GaussianBlurParams};
 pub use cache_warmup::{BlurSizeStats, CacheWarmupManager};
+pub(crate) use damage_tracker::DamageTracker;
 pub use direct_scanout::{DirectScanoutManager, DirectScanoutStats, WindowScanoutInfo};
 pub use dirty_region::{DirtyRect, DirtyRegionTracker};
 pub use frame_rate::{AdaptiveFrameRate, FrameRateLimiter};
+pub(crate) use frame_stats::FrameStats;
 pub use gpu_fence_sync::GPUFenceSyncManager;
+pub(crate) use latency::latency_stats;
 pub use oml_sync_control::OmlSyncControl;
 pub use optimization_manager::{OptimizationManager, OptimizationStatus};
 pub use pbo_uploader::PBOUploader;
@@ -135,10 +159,24 @@ pub use predictive_render::{PredictiveRenderManager, SceneActivity};
 pub use profiler::{FrameProfiler, ProfileZone, ZoneStats};
 pub use render_batcher::{BatchKey, GLStateTracker, QuadInstance, RenderBatcher};
 pub use render_stats::{GLCallStats, PassStats, RenderStats};
+pub(crate) use rules_common::{
+    CornerRadiusRule, OpacityRule, ScaleRule, corner_radius_rule_for_class, opacity_rule_for_class,
+    parse_corner_radius_rules, parse_opacity_rules, parse_scale_rules, scale_rule_for_class,
+};
+pub(crate) use rules_common::{
+    blur_strength_for_hz, class_matches_exclude, contains_ignore_case, monitor_id_by_overlap,
+    parse_blur_quality_by_monitor, parse_blur_strength_by_hz,
+};
 pub use shader_cache::ShaderCache;
 pub use subpixel_integration::{SubpixelCompositorIntegration, SubpixelRenderParams};
 pub use subpixel_render::{SubpixelMetrics, SubpixelMode, SubpixelRenderManager, WindowType};
 pub use texture_pool::TexturePool;
+pub(crate) use vsync::VsyncMethod;
+pub(crate) use wallpaper_common::{
+    WallpaperImageData, WallpaperMode, compute_wallpaper_rect, parse_wallpaper_mode,
+    resolve_wallpaper_for_tag,
+};
+pub(crate) use wobbly::WobblyState;
 
 use glow::HasContext;
 use std::collections::HashMap;
@@ -176,90 +214,6 @@ const GLX_TEXTURE_2D_EXT: i32 = 0x20DC;
 const GLX_TEXTURE_FORMAT_RGBA_EXT: i32 = 0x20DA;
 const GLX_TEXTURE_FORMAT_RGB_EXT: i32 = 0x20D9;
 const GLX_FRONT_LEFT_EXT: i32 = 0x20DE;
-
-// ---------------------------------------------------------------------------
-// VSync method selection
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VsyncMethod {
-    Global,         // glXSwapInterval=1 (traditional, all windows locked to one vblank)
-    OmlSyncControl, // GLX_OML_sync_control (per-window MSC-based timing)
-    Present,        // X11 Present extension (per-window independent presentation)
-}
-
-impl Default for VsyncMethod {
-    fn default() -> Self {
-        VsyncMethod::Global
-    }
-}
-
-// ---------------------------------------------------------------------------
-// TFP window texture state machine
-// ---------------------------------------------------------------------------
-
-/// Explicit state machine for window texture lifecycle.
-/// Replaces scattered bool flags (dirty, needs_pixmap_refresh, fading_out).
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-enum WindowTextureState {
-    /// Window just mapped, pixmap being created
-    Initializing,
-    /// Normal operation, texture ready for rendering
-    Active {
-        /// Whether the texture needs TFP refresh from pixmap
-        dirty: bool,
-    },
-    /// Geometry changed, pixmap needs recreation on next render
-    PendingRefresh,
-    /// Window closing, fading out opacity
-    FadingOut {
-        /// Current opacity (0.0 = fully transparent)
-        opacity: f32,
-    },
-    /// Special animation (e.g., genie minimize)
-    Animating {
-        /// Animation type/context
-        kind: String,
-    },
-}
-
-impl WindowTextureState {
-    /// Check if texture is ready for rendering
-    #[allow(dead_code)]
-    fn is_renderable(&self) -> bool {
-        matches!(
-            self,
-            WindowTextureState::Active { .. }
-                | WindowTextureState::FadingOut { .. }
-                | WindowTextureState::Animating { .. }
-        )
-    }
-
-    /// Check if TFP refresh is needed
-    #[allow(dead_code)]
-    fn needs_tfp_refresh(&self) -> bool {
-        matches!(self, WindowTextureState::Active { dirty: true })
-    }
-
-    /// Mark texture as dirty (needs TFP refresh)
-    #[allow(dead_code)]
-    fn mark_dirty(&mut self) {
-        if let WindowTextureState::Active { dirty } = self {
-            *dirty = true;
-        }
-    }
-
-    /// Mark texture clean (TFP refresh complete)
-    #[allow(dead_code)]
-    fn mark_clean(&mut self) {
-        if let WindowTextureState::Active { dirty } = self {
-            *dirty = false;
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 
 struct WindowTexture {
     x: i32,
@@ -399,22 +353,6 @@ struct PortalUniforms {
 
 use transitions_common::TransitionMode;
 
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum WallpaperMode {
-    Fill,
-    Fit,
-    Stretch,
-    Center,
-}
-
-/// Decoded wallpaper image data ready for GPU upload (produced by background thread).
-struct WallpaperImageData {
-    rgba: Vec<u8>,
-    width: u32,
-    height: u32,
-    mode: WallpaperMode,
-}
-
 /// Per-monitor wallpaper state.
 struct MonitorWallpaper {
     /// Monitor geometry in screen coordinates.
@@ -430,27 +368,6 @@ struct MonitorWallpaper {
     /// Currently-loaded wallpaper path (used to skip reloads when active tags
     /// change but the resolved wallpaper for this monitor stays the same).
     current_path: String,
-}
-
-/// Parsed opacity rule: "opacity_percent:class_name"
-#[derive(Clone)]
-struct OpacityRule {
-    opacity: f32, // 0.0..1.0
-    class_name: String,
-}
-
-/// Parsed corner radius rule: "radius:class_name"
-#[derive(Clone)]
-struct CornerRadiusRule {
-    radius: f32,
-    class_name: String,
-}
-
-/// Parsed scale rule: "scale_percent:class_name"
-#[derive(Clone)]
-struct ScaleRule {
-    scale: f32, // 0.0..1.0
-    class_name: String,
 }
 
 // --- Feature 1: Border uniforms ---
@@ -494,34 +411,6 @@ struct HudTextUniforms {
     projection: Option<glow::UniformLocation>,
     rect: Option<glow::UniformLocation>,
     texture: Option<glow::UniformLocation>,
-}
-
-/// Frame timing statistics for the debug HUD (feature 11).
-struct FrameStats {
-    frame_count: u64,
-    last_fps_update: std::time::Instant,
-    fps: f32,
-    frame_times: std::collections::VecDeque<f32>, // P5F.3: VecDeque for O(1) operations
-    last_frame_time: std::time::Instant,
-    // Phase 7.2: Extended debug stats
-    draw_calls: u32,
-    texture_memory_bytes: u64,
-    blur_cache_hits: u64,
-    blur_cache_misses: u64,
-    // Task 8: Input latency tracking
-    last_input_time: Option<std::time::Instant>,
-    latency_samples: std::collections::VecDeque<f32>, // in ms, ring buffer up to 300 samples
-}
-
-/// Per-window wobbly animation state (grid spring-mass system).
-struct WobblyState {
-    grid_n: usize,                 // nodes per axis = grid_size + 1
-    offsets: Vec<[f32; 2]>,        // grid_n * grid_n node offsets (pixels)
-    velocities: Vec<[f32; 2]>,     // grid_n * grid_n node velocities
-    dragging: bool,                // true while interactive move is active
-    anchor_row: usize,             // drag anchor node row
-    anchor_col: usize,             // drag anchor node column
-    last_tick: std::time::Instant, // for accurate dt calculation
 }
 
 /// Entry for Alt-Tab overview mode.
@@ -602,148 +491,6 @@ struct MagnifierUniforms {
 struct ParticleUniforms {
     projection: Option<glow::UniformLocation>,
     point_size: Option<glow::UniformLocation>,
-}
-
-// ---------------------------------------------------------------------------
-// Tile-based damage tracker for partial redraw optimization (Phase 2.1)
-// ---------------------------------------------------------------------------
-
-struct DamageTracker {
-    /// Screen divided into dynamically-sized tiles.
-    dirty_tiles: Vec<bool>,
-    tile_w: u32,
-    tile_h: u32,
-    tile_cols: u32,
-    tile_rows: u32,
-    screen_w: u32,
-    screen_h: u32,
-    window_count: usize,
-    animating: bool,
-}
-
-impl DamageTracker {
-    fn new(screen_w: u32, screen_h: u32) -> Self {
-        let (tile_cols, tile_rows) = Self::compute_grid_size(screen_w, screen_h);
-        let tile_w = (screen_w + tile_cols - 1) / tile_cols;
-        let tile_h = (screen_h + tile_rows - 1) / tile_rows;
-        Self {
-            dirty_tiles: vec![true; (tile_cols * tile_rows) as usize],
-            tile_w,
-            tile_h,
-            tile_cols,
-            tile_rows,
-            screen_w,
-            screen_h,
-            window_count: 0,
-            animating: false,
-        }
-    }
-
-    /// Compute dynamic grid size based on resolution
-    /// 4K: 16x12, 1080p: 8x6, 720p: 5x4
-    fn compute_grid_size(screen_w: u32, screen_h: u32) -> (u32, u32) {
-        let cols = (screen_w / 240).clamp(4, 16);
-        let rows = (screen_h / 180).clamp(3, 12);
-        (cols, rows)
-    }
-
-    /// Update tracking state for dynamic threshold calculation
-    fn update_state(&mut self, window_count: usize, animating: bool) {
-        self.window_count = window_count;
-        self.animating = animating;
-    }
-
-    /// Calculate dynamic threshold based on scene complexity
-    #[allow(dead_code)]
-    fn dynamic_threshold(&self) -> f32 {
-        // Animations need more precision (smaller threshold = more likely to use scissor)
-        if self.animating {
-            return 0.3;
-        }
-        // More windows = more likely to have localized damage
-        match self.window_count {
-            0..=3 => 0.7, // Few windows = large tiles OK, higher threshold
-            4..=8 => 0.5, // Moderate
-            _ => 0.35,    // Many windows = keep scissor precision
-        }
-    }
-
-    fn mark_all_dirty(&mut self) {
-        self.dirty_tiles.fill(true);
-    }
-
-    fn clear(&mut self) {
-        self.dirty_tiles.fill(false);
-    }
-
-    /// Mark a specific region as dirty (tiles overlapping the rect)
-    fn mark_region_dirty(&mut self, x: i32, y: i32, w: u32, h: u32) {
-        let x1 = x.max(0) as u32;
-        let y1 = y.max(0) as u32;
-        let x2 = (x + w as i32).min(self.screen_w as i32) as u32;
-        let y2 = (y + h as i32).min(self.screen_h as i32) as u32;
-
-        let tile_x1 = x1 / self.tile_w;
-        let tile_y1 = y1 / self.tile_h;
-        let tile_x2 = (x2 + self.tile_w - 1) / self.tile_w;
-        let tile_y2 = (y2 + self.tile_h - 1) / self.tile_h;
-
-        for ty in tile_y1..tile_y2.min(self.tile_rows) {
-            for tx in tile_x1..tile_x2.min(self.tile_cols) {
-                self.dirty_tiles[(ty * self.tile_cols + tx) as usize] = true;
-            }
-        }
-    }
-
-    fn dirty_fraction(&self) -> f32 {
-        let dirty = self.dirty_tiles.iter().filter(|&&d| d).count();
-        dirty as f32 / self.dirty_tiles.len() as f32
-    }
-
-    /// Returns the bounding rectangle of all dirty tiles, or None if nothing is dirty.
-    /// Uses dynamic threshold based on scene complexity.
-    #[allow(dead_code)]
-    fn dirty_bounds(&self) -> Option<(i32, i32, u32, u32)> {
-        let threshold = self.dynamic_threshold();
-        if self.dirty_fraction() > threshold {
-            return Some((0, 0, self.screen_w, self.screen_h));
-        }
-        let mut min_x = self.screen_w as i32;
-        let mut min_y = self.screen_h as i32;
-        let mut max_x = 0i32;
-        let mut max_y = 0i32;
-        let mut any_dirty = false;
-        for ty in 0..self.tile_rows {
-            for tx in 0..self.tile_cols {
-                if self.dirty_tiles[(ty * self.tile_cols + tx) as usize] {
-                    any_dirty = true;
-                    let px = (tx * self.tile_w) as i32;
-                    let py = (ty * self.tile_h) as i32;
-                    min_x = min_x.min(px);
-                    min_y = min_y.min(py);
-                    max_x = max_x.max(px + self.tile_w as i32);
-                    max_y = max_y.max(py + self.tile_h as i32);
-                }
-            }
-        }
-        if any_dirty {
-            Some((min_x, min_y, (max_x - min_x) as u32, (max_y - min_y) as u32))
-        } else {
-            None
-        }
-    }
-
-    fn resize(&mut self, screen_w: u32, screen_h: u32) {
-        self.screen_w = screen_w;
-        self.screen_h = screen_h;
-        // Recompute grid size based on new resolution
-        let (tile_cols, tile_rows) = Self::compute_grid_size(screen_w, screen_h);
-        self.tile_cols = tile_cols;
-        self.tile_rows = tile_rows;
-        self.tile_w = (screen_w + tile_cols - 1) / tile_cols;
-        self.tile_h = (screen_h + tile_rows - 1) / tile_rows;
-        self.dirty_tiles = vec![true; (tile_cols * tile_rows) as usize];
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -894,6 +641,7 @@ pub(crate) struct Compositor {
     scale_rules: Vec<ScaleRule>,
 
     // --- Feature 6: Damage region tracking for partial redraw ---
+    partial_damage_enabled: bool,
     damage_tracker: DamageTracker,
     // P5C: Rectangle-level precise dirty tracking
     dirty_region_tracker: DirtyRegionTracker,

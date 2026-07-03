@@ -226,12 +226,7 @@ impl Compositor {
             0.0
         };
 
-        let dirty_tiles_count = self
-            .damage_tracker
-            .dirty_tiles
-            .iter()
-            .filter(|&&d| d)
-            .count();
+        let dirty_tiles_count = self.damage_tracker.dirty_tile_count();
         let dirty_fraction = self.damage_tracker.dirty_fraction();
 
         let latency_stats = self.compute_latency_stats();
@@ -880,7 +875,7 @@ impl Compositor {
 
         // P5C Phase 3: Apply scissor test using rectangle-based dirty tracker
         let dirty_rect = self.dirty_region_tracker.merged();
-        let use_scissor = dirty_rect.is_some() && !force_render;
+        let use_scissor = self.partial_damage_enabled && dirty_rect.is_some() && !force_render;
         let mut damage_scissor = (0i32, 0i32, self.screen_w as i32, self.screen_h as i32);
         if let (true, Some(rect)) = (use_scissor, dirty_rect) {
             unsafe {
@@ -976,7 +971,7 @@ impl Compositor {
                                 mw.mon_w as f32,
                                 mw.mon_h as f32,
                             );
-                            let (rx, ry, rw, rh) = Self::compute_wallpaper_rect(mode, area, iw, ih);
+                            let (rx, ry, rw, rh) = compute_wallpaper_rect(mode, area, iw, ih);
                             self.gl
                                 .uniform_4_f32(self.win_uniforms.rect.as_ref(), rx, ry, rw, rh);
                             self.gl
@@ -988,7 +983,7 @@ impl Compositor {
                     } else if let Some(wp_tex) = self.wallpaper_texture {
                         // Single global wallpaper (no monitors set yet)
                         let area = (0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
-                        let (rx, ry, rw, rh) = Self::compute_wallpaper_rect(
+                        let (rx, ry, rw, rh) = compute_wallpaper_rect(
                             self.wallpaper_mode,
                             area,
                             self.wallpaper_img_w,
@@ -1011,7 +1006,7 @@ impl Compositor {
                         let old_opacity = (1.0 - elapsed / duration).max(0.0);
                         if old_opacity > 0.0 {
                             let area = (0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
-                            let (rx, ry, rw, rh) = Self::compute_wallpaper_rect(
+                            let (rx, ry, rw, rh) = compute_wallpaper_rect(
                                 self.wallpaper_mode,
                                 area,
                                 self.wallpaper_img_w,
@@ -1108,7 +1103,7 @@ impl Compositor {
                         continue;
                     }
                     // Per-window shadow exclude
-                    if Self::class_matches_exclude(&wt.class_name, &self.shadow_exclude) {
+                    if class_matches_exclude(&wt.class_name, &self.shadow_exclude) {
                         continue;
                     }
                     // Feature 14: Skip shadow for shaped windows (non-rectangular)
@@ -1136,10 +1131,7 @@ impl Compositor {
 
                     // Feature 3: Per-window corner radius for shadow
                     let win_radius = wt.corner_radius_override.unwrap_or(
-                        if Self::class_matches_exclude(
-                            &wt.class_name,
-                            &self.rounded_corners_exclude,
-                        ) {
+                        if class_matches_exclude(&wt.class_name, &self.rounded_corners_exclude) {
                             0.0
                         } else {
                             self.corner_radius
@@ -1275,10 +1267,8 @@ impl Compositor {
                         0.0
                     } else {
                         wt.corner_radius_override.unwrap_or(
-                            if Self::class_matches_exclude(
-                                &wt.class_name,
-                                &self.rounded_corners_exclude,
-                            ) {
+                            if class_matches_exclude(&wt.class_name, &self.rounded_corners_exclude)
+                            {
                                 0.0
                             } else {
                                 self.corner_radius
@@ -2178,7 +2168,7 @@ impl Compositor {
                 max_dt * 1000.0,
                 min_dt * 1000.0,
                 self.windows.len(),
-                self.damage_tracker.dirty_tiles.len(),
+                self.damage_tracker.tile_count(),
                 self.damage_tracker.dirty_fraction() * 100.0,
                 self.sys_stats.rss_mib(),
                 self.sys_stats.cpu_pct(),
@@ -2430,6 +2420,7 @@ impl Compositor {
             let scissor_gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
 
             match self.transition_mode {
+                TransitionMode::None => {}
                 TransitionMode::Slide => {
                     // --- Slide mode: old scene slides out + fades ---
                     // New scene is already in the back-buffer at final position.

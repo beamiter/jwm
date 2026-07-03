@@ -1,4 +1,4 @@
-use super::{Compositor, SnapPreview, WindowTab};
+use super::{Compositor, SnapPreview, WindowTab, class_matches_exclude};
 use crate::backend::compositor_common::expose::{build_expose_entries, tick_expose_entries};
 use glow::HasContext;
 
@@ -390,7 +390,7 @@ impl Compositor {
         if !self.peek_active && self.peek_opacity >= 1.0 {
             return 1.0;
         }
-        if Self::class_matches_exclude(class_name, &self.peek_exclude) {
+        if class_matches_exclude(class_name, &self.peek_exclude) {
             return 1.0;
         }
         self.peek_opacity

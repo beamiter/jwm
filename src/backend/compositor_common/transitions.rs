@@ -1,5 +1,6 @@
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TransitionMode {
+    None,
     Slide,
     Cube,
     Fade,
@@ -25,6 +26,14 @@ impl TransitionMode {
             "helix" => Self::Helix,
             "portal" => Self::Portal,
             _ => Self::Slide,
+        }
+    }
+
+    pub fn from_name_or_none(mode: &str) -> Self {
+        match mode {
+            "none" => Self::None,
+            "" => Self::None,
+            _ => Self::from_name(mode),
         }
     }
 
@@ -54,6 +63,14 @@ mod tests {
             TransitionMode::from_name("unknown"),
             TransitionMode::Slide
         ));
+        assert!(matches!(
+            TransitionMode::from_name_or_none("unknown"),
+            TransitionMode::Slide
+        ));
+        assert!(matches!(
+            TransitionMode::from_name_or_none("none"),
+            TransitionMode::None
+        ));
     }
 
     #[test]
@@ -61,6 +78,7 @@ mod tests {
         assert!(TransitionMode::Cube.needs_new_scene_fbo());
         assert!(TransitionMode::Portal.needs_new_scene_fbo());
         assert!(!TransitionMode::Slide.needs_new_scene_fbo());
+        assert!(!TransitionMode::None.needs_new_scene_fbo());
         assert!(!TransitionMode::Fade.needs_new_scene_fbo());
         assert!(!TransitionMode::Stack.needs_new_scene_fbo());
     }

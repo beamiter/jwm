@@ -30,77 +30,15 @@ use x11rb::rust_connection::RustConnection;
 #[allow(unused_imports)]
 use x11rb::wrapper::ConnectionExt as WrapperExt;
 
-/// ASCII case-insensitive substring test that performs no heap allocation.
-/// Window class names are ASCII identifiers in practice, so ASCII case folding
-/// is sufficient and avoids the per-call `String` allocs that
-/// `haystack.to_lowercase().contains(&needle.to_lowercase())` incurs.
-fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
-    let n = needle.len();
-    if n == 0 {
-        return true;
-    }
-    let h = haystack.as_bytes();
-    let ne = needle.as_bytes();
-    if h.len() < n {
-        return false;
-    }
-    let first = ne[0].to_ascii_lowercase();
-    for start in 0..=h.len() - n {
-        if h[start].to_ascii_lowercase() != first {
-            continue;
-        }
-        if h[start..start + n]
-            .iter()
-            .zip(ne)
-            .all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase())
-        {
-            return true;
-        }
-    }
-    false
-}
-
 impl Compositor {
-    /// Check if a window class matches any entry in an exclude list.
-    pub(super) fn class_matches_exclude(class_name: &str, exclude_list: &[String]) -> bool {
-        if class_name.is_empty() {
-            return false;
-        }
-        // Screenshot overlays like Flameshot are full-screen translucent windows
-        // that update every pointer move. Running blur/shadow/rounding on them is
-        // very expensive and causes visible stutter during region selection.
-        if class_name.eq_ignore_ascii_case("flameshot") {
-            return true;
-        }
-        exclude_list
-            .iter()
-            .any(|ex| ex.eq_ignore_ascii_case(class_name))
-    }
-
     /// Look up per-window opacity from opacity_rules.
     pub(super) fn lookup_opacity_rule(&self, class_name: &str) -> Option<f32> {
-        if class_name.is_empty() {
-            return None;
-        }
-        for rule in &self.opacity_rules {
-            if rule.class_name.eq_ignore_ascii_case(class_name) {
-                return Some(rule.opacity);
-            }
-        }
-        None
+        opacity_rule_for_class(&self.opacity_rules, class_name)
     }
 
     /// Look up per-window corner radius (feature 3).
     pub(super) fn lookup_corner_radius_rule(&self, class_name: &str) -> Option<f32> {
-        if class_name.is_empty() {
-            return None;
-        }
-        for rule in &self.corner_radius_rules {
-            if rule.class_name.eq_ignore_ascii_case(class_name) {
-                return Some(rule.radius);
-            }
-        }
-        None
+        corner_radius_rule_for_class(&self.corner_radius_rules, class_name)
     }
 
     /// Look up whether a window should have frosted glass effect.
@@ -253,20 +191,7 @@ impl Compositor {
 
     /// Compute latency statistics (p50, p95, p99)
     pub(super) fn compute_latency_stats(&self) -> (f32, f32, f32, f32) {
-        if self.frame_stats.latency_samples.is_empty() {
-            return (0.0, 0.0, 0.0, 0.0);
-        }
-
-        let mut sorted: Vec<f32> = self.frame_stats.latency_samples.iter().copied().collect();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-        let len = sorted.len();
-        let p50_idx = (len * 50 / 100).min(len - 1);
-        let p95_idx = (len * 95 / 100).min(len - 1);
-        let p99_idx = (len * 99 / 100).min(len - 1);
-
-        let avg = sorted.iter().sum::<f32>() / len as f32;
-        (avg, sorted[p50_idx], sorted[p95_idx], sorted[p99_idx])
+        latency_stats(self.frame_stats.latency_samples.iter().copied())
     }
 
     /// P5B: Build monitor rectangles from RandR outputs
@@ -441,47 +366,11 @@ impl Compositor {
         window_h: u32,
     ) -> u32 {
         if let Some(id) =
-            Self::monitor_id_by_overlap(&self.monitor_rects, window_x, window_y, window_w, window_h)
+            monitor_id_by_overlap(&self.monitor_rects, window_x, window_y, window_w, window_h)
         {
             return id;
         }
         self.monitor_rects.first().map(|r| r.0).unwrap_or(0)
-    }
-
-    pub(crate) fn monitor_id_by_overlap(
-        monitors: &[(u32, i32, i32, u32, u32)],
-        x: i32,
-        y: i32,
-        w: u32,
-        h: u32,
-    ) -> Option<u32> {
-        if monitors.is_empty() {
-            return None;
-        }
-        let wx2 = x + w as i32;
-        let wy2 = y + h as i32;
-        let mut best: Option<(u32, i64)> = None;
-        for &(id, mx, my, mw, mh) in monitors {
-            let mx2 = mx + mw as i32;
-            let my2 = my + mh as i32;
-            let ix = (wx2.min(mx2) - x.max(mx)).max(0) as i64;
-            let iy = (wy2.min(my2) - y.max(my)).max(0) as i64;
-            let area = ix * iy;
-            if area > 0 && best.map_or(true, |(_, ba)| area > ba) {
-                best = Some((id, area));
-            }
-        }
-        if let Some((id, _)) = best {
-            return Some(id);
-        }
-        let cx = x + w as i32 / 2;
-        let cy = y + h as i32 / 2;
-        for &(id, mx, my, mw, mh) in monitors {
-            if cx >= mx && cx < mx + mw as i32 && cy >= my && cy < my + mh as i32 {
-                return Some(id);
-            }
-        }
-        None
     }
 
     /// P5B Phase 2: Get refresh rate for a specific monitor
@@ -622,105 +511,10 @@ impl Compositor {
     }
 
     /// Parse blur_strength_by_hz config string: "60:2,75:2.5,144:3.5" -> [(60, 2), (75, 2), (144, 3)]
-    pub(super) fn parse_blur_strength_by_hz(config_str: &str) -> Vec<(u32, u32)> {
-        let mut result = Vec::new();
-        if config_str.is_empty() {
-            return result;
-        }
-        for pair in config_str.split(',') {
-            let parts: Vec<&str> = pair.trim().split(':').collect();
-            if parts.len() == 2 {
-                if let (Ok(hz), Ok(strength_f)) = (
-                    parts[0].trim().parse::<u32>(),
-                    parts[1].trim().parse::<f32>(),
-                ) {
-                    result.push((hz, strength_f as u32));
-                }
-            }
-        }
-        result.sort_by_key(|p| p.0); // Sort by Hz ascending
-        result
-    }
-
-    /// Get blur strength for a given refresh rate Hz (static version for use during init).
-    /// If exact Hz not found, returns closest lower, or if none, closest higher.
-    pub(super) fn new_get_blur_strength_for_hz_static(
-        blur_strength_by_hz: &[(u32, u32)],
-        hz: u32,
-    ) -> Option<u32> {
-        if blur_strength_by_hz.is_empty() {
-            return None;
-        }
-
-        // Find exact match or closest lower
-        for (i, &(config_hz, strength)) in blur_strength_by_hz.iter().enumerate() {
-            if config_hz == hz {
-                return Some(strength);
-            }
-            if config_hz > hz {
-                // Not found exact, try previous
-                if i > 0 {
-                    return Some(blur_strength_by_hz[i - 1].1);
-                }
-                // No lower value, use this one
-                return Some(strength);
-            }
-        }
-        // All values are lower, use the last one
-        blur_strength_by_hz.last().map(|p| p.1)
-    }
-
-    /// Parse blur_quality_by_monitor config string: "primary:Full,secondary:Reduced"
-    pub(super) fn parse_blur_quality_by_monitor(config_str: &str) -> HashMap<u32, BlurQuality> {
-        let mut result = HashMap::new();
-        if config_str.is_empty() {
-            return result;
-        }
-        let monitor_names = ["primary", "secondary", "tertiary", "quaternary", "quinary"];
-        for pair in config_str.split(',') {
-            let parts: Vec<&str> = pair.trim().split(':').collect();
-            if parts.len() == 2 {
-                let monitor_name = parts[0].trim();
-                let quality_str = parts[1].trim();
-
-                // Map monitor name to index
-                if let Some(idx) = monitor_names.iter().position(|&n| n == monitor_name) {
-                    let quality = match quality_str {
-                        "Full" => BlurQuality::Full,
-                        "Reduced" => BlurQuality::Reduced,
-                        "Minimal" => BlurQuality::Minimal,
-                        _ => continue,
-                    };
-                    result.insert(idx as u32, quality);
-                }
-            }
-        }
-        result
-    }
-
     /// Get blur strength for a given refresh rate Hz.
     /// If exact Hz not found, returns closest lower, or if none, closest higher.
     pub(super) fn get_blur_strength_for_hz(&self, hz: u32) -> Option<u32> {
-        if self.blur_strength_by_hz.is_empty() {
-            return None;
-        }
-
-        // Find exact match or closest lower
-        for (i, &(config_hz, strength)) in self.blur_strength_by_hz.iter().enumerate() {
-            if config_hz == hz {
-                return Some(strength);
-            }
-            if config_hz > hz {
-                // Not found exact, try previous
-                if i > 0 {
-                    return Some(self.blur_strength_by_hz[i - 1].1);
-                }
-                // No lower value, use this one
-                return Some(strength);
-            }
-        }
-        // All values are lower, use the last one
-        self.blur_strength_by_hz.last().map(|p| p.1)
+        blur_strength_for_hz(&self.blur_strength_by_hz, hz)
     }
 
     /// Compute a hash of all visible window positions (for temporal blur reuse detection).
@@ -918,7 +712,7 @@ impl Compositor {
         if wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name) {
             return false;
         }
-        if Self::class_matches_exclude(&wt.class_name, &self.blur_exclude) {
+        if class_matches_exclude(&wt.class_name, &self.blur_exclude) {
             return false;
         }
         // Skip backdrop blur for large override-redirect RGBA windows.  These
@@ -945,319 +739,6 @@ impl Compositor {
 
     /// Look up per-window scale (feature 4).
     pub(super) fn lookup_scale_rule(&self, class_name: &str) -> Option<f32> {
-        if class_name.is_empty() {
-            return None;
-        }
-        for rule in &self.scale_rules {
-            if rule.class_name.eq_ignore_ascii_case(class_name) {
-                return Some(rule.scale);
-            }
-        }
-        None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // -----------------------------------------------------------------------
-    // class_matches_exclude
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_class_matches_exclude_empty_name() {
-        let list = vec!["firefox".to_string()];
-        assert!(!Compositor::class_matches_exclude("", &list));
-    }
-
-    #[test]
-    fn test_class_matches_exclude_empty_list() {
-        assert!(!Compositor::class_matches_exclude("firefox", &[]));
-    }
-
-    #[test]
-    fn test_class_matches_exclude_exact_match() {
-        let list = vec!["firefox".to_string(), "chromium".to_string()];
-        assert!(Compositor::class_matches_exclude("firefox", &list));
-        assert!(Compositor::class_matches_exclude("chromium", &list));
-    }
-
-    #[test]
-    fn test_class_matches_exclude_case_insensitive() {
-        let list = vec!["Firefox".to_string()];
-        assert!(Compositor::class_matches_exclude("firefox", &list));
-        assert!(Compositor::class_matches_exclude("FIREFOX", &list));
-        assert!(Compositor::class_matches_exclude("FireFox", &list));
-    }
-
-    #[test]
-    fn test_class_matches_exclude_not_in_list() {
-        let list = vec!["firefox".to_string()];
-        assert!(!Compositor::class_matches_exclude("chromium", &list));
-    }
-
-    #[test]
-    fn test_class_matches_exclude_flameshot_hardcoded() {
-        // Flameshot is always excluded regardless of list
-        assert!(Compositor::class_matches_exclude("flameshot", &[]));
-        assert!(Compositor::class_matches_exclude("Flameshot", &[]));
-        assert!(Compositor::class_matches_exclude("FLAMESHOT", &[]));
-    }
-
-    // -----------------------------------------------------------------------
-    // parse_blur_strength_by_hz
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_parse_blur_strength_by_hz_empty() {
-        let result = Compositor::parse_blur_strength_by_hz("");
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_parse_blur_strength_by_hz_single() {
-        let result = Compositor::parse_blur_strength_by_hz("60:2");
-        assert_eq!(result, vec![(60, 2)]);
-    }
-
-    #[test]
-    fn test_parse_blur_strength_by_hz_multiple() {
-        let result = Compositor::parse_blur_strength_by_hz("60:2,75:2,144:3");
-        assert_eq!(result, vec![(60, 2), (75, 2), (144, 3)]);
-    }
-
-    #[test]
-    fn test_parse_blur_strength_by_hz_sorted_ascending() {
-        // Input out of order; output must be sorted by Hz
-        let result = Compositor::parse_blur_strength_by_hz("144:3,60:2,75:2");
-        assert_eq!(result[0].0, 60);
-        assert_eq!(result[1].0, 75);
-        assert_eq!(result[2].0, 144);
-    }
-
-    #[test]
-    fn test_parse_blur_strength_by_hz_float_strength_truncated() {
-        // f32 cast to u32 truncates
-        let result = Compositor::parse_blur_strength_by_hz("60:2.9");
-        assert_eq!(result, vec![(60, 2)]);
-    }
-
-    #[test]
-    fn test_parse_blur_strength_by_hz_invalid_entries_skipped() {
-        let result = Compositor::parse_blur_strength_by_hz("60:2,bad,144:3");
-        assert_eq!(result, vec![(60, 2), (144, 3)]);
-    }
-
-    #[test]
-    fn test_parse_blur_strength_by_hz_whitespace_trimmed() {
-        let result = Compositor::parse_blur_strength_by_hz(" 60 : 2 , 144 : 3 ");
-        assert_eq!(result, vec![(60, 2), (144, 3)]);
-    }
-
-    // -----------------------------------------------------------------------
-    // new_get_blur_strength_for_hz_static
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_blur_strength_for_hz_empty_returns_none() {
-        assert_eq!(
-            Compositor::new_get_blur_strength_for_hz_static(&[], 60),
-            None
-        );
-    }
-
-    #[test]
-    fn test_blur_strength_for_hz_exact_match() {
-        let table = vec![(60, 2), (144, 4)];
-        assert_eq!(
-            Compositor::new_get_blur_strength_for_hz_static(&table, 60),
-            Some(2)
-        );
-        assert_eq!(
-            Compositor::new_get_blur_strength_for_hz_static(&table, 144),
-            Some(4)
-        );
-    }
-
-    #[test]
-    fn test_blur_strength_for_hz_closest_lower() {
-        let table = vec![(60, 2), (144, 4)];
-        // 75Hz: no exact match; closest lower is 60Hz → strength 2
-        assert_eq!(
-            Compositor::new_get_blur_strength_for_hz_static(&table, 75),
-            Some(2)
-        );
-    }
-
-    #[test]
-    fn test_blur_strength_for_hz_below_all_uses_first() {
-        let table = vec![(60, 2), (144, 4)];
-        // 30Hz: below all entries → use first (60Hz)
-        assert_eq!(
-            Compositor::new_get_blur_strength_for_hz_static(&table, 30),
-            Some(2)
-        );
-    }
-
-    #[test]
-    fn test_blur_strength_for_hz_above_all_uses_last() {
-        let table = vec![(60, 2), (144, 4)];
-        // 240Hz: above all → use last (144Hz)
-        assert_eq!(
-            Compositor::new_get_blur_strength_for_hz_static(&table, 240),
-            Some(4)
-        );
-    }
-
-    #[test]
-    fn test_blur_strength_for_hz_single_entry() {
-        let table = vec![(60, 3)];
-        assert_eq!(
-            Compositor::new_get_blur_strength_for_hz_static(&table, 30),
-            Some(3)
-        );
-        assert_eq!(
-            Compositor::new_get_blur_strength_for_hz_static(&table, 60),
-            Some(3)
-        );
-        assert_eq!(
-            Compositor::new_get_blur_strength_for_hz_static(&table, 120),
-            Some(3)
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // parse_blur_quality_by_monitor
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_parse_blur_quality_by_monitor_empty() {
-        let result = Compositor::parse_blur_quality_by_monitor("");
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_parse_blur_quality_by_monitor_primary() {
-        let result = Compositor::parse_blur_quality_by_monitor("primary:Full");
-        assert_eq!(result.get(&0), Some(&BlurQuality::Full));
-    }
-
-    #[test]
-    fn test_parse_blur_quality_by_monitor_secondary_reduced() {
-        let result = Compositor::parse_blur_quality_by_monitor("secondary:Reduced");
-        assert_eq!(result.get(&1), Some(&BlurQuality::Reduced));
-    }
-
-    #[test]
-    fn test_parse_blur_quality_by_monitor_all_variants() {
-        let result = Compositor::parse_blur_quality_by_monitor(
-            "primary:Full,secondary:Reduced,tertiary:Minimal",
-        );
-        assert_eq!(result.get(&0), Some(&BlurQuality::Full));
-        assert_eq!(result.get(&1), Some(&BlurQuality::Reduced));
-        assert_eq!(result.get(&2), Some(&BlurQuality::Minimal));
-    }
-
-    #[test]
-    fn test_parse_blur_quality_by_monitor_unknown_quality_skipped() {
-        let result = Compositor::parse_blur_quality_by_monitor("primary:Ultra");
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_parse_blur_quality_by_monitor_unknown_monitor_skipped() {
-        let result = Compositor::parse_blur_quality_by_monitor("sixth:Full");
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_parse_blur_quality_by_monitor_whitespace_trimmed() {
-        let result = Compositor::parse_blur_quality_by_monitor(" primary : Full ");
-        assert_eq!(result.get(&0), Some(&BlurQuality::Full));
-    }
-
-    // -----------------------------------------------------------------------
-    // compute_latency_stats
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_compute_latency_stats_empty() {
-        // We can't construct Compositor directly; test the math inline
-        // to mirror what compute_latency_stats does.
-        let samples: Vec<f32> = vec![];
-        let (avg, p50, p95, p99) = if samples.is_empty() {
-            (0.0f32, 0.0f32, 0.0f32, 0.0f32)
-        } else {
-            let mut sorted = samples.clone();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let len = sorted.len();
-            let avg = sorted.iter().sum::<f32>() / len as f32;
-            (
-                avg,
-                sorted[len * 50 / 100],
-                sorted[len * 95 / 100],
-                sorted[len * 99 / 100],
-            )
-        };
-        assert_eq!(avg, 0.0);
-        assert_eq!(p50, 0.0);
-        assert_eq!(p95, 0.0);
-        assert_eq!(p99, 0.0);
-    }
-
-    #[test]
-    fn test_compute_latency_stats_uniform() {
-        // All samples equal → all percentiles equal the value
-        let samples: Vec<f32> = vec![20.0; 100];
-        let mut sorted = samples.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let len = sorted.len();
-        let avg = sorted.iter().sum::<f32>() / len as f32;
-        let p50 = sorted[(len * 50 / 100).min(len - 1)];
-        let p95 = sorted[(len * 95 / 100).min(len - 1)];
-        let p99 = sorted[(len * 99 / 100).min(len - 1)];
-        assert!((avg - 20.0).abs() < 0.001);
-        assert!((p50 - 20.0).abs() < 0.001);
-        assert!((p95 - 20.0).abs() < 0.001);
-        assert!((p99 - 20.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_compute_latency_stats_ordered() {
-        // p50 ≤ p95 ≤ p99
-        let mut samples: Vec<f32> = (1..=100).map(|i| i as f32).collect();
-        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let len = samples.len();
-        let p50 = samples[(len * 50 / 100).min(len - 1)];
-        let p95 = samples[(len * 95 / 100).min(len - 1)];
-        let p99 = samples[(len * 99 / 100).min(len - 1)];
-        assert!(p50 <= p95);
-        assert!(p95 <= p99);
-    }
-
-    #[test]
-    fn test_monitor_id_by_overlap_x11_side_by_side() {
-        let monitors = vec![
-            (0u32, 0i32, 0i32, 1920u32, 1080u32),
-            (1u32, 1920i32, 0i32, 1920u32, 1080u32),
-        ];
-        // Window entirely on monitor 1.
-        assert_eq!(
-            Compositor::monitor_id_by_overlap(&monitors, 2000, 100, 400, 300),
-            Some(1)
-        );
-        // Straddling, more area on monitor 0.
-        assert_eq!(
-            Compositor::monitor_id_by_overlap(&monitors, 1340, 100, 1000, 500),
-            Some(0)
-        );
-        // Off-screen below: no overlap, no center hit.
-        assert_eq!(
-            Compositor::monitor_id_by_overlap(&monitors, 100, 5000, 200, 200),
-            None
-        );
-        // Empty monitors.
-        assert_eq!(Compositor::monitor_id_by_overlap(&[], 0, 0, 100, 100), None);
+        scale_rule_for_class(&self.scale_rules, class_name)
     }
 }

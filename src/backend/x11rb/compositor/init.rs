@@ -1198,62 +1198,10 @@ impl Compositor {
             }
         };
 
-        // Parse opacity rules ("opacity_percent:class_name")
-        let opacity_rules: Vec<OpacityRule> = behavior
-            .opacity_rules
-            .iter()
-            .filter_map(|rule| {
-                let parts: Vec<&str> = rule.splitn(2, ':').collect();
-                if parts.len() == 2 {
-                    if let Ok(pct) = parts[0].trim().parse::<f32>() {
-                        return Some(OpacityRule {
-                            opacity: (pct / 100.0).clamp(0.0, 1.0),
-                            class_name: parts[1].trim().to_string(),
-                        });
-                    }
-                }
-                log::warn!("compositor: invalid opacity rule: {rule}");
-                None
-            })
-            .collect();
-
-        // Parse corner radius rules ("radius:class_name") — feature 3
-        let corner_radius_rules: Vec<CornerRadiusRule> = behavior
-            .corner_radius_rules
-            .iter()
-            .filter_map(|rule| {
-                let parts: Vec<&str> = rule.splitn(2, ':').collect();
-                if parts.len() == 2 {
-                    if let Ok(r) = parts[0].trim().parse::<f32>() {
-                        return Some(CornerRadiusRule {
-                            radius: r.max(0.0),
-                            class_name: parts[1].trim().to_string(),
-                        });
-                    }
-                }
-                log::warn!("compositor: invalid corner radius rule: {rule}");
-                None
-            })
-            .collect();
-
-        // Parse scale rules ("scale_percent:class_name") — feature 4
-        let scale_rules: Vec<ScaleRule> = behavior
-            .scale_rules
-            .iter()
-            .filter_map(|rule| {
-                let parts: Vec<&str> = rule.splitn(2, ':').collect();
-                if parts.len() == 2 {
-                    if let Ok(pct) = parts[0].trim().parse::<f32>() {
-                        return Some(ScaleRule {
-                            scale: (pct / 100.0).clamp(0.1, 2.0),
-                            class_name: parts[1].trim().to_string(),
-                        });
-                    }
-                }
-                log::warn!("compositor: invalid scale rule: {rule}");
-                None
-            })
-            .collect();
+        // Parse per-window rules.
+        let opacity_rules = parse_opacity_rules(&behavior.opacity_rules);
+        let corner_radius_rules = parse_corner_radius_rules(&behavior.corner_radius_rules);
+        let scale_rules = parse_scale_rules(&behavior.scale_rules);
 
         // Create blur FBOs if blur is enabled
         let blur_fbos = if behavior.blur_enabled {
@@ -1271,7 +1219,7 @@ impl Compositor {
 
         // Load wallpaper asynchronously — decode on background thread so the
         // desktop appears immediately and the wallpaper fades in once ready.
-        let wallpaper_mode = Self::parse_wallpaper_mode(&behavior.wallpaper_mode);
+        let wallpaper_mode = parse_wallpaper_mode(&behavior.wallpaper_mode);
         let pending_wallpaper = if !behavior.wallpaper.is_empty() {
             Some(Self::load_wallpaper_async(
                 &behavior.wallpaper,
@@ -1297,11 +1245,11 @@ impl Compositor {
         };
 
         // Parse P4: blur_strength_by_hz configuration
-        let blur_strength_by_hz = Self::parse_blur_strength_by_hz(&behavior.blur_strength_by_hz);
+        let blur_strength_by_hz = parse_blur_strength_by_hz(&behavior.blur_strength_by_hz);
 
         // Parse P4: blur_quality_by_monitor configuration
         let blur_quality_by_monitor =
-            Self::parse_blur_quality_by_monitor(&behavior.blur_quality_by_monitor);
+            parse_blur_quality_by_monitor(&behavior.blur_quality_by_monitor);
 
         // P5: Apply dynamic blur strength based on Hz
         // Use actual primary monitor refresh rate (now queried from RandR)
@@ -1309,7 +1257,7 @@ impl Compositor {
         if !blur_strength_by_hz.is_empty() {
             // Use actual primary monitor refresh rate from RandR
             if let Some(hz_strength) =
-                Self::new_get_blur_strength_for_hz_static(&blur_strength_by_hz, primary_refresh_hz)
+                blur_strength_for_hz(&blur_strength_by_hz, primary_refresh_hz)
             {
                 dynamic_blur_strength = hz_strength;
                 log::info!(
@@ -1410,6 +1358,7 @@ impl Compositor {
             // Feature 4: scale
             scale_rules,
             // Feature 6: damage tracking (tile-based, Phase 2.1)
+            partial_damage_enabled: true,
             damage_tracker: DamageTracker::new(screen_w, screen_h),
             // P5C: Rectangle-level dirty tracking
             dirty_region_tracker: DirtyRegionTracker::new(screen_w, screen_h),
@@ -1446,19 +1395,7 @@ impl Compositor {
             hud_text_cache: String::new(),
             debug_hud: behavior.debug_hud,
             sys_stats: crate::backend::sys_stats::SysStatsSampler::new(),
-            frame_stats: FrameStats {
-                frame_count: 0,
-                last_fps_update: std::time::Instant::now(),
-                fps: 0.0,
-                frame_times: std::collections::VecDeque::with_capacity(120), // P5F.3
-                last_frame_time: std::time::Instant::now(),
-                draw_calls: 0,
-                texture_memory_bytes: 0,
-                blur_cache_hits: 0,
-                blur_cache_misses: 0,
-                last_input_time: None,
-                latency_samples: std::collections::VecDeque::with_capacity(300),
-            },
+            frame_stats: FrameStats::new(),
             // Feature 12: screenshot
             pending_screenshot: None,
             pending_screenshot_region: None,

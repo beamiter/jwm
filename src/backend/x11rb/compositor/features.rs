@@ -31,6 +31,21 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as WrapperExt;
 
 impl Compositor {
+    pub(crate) fn has_partial_damage(&self) -> bool {
+        self.partial_damage_enabled
+    }
+
+    pub(crate) fn set_partial_damage(&mut self, enabled: bool) -> bool {
+        if self.partial_damage_enabled == enabled {
+            return false;
+        }
+        self.partial_damage_enabled = enabled;
+        self.damage_tracker.mark_all_dirty();
+        self.dirty_region_tracker.mark_all_dirty();
+        self.needs_render = true;
+        true
+    }
+
     pub(crate) fn set_mouse_position(&mut self, x: f32, y: f32) {
         self.mouse_x = x;
         self.mouse_y = y;
@@ -252,19 +267,10 @@ impl Compositor {
             // Determine anchor node: closest grid node to mouse position
             let rel_x = ((self.mouse_x - wt.x as f32).max(0.0)).min(wt.w as f32);
             let rel_y = ((self.mouse_y - wt.y as f32).max(0.0)).min(wt.h as f32);
-            let anchor_col = ((rel_x / wt.w as f32) * (grid_n - 1) as f32).round() as usize;
-            let anchor_row = ((rel_y / wt.h as f32) * (grid_n - 1) as f32).round() as usize;
+            let (anchor_row, anchor_col) =
+                WobblyState::anchor_for_point(grid_n, rel_x, rel_y, wt.w as f32, wt.h as f32);
 
-            let count = grid_n * grid_n;
-            wt.wobbly = Some(WobblyState {
-                grid_n,
-                offsets: vec![[0.0; 2]; count],
-                velocities: vec![[0.0; 2]; count],
-                dragging: true,
-                anchor_row: anchor_row.min(grid_n - 1),
-                anchor_col: anchor_col.min(grid_n - 1),
-                last_tick: std::time::Instant::now(),
-            });
+            wt.wobbly = Some(WobblyState::new(grid_n, anchor_row, anchor_col));
         } else {
             log::warn!(
                 "[wobbly] move_start: window 0x{:x} not tracked by compositor",
@@ -289,23 +295,7 @@ impl Compositor {
                     // The window has already moved to the new position.
                     // Anchor node stays at [0,0] (moves with the window).
                     // All OTHER nodes get a reverse impulse to simulate inertia.
-                    let n = w.grid_n;
-                    let ar = w.anchor_row;
-                    let ac = w.anchor_col;
-                    for row in 0..n {
-                        for col in 0..n {
-                            if row == ar && col == ac {
-                                continue;
-                            }
-                            let idx = row * n + col;
-                            w.offsets[idx][0] -= dx;
-                            w.offsets[idx][1] -= dy;
-                        }
-                    }
-                    // Ensure anchor stays pinned at zero
-                    let ai = ar * n + ac;
-                    w.offsets[ai] = [0.0, 0.0];
-                    w.velocities[ai] = [0.0, 0.0];
+                    w.apply_window_move_delta(dx, dy);
                 }
             }
         }
@@ -334,7 +324,7 @@ impl Compositor {
         // Release anchor — let all nodes spring back via tick_wobbly
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             if let Some(ref mut w) = wt.wobbly {
-                w.dragging = false;
+                w.end_drag();
             }
         }
     }

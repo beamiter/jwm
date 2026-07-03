@@ -1792,6 +1792,19 @@ impl Backend for XcbBackend {
         Ok(true)
     }
 
+    fn has_partial_damage(&self) -> bool {
+        self.compositor
+            .as_ref()
+            .is_some_and(|c| c.has_partial_damage())
+    }
+
+    fn set_partial_damage(&mut self, enabled: bool) -> XcbResult<bool> {
+        Ok(self
+            .compositor
+            .as_mut()
+            .is_some_and(|c| c.set_partial_damage(enabled)))
+    }
+
     fn compositor_needs_render(&self) -> bool {
         self.compositor.as_ref().is_some_and(|c| c.needs_render())
     }

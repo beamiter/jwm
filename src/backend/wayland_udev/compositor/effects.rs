@@ -83,11 +83,6 @@ impl WaylandCompositor {
             }
             return;
         }
-        // Implementation: for each window with wobbly state, iterate 3 sub-steps:
-        // For each node, compute spring forces from neighbors + restore force toward rest position
-        // Apply velocity damping, integrate with symplectic euler
-        let sub_steps = 3;
-        let sub_dt = dt / sub_steps as f32;
         let spring_k = 800.0f32;
         let damping = 12.0f32;
         let restore_k = 200.0f32;
@@ -97,79 +92,8 @@ impl WaylandCompositor {
                 Some(w) => w,
                 None => continue,
             };
-            let grid_n = wobbly.grid_n;
-
-            for _ in 0..sub_steps {
-                let mut forces: Vec<[f32; 2]> = vec![[0.0, 0.0]; grid_n * grid_n];
-
-                for row in 0..grid_n {
-                    for col in 0..grid_n {
-                        let idx = row * grid_n + col;
-                        let pos = wobbly.offsets[idx];
-
-                        // Neighbor spring forces
-                        let neighbors = [
-                            if col > 0 { Some(idx - 1) } else { None },
-                            if col < grid_n - 1 {
-                                Some(idx + 1)
-                            } else {
-                                None
-                            },
-                            if row > 0 { Some(idx - grid_n) } else { None },
-                            if row < grid_n - 1 {
-                                Some(idx + grid_n)
-                            } else {
-                                None
-                            },
-                        ];
-
-                        for neighbor_idx in neighbors.iter().flatten() {
-                            let neighbor_pos = wobbly.offsets[*neighbor_idx];
-                            let dx = neighbor_pos[0] - pos[0];
-                            let dy = neighbor_pos[1] - pos[1];
-                            forces[idx][0] += dx * spring_k;
-                            forces[idx][1] += dy * spring_k;
-                        }
-
-                        // Restore force toward zero (rest position)
-                        forces[idx][0] -= pos[0] * restore_k;
-                        forces[idx][1] -= pos[1] * restore_k;
-
-                        // Damping
-                        forces[idx][0] -= wobbly.velocities[idx][0] * damping;
-                        forces[idx][1] -= wobbly.velocities[idx][1] * damping;
-                    }
-                }
-
-                // Symplectic Euler integration
-                for i in 0..grid_n * grid_n {
-                    // Skip anchor point if dragging
-                    if wobbly.dragging {
-                        let anchor_idx = wobbly.anchor_row * grid_n + wobbly.anchor_col;
-                        if i == anchor_idx {
-                            continue;
-                        }
-                    }
-                    wobbly.velocities[i][0] += forces[i][0] * sub_dt;
-                    wobbly.velocities[i][1] += forces[i][1] * sub_dt;
-                    wobbly.offsets[i][0] += wobbly.velocities[i][0] * sub_dt;
-                    wobbly.offsets[i][1] += wobbly.velocities[i][1] * sub_dt;
-                }
-            }
-
-            // Check if wobbly has settled (all velocities and offsets near zero)
-            if !wobbly.dragging {
-                let settled = wobbly
-                    .offsets
-                    .iter()
-                    .zip(wobbly.velocities.iter())
-                    .all(|(o, v)| {
-                        o[0].abs() < 0.1 && o[1].abs() < 0.1 && v[0].abs() < 0.5 && v[1].abs() < 0.5
-                    });
-                if settled {
-                    // Clear wobbly state
-                    win.wobbly = None;
-                }
+            if !wobbly.tick_physics(dt, spring_k, restore_k, damping, 0.5) {
+                win.wobbly = None;
             }
         }
     }

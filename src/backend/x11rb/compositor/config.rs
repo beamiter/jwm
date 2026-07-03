@@ -291,56 +291,9 @@ impl Compositor {
         self.rounded_corners_exclude
             .clone_from(&behavior.rounded_corners_exclude);
 
-        self.opacity_rules = behavior
-            .opacity_rules
-            .iter()
-            .filter_map(|rule| {
-                let parts: Vec<&str> = rule.splitn(2, ':').collect();
-                if parts.len() == 2 {
-                    if let Ok(pct) = parts[0].trim().parse::<f32>() {
-                        return Some(OpacityRule {
-                            opacity: (pct / 100.0).clamp(0.0, 1.0),
-                            class_name: parts[1].trim().to_string(),
-                        });
-                    }
-                }
-                None
-            })
-            .collect();
-
-        self.corner_radius_rules = behavior
-            .corner_radius_rules
-            .iter()
-            .filter_map(|rule| {
-                let parts: Vec<&str> = rule.splitn(2, ':').collect();
-                if parts.len() == 2 {
-                    if let Ok(r) = parts[0].trim().parse::<f32>() {
-                        return Some(CornerRadiusRule {
-                            radius: r.max(0.0),
-                            class_name: parts[1].trim().to_string(),
-                        });
-                    }
-                }
-                None
-            })
-            .collect();
-
-        self.scale_rules = behavior
-            .scale_rules
-            .iter()
-            .filter_map(|rule| {
-                let parts: Vec<&str> = rule.splitn(2, ':').collect();
-                if parts.len() == 2 {
-                    if let Ok(pct) = parts[0].trim().parse::<f32>() {
-                        return Some(ScaleRule {
-                            scale: (pct / 100.0).clamp(0.1, 2.0),
-                            class_name: parts[1].trim().to_string(),
-                        });
-                    }
-                }
-                None
-            })
-            .collect();
+        self.opacity_rules = parse_opacity_rules(&behavior.opacity_rules);
+        self.corner_radius_rules = parse_corner_radius_rules(&behavior.corner_radius_rules);
+        self.scale_rules = parse_scale_rules(&behavior.scale_rules);
 
         // --- Borders ---
         self.border_enabled = behavior.border_enabled;
@@ -472,7 +425,7 @@ impl Compositor {
             .clone_from(&behavior.recording_output_dir);
 
         // --- Wallpaper (trigger async reload if path or mode changed) ---
-        let new_mode = Self::parse_wallpaper_mode(&behavior.wallpaper_mode);
+        let new_mode = parse_wallpaper_mode(&behavior.wallpaper_mode);
         if behavior.wallpaper != self.wallpaper_path || new_mode != self.wallpaper_mode {
             self.wallpaper_mode = new_mode;
             self.wallpaper_path.clone_from(&behavior.wallpaper);

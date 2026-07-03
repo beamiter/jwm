@@ -17,90 +17,11 @@ impl Compositor {
 
         for (&win, wt) in self.windows.iter_mut() {
             if let Some(ref mut w) = wt.wobbly {
-                let raw_dt = now.duration_since(w.last_tick).as_secs_f32();
-                let dt = raw_dt.clamp(0.001, 0.033);
-                w.last_tick = now;
-
-                let n = w.grid_n;
-                let sub_steps = 3;
-                let sub_dt = dt / sub_steps as f32;
-
-                for _ in 0..sub_steps {
-                    // Compute forces for all nodes into a temporary buffer
-                    let count = n * n;
-                    let mut forces = vec![[0.0f32; 2]; count];
-
-                    for row in 0..n {
-                        for col in 0..n {
-                            // Skip anchor node during drag
-                            if w.dragging && row == w.anchor_row && col == w.anchor_col {
-                                continue;
-                            }
-                            let idx = row * n + col;
-                            let off = w.offsets[idx];
-                            let vel = w.velocities[idx];
-
-                            let mut fx = 0.0f32;
-                            let mut fy = 0.0f32;
-
-                            // Neighbor spring forces (up, down, left, right)
-                            if row > 0 {
-                                let ni = (row - 1) * n + col;
-                                fx += neighbor_k * (w.offsets[ni][0] - off[0]);
-                                fy += neighbor_k * (w.offsets[ni][1] - off[1]);
-                            }
-                            if row + 1 < n {
-                                let ni = (row + 1) * n + col;
-                                fx += neighbor_k * (w.offsets[ni][0] - off[0]);
-                                fy += neighbor_k * (w.offsets[ni][1] - off[1]);
-                            }
-                            if col > 0 {
-                                let ni = row * n + (col - 1);
-                                fx += neighbor_k * (w.offsets[ni][0] - off[0]);
-                                fy += neighbor_k * (w.offsets[ni][1] - off[1]);
-                            }
-                            if col + 1 < n {
-                                let ni = row * n + (col + 1);
-                                fx += neighbor_k * (w.offsets[ni][0] - off[0]);
-                                fy += neighbor_k * (w.offsets[ni][1] - off[1]);
-                            }
-
-                            // Restore spring (pull back to rest position [0,0])
-                            fx += -restore_k * off[0];
-                            fy += -restore_k * off[1];
-
-                            // Velocity damping
-                            fx += -damping * vel[0];
-                            fy += -damping * vel[1];
-
-                            forces[idx] = [fx, fy];
-                        }
-                    }
-
-                    // Symplectic Euler: update velocity then position
-                    for row in 0..n {
-                        for col in 0..n {
-                            if w.dragging && row == w.anchor_row && col == w.anchor_col {
-                                continue;
-                            }
-                            let idx = row * n + col;
-                            w.velocities[idx][0] += forces[idx][0] * sub_dt;
-                            w.velocities[idx][1] += forces[idx][1] * sub_dt;
-                            w.offsets[idx][0] += w.velocities[idx][0] * sub_dt;
-                            w.offsets[idx][1] += w.velocities[idx][1] * sub_dt;
-                        }
-                    }
-                }
-
-                // Check if settled
-                let all_settled = w.offsets.iter().zip(w.velocities.iter()).all(|(o, v)| {
-                    o[0].abs() < 0.1 && o[1].abs() < 0.1 && v[0].abs() < 0.1 && v[1].abs() < 0.1
-                });
-
-                if all_settled && !w.dragging {
-                    to_clear.push(win);
-                } else {
+                let dt = w.elapsed_dt(now);
+                if w.tick_physics(dt, neighbor_k, restore_k, damping, 0.1) {
                     any_active = true;
+                } else {
+                    to_clear.push(win);
                 }
             }
         }
