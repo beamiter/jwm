@@ -162,6 +162,142 @@ impl<'a> BatchedGeometryRequest<'a> {
     }
 }
 
+type PropertyKey = (u32, u32);
+
+#[derive(Clone, Copy)]
+pub struct PropertyQuery {
+    pub window: u32,
+    pub atom: u32,
+    pub prop_type: u32,
+    pub max_len: u32,
+}
+
+pub struct BatchedPropertyRequest<'a> {
+    conn: &'a xcb::Connection,
+    queries: Vec<PropertyQuery>,
+}
+
+impl<'a> BatchedPropertyRequest<'a> {
+    pub fn new(conn: &'a xcb::Connection) -> Self {
+        Self {
+            conn,
+            queries: Vec::new(),
+        }
+    }
+
+    pub fn queue_property(&mut self, window: u32, atom: u32, prop_type: u32, max_len: u32) {
+        self.queries.push(PropertyQuery {
+            window,
+            atom,
+            prop_type,
+            max_len,
+        });
+    }
+
+    pub fn flush_and_collect(self) -> Result<HashMap<PropertyKey, Vec<u8>>, BackendError> {
+        let mut cookies = Vec::with_capacity(self.queries.len());
+
+        for query in &self.queries {
+            let window = x::Window::new(query.window);
+            let atom = x::Atom::new(query.atom);
+            let prop_type = x::Atom::new(query.prop_type);
+            let cookie = self.conn.send_request(&x::GetProperty {
+                delete: false,
+                window,
+                property: atom,
+                r#type: prop_type,
+                long_offset: 0,
+                long_length: query.max_len,
+            });
+            cookies.push(((query.window, query.atom), cookie));
+        }
+
+        self.conn
+            .flush()
+            .map_err(|e| BackendError::Message(format!("xcb flush failed: {e}")))?;
+
+        let mut results = HashMap::new();
+        for (key, cookie) in cookies {
+            match self.conn.wait_for_reply(cookie) {
+                Ok(reply) => {
+                    results.insert(key, reply.value::<u8>().to_vec());
+                }
+                Err(e) => {
+                    log::debug!(
+                        "Failed to get property for window 0x{:x} atom {}: {}",
+                        key.0,
+                        key.1,
+                        e
+                    );
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.queries.len()
+    }
+}
+
+pub struct BatchedAttributesRequest<'a> {
+    conn: &'a xcb::Connection,
+    windows: Vec<x::Window>,
+}
+
+impl<'a> BatchedAttributesRequest<'a> {
+    pub fn new(conn: &'a xcb::Connection) -> Self {
+        Self {
+            conn,
+            windows: Vec::new(),
+        }
+    }
+
+    pub fn queue_attributes(&mut self, window: u32) {
+        self.windows.push(x::Window::new(window));
+    }
+
+    pub fn flush_and_collect(
+        self,
+    ) -> Result<HashMap<u32, x::GetWindowAttributesReply>, BackendError> {
+        let mut cookies = Vec::with_capacity(self.windows.len());
+
+        for window in &self.windows {
+            let cookie = self
+                .conn
+                .send_request(&x::GetWindowAttributes { window: *window });
+            cookies.push((*window, cookie));
+        }
+
+        self.conn
+            .flush()
+            .map_err(|e| BackendError::Message(format!("xcb flush failed: {e}")))?;
+
+        let mut results = HashMap::new();
+        for (window, cookie) in cookies {
+            match self.conn.wait_for_reply(cookie) {
+                Ok(reply) => {
+                    results.insert(window.resource_id(), reply);
+                }
+                Err(e) => {
+                    log::debug!(
+                        "Failed to get attributes for window 0x{:x}: {}",
+                        window.resource_id(),
+                        e
+                    );
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.windows.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

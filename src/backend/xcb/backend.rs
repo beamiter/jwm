@@ -31,7 +31,7 @@ use crate::backend::x11::wm::{
     window_changes_from_configure_request_parts, window_type_from_atom, wm_delete_window_message,
     wm_take_focus_message,
 };
-use crate::backend::xcb::batch::BatchedGeometryRequest;
+use crate::backend::xcb::batch::{BatchedGeometryRequest, XcbRequestBatcher};
 use crate::backend::xcb::compositor_protocol::{
     XcbCompositorProtocol, XcbSharedCompositor, XcbSharedCompositorConnection,
     create_shared_compositor_connection,
@@ -66,6 +66,7 @@ struct XcbAtoms {
     wm_class: x::Atom,
     wm_hints: x::Atom,
     wm_normal_hints: x::Atom,
+    wm_size_hints: x::Atom,
     utf8_string: x::Atom,
     string: x::Atom,
     cardinal: x::Atom,
@@ -113,6 +114,8 @@ struct XcbAtoms {
     net_wm_sync_request: x::Atom,
     net_wm_sync_request_counter: x::Atom,
     net_wm_user_time: x::Atom,
+    #[allow(dead_code)]
+    net_wm_user_time_window: x::Atom,
     net_wm_icon: x::Atom,
     net_wm_bypass_compositor: x::Atom,
     net_wm_opaque_region: x::Atom,
@@ -134,11 +137,15 @@ struct XcbAtoms {
     net_workarea: x::Atom,
     net_system_tray_opcode: x::Atom,
     net_system_tray_orientation: x::Atom,
+    #[allow(dead_code)]
+    net_system_tray_visual: x::Atom,
     manager: x::Atom,
     xembed: x::Atom,
     xembed_info: x::Atom,
     motif_wm_hints: x::Atom,
     gtk_frame_extents: x::Atom,
+    #[allow(dead_code)]
+    compound_text: x::Atom,
 }
 
 impl XcbAtoms {
@@ -162,6 +169,7 @@ impl XcbAtoms {
             wm_class: x::ATOM_WM_CLASS,
             wm_hints: x::ATOM_WM_HINTS,
             wm_normal_hints: x::ATOM_WM_NORMAL_HINTS,
+            wm_size_hints: Self::intern(conn, b"WM_SIZE_HINTS")?,
             utf8_string: Self::intern(conn, b"UTF8_STRING")?,
             string: x::ATOM_STRING,
             cardinal: x::ATOM_CARDINAL,
@@ -215,6 +223,7 @@ impl XcbAtoms {
             net_wm_sync_request: Self::intern(conn, b"_NET_WM_SYNC_REQUEST")?,
             net_wm_sync_request_counter: Self::intern(conn, b"_NET_WM_SYNC_REQUEST_COUNTER")?,
             net_wm_user_time: Self::intern(conn, b"_NET_WM_USER_TIME")?,
+            net_wm_user_time_window: Self::intern(conn, b"_NET_WM_USER_TIME_WINDOW")?,
             net_wm_icon: Self::intern(conn, b"_NET_WM_ICON")?,
             net_wm_bypass_compositor: Self::intern(conn, b"_NET_WM_BYPASS_COMPOSITOR")?,
             net_wm_opaque_region: Self::intern(conn, b"_NET_WM_OPAQUE_REGION")?,
@@ -236,11 +245,13 @@ impl XcbAtoms {
             net_workarea: Self::intern(conn, b"_NET_WORKAREA")?,
             net_system_tray_opcode: Self::intern(conn, b"_NET_SYSTEM_TRAY_OPCODE")?,
             net_system_tray_orientation: Self::intern(conn, b"_NET_SYSTEM_TRAY_ORIENTATION")?,
+            net_system_tray_visual: Self::intern(conn, b"_NET_SYSTEM_TRAY_VISUAL")?,
             manager: Self::intern(conn, b"MANAGER")?,
             xembed: Self::intern(conn, b"_XEMBED")?,
             xembed_info: Self::intern(conn, b"_XEMBED_INFO")?,
             motif_wm_hints: Self::intern(conn, b"_MOTIF_WM_HINTS")?,
             gtk_frame_extents: Self::intern(conn, b"_GTK_FRAME_EXTENTS")?,
+            compound_text: Self::intern(conn, b"COMPOUND_TEXT")?,
         })
     }
 
@@ -2699,6 +2710,7 @@ struct XcbWindowOps {
     ids: XcbIdRegistry,
     atoms: XcbAtoms,
     root: x::Window,
+    batcher: XcbRequestBatcher,
 }
 
 impl XcbWindowOps {
@@ -2713,6 +2725,7 @@ impl XcbWindowOps {
             ids,
             atoms,
             root,
+            batcher: XcbRequestBatcher::new(),
         }
     }
 
@@ -2861,12 +2874,11 @@ impl WindowOps for XcbWindowOps {
         border_color: Pixel,
     ) -> XcbResult<()> {
         let w = self.win(win)?;
-        self.conn
-            .send_and_check_request(&x::ChangeWindowAttributes {
-                window: w,
-                value_list: &[x::Cw::BorderPixel(border_color.0)],
-            })
-            .map_err(xcb_err)?;
+        self.conn.send_request(&x::ChangeWindowAttributes {
+            window: w,
+            value_list: &[x::Cw::BorderPixel(border_color.0)],
+        });
+        self.batcher.mark_op(&self.conn)?;
         self.apply_window_changes(
             win,
             WindowChanges {
@@ -2991,7 +3003,7 @@ impl WindowOps for XcbWindowOps {
     }
 
     fn flush(&self) -> XcbResult<()> {
-        self.conn.flush().map_err(xcb_err)
+        self.batcher.flush(&self.conn)
     }
 
     fn kill_client(&self, win: WindowId) -> XcbResult<()> {
@@ -3028,12 +3040,11 @@ impl WindowOps for XcbWindowOps {
         if values.is_empty() {
             return Ok(());
         }
-        self.conn
-            .send_and_check_request(&x::ConfigureWindow {
-                window: self.win(win)?,
-                value_list: &values,
-            })
-            .map_err(xcb_err)
+        self.conn.send_request(&x::ConfigureWindow {
+            window: self.win(win)?,
+            value_list: &values,
+        });
+        self.batcher.mark_op(&self.conn)
     }
 
     fn ungrab_all_buttons(&self, win: WindowId) -> XcbResult<()> {
@@ -3301,7 +3312,7 @@ impl XcbPropertyOps {
         self.ids.window(win)
     }
 
-    fn get_text_property(&self, win: WindowId, property: x::Atom, ty: x::Atom) -> Option<String> {
+    fn get_text_property(&self, win: WindowId, property: x::Atom) -> Option<String> {
         let Ok(w) = self.win(win) else {
             return None;
         };
@@ -3317,13 +3328,17 @@ impl XcbPropertyOps {
             if r.format() != 8 {
                 return None;
             }
-            decode_text_property(r.value::<u8>(), r.r#type(), ty, self.atoms.string)
+            decode_text_property(
+                r.value::<u8>(),
+                r.r#type(),
+                self.atoms.utf8_string,
+                self.atoms.string,
+            )
         })
     }
 
-    fn get_string(&self, win: WindowId, property: x::Atom, ty: x::Atom) -> String {
-        self.get_text_property(win, property, ty)
-            .unwrap_or_default()
+    fn get_string(&self, win: WindowId, property: x::Atom) -> String {
+        self.get_text_property(win, property).unwrap_or_default()
     }
 
     fn states(&self, win: WindowId) -> Vec<x::Atom> {
@@ -3347,9 +3362,9 @@ impl XcbPropertyOps {
 
 impl PropertyOps for XcbPropertyOps {
     fn get_title(&self, win: WindowId) -> String {
-        let title = self.get_string(win, self.atoms.net_wm_name, self.atoms.utf8_string);
+        let title = self.get_string(win, self.atoms.net_wm_name);
         if title.is_empty() {
-            self.get_string(win, x::ATOM_WM_NAME, self.atoms.string)
+            self.get_string(win, x::ATOM_WM_NAME)
         } else {
             title
         }
@@ -3482,7 +3497,7 @@ impl PropertyOps for XcbPropertyOps {
             &self.conn,
             w,
             self.atoms.wm_normal_hints,
-            self.atoms.wm_normal_hints,
+            self.atoms.wm_size_hints,
             MAX_WM_NORMAL_HINTS_ITEMS,
         );
         Ok(parse_normal_hints(&v))
@@ -3849,7 +3864,7 @@ impl XcbOutputOps {
     fn query_output_hdr_capable(&self, output: xcb::randr::Output) -> bool {
         let atom = match XcbAtoms::intern(&self.conn, b"max_bpc") {
             Ok(atom) => atom,
-            Err(_) => return false,
+            Err(_) => return true,
         };
         let cookie = self.conn.send_request(&xcb::randr::GetOutputProperty {
             output,
@@ -3861,10 +3876,10 @@ impl XcbOutputOps {
             pending: false,
         });
         let Ok(reply) = self.conn.wait_for_reply(cookie) else {
-            return false;
+            return true;
         };
         if reply.format() != 32 || reply.data::<u32>().is_empty() {
-            return false;
+            return true;
         }
         reply.data::<u32>()[0] >= 10
     }
@@ -5036,4 +5051,207 @@ where
     E: std::error::Error + Send + Sync + 'static,
 {
     BackendError::Other(Box::new(err))
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use std::collections::BTreeSet;
+
+    const X11RB_BACKEND_SRC: &str = include_str!("../x11rb/backend.rs");
+    const X11RB_MOD_SRC: &str = include_str!("../x11rb/mod.rs");
+    const XCB_BACKEND_SRC: &str = include_str!("backend.rs");
+
+    fn impl_body_after<'a>(src: &'a str, needle: &str) -> &'a str {
+        let start = src
+            .find(&needle)
+            .unwrap_or_else(|| panic!("missing `{needle}`"));
+        let body_start = src[start..]
+            .find('{')
+            .map(|idx| start + idx + 1)
+            .unwrap_or_else(|| panic!("missing body for `{needle}`"));
+        let mut depth = 1usize;
+        let mut end = body_start;
+        for (offset, ch) in src[body_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = body_start + offset;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        &src[body_start..end]
+    }
+
+    fn method_names(body: &str) -> BTreeSet<String> {
+        body.lines()
+            .filter_map(|line| {
+                let trimmed = line.trim_start();
+                let rest = trimmed.strip_prefix("fn ")?;
+                let name = rest
+                    .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                    .next()?;
+                Some(name.to_string())
+            })
+            .collect()
+    }
+
+    fn x11rb_atom_names() -> BTreeSet<String> {
+        let start = X11RB_MOD_SRC
+            .find("pub Atoms: AtomsCookie")
+            .expect("missing x11rb Atoms declaration");
+        let body_start = X11RB_MOD_SRC[start..]
+            .find('{')
+            .map(|idx| start + idx + 1)
+            .expect("missing x11rb Atoms body");
+        let body_end = X11RB_MOD_SRC[body_start..]
+            .find('}')
+            .map(|idx| body_start + idx)
+            .expect("missing x11rb Atoms body end");
+
+        X11RB_MOD_SRC[body_start..body_end]
+            .lines()
+            .filter_map(|line| {
+                let name = line.split("//").next()?.trim().trim_end_matches(',');
+                (!name.is_empty()).then(|| name.to_string())
+            })
+            .collect()
+    }
+
+    fn xcb_atom_fields() -> BTreeSet<String> {
+        let start = XCB_BACKEND_SRC
+            .find("struct XcbAtoms")
+            .expect("missing XcbAtoms");
+        let body_start = XCB_BACKEND_SRC[start..]
+            .find('{')
+            .map(|idx| start + idx + 1)
+            .expect("missing XcbAtoms body");
+        let body_end = XCB_BACKEND_SRC[body_start..]
+            .find('}')
+            .map(|idx| body_start + idx)
+            .expect("missing XcbAtoms body end");
+
+        XCB_BACKEND_SRC[body_start..body_end]
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                let (name, ty) = line.split_once(':')?;
+                ty.trim_start()
+                    .starts_with("x::Atom")
+                    .then(|| name.trim().to_string())
+            })
+            .collect()
+    }
+
+    fn x11rb_atom_to_xcb_field(atom: &str) -> String {
+        atom.trim_start_matches('_').to_ascii_lowercase()
+    }
+
+    fn assert_same_methods(
+        x11rb_needle: &str,
+        xcb_needle: &str,
+        label: &str,
+        allow_xcb_extra: bool,
+    ) {
+        let x11rb = method_names(impl_body_after(X11RB_BACKEND_SRC, x11rb_needle));
+        let xcb = method_names(impl_body_after(XCB_BACKEND_SRC, xcb_needle));
+
+        let missing: Vec<_> = x11rb.difference(&xcb).cloned().collect();
+        let extra: Vec<_> = xcb.difference(&x11rb).cloned().collect();
+
+        assert!(
+            missing.is_empty() && (allow_xcb_extra || extra.is_empty()),
+            "{label} impl drift between x11rb and xcb; missing={missing:?}, extra={extra:?}"
+        );
+    }
+
+    #[test]
+    fn xcb_backend_overrides_match_x11rb_backend() {
+        assert_same_methods(
+            "impl Backend for X11rbBackend",
+            "impl Backend for XcbBackend",
+            "Backend",
+            false,
+        );
+    }
+
+    #[test]
+    fn xcb_ops_trait_methods_match_x11rb() {
+        for (label, x11rb_needle, xcb_needle) in [
+            (
+                "WindowOps",
+                "WindowOps for X11WindowOps",
+                "WindowOps for XcbWindowOps",
+            ),
+            (
+                "InputOps",
+                "InputOpsTrait for X11InputOps",
+                "InputOps for XcbInputOps",
+            ),
+            (
+                "PropertyOps",
+                "PropertyOpsTrait for X11PropertyOps",
+                "PropertyOps for XcbPropertyOps",
+            ),
+            (
+                "OutputOps",
+                "OutputOps for X11OutputOps",
+                "OutputOps for XcbOutputOps",
+            ),
+            ("KeyOps", "KeyOps for X11KeyOps", "KeyOps for XcbKeyOps"),
+            (
+                "EwmhFacade",
+                "EwmhFacade for X11EwmhFacade",
+                "EwmhFacade for XcbEwmh",
+            ),
+            (
+                "ColorAllocator",
+                "ColorAllocator for X11ColorAllocator",
+                "ColorAllocator for XcbColorAllocator",
+            ),
+            (
+                "CursorProvider",
+                "CursorProvider for X11CursorProvider",
+                "CursorProvider for XcbCursorProvider",
+            ),
+        ] {
+            assert_same_methods(x11rb_needle, xcb_needle, label, true);
+        }
+    }
+
+    #[test]
+    fn xcb_atoms_cover_x11rb_atoms() {
+        let xcb = xcb_atom_fields();
+        let missing: Vec<_> = x11rb_atom_names()
+            .into_iter()
+            .filter(|atom| !xcb.contains(&x11rb_atom_to_xcb_field(atom)))
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "XcbAtoms does not cover x11rb Atoms: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn xcb_normal_hints_use_wm_size_hints_type() {
+        let start = XCB_BACKEND_SRC
+            .find("fn fetch_normal_hints")
+            .expect("missing fetch_normal_hints");
+        let end = XCB_BACKEND_SRC[start..]
+            .find("fn set_window_strut_top")
+            .map(|idx| start + idx)
+            .expect("missing function after fetch_normal_hints");
+        let body = &XCB_BACKEND_SRC[start..end];
+
+        assert!(
+            body.contains("self.atoms.wm_normal_hints")
+                && body.contains("self.atoms.wm_size_hints"),
+            "WM_NORMAL_HINTS must be fetched with property=WM_NORMAL_HINTS and type=WM_SIZE_HINTS"
+        );
+    }
 }

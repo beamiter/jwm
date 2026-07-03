@@ -167,7 +167,10 @@ impl<'a> XcbCompositorProtocol<'a> {
                 r#type: x::ATOM_ATOM,
                 data: &[notification],
             })
-            .map_err(|e| BackendError::Message(format!("set _NET_WM_WINDOW_TYPE failed: {e}")))
+            .map_err(|e| BackendError::Message(format!("set _NET_WM_WINDOW_TYPE failed: {e}")))?;
+        self.conn.flush().map_err(|e| {
+            BackendError::Message(format!("xcb flush after overlay window type failed: {e}"))
+        })
     }
 
     pub(crate) fn claim_compositor_selection(
