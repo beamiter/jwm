@@ -70,13 +70,14 @@ ALL_BARS=(
     xcb_bar
     xilem_bar
     gpui_bar
+    gpui_component_bar
 )
 
 # ============================================================
 # 默认值
 # ============================================================
 BUILD_MODE="release"
-JWM_BAR_NAME="xilem_bar"
+JWM_BAR_NAME="gpui_component_bar"
 JWM_BAR_SET_BY_ARGS=false
 
 # CLONE_BARS：仅用于把这些 bar 仓库拉到本地（git clone / pull），
