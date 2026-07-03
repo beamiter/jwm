@@ -1,6 +1,6 @@
 use crate::backend::error::BackendError;
 use crate::backend::x11::compositor::Compositor;
-use crate::backend::x11::compositor_backend::{
+use crate::backend::x11::compositor_common::{
     X11BootstrapOps, X11CompositeRedirectOps, X11ConnectionOps, X11PresentOps, X11RandrOps,
     X11TextureSourceOps, X11WindowResourceOps,
 };
