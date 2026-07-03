@@ -75,8 +75,8 @@ impl Jwm {
             // GSK_RENDERER=cairo forces CPU Cairo rendering into plain wl_shm
             // buffers which always contain correct content regardless of DRM
             // master status.  Disable vulkan+dmabuf to prevent feedback hangs.
-            // NOTE: GDK_DISABLE=gl was added in GTK 4.14; for GTK 4.6 the
-            // only reliable way to bypass the GL renderer is GSK_RENDERER=cairo.
+            // NOTE: GTK4 apps here run with GDK paths for Vulkan/DMABuf disabled
+            // while `GSK_RENDERER=cairo` forces the fallback Cairo+wl_shm path.
             command.env("GSK_RENDERER", "cairo");
             command.env("GDK_DISABLE", "vulkan,dmabuf");
             // GTK3 apps (e.g. terminator/VTE) may use GL via wl_egl_window which
