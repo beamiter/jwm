@@ -3,7 +3,7 @@
 
 #[allow(unused_imports)]
 use super::*;
-use crate::backend::compositor_common::wallpaper::{compute_wallpaper_rect, parse_wallpaper_mode};
+use crate::backend::x11::compositor_common::wallpaper::{compute_wallpaper_rect, parse_wallpaper_mode};
 use smithay::backend::renderer::gles::ffi;
 use std::sync::mpsc;
 use std::sync::{Condvar, Mutex, OnceLock};

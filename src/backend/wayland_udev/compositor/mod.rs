@@ -68,9 +68,9 @@ use std::ffi::CString;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::backend::compositor_common::transitions::TransitionMode;
-use crate::backend::compositor_common::wallpaper::{WallpaperImageData, WallpaperMode};
-use crate::backend::compositor_common::wobbly::WobblyState;
+use crate::backend::x11::compositor_common::transitions::TransitionMode;
+use crate::backend::x11::compositor_common::wallpaper::{WallpaperImageData, WallpaperMode};
+use crate::backend::x11::compositor_common::wobbly::WobblyState;
 
 // ---------------------------------------------------------------------------
 // Matrix math

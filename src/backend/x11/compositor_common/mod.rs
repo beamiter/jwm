@@ -1,4 +1,4 @@
-//! Backend-independent compositor building blocks shared by X11 backends.
+//! Compositor support modules used by the X11 compositor stack.
 
 pub mod annotations;
 pub mod async_x11;

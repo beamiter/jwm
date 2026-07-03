@@ -1,5 +1,5 @@
 use super::{Compositor, SnapPreview, WindowTab, class_matches_exclude};
-use crate::backend::compositor_common::expose::{build_expose_entries, tick_expose_entries};
+use crate::backend::x11::compositor_common::expose::{build_expose_entries, tick_expose_entries};
 use glow::HasContext;
 
 use super::CompositorConnection;

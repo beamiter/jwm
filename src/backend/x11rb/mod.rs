@@ -7,7 +7,7 @@ pub mod edid;
 pub mod systray;
 
 pub mod event_coalescer {
-    pub use crate::backend::compositor_common::event_coalescer::*;
+    pub use crate::backend::x11::compositor_common::event_coalescer::*;
 }
 
 x11rb::atom_manager! {

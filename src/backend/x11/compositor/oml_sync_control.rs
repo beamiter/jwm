@@ -1,7 +1,7 @@
 use std::ffi::CString;
 use std::time::{Duration, Instant};
 
-use crate::backend::compositor_common::oml_sync::OmlSyncWindow;
+use crate::backend::x11::compositor_common::oml_sync::OmlSyncWindow;
 
 /// GLX_OML_sync_control function pointers
 pub struct OmlSyncControlFunctions {

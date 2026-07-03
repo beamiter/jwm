@@ -1,5 +1,5 @@
 use super::Compositor;
-use crate::backend::compositor_common::annotations::{AnnotationPoint, AnnotationStroke};
+use crate::backend::x11::compositor_common::annotations::{AnnotationPoint, AnnotationStroke};
 use glow::HasContext;
 
 use super::CompositorConnection;

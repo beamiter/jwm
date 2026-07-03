@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::sync::{Condvar, Mutex, OnceLock};
 
-use crate::backend::compositor_common::wallpaper::parse_wallpaper_mode;
+use crate::backend::x11::compositor_common::wallpaper::parse_wallpaper_mode;
 
 /// Process-wide gate bounding how many wallpaper images decode concurrently.
 /// Each decode does `image::open` + a Lanczos3 downscale (heavy CPU, transient
