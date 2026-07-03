@@ -846,10 +846,12 @@ impl XcbBackend {
             None,
             &[],
             &[
+                xcb::Extension::Composite,
                 xcb::Extension::RandR,
                 xcb::Extension::Shape,
                 xcb::Extension::Damage,
                 xcb::Extension::Present,
+                xcb::Extension::XFixes,
             ],
         )
         .map_err(xcb_err)?;
@@ -1527,10 +1529,8 @@ impl XcbBackend {
     }
 
     fn hit_target(&self, window: x::Window) -> HitTarget {
-        if window == self.root {
-            HitTarget::Background {
-                output: Some(OutputId(1)),
-            }
+        if window == self.root || self.is_compositor_overlay(window) {
+            HitTarget::Background { output: None }
         } else {
             HitTarget::Surface(self.ids.intern(window))
         }
