@@ -14,6 +14,7 @@ pub mod sys_stats;
 
 // Backend-independent compositor state, profiling and diagnostics helpers.
 pub mod compositor_common;
+pub mod shared_x11_compositor;
 
 // Shared Smithay Wayland compositor state (used by udev/KMS and windowed X11 backend).
 pub mod wayland;

@@ -13,22 +13,6 @@ use std::ffi::CString;
 use std::sync::Arc;
 #[allow(unused_imports)]
 use std::sync::mpsc;
-#[allow(unused_imports)]
-use x11rb::connection::{Connection, RequestConnection};
-#[allow(unused_imports)]
-use x11rb::protocol::composite::ConnectionExt as CompositeExt;
-#[allow(unused_imports)]
-use x11rb::protocol::damage::{self, ConnectionExt as DamageExt};
-#[allow(unused_imports)]
-use x11rb::protocol::randr::ConnectionExt as RandrExt;
-#[allow(unused_imports)]
-use x11rb::protocol::xfixes::ConnectionExt as XFixesExt;
-#[allow(unused_imports)]
-use x11rb::protocol::xproto::{self, ConnectionExt as XProtoExt};
-#[allow(unused_imports)]
-use x11rb::rust_connection::RustConnection;
-#[allow(unused_imports)]
-use x11rb::wrapper::ConnectionExt as WrapperExt;
 
 impl<C: CompositorConnection> Compositor<C> {
     // =====================================================================
@@ -374,11 +358,8 @@ impl<C: CompositorConnection> Compositor<C> {
                         {
                             // Unredirect: the X server draws directly
                             if self.unredirected_window != Some(focused_win) {
-                                let _ = self.conn.composite_unredirect_window(
-                                    focused_win,
-                                    x11rb::protocol::composite::Redirect::MANUAL,
-                                );
-                                let _ = self.conn.flush();
+                                let _ = self.conn.unredirect_window_manual(focused_win);
+                                let _ = self.conn.flush_x11();
                                 self.unredirected_window = Some(focused_win);
                                 log::info!(
                                     "compositor: unredirected fullscreen window 0x{:x}",
@@ -393,10 +374,8 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         // Re-redirect if we had an unredirected window that's no longer fullscreen
         if let Some(prev) = self.unredirected_window.take() {
-            let _ = self
-                .conn
-                .composite_redirect_window(prev, x11rb::protocol::composite::Redirect::MANUAL);
-            let _ = self.conn.flush();
+            let _ = self.conn.redirect_window_manual(prev);
+            let _ = self.conn.flush_x11();
             // The X server allocated a fresh backing pixmap while the window was
             // unredirected; the old NameWindowPixmap binding is now stale. Force
             // a rebind or the window renders frozen content until its next resize.

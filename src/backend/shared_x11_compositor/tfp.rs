@@ -4,10 +4,6 @@ use super::{
     GLX_TEXTURE_FORMAT_RGBA_EXT, GLX_TEXTURE_TARGET_EXT, RippleState, WindowTexture,
 };
 use glow::HasContext;
-use x11rb::connection::Connection;
-use x11rb::protocol::composite::ConnectionExt as CompositeExt;
-use x11rb::protocol::damage::{self, ConnectionExt as DamageExt};
-use x11rb::protocol::xproto::ConnectionExt as XProtoExt;
 
 use super::CompositorConnection;
 
@@ -65,55 +61,40 @@ impl<C: CompositorConnection> Compositor<C> {
         );
 
         // Create damage
-        let damage_id = match self.conn.generate_id() {
+        let damage_id = match self.conn.generate_xid() {
             Ok(id) => id,
             Err(e) => {
                 log::warn!("compositor: generate_id for damage failed: {e}");
                 return;
             }
         };
-        if let Err(e) = self
-            .conn
-            .damage_create(damage_id, x11_win, damage::ReportLevel::NON_EMPTY)
-        {
+        if let Err(e) = self.conn.create_window_damage(damage_id, x11_win) {
             log::warn!("compositor: damage_create failed for 0x{x11_win:x}: {e}");
             return;
         }
 
         // NameWindowPixmap
-        let pixmap = match self.conn.generate_id() {
+        let pixmap = match self.conn.generate_xid() {
             Ok(id) => id,
             Err(e) => {
                 log::warn!("compositor: generate_id for pixmap failed: {e}");
-                let _ = self.conn.damage_destroy(damage_id);
+                let _ = self.conn.destroy_window_damage(damage_id);
                 return;
             }
         };
-        if let Err(e) = self.conn.composite_name_window_pixmap(x11_win, pixmap) {
+        if let Err(e) = self.conn.name_window_pixmap(x11_win, pixmap) {
             log::warn!("compositor: name_window_pixmap failed for 0x{x11_win:x}: {e}");
-            let _ = self.conn.damage_destroy(damage_id);
+            let _ = self.conn.destroy_window_damage(damage_id);
             return;
         }
-        // Flush x11rb AND sync Xlib so the pixmap XID is visible to GLX.
-        let _ = self.conn.flush();
+        // Flush the X11 connection and sync Xlib so the pixmap XID is visible to GLX.
+        let _ = self.conn.flush_x11();
 
         // Select the TFP FBConfig for this window.  First try an exact match
         // by visual ID (required on older Mesa, e.g. Ubuntu 20); fall back to
         // the generic depth-based selection.
-        let win_visual = self
-            .conn
-            .get_window_attributes(x11_win)
-            .ok()
-            .and_then(|c| c.reply().ok())
-            .map(|a| a.visual)
-            .unwrap_or(0);
-        let win_depth = self
-            .conn
-            .get_geometry(x11_win)
-            .ok()
-            .and_then(|c| c.reply().ok())
-            .map(|g| g.depth)
-            .unwrap_or(24);
+        let win_visual = self.conn.get_window_visual(x11_win).unwrap_or(0);
+        let win_depth = self.conn.get_window_depth(x11_win).unwrap_or(24);
 
         let (fbconfig, use_rgba) = if self.hdr_enabled {
             // HDR mode: prefer 10-bit TFP configs when available
@@ -174,8 +155,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 win_depth,
                 x11_win
             );
-            let _ = self.conn.free_pixmap(pixmap);
-            let _ = self.conn.damage_destroy(damage_id);
+            let _ = self.conn.free_window_pixmap(pixmap);
+            let _ = self.conn.destroy_window_damage(damage_id);
             return;
         }
         let tex_fmt = if use_rgba {
@@ -202,7 +183,7 @@ impl<C: CompositorConnection> Compositor<C> {
         );
         let glx_pixmap = unsafe {
             // Sync both connections so the Xlib display can see the pixmap
-            // created by x11rb.
+            // created by the X11 connection backend.
             x11::xlib::XSync(self.xlib_display, 0);
 
             x11::glx::glXCreatePixmap(
@@ -215,8 +196,8 @@ impl<C: CompositorConnection> Compositor<C> {
         log::info!("compositor: glXCreatePixmap returned 0x{:x}", glx_pixmap);
         if glx_pixmap == 0 {
             log::warn!("compositor: glXCreatePixmap failed for 0x{x11_win:x}");
-            let _ = self.conn.free_pixmap(pixmap);
-            let _ = self.conn.damage_destroy(damage_id);
+            let _ = self.conn.free_window_pixmap(pixmap);
+            let _ = self.conn.destroy_window_damage(damage_id);
             return;
         }
 
@@ -227,8 +208,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 Err(e) => {
                     log::warn!("compositor: create_texture failed: {e}");
                     x11::glx::glXDestroyPixmap(self.xlib_display, glx_pixmap);
-                    let _ = self.conn.free_pixmap(pixmap);
-                    let _ = self.conn.damage_destroy(damage_id);
+                    let _ = self.conn.free_window_pixmap(pixmap);
+                    let _ = self.conn.destroy_window_damage(damage_id);
                     return;
                 }
             }
@@ -444,8 +425,8 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.delete_texture(gl_texture);
             x11::glx::glXDestroyPixmap(self.xlib_display, glx_pixmap);
         }
-        let _ = self.conn.free_pixmap(pixmap);
-        let _ = self.conn.damage_destroy(damage);
+        let _ = self.conn.free_window_pixmap(pixmap);
+        let _ = self.conn.destroy_window_damage(damage);
     }
 
     /// Actually remove a window (no fade). Used internally.
@@ -525,14 +506,14 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.gl.bind_texture(glow::TEXTURE_2D, None);
                 x11::glx::glXDestroyPixmap(self.xlib_display, wt.glx_pixmap);
             }
-            let _ = self.conn.free_pixmap(wt.pixmap);
+            let _ = self.conn.free_window_pixmap(wt.pixmap);
         }
 
-        // Create new named pixmaps for all windows via x11rb
+        // Create new named pixmaps for all windows via the shared texture-source ops
         let mut new_pixmaps: Vec<(u32, u32)> = Vec::new(); // (win, pixmap)
         for &win in &refresh_wins {
             let wt = self.windows.get_mut(&win).unwrap();
-            let pixmap = match self.conn.generate_id() {
+            let pixmap = match self.conn.generate_xid() {
                 Ok(id) => id,
                 Err(_) => {
                     wt.glx_pixmap = 0;
@@ -541,11 +522,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     continue;
                 }
             };
-            if self
-                .conn
-                .composite_name_window_pixmap(wt.x11_win, pixmap)
-                .is_err()
-            {
+            if self.conn.name_window_pixmap(wt.x11_win, pixmap).is_err() {
                 wt.glx_pixmap = 0;
                 wt.pixmap = 0;
                 wt.needs_pixmap_refresh = false;
@@ -556,7 +533,7 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         // Single flush + sync for the entire batch
-        let _ = self.conn.flush();
+        let _ = self.conn.flush_x11();
         unsafe {
             x11::xlib::XSync(self.xlib_display, 0);
         }
@@ -586,7 +563,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 )
             };
             if glx_pixmap == 0 {
-                let _ = self.conn.free_pixmap(pixmap);
+                let _ = self.conn.free_window_pixmap(pixmap);
                 wt.pixmap = 0;
                 wt.glx_pixmap = 0;
                 wt.needs_pixmap_refresh = false;
@@ -637,7 +614,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 wt.h + expand as u32 * 2,
             );
             // Subtract damage so we get future notifications
-            let _ = self.conn.damage_subtract(wt.damage, 0u32, 0u32);
+            let _ = self.conn.clear_window_damage(wt.damage);
         }
     }
 

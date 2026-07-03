@@ -13,22 +13,6 @@ use std::ffi::CString;
 use std::sync::Arc;
 #[allow(unused_imports)]
 use std::sync::mpsc;
-#[allow(unused_imports)]
-use x11rb::connection::{Connection, RequestConnection};
-#[allow(unused_imports)]
-use x11rb::protocol::composite::ConnectionExt as CompositeExt;
-#[allow(unused_imports)]
-use x11rb::protocol::damage::{self, ConnectionExt as DamageExt};
-#[allow(unused_imports)]
-use x11rb::protocol::randr::ConnectionExt as RandrExt;
-#[allow(unused_imports)]
-use x11rb::protocol::xfixes::ConnectionExt as XFixesExt;
-#[allow(unused_imports)]
-use x11rb::protocol::xproto::{self, ConnectionExt as XProtoExt};
-#[allow(unused_imports)]
-use x11rb::rust_connection::RustConnection;
-#[allow(unused_imports)]
-use x11rb::wrapper::ConnectionExt as WrapperExt;
 
 impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn needs_render(&self) -> bool {
@@ -138,6 +122,10 @@ impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn on_present_idle(&mut self, x11_win: u32, _serial: u32, _pixmap: u32) {
         // Window is idle and ready for next presentation
         log::debug!("compositor: Present idle for 0x{:x}", x11_win);
+    }
+
+    pub(crate) fn set_present_manager(&mut self, present_mgr: Option<Box<dyn PresentController>>) {
+        self.present_mgr = present_mgr;
     }
 
     pub(crate) fn clear_needs_render(&mut self) {

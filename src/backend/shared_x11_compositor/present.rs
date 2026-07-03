@@ -1,12 +1,11 @@
+use crate::backend::compositor_common::present::PresentController;
 use std::collections::HashMap;
 use std::sync::Arc;
-use x11rb::connection::{Connection, RequestConnection};
-use x11rb::protocol::present::{self, ConnectionExt as PresentExt};
 
 use super::CompositorConnection;
 
 /// Present extension support for per-window independent presentation
-pub(crate) struct PresentManager<C: CompositorConnection> {
+pub(crate) struct X11rbPresentManager<C: CompositorConnection> {
     conn: Arc<C>,
     available: bool,
     #[allow(dead_code)]
@@ -15,23 +14,20 @@ pub(crate) struct PresentManager<C: CompositorConnection> {
 }
 
 #[allow(dead_code)]
-impl<C: CompositorConnection> PresentManager<C> {
+impl<C: CompositorConnection> X11rbPresentManager<C> {
     /// Load and initialize Present extension
     pub(crate) fn load(conn: Arc<C>) -> Option<Self> {
-        // Query Present extension version
-        let query_result = conn.present_query_version(1, 0).ok()?;
-        let reply = query_result.reply().ok()?;
+        let (major_version, minor_version) = conn.query_present_version().ok()?;
 
         log::info!(
             "compositor: Present extension available - version {}.{}",
-            reply.major_version,
-            reply.minor_version
+            major_version,
+            minor_version
         );
 
-        // Get extension information for event base
-        let ext_info = match conn.extension_information(present::X11_EXTENSION_NAME) {
-            Ok(Some(info)) => info,
-            _ => {
+        let event_base = match conn.query_present_event_base() {
+            Ok(base) => base,
+            Err(_) => {
                 log::warn!("compositor: Present extension info not available");
                 return None;
             }
@@ -39,14 +35,14 @@ impl<C: CompositorConnection> PresentManager<C> {
 
         log::info!(
             "compositor: Present event base: {}, first_error: {}",
-            ext_info.first_event,
-            ext_info.first_error
+            event_base,
+            0
         );
 
-        Some(PresentManager {
+        Some(X11rbPresentManager {
             conn,
             available: true,
-            event_base: ext_info.first_event,
+            event_base,
             window_events: HashMap::new(),
         })
     }
@@ -66,18 +62,11 @@ impl<C: CompositorConnection> PresentManager<C> {
         }
 
         // Allocate an event ID
-        match self.conn.generate_id() {
+        match self.conn.generate_xid() {
             Ok(event_id) => {
-                // Register for Present events: CompleteNotify and IdleNotify
-                let event_mask =
-                    present::EventMask::COMPLETE_NOTIFY | present::EventMask::IDLE_NOTIFY;
-
-                match self
-                    .conn
-                    .present_select_input(event_id, x11_win, event_mask)
-                {
-                    Ok(_cookie) => {
-                        if let Err(e) = self.conn.flush() {
+                match self.conn.select_present_input(event_id, x11_win) {
+                    Ok(()) => {
+                        if let Err(e) = self.conn.flush_x11() {
                             log::error!(
                                 "compositor: flush failed after Present select_input: {}",
                                 e
@@ -132,23 +121,10 @@ impl<C: CompositorConnection> PresentManager<C> {
         // Simple presentation: no regions, no fences, just the basic pixmap
         // MSC = 0 means present immediately
         // For advanced use: would specify target_msc, divisor, remainder for precise timing
-        match self.conn.present_pixmap(
-            x11_win,    // window
-            pixmap,     // pixmap to present
-            serial,     // serial number for tracking
-            0,          // valid region (0 = entire pixmap)
-            0,          // update region (0 = entire pixmap)
-            0,          // x_off
-            0,          // y_off
-            0,          // target_crtc
-            0,          // wait_fence
-            0,          // idle_fence
-            0,          // options
-            target_msc, // target MSC (0 for immediate)
-            1,          // divisor (1 = any MSC)
-            0,          // remainder
-            &[],        // notifies (empty for now)
-        ) {
+        match self
+            .conn
+            .present_pixmap_for_window(x11_win, pixmap, target_msc, serial)
+        {
             Ok(_) => {
                 log::debug!(
                     "compositor: presented pixmap for 0x{:x} serial={} msc={}",
@@ -176,13 +152,7 @@ impl<C: CompositorConnection> PresentManager<C> {
             return Err("Present extension not available".to_string());
         }
 
-        match self.conn.present_notify_msc(
-            x11_win,    // window
-            serial,     // serial for identification
-            target_msc, // target MSC
-            1,          // divisor
-            0,          // remainder
-        ) {
+        match self.conn.notify_present_msc(x11_win, serial, target_msc) {
             Ok(_) => Ok(()),
             Err(e) => {
                 log::error!("compositor: notify_msc failed: {}", e);
@@ -200,6 +170,52 @@ impl<C: CompositorConnection> PresentManager<C> {
     pub(crate) fn is_window_registered(&self, x11_win: u32) -> bool {
         self.window_events.contains_key(&x11_win)
     }
+}
+
+impl<C: CompositorConnection> PresentController for X11rbPresentManager<C> {
+    fn is_available(&self) -> bool {
+        X11rbPresentManager::is_available(self)
+    }
+
+    fn get_event_base(&self) -> u8 {
+        X11rbPresentManager::get_event_base(self)
+    }
+
+    fn register_window(&mut self, x11_win: u32) -> Result<(), String> {
+        X11rbPresentManager::register_window(self, x11_win)
+    }
+
+    fn unregister_window(&mut self, x11_win: u32) {
+        X11rbPresentManager::unregister_window(self, x11_win)
+    }
+
+    fn present_pixmap(
+        &self,
+        x11_win: u32,
+        pixmap: u32,
+        target_msc: u64,
+        serial: u32,
+    ) -> Result<(), String> {
+        X11rbPresentManager::present_pixmap(self, x11_win, pixmap, target_msc, serial)
+    }
+
+    fn notify_msc(&self, x11_win: u32, serial: u32, target_msc: u64) -> Result<(), String> {
+        X11rbPresentManager::notify_msc(self, x11_win, serial, target_msc)
+    }
+
+    fn window_count(&self) -> usize {
+        X11rbPresentManager::window_count(self)
+    }
+
+    fn is_window_registered(&self, x11_win: u32) -> bool {
+        X11rbPresentManager::is_window_registered(self, x11_win)
+    }
+}
+
+pub(crate) fn load_present_manager<C: CompositorConnection>(
+    conn: Arc<C>,
+) -> Option<Box<dyn PresentController>> {
+    X11rbPresentManager::load(conn).map(|mgr| Box::new(mgr) as Box<dyn PresentController>)
 }
 
 #[cfg(test)]

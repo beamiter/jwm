@@ -1,10 +1,10 @@
 //! Native X11 backend implemented with the `xcb` crate.
 //!
-//! This backend owns a real `xcb::Connection` and implements the same JWM
-//! backend traits as the x11rb backend. Window management, EWMH, input,
-//! systray, and primary event dispatch are handled directly through XCB. The
-//! compositor path still reuses the shared x11rb implementation through a helper
-//! connection so both X11 backends expose the same higher-level feature surface.
+//! This backend owns a real `xcb::Connection` and implements the full JWM
+//! backend trait surface directly on top of XCB. Window management, EWMH,
+//! input, systray, and primary event dispatch are handled natively. The
+//! compositor path reuses the shared X11 compositor layer so both X11
+//! backends expose the same higher-level feature surface.
 
 use crate::backend::api::{
     AllowMode, AllowedAction, Backend, BackendEvent, Capabilities, CloseResult, ColorAllocator,
@@ -31,6 +31,12 @@ use crate::backend::x11_shared::{
     window_changes_from_configure_request_parts, window_type_from_atom, wm_delete_window_message,
     wm_take_focus_message,
 };
+use crate::backend::xcb::batch::BatchedGeometryRequest;
+use crate::backend::xcb::compositor_protocol::{
+    XcbCompositorProtocol, XcbSharedCompositor, XcbSharedCompositorConnection,
+    create_shared_compositor_connection,
+};
+use crate::backend::xcb::present::load_present_manager as load_xcb_present_manager;
 use crate::jwm::InteractionAction;
 use calloop::signals::{Signal, Signals};
 use calloop::{
@@ -454,11 +460,8 @@ pub struct XcbBackend {
     color_allocator: Box<dyn ColorAllocator>,
     pending: VecDeque<BackendEvent>,
     interaction: Option<XcbInteraction>,
-    compositor: Option<
-        crate::backend::x11rb::compositor::Compositor<
-            crate::backend::x11rb::compositor::XcbCompositorConnection,
-        >,
-    >,
+    shared_compositor_conn: Option<Arc<XcbSharedCompositorConnection>>,
+    compositor: Option<XcbSharedCompositor>,
     systray: Option<XcbSystemTray>,
     benchmark_auto_exit: bool,
     scratch_x11_scene: Vec<(u32, i32, i32, u32, u32)>,
@@ -904,10 +907,22 @@ impl XcbBackend {
             primary_refresh_hz
         );
 
+        let shared_compositor_conn = if compositor_enabled {
+            match create_shared_compositor_connection(conn.clone()) {
+                Ok(comp_conn) => Some(comp_conn),
+                Err(e) => {
+                    log::warn!("XCB backend: failed to create shared compositor wrapper: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let compositor = if compositor_enabled {
             let _ = Self::prime_compositor_event_extensions(&conn);
-            match Self::wrap_xcb_for_compositor(conn.clone()) {
-                Ok(comp_conn) => match crate::backend::x11rb::compositor::Compositor::new(
+            match shared_compositor_conn.clone() {
+                Some(comp_conn) => match XcbSharedCompositor::new(
                     comp_conn,
                     root.resource_id(),
                     screen_width as u32,
@@ -916,6 +931,8 @@ impl XcbBackend {
                 ) {
                     Ok(c) => {
                         log::info!("XCB backend: GPU compositor initialized successfully");
+                        let mut c = c;
+                        c.set_present_manager(load_xcb_present_manager(conn.clone()));
                         Some(c)
                     }
                     Err(e) => {
@@ -925,10 +942,7 @@ impl XcbBackend {
                         None
                     }
                 },
-                Err(e) => {
-                    log::warn!("XCB backend: failed to wrap xcb connection for compositor: {e}");
-                    None
-                }
+                None => None,
             }
         } else {
             log::info!("XCB backend: compositor disabled (set JWM_COMPOSITOR=1 to enable)");
@@ -952,6 +966,7 @@ impl XcbBackend {
             color_allocator,
             pending: VecDeque::new(),
             interaction: None,
+            shared_compositor_conn,
             compositor,
             systray: None,
             benchmark_auto_exit: false,
@@ -979,35 +994,20 @@ impl XcbBackend {
             .unwrap_or(60)
     }
 
-    fn wrap_xcb_for_compositor(
-        conn: Arc<xcb::Connection>,
-    ) -> Result<Arc<crate::backend::x11rb::compositor::XcbCompositorConnection>, BackendError> {
-        // SAFETY: the backend owns `conn` for at least as long as the returned
-        // x11rb wrapper lives, and `should_drop=false` prevents double-disconnect.
-        unsafe {
-            crate::backend::x11rb::compositor::XcbCompositorConnection::from_raw_xcb_connection(
-                conn.get_raw_conn().cast(),
-                false,
-            )
-        }
-        .map(Arc::new)
-        .map_err(|e| BackendError::Message(format!("failed to create x11rb xcb wrapper: {e}")))
+    fn prime_compositor_event_extensions(conn: &xcb::Connection) -> XcbResult<()> {
+        XcbCompositorProtocol::new(conn).prime_extensions()
     }
 
-    fn prime_compositor_event_extensions(conn: &xcb::Connection) -> XcbResult<()> {
-        let damage_cookie = conn.send_request(&xcb::damage::QueryVersion {
-            client_major_version: 1,
-            client_minor_version: 1,
-        });
-        let _ = conn.wait_for_reply(damage_cookie).map_err(xcb_err)?;
+    fn shared_compositor_connection(
+        &mut self,
+    ) -> XcbResult<Arc<XcbSharedCompositorConnection>> {
+        if let Some(conn) = &self.shared_compositor_conn {
+            return Ok(conn.clone());
+        }
 
-        let present_cookie = conn.send_request(&xcb::present::QueryVersion {
-            major_version: 1,
-            minor_version: 0,
-        });
-        let _ = conn.wait_for_reply(present_cookie).map_err(xcb_err)?;
-
-        Ok(())
+        let conn = create_shared_compositor_connection(self.conn.clone())?;
+        self.shared_compositor_conn = Some(conn.clone());
+        Ok(conn)
     }
 
     fn init_systray(&mut self, screen_num: usize) {
@@ -1166,10 +1166,7 @@ impl XcbBackend {
 
     fn register_existing_windows_with_compositor(
         &mut self,
-        conn: &crate::backend::x11rb::compositor::XcbCompositorConnection,
-        compositor: &mut crate::backend::x11rb::compositor::Compositor<
-            crate::backend::x11rb::compositor::XcbCompositorConnection,
-        >,
+        compositor: &mut XcbSharedCompositor,
     ) {
         let overlay = compositor.overlay_window();
         let windows: Vec<_> = self
@@ -1183,9 +1180,7 @@ impl XcbBackend {
             return;
         }
 
-        use crate::backend::x11rb::batch::BatchedGeometryRequest;
-
-        let mut batch = BatchedGeometryRequest::new(conn);
+        let mut batch = BatchedGeometryRequest::new(&self.conn);
         for &(x11w, _) in &windows {
             batch.queue_geometry(x11w);
         }
@@ -1226,9 +1221,7 @@ impl XcbBackend {
 
     fn apply_compositor_window_metadata(
         &self,
-        compositor: &mut crate::backend::x11rb::compositor::Compositor<
-            crate::backend::x11rb::compositor::XcbCompositorConnection,
-        >,
+        compositor: &mut XcbSharedCompositor,
         x11w: u32,
         wid: WindowId,
     ) {
@@ -1769,9 +1762,8 @@ impl Backend for XcbBackend {
 
         let screen = self.output_ops.screen_info();
         Self::prime_compositor_event_extensions(&self.conn)?;
-        let comp_conn = Self::wrap_xcb_for_compositor(self.conn.clone())?;
-        let batch_conn = comp_conn.clone();
-        let mut compositor = crate::backend::x11rb::compositor::Compositor::new(
+        let comp_conn = self.shared_compositor_connection()?;
+        let mut compositor = XcbSharedCompositor::new(
             comp_conn,
             self.root.resource_id(),
             screen.width as u32,
@@ -1779,7 +1771,8 @@ impl Backend for XcbBackend {
             self.get_primary_monitor_refresh_rate(),
         )
         .map_err(|e| BackendError::Message(format!("compositor init failed: {e}")))?;
-        self.register_existing_windows_with_compositor(&batch_conn, &mut compositor);
+        compositor.set_present_manager(load_xcb_present_manager(self.conn.clone()));
+        self.register_existing_windows_with_compositor(&mut compositor);
         self.compositor = Some(compositor);
         self.compositor_auto_configure_hdr();
         Ok(true)

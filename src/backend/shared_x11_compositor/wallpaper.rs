@@ -14,22 +14,6 @@ use std::sync::Arc;
 #[allow(unused_imports)]
 use std::sync::mpsc;
 use std::sync::{Condvar, Mutex, OnceLock};
-#[allow(unused_imports)]
-use x11rb::connection::{Connection, RequestConnection};
-#[allow(unused_imports)]
-use x11rb::protocol::composite::ConnectionExt as CompositeExt;
-#[allow(unused_imports)]
-use x11rb::protocol::damage::{self, ConnectionExt as DamageExt};
-#[allow(unused_imports)]
-use x11rb::protocol::randr::ConnectionExt as RandrExt;
-#[allow(unused_imports)]
-use x11rb::protocol::xfixes::ConnectionExt as XFixesExt;
-#[allow(unused_imports)]
-use x11rb::protocol::xproto::{self, ConnectionExt as XProtoExt};
-#[allow(unused_imports)]
-use x11rb::rust_connection::RustConnection;
-#[allow(unused_imports)]
-use x11rb::wrapper::ConnectionExt as WrapperExt;
 
 use crate::backend::compositor_common::wallpaper::parse_wallpaper_mode;
 

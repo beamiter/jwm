@@ -13,22 +13,6 @@ use std::ffi::CString;
 use std::sync::Arc;
 #[allow(unused_imports)]
 use std::sync::mpsc;
-#[allow(unused_imports)]
-use x11rb::connection::{Connection, RequestConnection};
-#[allow(unused_imports)]
-use x11rb::protocol::composite::ConnectionExt as CompositeExt;
-#[allow(unused_imports)]
-use x11rb::protocol::damage::{self, ConnectionExt as DamageExt};
-#[allow(unused_imports)]
-use x11rb::protocol::randr::ConnectionExt as RandrExt;
-#[allow(unused_imports)]
-use x11rb::protocol::xfixes::ConnectionExt as XFixesExt;
-#[allow(unused_imports)]
-use x11rb::protocol::xproto::{self, ConnectionExt as XProtoExt};
-#[allow(unused_imports)]
-use x11rb::rust_connection::RustConnection;
-#[allow(unused_imports)]
-use x11rb::wrapper::ConnectionExt as WrapperExt;
 
 impl<C: CompositorConnection> Compositor<C> {
     /// Look up per-window opacity from opacity_rules.
@@ -199,61 +183,7 @@ impl<C: CompositorConnection> Compositor<C> {
         conn: &Arc<C>,
         root: u32,
     ) -> Vec<(u32, i32, i32, u32, u32)> {
-        // Query RandR for outputs to get monitor positions and dimensions
-        let mut rects = Vec::new();
-
-        // Try RandR 1.5 get_monitors API first
-        if let Ok(ver_cookie) = conn.as_ref().randr_query_version(1, 5) {
-            if let Ok(ver) = ver_cookie.reply() {
-                if ver.major_version > 1 || (ver.major_version == 1 && ver.minor_version >= 5) {
-                    if let Ok(mon_cookie) = conn.as_ref().randr_get_monitors(root, true) {
-                        if let Ok(reply) = mon_cookie.reply() {
-                            for (idx, mon) in reply.monitors.iter().enumerate() {
-                                if mon.width > 0 && mon.height > 0 {
-                                    rects.push((
-                                        idx as u32,
-                                        mon.x as i32,
-                                        mon.y as i32,
-                                        mon.width as u32,
-                                        mon.height as u32,
-                                    ));
-                                }
-                            }
-                            if !rects.is_empty() {
-                                return rects;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Fallback: use screen resources (older RandR)
-        if let Ok(res_cookie) = conn.as_ref().randr_get_screen_resources(root) {
-            if let Ok(resources) = res_cookie.reply() {
-                for (idx, crtc_id) in resources.crtcs.iter().enumerate() {
-                    if let Ok(info_cookie) = conn.as_ref().randr_get_crtc_info(*crtc_id, 0) {
-                        if let Ok(info) = info_cookie.reply() {
-                            if info.width > 0 && info.height > 0 {
-                                rects.push((
-                                    idx as u32,
-                                    info.x as i32,
-                                    info.y as i32,
-                                    info.width as u32,
-                                    info.height as u32,
-                                ));
-                            }
-                        }
-                    }
-                }
-                if !rects.is_empty() {
-                    return rects;
-                }
-            }
-        }
-
-        // Fallback: return empty vector (will use center-point detection with fallback to monitor 0)
-        rects
+        conn.query_monitor_rects(root)
     }
 
     /// P5B Phase 2: Build monitor refresh rates from RandR outputs
@@ -261,98 +191,7 @@ impl<C: CompositorConnection> Compositor<C> {
         conn: &Arc<C>,
         root: u32,
     ) -> HashMap<u32, u32> {
-        let mut rates = HashMap::new();
-
-        // Helper to calculate refresh rate from mode info
-        fn calc_refresh_mhz(mode: &x11rb::protocol::randr::ModeInfo) -> u32 {
-            if mode.htotal == 0 || mode.vtotal == 0 {
-                return 60000; // 60Hz fallback
-            }
-            let dot_clock = mode.dot_clock as u64;
-            let htotal = mode.htotal as u64;
-            let vtotal = mode.vtotal as u64;
-            ((dot_clock * 1000) / (htotal * vtotal)) as u32
-        }
-
-        // Try RandR 1.5 get_monitors API
-        if let Ok(ver_cookie) = conn.as_ref().randr_query_version(1, 5) {
-            if let Ok(ver) = ver_cookie.reply() {
-                if ver.major_version > 1 || (ver.major_version == 1 && ver.minor_version >= 5) {
-                    // Get screen resources for mode info
-                    if let Ok(res_cookie) = conn.as_ref().randr_get_screen_resources(root) {
-                        if let Ok(resources) = res_cookie.reply() {
-                            let modes = resources.modes;
-
-                            if let Ok(mon_cookie) = conn.as_ref().randr_get_monitors(root, true) {
-                                if let Ok(reply) = mon_cookie.reply() {
-                                    for (idx, mon) in reply.monitors.iter().enumerate() {
-                                        // Get first output's current mode to determine refresh rate
-                                        if let Some(&output_id) = mon.outputs.first() {
-                                            if let Ok(output_cookie) =
-                                                conn.as_ref().randr_get_output_info(output_id, 0)
-                                            {
-                                                if let Ok(output_info) = output_cookie.reply() {
-                                                    if output_info.crtc != 0 {
-                                                        if let Ok(crtc_cookie) =
-                                                            conn.as_ref().randr_get_crtc_info(
-                                                                output_info.crtc,
-                                                                0,
-                                                            )
-                                                        {
-                                                            if let Ok(crtc_info) =
-                                                                crtc_cookie.reply()
-                                                            {
-                                                                let refresh = modes
-                                                                    .iter()
-                                                                    .find(|m| {
-                                                                        m.id == crtc_info.mode
-                                                                    })
-                                                                    .map(calc_refresh_mhz)
-                                                                    .unwrap_or(60000);
-                                                                rates.insert(
-                                                                    idx as u32,
-                                                                    refresh / 1000,
-                                                                ); // mHz -> Hz
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    if !rates.is_empty() {
-                                        return rates;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Fallback: use screen resources directly
-        if let Ok(res_cookie) = conn.as_ref().randr_get_screen_resources(root) {
-            if let Ok(resources) = res_cookie.reply() {
-                let modes = resources.modes;
-                for (idx, crtc_id) in resources.crtcs.iter().enumerate() {
-                    if let Ok(info_cookie) = conn.as_ref().randr_get_crtc_info(*crtc_id, 0) {
-                        if let Ok(info) = info_cookie.reply() {
-                            if info.width > 0 && info.height > 0 {
-                                let refresh = modes
-                                    .iter()
-                                    .find(|m| m.id == info.mode)
-                                    .map(calc_refresh_mhz)
-                                    .unwrap_or(60000);
-                                rates.insert(idx as u32, refresh / 1000); // mHz -> Hz
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        rates
+        conn.query_monitor_refresh_rates(root)
     }
 
     /// P5B Phase 1: Map window position to monitor index using real RandR geometry.

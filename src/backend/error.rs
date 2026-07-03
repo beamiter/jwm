@@ -62,33 +62,3 @@ impl From<calloop::Error> for BackendError {
         BackendError::Other(Box::new(e))
     }
 }
-
-// === X11RB ===
-
-// 连接建立时的错误
-impl From<x11rb::rust_connection::ConnectError> for BackendError {
-    fn from(e: x11rb::rust_connection::ConnectError) -> Self {
-        BackendError::Other(Box::new(e))
-    }
-}
-
-// 连接运行时的错误 (只保留这一个 ConnectionError 实现以避免冲突)
-impl From<x11rb::rust_connection::ConnectionError> for BackendError {
-    fn from(e: x11rb::rust_connection::ConnectionError) -> Self {
-        BackendError::Other(Box::new(e))
-    }
-}
-
-// Reply 错误
-impl From<x11rb::errors::ReplyError> for BackendError {
-    fn from(e: x11rb::errors::ReplyError) -> Self {
-        BackendError::Other(Box::new(e))
-    }
-}
-
-// ReplyOrId 错误
-impl From<x11rb::errors::ReplyOrIdError> for BackendError {
-    fn from(e: x11rb::errors::ReplyOrIdError) -> Self {
-        BackendError::Other(Box::new(e))
-    }
-}

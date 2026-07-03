@@ -73,7 +73,7 @@ pub struct X11rbBackend {
 
     interaction: Option<X11Interaction>,
 
-    compositor: Option<super::compositor::Compositor>,
+    compositor: Option<super::compositor::Compositor<RustConnection>>,
 
     systray: Option<super::systray::SystemTray<RustConnection>>,
 

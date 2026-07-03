@@ -1,4 +1,5 @@
 // Compositor::new() constructor
+use crate::backend::compositor_common::x11_bootstrap::BootstrapState;
 #[allow(unused_imports)]
 use super::math::ortho;
 #[allow(unused_imports)]
@@ -13,22 +14,6 @@ use std::ffi::CString;
 use std::sync::Arc;
 #[allow(unused_imports)]
 use std::sync::mpsc;
-#[allow(unused_imports)]
-use x11rb::connection::{Connection, RequestConnection};
-#[allow(unused_imports)]
-use x11rb::protocol::composite::ConnectionExt as CompositeExt;
-#[allow(unused_imports)]
-use x11rb::protocol::damage::{self, ConnectionExt as DamageExt};
-#[allow(unused_imports)]
-use x11rb::protocol::randr::ConnectionExt as RandrExt;
-#[allow(unused_imports)]
-use x11rb::protocol::xfixes::ConnectionExt as XFixesExt;
-#[allow(unused_imports)]
-use x11rb::protocol::xproto::{self, ConnectionExt as XProtoExt};
-#[allow(unused_imports)]
-use x11rb::rust_connection::RustConnection;
-#[allow(unused_imports)]
-use x11rb::wrapper::ConnectionExt as WrapperExt;
 
 impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn new(
@@ -39,14 +24,10 @@ impl<C: CompositorConnection> Compositor<C> {
         primary_refresh_hz: u32,
     ) -> Result<Self, String> {
         // 1. Check composite extension
-        conn.composite_query_version(0, 4)
-            .map_err(|e| format!("composite_query_version: {e}"))?
-            .reply()
-            .map_err(|e| format!("composite reply: {e}"))?;
+        conn.query_composite_version()?;
 
         // 2. Redirect subwindows
-        conn.composite_redirect_subwindows(root, x11rb::protocol::composite::Redirect::MANUAL)
-            .map_err(|e| format!("redirect_subwindows: {e}"))?;
+        conn.redirect_subwindows_manual(root)?;
 
         // RAII guard: if we return Err after the redirect, undo it so the screen
         // doesn't go permanently black.
@@ -59,14 +40,11 @@ impl<C: CompositorConnection> Compositor<C> {
         impl<C: CompositorConnection> Drop for RedirectGuard<C> {
             fn drop(&mut self) {
                 if self.active {
-                    let _ = self.conn.composite_unredirect_subwindows(
-                        self.root,
-                        x11rb::protocol::composite::Redirect::MANUAL,
-                    );
+                    let _ = self.conn.unredirect_subwindows_manual(self.root);
                     if let Some(ow) = self.overlay {
-                        let _ = self.conn.composite_release_overlay_window(ow);
+                        let _ = self.conn.release_overlay_window(ow);
                     }
-                    let _ = self.conn.flush();
+                    let _ = self.conn.flush_x11();
                 }
             }
         }
@@ -77,70 +55,12 @@ impl<C: CompositorConnection> Compositor<C> {
             active: true,
         };
 
-        // 3. Damage extension
-        conn.damage_query_version(1, 1)
-            .map_err(|e| format!("damage_query_version: {e}"))?
-            .reply()
-            .map_err(|e| format!("damage reply: {e}"))?;
-
-        let damage_ext = conn
-            .extension_information(damage::X11_EXTENSION_NAME)
-            .map_err(|e| format!("damage ext info: {e}"))?
-            .ok_or("damage extension not available")?;
-        let damage_event_base = damage_ext.first_event;
-
-        // 4. Get overlay window
-        let overlay_reply = conn
-            .composite_get_overlay_window(root)
-            .map_err(|e| format!("get_overlay_window: {e}"))?
-            .reply()
-            .map_err(|e| format!("overlay reply: {e}"))?;
-        let overlay_window = overlay_reply.overlay_win;
+        // 3-5. Bootstrap X11 compositor state shared across X11 backends.
+        let BootstrapState {
+            damage_event_base,
+            overlay_window,
+        } = conn.bootstrap_state(root)?;
         guard.overlay = Some(overlay_window);
-
-        // 5. Make overlay input-passthrough using XFixes
-        {
-            // XFixes version negotiation is REQUIRED before using xfixes_set_window_shape_region.
-            // Without this, some X servers (e.g. Ubuntu 20's Xorg) silently ignore the request,
-            // leaving the overlay opaque to input and blocking all mouse clicks to client windows.
-            let xfixes_ver = conn
-                .xfixes_query_version(5, 0)
-                .map_err(|e| format!("xfixes_query_version: {e}"))?
-                .reply()
-                .map_err(|e| format!("xfixes version reply: {e}"))?;
-            log::info!(
-                "compositor: XFixes version {}.{}",
-                xfixes_ver.major_version,
-                xfixes_ver.minor_version
-            );
-
-            log::info!(
-                "compositor: setting empty INPUT shape on overlay 0x{:x} to pass through input",
-                overlay_window
-            );
-            let region = conn.generate_id().map_err(|e| format!("gen id: {e}"))?;
-            conn.xfixes_create_region(region, &[])
-                .map_err(|e| format!("create_region: {e}"))?;
-            conn.xfixes_set_window_shape_region(
-                overlay_window,
-                x11rb::protocol::shape::SK::INPUT,
-                0,
-                0,
-                region,
-            )
-            .map_err(|e| format!("set_window_shape_region: {e}"))?;
-            conn.xfixes_destroy_region(region)
-                .map_err(|e| format!("destroy_region: {e}"))?;
-            // Flush and round-trip to ensure the shape region is applied before proceeding
-            conn.flush()
-                .map_err(|e| format!("flush after shape: {e}"))?;
-            // Round-trip: get_input_focus forces the X server to process all prior requests
-            conn.get_input_focus()
-                .map_err(|e| format!("sync after shape: {e}"))?
-                .reply()
-                .map_err(|e| format!("sync reply after shape: {e}"))?;
-            log::info!("compositor: overlay input shape set successfully (verified via sync)");
-        }
 
         // Read HDR setting from config early for GLX setup
         let hdr_enabled = crate::config::CONFIG.load().behavior().hdr_enabled;
@@ -179,18 +99,13 @@ impl<C: CompositorConnection> Compositor<C> {
             log::info!("GLX extensions: {ext_str}");
         }
 
+        let cm_selection_owner = conn.claim_compositor_selection_owner(root, screen_num)?;
+
         // 7. Choose FBConfig for GLX context.
         // We must pick an FBConfig whose visual matches the overlay window's
         // visual — otherwise glXCreateWindow / glXMakeContextCurrent will fail
         // (or even segfault) due to the visual mismatch.
-        let overlay_visual_id = {
-            let attrs = conn
-                .get_window_attributes(overlay_window)
-                .map_err(|e| format!("get_window_attributes(overlay): {e}"))?
-                .reply()
-                .map_err(|e| format!("overlay attrs reply: {e}"))?;
-            attrs.visual
-        };
+        let overlay_visual_id = conn.get_window_visual(overlay_window)?;
         log::info!(
             "compositor: overlay visual=0x{:x}, choosing matching FBConfig...",
             overlay_visual_id
@@ -1076,77 +991,6 @@ impl<C: CompositorConnection> Compositor<C> {
         // Success — defuse the guard so it doesn't undo our redirect
         guard.active = false;
 
-        // Set _NET_WM_WINDOW_TYPE on the overlay window so that screenshot tools
-        // (e.g. Electron-based apps like Feishu/Lark) that enumerate windows via
-        // XComposite will skip the overlay and not double-composite its contents
-        // alongside the individual redirected window pixmaps.
-        {
-            let wm_type_atom = conn
-                .intern_atom(false, b"_NET_WM_WINDOW_TYPE")
-                .map_err(|e| format!("intern _NET_WM_WINDOW_TYPE: {e}"))?
-                .reply()
-                .map_err(|e| format!("intern reply: {e}"))?
-                .atom;
-            let notification_atom = conn
-                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_NOTIFICATION")
-                .map_err(|e| format!("intern _NET_WM_WINDOW_TYPE_NOTIFICATION: {e}"))?
-                .reply()
-                .map_err(|e| format!("intern reply: {e}"))?
-                .atom;
-            conn.change_property32(
-                xproto::PropMode::REPLACE,
-                overlay_window,
-                wm_type_atom,
-                xproto::AtomEnum::ATOM,
-                &[notification_atom],
-            )
-            .map_err(|e| format!("set overlay _NET_WM_WINDOW_TYPE: {e}"))?;
-            let _ = conn.flush();
-            log::info!(
-                "compositor: set overlay 0x{:x} _NET_WM_WINDOW_TYPE = NOTIFICATION",
-                overlay_window
-            );
-        }
-
-        // Claim the _NET_WM_CM_Sn selection so that other clients (screenshot
-        // tools, Electron apps like Feishu/Lark, etc.) know a compositing
-        // manager is active and don't try to composite the screen themselves.
-        let cm_selection_owner = {
-            let sel_name = format!("_NET_WM_CM_S{}", screen_num);
-            let cm_atom = conn
-                .intern_atom(false, sel_name.as_bytes())
-                .map_err(|e| format!("intern {sel_name}: {e}"))?
-                .reply()
-                .map_err(|e| format!("intern reply {sel_name}: {e}"))?
-                .atom;
-            let sel_win = conn
-                .generate_id()
-                .map_err(|e| format!("generate_id for CM selection owner: {e}"))?;
-            conn.create_window(
-                0, // copy_from_parent depth
-                sel_win,
-                root,
-                0,
-                0,
-                1,
-                1, // off-screen 1x1
-                0,
-                xproto::WindowClass::INPUT_ONLY,
-                0, // copy_from_parent visual
-                &xproto::CreateWindowAux::default(),
-            )
-            .map_err(|e| format!("create CM selection owner window: {e}"))?;
-            conn.set_selection_owner(sel_win, cm_atom, x11rb::CURRENT_TIME)
-                .map_err(|e| format!("set_selection_owner {sel_name}: {e}"))?;
-            let _ = conn.flush();
-            log::info!(
-                "compositor: claimed {} selection (owner=0x{:x})",
-                sel_name,
-                sel_win
-            );
-            sel_win
-        };
-
         // Read compositor visual settings from config
         let cfg = crate::config::CONFIG.load();
         let behavior = cfg.behavior();
@@ -1154,7 +998,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // Load Present extension (always try to load even if not the selected vsync method,
         // since it may be used for per-window presentation alongside other methods)
-        let present_loaded = present::PresentManager::load(conn.clone());
+        let present_loaded = present::load_present_manager(conn.clone());
 
         // Determine which VSync method to use based on config and availability
         let (oml, vsync_method, present_mgr) = match behavior.vsync_method.as_str() {

@@ -1,6 +1,8 @@
 pub mod backend;
 pub mod batch;
 pub mod compositor;
+mod error_adapters;
+mod shared_x11_adapters;
 pub mod edid;
 pub mod systray;
 

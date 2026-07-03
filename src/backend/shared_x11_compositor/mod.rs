@@ -14,8 +14,7 @@ mod transitions;
 pub mod oml_sync_control;
 pub mod present;
 
-// Backend-independent modules kept under the old x11rb::compositor path as
-// compatibility facades while xcb starts using the common layer directly.
+// Backend-independent modules shared by X11 compositors.
 pub mod benchmark {
     pub use crate::backend::compositor_common::benchmark::*;
 }
@@ -154,6 +153,7 @@ pub use pbo_uploader::PBOUploader;
 pub use per_monitor::{MonitorRenderRegion, PerMonitorRenderer};
 pub use perf_metrics::PerfMetrics;
 pub use pixel_buffer_pool::PixelBufferPool;
+pub use crate::backend::compositor_common::present::PresentController;
 pub use power_saving::{BatteryStatus, PowerProfile, PowerSavingConfig, PowerSavingManager};
 pub use predictive_render::{PredictiveRenderManager, SceneActivity};
 pub use profiler::{FrameProfiler, ProfileZone, ZoneStats};
@@ -179,14 +179,16 @@ pub(crate) use wallpaper_common::{
 pub(crate) use wobbly::WobblyState;
 
 use glow::HasContext;
+use crate::backend::compositor_common::x11_bootstrap::X11BootstrapOps;
+use crate::backend::compositor_common::x11_connection::X11ConnectionOps;
+use crate::backend::compositor_common::x11_composite_redirect::X11CompositeRedirectOps;
+use crate::backend::compositor_common::x11_present::X11PresentOps;
+use crate::backend::compositor_common::x11_randr::X11RandrOps;
+use crate::backend::compositor_common::x11_texture_source::X11TextureSourceOps;
+use crate::backend::compositor_common::x11_window_resource::X11WindowResourceOps;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc;
-use x11rb::connection::Connection;
-use x11rb::connection::RequestConnection;
-use x11rb::protocol::composite::ConnectionExt as CompositeExt;
-use x11rb::protocol::xproto::ConnectionExt as XProtoExt;
-use x11rb::rust_connection::RustConnection;
 
 use math::ortho;
 
@@ -543,16 +545,36 @@ struct GenieAnimation {
 // Compositor
 // ---------------------------------------------------------------------------
 
-pub(crate) type XcbCompositorConnection = x11rb::xcb_ffi::XCBConnection;
-
 pub(crate) trait CompositorConnection:
-    Connection + RequestConnection + Send + Sync + 'static
+    X11BootstrapOps
+    + X11ConnectionOps
+    + X11CompositeRedirectOps
+    + X11PresentOps
+    + X11RandrOps
+    + X11TextureSourceOps
+    + X11WindowResourceOps
+    + Send
+    + Sync
+    + 'static
 {
 }
 
-impl<T> CompositorConnection for T where T: Connection + RequestConnection + Send + Sync + 'static {}
+impl<T> CompositorConnection for T
+where
+    T: X11BootstrapOps
+        + X11ConnectionOps
+        + X11CompositeRedirectOps
+        + X11PresentOps
+        + X11RandrOps
+        + X11TextureSourceOps
+        + X11WindowResourceOps
+        + Send
+        + Sync
+        + 'static,
+{
+}
 
-pub(crate) struct Compositor<C = RustConnection>
+pub(crate) struct Compositor<C>
 where
     C: CompositorConnection,
 {
@@ -637,7 +659,7 @@ where
     /// Audio sync manager for per-window audio-video synchronization
     audio_sync: audio_sync::AudioSyncManager,
     /// Present extension for per-window independent presentation
-    present_mgr: Option<present::PresentManager<C>>,
+    present_mgr: Option<Box<dyn PresentController>>,
 
     // --- Feature 1: Window borders ---
     border_program: glow::Program,
@@ -1130,16 +1152,11 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
             self.remove_window_immediate(w);
         }
         // Destroy the _NET_WM_CM_Sn selection owner window (releases ownership)
-        let _ = self.conn.destroy_window(self.cm_selection_owner);
+        let _ = self.conn.destroy_window_resource(self.cm_selection_owner);
         // Undo the MANUAL redirect so the X server renders windows normally again
-        let _ = self.conn.composite_unredirect_subwindows(
-            self.root,
-            x11rb::protocol::composite::Redirect::MANUAL,
-        );
-        let _ = self
-            .conn
-            .composite_release_overlay_window(self.overlay_window);
-        let _ = self.conn.flush();
+        let _ = self.conn.unredirect_subwindows_manual(self.root);
+        let _ = self.conn.release_overlay_window(self.overlay_window);
+        let _ = self.conn.flush_x11();
         unsafe {
             x11::glx::glXDestroyContext(self.xlib_display, self.glx_context);
             x11::xlib::XCloseDisplay(self.xlib_display);

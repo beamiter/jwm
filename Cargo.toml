@@ -64,7 +64,7 @@ drm-ffi = "0.9.1"
 libseat = "0.2.4"
 gbm = "0.18.0"
 egl = "0.2.7"
-xcb = { version = "1.7.0", features = ["shape", "randr", "damage", "present"] }
+xcb = { version = "1.7.0", features = ["composite", "shape", "randr", "damage", "present", "xfixes"] }
 
 [[bench]]
 name = "wm_benchmark"
