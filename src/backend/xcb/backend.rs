@@ -46,10 +46,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 use std::time::Duration;
-use x11rb::connection::Connection as X11rbConnection;
-use x11rb::protocol::Event as X11rbEvent;
-use x11rb::rust_connection::RustConnection;
-use xcb::{Xid, XidNew, x};
+use xcb::{Raw, Xid, XidNew, x};
 
 type XcbResult<T> = Result<T, BackendError>;
 
@@ -438,11 +435,6 @@ impl XcbIdRegistry {
         }
     }
 
-    fn remove_raw(&self, raw: u32) {
-        if let Some(id) = self.x_to_wid.write().unwrap().remove(&raw) {
-            self.wid_to_x.write().unwrap().remove(&id);
-        }
-    }
 }
 
 pub struct XcbBackend {
@@ -462,9 +454,11 @@ pub struct XcbBackend {
     color_allocator: Box<dyn ColorAllocator>,
     pending: VecDeque<BackendEvent>,
     interaction: Option<XcbInteraction>,
-    compositor_conn: Option<Arc<RustConnection>>,
-    compositor_screen_num: Option<usize>,
-    compositor: Option<crate::backend::x11rb::compositor::Compositor>,
+    compositor: Option<
+        crate::backend::x11rb::compositor::Compositor<
+            crate::backend::x11rb::compositor::XcbCompositorConnection,
+        >,
+    >,
     systray: Option<XcbSystemTray>,
     benchmark_auto_exit: bool,
     scratch_x11_scene: Vec<(u32, i32, i32, u32, u32)>,
@@ -910,52 +904,35 @@ impl XcbBackend {
             primary_refresh_hz
         );
 
-        let (compositor_conn, compositor, compositor_screen_num) = if compositor_enabled {
-            match RustConnection::connect(None) {
-                Ok((raw_conn, comp_screen_num)) => {
-                    let comp_conn = Arc::new(raw_conn);
-                    let comp_root = comp_conn
-                        .setup()
-                        .roots
-                        .get(comp_screen_num)
-                        .map(|screen| screen.root)
-                        .unwrap_or(root.resource_id());
-                    if comp_root != root.resource_id() {
-                        log::warn!(
-                            "xcb compositor helper connected to a different root (xcb=0x{:x}, x11rb=0x{:x}); disabling compositor",
-                            root.resource_id(),
-                            comp_root
-                        );
-                        (Some(comp_conn), None, Some(comp_screen_num))
-                    } else {
-                        match crate::backend::x11rb::compositor::Compositor::new(
-                            comp_conn.clone(),
-                            root.resource_id(),
-                            screen_width as u32,
-                            screen_height as u32,
-                            primary_refresh_hz,
-                        ) {
-                            Ok(c) => {
-                                log::info!("XCB backend: GPU compositor initialized successfully");
-                                (Some(comp_conn), Some(c), Some(comp_screen_num))
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "XCB backend: compositor init failed, falling back to non-composited mode: {e}"
-                                );
-                                (Some(comp_conn), None, Some(comp_screen_num))
-                            }
-                        }
+        let compositor = if compositor_enabled {
+            let _ = Self::prime_compositor_event_extensions(&conn);
+            match Self::wrap_xcb_for_compositor(conn.clone()) {
+                Ok(comp_conn) => match crate::backend::x11rb::compositor::Compositor::new(
+                    comp_conn,
+                    root.resource_id(),
+                    screen_width as u32,
+                    screen_height as u32,
+                    primary_refresh_hz,
+                ) {
+                    Ok(c) => {
+                        log::info!("XCB backend: GPU compositor initialized successfully");
+                        Some(c)
                     }
-                }
+                    Err(e) => {
+                        log::warn!(
+                            "XCB backend: compositor init failed, falling back to non-composited mode: {e}"
+                        );
+                        None
+                    }
+                },
                 Err(e) => {
-                    log::warn!("XCB backend: failed to open compositor helper connection: {e}");
-                    (None, None, None)
+                    log::warn!("XCB backend: failed to wrap xcb connection for compositor: {e}");
+                    None
                 }
             }
         } else {
             log::info!("XCB backend: compositor disabled (set JWM_COMPOSITOR=1 to enable)");
-            (None, None, None)
+            None
         };
 
         let mut backend = Self {
@@ -975,8 +952,6 @@ impl XcbBackend {
             color_allocator,
             pending: VecDeque::new(),
             interaction: None,
-            compositor_conn,
-            compositor_screen_num,
             compositor,
             systray: None,
             benchmark_auto_exit: false,
@@ -1002,6 +977,37 @@ impl XcbBackend {
             .into_iter()
             .find_map(|o| (o.refresh_rate > 0).then_some(o.refresh_rate))
             .unwrap_or(60)
+    }
+
+    fn wrap_xcb_for_compositor(
+        conn: Arc<xcb::Connection>,
+    ) -> Result<Arc<crate::backend::x11rb::compositor::XcbCompositorConnection>, BackendError> {
+        // SAFETY: the backend owns `conn` for at least as long as the returned
+        // x11rb wrapper lives, and `should_drop=false` prevents double-disconnect.
+        unsafe {
+            crate::backend::x11rb::compositor::XcbCompositorConnection::from_raw_xcb_connection(
+                conn.get_raw_conn().cast(),
+                false,
+            )
+        }
+        .map(Arc::new)
+        .map_err(|e| BackendError::Message(format!("failed to create x11rb xcb wrapper: {e}")))
+    }
+
+    fn prime_compositor_event_extensions(conn: &xcb::Connection) -> XcbResult<()> {
+        let damage_cookie = conn.send_request(&xcb::damage::QueryVersion {
+            client_major_version: 1,
+            client_minor_version: 1,
+        });
+        let _ = conn.wait_for_reply(damage_cookie).map_err(xcb_err)?;
+
+        let present_cookie = conn.send_request(&xcb::present::QueryVersion {
+            major_version: 1,
+            minor_version: 0,
+        });
+        let _ = conn.wait_for_reply(present_cookie).map_err(xcb_err)?;
+
+        Ok(())
     }
 
     fn init_systray(&mut self, screen_num: usize) {
@@ -1160,24 +1166,79 @@ impl XcbBackend {
 
     fn register_existing_windows_with_compositor(
         &mut self,
-        compositor: &mut crate::backend::x11rb::compositor::Compositor,
+        conn: &crate::backend::x11rb::compositor::XcbCompositorConnection,
+        compositor: &mut crate::backend::x11rb::compositor::Compositor<
+            crate::backend::x11rb::compositor::XcbCompositorConnection,
+        >,
     ) {
         let overlay = compositor.overlay_window();
-        for (x11w, wid) in self.ids.all_x11_windows() {
-            if x11w == self.root.resource_id() || x11w == overlay {
-                continue;
-            }
-            if let Ok(geom) = self.window_ops.get_geometry(wid) {
-                compositor.add_window(x11w, geom.x, geom.y, geom.w, geom.h);
-                let (_, cls) = self.property_ops.get_class(wid);
-                if !cls.is_empty() {
-                    compositor.set_window_class(x11w, &cls);
-                }
-                if let Ok(attr) = self.window_ops.get_window_attributes(wid) {
-                    if attr.override_redirect {
-                        compositor.set_window_override_redirect(x11w, true);
+        let windows: Vec<_> = self
+            .ids
+            .all_x11_windows()
+            .into_iter()
+            .filter(|(x11w, _)| *x11w != self.root.resource_id() && *x11w != overlay)
+            .collect();
+
+        if windows.is_empty() {
+            return;
+        }
+
+        use crate::backend::x11rb::batch::BatchedGeometryRequest;
+
+        let mut batch = BatchedGeometryRequest::new(conn);
+        for &(x11w, _) in &windows {
+            batch.queue_geometry(x11w);
+        }
+
+        match batch.flush_and_collect() {
+            Ok(geometries) => {
+                let mut registered = 0usize;
+                for (x11w, wid) in &windows {
+                    if let Some((x, y, w, h)) = geometries.get(x11w) {
+                        compositor.add_window(*x11w, *x as i32, *y as i32, *w as u32, *h as u32);
+                        self.apply_compositor_window_metadata(compositor, *x11w, *wid);
+                        registered += 1;
                     }
                 }
+                log::info!(
+                    "XCB backend: compositor registered {registered} existing windows via batched geometry"
+                );
+                return;
+            }
+            Err(e) => {
+                log::warn!(
+                    "XCB backend: batched geometry request failed: {e:?}; falling back to individual queries"
+                );
+            }
+        }
+
+        let mut registered = 0usize;
+        for (x11w, wid) in windows {
+            if let Ok(geom) = self.window_ops.get_geometry(wid) {
+                compositor.add_window(x11w, geom.x, geom.y, geom.w, geom.h);
+                self.apply_compositor_window_metadata(compositor, x11w, wid);
+                registered += 1;
+            }
+        }
+
+        log::info!("XCB backend: compositor registered {registered} existing windows");
+    }
+
+    fn apply_compositor_window_metadata(
+        &self,
+        compositor: &mut crate::backend::x11rb::compositor::Compositor<
+            crate::backend::x11rb::compositor::XcbCompositorConnection,
+        >,
+        x11w: u32,
+        wid: WindowId,
+    ) {
+        let (_, cls) = self.property_ops.get_class(wid);
+        if !cls.is_empty() {
+            compositor.set_window_class(x11w, &cls);
+        }
+        if let Ok(attr) = self.window_ops.get_window_attributes(wid) {
+            if attr.override_redirect {
+                compositor.set_window_override_redirect(x11w, true);
             }
         }
     }
@@ -1429,6 +1490,29 @@ impl XcbBackend {
             | xcb::Event::RandR(xcb::randr::Event::Notify(_)) => {
                 Some(BackendEvent::ScreenLayoutChanged)
             }
+            xcb::Event::Damage(xcb::damage::Event::Notify(ev)) => Some(BackendEvent::DamageNotify {
+                // xcb's generated DAMAGE bindings keep `drawable` private because
+                // it is encoded as a Drawable union on the wire; read the raw
+                // 32-bit XID directly from the fixed event layout.
+                drawable: self.ids.intern_raw(unsafe {
+                    *(ev.as_raw() as *const u8).add(4).cast::<u32>()
+                }),
+            }),
+            xcb::Event::Present(xcb::present::Event::CompleteNotify(ev)) => {
+                Some(BackendEvent::PresentComplete {
+                    window: self.ids.intern_raw(ev.window().resource_id()),
+                    serial: ev.serial(),
+                    msc: ev.msc(),
+                    ust: ev.ust(),
+                })
+            }
+            xcb::Event::Present(xcb::present::Event::IdleNotify(ev)) => {
+                Some(BackendEvent::PresentIdle {
+                    window: self.ids.intern_raw(ev.window().resource_id()),
+                    serial: ev.serial(),
+                    pixmap: ev.pixmap().resource_id(),
+                })
+            }
             xcb::Event::Shape(xcb::shape::Event::Notify(ev)) => Some(BackendEvent::ShapeChanged {
                 window: self.ids.intern(ev.affected_window()),
                 shaped: ev.shaped(),
@@ -1513,75 +1597,6 @@ impl XcbBackend {
                 data,
                 format: ev.format(),
             }),
-        }
-    }
-
-    fn map_compositor_x11_event(&mut self, event: X11rbEvent) -> Option<BackendEvent> {
-        match event {
-            X11rbEvent::MapNotify(e) => {
-                if self.compositor_overlay_raw() == Some(e.window) {
-                    return None;
-                }
-                Some(BackendEvent::WindowMapped(self.ids.intern_raw(e.window)))
-            }
-            X11rbEvent::UnmapNotify(e) => {
-                if self.compositor_overlay_raw() == Some(e.window) {
-                    return None;
-                }
-                Some(BackendEvent::WindowUnmapped(self.ids.intern_raw(e.window)))
-            }
-            X11rbEvent::DestroyNotify(e) => {
-                if self.compositor_overlay_raw() == Some(e.window) {
-                    return None;
-                }
-                let id = self.ids.intern_raw(e.window);
-                self.ids.remove_raw(e.window);
-                Some(BackendEvent::WindowDestroyed(id))
-            }
-            X11rbEvent::ConfigureNotify(e) => {
-                if self.compositor_overlay_raw() == Some(e.window) {
-                    return None;
-                }
-                Some(BackendEvent::WindowConfigured {
-                    window: self.ids.intern_raw(e.window),
-                    x: e.x as i32,
-                    y: e.y as i32,
-                    width: e.width as u32,
-                    height: e.height as u32,
-                })
-            }
-            X11rbEvent::PropertyNotify(e) => {
-                if e.state == x11rb::protocol::xproto::Property::DELETE.into() {
-                    return None;
-                }
-                Some(BackendEvent::PropertyChanged {
-                    window: self.ids.intern_raw(e.window),
-                    kind: self.property_kind(x::Atom::new(e.atom)),
-                })
-            }
-            X11rbEvent::DamageNotify(e) => Some(BackendEvent::DamageNotify {
-                drawable: self.ids.intern_raw(e.drawable),
-            }),
-            X11rbEvent::PresentCompleteNotify(e) => Some(BackendEvent::PresentComplete {
-                window: self.ids.intern_raw(e.window),
-                serial: e.serial,
-                msc: e.msc,
-                ust: e.ust,
-            }),
-            X11rbEvent::PresentIdleNotify(e) => Some(BackendEvent::PresentIdle {
-                window: self.ids.intern_raw(e.window),
-                serial: e.serial,
-                pixmap: e.pixmap,
-            }),
-            X11rbEvent::ShapeNotify(e) => Some(BackendEvent::ShapeChanged {
-                window: self.ids.intern_raw(e.affected_window),
-                shaped: e.shaped,
-            }),
-            X11rbEvent::Expose(e) => Some(BackendEvent::Expose {
-                window: self.ids.intern_raw(e.window),
-            }),
-            X11rbEvent::MappingNotify(_) => Some(BackendEvent::MappingNotify),
-            _ => None,
         }
     }
 
@@ -1752,32 +1767,10 @@ impl Backend for XcbBackend {
             return Ok(true);
         }
 
-        if self.compositor_conn.is_none() {
-            let (raw_conn, screen_num) = RustConnection::connect(None)?;
-            let comp_conn = Arc::new(raw_conn);
-            let comp_root = comp_conn
-                .setup()
-                .roots
-                .get(screen_num)
-                .map(|screen| screen.root)
-                .unwrap_or(self.root.resource_id());
-            if comp_root != self.root.resource_id() {
-                return Err(BackendError::Message(format!(
-                    "compositor helper connected to a different root (xcb=0x{:x}, x11rb=0x{:x})",
-                    self.root.resource_id(),
-                    comp_root
-                )));
-            }
-            self.compositor_conn = Some(comp_conn);
-            self.compositor_screen_num = Some(screen_num);
-        }
-
         let screen = self.output_ops.screen_info();
-        let comp_conn = self
-            .compositor_conn
-            .as_ref()
-            .ok_or(BackendError::NotFound("compositor helper connection"))?
-            .clone();
+        Self::prime_compositor_event_extensions(&self.conn)?;
+        let comp_conn = Self::wrap_xcb_for_compositor(self.conn.clone())?;
+        let batch_conn = comp_conn.clone();
         let mut compositor = crate::backend::x11rb::compositor::Compositor::new(
             comp_conn,
             self.root.resource_id(),
@@ -1786,7 +1779,7 @@ impl Backend for XcbBackend {
             self.get_primary_monitor_refresh_rate(),
         )
         .map_err(|e| BackendError::Message(format!("compositor init failed: {e}")))?;
-        self.register_existing_windows_with_compositor(&mut compositor);
+        self.register_existing_windows_with_compositor(&batch_conn, &mut compositor);
         self.compositor = Some(compositor);
         self.compositor_auto_configure_hdr();
         Ok(true)
@@ -1834,16 +1827,28 @@ impl Backend for XcbBackend {
         let root = self.root.resource_id();
         let compositor = self.compositor.as_mut().unwrap();
 
+        if !scene.is_empty() && x11_scene.is_empty() {
+            log::warn!(
+                "[xcb compositor] scene has {} entries but x11_scene is empty (ID lookup failed)",
+                scene.len()
+            );
+        }
+
         for &(x11w, x, y, w, h) in &x11_scene {
             if !compositor.has_window(x11w) && x11w != root {
+                log::info!(
+                    "[xcb compositor] lazily adding untracked window 0x{:x} {}x{} at ({},{})",
+                    x11w,
+                    w,
+                    h,
+                    x,
+                    y
+                );
                 compositor.add_window(x11w, x, y, w, h);
             }
         }
 
         let _ = self.conn.flush();
-        if let Some(conn) = self.compositor_conn.as_ref() {
-            let _ = conn.flush();
-        }
         let rendered = compositor.render_frame(&x11_scene, focused_x11);
         compositor.clear_needs_render();
         self.scratch_x11_scene = x11_scene;
@@ -2509,57 +2514,6 @@ impl Backend for XcbBackend {
                 },
             )
             .map_err(|e| BackendError::Message(format!("Failed to insert XCB source: {e}")))?;
-
-        if let Some(comp_conn) = self.compositor_conn.clone() {
-            let comp_fd = comp_conn.stream().as_raw_fd();
-            handle
-                .insert_source(
-                    calloop::generic::Generic::new(
-                        unsafe { BorrowedFd::borrow_raw(comp_fd) },
-                        calloop::Interest::READ,
-                        calloop::Mode::Level,
-                    ),
-                    move |_, _, data| {
-                        let mut pending_motion = None;
-                        loop {
-                            let event = match comp_conn.poll_for_event() {
-                                Ok(Some(event)) => event,
-                                Ok(None) => break,
-                                Err(err) => {
-                                    log::error!("XCB compositor helper event error: {err}");
-                                    return Err(std::io::Error::other(format!(
-                                        "XCB compositor helper event error: {err}"
-                                    )));
-                                }
-                            };
-                            if let Some(mapped) = data.backend.map_compositor_x11_event(event) {
-                                data.dispatch_backend_event(
-                                    mapped,
-                                    &mut pending_motion,
-                                    "XCB compositor helper event",
-                                );
-                            }
-                            while let Some(mapped) = data.backend.pending.pop_front() {
-                                data.dispatch_backend_event(
-                                    mapped,
-                                    &mut pending_motion,
-                                    "queued XCB compositor helper event",
-                                );
-                            }
-                        }
-                        data.flush_pending_motion(
-                            &mut pending_motion,
-                            "XCB compositor helper event",
-                        );
-                        Ok(calloop::PostAction::Continue)
-                    },
-                )
-                .map_err(|e| {
-                    BackendError::Message(format!(
-                        "Failed to insert XCB compositor helper source: {e}"
-                    ))
-                })?;
-        }
 
         let signals = Signals::new(&[Signal::SIGCHLD])?;
         handle

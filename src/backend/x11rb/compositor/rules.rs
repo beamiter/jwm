@@ -30,7 +30,7 @@ use x11rb::rust_connection::RustConnection;
 #[allow(unused_imports)]
 use x11rb::wrapper::ConnectionExt as WrapperExt;
 
-impl Compositor {
+impl<C: CompositorConnection> Compositor<C> {
     /// Look up per-window opacity from opacity_rules.
     pub(super) fn lookup_opacity_rule(&self, class_name: &str) -> Option<f32> {
         opacity_rule_for_class(&self.opacity_rules, class_name)
@@ -196,7 +196,7 @@ impl Compositor {
 
     /// P5B: Build monitor rectangles from RandR outputs
     pub(super) fn build_monitor_rects(
-        conn: &Arc<RustConnection>,
+        conn: &Arc<C>,
         root: u32,
     ) -> Vec<(u32, i32, i32, u32, u32)> {
         // Query RandR for outputs to get monitor positions and dimensions
@@ -258,7 +258,7 @@ impl Compositor {
 
     /// P5B Phase 2: Build monitor refresh rates from RandR outputs
     pub(super) fn build_monitor_refresh_rates(
-        conn: &Arc<RustConnection>,
+        conn: &Arc<C>,
         root: u32,
     ) -> HashMap<u32, u32> {
         let mut rates = HashMap::new();

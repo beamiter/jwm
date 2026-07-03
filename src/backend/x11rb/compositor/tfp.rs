@@ -9,7 +9,9 @@ use x11rb::protocol::composite::ConnectionExt as CompositeExt;
 use x11rb::protocol::damage::{self, ConnectionExt as DamageExt};
 use x11rb::protocol::xproto::ConnectionExt as XProtoExt;
 
-impl Compositor {
+use super::CompositorConnection;
+
+impl<C: CompositorConnection> Compositor<C> {
     // =====================================================================
     // Feature 13: Set frame extents for blur mask
     // =====================================================================

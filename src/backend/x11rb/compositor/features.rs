@@ -30,7 +30,7 @@ use x11rb::rust_connection::RustConnection;
 #[allow(unused_imports)]
 use x11rb::wrapper::ConnectionExt as WrapperExt;
 
-impl Compositor {
+impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn has_partial_damage(&self) -> bool {
         self.partial_damage_enabled
     }

@@ -30,9 +30,9 @@ use x11rb::rust_connection::RustConnection;
 #[allow(unused_imports)]
 use x11rb::wrapper::ConnectionExt as WrapperExt;
 
-impl Compositor {
+impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn new(
-        conn: Arc<RustConnection>,
+        conn: Arc<C>,
         root: u32,
         screen_w: u32,
         screen_h: u32,
@@ -50,13 +50,13 @@ impl Compositor {
 
         // RAII guard: if we return Err after the redirect, undo it so the screen
         // doesn't go permanently black.
-        struct RedirectGuard {
-            conn: Arc<RustConnection>,
+        struct RedirectGuard<C: CompositorConnection> {
+            conn: Arc<C>,
             root: u32,
             overlay: Option<u32>,
             active: bool,
         }
-        impl Drop for RedirectGuard {
+        impl<C: CompositorConnection> Drop for RedirectGuard<C> {
             fn drop(&mut self) {
                 if self.active {
                     let _ = self.conn.composite_unredirect_subwindows(
@@ -70,7 +70,7 @@ impl Compositor {
                 }
             }
         }
-        let mut guard = RedirectGuard {
+        let mut guard = RedirectGuard::<C> {
             conn: conn.clone(),
             root,
             overlay: None,

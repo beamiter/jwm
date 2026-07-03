@@ -5,7 +5,9 @@ use super::math::{
 };
 use glow::HasContext;
 
-impl Compositor {
+use super::CompositorConnection;
+
+impl<C: CompositorConnection> Compositor<C> {
     /// Returns true if a tag-switch transition is in progress.
     pub(crate) fn transition_active(&self) -> bool {
         self.transition_start.is_some()

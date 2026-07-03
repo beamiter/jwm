@@ -30,7 +30,7 @@ use x11rb::rust_connection::RustConnection;
 #[allow(unused_imports)]
 use x11rb::wrapper::ConnectionExt as WrapperExt;
 
-impl Compositor {
+impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn needs_render(&self) -> bool {
         if self.needs_render || self.recording_active {
             return true;

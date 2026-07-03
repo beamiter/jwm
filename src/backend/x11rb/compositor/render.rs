@@ -30,7 +30,7 @@ use x11rb::rust_connection::RustConnection;
 #[allow(unused_imports)]
 use x11rb::wrapper::ConnectionExt as WrapperExt;
 
-impl Compositor {
+impl<C: CompositorConnection> Compositor<C> {
     // =====================================================================
     // Tag-switch slide transition
     // =====================================================================

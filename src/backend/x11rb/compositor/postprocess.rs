@@ -2,7 +2,9 @@ use super::Compositor;
 use super::math::ortho;
 use glow::HasContext;
 
-impl Compositor {
+use super::CompositorConnection;
+
+impl<C: CompositorConnection> Compositor<C> {
     /// Lazily create postprocess FBO if it doesn't exist yet.
     pub(super) fn ensure_postprocess_fbo(&mut self) {
         if self.postprocess_fbo.is_none() {

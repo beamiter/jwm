@@ -2,19 +2,22 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::present::{self, ConnectionExt as PresentExt};
-use x11rb::rust_connection::RustConnection;
+
+use super::CompositorConnection;
 
 /// Present extension support for per-window independent presentation
-pub struct PresentManager {
-    conn: Arc<RustConnection>,
+pub(crate) struct PresentManager<C: CompositorConnection> {
+    conn: Arc<C>,
     available: bool,
+    #[allow(dead_code)]
     event_base: u8,
     window_events: HashMap<u32, u32>, // x11_win -> Event ID
 }
 
-impl PresentManager {
+#[allow(dead_code)]
+impl<C: CompositorConnection> PresentManager<C> {
     /// Load and initialize Present extension
-    pub fn load(conn: Arc<RustConnection>) -> Option<Self> {
+    pub(crate) fn load(conn: Arc<C>) -> Option<Self> {
         // Query Present extension version
         let query_result = conn.present_query_version(1, 0).ok()?;
         let reply = query_result.reply().ok()?;
@@ -48,16 +51,16 @@ impl PresentManager {
         })
     }
 
-    pub fn is_available(&self) -> bool {
+    pub(crate) fn is_available(&self) -> bool {
         self.available
     }
 
-    pub fn get_event_base(&self) -> u8 {
+    pub(crate) fn get_event_base(&self) -> u8 {
         self.event_base
     }
 
     /// Register a window for Present events
-    pub fn register_window(&mut self, x11_win: u32) -> Result<(), String> {
+    pub(crate) fn register_window(&mut self, x11_win: u32) -> Result<(), String> {
         if !self.available {
             return Err("Present extension not available".to_string());
         }
@@ -102,7 +105,7 @@ impl PresentManager {
     }
 
     /// Unregister a window
-    pub fn unregister_window(&mut self, x11_win: u32) {
+    pub(crate) fn unregister_window(&mut self, x11_win: u32) {
         if let Some(_event_id) = self.window_events.remove(&x11_win) {
             log::info!(
                 "compositor: Present events unregistered for window 0x{:x}",
@@ -115,7 +118,7 @@ impl PresentManager {
     ///
     /// This allows the window to present its content independently of the compositor's
     /// global frame rate, enabling per-window audio-video synchronization.
-    pub fn present_pixmap(
+    pub(crate) fn present_pixmap(
         &self,
         x11_win: u32,
         pixmap: u32,
@@ -163,7 +166,12 @@ impl PresentManager {
     }
 
     /// Request notification at a specific MSC
-    pub fn notify_msc(&self, x11_win: u32, serial: u32, target_msc: u64) -> Result<(), String> {
+    pub(crate) fn notify_msc(
+        &self,
+        x11_win: u32,
+        serial: u32,
+        target_msc: u64,
+    ) -> Result<(), String> {
         if !self.available {
             return Err("Present extension not available".to_string());
         }
@@ -184,12 +192,12 @@ impl PresentManager {
     }
 
     /// Get the number of registered windows
-    pub fn window_count(&self) -> usize {
+    pub(crate) fn window_count(&self) -> usize {
         self.window_events.len()
     }
 
     /// Check if a window is registered for Present
-    pub fn is_window_registered(&self, x11_win: u32) -> bool {
+    pub(crate) fn is_window_registered(&self, x11_win: u32) -> bool {
         self.window_events.contains_key(&x11_win)
     }
 }

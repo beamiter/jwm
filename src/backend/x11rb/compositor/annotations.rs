@@ -2,7 +2,9 @@ use super::Compositor;
 use crate::backend::compositor_common::annotations::{AnnotationPoint, AnnotationStroke};
 use glow::HasContext;
 
-impl Compositor {
+use super::CompositorConnection;
+
+impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn set_annotation_mode(&mut self, active: bool) {
         self.annotation_active = active;
         if !active {

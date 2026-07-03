@@ -2,7 +2,9 @@ use super::Compositor;
 use super::math::{mat4_mul, perspective_matrix, rotate_y_matrix, scale_matrix, translate_matrix};
 use glow::HasContext;
 
-impl Compositor {
+use super::CompositorConnection;
+
+impl<C: CompositorConnection> Compositor<C> {
     pub(super) fn clear_overview_snapshots(&mut self) {
         unsafe {
             for entry in &mut self.overview_windows {

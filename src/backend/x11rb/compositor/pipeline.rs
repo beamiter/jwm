@@ -1,6 +1,6 @@
 use super::*;
 
-impl Compositor {
+impl<C: CompositorConnection> Compositor<C> {
     /// Create the dual Kawase blur FBO mipmap chain.
     /// Each level is half the size of the previous.
     pub(super) unsafe fn create_blur_fbos(

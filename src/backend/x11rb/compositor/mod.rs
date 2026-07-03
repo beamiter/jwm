@@ -183,6 +183,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc;
 use x11rb::connection::Connection;
+use x11rb::connection::RequestConnection;
 use x11rb::protocol::composite::ConnectionExt as CompositeExt;
 use x11rb::protocol::xproto::ConnectionExt as XProtoExt;
 use x11rb::rust_connection::RustConnection;
@@ -542,8 +543,20 @@ struct GenieAnimation {
 // Compositor
 // ---------------------------------------------------------------------------
 
-pub(crate) struct Compositor {
-    conn: Arc<RustConnection>,
+pub(crate) type XcbCompositorConnection = x11rb::xcb_ffi::XCBConnection;
+
+pub(crate) trait CompositorConnection:
+    Connection + RequestConnection + Send + Sync + 'static
+{
+}
+
+impl<T> CompositorConnection for T where T: Connection + RequestConnection + Send + Sync + 'static {}
+
+pub(crate) struct Compositor<C = RustConnection>
+where
+    C: CompositorConnection,
+{
+    conn: Arc<C>,
     xlib_display: *mut x11::xlib::Display,
     tfp: TfpFunctions,
     glx_context: x11::glx::GLXContext,
@@ -624,7 +637,7 @@ pub(crate) struct Compositor {
     /// Audio sync manager for per-window audio-video synchronization
     audio_sync: audio_sync::AudioSyncManager,
     /// Present extension for per-window independent presentation
-    present_mgr: Option<present::PresentManager>,
+    present_mgr: Option<present::PresentManager<C>>,
 
     // --- Feature 1: Window borders ---
     border_program: glow::Program,
@@ -1027,9 +1040,9 @@ pub(crate) struct Compositor {
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
 // All raw pointers (Display*, GLXContext, etc.) are only used from that thread.
-unsafe impl Send for Compositor {}
+unsafe impl<C: CompositorConnection> Send for Compositor<C> {}
 
-impl Drop for Compositor {
+impl<C: CompositorConnection> Drop for Compositor<C> {
     fn drop(&mut self) {
         self.clear_overview_snapshots();
         unsafe {

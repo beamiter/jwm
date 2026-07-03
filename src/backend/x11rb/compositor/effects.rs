@@ -1,7 +1,9 @@
 use super::{Compositor, Particle};
 use glow::HasContext;
 
-impl Compositor {
+use super::CompositorConnection;
+
+impl<C: CompositorConnection> Compositor<C> {
     /// Tick wobbly grid spring-mass physics. Returns true if any wobbly is active.
     pub(super) fn tick_wobbly(&mut self) -> bool {
         if !self.wobbly_windows {

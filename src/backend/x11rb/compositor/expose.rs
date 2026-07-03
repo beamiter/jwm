@@ -2,7 +2,9 @@ use super::{Compositor, SnapPreview, WindowTab, class_matches_exclude};
 use crate::backend::compositor_common::expose::{build_expose_entries, tick_expose_entries};
 use glow::HasContext;
 
-impl Compositor {
+use super::CompositorConnection;
+
+impl<C: CompositorConnection> Compositor<C> {
     // =========================================================================
     // 5.1 Expose / Mission Control mode
     // =========================================================================

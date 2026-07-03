@@ -73,7 +73,7 @@ impl Drop for DecodePermit {
     }
 }
 
-impl Compositor {
+impl<C: CompositorConnection> Compositor<C> {
     /// Decode a wallpaper image on a background thread.
     /// Returns a receiver that will deliver the decoded RGBA data.
     pub(super) fn load_wallpaper_async(
