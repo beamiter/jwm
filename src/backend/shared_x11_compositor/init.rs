@@ -1,5 +1,5 @@
 // Compositor::new() constructor
-use crate::backend::compositor_common::x11_bootstrap::BootstrapState;
+use crate::backend::x11::compositor_backend::BootstrapState;
 #[allow(unused_imports)]
 use super::math::ortho;
 #[allow(unused_imports)]

@@ -15,6 +15,7 @@ pub mod sys_stats;
 // Backend-independent compositor state, profiling and diagnostics helpers.
 pub mod compositor_common;
 pub mod shared_x11_compositor;
+pub mod x11;
 
 // Shared Smithay Wayland compositor state (used by udev/KMS and windowed X11 backend).
 pub mod wayland;
@@ -25,6 +26,7 @@ pub mod wayland_key_ops;
 // Shared dummy ops used by Smithay-backed backends.
 pub mod wayland_dummy_ops;
 
+// Legacy X11 shared helpers. Prefer `backend::x11::wm` in new code.
 pub mod x11_shared;
 pub mod x11rb;
 pub mod xcb;

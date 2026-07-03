@@ -18,7 +18,7 @@ use crate::backend::common_define::{
     StdCursorKind, WindowId,
 };
 use crate::backend::error::BackendError;
-use crate::backend::x11_shared::{
+use crate::backend::x11::wm::{
     AllowedActionAtoms, ClientMessageAtoms, ClientMessageKind, DEFAULT_OUTPUT_REFRESH_MHZ,
     EwmhFeatureAtoms, NetWmStateAtoms, PropertyKindAtoms, SUPPORTED_EWMH_FEATURES, WindowTypeAtoms,
     atom_for_allowed_action, atom_for_ewmh_feature, atom_for_net_wm_state, build_output_info,

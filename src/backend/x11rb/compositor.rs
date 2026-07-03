@@ -1,1 +1,1 @@
-pub use crate::backend::shared_x11_compositor::*;
+pub use crate::backend::x11::compositor::*;

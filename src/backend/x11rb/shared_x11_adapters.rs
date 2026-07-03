@@ -1,10 +1,7 @@
-use crate::backend::compositor_common::x11_bootstrap::X11BootstrapOps;
-use crate::backend::compositor_common::x11_composite_redirect::X11CompositeRedirectOps;
-use crate::backend::compositor_common::x11_connection::X11ConnectionOps;
-use crate::backend::compositor_common::x11_present::X11PresentOps;
-use crate::backend::compositor_common::x11_randr::X11RandrOps;
-use crate::backend::compositor_common::x11_texture_source::X11TextureSourceOps;
-use crate::backend::compositor_common::x11_window_resource::X11WindowResourceOps;
+use crate::backend::x11::compositor_backend::{
+    X11BootstrapOps, X11CompositeRedirectOps, X11ConnectionOps, X11PresentOps, X11RandrOps,
+    X11TextureSourceOps, X11WindowResourceOps,
+};
 use std::collections::HashMap;
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::composite::ConnectionExt as CompositeExt;

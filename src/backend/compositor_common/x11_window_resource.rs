@@ -1,5 +1,1 @@
-/// Shared X11 window resource operations used by compositor teardown and
-/// ownership cleanup paths.
-pub trait X11WindowResourceOps {
-    fn destroy_window_resource(&self, window: u32) -> Result<(), String>;
-}
+pub use crate::backend::x11::compositor_backend::x11_window_resource::*;

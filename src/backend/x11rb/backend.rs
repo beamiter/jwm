@@ -32,7 +32,7 @@ use crate::backend::api::{
     Backend, Capabilities, ColorAllocator, CursorProvider, EwmhFacade, InputOps, KeyOps, OutputOps,
     PropertyOps, VrrCapabilities, WindowOps,
 };
-use crate::backend::x11_shared::SUPPORTED_EWMH_FEATURES;
+use crate::backend::x11::wm::SUPPORTED_EWMH_FEATURES;
 
 use self::{
     color::X11ColorAllocator, cursor::X11CursorProvider, event_source::X11EventSource,
@@ -2575,7 +2575,7 @@ mod event_source {
     use crate::backend::api::{BackendEvent, NetWmState};
     use crate::backend::api::{HitTarget, NotifyMode};
     use crate::backend::error::BackendError;
-    use crate::backend::x11_shared::{
+    use crate::backend::x11::wm::{
         ClientMessageAtoms, ClientMessageKind, PropertyKindAtoms, classify_client_message,
         expand_net_wm_state_requests, net_wm_state_from_atom, property_kind_from_atom,
         stack_mode_from_index, window_changes_from_configure_request_parts,
@@ -2657,8 +2657,8 @@ mod event_source {
             net_wm_state_from_atom(atom, self.net_wm_state_atoms())
         }
 
-        fn net_wm_state_atoms(&self) -> crate::backend::x11_shared::NetWmStateAtoms<u32> {
-            crate::backend::x11_shared::NetWmStateAtoms {
+        fn net_wm_state_atoms(&self) -> crate::backend::x11::wm::NetWmStateAtoms<u32> {
+            crate::backend::x11::wm::NetWmStateAtoms {
                 fullscreen: self.atoms._NET_WM_STATE_FULLSCREEN,
                 maximized_vert: self.atoms._NET_WM_STATE_MAXIMIZED_VERT,
                 maximized_horz: self.atoms._NET_WM_STATE_MAXIMIZED_HORZ,
@@ -3035,7 +3035,7 @@ mod ewmh_facade {
     use crate::backend::api::{EwmhFacade, EwmhFeature};
     use crate::backend::common_define::WindowId;
     use crate::backend::error::BackendError;
-    use crate::backend::x11_shared::{EwmhFeatureAtoms, atom_for_ewmh_feature};
+    use crate::backend::x11::wm::{EwmhFeatureAtoms, atom_for_ewmh_feature};
     use crate::backend::x11rb::Atoms;
     use std::sync::Arc;
     use x11rb::connection::Connection;
@@ -3466,7 +3466,7 @@ mod key_ops {
     use crate::backend::common_define::WindowId;
     use crate::backend::common_define::{KeySym, Mods};
     use crate::backend::error::BackendError;
-    use crate::backend::x11_shared::lock_modifier_combinations;
+    use crate::backend::x11::wm::lock_modifier_combinations;
 
     pub(super) struct X11KeyOps<C: Connection> {
         conn: Arc<C>,
@@ -3696,7 +3696,7 @@ mod key_ops {
 mod output_ops {
     use crate::backend::api::{OutputInfo, OutputOps, ScreenInfo};
     use crate::backend::common_define::OutputId;
-    use crate::backend::x11_shared::{
+    use crate::backend::x11::wm::{
         DEFAULT_OUTPUT_REFRESH_MHZ, build_output_info, fallback_output, output_at,
     };
     use std::sync::{Arc, Mutex};
@@ -4139,7 +4139,7 @@ mod property_ops {
     };
     use crate::backend::common_define::WindowId;
     use crate::backend::error::BackendError;
-    use crate::backend::x11_shared::{
+    use crate::backend::x11::wm::{
         AllowedActionAtoms, NetWmStateAtoms, WindowTypeAtoms, atom_for_allowed_action,
         atom_for_net_wm_state, decode_text_property, net_wm_ping_message,
         net_wm_sync_request_message, parse_gtk_frame_extents, parse_icon_data, parse_motif_hints,
@@ -4892,7 +4892,7 @@ mod window_ops {
     use crate::backend::api::{StackMode, WindowChanges};
     use crate::backend::common_define::{Mods, Pixel, WindowId};
     use crate::backend::error::BackendError;
-    use crate::backend::x11_shared::{
+    use crate::backend::x11::wm::{
         lock_modifier_combinations, protocol_supported, restack_window_changes,
         wm_delete_window_message, wm_take_focus_message,
     };
