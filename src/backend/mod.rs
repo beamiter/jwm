@@ -14,6 +14,7 @@ pub mod sys_stats;
 
 // Backend-independent compositor state, profiling and diagnostics helpers.
 pub mod compositor_common;
+// Legacy X11 compositor location. Prefer `backend::x11::compositor` in new code.
 pub mod shared_x11_compositor;
 pub mod x11;
 

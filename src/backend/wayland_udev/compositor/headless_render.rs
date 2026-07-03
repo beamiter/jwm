@@ -377,7 +377,7 @@ fn wayland_shaders() -> Vec<(&'static str, Stage, &'static str)> {
 /// `#version 330 core`). These have diverged from the Wayland set (different
 /// GLSL dialect) and must be validated against a desktop-GL core context.
 fn x11_shaders() -> Vec<(&'static str, Stage, &'static str)> {
-    use crate::backend::shared_x11_compositor::shaders as s;
+    use crate::backend::x11::compositor::shaders as s;
     use Stage::{Fragment as F, Vertex as V};
     vec![
         ("VERTEX_SHADER", V, s::VERTEX_SHADER),

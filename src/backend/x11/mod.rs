@@ -7,15 +7,7 @@
 //!
 //! The older modules remain in place for compatibility while call sites migrate.
 
-/// Shared X11 WM/EWMH/property helpers used by both `xcb` and `x11rb`.
-pub mod wm {
-    pub use crate::backend::x11_shared::*;
-}
-
-/// Shared X11 compositor implementation used by the `xcb` and `x11rb` backends.
-pub mod compositor {
-    pub use crate::backend::shared_x11_compositor::*;
-}
-
+pub mod compositor;
 /// X11 protocol traits required by the shared compositor implementation.
 pub mod compositor_backend;
+pub mod wm;

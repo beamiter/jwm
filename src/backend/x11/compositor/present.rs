@@ -63,29 +63,24 @@ impl<C: CompositorConnection> X11rbPresentManager<C> {
 
         // Allocate an event ID
         match self.conn.generate_xid() {
-            Ok(event_id) => {
-                match self.conn.select_present_input(event_id, x11_win) {
-                    Ok(()) => {
-                        if let Err(e) = self.conn.flush_x11() {
-                            log::error!(
-                                "compositor: flush failed after Present select_input: {}",
-                                e
-                            );
-                            return Err(format!("flush failed: {}", e));
-                        }
-                        log::info!(
-                            "compositor: Present events registered for window 0x{:x}",
-                            x11_win
-                        );
-                        self.window_events.insert(x11_win, event_id);
-                        Ok(())
+            Ok(event_id) => match self.conn.select_present_input(event_id, x11_win) {
+                Ok(()) => {
+                    if let Err(e) = self.conn.flush_x11() {
+                        log::error!("compositor: flush failed after Present select_input: {}", e);
+                        return Err(format!("flush failed: {}", e));
                     }
-                    Err(e) => {
-                        log::error!("compositor: Present select_input failed: {}", e);
-                        Err(format!("select_input failed: {}", e))
-                    }
+                    log::info!(
+                        "compositor: Present events registered for window 0x{:x}",
+                        x11_win
+                    );
+                    self.window_events.insert(x11_win, event_id);
+                    Ok(())
                 }
-            }
+                Err(e) => {
+                    log::error!("compositor: Present select_input failed: {}", e);
+                    Err(format!("select_input failed: {}", e))
+                }
+            },
             Err(e) => {
                 log::error!("compositor: generate_id failed: {}", e);
                 Err(format!("generate_id failed: {}", e))
@@ -118,9 +113,6 @@ impl<C: CompositorConnection> X11rbPresentManager<C> {
             return Err("Present extension not available".to_string());
         }
 
-        // Simple presentation: no regions, no fences, just the basic pixmap
-        // MSC = 0 means present immediately
-        // For advanced use: would specify target_msc, divisor, remainder for precise timing
         match self
             .conn
             .present_pixmap_for_window(x11_win, pixmap, target_msc, serial)

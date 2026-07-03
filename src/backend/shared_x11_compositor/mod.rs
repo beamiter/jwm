@@ -1,17 +1,21 @@
+#[path = "../x11/compositor/annotations.rs"]
 mod annotations;
 mod effects;
 mod expose;
+#[path = "../x11/compositor/font.rs"]
 mod font;
 mod overview;
 mod pipeline;
 mod postprocess;
 mod tfp;
 mod transitions;
+mod types;
 
 // Optimization modules
 
 // Sync control modules
 pub mod oml_sync_control;
+#[path = "../x11/compositor/present.rs"]
 pub mod present;
 
 // Backend-independent modules shared by X11 compositors.
@@ -177,6 +181,7 @@ pub(crate) use wallpaper_common::{
     resolve_wallpaper_for_tag,
 };
 pub(crate) use wobbly::WobblyState;
+use types::*;
 
 use glow::HasContext;
 use crate::backend::x11::compositor_backend::{
@@ -188,351 +193,13 @@ use std::sync::Arc;
 use std::sync::mpsc;
 
 use math::ortho;
-
-// ---------------------------------------------------------------------------
-// TFP function pointers (glXBindTexImageEXT / glXReleaseTexImageEXT)
-// ---------------------------------------------------------------------------
-
-type GlXBindTexImageEXT =
-    unsafe extern "C" fn(*mut x11::xlib::Display, x11::glx::GLXDrawable, i32, *const i32);
-type GlXReleaseTexImageEXT =
-    unsafe extern "C" fn(*mut x11::xlib::Display, x11::glx::GLXDrawable, i32);
-
-struct TfpFunctions {
-    bind: GlXBindTexImageEXT,
-    release: GlXReleaseTexImageEXT,
-}
-
-// GLX_BIND_TO_TEXTURE_*_EXT constants
-const GLX_BIND_TO_TEXTURE_RGBA_EXT: i32 = 0x20D1;
-const GLX_BIND_TO_TEXTURE_RGB_EXT: i32 = 0x20D0;
-#[allow(dead_code)]
-const GLX_Y_INVERTED_EXT: i32 = 0x20D4;
-const GLX_TEXTURE_FORMAT_EXT: i32 = 0x20D5;
-const GLX_TEXTURE_TARGET_EXT: i32 = 0x20D6;
-const GLX_TEXTURE_2D_EXT: i32 = 0x20DC;
-const GLX_TEXTURE_FORMAT_RGBA_EXT: i32 = 0x20DA;
-const GLX_TEXTURE_FORMAT_RGB_EXT: i32 = 0x20D9;
-const GLX_FRONT_LEFT_EXT: i32 = 0x20DE;
-
-struct WindowTexture {
-    x: i32,
-    y: i32,
-    w: u32,
-    h: u32,
-    damage: u32,
-    pixmap: u32,
-    glx_pixmap: x11::glx::GLXPixmap,
-    gl_texture: glow::Texture,
-    dirty: bool,
-    has_rgba: bool,
-    /// The TFP FBConfig used for this window's GLX pixmap.
-    fbconfig: x11::glx::GLXFBConfig,
-    /// When true, the pixmap needs to be recreated (deferred from update_geometry).
-    needs_pixmap_refresh: bool,
-    /// The X11 window ID, needed for deferred pixmap recreation.
-    x11_win: u32,
-    /// Current fade opacity (0.0 = fully transparent, 1.0 = fully visible).
-    /// Used for fade-in/fade-out animations.
-    fade_opacity: f32,
-    /// Whether this window is fading out (will be removed when opacity reaches 0).
-    fading_out: bool,
-    /// Window class name (for per-window rules).
-    class_name: String,
-    /// Per-window opacity override from opacity_rules (0.0..1.0), or None for default.
-    opacity_override: Option<f32>,
-    /// Whether this window is fullscreen.
-    is_fullscreen: bool,
-    // --- Feature 3: Per-window corner radius ---
-    corner_radius_override: Option<f32>,
-    // --- Feature 4: Window scale ---
-    scale: f32,
-    // --- Feature 13: Frame extents for blur mask ---
-    frame_extents: [u32; 4], // left, right, top, bottom
-    // --- Feature 14: Window has X Shape (non-rectangular) ---
-    is_shaped: bool,
-    // --- Scale animation ---
-    anim_scale: f32,
-    anim_scale_target: f32,
-    // --- Urgent state ---
-    is_urgent: bool,
-    // --- PiP state ---
-    is_pip: bool,
-    // --- Frosted glass ---
-    is_frosted: bool,
-    // --- Override-redirect (unmanaged overlay) ---
-    is_override_redirect: bool,
-    // --- Wobbly state ---
-    wobbly: Option<WobblyState>,
-    // --- Phase 2.3: Fence sync for async pixmap refresh ---
-    pending_fence: Option<glow::Fence>,
-    // --- Phase 3.1: Motion trail ---
-    motion_trail: std::collections::VecDeque<(i32, i32)>,
-    // --- Audio sync: target presentation FPS to match audio stream ---
-    audio_sync_target: Option<f32>,
-}
-
-// ---------------------------------------------------------------------------
-// Cached uniform locations
-// ---------------------------------------------------------------------------
-
-struct WindowUniforms {
-    projection: Option<glow::UniformLocation>,
-    rect: Option<glow::UniformLocation>,
-    texture: Option<glow::UniformLocation>,
-    opacity: Option<glow::UniformLocation>,
-    radius: Option<glow::UniformLocation>,
-    size: Option<glow::UniformLocation>,
-    dim: Option<glow::UniformLocation>,
-    uv_rect: Option<glow::UniformLocation>,
-    ripple_progress: Option<glow::UniformLocation>,
-    ripple_amplitude: Option<glow::UniformLocation>,
-}
-
-struct ShadowUniforms {
-    projection: Option<glow::UniformLocation>,
-    rect: Option<glow::UniformLocation>,
-    shadow_color: Option<glow::UniformLocation>,
-    size: Option<glow::UniformLocation>,
-    radius: Option<glow::UniformLocation>,
-    spread: Option<glow::UniformLocation>,
-}
-
-struct BlurUniforms {
-    projection: Option<glow::UniformLocation>,
-    rect: Option<glow::UniformLocation>,
-    texture: Option<glow::UniformLocation>,
-    halfpixel: Option<glow::UniformLocation>,
-}
-
-/// A single level in the blur mipmap chain.
-struct BlurFboLevel {
-    fbo: glow::Framebuffer,
-    texture: glow::Texture,
-    w: u32,
-    h: u32,
-}
-
-// ---------------------------------------------------------------------------
-// Tag-switch transition uniforms
-// ---------------------------------------------------------------------------
-
-struct TransitionUniforms {
-    projection: Option<glow::UniformLocation>,
-    rect: Option<glow::UniformLocation>,
-    texture: Option<glow::UniformLocation>,
-    opacity: Option<glow::UniformLocation>,
-    uv_rect: Option<glow::UniformLocation>,
-}
-
-// ---------------------------------------------------------------------------
-// Cube transition uniforms
-// ---------------------------------------------------------------------------
-
-struct CubeUniforms {
-    mvp: Option<glow::UniformLocation>,
-    aspect: Option<glow::UniformLocation>,
-    texture: Option<glow::UniformLocation>,
-    brightness: Option<glow::UniformLocation>,
-    uv_rect: Option<glow::UniformLocation>,
-}
-
-// ---------------------------------------------------------------------------
-// Portal transition uniforms
-// ---------------------------------------------------------------------------
-
-struct PortalUniforms {
-    projection: Option<glow::UniformLocation>,
-    rect: Option<glow::UniformLocation>,
-    texture: Option<glow::UniformLocation>,
-    progress: Option<glow::UniformLocation>,
-    glow: Option<glow::UniformLocation>,
-    center: Option<glow::UniformLocation>,
-    uv_rect: Option<glow::UniformLocation>,
-}
-
 use transitions_common::TransitionMode;
-
-/// Per-monitor wallpaper state.
-struct MonitorWallpaper {
-    /// Monitor geometry in screen coordinates.
-    mon_x: i32,
-    mon_y: i32,
-    mon_w: u32,
-    mon_h: u32,
-    /// GL texture for this monitor's wallpaper (None = use default).
-    texture: Option<glow::Texture>,
-    mode: WallpaperMode,
-    img_w: u32,
-    img_h: u32,
-    /// Currently-loaded wallpaper path (used to skip reloads when active tags
-    /// change but the resolved wallpaper for this monitor stays the same).
-    current_path: String,
-}
-
-// --- Feature 1: Border uniforms ---
-struct BorderUniforms {
-    projection: Option<glow::UniformLocation>,
-    rect: Option<glow::UniformLocation>,
-    border_color: Option<glow::UniformLocation>,
-    size: Option<glow::UniformLocation>,
-    radius: Option<glow::UniformLocation>,
-    border_width: Option<glow::UniformLocation>,
-}
-
-// --- Feature 9/10: Post-process uniforms ---
-struct PostprocessUniforms {
-    projection: Option<glow::UniformLocation>, // P5F.1: Cache to avoid per-frame lookup
-    rect: Option<glow::UniformLocation>,       // P5F.1: Cache to avoid per-frame lookup
-    texture: Option<glow::UniformLocation>,
-    color_temp: Option<glow::UniformLocation>,
-    saturation: Option<glow::UniformLocation>,
-    brightness: Option<glow::UniformLocation>,
-    contrast: Option<glow::UniformLocation>,
-    invert: Option<glow::UniformLocation>,
-    grayscale: Option<glow::UniformLocation>,
-    hdr_enabled: Option<glow::UniformLocation>,
-    hdr_peak_nits: Option<glow::UniformLocation>,
-    tone_mapping_method: Option<glow::UniformLocation>,
-    eotf_mode: Option<glow::UniformLocation>,
-    output_colorspace: Option<glow::UniformLocation>,
-}
-
-// --- Feature 11: HUD uniforms ---
-struct HudUniforms {
-    projection: Option<glow::UniformLocation>,
-    rect: Option<glow::UniformLocation>,
-    bg_color: Option<glow::UniformLocation>,
-    fg_color: Option<glow::UniformLocation>,
-    size: Option<glow::UniformLocation>,
-}
-
-struct HudTextUniforms {
-    projection: Option<glow::UniformLocation>,
-    rect: Option<glow::UniformLocation>,
-    texture: Option<glow::UniformLocation>,
-}
-
-/// Entry for Alt-Tab overview mode.
-struct OverviewEntry {
-    x11_win: u32,
-    target_w: f32,
-    target_h: f32,
-    is_selected: bool,
-    snapshot_texture: Option<glow::Texture>,
-    title: String,
-    /// (texture, width, height) for the rendered title label.
-    title_texture: Option<(glow::Texture, u32, u32)>,
-    /// Which face of the hexagonal prism this entry occupies (0..5).
-    face_index: usize,
-}
-
-use effects_common::{Particle, ParticleSystem, RippleState};
-use expose_common::{ExposeEntry, SnapPreview, WindowTab};
-
-/// Cached uniform locations for edge glow shader.
-struct EdgeGlowUniforms {
-    projection: Option<glow::UniformLocation>,
-    rect: Option<glow::UniformLocation>,
-    glow_color: Option<glow::UniformLocation>,
-    glow_width: Option<glow::UniformLocation>,
-    mouse: Option<glow::UniformLocation>,
-    screen_size: Option<glow::UniformLocation>,
-    time: Option<glow::UniformLocation>,
-}
-
-/// Cached uniform locations for tilt shader.
-struct TiltUniforms {
-    projection: Option<glow::UniformLocation>,
-    rect: Option<glow::UniformLocation>,
-    texture: Option<glow::UniformLocation>,
-    opacity: Option<glow::UniformLocation>,
-    radius: Option<glow::UniformLocation>,
-    size: Option<glow::UniformLocation>,
-    dim: Option<glow::UniformLocation>,
-    uv_rect: Option<glow::UniformLocation>,
-    tilt: Option<glow::UniformLocation>,
-    perspective: Option<glow::UniformLocation>,
-    grid_size: Option<glow::UniformLocation>,
-    light_dir: Option<glow::UniformLocation>,
-}
-
-/// Cached uniform locations for wobbly shader.
-struct WobblyUniforms {
-    projection: Option<glow::UniformLocation>,
-    rect: Option<glow::UniformLocation>,
-    texture: Option<glow::UniformLocation>,
-    opacity: Option<glow::UniformLocation>,
-    radius: Option<glow::UniformLocation>,
-    size: Option<glow::UniformLocation>,
-    dim: Option<glow::UniformLocation>,
-    uv_rect: Option<glow::UniformLocation>,
-    grid_offsets: Option<glow::UniformLocation>, // vec2 u_grid_offsets[289]
-    grid_n: Option<glow::UniformLocation>,       // int u_grid_n
-}
-
-/// Cached uniform locations for overview background shader.
-struct OverviewBgUniforms {
-    projection: Option<glow::UniformLocation>,
-    rect: Option<glow::UniformLocation>,
-    opacity: Option<glow::UniformLocation>,
-}
-
-/// Magnifier uniform locations (added to PostprocessUniforms).
-struct MagnifierUniforms {
-    magnifier_enabled: Option<glow::UniformLocation>,
-    magnifier_center: Option<glow::UniformLocation>,
-    magnifier_radius: Option<glow::UniformLocation>,
-    magnifier_zoom: Option<glow::UniformLocation>,
-    colorblind_mode: Option<glow::UniformLocation>,
-}
-
-/// Particle shader uniform locations.
-struct ParticleUniforms {
-    projection: Option<glow::UniformLocation>,
-    point_size: Option<glow::UniformLocation>,
-}
 
 // ---------------------------------------------------------------------------
 // Blur quality auto-downgrade (Phase 2.2)
 // ---------------------------------------------------------------------------
 
 pub(crate) use crate::renderer::types::BlurQuality;
-
-// ---------------------------------------------------------------------------
-// Phase 3.2: Genie minimize animation
-// ---------------------------------------------------------------------------
-
-struct GenieUniforms {
-    projection: Option<glow::UniformLocation>,
-    rect: Option<glow::UniformLocation>,
-    texture: Option<glow::UniformLocation>,
-    opacity: Option<glow::UniformLocation>,
-    radius: Option<glow::UniformLocation>,
-    size: Option<glow::UniformLocation>,
-    dim: Option<glow::UniformLocation>,
-    uv_rect: Option<glow::UniformLocation>,
-    progress: Option<glow::UniformLocation>,
-    dock_pos: Option<glow::UniformLocation>,
-    grid_size: Option<glow::UniformLocation>,
-}
-
-/// Active genie minimize animation for one window.
-struct GenieAnimation {
-    start: std::time::Instant,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    gl_texture: glow::Texture,
-    has_rgba: bool,
-    // The animation owns these resources (transferred from the WindowTexture)
-    // and frees them when it completes; the texture is sampled for the whole
-    // animation, so it must not be freed earlier.
-    glx_pixmap: x11::glx::GLXPixmap,
-    pixmap: u32,
-    damage: u32,
-}
 
 // ---------------------------------------------------------------------------
 // Phase 3.3: Window open ripple
