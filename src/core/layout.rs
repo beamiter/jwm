@@ -18,6 +18,7 @@ pub struct LayoutParams {
 pub struct ScrollingParams {
     pub screen_area: Rect,
     pub column_width_ratio: f32, // 列宽占屏幕比例 (来自 m_fact)
+    pub column_width_factors: Vec<f32>,
     pub gap: i32,
     pub viewport_x: f32, // 当前视口偏移
 }
@@ -970,17 +971,28 @@ pub fn calculate_scrolling<K: Copy>(
 
     let gap = params.gap;
     let screen = &params.screen_area;
-    let col_w = (screen.w as f32 * params.column_width_ratio) as i32;
+    let base_col_w = (screen.w as f32 * params.column_width_ratio) as i32;
+    let base_col_w = base_col_w.max(1);
 
     // Outer margin
     let outer_gap = gap;
-    let avail_h = screen.h - 2 * outer_gap;
+    let avail_h = (screen.h - 2 * outer_gap).max(0);
 
     // Calculate total strip width and per-column x positions (in strip space, starting at 0)
     let mut col_positions: Vec<i32> = Vec::with_capacity(columns.len());
+    let mut col_widths: Vec<i32> = Vec::with_capacity(columns.len());
     let mut x_cursor = 0i32;
     for (i, _col) in columns.iter().enumerate() {
+        let width_factor = params
+            .column_width_factors
+            .get(i)
+            .copied()
+            .unwrap_or(1.0)
+            .clamp(0.25, 2.5);
+        let col_w = ((base_col_w as f32) * width_factor) as i32;
+        let col_w = col_w.max(1);
         col_positions.push(x_cursor);
+        col_widths.push(col_w);
         x_cursor += col_w;
         if i + 1 < columns.len() {
             x_cursor += gap;
@@ -989,7 +1001,7 @@ pub fn calculate_scrolling<K: Copy>(
 
     // Center focused column in viewport
     let focus_col = focus_col.min(columns.len() - 1);
-    let focus_col_center = col_positions[focus_col] as f32 + col_w as f32 / 2.0;
+    let focus_col_center = col_positions[focus_col] as f32 + col_widths[focus_col] as f32 / 2.0;
     let new_viewport_x = focus_col_center - screen.w as f32 / 2.0;
 
     // Layout each column
@@ -998,27 +1010,40 @@ pub fn calculate_scrolling<K: Copy>(
             continue;
         }
         let strip_x = col_positions[col_idx];
+        let col_w = col_widths[col_idx];
         // Screen x = strip_x - viewport_x + screen.x
         let screen_x = strip_x as f32 - new_viewport_x + screen.x as f32;
 
-        let n = col.len() as i32;
-        let inner_gaps = (n - 1).max(0) * gap;
-        let avail_col_h = avail_h - inner_gaps;
+        let inner_gaps = (col.len() as i32 - 1).max(0) * gap;
+        let avail_col_h = (avail_h - inner_gaps).max(0);
+        let mut remaining_fact: f32 = col.iter().map(|client| client.factor.max(0.0)).sum();
 
         let mut y_cursor = 0;
         for (win_idx, client) in col.iter().enumerate() {
-            let remaining = n - win_idx as i32;
-            let h = (avail_col_h - y_cursor).max(0) / remaining.max(1);
+            let remaining = col.len() as i32 - win_idx as i32;
+            let remaining_h = (avail_col_h - y_cursor).max(0);
+            let client_fact = client.factor.max(0.0);
+            let h = if remaining_fact > 0.001 {
+                (remaining_h as f32 * (client_fact / remaining_fact)) as i32
+            } else {
+                remaining_h / remaining.max(1)
+            };
             let border2 = 2 * client.border_w;
 
             let win_y = screen.y + outer_gap + y_cursor + win_idx as i32 * gap;
 
             results.push(LayoutResult {
                 key: client.key,
-                rect: Rect::new(screen_x as i32, win_y, col_w - border2, h - border2),
+                rect: Rect::new(
+                    screen_x as i32,
+                    win_y,
+                    (col_w - border2).max(1),
+                    (h - border2).max(1),
+                ),
             });
 
             y_cursor += h;
+            remaining_fact -= client_fact;
         }
     }
 
@@ -1402,5 +1427,94 @@ mod tests {
         let clients = [client(1, 1.0), client(2, 1.0)];
         let result = calculate_vstack(&p, &clients);
         assert_eq!(result.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // calculate_scrolling
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_scrolling_column_uses_client_factors() {
+        let p = ScrollingParams {
+            screen_area: Rect::new(0, 0, 1000, 600),
+            column_width_ratio: 0.5,
+            column_width_factors: Vec::new(),
+            gap: 0,
+            viewport_x: 0.0,
+        };
+        let columns = vec![vec![client(1, 2.0), client(2, 1.0)]];
+
+        let (result, _) = calculate_scrolling(&p, &columns, 0);
+
+        assert_eq!(result.len(), 2);
+        assert!(
+            result[0].rect.h > result[1].rect.h,
+            "larger factor should receive more column height"
+        );
+        assert!((result[0].rect.h - 398).abs() <= 2);
+        assert!((result[1].rect.h - 198).abs() <= 2);
+    }
+
+    #[test]
+    fn test_scrolling_centers_focused_column() {
+        let p = ScrollingParams {
+            screen_area: Rect::new(0, 0, 1000, 600),
+            column_width_ratio: 0.5,
+            column_width_factors: Vec::new(),
+            gap: 10,
+            viewport_x: 0.0,
+        };
+        let columns = vec![vec![client(1, 1.0)], vec![client(2, 1.0)]];
+
+        let (result, viewport_x) = calculate_scrolling(&p, &columns, 1);
+
+        assert!((viewport_x - 260.0).abs() < 1e-6);
+        let focused = result.iter().find(|res| res.key == 2).unwrap().rect;
+        assert_eq!(focused.x, 250);
+    }
+
+    #[test]
+    fn test_scrolling_supports_per_column_widths() {
+        let p = ScrollingParams {
+            screen_area: Rect::new(0, 0, 1000, 600),
+            column_width_ratio: 0.4,
+            column_width_factors: vec![1.0, 1.5, 0.5],
+            gap: 10,
+            viewport_x: 0.0,
+        };
+        let columns = vec![
+            vec![client(1, 1.0)],
+            vec![client(2, 1.0)],
+            vec![client(3, 1.0)],
+        ];
+
+        let (result, _) = calculate_scrolling(&p, &columns, 0);
+
+        let first = result.iter().find(|res| res.key == 1).unwrap().rect;
+        let second = result.iter().find(|res| res.key == 2).unwrap().rect;
+        let third = result.iter().find(|res| res.key == 3).unwrap().rect;
+        assert_eq!(first.w, 398);
+        assert_eq!(second.w, 598);
+        assert_eq!(third.w, 198);
+        assert_eq!(second.x - first.x, 410);
+        assert_eq!(third.x - second.x, 610);
+    }
+
+    #[test]
+    fn test_scrolling_centers_variable_width_focused_column() {
+        let p = ScrollingParams {
+            screen_area: Rect::new(0, 0, 1000, 600),
+            column_width_ratio: 0.4,
+            column_width_factors: vec![1.0, 1.5],
+            gap: 10,
+            viewport_x: 0.0,
+        };
+        let columns = vec![vec![client(1, 1.0)], vec![client(2, 1.0)]];
+
+        let (result, viewport_x) = calculate_scrolling(&p, &columns, 1);
+
+        assert!((viewport_x - 210.0).abs() < 1e-6);
+        let focused = result.iter().find(|res| res.key == 2).unwrap().rect;
+        assert_eq!(focused.x, 200);
     }
 }

@@ -13,6 +13,10 @@ pub type MonitorKey = DefaultKey;
 #[derive(Debug, Clone)]
 pub struct ScrollingState {
     pub columns: Vec<Vec<ClientKey>>,
+    pub column_width_factors: Vec<f32>,
+    pub focused_clients: Vec<Option<ClientKey>>,
+    pub focused_column: Option<usize>,
+    pub attach_new_windows_to_focused_column: bool,
     pub viewport_x: f32,
 }
 
@@ -20,9 +24,113 @@ impl ScrollingState {
     pub fn new() -> Self {
         Self {
             columns: Vec::new(),
+            column_width_factors: Vec::new(),
+            focused_clients: Vec::new(),
+            focused_column: None,
+            attach_new_windows_to_focused_column: false,
             viewport_x: 0.0,
         }
     }
+
+    pub fn ensure_column_metadata(&mut self) {
+        self.column_width_factors.resize(self.columns.len(), 1.0);
+        self.focused_clients.resize(self.columns.len(), None);
+        self.column_width_factors.truncate(self.columns.len());
+        self.focused_clients.truncate(self.columns.len());
+    }
+
+    pub fn remember_focus(&mut self, client_key: ClientKey) {
+        self.ensure_column_metadata();
+        if let Some(col_idx) = self
+            .columns
+            .iter()
+            .position(|col| col.contains(&client_key))
+        {
+            self.focused_clients[col_idx] = Some(client_key);
+            self.focused_column = Some(col_idx);
+        }
+    }
+
+    pub fn focused_column_index(&self) -> Option<usize> {
+        self.focused_column.filter(|&idx| idx < self.columns.len())
+    }
+
+    pub fn set_focused_column(&mut self, col_idx: usize) {
+        if col_idx < self.columns.len() {
+            self.focused_column = Some(col_idx);
+        }
+    }
+
+    pub fn target_for_column(&self, col_idx: usize) -> Option<ClientKey> {
+        let col = self.columns.get(col_idx)?;
+        self.focused_clients
+            .get(col_idx)
+            .and_then(|focus| focus.filter(|key| col.contains(key)))
+            .or_else(|| col.first().copied())
+    }
+
+    pub fn retain_non_empty_columns(&mut self) {
+        self.ensure_column_metadata();
+
+        let old_columns = std::mem::take(&mut self.columns);
+        let old_widths = std::mem::take(&mut self.column_width_factors);
+        let old_focuses = std::mem::take(&mut self.focused_clients);
+
+        for (idx, col) in old_columns.into_iter().enumerate() {
+            if col.is_empty() {
+                continue;
+            }
+
+            let focus = old_focuses
+                .get(idx)
+                .copied()
+                .flatten()
+                .filter(|key| col.contains(key));
+            self.columns.push(col);
+            self.column_width_factors
+                .push(old_widths.get(idx).copied().unwrap_or(1.0));
+            self.focused_clients.push(focus);
+        }
+
+        self.focused_column = self
+            .focused_column
+            .and_then(|old_idx| {
+                old_columns_index_after_retain(old_idx, &self.columns, &old_focuses)
+            })
+            .or_else(|| {
+                self.focused_clients
+                    .iter()
+                    .position(|focus| focus.is_some())
+            })
+            .filter(|&idx| idx < self.columns.len());
+    }
+
+    pub fn insert_new_client(&mut self, client_key: ClientKey) {
+        self.ensure_column_metadata();
+
+        if self.attach_new_windows_to_focused_column {
+            if let Some(col_idx) = self.focused_column_index() {
+                self.columns[col_idx].push(client_key);
+                self.focused_clients[col_idx] = Some(client_key);
+                self.focused_column = Some(col_idx);
+                return;
+            }
+        }
+
+        self.columns.push(vec![client_key]);
+        self.column_width_factors.push(1.0);
+        self.focused_clients.push(Some(client_key));
+        self.focused_column = Some(self.columns.len() - 1);
+    }
+}
+
+fn old_columns_index_after_retain(
+    old_idx: usize,
+    retained_columns: &[Vec<ClientKey>],
+    old_focuses: &[Option<ClientKey>],
+) -> Option<usize> {
+    let focus = old_focuses.get(old_idx).copied().flatten()?;
+    retained_columns.iter().position(|col| col.contains(&focus))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -682,6 +790,76 @@ mod tests {
     fn test_scrolling_state_new() {
         let s = ScrollingState::new();
         assert!(s.columns.is_empty());
+        assert!(s.column_width_factors.is_empty());
+        assert!(s.focused_clients.is_empty());
+        assert!(s.focused_column.is_none());
+        assert!(!s.attach_new_windows_to_focused_column);
         assert!((s.viewport_x - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_scrolling_state_remembers_focus_per_column() {
+        let mut keys = slotmap::SlotMap::<ClientKey, ()>::with_key();
+        let a = keys.insert(());
+        let b = keys.insert(());
+        let c = keys.insert(());
+        let mut s = ScrollingState::new();
+        s.columns = vec![vec![a, b], vec![c]];
+
+        s.remember_focus(b);
+
+        assert_eq!(s.target_for_column(0), Some(b));
+        assert_eq!(s.target_for_column(1), Some(c));
+        assert_eq!(s.focused_column_index(), Some(0));
+    }
+
+    #[test]
+    fn test_scrolling_state_retains_column_metadata() {
+        let mut keys = slotmap::SlotMap::<ClientKey, ()>::with_key();
+        let a = keys.insert(());
+        let b = keys.insert(());
+        let mut s = ScrollingState::new();
+        s.columns = vec![vec![a], Vec::new(), vec![b]];
+        s.column_width_factors = vec![1.25, 0.75, 1.5];
+        s.focused_clients = vec![Some(a), None, Some(b)];
+
+        s.retain_non_empty_columns();
+
+        assert_eq!(s.columns, vec![vec![a], vec![b]]);
+        assert_eq!(s.column_width_factors, vec![1.25, 1.5]);
+        assert_eq!(s.focused_clients, vec![Some(a), Some(b)]);
+    }
+
+    #[test]
+    fn test_scrolling_state_attaches_new_client_to_focused_column() {
+        let mut keys = slotmap::SlotMap::<ClientKey, ()>::with_key();
+        let a = keys.insert(());
+        let b = keys.insert(());
+        let c = keys.insert(());
+        let mut s = ScrollingState::new();
+        s.columns = vec![vec![a], vec![b]];
+        s.remember_focus(a);
+        s.attach_new_windows_to_focused_column = true;
+
+        s.insert_new_client(c);
+
+        assert_eq!(s.columns, vec![vec![a, c], vec![b]]);
+        assert_eq!(s.focused_clients, vec![Some(c), None]);
+        assert_eq!(s.focused_column_index(), Some(0));
+    }
+
+    #[test]
+    fn test_scrolling_state_new_client_defaults_to_new_column() {
+        let mut keys = slotmap::SlotMap::<ClientKey, ()>::with_key();
+        let a = keys.insert(());
+        let b = keys.insert(());
+        let mut s = ScrollingState::new();
+        s.columns = vec![vec![a]];
+        s.remember_focus(a);
+
+        s.insert_new_client(b);
+
+        assert_eq!(s.columns, vec![vec![a], vec![b]]);
+        assert_eq!(s.focused_column_index(), Some(1));
     }
 }

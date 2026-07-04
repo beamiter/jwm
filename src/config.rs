@@ -1545,6 +1545,12 @@ impl Config {
             // Scrolling layout: consume/expel
             KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Control".to_string()],
+                key: "a".to_string(),
+                function: "scrolling_toggle_attach_mode".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
                 key: "h".to_string(),
                 function: "scrolling_consume".to_string(),
                 argument: ArgumentConfig::Int(-1),
@@ -2030,6 +2036,7 @@ impl Config {
             "scrolling_consume" => Some(Jwm::scrolling_consume),
             "scrolling_expel" => Some(Jwm::scrolling_expel),
             "scrolling_focus_window" => Some(Jwm::scrolling_focus_window),
+            "scrolling_toggle_attach_mode" => Some(Jwm::scrolling_toggle_attach_mode),
 
             _ => {
                 eprintln!("Unknown function: {}", func_name);

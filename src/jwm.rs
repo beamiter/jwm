@@ -239,6 +239,8 @@ impl Jwm {
             "incnmaster"
         } else if eq!(Jwm::movestack) {
             "movestack"
+        } else if eq!(Jwm::scrolling_toggle_attach_mode) {
+            "scrolling_toggle_attach_mode"
         } else if eq!(Jwm::view) {
             "view"
         } else if eq!(Jwm::tag) {

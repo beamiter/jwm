@@ -151,6 +151,9 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "setmfact" => Ok((Jwm::setmfact, parse_float_arg(args, 0.0))),
         "setcfact" => Ok((Jwm::setcfact, parse_float_arg(args, 0.0))),
         "incnmaster" => Ok((Jwm::incnmaster, parse_int_arg(args, 1))),
+        "scrolling_toggle_attach_mode" => {
+            Ok((Jwm::scrolling_toggle_attach_mode, parse_int_arg(args, 0)))
+        }
         "setlayout" => {
             let layout = parse_layout_arg(args)?;
             Ok((Jwm::setlayout, layout))

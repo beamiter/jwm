@@ -319,6 +319,7 @@ impl Jwm {
         let params = ScrollingParams {
             screen_area,
             column_width_ratio: mfact,
+            column_width_factors: state.column_width_factors.clone(),
             gap: effective_gap,
             viewport_x: state.viewport_x,
         };
@@ -340,12 +341,15 @@ impl Jwm {
         state: &mut ScrollingState,
         visible_clients: &[ClientKey],
     ) {
+        state.ensure_column_metadata();
+
         // 1. Remove clients that are no longer visible
         for col in &mut state.columns {
             col.retain(|k| visible_clients.contains(k));
         }
-        // 2. Remove empty columns
-        state.columns.retain(|col| !col.is_empty());
+
+        // 2. Remove empty columns while preserving width factors for retained columns
+        state.retain_non_empty_columns();
 
         // 3. Find new clients not in any column
         let existing: HashSet<ClientKey> = state.columns.iter().flatten().copied().collect();
@@ -357,7 +361,7 @@ impl Jwm {
 
         // 4. Insert new clients as individual columns (at the end)
         for key in new_clients {
-            state.columns.push(vec![key]);
+            state.insert_new_client(key);
         }
     }
 
