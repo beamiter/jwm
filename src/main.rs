@@ -83,6 +83,10 @@ const MAX_TAB_WIDTH: f64 = 56.0;
 const TAB_SPACING: f64 = 4.0;
 const TAB_FONT_SIZE: f32 = 12.0;
 const PILL_FONT_SIZE: f32 = 11.0;
+const LEFT_SECTION_GAP: f64 = 1.0;
+const CENTER_SECTION_GAP: f64 = 2.0;
+const RIGHT_SECTION_GAP: f64 = 4.0;
+const RIGHTMOST_SECTION_GAP: f64 = 8.0;
 
 fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::from_rgb8(r, g, b)
@@ -281,7 +285,7 @@ impl XilemBar {
 
         // Keep the left workspace group proportional to the monitor width,
         // while clamping individual tab width to avoid extreme sizes.
-        let group_width = (monitor_width as f64 * 0.23).clamp(396.0, 540.0);
+        let group_width = (monitor_width as f64 * 0.20).clamp(360.0, 500.0);
         let total_spacing = TAB_SPACING * (TAG_ICONS.len().saturating_sub(1) as f64);
         ((group_width - total_spacing) / TAG_ICONS.len() as f64).clamp(MIN_TAB_WIDTH, MAX_TAB_WIDTH)
     }
@@ -780,33 +784,33 @@ fn app_logic(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
         (
             (
                 tags,
-                FlexSpacer::Fixed(Length::px(2.0)),
+                FlexSpacer::Fixed(Length::px(LEFT_SECTION_GAP)),
                 lt_btn,
-                FlexSpacer::Fixed(Length::px(2.0)),
+                FlexSpacer::Fixed(Length::px(LEFT_SECTION_GAP)),
                 lt_options,
                 FlexSpacer::Flex(1.0),
             ),
             (
                 usage_pill_view(&theme, ICON_CPU, cpu),
-                FlexSpacer::Fixed(Length::px(2.0)),
+                FlexSpacer::Fixed(Length::px(CENTER_SECTION_GAP)),
                 usage_pill_view(&theme, ICON_MEM, mem),
-                FlexSpacer::Fixed(Length::px(2.0)),
+                FlexSpacer::Fixed(Length::px(CENTER_SECTION_GAP)),
                 battery_pill_view(state),
-                FlexSpacer::Fixed(Length::px(2.0)),
+                FlexSpacer::Fixed(Length::px(CENTER_SECTION_GAP)),
                 brightness_pill_view(state),
-                FlexSpacer::Fixed(Length::px(2.0)),
+                FlexSpacer::Fixed(Length::px(CENTER_SECTION_GAP)),
                 volume_pill_view(state),
             ),
             (
-                FlexSpacer::Fixed(Length::px(2.0)),
+                FlexSpacer::Fixed(Length::px(RIGHT_SECTION_GAP)),
                 screenshot_pill_view(state),
-                FlexSpacer::Fixed(Length::px(2.0)),
+                FlexSpacer::Fixed(Length::px(RIGHT_SECTION_GAP)),
                 theme_pill_view(state),
-                FlexSpacer::Fixed(Length::px(2.0)),
+                FlexSpacer::Fixed(Length::px(RIGHTMOST_SECTION_GAP)),
                 time_pill_view(state),
-                FlexSpacer::Fixed(Length::px(2.0)),
+                FlexSpacer::Fixed(Length::px(RIGHTMOST_SECTION_GAP)),
                 monitor_pill_view(&theme, monitor_num),
-                FlexSpacer::Fixed(Length::px(2.0)),
+                FlexSpacer::Fixed(Length::px(RIGHTMOST_SECTION_GAP)),
                 scale_pill_view(&theme, 1.0),
             ),
         ),
