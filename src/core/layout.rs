@@ -29,6 +29,153 @@ pub struct LayoutResult<K> {
     pub rect: Rect,
 }
 
+fn usable_area(screen_area: Rect, gap: i32) -> Rect {
+    let gap = gap.max(0);
+    Rect::new(
+        screen_area.x + gap,
+        screen_area.y + gap,
+        (screen_area.w - 2 * gap).max(1),
+        (screen_area.h - 2 * gap).max(1),
+    )
+}
+
+fn client_rect(x: i32, y: i32, w: i32, h: i32, border_w: i32) -> Rect {
+    let border2 = 2 * border_w.max(0);
+    Rect::new(x, y, (w - border2).max(1), (h - border2).max(1))
+}
+
+fn split_evenly(total: i32, count: i32, gap: i32, used: i32, index: i32) -> i32 {
+    let remaining = (total - (count - 1).max(0) * gap - used).max(0);
+    let remaining_count = (count - index).max(1);
+    (remaining / remaining_count).max(1)
+}
+
+fn choose_grid_dimensions(n: usize, area: Rect) -> (i32, i32) {
+    if n <= 1 {
+        return (1, 1);
+    }
+
+    let target_aspect = if area.h > 0 {
+        ((area.w as f32 / area.h as f32).sqrt()).clamp(1.0, 1.8)
+    } else {
+        1.0
+    };
+
+    let mut best = (n as i32, 1);
+    let mut best_score = f32::MAX;
+    for cols in 1..=n as i32 {
+        let rows = (n as i32 + cols - 1) / cols;
+        let cell_aspect = (area.w as f32 / cols as f32) / (area.h as f32 / rows as f32);
+        let empty_cells = cols * rows - n as i32;
+        let score = (cell_aspect - target_aspect).abs() + empty_cells as f32 * 0.15;
+        if score < best_score {
+            best = (cols, rows);
+            best_score = score;
+        }
+    }
+    best
+}
+
+fn distribute_length(
+    total: i32,
+    gap: i32,
+    used: i32,
+    index: i32,
+    count: i32,
+    factor: f32,
+    remaining_factor: f32,
+) -> i32 {
+    let available = (total - (count - 1).max(0) * gap).max(1);
+    let remaining = (available - used).max(1);
+    if remaining_factor > 0.001 {
+        (remaining as f32 * (factor.max(0.0) / remaining_factor)) as i32
+    } else {
+        remaining / (count - index).max(1)
+    }
+    .max(1)
+}
+
+fn push_factor_row<K: Copy>(
+    results: &mut Vec<LayoutResult<K>>,
+    clients: &[LayoutClient<K>],
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    gap: i32,
+) {
+    let count = clients.len() as i32;
+    if count == 0 {
+        return;
+    }
+
+    let mut used_w = 0;
+    let mut remaining_factor: f32 = clients.iter().map(|c| c.factor.max(0.0)).sum();
+
+    for (i, c) in clients.iter().enumerate() {
+        let cw = distribute_length(w, gap, used_w, i as i32, count, c.factor, remaining_factor);
+        results.push(LayoutResult {
+            key: c.key,
+            rect: client_rect(x + used_w + i as i32 * gap, y, cw, h, c.border_w),
+        });
+        used_w += cw;
+        remaining_factor -= c.factor.max(0.0);
+    }
+}
+
+fn push_factor_column<K: Copy>(
+    results: &mut Vec<LayoutResult<K>>,
+    clients: &[LayoutClient<K>],
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    gap: i32,
+) {
+    let count = clients.len() as i32;
+    if count == 0 {
+        return;
+    }
+
+    let mut used_h = 0;
+    let mut remaining_factor: f32 = clients.iter().map(|c| c.factor.max(0.0)).sum();
+
+    for (i, c) in clients.iter().enumerate() {
+        let ch = distribute_length(h, gap, used_h, i as i32, count, c.factor, remaining_factor);
+        results.push(LayoutResult {
+            key: c.key,
+            rect: client_rect(x, y + used_h + i as i32 * gap, w, ch, c.border_w),
+        });
+        used_h += ch;
+        remaining_factor -= c.factor.max(0.0);
+    }
+}
+
+fn push_deck_previews<K: Copy>(
+    results: &mut Vec<LayoutResult<K>>,
+    clients: &[LayoutClient<K>],
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    gap: i32,
+) {
+    for (i, c) in clients.iter().enumerate() {
+        let preview_step = gap.max(6).min(16);
+        let preview_offset = (i as i32).min(5) * preview_step;
+        results.push(LayoutResult {
+            key: c.key,
+            rect: client_rect(
+                x + preview_offset,
+                y + preview_offset,
+                w - preview_offset,
+                h - preview_offset,
+                c.border_w,
+            ),
+        });
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutEnum(pub &'static str);
 
@@ -163,95 +310,52 @@ pub fn calculate_tile<K: Copy>(
 
     // 外边距：缩小可用区域。gap 过大（> 屏幕一半）时 w/h 会变负，进而让 mw/列宽
     // 变成负数并产生非法窗口尺寸，这里夹到 >= 0。
-    let wx = screen_area.x + gap;
-    let wy = screen_area.y + gap;
-    let ww = (screen_area.w - 2 * gap).max(0);
-    let wh = (screen_area.h - 2 * gap).max(0);
-
-    let border2 = 2 * clients.first().map_or(0, |c| c.border_w);
+    let area = usable_area(*screen_area, gap);
+    let (wx, wy, ww, wh) = (area.x, area.y, area.w, area.h);
 
     let has_stack = n > *n_master && *n_master > 0;
+
+    if *n_master == 0 {
+        push_factor_column(&mut results, clients, wx, wy, ww, wh, gap);
+        return results;
+    }
+
+    if has_stack && wh > ww {
+        let mh = ((wh - gap) as f32 * m_fact.clamp(0.05, 0.95)) as i32;
+        let sh = (wh - mh - gap).max(1);
+        let master_end = (*n_master as usize).min(clients.len());
+        push_factor_row(&mut results, &clients[..master_end], wx, wy, ww, mh, gap);
+        push_factor_row(
+            &mut results,
+            &clients[master_end..],
+            wx,
+            wy + mh + gap,
+            ww,
+            sh,
+            gap,
+        );
+        return results;
+    }
+
     // Master 和 Stack 列之间留 gap
     let mw = if has_stack {
-        ((ww - gap) as f32 * m_fact) as i32
+        ((ww - gap) as f32 * m_fact.clamp(0.05, 0.95)) as i32
     } else {
         ww
     };
+    let stack_w = (ww - mw - gap).max(1);
 
-    // 1. 计算总的 factors
-    let (total_m_fact, total_s_fact) =
-        clients
-            .iter()
-            .enumerate()
-            .fold((0.0, 0.0), |(m, s), (i, c)| {
-                if i < *n_master as usize {
-                    (m + c.factor, s)
-                } else {
-                    (m, s + c.factor)
-                }
-            });
-
-    let n_master_count = n.min(*n_master) as i32;
-    let n_stack_count = (clients.len() as i32 - *n_master as i32).max(0);
-
-    // Master 列中 N 个窗口之间有 (N-1) 个 gap
-    let master_avail_h = wh - (n_master_count - 1).max(0) * gap;
-    // Stack 列同理
-    let stack_avail_h = wh - (n_stack_count - 1).max(0) * gap;
-
-    let mut mi = 0; // Master 窗口序号
-    let mut si = 0; // Stack 窗口序号
-    let mut my = 0; // Master Y offset
-    let mut ty = 0; // Stack Y offset
-    let mut remaining_m_fact = total_m_fact;
-    let mut remaining_s_fact = total_s_fact;
-
-    for (i, c) in clients.iter().enumerate() {
-        let is_master = i < *n_master as usize;
-
-        let (x, y, w, h) = if is_master {
-            let remaining_masters = n_master_count - mi;
-            let remaining_h = (master_avail_h - my).max(0);
-
-            let h = if remaining_m_fact > 0.001 {
-                (remaining_h as f32 * (c.factor / remaining_m_fact)) as i32
-            } else if remaining_masters > 0 {
-                remaining_h / remaining_masters
-            } else {
-                remaining_h
-            };
-
-            let res_y = wy + my + mi * gap;
-            my += h;
-            mi += 1;
-            remaining_m_fact -= c.factor;
-
-            (wx, res_y, mw - border2, h - border2)
-        } else {
-            let remaining_stacks = n_stack_count - si;
-            let remaining_h = (stack_avail_h - ty).max(0);
-
-            let h = if remaining_s_fact > 0.001 {
-                (remaining_h as f32 * (c.factor / remaining_s_fact)) as i32
-            } else if remaining_stacks > 0 {
-                remaining_h / remaining_stacks
-            } else {
-                remaining_h
-            };
-
-            let res_y = wy + ty + si * gap;
-            ty += h;
-            si += 1;
-            remaining_s_fact -= c.factor;
-
-            (wx + mw + gap, res_y, ww - mw - gap - border2, h - border2)
-        };
-
-        results.push(LayoutResult {
-            key: c.key,
-            rect: Rect::new(x, y, w, h),
-        });
-    }
+    let master_end = (*n_master as usize).min(clients.len());
+    push_factor_column(&mut results, &clients[..master_end], wx, wy, mw, wh, gap);
+    push_factor_column(
+        &mut results,
+        &clients[master_end..],
+        wx + mw + gap,
+        wy,
+        stack_w,
+        wh,
+        gap,
+    );
 
     results
 }
@@ -266,12 +370,9 @@ pub fn calculate_monocle<K: Copy>(
 
     clients
         .iter()
-        .map(|c| {
-            let border2 = 2 * c.border_w;
-            LayoutResult {
-                key: c.key,
-                rect: Rect::new(wx, wy, ww - border2, wh - border2),
-            }
+        .map(|c| LayoutResult {
+            key: c.key,
+            rect: client_rect(wx, wy, ww, wh, c.border_w),
         })
         .collect()
 }
@@ -295,10 +396,8 @@ pub fn calculate_fibonacci<K: Copy>(
     let gap = *gap;
 
     // 外边距
-    let wx = screen_area.x + gap;
-    let wy = screen_area.y + gap;
-    let ww = screen_area.w - 2 * gap;
-    let wh = screen_area.h - 2 * gap;
+    let area = usable_area(*screen_area, gap);
+    let (wx, wy, ww, wh) = (area.x, area.y, area.w, area.h);
 
     let has_stack = n > *n_master;
     let mw = if has_stack {
@@ -308,9 +407,14 @@ pub fn calculate_fibonacci<K: Copy>(
     };
 
     let n_master_count = n.min(*n_master) as i32;
-    let master_avail_h = wh - (n_master_count - 1).max(0) * gap;
+    let total_m_fact: f32 = clients
+        .iter()
+        .take(*n_master as usize)
+        .map(|c| c.factor.max(0.0))
+        .sum();
     let mut mi = 0i32;
     let mut my = 0;
+    let mut remaining_m_fact = total_m_fact;
 
     // Stack 区域的初始状态
     let mut sx = if *n_master > 0 { wx + mw + gap } else { wx };
@@ -320,25 +424,17 @@ pub fn calculate_fibonacci<K: Copy>(
 
     for (i, c) in clients.iter().enumerate() {
         let is_master = (i as u32) < *n_master;
-        let border2 = 2 * c.border_w;
-
         if is_master {
-            let remaining_masters = n_master_count - mi;
-            let remaining_h = (master_avail_h - my).max(0);
-
-            let h = if remaining_masters > 0 {
-                remaining_h / remaining_masters
-            } else {
-                remaining_h
-            };
+            let h = distribute_length(wh, gap, my, mi, n_master_count, c.factor, remaining_m_fact);
 
             let res_y = wy + my + mi * gap;
             my += h;
             mi += 1;
+            remaining_m_fact -= c.factor.max(0.0);
 
             results.push(LayoutResult {
                 key: c.key,
-                rect: Rect::new(wx, res_y, mw - border2, h - border2),
+                rect: client_rect(wx, res_y, mw, h, c.border_w),
             });
         } else {
             let stack_idx = (i as u32) - *n_master;
@@ -347,7 +443,7 @@ pub fn calculate_fibonacci<K: Copy>(
             if stack_idx == stack_count - 1 {
                 results.push(LayoutResult {
                     key: c.key,
-                    rect: Rect::new(sx, sy, sw - border2, sh - border2),
+                    rect: client_rect(sx, sy, sw, sh, c.border_w),
                 });
             } else {
                 if stack_idx % 2 == 0 {
@@ -355,7 +451,7 @@ pub fn calculate_fibonacci<K: Copy>(
                     let h = (sh - gap) / 2;
                     results.push(LayoutResult {
                         key: c.key,
-                        rect: Rect::new(sx, sy, sw - border2, h - border2),
+                        rect: client_rect(sx, sy, sw, h, c.border_w),
                     });
                     sy += h + gap;
                     sh -= h + gap;
@@ -364,7 +460,7 @@ pub fn calculate_fibonacci<K: Copy>(
                     let w = (sw - gap) / 2;
                     results.push(LayoutResult {
                         key: c.key,
-                        rect: Rect::new(sx, sy, w - border2, sh - border2),
+                        rect: client_rect(sx, sy, w, sh, c.border_w),
                     });
                     sx += w + gap;
                     sw -= w + gap;
@@ -389,90 +485,81 @@ pub fn calculate_centered_master<K: Copy>(
     let mut results = Vec::with_capacity(clients.len());
     let gap = params.gap;
 
-    let wx = params.screen_area.x + gap;
-    let wy = params.screen_area.y + gap;
-    let ww = params.screen_area.w - 2 * gap;
-    let wh = params.screen_area.h - 2 * gap;
+    let area = usable_area(params.screen_area, gap);
+    let (wx, wy, ww, wh) = (area.x, area.y, area.w, area.h);
 
     let n_master = params.n_master;
     let n_master_count = n.min(n_master) as i32;
     let n_stack = (n as i32 - n_master as i32).max(0);
 
+    if n_master == 0 {
+        return calculate_grid(params, clients);
+    }
+
     if n_stack == 0 {
-        let master_avail_h = wh - (n_master_count - 1).max(0) * gap;
         let mut my = 0;
         for (i, c) in clients.iter().enumerate() {
-            let remaining = n_master_count - i as i32;
-            let h = (master_avail_h - my).max(0) / remaining.max(1);
-            let b2 = 2 * c.border_w;
+            let h = split_evenly(wh, n_master_count, gap, my, i as i32);
             results.push(LayoutResult {
                 key: c.key,
-                rect: Rect::new(wx, wy + my + i as i32 * gap, ww - b2, h - b2),
+                rect: client_rect(wx, wy + my + i as i32 * gap, ww, h, c.border_w),
             });
             my += h;
         }
         return results;
     }
 
+    if wh > ww {
+        return calculate_bstack(params, clients);
+    }
+
     // 左 stack | 中 master | 右 stack
-    let mw = ((ww - 2 * gap) as f32 * params.m_fact) as i32;
+    let mfact = params.m_fact.clamp(0.25, 0.75);
+    let side_total = n_stack.max(1) as f32;
+    let master_bias = if n_stack <= 2 {
+        1.0
+    } else {
+        (2.0 / side_total).max(0.7)
+    };
+    let mw = ((ww - 2 * gap) as f32 * mfact * master_bias).max(1.0) as i32;
     let n_left = (n_stack + 1) / 2;
     let n_right = n_stack - n_left;
-    let left_w = (ww - mw - 2 * gap) / 2;
-    let right_w = ww - mw - 2 * gap - left_w;
+    let side_w_total = (ww - mw - 2 * gap).max(1);
+    let left_w = (side_w_total / 2).max(1);
+    let right_w = (side_w_total - left_w).max(1);
 
     let master_x = wx + left_w + gap;
     let right_x = master_x + mw + gap;
 
-    let master_avail_h = wh - (n_master_count - 1).max(0) * gap;
-    let left_avail_h = wh - (n_left - 1).max(0) * gap;
-    let right_avail_h = if n_right > 0 {
-        wh - (n_right - 1).max(0) * gap
-    } else {
-        wh
-    };
-
-    let mut mi = 0i32;
-    let mut li = 0i32;
-    let mut ri = 0i32;
-    let mut my = 0;
-    let mut ly = 0;
-    let mut ry = 0;
-
-    for (i, c) in clients.iter().enumerate() {
-        let b2 = 2 * c.border_w;
-        if (i as u32) < n_master {
-            let remaining = n_master_count - mi;
-            let h = (master_avail_h - my).max(0) / remaining.max(1);
-            results.push(LayoutResult {
+    let master_end = (n_master as usize).min(clients.len());
+    let mut left_clients = Vec::with_capacity(n_left as usize);
+    let mut right_clients = Vec::with_capacity(n_right as usize);
+    for (idx, c) in clients[master_end..].iter().enumerate() {
+        if idx % 2 == 0 {
+            left_clients.push(LayoutClient {
                 key: c.key,
-                rect: Rect::new(master_x, wy + my + mi * gap, mw - b2, h - b2),
+                factor: c.factor,
+                border_w: c.border_w,
             });
-            my += h;
-            mi += 1;
         } else {
-            let stack_idx = (i as u32 - n_master) as i32;
-            if stack_idx % 2 == 0 {
-                let remaining = n_left - li;
-                let h = (left_avail_h - ly).max(0) / remaining.max(1);
-                results.push(LayoutResult {
-                    key: c.key,
-                    rect: Rect::new(wx, wy + ly + li * gap, left_w - b2, h - b2),
-                });
-                ly += h;
-                li += 1;
-            } else {
-                let remaining = n_right - ri;
-                let h = (right_avail_h - ry).max(0) / remaining.max(1);
-                results.push(LayoutResult {
-                    key: c.key,
-                    rect: Rect::new(right_x, wy + ry + ri * gap, right_w - b2, h - b2),
-                });
-                ry += h;
-                ri += 1;
-            }
+            right_clients.push(LayoutClient {
+                key: c.key,
+                factor: c.factor,
+                border_w: c.border_w,
+            });
         }
     }
+    push_factor_column(
+        &mut results,
+        &clients[..master_end],
+        master_x,
+        wy,
+        mw,
+        wh,
+        gap,
+    );
+    push_factor_column(&mut results, &left_clients, wx, wy, left_w, wh, gap);
+    push_factor_column(&mut results, &right_clients, right_x, wy, right_w, wh, gap);
 
     results
 }
@@ -490,14 +577,16 @@ pub fn calculate_bstack<K: Copy>(
     let mut results = Vec::with_capacity(clients.len());
     let gap = params.gap;
 
-    let wx = params.screen_area.x + gap;
-    let wy = params.screen_area.y + gap;
-    let ww = params.screen_area.w - 2 * gap;
-    let wh = params.screen_area.h - 2 * gap;
+    let area = usable_area(params.screen_area, gap);
+    let (wx, wy, ww, wh) = (area.x, area.y, area.w, area.h);
 
     let n_master = params.n_master;
     let n_master_count = n.min(n_master) as i32;
     let n_stack = (n as i32 - n_master as i32).max(0);
+
+    if n_master == 0 {
+        return calculate_grid(params, clients);
+    }
 
     let has_stack = n_stack > 0 && n_master_count > 0;
     let mh = if has_stack {
@@ -506,40 +595,39 @@ pub fn calculate_bstack<K: Copy>(
         wh
     };
 
-    let master_avail_w = ww - (n_master_count - 1).max(0) * gap;
-    let stack_avail_w = if n_stack > 0 {
-        ww - (n_stack - 1).max(0) * gap
+    let stack_rows = if n_stack > 4 { 2 } else { 1 };
+    let stack_cols = if n_stack > 0 {
+        (n_stack + stack_rows - 1) / stack_rows
     } else {
         0
     };
+    let stack_total_h = (wh - mh - gap).max(1);
+    let stack_cell_h = ((stack_total_h - (stack_rows - 1).max(0) * gap) / stack_rows.max(1)).max(1);
 
-    let mut mx = 0;
-    let mut sx = 0;
-    let mut mi = 0i32;
-    let mut si = 0i32;
+    let master_end = (n_master as usize).min(clients.len());
+    push_factor_row(&mut results, &clients[..master_end], wx, wy, ww, mh, gap);
 
-    for (i, c) in clients.iter().enumerate() {
-        let b2 = 2 * c.border_w;
-        if (i as u32) < n_master {
-            let remaining = n_master_count - mi;
-            let w = (master_avail_w - mx).max(0) / remaining.max(1);
-            results.push(LayoutResult {
-                key: c.key,
-                rect: Rect::new(wx + mx + mi * gap, wy, w - b2, mh - b2),
-            });
-            mx += w;
-            mi += 1;
-        } else {
-            let remaining = n_stack - si;
-            let w = (stack_avail_w - sx).max(0) / remaining.max(1);
-            let sh = wh - mh - gap;
-            results.push(LayoutResult {
-                key: c.key,
-                rect: Rect::new(wx + sx + si * gap, wy + mh + gap, w - b2, sh - b2),
-            });
-            sx += w;
-            si += 1;
+    let stack_clients = &clients[master_end..];
+    for row in 0..stack_rows {
+        let row_start = (row * stack_cols) as usize;
+        if row_start >= stack_clients.len() {
+            break;
         }
+        let row_len = if row == stack_rows - 1 {
+            (n_stack - row * stack_cols).max(0) as usize
+        } else {
+            stack_cols as usize
+        };
+        let row_end = (row_start + row_len).min(stack_clients.len());
+        push_factor_row(
+            &mut results,
+            &stack_clients[row_start..row_end],
+            wx,
+            wy + mh + gap + row * (stack_cell_h + gap),
+            ww,
+            stack_cell_h,
+            gap,
+        );
     }
 
     results
@@ -558,13 +646,10 @@ pub fn calculate_grid<K: Copy>(
     let mut results = Vec::with_capacity(n);
     let gap = params.gap;
 
-    let wx = params.screen_area.x + gap;
-    let wy = params.screen_area.y + gap;
-    let ww = params.screen_area.w - 2 * gap;
-    let wh = params.screen_area.h - 2 * gap;
+    let area = usable_area(params.screen_area, gap);
+    let (wx, wy, ww, wh) = (area.x, area.y, area.w, area.h);
 
-    let cols = (n as f32).sqrt().ceil() as i32;
-    let rows = (n as i32 + cols - 1) / cols;
+    let (cols, rows) = choose_grid_dimensions(n, area);
 
     let cell_w = (ww - (cols - 1) * gap) / cols;
     let cell_h = (wh - (rows - 1) * gap) / rows;
@@ -572,8 +657,6 @@ pub fn calculate_grid<K: Copy>(
     for (i, c) in clients.iter().enumerate() {
         let row = i as i32 / cols;
         let col = i as i32 % cols;
-        let b2 = 2 * c.border_w;
-
         // 最后一行可能不满，拉宽填满
         let (cx, cw) = if row == rows - 1 {
             let last_row_count = n as i32 - row * cols;
@@ -586,7 +669,7 @@ pub fn calculate_grid<K: Copy>(
 
         results.push(LayoutResult {
             key: c.key,
-            rect: Rect::new(cx, wy + row * (cell_h + gap), cw - b2, cell_h - b2),
+            rect: client_rect(cx, wy + row * (cell_h + gap), cw, cell_h, c.border_w),
         });
     }
 
@@ -606,43 +689,53 @@ pub fn calculate_deck<K: Copy>(
     let mut results = Vec::with_capacity(clients.len());
     let gap = params.gap;
 
-    let wx = params.screen_area.x + gap;
-    let wy = params.screen_area.y + gap;
-    let ww = params.screen_area.w - 2 * gap;
-    let wh = params.screen_area.h - 2 * gap;
+    let area = usable_area(params.screen_area, gap);
+    let (wx, wy, ww, wh) = (area.x, area.y, area.w, area.h);
 
     let n_master = params.n_master;
-    let n_master_count = n.min(n_master) as i32;
 
     let has_stack = n > n_master && n_master > 0;
+
+    if n_master == 0 {
+        push_deck_previews(&mut results, clients, wx, wy, ww, wh, gap);
+        return results;
+    }
+
+    if has_stack && wh > ww {
+        let mfact = params.m_fact.clamp(0.25, 0.75);
+        let mh = ((wh - gap) as f32 * mfact).max(1.0) as i32;
+        let sh = (wh - mh - gap).max(1);
+        let master_end = (n_master as usize).min(clients.len());
+        push_factor_row(&mut results, &clients[..master_end], wx, wy, ww, mh, gap);
+        push_deck_previews(
+            &mut results,
+            &clients[master_end..],
+            wx,
+            wy + mh + gap,
+            ww,
+            sh,
+            gap,
+        );
+        return results;
+    }
+
     let mw = if has_stack {
         ((ww - gap) as f32 * params.m_fact) as i32
     } else {
         ww
     };
 
-    let master_avail_h = wh - (n_master_count - 1).max(0) * gap;
-    let mut my = 0;
-
-    for (i, c) in clients.iter().enumerate() {
-        let b2 = 2 * c.border_w;
-        if (i as u32) < n_master {
-            let mi = i as i32;
-            let remaining = n_master_count - mi;
-            let h = (master_avail_h - my).max(0) / remaining.max(1);
-            results.push(LayoutResult {
-                key: c.key,
-                rect: Rect::new(wx, wy + my + mi * gap, mw - b2, h - b2),
-            });
-            my += h;
-        } else {
-            // Stack 区所有窗口重叠在同一位置
-            results.push(LayoutResult {
-                key: c.key,
-                rect: Rect::new(wx + mw + gap, wy, ww - mw - gap - b2, wh - b2),
-            });
-        }
-    }
+    let master_end = (n_master as usize).min(clients.len());
+    push_factor_column(&mut results, &clients[..master_end], wx, wy, mw, wh, gap);
+    push_deck_previews(
+        &mut results,
+        &clients[master_end..],
+        wx + mw + gap,
+        wy,
+        ww - mw - gap,
+        wh,
+        gap,
+    );
 
     results
 }
@@ -660,34 +753,39 @@ pub fn calculate_three_col<K: Copy>(
     let mut results = Vec::with_capacity(clients.len());
     let gap = params.gap;
 
-    let wx = params.screen_area.x + gap;
-    let wy = params.screen_area.y + gap;
-    let ww = params.screen_area.w - 2 * gap;
-    let wh = params.screen_area.h - 2 * gap;
+    let area = usable_area(params.screen_area, gap);
+    let (wx, wy, ww, wh) = (area.x, area.y, area.w, area.h);
 
     let n_master = params.n_master;
     let n_master_count = n.min(n_master) as i32;
     let n_stack = (n as i32 - n_master as i32).max(0);
 
+    if n_master == 0 {
+        return calculate_grid(params, clients);
+    }
+
     if n_stack == 0 {
-        let master_avail_h = wh - (n_master_count - 1).max(0) * gap;
         let mut my = 0;
         for (i, c) in clients.iter().enumerate() {
-            let remaining = n_master_count - i as i32;
-            let h = (master_avail_h - my).max(0) / remaining.max(1);
-            let b2 = 2 * c.border_w;
+            let h = split_evenly(wh, n_master_count, gap, my, i as i32);
             results.push(LayoutResult {
                 key: c.key,
-                rect: Rect::new(wx, wy + my + i as i32 * gap, ww - b2, h - b2),
+                rect: client_rect(wx, wy + my + i as i32 * gap, ww, h, c.border_w),
             });
             my += h;
         }
         return results;
     }
 
-    let mw = ((ww - 2 * gap) as f32 * params.m_fact) as i32;
-    let side_w = (ww - mw - 2 * gap) / 2;
-    let right_side_w = ww - mw - 2 * gap - side_w;
+    if wh > ww {
+        return calculate_bstack(params, clients);
+    }
+
+    let mfact = params.m_fact.clamp(0.25, 0.75);
+    let mw = ((ww - 2 * gap) as f32 * mfact).max(1.0) as i32;
+    let side_w_total = (ww - mw - 2 * gap).max(1);
+    let side_w = (side_w_total / 2).max(1);
+    let right_side_w = (side_w_total - side_w).max(1);
 
     let n_left = (n_stack + 1) / 2;
     let n_right = n_stack - n_left;
@@ -695,55 +793,43 @@ pub fn calculate_three_col<K: Copy>(
     let master_x = wx + side_w + gap;
     let right_x = master_x + mw + gap;
 
-    let master_avail_h = wh - (n_master_count - 1).max(0) * gap;
-    let left_avail_h = wh - (n_left - 1).max(0) * gap;
-    let right_avail_h = if n_right > 0 {
-        wh - (n_right - 1).max(0) * gap
-    } else {
-        wh
-    };
-
-    let mut mi = 0i32;
-    let mut li = 0i32;
-    let mut ri = 0i32;
-    let mut my = 0;
-    let mut ly = 0;
-    let mut ry = 0;
-
-    for (i, c) in clients.iter().enumerate() {
-        let b2 = 2 * c.border_w;
-        if (i as u32) < n_master {
-            let remaining = n_master_count - mi;
-            let h = (master_avail_h - my).max(0) / remaining.max(1);
-            results.push(LayoutResult {
+    let master_end = (n_master as usize).min(clients.len());
+    let mut left_clients = Vec::with_capacity(n_left as usize);
+    let mut right_clients = Vec::with_capacity(n_right as usize);
+    for (idx, c) in clients[master_end..].iter().enumerate() {
+        if idx % 2 == 0 {
+            left_clients.push(LayoutClient {
                 key: c.key,
-                rect: Rect::new(master_x, wy + my + mi * gap, mw - b2, h - b2),
+                factor: c.factor,
+                border_w: c.border_w,
             });
-            my += h;
-            mi += 1;
         } else {
-            let stack_idx = (i as u32 - n_master) as i32;
-            if stack_idx % 2 == 0 {
-                let remaining = n_left - li;
-                let h = (left_avail_h - ly).max(0) / remaining.max(1);
-                results.push(LayoutResult {
-                    key: c.key,
-                    rect: Rect::new(wx, wy + ly + li * gap, side_w - b2, h - b2),
-                });
-                ly += h;
-                li += 1;
-            } else {
-                let remaining = n_right - ri;
-                let h = (right_avail_h - ry).max(0) / remaining.max(1);
-                results.push(LayoutResult {
-                    key: c.key,
-                    rect: Rect::new(right_x, wy + ry + ri * gap, right_side_w - b2, h - b2),
-                });
-                ry += h;
-                ri += 1;
-            }
+            right_clients.push(LayoutClient {
+                key: c.key,
+                factor: c.factor,
+                border_w: c.border_w,
+            });
         }
     }
+    push_factor_column(
+        &mut results,
+        &clients[..master_end],
+        master_x,
+        wy,
+        mw,
+        wh,
+        gap,
+    );
+    push_factor_column(&mut results, &left_clients, wx, wy, side_w, wh, gap);
+    push_factor_column(
+        &mut results,
+        &right_clients,
+        right_x,
+        wy,
+        right_side_w,
+        wh,
+        gap,
+    );
 
     results
 }
@@ -761,28 +847,28 @@ pub fn calculate_tatami<K: Copy>(
     let mut results = Vec::with_capacity(n);
     let gap = params.gap;
 
-    let wx = params.screen_area.x + gap;
-    let wy = params.screen_area.y + gap;
-    let ww = params.screen_area.w - 2 * gap;
-    let wh = params.screen_area.h - 2 * gap;
+    if n > 10 {
+        return calculate_grid(params, clients);
+    }
+
+    let area = usable_area(params.screen_area, gap);
+    let (wx, wy, ww, wh) = (area.x, area.y, area.w, area.h);
 
     if n <= 4 {
         // 少量窗口直接铺
         match n {
             1 => {
-                let b2 = 2 * clients[0].border_w;
                 results.push(LayoutResult {
                     key: clients[0].key,
-                    rect: Rect::new(wx, wy, ww - b2, wh - b2),
+                    rect: client_rect(wx, wy, ww, wh, clients[0].border_w),
                 });
             }
             2 => {
                 let w = (ww - gap) / 2;
                 for (i, c) in clients.iter().enumerate() {
-                    let b2 = 2 * c.border_w;
                     results.push(LayoutResult {
                         key: c.key,
-                        rect: Rect::new(wx + i as i32 * (w + gap), wy, w - b2, wh - b2),
+                        rect: client_rect(wx + i as i32 * (w + gap), wy, w, wh, c.border_w),
                     });
                 }
             }
@@ -790,36 +876,39 @@ pub fn calculate_tatami<K: Copy>(
                 let lw = (ww - gap) / 2;
                 let rw = ww - lw - gap;
                 let rh = (wh - gap) / 2;
-                let b0 = 2 * clients[0].border_w;
-                let b1 = 2 * clients[1].border_w;
-                let b2 = 2 * clients[2].border_w;
                 results.push(LayoutResult {
                     key: clients[0].key,
-                    rect: Rect::new(wx, wy, lw - b0, wh - b0),
+                    rect: client_rect(wx, wy, lw, wh, clients[0].border_w),
                 });
                 results.push(LayoutResult {
                     key: clients[1].key,
-                    rect: Rect::new(wx + lw + gap, wy, rw - b1, rh - b1),
+                    rect: client_rect(wx + lw + gap, wy, rw, rh, clients[1].border_w),
                 });
                 results.push(LayoutResult {
                     key: clients[2].key,
-                    rect: Rect::new(wx + lw + gap, wy + rh + gap, rw - b2, wh - rh - gap - b2),
+                    rect: client_rect(
+                        wx + lw + gap,
+                        wy + rh + gap,
+                        rw,
+                        wh - rh - gap,
+                        clients[2].border_w,
+                    ),
                 });
             }
             4 => {
                 let cw = (ww - gap) / 2;
                 let ch = (wh - gap) / 2;
                 for (i, c) in clients.iter().enumerate() {
-                    let b2 = 2 * c.border_w;
                     let col = i as i32 % 2;
                     let row = i as i32 / 2;
                     results.push(LayoutResult {
                         key: c.key,
-                        rect: Rect::new(
+                        rect: client_rect(
                             wx + col * (cw + gap),
                             wy + row * (ch + gap),
-                            cw - b2,
-                            ch - b2,
+                            cw,
+                            ch,
+                            c.border_w,
                         ),
                     });
                 }
@@ -842,7 +931,6 @@ pub fn calculate_tatami<K: Copy>(
                 let cols = count as i32;
                 let cw = (ww - (cols - 1) * gap) / cols;
                 for j in 0..count {
-                    let b2 = 2 * clients[idx + j].border_w;
                     let actual_w = if j as i32 == cols - 1 {
                         ww - (cols - 1) * (cw + gap)
                     } else {
@@ -850,7 +938,13 @@ pub fn calculate_tatami<K: Copy>(
                     };
                     results.push(LayoutResult {
                         key: clients[idx + j].key,
-                        rect: Rect::new(wx + j as i32 * (cw + gap), gy, actual_w - b2, row_h - b2),
+                        rect: client_rect(
+                            wx + j as i32 * (cw + gap),
+                            gy,
+                            actual_w,
+                            row_h,
+                            clients[idx + j].border_w,
+                        ),
                     });
                 }
             } else {
@@ -864,33 +958,43 @@ pub fn calculate_tatami<K: Copy>(
                     let tw_last = ww - 2 * (tw + gap);
                     let bw = (ww - gap) / 2;
                     let bw_last = ww - bw - gap;
-
-                    let (b0, b1, b2, b3, b4) = (
-                        2 * clients[idx].border_w,
-                        2 * clients[idx + 1].border_w,
-                        2 * clients[idx + 2].border_w,
-                        2 * clients[idx + 3].border_w,
-                        2 * clients[idx + 4].border_w,
-                    );
                     results.push(LayoutResult {
                         key: clients[idx].key,
-                        rect: Rect::new(wx, gy, tw - b0, top_h - b0),
+                        rect: client_rect(wx, gy, tw, top_h, clients[idx].border_w),
                     });
                     results.push(LayoutResult {
                         key: clients[idx + 1].key,
-                        rect: Rect::new(wx + tw + gap, gy, tw - b1, top_h - b1),
+                        rect: client_rect(wx + tw + gap, gy, tw, top_h, clients[idx + 1].border_w),
                     });
                     results.push(LayoutResult {
                         key: clients[idx + 2].key,
-                        rect: Rect::new(wx + 2 * (tw + gap), gy, tw_last - b2, top_h - b2),
+                        rect: client_rect(
+                            wx + 2 * (tw + gap),
+                            gy,
+                            tw_last,
+                            top_h,
+                            clients[idx + 2].border_w,
+                        ),
                     });
                     results.push(LayoutResult {
                         key: clients[idx + 3].key,
-                        rect: Rect::new(wx, gy + top_h + gap, bw - b3, bot_h - b3),
+                        rect: client_rect(
+                            wx,
+                            gy + top_h + gap,
+                            bw,
+                            bot_h,
+                            clients[idx + 3].border_w,
+                        ),
                     });
                     results.push(LayoutResult {
                         key: clients[idx + 4].key,
-                        rect: Rect::new(wx + bw + gap, gy + top_h + gap, bw_last - b4, bot_h - b4),
+                        rect: client_rect(
+                            wx + bw + gap,
+                            gy + top_h + gap,
+                            bw_last,
+                            bot_h,
+                            clients[idx + 4].border_w,
+                        ),
                     });
                 } else {
                     // 图案 B: 上 2 下 3
@@ -898,37 +1002,48 @@ pub fn calculate_tatami<K: Copy>(
                     let tw_last = ww - tw - gap;
                     let bw = (ww - 2 * gap) / 3;
                     let bw_last = ww - 2 * (bw + gap);
-
-                    let (b0, b1, b2, b3, b4) = (
-                        2 * clients[idx].border_w,
-                        2 * clients[idx + 1].border_w,
-                        2 * clients[idx + 2].border_w,
-                        2 * clients[idx + 3].border_w,
-                        2 * clients[idx + 4].border_w,
-                    );
                     results.push(LayoutResult {
                         key: clients[idx].key,
-                        rect: Rect::new(wx, gy, tw - b0, top_h - b0),
+                        rect: client_rect(wx, gy, tw, top_h, clients[idx].border_w),
                     });
                     results.push(LayoutResult {
                         key: clients[idx + 1].key,
-                        rect: Rect::new(wx + tw + gap, gy, tw_last - b1, top_h - b1),
+                        rect: client_rect(
+                            wx + tw + gap,
+                            gy,
+                            tw_last,
+                            top_h,
+                            clients[idx + 1].border_w,
+                        ),
                     });
                     results.push(LayoutResult {
                         key: clients[idx + 2].key,
-                        rect: Rect::new(wx, gy + top_h + gap, bw - b2, bot_h - b2),
+                        rect: client_rect(
+                            wx,
+                            gy + top_h + gap,
+                            bw,
+                            bot_h,
+                            clients[idx + 2].border_w,
+                        ),
                     });
                     results.push(LayoutResult {
                         key: clients[idx + 3].key,
-                        rect: Rect::new(wx + bw + gap, gy + top_h + gap, bw - b3, bot_h - b3),
+                        rect: client_rect(
+                            wx + bw + gap,
+                            gy + top_h + gap,
+                            bw,
+                            bot_h,
+                            clients[idx + 3].border_w,
+                        ),
                     });
                     results.push(LayoutResult {
                         key: clients[idx + 4].key,
-                        rect: Rect::new(
+                        rect: client_rect(
                             wx + 2 * (bw + gap),
                             gy + top_h + gap,
-                            bw_last - b4,
-                            bot_h - b4,
+                            bw_last,
+                            bot_h,
+                            clients[idx + 4].border_w,
                         ),
                     });
                 }
@@ -1066,15 +1181,18 @@ pub fn calculate_vstack<K: Copy>(
     let mut results = Vec::with_capacity(n);
     let gap = params.gap;
 
-    // Usable monitor area (with outer gap)
-    let wx = params.screen_area.x + gap;
-    let wy = params.screen_area.y + gap;
-    let ww = params.screen_area.w - 2 * gap;
-    let wh = params.screen_area.h - 2 * gap;
+    let area = usable_area(params.screen_area, gap);
+    let (wx, wy, ww, wh) = (area.x, area.y, area.w, area.h);
 
-    // Every window is half the monitor size
-    let half_w = ww / 2;
-    let half_h = wh / 2;
+    // Keep the roomy half-monitor feel for a few windows, then shrink the
+    // cards gradually so dense V-stacks remain readable.
+    let scale = if n <= 5 {
+        1.0
+    } else {
+        (5.0 / n as f32).sqrt().clamp(0.35, 1.0)
+    };
+    let half_w = ((ww as f32 / 2.0) * scale) as i32;
+    let half_h = ((wh as f32 / 2.0) * scale) as i32;
 
     // Focused (main) client: centred horizontally, flush with the bottom
     let center_x = wx + (ww - half_w) / 2;
@@ -1305,6 +1423,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_tile_portrait_uses_top_bottom_split() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 900, 1600),
+            n_master: 1,
+            m_fact: 0.5,
+            gap: 10,
+        };
+        let clients = [client(1, 1.0), client(2, 1.0)];
+        let result = calculate_tile(&p, &clients);
+
+        assert_eq!(result.len(), 2);
+        assert!(result[0].rect.y < result[1].rect.y);
+        assert_eq!(result[0].rect.x, result[1].rect.x);
+    }
+
+    #[test]
+    fn test_tile_zero_master_stays_on_screen() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 1000, 700),
+            n_master: 0,
+            m_fact: 0.55,
+            gap: 8,
+        };
+        let clients = [client(1, 1.0), client(2, 2.0)];
+        let result = calculate_tile(&p, &clients);
+
+        assert_eq!(result.len(), 2);
+        for res in &result {
+            assert!(res.rect.x >= 0);
+            assert!(res.rect.x + res.rect.w <= 1000);
+            assert!(res.rect.w > 0 && res.rect.h > 0);
+        }
+        assert!(result[1].rect.h > result[0].rect.h);
+    }
+
     // -----------------------------------------------------------------------
     // calculate_monocle
     // -----------------------------------------------------------------------
@@ -1378,6 +1532,21 @@ mod tests {
         assert_eq!(result[1].key, 20);
     }
 
+    #[test]
+    fn test_fibonacci_master_uses_client_factors() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 1200, 900),
+            n_master: 2,
+            m_fact: 0.5,
+            gap: 0,
+        };
+        let clients = [client(1, 2.0), client(2, 1.0), client(3, 1.0)];
+        let result = calculate_fibonacci(&p, &clients);
+
+        assert_eq!(result.len(), 3);
+        assert!(result[0].rect.h > result[1].rect.h);
+    }
+
     // -----------------------------------------------------------------------
     // calculate_grid
     // -----------------------------------------------------------------------
@@ -1399,6 +1568,284 @@ mod tests {
         // All rects should be non-zero
         for r in &result {
             assert!(r.rect.w > 0 && r.rect.h > 0);
+        }
+    }
+
+    #[test]
+    fn test_bstack_dense_stack_wraps_to_second_row() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 1600, 1000),
+            n_master: 1,
+            m_fact: 0.55,
+            gap: 10,
+        };
+        let clients: Vec<_> = (0..7).map(|i| client(i, 1.0)).collect();
+        let result = calculate_bstack(&p, &clients);
+
+        assert_eq!(result.len(), 7);
+        let first_stack_y = result[1].rect.y;
+        assert!(
+            result.iter().skip(2).any(|res| res.rect.y > first_stack_y),
+            "dense bottom stack should wrap instead of staying in one row"
+        );
+    }
+
+    #[test]
+    fn test_bstack_master_uses_client_factors() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 1600, 900),
+            n_master: 2,
+            m_fact: 0.55,
+            gap: 0,
+        };
+        let clients = [client(1, 2.0), client(2, 1.0), client(3, 1.0)];
+        let result = calculate_bstack(&p, &clients);
+
+        assert_eq!(result.len(), 3);
+        assert!(result[0].rect.w > result[1].rect.w);
+    }
+
+    #[test]
+    fn test_bstack_stack_uses_client_factors() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 1600, 900),
+            n_master: 1,
+            m_fact: 0.55,
+            gap: 0,
+        };
+        let clients = [client(1, 1.0), client(2, 2.0), client(3, 1.0)];
+        let result = calculate_bstack(&p, &clients);
+
+        assert_eq!(result.len(), 3);
+        assert!(result[1].rect.w > result[2].rect.w);
+    }
+
+    #[test]
+    fn test_bstack_zero_master_falls_back_to_grid() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 900, 700),
+            n_master: 0,
+            m_fact: 0.55,
+            gap: 8,
+        };
+        let clients: Vec<_> = (0..3).map(|i| client(i, 1.0)).collect();
+        let bstack = calculate_bstack(&p, &clients);
+        let grid = calculate_grid(&p, &clients);
+
+        assert_eq!(bstack.len(), grid.len());
+        assert_eq!(bstack[0].rect, grid[0].rect);
+    }
+
+    #[test]
+    fn test_centered_master_portrait_uses_top_bottom_split() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 900, 1600),
+            n_master: 1,
+            m_fact: 0.55,
+            gap: 10,
+        };
+        let clients: Vec<_> = (0..4).map(|i| client(i, 1.0)).collect();
+        let result = calculate_centered_master(&p, &clients);
+
+        assert_eq!(result.len(), 4);
+        assert!(result[0].rect.y < result[1].rect.y);
+        assert_eq!(result[0].rect.x, result[1].rect.x);
+    }
+
+    #[test]
+    fn test_centered_master_uses_column_factors() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 1600, 900),
+            n_master: 2,
+            m_fact: 0.5,
+            gap: 0,
+        };
+        let clients = [
+            client(1, 2.0),
+            client(2, 1.0),
+            client(3, 3.0),
+            client(4, 1.0),
+            client(5, 1.0),
+        ];
+        let result = calculate_centered_master(&p, &clients);
+
+        assert_eq!(result.len(), 5);
+        let by_key = |key| result.iter().find(|res| res.key == key).unwrap().rect;
+        assert!(by_key(1).h > by_key(2).h);
+        assert!(by_key(3).h > by_key(5).h);
+    }
+
+    #[test]
+    fn test_centered_master_zero_master_falls_back_to_grid() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 1200, 800),
+            n_master: 0,
+            m_fact: 0.55,
+            gap: 8,
+        };
+        let clients: Vec<_> = (0..4).map(|i| client(i, 1.0)).collect();
+        let centered = calculate_centered_master(&p, &clients);
+        let grid = calculate_grid(&p, &clients);
+
+        assert_eq!(centered.len(), grid.len());
+        assert_eq!(centered[0].rect, grid[0].rect);
+    }
+
+    #[test]
+    fn test_deck_offsets_stack_previews() {
+        let p = params(1200, 800);
+        let clients: Vec<_> = (0..4).map(|i| client(i, 1.0)).collect();
+        let result = calculate_deck(&p, &clients);
+
+        assert_eq!(result.len(), 4);
+        assert!(result[2].rect.x > result[1].rect.x);
+        assert!(result[2].rect.y > result[1].rect.y);
+    }
+
+    #[test]
+    fn test_deck_master_uses_client_factors() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 1200, 800),
+            n_master: 2,
+            m_fact: 0.55,
+            gap: 0,
+        };
+        let clients = [client(1, 2.0), client(2, 1.0), client(3, 1.0)];
+        let result = calculate_deck(&p, &clients);
+
+        assert_eq!(result.len(), 3);
+        assert!(result[0].rect.h > result[1].rect.h);
+    }
+
+    #[test]
+    fn test_deck_portrait_uses_top_master_bottom_deck() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 900, 1600),
+            n_master: 1,
+            m_fact: 0.5,
+            gap: 10,
+        };
+        let clients: Vec<_> = (0..3).map(|i| client(i, 1.0)).collect();
+        let result = calculate_deck(&p, &clients);
+
+        assert_eq!(result.len(), 3);
+        assert!(result[0].rect.y < result[1].rect.y);
+        assert!(result[2].rect.x > result[1].rect.x);
+    }
+
+    #[test]
+    fn test_deck_zero_master_stays_on_screen() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 900, 700),
+            n_master: 0,
+            m_fact: 0.55,
+            gap: 8,
+        };
+        let clients: Vec<_> = (0..3).map(|i| client(i, 1.0)).collect();
+        let result = calculate_deck(&p, &clients);
+
+        assert_eq!(result.len(), 3);
+        for res in result {
+            assert!(res.rect.x >= 0);
+            assert!(res.rect.y >= 0);
+            assert!(res.rect.x + res.rect.w <= 900);
+            assert!(res.rect.y + res.rect.h <= 700);
+        }
+    }
+
+    #[test]
+    fn test_three_col_portrait_uses_top_bottom_split() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 900, 1600),
+            n_master: 1,
+            m_fact: 0.55,
+            gap: 10,
+        };
+        let clients: Vec<_> = (0..4).map(|i| client(i, 1.0)).collect();
+        let result = calculate_three_col(&p, &clients);
+
+        assert_eq!(result.len(), 4);
+        assert!(result[0].rect.y < result[1].rect.y);
+        assert_eq!(result[0].rect.x, result[1].rect.x);
+    }
+
+    #[test]
+    fn test_three_col_uses_column_factors() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 1600, 900),
+            n_master: 2,
+            m_fact: 0.5,
+            gap: 0,
+        };
+        let clients = [
+            client(1, 2.0),
+            client(2, 1.0),
+            client(3, 3.0),
+            client(4, 1.0),
+            client(5, 1.0),
+        ];
+        let result = calculate_three_col(&p, &clients);
+
+        assert_eq!(result.len(), 5);
+        let by_key = |key| result.iter().find(|res| res.key == key).unwrap().rect;
+        assert!(by_key(1).h > by_key(2).h);
+        assert!(by_key(3).h > by_key(5).h);
+    }
+
+    #[test]
+    fn test_three_col_zero_master_falls_back_to_grid() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 1200, 800),
+            n_master: 0,
+            m_fact: 0.55,
+            gap: 8,
+        };
+        let clients: Vec<_> = (0..4).map(|i| client(i, 1.0)).collect();
+        let three_col = calculate_three_col(&p, &clients);
+        let grid = calculate_grid(&p, &clients);
+
+        assert_eq!(three_col.len(), grid.len());
+        assert_eq!(three_col[0].rect, grid[0].rect);
+    }
+
+    #[test]
+    fn test_tatami_dense_falls_back_to_adaptive_grid() {
+        let p = params(1600, 900);
+        let clients: Vec<_> = (0..12).map(|i| client(i, 1.0)).collect();
+        let tatami = calculate_tatami(&p, &clients);
+        let grid = calculate_grid(&p, &clients);
+
+        assert_eq!(tatami.len(), grid.len());
+        assert_eq!(tatami[0].rect, grid[0].rect);
+    }
+
+    #[test]
+    fn test_layouts_keep_positive_rects_with_huge_gap() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 120, 90),
+            n_master: 1,
+            m_fact: 0.55,
+            gap: 80,
+        };
+        let clients: Vec<_> = (0..4).map(|i| client(i, 1.0)).collect();
+        let layouts = [
+            calculate_tile(&p, &clients),
+            calculate_monocle(&p, &clients),
+            calculate_fibonacci(&p, &clients),
+            calculate_centered_master(&p, &clients),
+            calculate_bstack(&p, &clients),
+            calculate_grid(&p, &clients),
+            calculate_deck(&p, &clients),
+            calculate_three_col(&p, &clients),
+            calculate_tatami(&p, &clients),
+            calculate_vstack(&p, &clients),
+        ];
+
+        for layout in layouts {
+            assert_eq!(layout.len(), clients.len());
+            for res in layout {
+                assert!(res.rect.w > 0 && res.rect.h > 0);
+            }
         }
     }
 
@@ -1427,6 +1874,19 @@ mod tests {
         let clients = [client(1, 1.0), client(2, 1.0)];
         let result = calculate_vstack(&p, &clients);
         assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_vstack_many_windows_shrink() {
+        let p = params(1920, 1080);
+        let few_clients: Vec<_> = (0..5).map(|i| client(i, 1.0)).collect();
+        let many_clients: Vec<_> = (0..10).map(|i| client(i, 1.0)).collect();
+
+        let few = calculate_vstack(&p, &few_clients);
+        let many = calculate_vstack(&p, &many_clients);
+
+        assert!(many[0].rect.w < few[0].rect.w);
+        assert!(many[0].rect.h < few[0].rect.h);
     }
 
     // -----------------------------------------------------------------------

@@ -287,6 +287,7 @@ fn parse_layout_arg(args: &Value) -> Result<WMArgEnum, String> {
         "three_col" | "threecol" => LayoutEnum::THREE_COL,
         "tatami" => LayoutEnum::TATAMI,
         "fullscreen" => LayoutEnum::FULLSCREEN,
+        "scrolling" => LayoutEnum::SCROLLING,
         "vstack" | "v_stack" => LayoutEnum::VSTACK,
         _ => return Err(format!("unknown layout: {name}")),
     };
@@ -375,6 +376,18 @@ mod tests {
         assert!(result.is_ok());
         let (_, arg) = result.unwrap();
         assert!(matches!(arg, WMArgEnum::Layout(_)));
+    }
+
+    #[test]
+    fn dispatch_scrolling_layout_command() {
+        let args = serde_json::json!({"layout": "scrolling"});
+        let result = dispatch_command("setlayout", &args);
+        assert!(result.is_ok());
+        let (_, arg) = result.unwrap();
+        let WMArgEnum::Layout(layout) = arg else {
+            panic!("expected layout arg");
+        };
+        assert_eq!(*layout, LayoutEnum::SCROLLING);
     }
 
     #[test]
