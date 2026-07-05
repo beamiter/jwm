@@ -21,7 +21,7 @@ const DEFAULT_ENABLE_OUTPUT_POWER: bool = true;
 const DEFAULT_ENABLE_WORKSPACE: bool = true;
 const DEFAULT_ENABLE_IMAGE_COPY_CAPTURE: bool = true;
 const DEFAULT_ENABLE_GAMMA_CONTROL: bool = true;
-const DEFAULT_ENABLE_FOREIGN_TOPLEVEL_MANAGEMENT: bool = false;
+const DEFAULT_ENABLE_FOREIGN_TOPLEVEL_MANAGEMENT: bool = true;
 const DEFAULT_ENABLE_VIRTUAL_POINTER: bool = false;
 
 fn optional_global_enabled(default_enabled: bool, flag_name: &str) -> bool {
