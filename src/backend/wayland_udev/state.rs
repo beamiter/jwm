@@ -21,7 +21,11 @@ use smithay::reexports::wayland_server::protocol::wl_shm;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::{Client, DisplayHandle, Resource};
 use smithay::utils::{Logical, Point, Rectangle, Serial, SERIAL_COUNTER as SCOUNTER};
-use smithay::desktop::{find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output, LayerSurface as DesktopLayerSurface, PopupKind, WindowSurfaceType};
+use smithay::desktop::{
+    find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output,
+    utils::under_from_surface_tree, LayerSurface as DesktopLayerSurface, PopupKind,
+    WindowSurfaceType,
+};
 use smithay::output::Output;
 use smithay::backend::renderer::utils::on_commit_buffer_handler;
 use smithay::backend::allocator::dmabuf::Dmabuf;
@@ -57,7 +61,9 @@ use smithay::wayland::text_input::TextInputManagerState;
 use smithay::wayland::input_method::{InputMethodHandler, InputMethodManagerState, PopupSurface as ImPopupSurface};
 use smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState;
 use smithay::wayland::xdg_activation::{XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData};
-use smithay::wayland::pointer_constraints::{PointerConstraintsHandler, PointerConstraintsState, with_pointer_constraint};
+use smithay::wayland::pointer_constraints::{
+    PointerConstraint, PointerConstraintsHandler, PointerConstraintsState, with_pointer_constraint,
+};
 use smithay::wayland::relative_pointer::RelativePointerManagerState;
 use smithay::wayland::session_lock::{SessionLockHandler, SessionLockManagerState, SessionLocker, LockSurface};
 use smithay::wayland::idle_inhibit::{IdleInhibitHandler, IdleInhibitManagerState};
@@ -73,7 +79,9 @@ use smithay::wayland::background_effect::{BackgroundEffectState, ExtBackgroundEf
 use smithay::wayland::foreign_toplevel_list::{ForeignToplevelListState, ForeignToplevelListHandler, ForeignToplevelHandle};
 use smithay::wayland::tablet_manager::TabletManagerState;
 use smithay::wayland::fifo::FifoManagerState;
-use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitState;
+use smithay::wayland::keyboard_shortcuts_inhibit::{
+    KeyboardShortcutsInhibitState, KeyboardShortcutsInhibitor, KeyboardShortcutsInhibitorSeat,
+};
 use smithay::wayland::security_context::SecurityContextState;
 use smithay::wayland::commit_timing::CommitTimingManagerState;
 use smithay::wayland::shell::xdg::dialog::{XdgDialogState, XdgDialogHandler, ToplevelDialogHint};
@@ -153,6 +161,10 @@ pub struct JwmWaylandState {
     pub compositor_dead_windows: Vec<u64>,
 
     pub pointer_location: Point<f64, Logical>,
+    /// Pointer location requested by pointer-warp/cursor-position-hint.
+    /// The udev backend drains this after calloop dispatch and mirrors it into
+    /// its shared input state, which drives WM hit testing and cursor rendering.
+    pub pending_pointer_warp: Option<Point<f64, Logical>>,
     pub needs_redraw: bool,
 
     pub dnd_icon: Option<DndIcon>,
@@ -212,11 +224,11 @@ pub struct JwmWaylandState {
 
     pub idle_inhibiting_surfaces: HashSet<ObjectId>,
     pub session_locked: bool,
-    /// Per-output session lock surfaces. Key: WlOutput object id.
+    /// Per-output session lock surfaces. Key: Smithay output name.
     /// Populated on `SessionLockHandler::new_surface`, drained on unlock or
     /// destruction. Used to know whether the lock client has a presence on a
     /// given output and (later) to render only those surfaces while locked.
-    pub lock_surfaces: HashMap<ObjectId, LockSurface>,
+    pub lock_surfaces: HashMap<String, LockSurface>,
     pub foreign_toplevel_handles: HashMap<WindowId, ForeignToplevelHandle>,
 
     /// Touchpad swipe-gesture tracker. When `intercept` is true, the WM is
@@ -473,6 +485,8 @@ impl PointerConstraintsHandler for JwmWaylandState {
             if let Some(geo) = self.window_geometry.get(&win) {
                 self.pointer_location =
                     (geo.x as f64 + location.x, geo.y as f64 + location.y).into();
+                self.pending_pointer_warp = Some(self.pointer_location);
+                self.needs_redraw = true;
             }
         }
     }
@@ -503,7 +517,12 @@ impl SessionLockHandler for JwmWaylandState {
     fn new_surface(&mut self, surface: LockSurface, output: WlOutput) {
         // Find the matching Output to learn its size; default to (0,0) which
         // tells the client to pick its own size.
-        let (w, h) = Output::from_resource(&output)
+        let output = Output::from_resource(&output);
+        let output_name = output
+            .as_ref()
+            .map(|o| o.name())
+            .unwrap_or_else(|| "unknown".to_string());
+        let (w, h) = output
             .and_then(|o| o.current_mode())
             .map(|m| (m.size.w as u32, m.size.h as u32))
             .unwrap_or((0, 0));
@@ -518,7 +537,7 @@ impl SessionLockHandler for JwmWaylandState {
             "[udev/wayland] session lock surface registered ({}x{})",
             w, h
         );
-        self.lock_surfaces.insert(output.id(), surface);
+        self.lock_surfaces.insert(output_name, surface);
         self.needs_redraw = true;
     }
 }
@@ -595,10 +614,19 @@ impl smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitHandl
         &mut self.keyboard_shortcuts_inhibit_state
     }
 
-    fn new_inhibitor(
-        &mut self,
-        _inhibitor: smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitor,
-    ) {
+    fn new_inhibitor(&mut self, inhibitor: KeyboardShortcutsInhibitor) {
+        if self
+            .active_toplevel
+            .and_then(|win| self.surface_for_window(win))
+            .as_ref()
+            .is_some_and(|surface| surface.id() == inhibitor.wl_surface().id())
+        {
+            inhibitor.activate();
+        }
+    }
+
+    fn inhibitor_destroyed(&mut self, _inhibitor: KeyboardShortcutsInhibitor) {
+        self.needs_redraw = true;
     }
 }
 
@@ -681,11 +709,21 @@ impl XdgSystemBellHandler for JwmWaylandState {
 impl PointerWarpHandler for JwmWaylandState {
     fn warp_pointer(
         &mut self,
-        _surface: WlSurface,
+        surface: WlSurface,
         _pointer: smithay::reexports::wayland_server::protocol::wl_pointer::WlPointer,
-        _pos: Point<f64, Logical>,
+        pos: Point<f64, Logical>,
         _serial: Serial,
     ) {
+        if let Some(win) = self.surface_to_window.get(&surface.id()).copied() {
+            let origin = self
+                .toplevel_buffer_origin(win)
+                .or_else(|| self.window_geometry.get(&win).map(|g| (g.x, g.y).into()));
+            if let Some(origin) = origin {
+                self.pointer_location = (origin.x as f64 + pos.x, origin.y as f64 + pos.y).into();
+                self.pending_pointer_warp = Some(self.pointer_location);
+                self.needs_redraw = true;
+            }
+        }
     }
 }
 
@@ -1150,6 +1188,35 @@ impl XwmHandler for JwmWaylandState {
 }
 
 impl JwmWaylandState {
+    fn sync_keyboard_shortcuts_inhibitors(
+        &mut self,
+        previous: Option<WindowId>,
+        active: Option<WindowId>,
+    ) {
+        let active_surface = active.and_then(|win| self.surface_for_window(win));
+        if let Some(prev_win) = previous {
+            if Some(prev_win) != active {
+                if let Some(surface) = self.surface_for_window(prev_win) {
+                    if let Some(inhibitor) =
+                        self.seat.keyboard_shortcuts_inhibitor_for_surface(&surface)
+                    {
+                        if inhibitor.is_active() {
+                            inhibitor.inactivate();
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(surface) = active_surface {
+            if let Some(inhibitor) = self.seat.keyboard_shortcuts_inhibitor_for_surface(&surface) {
+                if !inhibitor.is_active() {
+                    inhibitor.activate();
+                }
+            }
+        }
+    }
+
     pub fn set_active_toplevel(&mut self, win: Option<WindowId>) {
         if self.active_toplevel == win {
             return;
@@ -1160,6 +1227,7 @@ impl JwmWaylandState {
             .unwrap_or(false);
 
         let prev = self.active_toplevel.take();
+        self.sync_keyboard_shortcuts_inhibitors(prev, win);
         if debug_focus {
             info!("[udev/focus] active_toplevel {:?} -> {:?}", prev, win);
         }
@@ -1362,6 +1430,7 @@ impl JwmWaylandState {
                 compositor_dead_windows: Vec::new(),
 
                 pointer_location: (0.0, 0.0).into(),
+                pending_pointer_warp: None,
                 needs_redraw: true,
                 dnd_icon: None,
 
@@ -1543,6 +1612,40 @@ impl JwmWaylandState {
         &self,
         location: Point<f64, Logical>,
     ) -> Option<(Option<WindowId>, WlSurface, Point<f64, Logical>)> {
+        if self.session_locked {
+            for output in &self.outputs {
+                let Some(mode) = output.current_mode() else {
+                    continue;
+                };
+                let scale = output.current_scale().fractional_scale();
+                let logical_size = mode.size.to_f64().to_logical(scale).to_i32_round();
+                let logical_size = output.current_transform().transform_size(logical_size);
+                let rect = Rectangle::<i32, Logical>::new(output.current_location(), logical_size);
+                if rect.to_f64().contains(location) {
+                    if let Some(lock_surface) = self.lock_surfaces.get(&output.name()) {
+                        let origin: Point<f64, Logical> =
+                            (rect.loc.x as f64, rect.loc.y as f64).into();
+                        if let Some((surface, surf_loc)) = under_from_surface_tree(
+                            lock_surface.wl_surface(),
+                            location,
+                            rect.loc,
+                            WindowSurfaceType::ALL,
+                        ) {
+                            return Some((
+                                None,
+                                surface,
+                                (surf_loc.x as f64, surf_loc.y as f64).into(),
+                            ));
+                        }
+                        return Some((None, lock_surface.wl_surface().clone(), origin));
+                    }
+                    return None;
+                }
+            }
+
+            return None;
+        }
+
         // Layer surfaces should receive input before normal windows.
         for output in &self.outputs {
             let Some(mode) = output.current_mode() else {
@@ -1585,6 +1688,18 @@ impl JwmWaylandState {
                     let origin = self
                         .popup_buffer_origin(*win, &popup_surface, popup_rect)
                         .unwrap_or(popup_rect.loc);
+                    if let Some((surface, surf_loc)) = under_from_surface_tree(
+                        &popup_surface,
+                        location,
+                        origin,
+                        WindowSurfaceType::ALL,
+                    ) {
+                        return Some((
+                            Some(*win),
+                            surface,
+                            (surf_loc.x as f64, surf_loc.y as f64).into(),
+                        ));
+                    }
                     return Some((
                         Some(*win),
                         popup_surface,
@@ -1625,6 +1740,15 @@ impl JwmWaylandState {
                     }
                 }
                 if let Some(surface) = self.surface_for_window(*win) {
+                    if let Some((under_surface, surf_loc)) =
+                        under_from_surface_tree(&surface, location, origin, WindowSurfaceType::ALL)
+                    {
+                        return Some((
+                            Some(*win),
+                            under_surface,
+                            (surf_loc.x as f64, surf_loc.y as f64).into(),
+                        ));
+                    }
                     return Some((
                         Some(*win),
                         surface,
@@ -1635,6 +1759,50 @@ impl JwmWaylandState {
         }
 
         None
+    }
+
+    pub fn constrain_pointer_location(
+        &self,
+        current: Point<f64, Logical>,
+        proposed: Point<f64, Logical>,
+        pointer: &PointerHandle<Self>,
+    ) -> Point<f64, Logical> {
+        let Some((_win, surface, origin)) = self.surface_under(current) else {
+            return proposed;
+        };
+
+        with_pointer_constraint(&surface, pointer, |constraint| {
+            let Some(constraint) = constraint else {
+                return proposed;
+            };
+            if !constraint.is_active() {
+                return proposed;
+            }
+
+            match &*constraint {
+                PointerConstraint::Locked(_) => current,
+                PointerConstraint::Confined(_) => {
+                    if let Some(region) = constraint.region() {
+                        let local: Point<i32, Logical> = (
+                            (proposed.x - origin.x).round() as i32,
+                            (proposed.y - origin.y).round() as i32,
+                        )
+                            .into();
+                        if region.contains(local) {
+                            proposed
+                        } else {
+                            current
+                        }
+                    } else if self.surface_under(proposed).is_some_and(
+                        |(_, proposed_surface, _)| proposed_surface.id() == surface.id(),
+                    ) {
+                        proposed
+                    } else {
+                        current
+                    }
+                }
+            }
+        })
     }
 
     fn popup_committed_geometry(popup: &PopupSurface) -> Option<Rectangle<i32, Logical>> {

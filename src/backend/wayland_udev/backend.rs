@@ -66,6 +66,7 @@ use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::{Display, DisplayHandle};
 use smithay::utils::{Logical, Point, SERIAL_COUNTER as SCOUNTER};
+use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat;
 use smithay::wayland::shell::wlr_layer::{KeyboardInteractivity, Layer as WlrLayer};
 use smithay::xwayland::{X11Wm, XWayland, XWaylandEvent};
 
@@ -1318,7 +1319,7 @@ impl UdevBackend {
                         InputEvent::PointerMotion { event, .. } => {
                             let delta = event.delta();
                             let time = event.time_msec();
-                            let (x, y, output, in_screenshot) = {
+                            let (mut x, mut y, mut output, in_screenshot) = {
                                 let mut s = shared.lock_safe();
                                 s.pointer_x += delta.x;
                                 s.pointer_y += delta.y;
@@ -1341,7 +1342,20 @@ impl UdevBackend {
                                 (x, y, output, s.screenshot_grab_active)
                             };
 
-                            let location: Point<f64, Logical> = (x, y).into();
+                            let mut location: Point<f64, Logical> = (x, y).into();
+                            if let Some(pointer) = state.seat.get_pointer() {
+                                location = state.constrain_pointer_location(
+                                    state.pointer_location,
+                                    location,
+                                    &pointer,
+                                );
+                                x = location.x;
+                                y = location.y;
+                                let mut s = shared.lock_safe();
+                                s.pointer_x = x;
+                                s.pointer_y = y;
+                                output = output_at(&s.outputs, x, y);
+                            }
                             state.pointer_location = location;
                             state.needs_redraw = true;
 
@@ -1398,20 +1412,30 @@ impl UdevBackend {
                         }
                         InputEvent::PointerMotionAbsolute { event, .. } => {
                             let time = event.time_msec();
-                            let (x, y, output, in_screenshot) = {
+                            let (mut x, mut y, mut output, in_screenshot) = {
                                 let mut s = shared.lock_safe();
-                                let (w, h, origin_x, origin_y, output) = if let Some(first) = s.outputs.first() {
-                                    (first.width.max(1) as i32, first.height.max(1) as i32, first.x, first.y, Some(first.id))
-                                } else {
-                                    (1920, 1080, 0, 0, None)
-                                };
+                                let (w, h, origin_x, origin_y) = output_bounds(&s.outputs);
                                 let pos = event.position_transformed(smithay::utils::Size::from((w, h)));
                                 s.pointer_x = origin_x as f64 + pos.x;
                                 s.pointer_y = origin_y as f64 + pos.y;
+                                let output = output_at(&s.outputs, s.pointer_x, s.pointer_y);
                                 (s.pointer_x, s.pointer_y, output, s.screenshot_grab_active)
                             };
 
-                            let location: Point<f64, Logical> = (x, y).into();
+                            let mut location: Point<f64, Logical> = (x, y).into();
+                            if let Some(pointer) = state.seat.get_pointer() {
+                                location = state.constrain_pointer_location(
+                                    state.pointer_location,
+                                    location,
+                                    &pointer,
+                                );
+                                x = location.x;
+                                y = location.y;
+                                let mut s = shared.lock_safe();
+                                s.pointer_x = x;
+                                s.pointer_y = y;
+                                output = output_at(&s.outputs, x, y);
+                            }
                             state.pointer_location = location;
                             state.needs_redraw = true;
 
@@ -1621,6 +1645,7 @@ impl UdevBackend {
                             let state_key = event.state();
                             let serial = SCOUNTER.next_serial();
                             let pressed = matches!(state_key, smithay::backend::input::KeyState::Pressed);
+                            let session_locked = state.session_locked;
 
                             let debug_keys = std::env::var("JWM_DEBUG_KEYS")
                                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -1630,6 +1655,7 @@ impl UdevBackend {
                             // (e.g. lock screens / OSD). If such a surface exists on Top/Overlay,
                             // route keyboard events directly to it and do not emit WM shortcuts.
                             let mut handled_by_exclusive_layer = false;
+                            let mut shortcuts_inhibited = false;
 
                             // If nothing is focused, focus the surface under the pointer (best-effort).
                             if let Some(kbd) = state.seat.get_keyboard() {
@@ -1651,11 +1677,11 @@ impl UdevBackend {
                                 let cfg = crate::config::CONFIG.load();
                                 let bar_name = cfg.status_bar_name();
 
-                                let exclusive_surface = state
-                                    .layer_shell_state
-                                    .layer_surfaces()
-                                    .rev()
-                                    .find_map(|layer| {
+                                let exclusive_surface = if session_locked {
+                                    None
+                                } else {
+                                    state.layer_shell_state.layer_surfaces().rev().find_map(
+                                        |layer| {
                                         // Do not let the status bar block WM shortcuts.
                                         // Some bars mistakenly request `Exclusive` keyboard interactivity.
                                         if !bar_name.is_empty() {
@@ -1703,7 +1729,9 @@ impl UdevBackend {
                                         } else {
                                             None
                                         }
-                                    });
+                                        },
+                                    )
+                                };
 
                                 if let Some(surface) = exclusive_surface {
                                     let is_ime = state.im_client_id.as_ref().map_or(false, |im_id| {
@@ -1711,12 +1739,69 @@ impl UdevBackend {
                                     });
 
                                     if !is_ime {
-                                    handled_by_exclusive_layer = true;
+                                        handled_by_exclusive_layer = true;
 
-                                    if debug_keys && pressed {
-                                        log::info!("[udev:key] handled_by_exclusive_layer=true");
+                                        if debug_keys && pressed {
+                                            log::info!(
+                                                "[udev:key] handled_by_exclusive_layer=true"
+                                            );
+                                        }
+                                        kbd.set_focus(state, Some(surface), serial);
+
+                                        let _ = kbd.input::<(), _>(
+                                            state,
+                                            keycode,
+                                            state_key,
+                                            serial,
+                                            time,
+                                            |_, modifiers, _handle| {
+                                                let mods_bits = mods_from_smithay(modifiers).bits();
+                                                if let Some(mut s) = shared.lock().ok() {
+                                                    s.mods_state = mods_bits;
+                                                }
+                                                // Do not intercept any keys while an exclusive layer is active.
+                                                FilterResult::Forward
+                                            },
+                                        );
+
+                                        // Keep modifier state correct even if Smithay decides not to call
+                                        // the filter closure (e.g. when no focus exists).
+                                        let mods_bits =
+                                            mods_from_smithay(&kbd.modifier_state()).bits();
+                                        if let Some(mut s) = shared.lock().ok() {
+                                            s.mods_state = mods_bits;
+                                        }
                                     }
-                                    kbd.set_focus(state, Some(surface), serial);
+                                }
+
+                                if handled_by_exclusive_layer {
+                                    // Skip best-effort focus selection and WM shortcut emission.
+                                } else {
+                                    shortcuts_inhibited = state.seat.keyboard_shortcuts_inhibited();
+                                    if session_locked {
+                                        let (px, py) = {
+                                            let s = shared.lock_safe();
+                                            (s.pointer_x, s.pointer_y)
+                                        };
+                                        let location: Point<f64, Logical> = (px, py).into();
+                                        if let Some((_win, surface, _origin)) =
+                                            state.surface_under(location)
+                                        {
+                                            kbd.set_focus(state, Some(surface), serial);
+                                        }
+                                    }
+                                    if kbd.current_focus().is_none() {
+                                        let (px, py) = {
+                                            let s = shared.lock_safe();
+                                            (s.pointer_x, s.pointer_y)
+                                        };
+                                        let location: Point<f64, Logical> = (px, py).into();
+                                        if let Some((_win, surface, _origin)) =
+                                            state.surface_under(location)
+                                        {
+                                            kbd.set_focus(state, Some(surface), serial);
+                                        }
+                                    }
 
                                     let _ = kbd.input::<(), _>(
                                         state,
@@ -1726,11 +1811,60 @@ impl UdevBackend {
                                         time,
                                         |_, modifiers, _handle| {
                                             let mods_bits = mods_from_smithay(modifiers).bits();
-                                            if let Some(mut s) = shared.lock().ok() {
-                                                s.mods_state = mods_bits;
+
+                                            // Smithay provides XKB/Wayland keycodes already (evdev + 8).
+                                            // Use them directly for xkbcommon lookups.
+                                            let xkb_keycode_u8 =
+                                                u8::try_from(u32::from(keycode)).unwrap_or(0);
+
+                                            let Some(mut s) = shared.lock().ok() else {
+                                                return FilterResult::Forward;
+                                            };
+
+                                            s.mods_state = mods_bits;
+
+                                            // Keep key press/release symmetric: if we intercepted a press,
+                                            // also intercept its release so clients don't see a stray release.
+                                            if !pressed {
+                                                if s.suppressed_keycodes.remove(&xkb_keycode_u8) {
+                                                    return FilterResult::Intercept(());
+                                                }
+                                                return FilterResult::Forward;
                                             }
-                                            // Do not intercept any keys while an exclusive layer is active.
-                                            FilterResult::Forward
+
+                                            let keysym = s
+                                                .keysym_table
+                                                .get(xkb_keycode_u8 as usize)
+                                                .copied()
+                                                .unwrap_or(0);
+
+                                            let clean_mods =
+                                                crate::backend::common_define::Mods::from_bits_truncate(mods_bits)
+                                                    & allowed_shortcut_mods();
+
+                                            let is_wm_shortcut = s
+                                                .key_bindings
+                                                .iter()
+                                                .any(|(m, ks)| *ks == keysym && *m == clean_mods);
+                                            let is_screenshot_control = s.screenshot_grab_active
+                                                && matches!(
+                                                keysym,
+                                                crate::backend::common_define::keys::KEY_Escape
+                                                | crate::backend::common_define::keys::KEY_Return
+                                                | crate::backend::common_define::keys::KEY_s
+                                                | crate::backend::common_define::keys::KEY_c
+                                            );
+                                            let should_suppress = is_screenshot_control
+                                                || (!session_locked
+                                                    && !shortcuts_inhibited
+                                                    && is_wm_shortcut);
+
+                                            if should_suppress {
+                                                s.suppressed_keycodes.insert(xkb_keycode_u8);
+                                                FilterResult::Intercept(())
+                                            } else {
+                                                FilterResult::Forward
+                                            }
                                         },
                                     );
 
@@ -1740,96 +1874,21 @@ impl UdevBackend {
                                     if let Some(mut s) = shared.lock().ok() {
                                         s.mods_state = mods_bits;
                                     }
-                                    }
-                                }
-
-                                if handled_by_exclusive_layer {
-                                    // Skip best-effort focus selection and WM shortcut emission.
-                                } else {
-                                if kbd.current_focus().is_none() {
-                                    let (px, py) = {
-                                        let s = shared.lock_safe();
-                                        (s.pointer_x, s.pointer_y)
-                                    };
-                                    let location: Point<f64, Logical> = (px, py).into();
-                                    if let Some((_win, surface, _origin)) = state.surface_under(location) {
-                                        kbd.set_focus(state, Some(surface), serial);
-                                    }
-                                }
-
-                                let _ = kbd.input::<(), _>(
-                                    state,
-                                    keycode,
-                                    state_key,
-                                    serial,
-                                    time,
-                                    |_, modifiers, _handle| {
-                                        let mods_bits = mods_from_smithay(modifiers).bits();
-
-                                        // Smithay provides XKB/Wayland keycodes already (evdev + 8).
-                                        // Use them directly for xkbcommon lookups.
-                                        let xkb_keycode_u8 = u8::try_from(u32::from(keycode)).unwrap_or(0);
-
-                                        let Some(mut s) = shared.lock().ok() else {
-                                            return FilterResult::Forward;
-                                        };
-
-                                        s.mods_state = mods_bits;
-
-                                        // Keep key press/release symmetric: if we intercepted a press,
-                                        // also intercept its release so clients don't see a stray release.
-                                        if !pressed {
-                                            if s.suppressed_keycodes.remove(&xkb_keycode_u8) {
-                                                return FilterResult::Intercept(());
-                                            }
-                                            return FilterResult::Forward;
-                                        }
-
-                                        let keysym = s
-                                            .keysym_table
-                                            .get(xkb_keycode_u8 as usize)
-                                            .copied()
-                                            .unwrap_or(0);
-
-                                        let clean_mods = crate::backend::common_define::Mods::from_bits_truncate(mods_bits)
-                                            & allowed_shortcut_mods();
-
-                                        let should_suppress = s
-                                            .key_bindings
-                                            .iter()
-                                            .any(|(m, ks)| *ks == keysym && *m == clean_mods)
-                                            || (s.screenshot_grab_active && matches!(
-                                                keysym,
-                                                crate::backend::common_define::keys::KEY_Escape
-                                                | crate::backend::common_define::keys::KEY_Return
-                                                | crate::backend::common_define::keys::KEY_s
-                                                | crate::backend::common_define::keys::KEY_c
-                                            ));
-
-                                        if should_suppress {
-                                            s.suppressed_keycodes.insert(xkb_keycode_u8);
-                                            FilterResult::Intercept(())
-                                        } else {
-                                            FilterResult::Forward
-                                        }
-                                    },
-                                );
-
-                                // Keep modifier state correct even if Smithay decides not to call
-                                // the filter closure (e.g. when no focus exists).
-                                let mods_bits = mods_from_smithay(&kbd.modifier_state()).bits();
-                                if let Some(mut s) = shared.lock().ok() {
-                                    s.mods_state = mods_bits;
-                                }
                                 }
                             } else if debug_keys && pressed {
                                 log::warn!("[udev:key] seat.get_keyboard() returned None (no keyboard configured?)");
                             }
 
-                            // JWM only uses press for shortcuts for now.
-                            // Always dispatch to WM regardless of exclusive layer (e.g. fcitx5
-                            // IME panel); the layer still receives the key via FilterResult above.
+                            // JWM only uses press for shortcuts for now. When an active client
+                            // inhibits compositor shortcuts, let that client receive the combo
+                            // and keep the WM repeat state quiet.
+                            if session_locked || shortcuts_inhibited || handled_by_exclusive_layer {
+                                shared.lock_safe().repeat = None;
+                            }
                             if matches!(state_key, smithay::backend::input::KeyState::Pressed)
+                                && !session_locked
+                                && !shortcuts_inhibited
+                                && !handled_by_exclusive_layer
                             {
                                 // Smithay provides XKB/Wayland keycodes already (evdev + 8).
                                 let keycode_u32 = u32::from(keycode);
@@ -1921,15 +1980,13 @@ impl UdevBackend {
                         InputEvent::TouchDown { event, .. } => {
                             let time = event.time_msec();
                             let slot = event.slot();
-                            let (w, h) = {
+                            let (w, h, origin_x, origin_y) = {
                                 let s = shared.lock_safe();
-                                if let Some(first) = s.outputs.first() {
-                                    (first.width.max(1) as i32, first.height.max(1) as i32)
-                                } else {
-                                    (1920, 1080)
-                                }
+                                output_bounds(&s.outputs)
                             };
                             let pos = event.position_transformed(smithay::utils::Size::from((w, h)));
+                            let pos: Point<f64, Logical> =
+                                (origin_x as f64 + pos.x, origin_y as f64 + pos.y).into();
                             let focus = state.surface_under(pos).map(|(_win, surface, origin)| (surface, origin));
                             if let Some(touch) = state.seat.get_touch() {
                                 touch.down(
@@ -1947,15 +2004,13 @@ impl UdevBackend {
                         InputEvent::TouchMotion { event, .. } => {
                             let time = event.time_msec();
                             let slot = event.slot();
-                            let (w, h) = {
+                            let (w, h, origin_x, origin_y) = {
                                 let s = shared.lock_safe();
-                                if let Some(first) = s.outputs.first() {
-                                    (first.width.max(1) as i32, first.height.max(1) as i32)
-                                } else {
-                                    (1920, 1080)
-                                }
+                                output_bounds(&s.outputs)
                             };
                             let pos = event.position_transformed(smithay::utils::Size::from((w, h)));
+                            let pos: Point<f64, Logical> =
+                                (origin_x as f64 + pos.x, origin_y as f64 + pos.y).into();
                             let focus = state.surface_under(pos).map(|(_win, surface, origin)| (surface, origin));
                             if let Some(touch) = state.seat.get_touch() {
                                 touch.motion(
@@ -2322,6 +2377,38 @@ fn mods_from_smithay(mods: &ModifiersState) -> Mods {
     }
 
     out
+}
+
+fn output_bounds(outputs: &[OutputInfo]) -> (i32, i32, i32, i32) {
+    if outputs.is_empty() {
+        return (1920, 1080, 0, 0);
+    }
+
+    let min_x = outputs.iter().map(|o| o.x).min().unwrap_or(0);
+    let min_y = outputs.iter().map(|o| o.y).min().unwrap_or(0);
+    let max_x = outputs
+        .iter()
+        .map(|o| o.x + o.width.max(1))
+        .max()
+        .unwrap_or(min_x + 1920);
+    let max_y = outputs
+        .iter()
+        .map(|o| o.y + o.height.max(1))
+        .max()
+        .unwrap_or(min_y + 1080);
+
+    ((max_x - min_x).max(1), (max_y - min_y).max(1), min_x, min_y)
+}
+
+fn output_at(outputs: &[OutputInfo], x: f64, y: f64) -> Option<OutputId> {
+    outputs
+        .iter()
+        .find(|o| {
+            let x = x as i32;
+            let y = y as i32;
+            x >= o.x && y >= o.y && x < (o.x + o.width) && y < (o.y + o.height)
+        })
+        .map(|o| o.id)
 }
 
 impl Backend for UdevBackend {
@@ -3883,6 +3970,33 @@ impl Backend for UdevBackend {
             self.event_loop
                 .dispatch(timeout, &mut *self.state)
                 .map_err(|e| BackendError::Other(Box::new(e)))?;
+
+            if let Some(location) = self.state.pending_pointer_warp.take() {
+                let (x, y, output) = {
+                    let mut shared = self.shared.lock_safe();
+                    shared.pointer_x = location.x;
+                    shared.pointer_y = location.y;
+                    (
+                        shared.pointer_x,
+                        shared.pointer_y,
+                        output_at(&shared.outputs, shared.pointer_x, shared.pointer_y),
+                    )
+                };
+                let hit = self
+                    .state
+                    .surface_under(location)
+                    .as_ref()
+                    .and_then(|(win, _, _)| win.map(HitTarget::Surface));
+                self.pending_events
+                    .lock_safe()
+                    .push_back(BackendEvent::MotionNotify {
+                        target: hit.unwrap_or(HitTarget::Background { output }),
+                        root_x: x,
+                        root_y: y,
+                        time: 0,
+                    });
+                self.state.needs_redraw = true;
+            }
         }
 
         Ok(())

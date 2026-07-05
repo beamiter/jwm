@@ -973,13 +973,33 @@ impl EventHandler for Jwm {
             BackendEvent::ForeignToplevelActivate(win) => {
                 let _ = self.focusin(backend, win);
             }
-            BackendEvent::ForeignToplevelClose(_win) => {
-                use crate::jwm::types::WMArgEnum;
-                let _ = self.killclient(backend, &WMArgEnum::Int(0));
+            BackendEvent::ForeignToplevelClose(win) => {
+                let _ = backend.window_ops().close_window(win);
             }
-            BackendEvent::ForeignToplevelSetMaximized(_win, _maximized) => {}
+            BackendEvent::ForeignToplevelSetMaximized(win, maximized) => {
+                if let Some(ck) = self.wintoclient(win) {
+                    if let Some(c) = self.state.clients.get_mut(ck) {
+                        c.state.is_maximized_vert = maximized;
+                        c.state.is_maximized_horz = maximized;
+                    }
+                    let _ = backend.property_ops().set_net_wm_state_flag(
+                        win,
+                        NetWmState::MaximizedVert,
+                        maximized,
+                    );
+                    let _ = backend.property_ops().set_net_wm_state_flag(
+                        win,
+                        NetWmState::MaximizedHorz,
+                        maximized,
+                    );
+                }
+            }
             BackendEvent::ForeignToplevelSetMinimized(_win, _minimized) => {}
-            BackendEvent::ForeignToplevelSetFullscreen(_win, _fullscreen) => {}
+            BackendEvent::ForeignToplevelSetFullscreen(win, fullscreen) => {
+                if let Some(ck) = self.wintoclient(win) {
+                    let _ = self.setfullscreen(backend, ck, fullscreen);
+                }
+            }
 
             BackendEvent::PingResponse { window } => {
                 self.handle_ping_response(window);

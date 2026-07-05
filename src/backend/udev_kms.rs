@@ -2630,6 +2630,50 @@ impl KmsState {
             let mut visible_surfaces: HashSet<wayland_server::Weak<WlSurface>> = HashSet::new();
             let mut frame_roots: Vec<WlSurface> = Vec::new();
 
+            if state.session_locked {
+                if let Some(lock_surface) = state.lock_surfaces.get(&out.output.name()) {
+                    let surface = lock_surface.wl_surface().clone();
+                    frame_roots.push(surface.clone());
+
+                    with_surface_tree_downward(
+                        &surface,
+                        (),
+                        |_, _, _| TraversalAction::DoChildren(()),
+                        |child_surface, child_states, _| {
+                            let data = child_states.data_map.get::<RendererSurfaceStateUserData>();
+                            let Some(data) = data else {
+                                return;
+                            };
+                            if data.lock_safe().view().is_some() {
+                                out.output.enter(child_surface);
+                                visible_surfaces.insert(child_surface.downgrade());
+                            }
+                        },
+                        |_, _, _| true,
+                    );
+
+                    let tree = SurfaceTree::from_surface(&surface);
+                    let lock_elements: Vec<KmsRenderElement> =
+                        AsRenderElements::<GlesRenderer>::render_elements(
+                            &tree,
+                            &mut self.renderer,
+                            Point::<i32, Physical>::from((0, 0)),
+                            scale,
+                            1.0,
+                        );
+                    elements.extend(lock_elements);
+                }
+
+                // Opaque shield behind the lock surface and above regular clients.
+                elements.push(KmsRenderElement::Solid(SolidColorRenderElement::new(
+                    Id::new(),
+                    Rectangle::<i32, Physical>::from_size((out_w, out_h).into()),
+                    0usize,
+                    smithay::backend::renderer::Color32F::new(0.0, 0.0, 0.0, 1.0),
+                    Kind::Unspecified,
+                )));
+            }
+
             // DnD drag icon: rendered just below the cursor, in front of all windows.
             // Placed before the compositor/element branch split so it overlays both
             // render paths identically.
