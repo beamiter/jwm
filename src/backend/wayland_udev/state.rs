@@ -15,7 +15,7 @@ fn env_flag(name: &str) -> bool {
 
 const DEFAULT_ENABLE_SCREENCOPY: bool = true;
 const DEFAULT_ENABLE_TEARING_CONTROL: bool = true;
-const DEFAULT_ENABLE_COLOR_MANAGEMENT: bool = false;
+const DEFAULT_ENABLE_COLOR_MANAGEMENT: bool = true;
 const DEFAULT_ENABLE_OUTPUT_MANAGEMENT: bool = false;
 const DEFAULT_ENABLE_OUTPUT_POWER: bool = false;
 const DEFAULT_ENABLE_WORKSPACE: bool = false;
