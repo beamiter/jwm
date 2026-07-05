@@ -22,7 +22,7 @@ const DEFAULT_ENABLE_WORKSPACE: bool = true;
 const DEFAULT_ENABLE_IMAGE_COPY_CAPTURE: bool = true;
 const DEFAULT_ENABLE_GAMMA_CONTROL: bool = true;
 const DEFAULT_ENABLE_FOREIGN_TOPLEVEL_MANAGEMENT: bool = true;
-const DEFAULT_ENABLE_VIRTUAL_POINTER: bool = false;
+const DEFAULT_ENABLE_VIRTUAL_POINTER: bool = true;
 
 fn optional_global_enabled(default_enabled: bool, flag_name: &str) -> bool {
     default_enabled || env_flag("JWM_OPTIONAL_GLOBALS") || env_flag(flag_name)
