@@ -44,6 +44,10 @@ const PRIMARIES_BT2020: [i32; 8] = [
 
 const COLOR_MANAGER_VERSION: u32 = 1;
 
+fn advanced_color_management_enabled() -> bool {
+    std::env::var_os("JWM_COLOR_MANAGEMENT_ADVANCED").as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
 /// Accumulated parametric properties (collected by a creator object before
 /// `create`, then frozen into an ImageDescription).
 #[derive(Debug, Clone, Default)]
@@ -242,6 +246,9 @@ impl ColorManagerState {
 }
 
 pub(crate) fn params_for_output(output: &Output) -> ParametricParams {
+    if !advanced_color_management_enabled() {
+        return srgb_params();
+    }
     match output.user_data().get::<EdidHdrCapabilities>() {
         Some(caps) => params_from_edid(caps),
         None => srgb_params(),
@@ -276,23 +283,21 @@ fn emit_manager_caps(resource: &WpColorManagerV1) {
     // Mandatory: perceptual.
     resource.supported_intent(RenderIntent::Perceptual);
     resource.supported_feature(Feature::Parametric);
-    // ICC v2/v4 display profiles are parsed (see wayland_udev::icc) — the
-    // resulting parametric description carries explicit chromaticities and
-    // either a named TF or tf_power. Unparseable profiles fail at create-time
-    // rather than at the protocol layer.
-    resource.supported_feature(Feature::IccV2V4);
-    resource.supported_feature(Feature::SetPrimaries);
-    resource.supported_feature(Feature::SetLuminances);
-    resource.supported_feature(Feature::SetMasteringDisplayPrimaries);
-    // Common transfer functions a client might pick.
-    resource.supported_tf_named(TransferFunction::Bt1886);
     resource.supported_tf_named(TransferFunction::Gamma22);
-    resource.supported_tf_named(TransferFunction::St2084Pq);
-    resource.supported_tf_named(TransferFunction::Hlg);
-    resource.supported_tf_named(TransferFunction::ExtLinear);
-    // Common primaries.
     resource.supported_primaries_named(Primaries::Srgb);
-    resource.supported_primaries_named(Primaries::Bt2020);
+    if advanced_color_management_enabled() {
+        // ICC/HDR paths are still experimental. Keep them opt-in so Chromium
+        // clients do not enter unvalidated color-management code by default.
+        resource.supported_feature(Feature::IccV2V4);
+        resource.supported_feature(Feature::SetPrimaries);
+        resource.supported_feature(Feature::SetLuminances);
+        resource.supported_feature(Feature::SetMasteringDisplayPrimaries);
+        resource.supported_tf_named(TransferFunction::Bt1886);
+        resource.supported_tf_named(TransferFunction::St2084Pq);
+        resource.supported_tf_named(TransferFunction::Hlg);
+        resource.supported_tf_named(TransferFunction::ExtLinear);
+        resource.supported_primaries_named(Primaries::Bt2020);
+    }
     resource.done();
 }
 
@@ -360,6 +365,9 @@ pub(crate) fn params_from_edid(caps: &EdidHdrCapabilities) -> ParametricParams {
 /// on the smithay Output's user_data (see `attach_edid_caps_to_outputs` in the
 /// wayland_udev backend).
 fn params_for_wl_output(wl_output: &WlOutput) -> ParametricParams {
+    if !advanced_color_management_enabled() {
+        return srgb_params();
+    }
     match Output::from_resource(wl_output) {
         Some(o) => match o.user_data().get::<EdidHdrCapabilities>() {
             Some(caps) => params_from_edid(caps),
