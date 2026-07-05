@@ -13,6 +13,21 @@ fn env_flag(name: &str) -> bool {
     std::env::var_os(name).as_deref() == Some(std::ffi::OsStr::new("1"))
 }
 
+const DEFAULT_ENABLE_SCREENCOPY: bool = false;
+const DEFAULT_ENABLE_TEARING_CONTROL: bool = false;
+const DEFAULT_ENABLE_COLOR_MANAGEMENT: bool = false;
+const DEFAULT_ENABLE_OUTPUT_MANAGEMENT: bool = false;
+const DEFAULT_ENABLE_OUTPUT_POWER: bool = false;
+const DEFAULT_ENABLE_WORKSPACE: bool = false;
+const DEFAULT_ENABLE_IMAGE_COPY_CAPTURE: bool = false;
+const DEFAULT_ENABLE_GAMMA_CONTROL: bool = false;
+const DEFAULT_ENABLE_FOREIGN_TOPLEVEL_MANAGEMENT: bool = false;
+const DEFAULT_ENABLE_VIRTUAL_POINTER: bool = false;
+
+fn optional_global_enabled(default_enabled: bool, flag_name: &str) -> bool {
+    default_enabled || env_flag("JWM_OPTIONAL_GLOBALS") || env_flag(flag_name)
+}
+
 use smithay::delegate_dispatch2;
 use smithay::xwayland::{X11Wm, X11Surface, XwmHandler, XWaylandClientData, xwm::{Reorder, ResizeEdge as XwmResizeEdge, XwmId, WmWindowProperty}};
 use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
@@ -1331,66 +1346,96 @@ impl JwmWaylandState {
         let xwayland_shell_state = XWaylandShellState::new::<JwmWaylandState>(dh);
 
         // Extra desktop/tooling protocols are useful, but clients enumerate and
-        // bind globals before creating toplevels. Keep them opt-in while
-        // hardening the wayland-udev backend against early-client native faults.
-        let optional_globals_enabled = env_flag("JWM_OPTIONAL_GLOBALS");
-        let (
-            screencopy_pending,
-            tearing_hints,
-            color_manager,
-            workspace_state,
-            image_capture_pending,
-            foreign_toplevel_mgmt,
-        ) = if optional_globals_enabled {
-            // wlr-screencopy-unstable-v1 – allows grim and similar tools to capture screen content.
-            let screencopy_pending =
-                crate::backend::wayland_udev::screencopy::init_screencopy_manager(dh);
+        // bind globals before creating toplevels. Keep them individually
+        // toggleable while locating early-client native faults.
+        let screencopy_pending =
+            if optional_global_enabled(DEFAULT_ENABLE_SCREENCOPY, "JWM_ENABLE_SCREENCOPY") {
+                // wlr-screencopy-unstable-v1 – allows grim and similar tools to capture screen content.
+                Some(crate::backend::wayland_udev::screencopy::init_screencopy_manager(dh))
+            } else {
+                None
+            };
 
+        let tearing_hints = if optional_global_enabled(
+            DEFAULT_ENABLE_TEARING_CONTROL,
+            "JWM_ENABLE_TEARING_CONTROL",
+        ) {
             // wp-tearing-control-v1 – allows games to opt into async page flips.
-            let tearing_hints =
-                crate::backend::wayland_udev::tearing_control::init_tearing_control_manager(dh);
+            Some(crate::backend::wayland_udev::tearing_control::init_tearing_control_manager(dh))
+        } else {
+            None
+        };
 
+        let color_manager = if optional_global_enabled(
+            DEFAULT_ENABLE_COLOR_MANAGEMENT,
+            "JWM_ENABLE_COLOR_MANAGEMENT",
+        ) {
             // wp-color-management-v1 – HDR / color-space surface metadata.
-            let color_manager =
-                crate::backend::wayland_udev::color_management::init_color_management(dh);
+            Some(crate::backend::wayland_udev::color_management::init_color_management(dh))
+        } else {
+            None
+        };
 
+        if optional_global_enabled(
+            DEFAULT_ENABLE_OUTPUT_MANAGEMENT,
+            "JWM_ENABLE_OUTPUT_MANAGEMENT",
+        ) {
             // wlr-output-management-unstable-v1 – output config for kanshi/wlr-randr.
             crate::backend::wayland_udev::output_management::init_output_management(dh);
+        }
 
+        if optional_global_enabled(DEFAULT_ENABLE_OUTPUT_POWER, "JWM_ENABLE_OUTPUT_POWER") {
             // wlr-output-power-management-unstable-v1 – DPMS for swayidle.
             crate::backend::wayland_udev::output_power::init_output_power_management(dh);
+        }
 
-            // ext-workspace-v1 – workspace/tag state for taskbars (Waybar etc.).
-            let workspace_state =
-                crate::backend::wayland_udev::workspace_protocol::init_workspace_protocol(dh, 9);
+        let workspace_state =
+            if optional_global_enabled(DEFAULT_ENABLE_WORKSPACE, "JWM_ENABLE_WORKSPACE") {
+                // ext-workspace-v1 – workspace/tag state for taskbars (Waybar etc.).
+                Some(
+                    crate::backend::wayland_udev::workspace_protocol::init_workspace_protocol(
+                        dh, 9,
+                    ),
+                )
+            } else {
+                None
+            };
 
+        let image_capture_pending = if optional_global_enabled(
+            DEFAULT_ENABLE_IMAGE_COPY_CAPTURE,
+            "JWM_ENABLE_IMAGE_COPY_CAPTURE",
+        ) {
             // ext-image-copy-capture-v1 – modern screen capture (replaces wlr-screencopy).
-            let image_capture_pending =
-                crate::backend::wayland_udev::image_copy_capture::init_image_copy_capture(dh);
+            Some(crate::backend::wayland_udev::image_copy_capture::init_image_copy_capture(dh))
+        } else {
+            None
+        };
 
+        if optional_global_enabled(DEFAULT_ENABLE_GAMMA_CONTROL, "JWM_ENABLE_GAMMA_CONTROL") {
             // wlr-gamma-control-unstable-v1 – night light (gammastep/wlsunset).
             crate::backend::wayland_udev::gamma_control::init_gamma_control(dh);
+        }
 
+        let foreign_toplevel_mgmt = if optional_global_enabled(
+            DEFAULT_ENABLE_FOREIGN_TOPLEVEL_MANAGEMENT,
+            "JWM_ENABLE_FOREIGN_TOPLEVEL_MANAGEMENT",
+        ) {
             // wlr-foreign-toplevel-management-unstable-v1 – taskbar window control.
-            let foreign_toplevel_mgmt = crate::backend::wayland_udev::foreign_toplevel_management::init_foreign_toplevel_management(dh);
+            Some(crate::backend::wayland_udev::foreign_toplevel_management::init_foreign_toplevel_management(dh))
+        } else {
+            None
+        };
 
+        if optional_global_enabled(DEFAULT_ENABLE_VIRTUAL_POINTER, "JWM_ENABLE_VIRTUAL_POINTER") {
             // wlr-virtual-pointer-unstable-v1 – remote desktop pointer injection.
             crate::backend::wayland_udev::virtual_pointer::init_virtual_pointer_manager(dh);
+        }
 
-            (
-                Some(screencopy_pending),
-                Some(tearing_hints),
-                Some(color_manager),
-                Some(workspace_state),
-                Some(image_capture_pending),
-                Some(foreign_toplevel_mgmt),
-            )
-        } else {
+        if !env_flag("JWM_OPTIONAL_GLOBALS") {
             info!(
-                "[udev/wayland] optional globals disabled (set JWM_OPTIONAL_GLOBALS=1 to enable)"
+                "[udev/wayland] optional globals are individually gated; set JWM_OPTIONAL_GLOBALS=1 to enable all"
             );
-            (None, None, None, None, None, None)
-        };
+        }
 
         // Optional but very useful for toolkit compatibility.
         let output_manager_state = OutputManagerState::new_with_xdg_output::<JwmWaylandState>(dh);
