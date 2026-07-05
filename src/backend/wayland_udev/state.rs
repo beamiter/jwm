@@ -13,7 +13,7 @@ fn env_flag(name: &str) -> bool {
     std::env::var_os(name).as_deref() == Some(std::ffi::OsStr::new("1"))
 }
 
-const DEFAULT_ENABLE_SCREENCOPY: bool = false;
+const DEFAULT_ENABLE_SCREENCOPY: bool = true;
 const DEFAULT_ENABLE_TEARING_CONTROL: bool = false;
 const DEFAULT_ENABLE_COLOR_MANAGEMENT: bool = false;
 const DEFAULT_ENABLE_OUTPUT_MANAGEMENT: bool = false;
