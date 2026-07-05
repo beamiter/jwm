@@ -52,7 +52,7 @@ use smithay::backend::input::{
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::session::Event as SessionEvent;
 use smithay::backend::session::Session;
-use smithay::backend::session::libseat::LibSeatSession;
+use smithay::backend::session::libseat::{LibSeatSession, LibSeatSessionNotifier};
 use smithay::backend::udev::{UdevBackend as SmithayUdevBackend, UdevEvent, primary_gpu};
 use smithay::desktop::layer_map_for_output;
 use smithay::desktop::utils::bbox_from_surface_tree;
@@ -685,6 +685,7 @@ pub struct UdevBackend {
 
     compositor: Option<WaylandCompositor>,
     drag: Option<UdevDragState>,
+    last_inactive_session_log: Option<Instant>,
 
     // Reusable per-frame scratch buffers (cleared+refilled each frame) to avoid
     // two heap allocations per frame in compositor_render_frame.
@@ -705,6 +706,47 @@ unsafe impl Send for UdevBackend {}
 
 fn env_flag(name: &str) -> bool {
     std::env::var_os(name).as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
+fn open_active_libseat_session() -> Result<(LibSeatSession, LibSeatSessionNotifier), BackendError> {
+    let timeout = std::env::var("JWM_LIBSEAT_ACTIVE_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_secs(5));
+    let retry_interval = Duration::from_millis(100);
+    let deadline = Instant::now() + timeout;
+    let mut attempts = 0usize;
+
+    loop {
+        let (session, notifier) =
+            LibSeatSession::new().map_err(|err| BackendError::Other(Box::new(err)))?;
+        if session.is_active() {
+            if attempts > 0 {
+                log::info!("[udev] libseat session became active after {attempts} retries");
+            }
+            return Ok((session, notifier));
+        }
+
+        attempts += 1;
+        if attempts == 1 {
+            log::warn!(
+                "[udev] libseat session is inactive at startup; waiting up to {}ms before opening KMS/input",
+                timeout.as_millis()
+            );
+        }
+
+        if Instant::now() >= deadline {
+            return Err(BackendError::Message(format!(
+                "libseat session stayed inactive for {}ms; refusing to start half-active wayland-udev session",
+                timeout.as_millis()
+            )));
+        }
+
+        drop(notifier);
+        drop(session);
+        std::thread::sleep(retry_interval);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -874,8 +916,8 @@ impl UdevBackend {
             return;
         }
 
-        self.shared.lock_safe().session_active = session_active;
         if session_active {
+            self.shared.lock_safe().session_active = true;
             log::info!("[udev] session became active; rebuilding outputs and KMS");
             let seat_name = self.session.seat();
             refresh_preferred_device_id(&self.shared, &seat_name);
@@ -892,11 +934,21 @@ impl UdevBackend {
                     log::warn!("[udev] rebuild_outputs after session activation failed: {err:?}");
                 }
             }
-        } else {
-            log::info!("[udev] session became inactive");
-            self.pending_events
-                .lock_safe()
-                .push_back(BackendEvent::ScreenLayoutChanged);
+        } else if was_active {
+            // Treat libseat's polled inactive state as advisory only. LightDM can
+            // leave libseat reporting inactive during session handoff even after
+            // KMS has been opened successfully. Real deactivation is handled by
+            // the PauseSession notifier.
+            let now = Instant::now();
+            if self
+                .last_inactive_session_log
+                .is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_secs(2))
+            {
+                self.last_inactive_session_log = Some(now);
+                log::debug!(
+                    "[udev] libseat still reports inactive; keeping current session active"
+                );
+            }
         }
     }
 
@@ -1115,10 +1167,9 @@ impl UdevBackend {
             }
         }
 
-        let (mut session, notifier) =
-            LibSeatSession::new().map_err(|e| BackendError::Other(Box::new(e)))?;
+        let (mut session, notifier) = open_active_libseat_session()?;
         let seat_name = session.seat();
-        let session_active_at_start = session.is_active();
+        let session_active_at_start = true;
         shared.lock_safe().session_active = session_active_at_start;
 
         let (wayland_state, socket_name) = JwmWaylandState::init(
@@ -1238,8 +1289,9 @@ impl UdevBackend {
         })?;
         let libinput_backend = LibinputInputBackend::new(libinput_context.clone());
         if !session_active_at_start {
-            log::debug!("[udev] session inactive at startup; suspending libinput until activate");
-            libinput_context.suspend();
+            log::debug!(
+                "[udev] session inactive at startup; keeping libinput running and retrying KMS"
+            );
         }
 
         {
@@ -2255,19 +2307,20 @@ impl UdevBackend {
             let shared = shared.clone();
             let pending_events = pending_events.clone();
             let seat_name = seat_name.clone();
+            let mut notifier_libinput_context = libinput_context.clone();
             event_loop
                 .handle()
                 .insert_source(notifier, move |event, &mut (), _state| match event {
                     SessionEvent::PauseSession => {
                         shared.lock_safe().session_active = false;
-                        libinput_context.suspend();
+                        notifier_libinput_context.suspend();
                         pending_events
                             .lock_safe()
                             .push_back(BackendEvent::ScreenLayoutChanged);
                     }
                     SessionEvent::ActivateSession => {
                         shared.lock_safe().session_active = true;
-                        if let Err(e) = libinput_context.resume() {
+                        if let Err(e) = notifier_libinput_context.resume() {
                             log::warn!("[udev] libinput resume after VT-switch failed: {e:?}");
                         }
                         refresh_preferred_device_id(&shared, &seat_name);
@@ -2408,6 +2461,7 @@ impl UdevBackend {
 
             compositor: None,
             drag: None,
+            last_inactive_session_log: None,
             scratch_tex_updates: Vec::new(),
             scratch_full_scene: Vec::new(),
             offscreen_window_textures: HashMap::new(),
