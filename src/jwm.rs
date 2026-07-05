@@ -93,6 +93,8 @@ pub struct Jwm {
 
     // Per-monitor status bars
     pub secondary_bars: HashMap<i32, SecondaryBarInstance>,
+    pub secondary_bar_failures: HashMap<i32, u32>,
+    pub secondary_bar_retry_after: HashMap<i32, std::time::Instant>,
 
     pub last_key_grab_refresh_at: Option<std::time::Instant>,
 
@@ -439,6 +441,8 @@ impl Jwm {
             message: SharedMessage::default(),
 
             secondary_bars: HashMap::new(),
+            secondary_bar_failures: HashMap::new(),
+            secondary_bar_retry_after: HashMap::new(),
 
             last_key_grab_refresh_at: None,
             pending_bar_updates: HashSet::new(),

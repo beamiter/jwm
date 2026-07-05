@@ -9,6 +9,10 @@ use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
 
+fn env_flag(name: &str) -> bool {
+    std::env::var_os(name).as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
 use smithay::delegate_dispatch2;
 use smithay::xwayland::{X11Wm, X11Surface, XwmHandler, XWaylandClientData, xwm::{Reorder, ResizeEdge as XwmResizeEdge, XwmId, WmWindowProperty}};
 use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
@@ -1326,40 +1330,67 @@ impl JwmWaylandState {
 
         let xwayland_shell_state = XWaylandShellState::new::<JwmWaylandState>(dh);
 
-        // wlr-screencopy-unstable-v1 – allows grim and similar tools to capture screen content.
-        let screencopy_pending =
-            crate::backend::wayland_udev::screencopy::init_screencopy_manager(dh);
+        // Extra desktop/tooling protocols are useful, but clients enumerate and
+        // bind globals before creating toplevels. Keep them opt-in while
+        // hardening the wayland-udev backend against early-client native faults.
+        let optional_globals_enabled = env_flag("JWM_OPTIONAL_GLOBALS");
+        let (
+            screencopy_pending,
+            tearing_hints,
+            color_manager,
+            workspace_state,
+            image_capture_pending,
+            foreign_toplevel_mgmt,
+        ) = if optional_globals_enabled {
+            // wlr-screencopy-unstable-v1 – allows grim and similar tools to capture screen content.
+            let screencopy_pending =
+                crate::backend::wayland_udev::screencopy::init_screencopy_manager(dh);
 
-        // wp-tearing-control-v1 – allows games to opt into async page flips.
-        let tearing_hints =
-            crate::backend::wayland_udev::tearing_control::init_tearing_control_manager(dh);
+            // wp-tearing-control-v1 – allows games to opt into async page flips.
+            let tearing_hints =
+                crate::backend::wayland_udev::tearing_control::init_tearing_control_manager(dh);
 
-        // wp-color-management-v1 – HDR / color-space surface metadata.
-        let color_manager =
-            crate::backend::wayland_udev::color_management::init_color_management(dh);
+            // wp-color-management-v1 – HDR / color-space surface metadata.
+            let color_manager =
+                crate::backend::wayland_udev::color_management::init_color_management(dh);
 
-        // wlr-output-management-unstable-v1 – output config for kanshi/wlr-randr.
-        crate::backend::wayland_udev::output_management::init_output_management(dh);
+            // wlr-output-management-unstable-v1 – output config for kanshi/wlr-randr.
+            crate::backend::wayland_udev::output_management::init_output_management(dh);
 
-        // wlr-output-power-management-unstable-v1 – DPMS for swayidle.
-        crate::backend::wayland_udev::output_power::init_output_power_management(dh);
+            // wlr-output-power-management-unstable-v1 – DPMS for swayidle.
+            crate::backend::wayland_udev::output_power::init_output_power_management(dh);
 
-        // ext-workspace-v1 – workspace/tag state for taskbars (Waybar etc.).
-        let workspace_state =
-            crate::backend::wayland_udev::workspace_protocol::init_workspace_protocol(dh, 9);
+            // ext-workspace-v1 – workspace/tag state for taskbars (Waybar etc.).
+            let workspace_state =
+                crate::backend::wayland_udev::workspace_protocol::init_workspace_protocol(dh, 9);
 
-        // ext-image-copy-capture-v1 – modern screen capture (replaces wlr-screencopy).
-        let image_capture_pending =
-            crate::backend::wayland_udev::image_copy_capture::init_image_copy_capture(dh);
+            // ext-image-copy-capture-v1 – modern screen capture (replaces wlr-screencopy).
+            let image_capture_pending =
+                crate::backend::wayland_udev::image_copy_capture::init_image_copy_capture(dh);
 
-        // wlr-gamma-control-unstable-v1 – night light (gammastep/wlsunset).
-        crate::backend::wayland_udev::gamma_control::init_gamma_control(dh);
+            // wlr-gamma-control-unstable-v1 – night light (gammastep/wlsunset).
+            crate::backend::wayland_udev::gamma_control::init_gamma_control(dh);
 
-        // wlr-foreign-toplevel-management-unstable-v1 – taskbar window control.
-        let foreign_toplevel_mgmt = crate::backend::wayland_udev::foreign_toplevel_management::init_foreign_toplevel_management(dh);
+            // wlr-foreign-toplevel-management-unstable-v1 – taskbar window control.
+            let foreign_toplevel_mgmt = crate::backend::wayland_udev::foreign_toplevel_management::init_foreign_toplevel_management(dh);
 
-        // wlr-virtual-pointer-unstable-v1 – remote desktop pointer injection.
-        crate::backend::wayland_udev::virtual_pointer::init_virtual_pointer_manager(dh);
+            // wlr-virtual-pointer-unstable-v1 – remote desktop pointer injection.
+            crate::backend::wayland_udev::virtual_pointer::init_virtual_pointer_manager(dh);
+
+            (
+                Some(screencopy_pending),
+                Some(tearing_hints),
+                Some(color_manager),
+                Some(workspace_state),
+                Some(image_capture_pending),
+                Some(foreign_toplevel_mgmt),
+            )
+        } else {
+            info!(
+                "[udev/wayland] optional globals disabled (set JWM_OPTIONAL_GLOBALS=1 to enable)"
+            );
+            (None, None, None, None, None, None)
+        };
 
         // Optional but very useful for toolkit compatibility.
         let output_manager_state = OutputManagerState::new_with_xdg_output::<JwmWaylandState>(dh);
@@ -1529,16 +1560,16 @@ impl JwmWaylandState {
 
                 window_border_color: HashMap::new(),
 
-                screencopy_pending: Some(screencopy_pending),
-                tearing_hints: Some(tearing_hints),
+                screencopy_pending,
+                tearing_hints,
 
-                workspace_state: Some(workspace_state),
+                workspace_state,
 
-                image_capture_pending: Some(image_capture_pending),
+                image_capture_pending,
 
-                foreign_toplevel_mgmt: Some(foreign_toplevel_mgmt),
+                foreign_toplevel_mgmt,
 
-                color_manager: Some(color_manager),
+                color_manager,
             },
             socket_name,
         ))

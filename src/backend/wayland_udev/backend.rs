@@ -703,6 +703,10 @@ pub struct UdevBackend {
 // `UdevBackend` is never moved across threads.
 unsafe impl Send for UdevBackend {}
 
+fn env_flag(name: &str) -> bool {
+    std::env::var_os(name).as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
 #[derive(Debug, Clone, Copy)]
 enum UdevDragAction {
     Move,
@@ -744,18 +748,32 @@ impl UdevBackend {
         self.state.gamma_sizes = kms.borrow_mut().gamma_sizes().into_iter().collect();
         attach_edid_caps_to_outputs(&self.state.outputs, &self.shared.lock_safe().outputs);
 
-        {
+        if env_flag("JWM_DMABUF") {
             let kms_ref = kms.borrow();
             let render_formats = kms_ref.dmabuf_render_formats();
             let scanout_formats = kms_ref.dmabuf_render_formats();
             let main_device = kms_ref.dev_t();
             drop(kms_ref);
-            self.state.ensure_dmabuf_global_with_feedback(
-                &self.display_handle,
-                render_formats,
-                scanout_formats,
-                main_device,
-            );
+            if env_flag("JWM_DMABUF_FEEDBACK") {
+                self.state.ensure_dmabuf_global_with_feedback(
+                    &self.display_handle,
+                    render_formats,
+                    scanout_formats,
+                    main_device,
+                );
+            } else {
+                self.state.dmabuf_main_device = Some(main_device);
+                self.state.dmabuf_render_formats = render_formats.clone();
+                self.state
+                    .ensure_dmabuf_global(&self.display_handle, render_formats);
+                log::info!(
+                    "[udev/wayland] dmabuf feedback disabled (set JWM_DMABUF_FEEDBACK=1 to enable)"
+                );
+            }
+        } else {
+            self.state.dmabuf_main_device = None;
+            self.state.dmabuf_render_formats.clear();
+            log::info!("[udev/wayland] linux-dmabuf disabled (set JWM_DMABUF=1 to enable)");
         }
 
         if let Some(ref screencopy_queue) = self.state.screencopy_pending {
@@ -1247,34 +1265,58 @@ impl UdevBackend {
             state.outputs = kms.borrow().outputs();
             state.gamma_sizes = kms.borrow_mut().gamma_sizes().into_iter().collect();
 
-            // Advertise linux-dmabuf formats with scanout preference tranches.
-            // This tells clients which formats can bypass the compositor (direct scanout).
-            {
+            // Keep linux-dmabuf opt-in for now. Electron/VSCode binds
+            // compositor globals very early, and this path has been observed to
+            // trigger a native crash before the client creates an xdg_toplevel.
+            if env_flag("JWM_DMABUF") {
                 let kms_ref = kms.borrow();
                 let render_formats = kms_ref.dmabuf_render_formats();
                 let scanout_formats = kms_ref.dmabuf_render_formats();
                 let main_device = kms_ref.dev_t();
                 drop(kms_ref);
-                state.ensure_dmabuf_global_with_feedback(
-                    &display_handle,
-                    render_formats,
-                    scanout_formats,
-                    main_device,
-                );
+                if env_flag("JWM_DMABUF_FEEDBACK") {
+                    state.ensure_dmabuf_global_with_feedback(
+                        &display_handle,
+                        render_formats,
+                        scanout_formats,
+                        main_device,
+                    );
+                } else {
+                    state.dmabuf_main_device = Some(main_device);
+                    state.dmabuf_render_formats = render_formats.clone();
+                    state.ensure_dmabuf_global(&display_handle, render_formats);
+                    log::info!(
+                        "[udev/wayland] dmabuf feedback disabled (set JWM_DMABUF_FEEDBACK=1 to enable)"
+                    );
+                }
+            } else {
+                state.dmabuf_main_device = None;
+                state.dmabuf_render_formats.clear();
+                log::info!("[udev/wayland] linux-dmabuf disabled (set JWM_DMABUF=1 to enable)");
             }
 
-            // wp-linux-drm-syncobj-v1 (explicit sync) – required for NVIDIA
+            // wp-linux-drm-syncobj-v1 (explicit sync).
+            //
+            // Keep this opt-in for now. Some clients (notably Electron/VSCode)
+            // exercise this path immediately after connecting, and a failure in
+            // Smithay/driver syncobj lifetime handling can take the whole WM down
+            // with a native fault rather than a Rust panic.
             {
                 use smithay::wayland::drm_syncobj::{DrmSyncobjState, supports_syncobj_eventfd};
                 let drm_fd = kms.borrow().drm_device_fd.clone();
-                if supports_syncobj_eventfd(&drm_fd) {
+                let explicit_sync_enabled = env_flag("JWM_EXPLICIT_SYNC");
+                if explicit_sync_enabled && supports_syncobj_eventfd(&drm_fd) {
                     state.drm_syncobj_state = Some(DrmSyncobjState::new::<
                         crate::backend::wayland::state::JwmWaylandState,
                     >(&display_handle, drm_fd));
                     log::info!("[udev/wayland] wp-linux-drm-syncobj-v1 (explicit sync) enabled");
-                } else {
+                } else if explicit_sync_enabled {
                     log::info!(
                         "[udev/wayland] DRM syncobj eventfd not supported, explicit sync disabled"
+                    );
+                } else {
+                    log::info!(
+                        "[udev/wayland] explicit sync disabled (set JWM_EXPLICIT_SYNC=1 to enable)"
                     );
                 }
             }

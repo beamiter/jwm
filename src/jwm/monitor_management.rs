@@ -2,7 +2,7 @@ use crate::backend::api::Backend;
 use crate::config::CONFIG;
 use crate::core::layout::LayoutEnum;
 use crate::core::models::{MonitorKey, Pertag, WMMonitor};
-use log::{error, info};
+use log::{error, info, warn};
 use shared_structures::SharedRingBuffer;
 use std::collections::HashSet;
 use std::process::{Command, Stdio};
@@ -10,6 +10,9 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use super::Jwm;
+
+const BAR_MAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const BAR_MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl Jwm {
     pub(super) fn createmon(&mut self, show_bar: bool) -> WMMonitor {
@@ -74,31 +77,58 @@ impl Jwm {
 
         // Sequential creation: only create the next bar if all previous bars are managed
         for &mon_id in &all_mon_ids {
+            if let Some(&retry_after) = self.secondary_bar_retry_after.get(&mon_id) {
+                if now < retry_after {
+                    continue;
+                }
+                self.secondary_bar_retry_after.remove(&mon_id);
+            }
+
             // Check if this bar already exists
-            if let Some(bar) = self.secondary_bars.get_mut(&mon_id) {
+            if self.secondary_bars.contains_key(&mon_id) {
+                let mut remove_reason: Option<String> = None;
+                let mut waiting_for_map = false;
+
                 // Check if process is still alive
-                match bar.child.try_wait() {
-                    Ok(Some(status)) => {
-                        info!("Bar for monitor {} exited: {}", mon_id, status);
-                        self.secondary_bars.remove(&mon_id);
-                        // Don't create next bar yet, wait for next tick
-                        return;
-                    }
-                    Ok(None) => {
-                        // Process still running
-                        // If not yet managed (window not created), don't create next bar
-                        if bar.window.is_none() {
-                            return;
+                if let Some(bar) = self.secondary_bars.get_mut(&mon_id) {
+                    match bar.child.try_wait() {
+                        Ok(Some(status)) => {
+                            remove_reason = Some(format!("exited: {status}"));
                         }
-                        // This bar is managed, continue to check next
-                        continue;
-                    }
-                    Err(e) => {
-                        info!("Error checking bar for monitor {}: {}", mon_id, e);
-                        self.secondary_bars.remove(&mon_id);
-                        return;
+                        Ok(None) => {
+                            // Process still running. If it never maps a window, treat it as a
+                            // failed bar after a short grace period and let the WM keep going.
+                            if bar.window.is_none() {
+                                if now.saturating_duration_since(bar.last_spawn) > BAR_MAP_TIMEOUT {
+                                    let _ = bar.child.kill();
+                                    remove_reason = Some(format!(
+                                        "did not map a window within {}s",
+                                        BAR_MAP_TIMEOUT.as_secs()
+                                    ));
+                                } else {
+                                    waiting_for_map = true;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            remove_reason = Some(format!("try_wait failed: {e}"));
+                        }
                     }
                 }
+
+                if let Some(reason) = remove_reason {
+                    info!("Bar for monitor {} failed: {}", mon_id, reason);
+                    self.secondary_bars.remove(&mon_id);
+                    self.note_secondary_bar_failure(mon_id, now, &reason);
+                    continue;
+                }
+
+                if waiting_for_map {
+                    return;
+                }
+
+                // This bar is managed, continue to check next
+                continue;
             }
 
             // Bar doesn't exist, create it
@@ -112,6 +142,38 @@ impl Jwm {
         let existing_monitors: HashSet<i32> = self.state.monitors.values().map(|m| m.num).collect();
         self.secondary_bars
             .retain(|&mon_id, _| existing_monitors.contains(&mon_id));
+        self.secondary_bar_failures
+            .retain(|&mon_id, _| existing_monitors.contains(&mon_id));
+        self.secondary_bar_retry_after
+            .retain(|&mon_id, _| existing_monitors.contains(&mon_id));
+    }
+
+    pub(super) fn note_secondary_bar_failure(
+        &mut self,
+        monitor_id: i32,
+        now: Instant,
+        reason: &str,
+    ) {
+        let failures = self.secondary_bar_failures.entry(monitor_id).or_insert(0);
+        *failures = failures.saturating_add(1);
+
+        let delay_secs = match *failures {
+            0 | 1 => 5,
+            2 => 10,
+            3 => 30,
+            _ => BAR_MAX_RETRY_DELAY.as_secs(),
+        };
+        let delay = std::time::Duration::from_secs(delay_secs).min(BAR_MAX_RETRY_DELAY);
+        self.secondary_bar_retry_after
+            .insert(monitor_id, now + delay);
+
+        warn!(
+            "Secondary bar for monitor {} failed ({}); retrying in {}s (failure #{})",
+            monitor_id,
+            reason,
+            delay.as_secs(),
+            failures
+        );
     }
 
     pub(super) fn spawn_secondary_bar(&mut self, monitor_id: i32, now: Instant) {

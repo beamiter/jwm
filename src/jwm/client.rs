@@ -65,6 +65,8 @@ impl Jwm {
                     bar.client_key = Some(client_key);
                     bar.window = Some(win);
                 }
+                self.secondary_bar_failures.remove(&mon_id);
+                self.secondary_bar_retry_after.remove(&mon_id);
                 return self.manage_secondary_statusbar(backend, client_key, win, mon_id);
             } else {
                 // Don't warn - bar may have exited and been removed while window was still being mapped
