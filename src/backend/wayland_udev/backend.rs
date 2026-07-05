@@ -867,6 +867,39 @@ impl UdevBackend {
         }
     }
 
+    fn reconcile_session_active(&mut self) {
+        let session_active = self.session.is_active();
+        let was_active = self.shared.lock_safe().session_active;
+        if session_active == was_active {
+            return;
+        }
+
+        self.shared.lock_safe().session_active = session_active;
+        if session_active {
+            log::info!("[udev] session became active; rebuilding outputs and KMS");
+            let seat_name = self.session.seat();
+            refresh_preferred_device_id(&self.shared, &seat_name);
+            match rebuild_outputs(&self.shared, &self.pending_events) {
+                Ok(_) => {
+                    sync_output_rects(&mut self.state, &self.shared);
+                    self.pending_events
+                        .lock_safe()
+                        .push_back(BackendEvent::ScreenLayoutChanged);
+                    queue_kms_reinit(&self.shared);
+                    self.request_flush();
+                }
+                Err(err) => {
+                    log::warn!("[udev] rebuild_outputs after session activation failed: {err:?}");
+                }
+            }
+        } else {
+            log::info!("[udev] session became inactive");
+            self.pending_events
+                .lock_safe()
+                .push_back(BackendEvent::ScreenLayoutChanged);
+        }
+    }
+
     pub fn new() -> Result<Self, BackendError> {
         let event_loop: EventLoop<'static, JwmWaylandState> =
             EventLoop::try_new().map_err(|e| BackendError::Other(Box::new(e)))?;
@@ -3914,6 +3947,7 @@ impl Backend for UdevBackend {
                 }
             }
 
+            self.reconcile_session_active();
             self.maybe_reinit_kms();
 
             // Make cursor changes visible even if nothing else requests a redraw.
@@ -3979,8 +4013,11 @@ impl Backend for UdevBackend {
             let kms_pending = self.kms.as_ref().map_or(false, |k| k.borrow().needs_render);
             let render_work_pending =
                 session_active && (needs_tick || kms_pending || self.state.needs_redraw);
+            let poll_session_activation = !session_active && self.kms.is_none();
             let timeout = if has_pending_events {
                 Some(std::time::Duration::ZERO)
+            } else if poll_session_activation {
+                Some(std::time::Duration::from_millis(100))
             } else if render_work_pending {
                 Some(std::time::Duration::from_millis(16))
             } else {
