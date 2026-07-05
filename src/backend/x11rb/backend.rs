@@ -865,6 +865,7 @@ impl Backend for X11rbBackend {
         // allocation-free every frame.
         let mut x11_scene = std::mem::take(&mut self.scratch_x11_scene);
         x11_scene.clear();
+        x11_scene.reserve(scene.len());
         x11_scene.extend(scene.iter().filter_map(|&(wid_raw, x, y, w, h)| {
             let wid = WindowId::from_raw(wid_raw);
             self.ids.x11(wid).ok().map(|x11w| (x11w, x, y, w, h))
@@ -874,28 +875,7 @@ impl Backend for X11rbBackend {
             self.ids.x11(wid).ok()
         });
         let compositor = self.compositor.as_mut().unwrap();
-        if !scene.is_empty() && x11_scene.is_empty() {
-            log::warn!(
-                "[compositor] scene has {} entries but x11_scene is empty (ID lookup failed)",
-                scene.len()
-            );
-        }
-        // Lazily register any windows in the scene that the compositor doesn't
-        // yet track.  This happens for windows that were already mapped before
-        // the compositor was initialised (e.g. during setup_initial_windows).
-        for &(x11w, x, y, w, h) in &x11_scene {
-            if !compositor.has_window(x11w) && x11w != self.root_x11 {
-                log::info!(
-                    "[compositor] lazily adding untracked window 0x{:x} {}x{} at ({},{})",
-                    x11w,
-                    w,
-                    h,
-                    x,
-                    y
-                );
-                compositor.add_window(x11w, x, y, w, h);
-            }
-        }
+        compositor.ensure_scene_windows_tracked(&x11_scene, self.root_x11, scene.len(), "x11rb");
 
         let _ = self.conn.flush();
         let rendered = compositor.render_frame(&x11_scene, focused_x11);

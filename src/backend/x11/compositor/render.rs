@@ -154,6 +154,34 @@ impl<C: CompositorConnection> Compositor<C> {
         self.needs_render = true;
     }
 
+    pub(crate) fn ensure_scene_windows_tracked(
+        &mut self,
+        scene: &[(u32, i32, i32, u32, u32)],
+        root: u32,
+        original_scene_len: usize,
+        backend_label: &str,
+    ) {
+        if original_scene_len != 0 && scene.is_empty() {
+            log::warn!(
+                "[{backend_label} compositor] scene has {original_scene_len} entries but x11_scene is empty (ID lookup failed)"
+            );
+        }
+
+        for &(x11w, x, y, w, h) in scene {
+            if !self.has_window(x11w) && x11w != root {
+                log::info!(
+                    "[{backend_label} compositor] lazily adding untracked window 0x{:x} {}x{} at ({},{})",
+                    x11w,
+                    w,
+                    h,
+                    x,
+                    y
+                );
+                self.add_window(x11w, x, y, w, h);
+            }
+        }
+    }
+
     // =====================================================================
     // Feature 11: Debug HUD toggle
     // =====================================================================
@@ -453,13 +481,15 @@ impl<C: CompositorConnection> Compositor<C> {
             self.last_gpu_load_update = std::time::Instant::now();
         }
 
+        let periodic_60_frame = self.frame_stats.frame_count % 60 == 0;
+
         // Shader hot-reload: poll every 60 frames (~1s at 60fps)
-        if self.shader_hot_reload_enabled && self.frame_stats.frame_count % 60 == 0 {
+        if self.shader_hot_reload_enabled && periodic_60_frame {
             self.poll_shader_hot_reload();
         }
 
         // VRR state update: check every 60 frames (~1s at 60fps)
-        if self.frame_stats.frame_count % 60 == 0 {
+        if periodic_60_frame {
             self.update_vrr_state(focused);
         }
 
@@ -470,27 +500,25 @@ impl<C: CompositorConnection> Compositor<C> {
             0
         };
 
-        // Periodic diagnostic logging
-        static RENDER_LOG_COUNT: std::sync::atomic::AtomicU32 =
-            std::sync::atomic::AtomicU32::new(0);
-        let count = RENDER_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if count < 5 || count % 500 == 0 {
-            log::info!(
-                "[compositor::render_frame] frame={} scene={} tracked={}",
-                count,
-                scene.len(),
-                self.windows.len()
-            );
-        }
-
-        // Track render frequency for flicker diagnosis (info-level only — the
-        // SystemTime/realtime-clock read and counter churn are skipped entirely
-        // when info logging is off, which is the normal case).
-        static RENDER_FREQ_COUNT: std::sync::atomic::AtomicU32 =
-            std::sync::atomic::AtomicU32::new(0);
-        static RENDER_FREQ_EPOCH: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(0);
+        // Track render diagnostics only when info logging is enabled; default
+        // runs avoid the atomic counters and realtime-clock read entirely.
         if log::log_enabled!(log::Level::Info) {
+            static RENDER_LOG_COUNT: std::sync::atomic::AtomicU32 =
+                std::sync::atomic::AtomicU32::new(0);
+            let count = RENDER_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if count < 5 || count % 500 == 0 {
+                log::info!(
+                    "[compositor::render_frame] frame={} scene={} tracked={}",
+                    count,
+                    scene.len(),
+                    self.windows.len()
+                );
+            }
+
+            static RENDER_FREQ_COUNT: std::sync::atomic::AtomicU32 =
+                std::sync::atomic::AtomicU32::new(0);
+            static RENDER_FREQ_EPOCH: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -518,6 +546,7 @@ impl<C: CompositorConnection> Compositor<C> {
         {
             let mut scene_info = std::mem::take(&mut self.scratch_scene_info);
             scene_info.clear();
+            scene_info.reserve(scene.len());
             scene_info.extend(scene.iter().filter_map(|&(win, x, y, w, h)| {
                 self.windows.get(&win).map(|wt| {
                     let corner_radius = wt.corner_radius_override.unwrap_or(self.corner_radius);
@@ -641,11 +670,19 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // Skip-unchanged-frame: if scene hasn't changed and no textures are
         // dirty, we can skip the entire GL render (unless screenshot pending or HUD active).
-        let has_dirty = scene.iter().any(|&(win, _, _, _, _)| {
-            self.windows
-                .get(&win)
-                .map_or(false, |wt| wt.dirty || wt.needs_pixmap_refresh)
-        });
+        // While scanning, also feed the precise dirty-rect tracker so we do not
+        // walk the scene a second time later in the frame.
+        let mut has_dirty = false;
+        for &(win, _, _, _, _) in scene {
+            let dirty_rect = self.windows.get(&win).and_then(|wt| {
+                (wt.dirty || wt.needs_pixmap_refresh)
+                    .then(|| DirtyRect::new(wt.x, wt.y, wt.w, wt.h))
+            });
+            if let Some(dirty_rect) = dirty_rect {
+                has_dirty = true;
+                self.dirty_region_tracker.mark_dirty(dirty_rect);
+            }
+        }
         let explicit_render = std::mem::replace(&mut self.needs_render, false);
         let force_render = self.pending_screenshot.is_some()
             || self.pending_screenshot_region.is_some()
@@ -676,16 +713,6 @@ impl<C: CompositorConnection> Compositor<C> {
         // were previously loaded 4× per frame from separate ArcSwap guards.
         let frame_cfg = crate::config::CONFIG.load();
         let frame_status_bar_name = frame_cfg.status_bar_name();
-
-        // P5C Phase 2: Mark dirty windows' rectangles for precise tracking
-        for &(win, _, _, _, _) in scene.iter() {
-            if let Some(wt) = self.windows.get(&win) {
-                if wt.dirty || wt.needs_pixmap_refresh {
-                    let dirty_rect = DirtyRect::new(wt.x, wt.y, wt.w, wt.h);
-                    self.dirty_region_tracker.mark_dirty(dirty_rect);
-                }
-            }
-        }
 
         // Reset tilt targets — the render loop will set them if a focused window
         // uses tilt; otherwise they stay at 0 so the tilt smoothly returns to rest.
@@ -722,11 +749,13 @@ impl<C: CompositorConnection> Compositor<C> {
         // only the frosted window itself updated (e.g. fcitx candidate list).
         let mut blur_dirty_wins = std::mem::take(&mut self.scratch_blur_dirty);
         blur_dirty_wins.clear();
+        blur_dirty_wins.reserve(scene.len());
         blur_dirty_wins.extend(scene.iter().filter_map(|&(win, _, _, _, _)| {
             self.windows
                 .get(&win)
                 .and_then(|wt| if wt.dirty { Some(win) } else { None })
         }));
+        blur_dirty_wins.sort_unstable();
 
         // Refresh TFP textures for dirty windows with per-frame time budget.
         // Focused window always updates; others update within 3ms budget.
@@ -738,15 +767,20 @@ impl<C: CompositorConnection> Compositor<C> {
         // Build priority-ordered window list: focused first, then rest of scene
         let mut tfp_order = std::mem::take(&mut self.scratch_tfp_order);
         tfp_order.clear();
+        tfp_order.reserve(scene.len());
+        let mut focused_in_scene = false;
         if let Some(fw) = focused {
-            if scene.iter().any(|&(w, _, _, _, _)| w == fw) {
-                tfp_order.push(fw);
-            }
+            tfp_order.push(fw);
         }
         for &(win, _, _, _, _) in scene {
-            if Some(win) != focused {
+            if Some(win) == focused {
+                focused_in_scene = true;
+            } else {
                 tfp_order.push(win);
             }
+        }
+        if focused.is_some() && !focused_in_scene {
+            tfp_order.remove(0);
         }
 
         let mut tfp_budget_exhausted = false;
@@ -1875,7 +1909,7 @@ impl<C: CompositorConnection> Compositor<C> {
                         .wrapping_add(((x as u64) << 32) | (y as u32 as u64))
                         .wrapping_mul(6364136223846793005)
                         .wrapping_add(((w as u64) << 32) | (h as u64));
-                    if blur_dirty_wins.contains(&win) {
+                    if blur_dirty_wins.binary_search(&win).is_ok() {
                         blur_below_dirty = true;
                     }
                 }

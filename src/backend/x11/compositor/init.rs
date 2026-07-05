@@ -1495,6 +1495,8 @@ impl<C: CompositorConnection> Compositor<C> {
             scratch_scene_info: Vec::new(),
             scratch_blur_dirty: Vec::new(),
             scratch_tfp_order: Vec::new(),
+            scratch_refresh_wins: Vec::new(),
+            scratch_new_pixmaps: Vec::new(),
         })
     }
 

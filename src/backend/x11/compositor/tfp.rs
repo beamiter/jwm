@@ -166,7 +166,7 @@ impl<C: CompositorConnection> Compositor<C> {
         };
 
         // Create GLX pixmap for TFP
-        let pixmap_attrs: Vec<i32> = vec![
+        let pixmap_attrs = [
             GLX_TEXTURE_TARGET_EXT,
             GLX_TEXTURE_2D_EXT,
             GLX_TEXTURE_FORMAT_EXT,
@@ -486,14 +486,16 @@ impl<C: CompositorConnection> Compositor<C> {
     /// Called once per frame in render_frame() to batch all pending recreations.
     pub(super) fn refresh_pixmaps(&mut self) {
         // Collect window IDs that need refresh to avoid borrowing issues
-        let refresh_wins: Vec<u32> = self
-            .windows
-            .iter()
-            .filter(|(_, wt)| wt.needs_pixmap_refresh)
-            .map(|(&id, _)| id)
-            .collect();
+        let mut refresh_wins = std::mem::take(&mut self.scratch_refresh_wins);
+        refresh_wins.clear();
+        refresh_wins.extend(
+            self.windows
+                .iter()
+                .filter_map(|(&id, wt)| wt.needs_pixmap_refresh.then_some(id)),
+        );
 
         if refresh_wins.is_empty() {
+            self.scratch_refresh_wins = refresh_wins;
             return;
         }
 
@@ -510,7 +512,9 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         // Create new named pixmaps for all windows via the shared texture-source ops
-        let mut new_pixmaps: Vec<(u32, u32)> = Vec::new(); // (win, pixmap)
+        let mut new_pixmaps = std::mem::take(&mut self.scratch_new_pixmaps);
+        new_pixmaps.clear();
+        new_pixmaps.reserve(refresh_wins.len());
         for &win in &refresh_wins {
             let wt = self.windows.get_mut(&win).unwrap();
             let pixmap = match self.conn.generate_xid() {
@@ -539,7 +543,7 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         // Create GLX pixmaps and rebind textures
-        for (win, pixmap) in new_pixmaps {
+        for (win, pixmap) in new_pixmaps.drain(..) {
             let wt = self.windows.get_mut(&win).unwrap();
             let fbconfig = wt.fbconfig;
             let tex_fmt = if wt.has_rgba {
@@ -547,7 +551,7 @@ impl<C: CompositorConnection> Compositor<C> {
             } else {
                 GLX_TEXTURE_FORMAT_RGB_EXT
             };
-            let pixmap_attrs: Vec<i32> = vec![
+            let pixmap_attrs = [
                 GLX_TEXTURE_TARGET_EXT,
                 GLX_TEXTURE_2D_EXT,
                 GLX_TEXTURE_FORMAT_EXT,
@@ -598,6 +602,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 wt.needs_pixmap_refresh = false;
             }
         }
+        self.scratch_refresh_wins = refresh_wins;
+        self.scratch_new_pixmaps = new_pixmaps;
     }
 
     pub(crate) fn mark_damaged(&mut self, x11_win: u32) {

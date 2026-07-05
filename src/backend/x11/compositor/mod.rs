@@ -718,6 +718,8 @@ where
     scratch_scene_info: Vec<(u32, WindowScanoutInfo)>,
     scratch_blur_dirty: Vec<u32>,
     scratch_tfp_order: Vec<u32>,
+    scratch_refresh_wins: Vec<u32>,
+    scratch_new_pixmaps: Vec<(u32, u32)>,
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.

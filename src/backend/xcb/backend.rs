@@ -445,10 +445,9 @@ impl XcbIdRegistry {
             .collect()
     }
 
-    fn remove(&self, win: x::Window) {
-        let raw = win.resource_id();
-        if let Some(id) = self.x_to_wid.write().unwrap().remove(&raw) {
-            self.wid_to_x.write().unwrap().remove(&id);
+    fn remove_id(&self, id: WindowId) {
+        if let Some(raw) = self.wid_to_x.write().unwrap().remove(&id) {
+            self.x_to_wid.write().unwrap().remove(&raw);
         }
     }
 }
@@ -802,10 +801,12 @@ impl XcbLoopData<'_> {
         &mut self,
         event: BackendEvent,
         pending_motion: &mut Option<BackendEvent>,
+        pending_configure: &mut Option<BackendEvent>,
         context: &str,
     ) {
         match &event {
             BackendEvent::MotionNotify { target, .. } => {
+                self.flush_pending_configure(pending_configure, context);
                 if let Some(BackendEvent::MotionNotify {
                     target: prev_target,
                     ..
@@ -817,8 +818,22 @@ impl XcbLoopData<'_> {
                 }
                 *pending_motion = Some(event);
             }
+            BackendEvent::WindowConfigured { window, .. } => {
+                self.flush_pending_motion(pending_motion, context);
+                if let Some(BackendEvent::WindowConfigured {
+                    window: prev_window,
+                    ..
+                }) = pending_configure
+                {
+                    if prev_window != window {
+                        self.flush_pending_configure(pending_configure, context);
+                    }
+                }
+                *pending_configure = Some(event);
+            }
             _ => {
                 self.flush_pending_motion(pending_motion, context);
+                self.flush_pending_configure(pending_configure, context);
                 self.deliver_backend_event(event, context);
             }
         }
@@ -830,15 +845,31 @@ impl XcbLoopData<'_> {
         }
     }
 
+    fn flush_pending_configure(
+        &mut self,
+        pending_configure: &mut Option<BackendEvent>,
+        context: &str,
+    ) {
+        if let Some(event) = pending_configure.take() {
+            self.deliver_backend_event(event, context);
+        }
+    }
+
     fn deliver_backend_event(&mut self, event: BackendEvent, context: &str) {
+        let destroyed_window = match &event {
+            BackendEvent::WindowDestroyed(win) => Some(*win),
+            _ => None,
+        };
         self.backend.compositor_handle_event(&event);
         if self.backend.systray_handle_event(&event) {
+            self.backend.cleanup_destroyed_window(destroyed_window);
             return;
         }
         let event = self.backend.enrich_event_with_output(event);
         if let Err(err) = self.handler.handle_event(self.backend, event) {
             log::error!("Error handling {context}: {err:?}");
         }
+        self.backend.cleanup_destroyed_window(destroyed_window);
     }
 }
 
@@ -891,7 +922,14 @@ impl XcbBackend {
             supports_client_list: true,
         };
 
-        let window_ops = Box::new(XcbWindowOps::new(conn.clone(), ids.clone(), atoms, root));
+        let numlock_mask = Arc::new(RwLock::new(None));
+        let window_ops = Box::new(XcbWindowOps::new(
+            conn.clone(),
+            ids.clone(),
+            atoms,
+            root,
+            numlock_mask.clone(),
+        ));
         let input_ops = Box::new(XcbInputOps::new(conn.clone(), ids.clone(), root));
         let property_ops = Box::new(XcbPropertyOps::new(conn.clone(), ids.clone(), atoms));
         let output_ops = Box::new(XcbOutputOps::new(
@@ -905,6 +943,7 @@ impl XcbBackend {
             ids.clone(),
             min_keycode,
             max_keycode,
+            numlock_mask,
         ));
         let ewmh = Some(
             Box::new(XcbEwmh::new(conn.clone(), ids.clone(), atoms, root)) as Box<dyn EwmhFacade>,
@@ -1101,6 +1140,12 @@ impl XcbBackend {
                 false
             }
             _ => false,
+        }
+    }
+
+    fn cleanup_destroyed_window(&mut self, win: Option<WindowId>) {
+        if let Some(win) = win {
+            self.ids.remove_id(win);
         }
     }
 
@@ -1399,9 +1444,7 @@ impl XcbBackend {
                 if self.is_compositor_overlay(ev.window()) {
                     return None;
                 }
-                let id = self.ids.intern(ev.window());
-                self.ids.remove(ev.window());
-                Some(BackendEvent::WindowDestroyed(id))
+                Some(BackendEvent::WindowDestroyed(self.ids.intern(ev.window())))
             }
             xcb::Event::X(x::Event::ConfigureRequest(ev)) => {
                 let mask = ev.value_mask();
@@ -1833,6 +1876,7 @@ impl Backend for XcbBackend {
 
         let mut x11_scene = std::mem::take(&mut self.scratch_x11_scene);
         x11_scene.clear();
+        x11_scene.reserve(scene.len());
         x11_scene.extend(scene.iter().filter_map(|&(wid_raw, x, y, w, h)| {
             let wid = WindowId::from_raw(wid_raw);
             self.ids.x11(wid).ok().map(|x11w| (x11w, x, y, w, h))
@@ -1840,27 +1884,7 @@ impl Backend for XcbBackend {
         let focused_x11 = focused_window.and_then(|raw| self.ids.x11(WindowId::from_raw(raw)).ok());
         let root = self.root.resource_id();
         let compositor = self.compositor.as_mut().unwrap();
-
-        if !scene.is_empty() && x11_scene.is_empty() {
-            log::warn!(
-                "[xcb compositor] scene has {} entries but x11_scene is empty (ID lookup failed)",
-                scene.len()
-            );
-        }
-
-        for &(x11w, x, y, w, h) in &x11_scene {
-            if !compositor.has_window(x11w) && x11w != root {
-                log::info!(
-                    "[xcb compositor] lazily adding untracked window 0x{:x} {}x{} at ({},{})",
-                    x11w,
-                    w,
-                    h,
-                    x,
-                    y
-                );
-                compositor.add_window(x11w, x, y, w, h);
-            }
-        }
+        compositor.ensure_scene_windows_tracked(&x11_scene, root, scene.len(), "xcb");
 
         let _ = self.conn.flush();
         let rendered = compositor.render_frame(&x11_scene, focused_x11);
@@ -2563,6 +2587,7 @@ impl Backend for XcbBackend {
                 ),
                 |_, _, data| {
                     let mut pending_motion = None;
+                    let mut pending_configure = None;
                     loop {
                         let event = match data.backend.conn.poll_for_event() {
                             Ok(Some(event)) => event,
@@ -2573,17 +2598,24 @@ impl Backend for XcbBackend {
                             }
                         };
                         if let Some(mapped) = data.backend.map_event(event) {
-                            data.dispatch_backend_event(mapped, &mut pending_motion, "XCB event");
+                            data.dispatch_backend_event(
+                                mapped,
+                                &mut pending_motion,
+                                &mut pending_configure,
+                                "XCB event",
+                            );
                         }
                         while let Some(mapped) = data.backend.pending.pop_front() {
                             data.dispatch_backend_event(
                                 mapped,
                                 &mut pending_motion,
+                                &mut pending_configure,
                                 "queued XCB event",
                             );
                         }
                     }
                     data.flush_pending_motion(&mut pending_motion, "XCB event");
+                    data.flush_pending_configure(&mut pending_configure, "XCB event");
                     Ok(calloop::PostAction::Continue)
                 },
             )
@@ -2709,6 +2741,7 @@ struct XcbWindowOps {
     atoms: XcbAtoms,
     root: x::Window,
     batcher: XcbRequestBatcher,
+    numlock_mask: Arc<RwLock<Option<x::ModMask>>>,
 }
 
 impl XcbWindowOps {
@@ -2717,6 +2750,7 @@ impl XcbWindowOps {
         ids: XcbIdRegistry,
         atoms: XcbAtoms,
         root: x::Window,
+        numlock_mask: Arc<RwLock<Option<x::ModMask>>>,
     ) -> Self {
         Self {
             conn,
@@ -2724,6 +2758,7 @@ impl XcbWindowOps {
             atoms,
             root,
             batcher: XcbRequestBatcher::new(),
+            numlock_mask,
         }
     }
 
@@ -2763,6 +2798,10 @@ impl XcbWindowOps {
     }
 
     fn detect_numlock_mask(&self) -> x::ModMask {
+        if let Some(mask) = *self.numlock_mask.read().unwrap() {
+            return mask;
+        }
+
         let cookie = self.conn.send_request(&x::GetKeyboardMapping {
             first_keycode: self.conn.get_setup().min_keycode(),
             count: self
@@ -2773,46 +2812,60 @@ impl XcbWindowOps {
                 .saturating_add(1),
         });
         let Ok(mapping) = self.conn.wait_for_reply(cookie) else {
-            return x::ModMask::empty();
+            return self.store_numlock_mask(x::ModMask::empty());
         };
-        let per = mapping.keysyms_per_keycode() as usize;
-        let mut numlock_keys = Vec::new();
-        for (idx, symbols) in mapping.keysyms().chunks(per).enumerate() {
+        let keysyms_per_keycode = mapping.keysyms_per_keycode() as usize;
+        let min_keycode = self.conn.get_setup().min_keycode();
+        let mut numlock_keycodes = [false; 256];
+        let mut has_numlock_keycode = false;
+        for (idx, symbols) in mapping.keysyms().chunks(keysyms_per_keycode).enumerate() {
             if symbols.contains(&0xff7f) {
-                numlock_keys.push(
-                    self.conn
-                        .get_setup()
-                        .min_keycode()
-                        .saturating_add(idx as u8),
-                );
+                let keycode = min_keycode.saturating_add(idx as u8);
+                numlock_keycodes[keycode as usize] = true;
+                has_numlock_keycode = true;
             }
         }
-        if numlock_keys.is_empty() {
-            return x::ModMask::empty();
+        if !has_numlock_keycode {
+            return self.store_numlock_mask(x::ModMask::empty());
         }
 
         let cookie = self.conn.send_request(&x::GetModifierMapping {});
         let Ok(reply) = self.conn.wait_for_reply(cookie) else {
-            return x::ModMask::empty();
+            return self.store_numlock_mask(x::ModMask::empty());
         };
-        let per = reply.keycodes_per_modifier() as usize;
-        for (idx, chunk) in reply.keycodes().chunks(per).enumerate() {
-            if chunk
-                .iter()
-                .filter(|&&code| code != 0)
-                .any(|code| numlock_keys.contains(code))
-            {
-                return match idx {
-                    3 => x::ModMask::N1,
-                    4 => x::ModMask::N2,
-                    5 => x::ModMask::N3,
-                    6 => x::ModMask::N4,
-                    7 => x::ModMask::N5,
-                    _ => x::ModMask::N2,
-                };
-            }
+        let keycodes_per_modifier = reply.keycodes_per_modifier() as usize;
+        let mask = reply
+            .keycodes()
+            .chunks(keycodes_per_modifier)
+            .enumerate()
+            .find_map(|(idx, chunk)| {
+                chunk
+                    .iter()
+                    .filter(|&&code| code != 0)
+                    .any(|&code| numlock_keycodes[code as usize])
+                    .then(|| match idx {
+                        3 => x::ModMask::N1,
+                        4 => x::ModMask::N2,
+                        5 => x::ModMask::N3,
+                        6 => x::ModMask::N4,
+                        7 => x::ModMask::N5,
+                        _ => x::ModMask::N2,
+                    })
+            })
+            .unwrap_or_else(x::ModMask::empty);
+        self.store_numlock_mask(mask)
+    }
+
+    fn numlock_mask(&self) -> x::ModMask {
+        if let Some(mask) = *self.numlock_mask.read().unwrap() {
+            return mask;
         }
-        x::ModMask::empty()
+        self.detect_numlock_mask()
+    }
+
+    fn store_numlock_mask(&self, mask: x::ModMask) -> x::ModMask {
+        *self.numlock_mask.write().unwrap() = Some(mask);
+        mask
     }
 }
 
@@ -3076,7 +3129,7 @@ impl WindowOps for XcbWindowOps {
     fn grab_button(&self, win: WindowId, btn: u8, mask: u32, mods: Mods) -> XcbResult<()> {
         let window = self.win(win)?;
         let base = mods_to_xcb(mods);
-        let numlock = self.detect_numlock_mask();
+        let numlock = self.numlock_mask();
         let combos = lock_modifier_combinations(base, x::ModMask::LOCK, numlock);
         for modifiers in combos {
             self.conn
@@ -4188,8 +4241,8 @@ struct XcbKeyOps {
     ids: XcbIdRegistry,
     min_keycode: u8,
     max_keycode: u8,
-    keymap: RwLock<Option<XcbKeymap>>,
-    numlock_mask: RwLock<Option<x::ModMask>>,
+    keymap: RwLock<Option<Arc<XcbKeymap>>>,
+    numlock_mask: Arc<RwLock<Option<x::ModMask>>>,
 }
 
 impl XcbKeyOps {
@@ -4198,6 +4251,7 @@ impl XcbKeyOps {
         ids: XcbIdRegistry,
         min_keycode: u8,
         max_keycode: u8,
+        numlock_mask: Arc<RwLock<Option<x::ModMask>>>,
     ) -> Self {
         Self {
             conn,
@@ -4205,11 +4259,11 @@ impl XcbKeyOps {
             min_keycode,
             max_keycode,
             keymap: RwLock::new(None),
-            numlock_mask: RwLock::new(None),
+            numlock_mask,
         }
     }
 
-    fn load_keymap(&self) -> XcbResult<XcbKeymap> {
+    fn load_keymap(&self) -> XcbResult<Arc<XcbKeymap>> {
         if let Some(map) = self.keymap.read().unwrap().clone() {
             return Ok(map);
         }
@@ -4224,6 +4278,7 @@ impl XcbKeyOps {
         });
         let reply = self.conn.wait_for_reply(cookie).map_err(xcb_err)?;
         let per = reply.keysyms_per_keycode() as usize;
+        let mut primary_keysym_to_keycodes: HashMap<KeySym, Vec<u8>> = HashMap::new();
         let mut keysym_to_keycodes: HashMap<KeySym, Vec<u8>> = HashMap::new();
         let mut keycode_to_keysym: HashMap<u8, KeySym> = HashMap::new();
 
@@ -4231,16 +4286,21 @@ impl XcbKeyOps {
             let keycode = self.min_keycode.saturating_add(idx as u8);
             if let Some(&primary) = symbols.first().filter(|&&sym| sym != 0) {
                 keycode_to_keysym.insert(keycode, primary);
+                primary_keysym_to_keycodes
+                    .entry(primary)
+                    .or_default()
+                    .push(keycode);
             }
             for &sym in symbols.iter().filter(|&&sym| sym != 0) {
                 keysym_to_keycodes.entry(sym).or_default().push(keycode);
             }
         }
 
-        let map = XcbKeymap {
+        let map = Arc::new(XcbKeymap {
+            primary_keysym_to_keycodes,
             keysym_to_keycodes,
             keycode_to_keysym,
-        };
+        });
         *self.keymap.write().unwrap() = Some(map.clone());
         Ok(map)
     }
@@ -4257,14 +4317,9 @@ impl XcbKeyOps {
 
     fn detect_numlock_mask(&self) -> XcbResult<x::ModMask> {
         let keymap = self.load_keymap()?;
-        let numlock_keys = keymap
-            .keysym_to_keycodes
-            .get(&0xff7f)
-            .cloned()
-            .unwrap_or_default();
-        if numlock_keys.is_empty() {
+        let Some(numlock_keys) = keymap.keysym_to_keycodes.get(&0xff7f) else {
             return Ok(x::ModMask::empty());
-        }
+        };
 
         let cookie = self.conn.send_request(&x::GetModifierMapping {});
         let reply = self.conn.wait_for_reply(cookie).map_err(xcb_err)?;
@@ -4292,6 +4347,7 @@ impl XcbKeyOps {
 
 #[derive(Clone)]
 struct XcbKeymap {
+    primary_keysym_to_keycodes: HashMap<KeySym, Vec<u8>>,
     keysym_to_keycodes: HashMap<KeySym, Vec<u8>>,
     keycode_to_keysym: HashMap<u8, KeySym>,
 }
@@ -4302,18 +4358,13 @@ impl KeyOps for XcbKeyOps {
         let keymap = self.load_keymap()?;
         let numlock = self.numlock_mask();
         for &(mods, keysym) in bindings {
-            let keycodes = keymap
-                .keycode_to_keysym
-                .iter()
-                .filter_map(|(&keycode, &primary)| (primary == keysym).then_some(keycode))
-                .collect::<Vec<_>>();
-            if keycodes.is_empty() {
+            let Some(keycodes) = keymap.primary_keysym_to_keycodes.get(&keysym) else {
                 log::warn!("XCB: no keycode found for keysym 0x{keysym:x}");
                 continue;
-            }
-            for key in keycodes {
-                let base = mods_to_xcb(mods);
-                let combos = lock_modifier_combinations(base, x::ModMask::LOCK, numlock);
+            };
+            let base = mods_to_xcb(mods);
+            let combos = lock_modifier_combinations(base, x::ModMask::LOCK, numlock);
+            for &key in keycodes {
                 for modifiers in combos {
                     if let Err(err) = self.conn.send_and_check_request(&x::GrabKey {
                         owner_events: false,
@@ -5058,6 +5109,10 @@ mod parity_tests {
     const X11RB_BACKEND_SRC: &str = include_str!("../x11rb/backend.rs");
     const X11RB_MOD_SRC: &str = include_str!("../x11rb/mod.rs");
     const XCB_BACKEND_SRC: &str = include_str!("backend.rs");
+    const X11_COMPOSITOR_MOD_SRC: &str = include_str!("../x11/compositor/mod.rs");
+    const X11_COMPOSITOR_INIT_SRC: &str = include_str!("../x11/compositor/init.rs");
+    const X11_COMPOSITOR_RENDER_SRC: &str = include_str!("../x11/compositor/render.rs");
+    const X11_COMPOSITOR_TFP_SRC: &str = include_str!("../x11/compositor/tfp.rs");
 
     fn impl_body_after<'a>(src: &'a str, needle: &str) -> &'a str {
         let start = src
@@ -5250,6 +5305,317 @@ mod parity_tests {
             body.contains("self.atoms.wm_normal_hints")
                 && body.contains("self.atoms.wm_size_hints"),
             "WM_NORMAL_HINTS must be fetched with property=WM_NORMAL_HINTS and type=WM_SIZE_HINTS"
+        );
+    }
+
+    #[test]
+    fn xcb_destroy_notify_defers_id_cleanup_until_after_dispatch() {
+        let start = XCB_BACKEND_SRC
+            .find("xcb::Event::X(x::Event::DestroyNotify(ev))")
+            .expect("missing DestroyNotify arm");
+        let end = XCB_BACKEND_SRC[start..]
+            .find("xcb::Event::X(x::Event::ConfigureRequest(ev))")
+            .map(|idx| start + idx)
+            .expect("missing ConfigureRequest arm after DestroyNotify");
+        let destroy_arm = &XCB_BACKEND_SRC[start..end];
+
+        assert!(
+            !destroy_arm.contains("remove_id") && !destroy_arm.contains(".remove("),
+            "DestroyNotify must keep the X11<->WindowId mapping alive until the event is dispatched"
+        );
+        assert!(
+            {
+                let backend_body = impl_body_after(XCB_BACKEND_SRC, "impl XcbBackend");
+                backend_body.contains("fn cleanup_destroyed_window")
+                    && backend_body.contains("self.ids.remove_id(win)")
+            },
+            "destroyed XCB window ids must be cleaned after event dispatch"
+        );
+    }
+
+    #[test]
+    fn xcb_event_dispatch_coalesces_motion_and_configure_notify() {
+        let body = impl_body_after(XCB_BACKEND_SRC, "impl XcbLoopData<'_>");
+
+        assert!(
+            body.contains("pending_motion: &mut Option<BackendEvent>")
+                && body.contains("pending_configure: &mut Option<BackendEvent>")
+                && body.contains("BackendEvent::MotionNotify")
+                && body.contains("BackendEvent::WindowConfigured"),
+            "XCB dispatch should coalesce high-frequency motion and configure events"
+        );
+        assert!(
+            body.contains("fn flush_pending_motion") && body.contains("fn flush_pending_configure"),
+            "XCB dispatch must flush coalesced event types explicitly"
+        );
+    }
+
+    #[test]
+    fn xcb_button_grabs_share_cached_numlock_mask() {
+        let new_body = impl_body_after(XCB_BACKEND_SRC, "pub fn new() -> XcbResult<Self>");
+        assert!(
+            new_body.contains("let numlock_mask = Arc::new(RwLock::new(None))")
+                && new_body.contains("numlock_mask.clone()"),
+            "XCB window and key ops should share one lazy NumLock cache"
+        );
+
+        let window_ops_struct_start = XCB_BACKEND_SRC
+            .find("struct XcbWindowOps")
+            .expect("missing XcbWindowOps struct");
+        let window_ops_struct_end = XCB_BACKEND_SRC[window_ops_struct_start..]
+            .find("impl XcbWindowOps")
+            .map(|idx| window_ops_struct_start + idx)
+            .expect("missing impl XcbWindowOps after struct");
+        let window_ops_struct = &XCB_BACKEND_SRC[window_ops_struct_start..window_ops_struct_end];
+        let window_ops_impl = impl_body_after(XCB_BACKEND_SRC, "impl XcbWindowOps");
+        let trait_impl = impl_body_after(XCB_BACKEND_SRC, "impl WindowOps for XcbWindowOps");
+        assert!(
+            window_ops_struct.contains("numlock_mask: Arc<RwLock<Option<x::ModMask>>>")
+                && window_ops_impl.contains("fn store_numlock_mask")
+                && trait_impl.contains("let numlock = self.numlock_mask();"),
+            "XCB button grabs should use the cached NumLock mask"
+        );
+
+        let key_ops_struct_start = XCB_BACKEND_SRC
+            .find("struct XcbKeyOps")
+            .expect("missing XcbKeyOps struct");
+        let key_ops_struct_end = XCB_BACKEND_SRC[key_ops_struct_start..]
+            .find("impl XcbKeyOps")
+            .map(|idx| key_ops_struct_start + idx)
+            .expect("missing impl XcbKeyOps after struct");
+        let key_ops_struct = &XCB_BACKEND_SRC[key_ops_struct_start..key_ops_struct_end];
+        let key_ops_trait_impl = impl_body_after(XCB_BACKEND_SRC, "impl KeyOps for XcbKeyOps");
+        assert!(
+            key_ops_struct.contains("numlock_mask: Arc<RwLock<Option<x::ModMask>>>")
+                && key_ops_trait_impl.contains("*self.numlock_mask.write().unwrap() = None"),
+            "MappingNotify cache clears should invalidate the shared NumLock mask"
+        );
+    }
+
+    #[test]
+    fn xcb_key_grabs_avoid_per_binding_keycode_vec() {
+        let key_ops_trait_impl = impl_body_after(XCB_BACKEND_SRC, "impl KeyOps for XcbKeyOps");
+        let grab_keys_start = key_ops_trait_impl
+            .find("fn grab_keys")
+            .expect("missing grab_keys");
+        let grab_keys_end = key_ops_trait_impl[grab_keys_start..]
+            .find("fn clear_key_grabs")
+            .map(|idx| grab_keys_start + idx)
+            .expect("missing clear_key_grabs after grab_keys");
+        let grab_keys_body = &key_ops_trait_impl[grab_keys_start..grab_keys_end];
+
+        assert!(
+            !grab_keys_body.contains("collect::<Vec"),
+            "grab_keys should stream cached keycodes instead of allocating a Vec per binding"
+        );
+        assert!(
+            grab_keys_body.contains("let combos = lock_modifier_combinations")
+                && grab_keys_body.contains("keymap.primary_keysym_to_keycodes.get(&keysym)")
+                && !grab_keys_body.contains("keycode_to_keysym.iter()"),
+            "grab_keys should compute modifier combos once per binding and use the cached primary keysym index"
+        );
+
+        let key_ops_impl = impl_body_after(XCB_BACKEND_SRC, "impl XcbKeyOps");
+        assert!(
+            key_ops_impl.contains("primary_keysym_to_keycodes")
+                && key_ops_impl.contains(".entry(primary)"),
+            "XCB keymap should precompute a primary-keysym index to match x11rb grab semantics"
+        );
+    }
+
+    #[test]
+    fn xcb_keymap_cache_uses_arc_not_hashmap_clone() {
+        let key_ops_struct_start = XCB_BACKEND_SRC
+            .find("struct XcbKeyOps")
+            .expect("missing XcbKeyOps struct");
+        let key_ops_struct_end = XCB_BACKEND_SRC[key_ops_struct_start..]
+            .find("impl XcbKeyOps")
+            .map(|idx| key_ops_struct_start + idx)
+            .expect("missing impl XcbKeyOps after struct");
+        let key_ops_struct = &XCB_BACKEND_SRC[key_ops_struct_start..key_ops_struct_end];
+        let key_ops_impl = impl_body_after(XCB_BACKEND_SRC, "impl XcbKeyOps");
+
+        assert!(
+            key_ops_struct.contains("keymap: RwLock<Option<Arc<XcbKeymap>>>"),
+            "cached XCB keymap should be Arc-backed to avoid cloning HashMaps"
+        );
+        assert!(
+            key_ops_impl.contains("fn load_keymap(&self) -> XcbResult<Arc<XcbKeymap>>")
+                && key_ops_impl.contains("let map = Arc::new(XcbKeymap"),
+            "load_keymap should clone an Arc on cache hits and store Arc<XcbKeymap>"
+        );
+    }
+
+    #[test]
+    fn xcb_numlock_detection_avoids_temporary_keycode_vectors() {
+        let window_ops_impl = impl_body_after(XCB_BACKEND_SRC, "impl XcbWindowOps");
+        let window_detect_start = window_ops_impl
+            .find("fn detect_numlock_mask")
+            .expect("missing XcbWindowOps detect_numlock_mask");
+        let window_detect_end = window_ops_impl[window_detect_start..]
+            .find("fn numlock_mask")
+            .map(|idx| window_detect_start + idx)
+            .expect("missing numlock_mask after window detect_numlock_mask");
+        let window_detect_body = &window_ops_impl[window_detect_start..window_detect_end];
+
+        assert!(
+            !window_detect_body.contains("Vec::new()") && !window_detect_body.contains(".push("),
+            "window-side NumLock detection should borrow keyboard mapping instead of collecting keycodes"
+        );
+        assert!(
+            window_detect_body.contains("let keysyms_per_keycode")
+                && window_detect_body.contains("let mut numlock_keycodes = [false; 256]")
+                && window_detect_body.contains("numlock_keycodes[code as usize]"),
+            "window-side NumLock detection should build a stack keycode table for modifier lookups"
+        );
+
+        let key_ops_impl = impl_body_after(XCB_BACKEND_SRC, "impl XcbKeyOps");
+        let key_detect_start = key_ops_impl
+            .find("fn detect_numlock_mask")
+            .expect("missing XcbKeyOps detect_numlock_mask");
+        let key_detect_body = &key_ops_impl[key_detect_start..];
+
+        assert!(
+            !key_detect_body.contains(".cloned().unwrap_or_default()"),
+            "key-side NumLock detection should borrow cached keycode lists"
+        );
+        assert!(
+            key_detect_body.contains("let Some(numlock_keys)")
+                && key_detect_body.contains("keymap.keysym_to_keycodes.get(&0xff7f)"),
+            "key-side NumLock detection should read NumLock keycodes directly from the cached keymap"
+        );
+    }
+
+    #[test]
+    fn xcb_and_x11rb_compositor_render_paths_share_lazy_tracking() {
+        let xcb_backend_impl = impl_body_after(XCB_BACKEND_SRC, "impl Backend for XcbBackend");
+        let xcb_render_start = xcb_backend_impl
+            .find("fn compositor_render_frame")
+            .expect("missing xcb compositor_render_frame");
+        let xcb_render_end = xcb_backend_impl[xcb_render_start..]
+            .find("fn take_screenshot_to_file")
+            .map(|idx| xcb_render_start + idx)
+            .expect("missing xcb function after compositor_render_frame");
+        let xcb_render_body = &xcb_backend_impl[xcb_render_start..xcb_render_end];
+
+        let x11rb_backend_impl =
+            impl_body_after(X11RB_BACKEND_SRC, "impl Backend for X11rbBackend");
+        let x11rb_render_start = x11rb_backend_impl
+            .find("fn compositor_render_frame")
+            .expect("missing x11rb compositor_render_frame");
+        let x11rb_render_end = x11rb_backend_impl[x11rb_render_start..]
+            .find("fn take_screenshot_to_file")
+            .map(|idx| x11rb_render_start + idx)
+            .expect("missing x11rb function after compositor_render_frame");
+        let x11rb_render_body = &x11rb_backend_impl[x11rb_render_start..x11rb_render_end];
+
+        assert!(
+            xcb_render_body.contains("x11_scene.reserve(scene.len())")
+                && x11rb_render_body.contains("x11_scene.reserve(scene.len())"),
+            "XCB and x11rb compositor scene conversion should pre-reserve scratch capacity"
+        );
+        assert!(
+            xcb_render_body.contains("ensure_scene_windows_tracked(&x11_scene")
+                && x11rb_render_body.contains("ensure_scene_windows_tracked(&x11_scene"),
+            "XCB and x11rb compositor render paths should share lazy tracking logic"
+        );
+
+        let render_impl = impl_body_after(
+            X11_COMPOSITOR_RENDER_SRC,
+            "impl<C: CompositorConnection> Compositor<C>",
+        );
+        assert!(
+            render_impl.contains("fn ensure_scene_windows_tracked")
+                && render_impl.contains("scratch_scene_info")
+                && render_impl.contains("scene_info.reserve(scene.len())")
+                && render_impl.contains("blur_dirty_wins.reserve(scene.len())")
+                && render_impl.contains("blur_dirty_wins.sort_unstable()")
+                && render_impl.contains("blur_dirty_wins.binary_search(&win).is_ok()")
+                && render_impl.contains("tfp_order.reserve(scene.len())"),
+            "shared X11 compositor render scratch buffers should reserve scene-sized capacity"
+        );
+        assert!(
+            render_impl.contains("let periodic_60_frame = self.frame_stats.frame_count % 60 == 0")
+                && render_impl.contains("if self.shader_hot_reload_enabled && periodic_60_frame")
+                && render_impl.contains("if periodic_60_frame"),
+            "shared X11 compositor render path should compute periodic frame checks once"
+        );
+        assert!(
+            render_impl.contains("let mut has_dirty = false")
+                && render_impl.contains("self.dirty_region_tracker.mark_dirty(dirty_rect)")
+                && render_impl
+                    .matches("dirty_region_tracker.mark_dirty")
+                    .count()
+                    == 1,
+            "shared X11 compositor render path should combine dirty detection and dirty-rect marking"
+        );
+        let tfp_order_start = render_impl
+            .find("Build priority-ordered window list")
+            .expect("missing TFP order block");
+        let tfp_order_end = render_impl[tfp_order_start..]
+            .find("let mut tfp_budget_exhausted")
+            .map(|idx| tfp_order_start + idx)
+            .expect("missing TFP budget marker after order block");
+        let tfp_order_body = &render_impl[tfp_order_start..tfp_order_end];
+        assert!(
+            tfp_order_body.contains("let mut focused_in_scene = false")
+                && !tfp_order_body.contains("scene.iter().any"),
+            "TFP update ordering should avoid an extra scene scan for the focused window"
+        );
+
+        let diagnostics_start = render_impl
+            .find("Track render diagnostics only when info logging is enabled")
+            .expect("missing render diagnostics comment");
+        let diagnostics_end = render_impl[diagnostics_start..]
+            .find("Phase 2.3: Direct scanout check")
+            .map(|idx| diagnostics_start + idx)
+            .expect("missing direct scanout marker after diagnostics");
+        let diagnostics_body = &render_impl[diagnostics_start..diagnostics_end];
+        assert!(
+            diagnostics_body.contains("if log::log_enabled!(log::Level::Info)")
+                && diagnostics_body.contains("RENDER_LOG_COUNT")
+                && diagnostics_body.contains("RENDER_FREQ_COUNT")
+                && diagnostics_body.find("if log::log_enabled!(log::Level::Info)")
+                    < diagnostics_body.find("RENDER_LOG_COUNT"),
+            "render diagnostics counters should stay behind the info-log guard"
+        );
+
+        let compositor_struct_start = X11_COMPOSITOR_MOD_SRC
+            .find("pub(crate) struct Compositor<C>")
+            .expect("missing Compositor struct");
+        let compositor_struct_end = X11_COMPOSITOR_MOD_SRC[compositor_struct_start..]
+            .find("impl<C: CompositorConnection> Drop for Compositor<C>")
+            .map(|idx| compositor_struct_start + idx)
+            .expect("missing Compositor impl after struct");
+        let compositor_struct =
+            &X11_COMPOSITOR_MOD_SRC[compositor_struct_start..compositor_struct_end];
+        let init_impl = impl_body_after(
+            X11_COMPOSITOR_INIT_SRC,
+            "impl<C: CompositorConnection> Compositor<C>",
+        );
+        let tfp_impl = impl_body_after(
+            X11_COMPOSITOR_TFP_SRC,
+            "impl<C: CompositorConnection> Compositor<C>",
+        );
+        assert!(
+            compositor_struct.contains("scratch_refresh_wins: Vec<u32>")
+                && compositor_struct.contains("scratch_new_pixmaps: Vec<(u32, u32)>")
+                && init_impl.contains("scratch_refresh_wins: Vec::new()")
+                && init_impl.contains("scratch_new_pixmaps: Vec::new()"),
+            "X11 compositor should own reusable scratch buffers for pixmap refresh batches"
+        );
+        assert!(
+            tfp_impl.contains("std::mem::take(&mut self.scratch_refresh_wins)")
+                && tfp_impl.contains("std::mem::take(&mut self.scratch_new_pixmaps)")
+                && tfp_impl.contains("new_pixmaps.drain(..)")
+                && tfp_impl.contains("self.scratch_refresh_wins = refresh_wins")
+                && tfp_impl.contains("self.scratch_new_pixmaps = new_pixmaps"),
+            "refresh_pixmaps should reuse compositor scratch Vecs"
+        );
+        assert!(
+            !tfp_impl.contains("let pixmap_attrs: Vec<i32> = vec!")
+                && tfp_impl.contains("let pixmap_attrs = ["),
+            "GLX pixmap attributes should use stack arrays instead of heap Vecs"
         );
     }
 }
