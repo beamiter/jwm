@@ -41,6 +41,7 @@ use smithay::utils::{Physical, Scale, Size, Transform};
 use smithay::wayland::compositor::{get_children, with_states};
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 
+use smithay::backend::drm::{DrmNode, NodeType};
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, Event as InputEventExt,
     GestureBeginEvent as GestureBeginEventTrait, GestureEndEvent as GestureEndEventTrait,
@@ -52,7 +53,7 @@ use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface}
 use smithay::backend::session::Event as SessionEvent;
 use smithay::backend::session::Session;
 use smithay::backend::session::libseat::LibSeatSession;
-use smithay::backend::udev::{UdevBackend as SmithayUdevBackend, UdevEvent};
+use smithay::backend::udev::{UdevBackend as SmithayUdevBackend, UdevEvent, primary_gpu};
 use smithay::desktop::layer_map_for_output;
 use smithay::desktop::utils::bbox_from_surface_tree;
 use smithay::input::keyboard::{FilterResult, ModifiersState};
@@ -127,8 +128,10 @@ struct SharedState {
     output_key_to_id: HashMap<u64, OutputId>,
     next_output_raw: u64,
     device_paths: HashMap<u64, PathBuf>,
+    preferred_device_id: Option<u64>,
 
     kms_needs_reinit: bool,
+    session_active: bool,
 
     /// True while the WM screenshot region-select grab is active.
     /// Suppresses pointer/keyboard events from reaching Wayland clients.
@@ -152,8 +155,10 @@ impl Default for SharedState {
             output_key_to_id: HashMap::new(),
             next_output_raw: 0,
             device_paths: HashMap::new(),
+            preferred_device_id: None,
 
             kms_needs_reinit: false,
+            session_active: true,
             screenshot_grab_active: false,
         }
     }
@@ -720,7 +725,76 @@ impl UdevBackend {
         }
     }
 
+    fn drop_kms(&mut self) {
+        if let Some(old) = self.kms.take() {
+            if let Some(token) = old.borrow_mut().registration_token.take() {
+                let _ = self.event_loop.handle().remove(token);
+            }
+        }
+    }
+
+    fn sync_wayland_state_from_kms(&mut self) {
+        let Some(kms) = self.kms.as_ref() else {
+            self.state.outputs.clear();
+            self.state.gamma_sizes.clear();
+            return;
+        };
+
+        self.state.outputs = kms.borrow().outputs();
+        self.state.gamma_sizes = kms.borrow_mut().gamma_sizes().into_iter().collect();
+        attach_edid_caps_to_outputs(&self.state.outputs, &self.shared.lock_safe().outputs);
+
+        {
+            let kms_ref = kms.borrow();
+            let render_formats = kms_ref.dmabuf_render_formats();
+            let scanout_formats = kms_ref.dmabuf_render_formats();
+            let main_device = kms_ref.dev_t();
+            drop(kms_ref);
+            self.state.ensure_dmabuf_global_with_feedback(
+                &self.display_handle,
+                render_formats,
+                scanout_formats,
+                main_device,
+            );
+        }
+
+        if let Some(ref screencopy_queue) = self.state.screencopy_pending {
+            kms.borrow_mut()
+                .set_screencopy_pending(screencopy_queue.clone());
+        }
+        if let Some(ref image_capture_queue) = self.state.image_capture_pending {
+            kms.borrow_mut()
+                .set_image_capture_pending(image_capture_queue.clone());
+        }
+    }
+
+    fn recreate_compositor_for_current_kms(&mut self) {
+        if self.compositor.is_none() {
+            return;
+        }
+
+        self.compositor = None;
+        if let Some(kms) = &self.kms {
+            let mut kms_ref = kms.borrow_mut();
+            let (w, h) = kms_ref.total_screen_size();
+            let hdr_10bit = kms_ref.supports_10bit();
+            match kms_ref.with_renderer(|gl| unsafe { WaylandCompositor::new(gl, w, h, hdr_10bit) })
+            {
+                Ok(Ok(compositor)) => self.compositor = Some(compositor),
+                Ok(Err(e)) => {
+                    log::error!("[udev] compositor recreate after KMS reinit failed: {e}")
+                }
+                Err(e) => log::error!("[udev] GL access for compositor recreate failed: {e:?}"),
+            }
+        }
+        self.compositor_apply_config();
+    }
+
     fn maybe_reinit_kms(&mut self) {
+        if !self.shared.lock_safe().session_active {
+            return;
+        }
+
         let should = {
             let mut s = self.shared.lock_safe();
             if s.kms_needs_reinit {
@@ -734,38 +808,14 @@ impl UdevBackend {
             return;
         }
 
-        let selected = {
-            let s = self.shared.lock_safe();
-            s.device_paths
-                .iter()
-                .min_by_key(|(id, _)| *id)
-                .map(|(id, p)| (*id, p.clone()))
-        };
+        let selected = selected_kms_device(&self.shared);
 
         let Some((dev_id, dev_path)) = selected else {
-            // No DRM devices; drop KMS if any.
-            if let Some(old) = self.kms.take() {
-                if let Some(token) = old.borrow_mut().registration_token.take() {
-                    let _ = self.event_loop.handle().remove(token);
-                }
-            }
+            self.drop_kms();
             return;
         };
 
-        let output_layout: std::collections::HashMap<u64, (i32, i32)> = {
-            let s = self.shared.lock_safe();
-            let mut id_to_key: HashMap<OutputId, u64> = HashMap::new();
-            for (key, id) in &s.output_key_to_id {
-                id_to_key.insert(*id, *key);
-            }
-            let mut layout = std::collections::HashMap::new();
-            for o in &s.outputs {
-                if let Some(key) = id_to_key.get(&o.id) {
-                    layout.insert(*key, (o.x, o.y));
-                }
-            }
-            layout
-        };
+        let output_layout = output_layout_from_shared(&self.shared);
 
         let display_handle = self.display_handle.clone();
         match KmsState::new(
@@ -780,67 +830,16 @@ impl UdevBackend {
         ) {
             Ok(new_kms) => {
                 // Remove old notifier after new one is registered.
-                if let Some(old) = self.kms.take() {
-                    if let Some(token) = old.borrow_mut().registration_token.take() {
-                        let _ = self.event_loop.handle().remove(token);
-                    }
-                }
+                self.drop_kms();
 
                 self.kms = Some(new_kms);
                 self.state.needs_redraw = true;
-                self.state.outputs = self
-                    .kms
-                    .as_ref()
-                    .map(|k| k.borrow().outputs())
-                    .unwrap_or_default();
-                self.state.gamma_sizes = self
-                    .kms
-                    .as_ref()
-                    .map(|k| k.borrow_mut().gamma_sizes().into_iter().collect())
-                    .unwrap_or_default();
-                attach_edid_caps_to_outputs(&self.state.outputs, &self.shared.lock_safe().outputs);
-                // Wire screencopy pending queue to KMS state.
-                if let Some(ref screencopy_queue) = self.state.screencopy_pending {
-                    if let Some(ref kms) = self.kms {
-                        kms.borrow_mut()
-                            .set_screencopy_pending(screencopy_queue.clone());
-                    }
-                }
-                if let Some(ref image_capture_queue) = self.state.image_capture_pending {
-                    if let Some(ref kms) = self.kms {
-                        kms.borrow_mut()
-                            .set_image_capture_pending(image_capture_queue.clone());
-                    }
-                }
+                self.sync_wayland_state_from_kms();
 
                 // The rebuilt KMS state carries a fresh EGL context, so every GL
                 // object the compositor created in the previous context (shaders,
-                // textures, FBOs) is now dangling. If the compositor was enabled,
-                // recreate it against the new renderer; otherwise effects render
-                // from invalid handles (black screen / GL errors) after the
-                // VT-switch back. Its Drop is intentionally empty, so dropping the
-                // stale compositor issues no GL calls on the new context.
-                if self.compositor.is_some() {
-                    self.compositor = None;
-                    if let Some(kms) = &self.kms {
-                        let mut kms_ref = kms.borrow_mut();
-                        let (w, h) = kms_ref.total_screen_size();
-                        let hdr_10bit = kms_ref.supports_10bit();
-                        match kms_ref.with_renderer(|gl| unsafe {
-                            WaylandCompositor::new(gl, w, h, hdr_10bit)
-                        }) {
-                            Ok(Ok(compositor)) => self.compositor = Some(compositor),
-                            Ok(Err(e)) => log::error!(
-                                "[udev] compositor recreate after KMS reinit failed: {e}"
-                            ),
-                            Err(e) => log::error!(
-                                "[udev] GL access for compositor recreate failed: {e:?}"
-                            ),
-                        }
-                    }
-                    // Restore config-driven compositor settings (blur, etc.).
-                    self.compositor_apply_config();
-                }
+                // textures, FBOs) is now dangling.
+                self.recreate_compositor_for_current_kms();
 
                 self.request_flush();
             }
@@ -1068,6 +1067,8 @@ impl UdevBackend {
         let (mut session, notifier) =
             LibSeatSession::new().map_err(|e| BackendError::Other(Box::new(e)))?;
         let seat_name = session.seat();
+        let session_active_at_start = session.is_active();
+        shared.lock_safe().session_active = session_active_at_start;
 
         let (wayland_state, socket_name) = JwmWaylandState::init(
             &display_handle,
@@ -1185,6 +1186,10 @@ impl UdevBackend {
             )))
         })?;
         let libinput_backend = LibinputInputBackend::new(libinput_context.clone());
+        if !session_active_at_start {
+            log::debug!("[udev] session inactive at startup; suspending libinput until activate");
+            libinput_context.suspend();
+        }
 
         {
             let mut shared_guard = shared.lock_safe();
@@ -1194,47 +1199,28 @@ impl UdevBackend {
                     .insert(device_id, path.to_path_buf());
             }
         }
-        rebuild_outputs(&shared, &pending_events)?;
+        refresh_preferred_device_id(&shared, &seat_name);
+        if session_active_at_start {
+            rebuild_outputs(&shared, &pending_events)?;
+        } else {
+            log::debug!("[udev] session inactive at startup; delaying output scan");
+        }
 
         // Keep a copy of output geometries in the Wayland state for popup constraining.
-        {
-            let s = shared.lock_safe();
-            state.output_rects = s
-                .outputs
-                .iter()
-                .map(|o| {
-                    smithay::utils::Rectangle::new((o.x, o.y).into(), (o.width, o.height).into())
-                })
-                .collect();
-        }
+        sync_output_rects(&mut state, &shared);
 
         // Minimal visible output: initialize KMS and render a solid background.
         // If this fails (e.g. missing permissions / no DRM device), keep running headless.
         let kms = {
-            let selected = {
-                let s = shared.lock_safe();
-                s.device_paths
-                    .iter()
-                    .min_by_key(|(id, _)| *id)
-                    .map(|(id, p)| (*id, p.clone()))
-            };
+            let selected = selected_kms_device(&shared);
 
-            match selected {
-                Some((dev_id, p)) => {
-                    let output_layout: std::collections::HashMap<u64, (i32, i32)> = {
-                        let s = shared.lock_safe();
-                        let mut id_to_key: HashMap<OutputId, u64> = HashMap::new();
-                        for (key, id) in &s.output_key_to_id {
-                            id_to_key.insert(*id, *key);
-                        }
-                        let mut layout = std::collections::HashMap::new();
-                        for o in &s.outputs {
-                            if let Some(key) = id_to_key.get(&o.id) {
-                                layout.insert(*key, (o.x, o.y));
-                            }
-                        }
-                        layout
-                    };
+            match (session_active_at_start, selected) {
+                (false, _) => {
+                    log::debug!("[udev] session inactive at startup; delaying KMS init");
+                    None
+                }
+                (true, Some((dev_id, p))) => {
+                    let output_layout = output_layout_from_shared(&shared);
 
                     match KmsState::new(
                         &mut session,
@@ -1253,7 +1239,7 @@ impl UdevBackend {
                         }
                     }
                 }
-                None => None,
+                (true, None) => None,
             }
         };
 
@@ -2193,40 +2179,32 @@ impl UdevBackend {
         {
             let shared = shared.clone();
             let pending_events = pending_events.clone();
+            let seat_name = seat_name.clone();
             event_loop
                 .handle()
                 .insert_source(notifier, move |event, &mut (), _state| match event {
                     SessionEvent::PauseSession => {
+                        shared.lock_safe().session_active = false;
                         libinput_context.suspend();
                         pending_events
                             .lock_safe()
                             .push_back(BackendEvent::ScreenLayoutChanged);
                     }
                     SessionEvent::ActivateSession => {
+                        shared.lock_safe().session_active = true;
                         if let Err(e) = libinput_context.resume() {
                             log::warn!("[udev] libinput resume after VT-switch failed: {e:?}");
                         }
+                        refresh_preferred_device_id(&shared, &seat_name);
                         pending_events
                             .lock_safe()
                             .push_back(BackendEvent::ScreenLayoutChanged);
                         let _ = rebuild_outputs(&shared, &pending_events);
-                        {
-                            let s = shared.lock_safe();
-                            _state.output_rects = s
-                                .outputs
-                                .iter()
-                                .map(|o| {
-                                    smithay::utils::Rectangle::new(
-                                        (o.x, o.y).into(),
-                                        (o.width, o.height).into(),
-                                    )
-                                })
-                                .collect();
-                        }
+                        sync_output_rects(_state, &shared);
                         if let Some(grab_win) = _state.popup_grab_toplevel {
                             _state.reconstrain_popups_for_toplevel(grab_win);
                         }
-                        shared.lock_safe().kms_needs_reinit = true;
+                        queue_kms_reinit(&shared);
                     }
                 })
                 .map_err(|e| {
@@ -2239,44 +2217,52 @@ impl UdevBackend {
         {
             let shared = shared.clone();
             let pending_events = pending_events.clone();
+            let seat_name = seat_name.clone();
             event_loop
                 .handle()
                 .insert_source(udev_backend, move |event, _, _state| {
-                    match event {
+                    let device_lifecycle_changed = match event {
                         UdevEvent::Added { device_id, path } => {
                             shared
                                 .lock_safe()
                                 .device_paths
                                 .insert(device_id, path.to_path_buf());
+                            true
                         }
                         UdevEvent::Changed { device_id } => {
                             let _ = device_id;
+                            false
                         }
                         UdevEvent::Removed { device_id } => {
                             shared.lock_safe().device_paths.remove(&device_id);
+                            true
                         }
+                    };
+                    if device_lifecycle_changed {
+                        refresh_preferred_device_id(&shared, &seat_name);
                     }
-                    let _ = rebuild_outputs(&shared, &pending_events);
-                    {
-                        let s = shared.lock_safe();
-                        _state.output_rects = s
-                            .outputs
-                            .iter()
-                            .map(|o| {
-                                smithay::utils::Rectangle::new(
-                                    (o.x, o.y).into(),
-                                    (o.width, o.height).into(),
-                                )
-                            })
-                            .collect();
+
+                    if !shared.lock_safe().session_active {
+                        log::debug!("[udev] delaying output refresh while session is inactive");
+                        return;
                     }
-                    if let Some(grab_win) = _state.popup_grab_toplevel {
-                        _state.reconstrain_popups_for_toplevel(grab_win);
+
+                    let outputs_changed =
+                        rebuild_outputs(&shared, &pending_events).unwrap_or_else(|err| {
+                            log::warn!("[udev] rebuild_outputs failed: {err:?}");
+                            false
+                        });
+
+                    if outputs_changed {
+                        sync_output_rects(_state, &shared);
+                        if let Some(grab_win) = _state.popup_grab_toplevel {
+                            _state.reconstrain_popups_for_toplevel(grab_win);
+                        }
+                        queue_kms_reinit(&shared);
+                        pending_events
+                            .lock_safe()
+                            .push_back(BackendEvent::ScreenLayoutChanged);
                     }
-                    shared.lock_safe().kms_needs_reinit = true;
-                    pending_events
-                        .lock_safe()
-                        .push_back(BackendEvent::ScreenLayoutChanged);
                 })
                 .map_err(|e| {
                     BackendError::Message(format!("calloop insert_source(udev) failed: {e}"))
@@ -3864,20 +3850,7 @@ impl Backend for UdevBackend {
                             all_ok = false;
                         }
                         // Refresh advertised outputs and trigger a relayout.
-                        self.state.outputs = self
-                            .kms
-                            .as_ref()
-                            .map(|k| k.borrow().outputs())
-                            .unwrap_or_default();
-                        self.state.gamma_sizes = self
-                            .kms
-                            .as_ref()
-                            .map(|k| k.borrow_mut().gamma_sizes().into_iter().collect())
-                            .unwrap_or_default();
-                        attach_edid_caps_to_outputs(
-                            &self.state.outputs,
-                            &self.shared.lock_safe().outputs,
-                        );
+                        self.sync_wayland_state_from_kms();
                         self.state.needs_redraw = true;
                         self.state
                             .pending_events
@@ -3919,10 +3892,12 @@ impl Backend for UdevBackend {
             // accept a new frame. This prevents the GPU from doing expensive
             // rendering that will be discarded because the previous page-flip
             // hasn't completed yet.
-            let can_present = self
-                .kms
-                .as_ref()
-                .map_or(true, |k| !k.borrow().any_frame_pending());
+            let session_active = self.shared.lock_safe().session_active;
+            let can_present = session_active
+                && self
+                    .kms
+                    .as_ref()
+                    .map_or(true, |k| !k.borrow().any_frame_pending());
 
             let needs_redraw = self.state.needs_redraw;
             if needs_redraw && can_present {
@@ -3960,9 +3935,11 @@ impl Backend for UdevBackend {
             let has_pending_events = !self.pending_events.lock_safe().is_empty();
             let needs_tick = handler.needs_tick();
             let kms_pending = self.kms.as_ref().map_or(false, |k| k.borrow().needs_render);
+            let render_work_pending =
+                session_active && (needs_tick || kms_pending || self.state.needs_redraw);
             let timeout = if has_pending_events {
                 Some(std::time::Duration::ZERO)
-            } else if needs_tick || kms_pending || self.state.needs_redraw {
+            } else if render_work_pending {
                 Some(std::time::Duration::from_millis(16))
             } else {
                 None
@@ -4003,10 +3980,205 @@ impl Backend for UdevBackend {
     }
 }
 
+fn selected_kms_device(shared: &Arc<Mutex<SharedState>>) -> Option<(u64, PathBuf)> {
+    let s = shared.lock_safe();
+    let output_device_ids = current_output_device_ids(&s);
+    let has_outputs = |device_id: u64| output_device_ids.contains(&device_id);
+
+    if let Some(device_id) = s.preferred_device_id {
+        if let Some(path) = s.device_paths.get(&device_id) {
+            if has_outputs(device_id) {
+                return Some((device_id, path.clone()));
+            }
+        }
+    }
+
+    if let Some((device_id, path)) = s
+        .device_paths
+        .iter()
+        .filter(|(id, _)| has_outputs(**id))
+        .min_by_key(|(id, _)| *id)
+    {
+        return Some((*device_id, path.clone()));
+    }
+
+    if let Some(device_id) = s.preferred_device_id {
+        if let Some(path) = s.device_paths.get(&device_id) {
+            return Some((device_id, path.clone()));
+        }
+    }
+
+    s.device_paths
+        .iter()
+        .min_by_key(|(id, _)| *id)
+        .map(|(id, path)| (*id, path.clone()))
+}
+
+fn current_output_device_ids(shared: &SharedState) -> HashSet<u64> {
+    let id_to_key: HashMap<OutputId, u64> = shared
+        .output_key_to_id
+        .iter()
+        .map(|(key, id)| (*id, *key))
+        .collect();
+
+    shared
+        .outputs
+        .iter()
+        .filter_map(|output| id_to_key.get(&output.id).map(|key| *key >> 32))
+        .collect()
+}
+
+fn refresh_preferred_device_id(shared: &Arc<Mutex<SharedState>>, seat_name: &str) {
+    let device_paths = shared.lock_safe().device_paths.clone();
+    let preferred = preferred_kms_device_id(seat_name, &device_paths);
+
+    let mut s = shared.lock_safe();
+    if s.preferred_device_id != preferred {
+        match preferred {
+            Some(id) => log::info!("[udev] preferred KMS device set to dev_id={id}"),
+            None => log::debug!("[udev] no preferred KMS device; using stable fallback order"),
+        }
+    }
+    s.preferred_device_id = preferred;
+}
+
+fn preferred_kms_device_id(seat_name: &str, device_paths: &HashMap<u64, PathBuf>) -> Option<u64> {
+    if let Some(path) = std::env::var_os("JWM_DRM_DEVICE").map(PathBuf::from) {
+        if let Some(device_id) = match_drm_node_to_device_id(&path, device_paths) {
+            return Some(device_id);
+        }
+        log::warn!(
+            "[udev] JWM_DRM_DEVICE={:?} did not match a DRM device for seat {}; falling back",
+            path,
+            seat_name
+        );
+    }
+
+    match primary_gpu(seat_name) {
+        Ok(Some(path)) => match_drm_node_to_device_id(&path, device_paths),
+        Ok(None) => None,
+        Err(err) => {
+            log::debug!("[udev] primary_gpu({seat_name}) failed: {err:?}");
+            None
+        }
+    }
+}
+
+fn match_drm_node_to_device_id(path: &Path, device_paths: &HashMap<u64, PathBuf>) -> Option<u64> {
+    let node = DrmNode::from_path(path).ok()?;
+    let mut candidates = Vec::with_capacity(2);
+    if let Some(Ok(primary)) = node.node_with_type(NodeType::Primary) {
+        candidates.push(primary.dev_id() as u64);
+    }
+    candidates.push(node.dev_id() as u64);
+    candidates.dedup();
+
+    candidates
+        .into_iter()
+        .find(|device_id| device_paths.contains_key(device_id))
+}
+
+fn output_layout_from_shared(shared: &Arc<Mutex<SharedState>>) -> HashMap<u64, (i32, i32)> {
+    let s = shared.lock_safe();
+    let id_to_key: HashMap<OutputId, u64> = s
+        .output_key_to_id
+        .iter()
+        .map(|(key, id)| (*id, *key))
+        .collect();
+
+    s.outputs
+        .iter()
+        .filter_map(|output| {
+            id_to_key
+                .get(&output.id)
+                .map(|key| (*key, (output.x, output.y)))
+        })
+        .collect()
+}
+
+fn sync_output_rects(state: &mut JwmWaylandState, shared: &Arc<Mutex<SharedState>>) {
+    let s = shared.lock_safe();
+    state.output_rects = s
+        .outputs
+        .iter()
+        .map(|o| smithay::utils::Rectangle::new((o.x, o.y).into(), (o.width, o.height).into()))
+        .collect();
+}
+
+fn queue_kms_reinit(shared: &Arc<Mutex<SharedState>>) {
+    shared.lock_safe().kms_needs_reinit = true;
+}
+
+#[cfg(test)]
+mod udev_backend_selection_tests {
+    use super::*;
+
+    fn test_output(id: OutputId, name: &str) -> OutputInfo {
+        OutputInfo {
+            id,
+            name: name.to_string(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+            refresh_rate: 60_000,
+            hdr_capable: false,
+            hdr_metadata: None,
+        }
+    }
+
+    #[test]
+    fn selected_kms_device_ignores_stale_output_keys() {
+        let shared = Arc::new(Mutex::new(SharedState::default()));
+        {
+            let mut s = shared.lock_safe();
+            s.device_paths.insert(1, PathBuf::from("/dev/dri/card1"));
+            s.device_paths.insert(2, PathBuf::from("/dev/dri/card2"));
+            s.preferred_device_id = Some(1);
+
+            // Device 1 has only a historical output key. The current output
+            // list belongs to device 2, so device 2 must win.
+            s.output_key_to_id.insert(1u64 << 32, OutputId(10));
+            s.output_key_to_id.insert(2u64 << 32, OutputId(20));
+            s.outputs.push(test_output(OutputId(20), "HDMI-A-1"));
+        }
+
+        let selected = selected_kms_device(&shared).map(|(device_id, _)| device_id);
+        assert_eq!(selected, Some(2));
+    }
+
+    #[test]
+    fn current_output_device_ids_only_uses_live_outputs() {
+        let mut s = SharedState::default();
+        s.output_key_to_id.insert(1u64 << 32, OutputId(10));
+        s.output_key_to_id.insert(2u64 << 32, OutputId(20));
+        s.outputs.push(test_output(OutputId(20), "HDMI-A-1"));
+
+        let ids = current_output_device_ids(&s);
+        assert!(!ids.contains(&1));
+        assert!(ids.contains(&2));
+    }
+
+    #[test]
+    fn output_info_equivalent_covers_scale_and_hdr() {
+        let a = test_output(OutputId(1), "HDMI-A-1");
+        let mut b = a.clone();
+        assert!(output_info_equivalent(&a, &b));
+
+        b.scale = 1.25;
+        assert!(!output_info_equivalent(&a, &b));
+
+        b = a.clone();
+        b.hdr_capable = true;
+        assert!(!output_info_equivalent(&a, &b));
+    }
+}
+
 fn rebuild_outputs(
     shared: &Arc<Mutex<SharedState>>,
     pending_events: &Arc<Mutex<VecDeque<BackendEvent>>>,
-) -> Result<(), BackendError> {
+) -> Result<bool, BackendError> {
     let (old_outputs, device_paths, mut key_to_id, mut next_raw) = {
         let s = shared.lock_safe();
         (
@@ -4022,7 +4194,13 @@ fn rebuild_outputs(
     let mut device_paths: Vec<(u64, PathBuf)> = device_paths.into_iter().collect();
     device_paths.sort_by_key(|(id, _)| *id);
     for (dev_id, path) in device_paths {
-        let scanned = scan_drm_outputs(dev_id, &path)?;
+        let scanned = match scan_drm_outputs(dev_id, &path) {
+            Ok(scanned) => scanned,
+            Err(err) => {
+                log::warn!("[udev] failed to scan DRM outputs for {:?}: {err:?}", path);
+                continue;
+            }
+        };
         for (key, mut info) in scanned {
             info.x = x_cursor;
             info.y = 0;
@@ -4052,26 +4230,24 @@ fn rebuild_outputs(
         new_by_id.insert(o.id, o.clone());
     }
 
+    let mut changed = false;
     {
         let mut q = pending_events.lock_safe();
         for (id, old) in &old_by_id {
             if !new_by_id.contains_key(id) {
+                changed = true;
                 q.push_back(BackendEvent::OutputRemoved(*id));
             } else {
                 let new = new_by_id.get(id).unwrap();
-                if new.width != old.width
-                    || new.height != old.height
-                    || new.x != old.x
-                    || new.y != old.y
-                    || new.refresh_rate != old.refresh_rate
-                    || new.name != old.name
-                {
+                if !output_info_equivalent(old, new) {
+                    changed = true;
                     q.push_back(BackendEvent::OutputChanged(new.clone()));
                 }
             }
         }
         for (id, new) in &new_by_id {
             if !old_by_id.contains_key(id) {
+                changed = true;
                 q.push_back(BackendEvent::OutputAdded(new.clone()));
             }
         }
@@ -4083,7 +4259,36 @@ fn rebuild_outputs(
         s.output_key_to_id = key_to_id;
         s.next_output_raw = next_raw;
     }
-    Ok(())
+    Ok(changed)
+}
+
+fn output_info_equivalent(a: &OutputInfo, b: &OutputInfo) -> bool {
+    a.name == b.name
+        && a.x == b.x
+        && a.y == b.y
+        && a.width == b.width
+        && a.height == b.height
+        && a.scale.to_bits() == b.scale.to_bits()
+        && a.refresh_rate == b.refresh_rate
+        && a.hdr_capable == b.hdr_capable
+        && hdr_metadata_equivalent(a.hdr_metadata.as_ref(), b.hdr_metadata.as_ref())
+}
+
+fn hdr_metadata_equivalent(
+    a: Option<&crate::backend::edid::EdidHdrCapabilities>,
+    b: Option<&crate::backend::edid::EdidHdrCapabilities>,
+) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a.max_luminance_nits.to_bits() == b.max_luminance_nits.to_bits()
+                && a.min_luminance_nits.to_bits() == b.min_luminance_nits.to_bits()
+                && a.supports_bt2020 == b.supports_bt2020
+                && a.supports_pq == b.supports_pq
+                && a.supports_hlg == b.supports_hlg
+        }
+        _ => false,
+    }
 }
 
 fn scan_drm_outputs(dev_id: u64, path: &Path) -> Result<Vec<(u64, OutputInfo)>, BackendError> {

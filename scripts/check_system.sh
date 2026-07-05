@@ -65,6 +65,8 @@ echo ""
 # 7. 环境变量
 echo "🌍 Environment:"
 env | grep -E "XDG_|WAYLAND|DISPLAY" || echo "  No relevant env vars"
+echo "  JWM_BACKEND=${JWM_BACKEND:-<unset>}"
+echo "  JWM_DRM_DEVICE=${JWM_DRM_DEVICE:-<unset>}"
 echo ""
 
 # 8. Rust 工具链

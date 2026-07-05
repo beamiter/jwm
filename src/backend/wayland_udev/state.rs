@@ -407,16 +407,17 @@ impl JwmWaylandState {
         use smithay::wayland::dmabuf::DmabufFeedbackBuilder;
         use smithay::reexports::wayland_protocols::wp::linux_dmabuf::zv1::server::zwp_linux_dmabuf_feedback_v1::TrancheFlags;
 
-        if self.dmabuf_global.is_some() {
-            return;
-        }
-
         let render_fmts: Vec<DmabufFormat> = render_formats.into_iter().collect();
         let scanout_fmts: Vec<DmabufFormat> = scanout_formats.into_iter().collect();
 
-        // Stash for ext-image-copy-capture dmabuf advertising.
+        // Stash for ext-image-copy-capture dmabuf advertising. Keep this fresh
+        // across KMS rebuilds even when the Wayland global already exists.
         self.dmabuf_main_device = Some(main_device);
         self.dmabuf_render_formats = render_fmts.clone();
+
+        if self.dmabuf_global.is_some() {
+            return;
+        }
 
         match DmabufFeedbackBuilder::new(main_device, render_fmts.iter().copied())
             .add_preference_tranche(
