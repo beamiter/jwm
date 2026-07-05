@@ -41,6 +41,18 @@ impl Jwm {
             if std::env::var_os("XDG_SESSION_TYPE").is_none() {
                 command.env("XDG_SESSION_TYPE", "wayland");
             }
+            command.env(
+                "XDG_CURRENT_DESKTOP",
+                std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "jwm".to_string()),
+            );
+            command.env(
+                "XDG_SESSION_DESKTOP",
+                std::env::var("XDG_SESSION_DESKTOP").unwrap_or_else(|_| "jwm".to_string()),
+            );
+            command.env(
+                "DESKTOP_SESSION",
+                std::env::var("DESKTOP_SESSION").unwrap_or_else(|_| "jwm".to_string()),
+            );
             if std::env::var_os("WINIT_UNIX_BACKEND").is_none() {
                 command.env("WINIT_UNIX_BACKEND", "wayland");
             }

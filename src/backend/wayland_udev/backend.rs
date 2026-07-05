@@ -708,6 +708,37 @@ fn env_flag(name: &str) -> bool {
     std::env::var_os(name).as_deref() == Some(std::ffi::OsStr::new("1"))
 }
 
+fn spawn_env_import(vars: &[&str]) {
+    if vars.is_empty() {
+        return;
+    }
+
+    let mut dbus = std::process::Command::new("dbus-update-activation-environment");
+    dbus.arg("--systemd");
+    for var in vars {
+        dbus.arg(var);
+    }
+    dbus.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if let Err(err) = dbus.spawn() {
+        log::debug!("[env] dbus-update-activation-environment failed to spawn: {err}");
+    }
+
+    let mut systemctl = std::process::Command::new("systemctl");
+    systemctl.arg("--user").arg("import-environment");
+    for var in vars {
+        systemctl.arg(var);
+    }
+    systemctl
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if let Err(err) = systemctl.spawn() {
+        log::debug!("[env] systemctl --user import-environment failed to spawn: {err}");
+    }
+}
+
 fn open_active_libseat_session() -> Result<(LibSeatSession, LibSeatSessionNotifier), BackendError> {
     let timeout = std::env::var("JWM_LIBSEAT_ACTIVE_TIMEOUT_MS")
         .ok()
@@ -1198,6 +1229,8 @@ impl UdevBackend {
             unsafe {
                 std::env::set_var("WAYLAND_DISPLAY", name);
                 std::env::set_var("XDG_CURRENT_DESKTOP", "jwm");
+                std::env::set_var("XDG_SESSION_DESKTOP", "jwm");
+                std::env::set_var("DESKTOP_SESSION", "jwm");
                 std::env::set_var("XDG_SESSION_TYPE", "wayland");
                 if nested {
                     log::info!(
@@ -1206,6 +1239,14 @@ impl UdevBackend {
                     std::env::set_var("DBUS_SESSION_BUS_ADDRESS", "");
                 }
             }
+            spawn_env_import(&[
+                "WAYLAND_DISPLAY",
+                "XDG_CURRENT_DESKTOP",
+                "XDG_SESSION_DESKTOP",
+                "DESKTOP_SESSION",
+                "XDG_SESSION_TYPE",
+                "DBUS_SESSION_BUS_ADDRESS",
+            ]);
         }
         let mut state = Box::new(wayland_state);
 
@@ -1243,6 +1284,7 @@ impl UdevBackend {
                             unsafe {
                                 std::env::set_var("DISPLAY", format!(":{display_number}"));
                             }
+                            spawn_env_import(&["DISPLAY"]);
                             // `start_wm` requires `D: XwmHandler + XWaylandShellHandler + SeatHandler`.
                             // Our `JwmWaylandState` implements all three.
                             let dh = wl_state.display_handle.clone();
