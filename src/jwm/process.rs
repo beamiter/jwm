@@ -8,6 +8,17 @@ use std::process::Command;
 use super::Jwm;
 
 impl Jwm {
+    fn resolve_fuzzel_path_launcher() -> Vec<String> {
+        // fuzzel's default mode only searches desktop entries, which misses
+        // command-only tools like jterm1/2/3/4. Feed it PATH executables via
+        // dmenu mode so it behaves like a real command launcher.
+        vec![
+            "/bin/bash".to_string(),
+            "-lc".to_string(),
+            "compgen -c | sort -u | fuzzel --dmenu --prompt 'run> ' | { IFS= read -r cmd || exit 0; [ -n \"$cmd\" ] && exec ${SHELL:-/bin/bash} -lc \"$cmd\"; }".to_string(),
+        ]
+    }
+
     fn is_smithay_backend(backend: &dyn Backend) -> bool {
         backend
             .as_any()
@@ -127,6 +138,9 @@ impl Jwm {
                     .map(|o| o.status.success())
                     .unwrap_or(false)
                 {
+                    if bin == "fuzzel" {
+                        return Self::resolve_fuzzel_path_launcher();
+                    }
                     let mut v = vec![bin.to_string()];
                     v.extend(args.iter().map(|s| s.to_string()));
                     return v;
