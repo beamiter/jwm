@@ -141,6 +141,13 @@ enum Commands {
         json: bool,
     },
 
+    /// 打印推荐的 Wayland scrolling 触控板手势配置片段
+    WaylandGestureConfig {
+        /// 只输出 TOML 片段，不带说明文字
+        #[arg(long)]
+        toml: bool,
+    },
+
     /// 向 JWM IPC 发送消息 (JSON)
     #[command(
         long_about = "通过 Unix 套接字向 JWM 发送 IPC 消息。\n\
@@ -984,6 +991,50 @@ fn print_wayland_audit(markdown: bool) {
     }
 }
 
+fn recommended_scrolling_gesture_toml() -> &'static str {
+    r#"# 3+ finger swipes are intercepted only when configured.
+# Keep this threshold high enough to avoid accidental client gesture capture.
+behavior.gesture_swipe_threshold = 80.0
+
+[[behavior.gesture_swipe]]
+fingers = 3
+direction = "left"
+function = "scrolling_focus_column"
+argument = 1
+
+[[behavior.gesture_swipe]]
+fingers = 3
+direction = "right"
+function = "scrolling_focus_column"
+argument = -1
+
+[[behavior.gesture_swipe]]
+fingers = 3
+direction = "up"
+function = "scrolling_focus_window"
+argument = -1
+
+[[behavior.gesture_swipe]]
+fingers = 3
+direction = "down"
+function = "scrolling_focus_window"
+argument = 1
+"#
+}
+
+fn print_wayland_gesture_config(toml_only: bool) {
+    if !toml_only {
+        println!("=== JWM Wayland Scrolling Gesture Config ===");
+        println!("Paste this TOML into your JWM config to enable 3-finger scrolling navigation.");
+        println!("The compositor only intercepts configured 3+ finger swipes.");
+        println!(
+            "If your config already sets behavior.gesture_swipe_threshold, keep only one value."
+        );
+        println!();
+    }
+    print!("{}", recommended_scrolling_gesture_toml());
+}
+
 // --- main ---
 
 fn main() -> io::Result<()> {
@@ -1027,6 +1078,8 @@ fn main() -> io::Result<()> {
         Commands::WaylandAudit { markdown } => print_wayland_audit(markdown),
 
         Commands::WaylandStatus { json } => run_wayland_status(json)?,
+
+        Commands::WaylandGestureConfig { toml } => print_wayland_gesture_config(toml),
 
         Commands::Msg {
             name,
