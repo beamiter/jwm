@@ -469,8 +469,8 @@ pub enum BackendEvent {
     },
 
     // === Touchpad gesture events (Wayland only) ===
-    /// A 3+ finger swipe gesture has completed and was intercepted by the
-    /// compositor (not forwarded to clients).
+    /// A configured 3+ finger swipe gesture has completed and was intercepted
+    /// by the compositor (not forwarded to clients).
     GestureSwipeAction {
         fingers: u32,
         /// One of: "left", "right", "up", "down".

@@ -75,6 +75,13 @@ fn allowed_shortcut_mods() -> Mods {
     Mods::SHIFT | Mods::CONTROL | Mods::ALT | Mods::SUPER | Mods::MOD2 | Mods::MOD3 | Mods::MOD5
 }
 
+fn gesture_swipe_should_intercept(
+    fingers: u32,
+    bindings: &[crate::config::GestureSwipeConfig],
+) -> bool {
+    fingers >= 3 && bindings.iter().any(|binding| binding.fingers == fingers)
+}
+
 // libinput/evdev does not generate key repeat events for us (X11 does).
 // Emulate the common behavior for WM shortcuts.
 const KEY_REPEAT_DELAY: Duration = Duration::from_millis(400);
@@ -2286,8 +2293,12 @@ impl UdevBackend {
                         }
                         InputEvent::GestureSwipeBegin { event, .. } => {
                             let fingers = event.fingers();
-                            // 3+ fingers: WM claims the gesture; clients see nothing.
-                            if fingers >= 3 {
+                            let cfg = crate::config::CONFIG.load();
+                            let intercept = gesture_swipe_should_intercept(
+                                fingers,
+                                &cfg.behavior().gesture_swipe,
+                            );
+                            if intercept {
                                 state.gesture_swipe = crate::backend::wayland::state::GestureSwipeTracker {
                                     fingers,
                                     intercept: true,
@@ -4471,6 +4482,33 @@ fn queue_kms_reinit(shared: &Arc<Mutex<SharedState>>) {
 #[cfg(test)]
 mod udev_backend_selection_tests {
     use super::*;
+    use crate::config::{ArgumentConfig, GestureSwipeConfig};
+
+    fn swipe_binding(fingers: u32, direction: &str) -> GestureSwipeConfig {
+        GestureSwipeConfig {
+            fingers,
+            direction: direction.to_string(),
+            function: "scrolling_focus_column".to_string(),
+            argument: ArgumentConfig::Int(1),
+        }
+    }
+
+    #[test]
+    fn gesture_swipe_intercept_requires_configured_finger_count() {
+        assert!(!gesture_swipe_should_intercept(3, &[]));
+        assert!(!gesture_swipe_should_intercept(
+            2,
+            &[swipe_binding(2, "left")]
+        ));
+        assert!(!gesture_swipe_should_intercept(
+            4,
+            &[swipe_binding(3, "left")]
+        ));
+        assert!(gesture_swipe_should_intercept(
+            3,
+            &[swipe_binding(3, "left")]
+        ));
+    }
 
     fn test_output(id: OutputId, name: &str) -> OutputInfo {
         OutputInfo {

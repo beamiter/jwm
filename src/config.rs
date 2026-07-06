@@ -553,9 +553,9 @@ pub struct BehaviorConfig {
     pub swallow_exceptions: Vec<String>,
 
     // --- Touchpad gestures (Wayland only) ---
-    /// Touchpad swipe-gesture bindings. 3+ finger swipes are intercepted by the
-    /// compositor and dispatched as WM commands; 1- and 2-finger swipes continue
-    /// to forward to clients.
+    /// Touchpad swipe-gesture bindings. 3+ finger swipes are intercepted only
+    /// when their finger count has at least one configured binding; 1- and
+    /// 2-finger swipes continue to forward to clients.
     #[serde(default)]
     pub gesture_swipe: Vec<GestureSwipeConfig>,
     /// Minimum cumulative pixel delta along the dominant axis before a swipe

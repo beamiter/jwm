@@ -158,8 +158,8 @@ pub struct DndIcon {
 
 /// In-progress touchpad swipe gesture, accumulated between Begin and End.
 /// When `intercept` is true, neither the corresponding Begin/Update/End nor
-/// any in-flight events should be forwarded to client surfaces — the WM has
-/// claimed the gesture.
+/// any in-flight events should be forwarded to client surfaces; the WM has
+/// claimed the configured gesture.
 #[derive(Debug, Default, Clone)]
 pub struct GestureSwipeTracker {
     pub fingers: u32,
