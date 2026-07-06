@@ -211,6 +211,13 @@ impl Jwm {
         )
     }
 
+    pub(crate) fn drop_scrolling_states_for_monitor(&mut self, mon_key: MonitorKey) -> usize {
+        let before = self.scrolling_states.len();
+        self.scrolling_states
+            .retain(|(state_mon_key, _), _| *state_mon_key != mon_key);
+        before.saturating_sub(self.scrolling_states.len())
+    }
+
     fn enable_floating_keep_geometry(
         &mut self,
         backend: &mut dyn Backend,

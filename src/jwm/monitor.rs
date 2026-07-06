@@ -120,6 +120,7 @@ impl Jwm {
             self.state.monitor_clients.remove(mon_key);
             self.state.monitor_stack.remove(mon_key);
             self.state.monitor_order.retain(|&k| k != mon_key);
+            let dropped_scrolling_states = self.drop_scrolling_states_for_monitor(mon_key);
 
             // 如果删除了当前选中的 Monitor，重置选中
             if self.state.sel_mon == Some(mon_key) {
@@ -128,6 +129,12 @@ impl Jwm {
             }
 
             self.arrange(backend, None);
+            if dropped_scrolling_states > 0 {
+                info!(
+                    "[handle_output_removed] Dropped {} scrolling states for removed monitor {:?}",
+                    dropped_scrolling_states, mon_key
+                );
+            }
         }
         Ok(())
     }
@@ -302,10 +309,12 @@ impl Jwm {
                 self.state.output_map.remove(mon_key_to_remove);
                 self.state.monitor_clients.remove(mon_key_to_remove);
                 self.state.monitor_stack.remove(mon_key_to_remove);
+                let dropped_scrolling_states =
+                    self.drop_scrolling_states_for_monitor(mon_key_to_remove);
 
                 info!(
-                    "[remove_excess_monitors] Removed monitor {:?}",
-                    mon_key_to_remove
+                    "[remove_excess_monitors] Removed monitor {:?}, dropped {} scrolling states",
+                    mon_key_to_remove, dropped_scrolling_states
                 );
             }
         }
