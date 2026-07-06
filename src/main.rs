@@ -69,7 +69,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ensure_dbus_session();
 
     jwm::miscellaneous::init_auto_command();
-    if !is_restart {
+    if is_restart {
+        jwm::miscellaneous::ensure_restart_input_method();
+    } else {
         jwm::miscellaneous::init_auto_start();
     }
 

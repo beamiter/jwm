@@ -51,3 +51,58 @@ pub fn init_auto_start() {
         );
     }
 }
+
+fn path_has_executable(bin: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        let candidate = dir.join(bin);
+        candidate.is_file()
+            && std::fs::metadata(&candidate)
+                .map(|m| {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        m.permissions().mode() & 0o111 != 0
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        true
+                    }
+                })
+                .unwrap_or(false)
+    })
+}
+
+pub fn ensure_restart_input_method() {
+    if !path_has_executable("fcitx5") {
+        info!("fcitx5 not found in PATH, skipping restart IM bootstrap");
+        return;
+    }
+
+    let already_running = Command::new("pgrep")
+        .args(["-x", "fcitx5"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if already_running {
+        info!("fcitx5 already running on restart, skipping bootstrap");
+        return;
+    }
+
+    match Command::new("fcitx5")
+        .arg("-d")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(_) => info!("Spawned fcitx5 for restart session"),
+        Err(e) => error!("Failed to spawn fcitx5 on restart: {e}"),
+    }
+}
