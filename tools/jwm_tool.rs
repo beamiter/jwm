@@ -1362,6 +1362,37 @@ fn print_unified_wayland_status(status: &serde_json::Value) {
         }
     }
 
+    if let Some(gestures) = status.get("gestures").filter(|v| !v.is_null()) {
+        let threshold = gestures
+            .get("swipe_threshold")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let bindings = gestures
+            .get("binding_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let scrolling_bindings = gestures
+            .get("scrolling_binding_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let fingers = gestures
+            .get("intercepted_fingers")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_u64())
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "none".into());
+        println!(
+            "gestures: swipe_bindings={} scrolling_bindings={} intercepted_fingers={} threshold={:.1}",
+            bindings, scrolling_bindings, fingers, threshold
+        );
+    }
+
     if let Some(hdr) = status.get("hdr") {
         let enabled = hdr
             .get("config_enabled")
@@ -1482,6 +1513,7 @@ fn run_wayland_status(json_output: bool) -> io::Result<()> {
         "get_workspaces",
         "get_windows",
         "get_scrolling_status",
+        "get_gesture_status",
         "get_metrics",
         "get_hdr_status",
         "get_tearing_hints",
@@ -1554,6 +1586,21 @@ fn run_wayland_status(json_output: bool) -> io::Result<()> {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         println!("scrolling: active_monitors={}", active);
+    }
+
+    if let Some(gestures) = response_data(queries, "get_gesture_status") {
+        let bindings = gestures
+            .get("binding_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let scrolling_bindings = gestures
+            .get("scrolling_binding_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        println!(
+            "gestures: swipe_bindings={} scrolling_bindings={}",
+            bindings, scrolling_bindings
+        );
     }
 
     if let Some(metrics) = response_data(queries, "get_metrics") {

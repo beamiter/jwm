@@ -222,6 +222,7 @@ impl Jwm {
                 IpcResponse::ok(Some(serde_json::to_value(tree).unwrap_or_default()))
             }
             "get_scrolling_status" => IpcResponse::ok(Some(self.query_scrolling_status())),
+            "get_gesture_status" => IpcResponse::ok(Some(self.query_gesture_status())),
             "get_wayland_status" => IpcResponse::ok(Some(self.query_wayland_status(backend))),
             "get_config" => IpcResponse::ok(Some(serde_json::json!({
                 "border_px": cfg.border_px(),
@@ -487,6 +488,7 @@ impl Jwm {
             "workspaces": self.query_workspaces(),
             "windows": self.query_windows(),
             "scrolling": self.query_scrolling_status(),
+            "gestures": self.query_gesture_status(),
             "metrics": metrics,
             "direct_scanout": direct_scanout,
             "presentation_timing": presentation_timing,
@@ -826,6 +828,59 @@ impl Jwm {
         serde_json::json!({
             "active_monitor_count": active_monitor_count,
             "monitors": monitors,
+        })
+    }
+
+    pub(crate) fn query_gesture_status(&self) -> serde_json::Value {
+        let cfg = CONFIG.load();
+        let bindings = &cfg.behavior().gesture_swipe;
+        let mut intercepted_fingers = bindings
+            .iter()
+            .filter(|binding| binding.fingers >= 3)
+            .map(|binding| binding.fingers)
+            .collect::<Vec<_>>();
+        intercepted_fingers.sort_unstable();
+        intercepted_fingers.dedup();
+
+        let binding_details = bindings
+            .iter()
+            .map(|binding| {
+                let scrolling_related = matches!(
+                    binding.function.as_str(),
+                    "scrolling_focus_column"
+                        | "scrolling_move_column"
+                        | "scrolling_focus_window"
+                        | "scrolling_consume"
+                        | "scrolling_expel"
+                        | "scrolling_toggle_attach_mode"
+                );
+                serde_json::json!({
+                    "fingers": binding.fingers,
+                    "direction": binding.direction,
+                    "function": binding.function,
+                    "argument": binding.argument,
+                    "will_intercept": binding.fingers >= 3,
+                    "scrolling_related": scrolling_related,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let scrolling_binding_count = binding_details
+            .iter()
+            .filter(|binding| {
+                binding
+                    .get("scrolling_related")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            })
+            .count();
+
+        serde_json::json!({
+            "swipe_threshold": cfg.behavior().gesture_swipe_threshold,
+            "binding_count": bindings.len(),
+            "scrolling_binding_count": scrolling_binding_count,
+            "intercepted_fingers": intercepted_fingers,
+            "bindings": binding_details,
         })
     }
 
