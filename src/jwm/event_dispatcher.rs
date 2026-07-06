@@ -197,6 +197,20 @@ impl WMController for Jwm {
 
         // Screenshot region selection: on mouse release, commit the selection
         // and wait for the user to choose save action (Enter=file, c=clipboard).
+        if self.features.screenshot.active && self.features.screenshot.drawing_annotation {
+            self.features.screenshot.commit_annotation();
+            if backend.has_compositor() {
+                backend.compositor_set_snap_preview(
+                    self.features
+                        .screenshot
+                        .get_selection_rect()
+                        .map(|r| (r.x as f32, r.y as f32, r.w as f32, r.h as f32)),
+                );
+                self.sync_screenshot_annotation_overlay(backend, false);
+            }
+            return;
+        }
+
         if self.features.screenshot.active && self.features.screenshot.dragging {
             let (sx, sy) = self.features.screenshot.start;
             let (ex, ey) = self.last_mouse_root;
@@ -210,6 +224,12 @@ impl WMController for Jwm {
             self.features.screenshot.dragging = false;
             self.features.screenshot.committed = true;
             self.features.screenshot.end = self.last_mouse_root;
+            self.features
+                .screenshot
+                .set_tool(crate::jwm::features::screenshot::ScreenshotTool::Pencil);
+            self.sync_screenshot_annotation_style(backend);
+            backend.compositor_set_annotation_mode(true);
+            self.sync_screenshot_annotation_overlay(backend, false);
             // Keep the snap preview visible so the user can see the selection
             return;
         }
@@ -305,6 +325,35 @@ impl WMController for Jwm {
                 let h = (sy - root_y).abs() as f32;
                 // Always update preview, even for tiny movements
                 backend.compositor_set_snap_preview(Some((x, y, w.max(1.0), h.max(1.0))));
+                backend.compositor_force_full_redraw();
+            }
+            return;
+        }
+
+        if self.features.screenshot.active && self.features.screenshot.drawing_annotation {
+            self.last_mouse_root = (root_x, root_y);
+            self.features
+                .screenshot
+                .update_annotation(root_x as f32, root_y as f32);
+            if backend.has_compositor() {
+                match self.features.screenshot.tool {
+                    crate::jwm::features::screenshot::ScreenshotTool::Pencil => {
+                        backend.compositor_annotation_add_point(root_x as f32, root_y as f32);
+                    }
+                    crate::jwm::features::screenshot::ScreenshotTool::Rectangle
+                    | crate::jwm::features::screenshot::ScreenshotTool::Ellipse
+                    | crate::jwm::features::screenshot::ScreenshotTool::Line
+                    | crate::jwm::features::screenshot::ScreenshotTool::Arrow => {
+                        backend.compositor_set_snap_preview(
+                            self.features
+                                .screenshot
+                                .get_selection_rect()
+                                .map(|r| (r.x as f32, r.y as f32, r.w as f32, r.h as f32)),
+                        );
+                        self.sync_screenshot_annotation_overlay(backend, true);
+                    }
+                    crate::jwm::features::screenshot::ScreenshotTool::Select => {}
+                }
                 backend.compositor_force_full_redraw();
             }
             return;

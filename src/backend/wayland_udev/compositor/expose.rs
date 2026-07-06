@@ -187,7 +187,7 @@ impl WaylandCompositor {
         let opacity = self.snap_preview_opacity;
 
         unsafe {
-            gl.BindVertexArray(self.quad_vao);
+            self.bind_quad_vao(gl);
 
             // Draw filled semi-transparent background
             gl.UseProgram(self.border_program);

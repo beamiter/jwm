@@ -228,13 +228,12 @@ impl InputOps for UdevInputOps {
     fn grab_pointer(&self, mask: u32, _cursor: Option<u64>) -> Result<bool, BackendError> {
         if mask != 0 {
             // Non-zero mask → screenshot region-select grab.
-            // Suppress events reaching Wayland clients and switch to crosshair cursor.
+            // Suppress events reaching Wayland clients. Keep the current cursor:
+            // changing to a cursor-theme bitmap here routes through Smithay's
+            // cursor renderer immediately after our raw GLES frame, and some
+            // drivers are sensitive to inherited VAO/VBO state during that path.
             let mut shared = self.shared.lock_safe();
             shared.screenshot_grab_active = true;
-            if shared.cursor_kind != StdCursorKind::Crosshair {
-                shared.cursor_kind = StdCursorKind::Crosshair;
-                shared.cursor_dirty = true;
-            }
         }
         Ok(true)
     }
@@ -739,6 +738,52 @@ fn spawn_env_import(vars: &[&str]) {
     }
 }
 
+fn path_has_executable(bin: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        let candidate = dir.join(bin);
+        candidate.is_file()
+            && std::fs::metadata(&candidate)
+                .map(|m| {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        m.permissions().mode() & 0o111 != 0
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        true
+                    }
+                })
+                .unwrap_or(false)
+    })
+}
+
+fn ensure_fcitx_env_for_primary_session(nested: bool) {
+    if nested || !path_has_executable("fcitx5") {
+        return;
+    }
+    // Do not override an explicit user choice. These defaults make systemd/D-Bus
+    // activated XWayland and toolkit helper processes pick up fcitx5 after an
+    // exec restart even when the login environment was sparse.
+    unsafe {
+        if std::env::var_os("GTK_IM_MODULE").is_none() {
+            std::env::set_var("GTK_IM_MODULE", "fcitx");
+        }
+        if std::env::var_os("QT_IM_MODULE").is_none() {
+            std::env::set_var("QT_IM_MODULE", "fcitx");
+        }
+        if std::env::var_os("XMODIFIERS").is_none() {
+            std::env::set_var("XMODIFIERS", "@im=fcitx");
+        }
+        if std::env::var_os("SDL_IM_MODULE").is_none() {
+            std::env::set_var("SDL_IM_MODULE", "fcitx");
+        }
+    }
+}
+
 fn open_active_libseat_session() -> Result<(LibSeatSession, LibSeatSessionNotifier), BackendError> {
     let timeout = std::env::var("JWM_LIBSEAT_ACTIVE_TIMEOUT_MS")
         .ok()
@@ -1224,7 +1269,9 @@ impl UdevBackend {
             // Clear D-Bus from our process env so that every subsequently spawned
             // child starts without a pre-existing bus address and either skips
             // D-Bus registration or starts its own session.
-            let nested = std::env::var_os("WAYLAND_DISPLAY").is_some();
+            let restarting = std::env::var_os("JWM_RESTARTING").is_some()
+                || std::env::var_os("JWM_EXEC_RESTARTED").is_some();
+            let nested = !restarting && std::env::var_os("WAYLAND_DISPLAY").is_some();
             // SAFETY: JWM's backend is single-threaded and we set this once at startup.
             unsafe {
                 std::env::set_var("WAYLAND_DISPLAY", name);
@@ -1239,6 +1286,10 @@ impl UdevBackend {
                     std::env::set_var("DBUS_SESSION_BUS_ADDRESS", "");
                 }
             }
+            unsafe {
+                std::env::remove_var("JWM_EXEC_RESTARTED");
+            }
+            ensure_fcitx_env_for_primary_session(nested);
             spawn_env_import(&[
                 "WAYLAND_DISPLAY",
                 "XDG_CURRENT_DESKTOP",
@@ -1246,6 +1297,10 @@ impl UdevBackend {
                 "DESKTOP_SESSION",
                 "XDG_SESSION_TYPE",
                 "DBUS_SESSION_BUS_ADDRESS",
+                "GTK_IM_MODULE",
+                "QT_IM_MODULE",
+                "XMODIFIERS",
+                "SDL_IM_MODULE",
             ]);
         }
         let mut state = Box::new(wayland_state);
@@ -1832,7 +1887,11 @@ impl UdevBackend {
                                 let cfg = crate::config::CONFIG.load();
                                 let bar_name = cfg.status_bar_name();
 
-                                let exclusive_surface = if session_locked {
+                                let screenshot_grab_active =
+                                    shared.lock_safe().screenshot_grab_active;
+
+                                let exclusive_surface = if session_locked || screenshot_grab_active
+                                {
                                     None
                                 } else {
                                     state.layer_shell_state.layer_surfaces().rev().find_map(
@@ -2003,11 +2062,32 @@ impl UdevBackend {
                                                 .any(|(m, ks)| *ks == keysym && *m == clean_mods);
                                             let is_screenshot_control = s.screenshot_grab_active
                                                 && matches!(
-                                                keysym,
-                                                crate::backend::common_define::keys::KEY_Escape
-                                                | crate::backend::common_define::keys::KEY_Return
-                                                | crate::backend::common_define::keys::KEY_s
-                                                | crate::backend::common_define::keys::KEY_c
+                                                    keysym,
+                                                    crate::backend::common_define::keys::KEY_Escape
+                                                        | crate::backend::common_define::keys::KEY_Return
+                                                        | crate::backend::common_define::keys::KEY_s
+                                                        | crate::backend::common_define::keys::KEY_c
+                                                        | crate::backend::common_define::keys::KEY_p
+                                                        | crate::backend::common_define::keys::KEY_f
+                                                        | crate::backend::common_define::keys::KEY_l
+                                                        | crate::backend::common_define::keys::KEY_a
+                                                        | crate::backend::common_define::keys::KEY_r
+                                                        | crate::backend::common_define::keys::KEY_o
+                                                        | crate::backend::common_define::keys::KEY_z
+                                                        | crate::backend::common_define::keys::KEY_BackSpace
+                                                        | crate::backend::common_define::keys::KEY_Delete
+                                                        | crate::backend::common_define::keys::KEY_Left
+                                                        | crate::backend::common_define::keys::KEY_Right
+                                                        | crate::backend::common_define::keys::KEY_Up
+                                                        | crate::backend::common_define::keys::KEY_Down
+                                                        | crate::backend::common_define::keys::KEY_1
+                                                        | crate::backend::common_define::keys::KEY_2
+                                                        | crate::backend::common_define::keys::KEY_3
+                                                        | crate::backend::common_define::keys::KEY_4
+                                                        | crate::backend::common_define::keys::KEY_5
+                                                        | crate::backend::common_define::keys::KEY_6
+                                                        | crate::backend::common_define::keys::KEY_7
+                                                        | crate::backend::common_define::keys::KEY_8
                                             );
                                             let should_suppress = is_screenshot_control
                                                 || (!session_locked
@@ -2037,13 +2117,17 @@ impl UdevBackend {
                             // JWM only uses press for shortcuts for now. When an active client
                             // inhibits compositor shortcuts, let that client receive the combo
                             // and keep the WM repeat state quiet.
-                            if session_locked || shortcuts_inhibited || handled_by_exclusive_layer {
+                            let screenshot_grab_active = shared.lock_safe().screenshot_grab_active;
+                            if session_locked
+                                || (!screenshot_grab_active
+                                    && (shortcuts_inhibited || handled_by_exclusive_layer))
+                            {
                                 shared.lock_safe().repeat = None;
                             }
                             if matches!(state_key, smithay::backend::input::KeyState::Pressed)
                                 && !session_locked
-                                && !shortcuts_inhibited
-                                && !handled_by_exclusive_layer
+                                && (screenshot_grab_active
+                                    || (!shortcuts_inhibited && !handled_by_exclusive_layer))
                             {
                                 // Smithay provides XKB/Wayland keycodes already (evdev + 8).
                                 let keycode_u32 = u32::from(keycode);
@@ -3742,6 +3826,18 @@ impl Backend for UdevBackend {
     fn compositor_set_annotation_mode(&mut self, active: bool) {
         if let Some(c) = self.compositor.as_mut() {
             c.set_annotation_mode(active);
+        }
+    }
+
+    fn compositor_set_annotation_color(&mut self, rgba: [f32; 4]) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_annotation_color(rgba[0], rgba[1], rgba[2], rgba[3]);
+        }
+    }
+
+    fn compositor_set_annotation_line_width(&mut self, width: f32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_annotation_line_width(width);
         }
     }
 

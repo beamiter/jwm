@@ -298,7 +298,7 @@ impl WaylandCompositor {
 
         unsafe {
             gl.UseProgram(self.program);
-            gl.BindVertexArray(self.quad_vao);
+            self.bind_quad_vao(gl);
             gl.ActiveTexture(ffi::TEXTURE0);
             gl.Uniform1i(self.win_uniforms.texture, 0);
 

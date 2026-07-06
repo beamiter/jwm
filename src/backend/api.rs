@@ -1323,6 +1323,12 @@ pub trait Backend: Send {
     /// Set annotation mode (Phase 6.2).
     fn compositor_set_annotation_mode(&mut self, _active: bool) {}
 
+    /// Set annotation stroke color.
+    fn compositor_set_annotation_color(&mut self, _rgba: [f32; 4]) {}
+
+    /// Set annotation stroke line width.
+    fn compositor_set_annotation_line_width(&mut self, _width: f32) {}
+
     /// Add annotation point (Phase 6.2).
     fn compositor_annotation_add_point(&mut self, _x: f32, _y: f32) {}
 

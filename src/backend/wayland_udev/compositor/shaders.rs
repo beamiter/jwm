@@ -2,14 +2,13 @@ pub const VERTEX_SHADER: &str = r#"#version 300 es
 
 uniform vec4 u_rect;       // x, y, w, h in pixels
 uniform mat4 u_projection; // orthographic projection
+layout(location = 0) in vec2 a_position;
 
 out vec2 v_uv;
 
 void main() {
-    // Generate a fullscreen quad from gl_VertexID (0..3)
-    vec2 pos = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1));
-    v_uv = pos; // GLX textures are Y-inverted (top-left origin matches screen coords)
-    vec2 pixel = u_rect.xy + pos * u_rect.zw;
+    v_uv = a_position; // GLX textures are Y-inverted (top-left origin matches screen coords)
+    vec2 pixel = u_rect.xy + a_position * u_rect.zw;
     gl_Position = u_projection * vec4(pixel, 0.0, 1.0);
 }
 "#;
@@ -241,12 +240,12 @@ pub const BLUR_DOWN_VERTEX: &str = r#"#version 300 es
 
 uniform vec4 u_rect; // x, y, w, h in pixels (fullscreen quad for blur pass)
 uniform mat4 u_projection;
+layout(location = 0) in vec2 a_position;
 out vec2 v_uv;
 
 void main() {
-    vec2 pos = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1));
-    v_uv = pos;
-    vec2 pixel = u_rect.xy + pos * u_rect.zw;
+    v_uv = a_position;
+    vec2 pixel = u_rect.xy + a_position * u_rect.zw;
     gl_Position = u_projection * vec4(pixel, 0.0, 1.0);
 }
 "#;
@@ -554,13 +553,13 @@ pub const CUBE_VERTEX_SHADER: &str = r#"#version 300 es
 
 uniform mat4 u_mvp;
 uniform float u_aspect; // screen_w / workspace_h
+layout(location = 0) in vec2 a_position;
 out vec2 v_uv;
 
 void main() {
-    vec2 pos = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1));
-    v_uv = pos;
+    v_uv = a_position;
     // Face quad spans [-aspect, -1] to [+aspect, +1] in model space
-    vec3 vert = vec3((pos.x * 2.0 - 1.0) * u_aspect, pos.y * 2.0 - 1.0, 0.0);
+    vec3 vert = vec3((a_position.x * 2.0 - 1.0) * u_aspect, a_position.y * 2.0 - 1.0, 0.0);
     gl_Position = u_mvp * vec4(vert, 1.0);
 }
 "#;
@@ -1135,12 +1134,12 @@ pub const TEMPORAL_BLUR_MIX_VERTEX: &str = r#"#version 300 es
 
 uniform vec4 u_rect;
 uniform mat4 u_projection;
+layout(location = 0) in vec2 a_position;
 out vec2 v_uv;
 
 void main() {
-    vec2 pos = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1));
-    v_uv = pos;
-    vec2 pixel = u_rect.xy + pos * u_rect.zw;
+    v_uv = a_position;
+    vec2 pixel = u_rect.xy + a_position * u_rect.zw;
     gl_Position = u_projection * vec4(pixel, 0.0, 1.0);
 }
 "#;

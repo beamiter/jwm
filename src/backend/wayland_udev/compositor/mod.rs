@@ -564,6 +564,7 @@ pub(crate) struct WaylandCompositor {
 
     // GL resources
     quad_vao: u32,
+    quad_vbo: u32,
     output_fbo: u32,
     output_texture: u32,
     /// SOTA #2 Phase 2.1: FP16 (RGBA16F) intermediate target used when
@@ -1254,9 +1255,33 @@ impl WaylandCompositor {
                 time: get_uniform_loc(gl, edge_glow_program, "u_time"),
             };
 
-            // ----- Create quad VAO (empty, using gl_VertexID) -----
+            // ----- Create quad VAO/VBO -----
+            //
+            // Keep attribute 0 backed by a tiny static buffer. Several quad
+            // shaders consume this directly, and some GLES drivers validate
+            // VAO/VBO/pointer state aggressively even for shaders that do not.
             let mut quad_vao = 0u32;
+            let mut quad_vbo = 0u32;
+            let quad_vertices: [f32; 8] = [
+                0.0, 0.0, //
+                1.0, 0.0, //
+                0.0, 1.0, //
+                1.0, 1.0,
+            ];
             gl.GenVertexArrays(1, &mut quad_vao);
+            gl.GenBuffers(1, &mut quad_vbo);
+            gl.BindVertexArray(quad_vao);
+            gl.BindBuffer(ffi::ARRAY_BUFFER, quad_vbo);
+            gl.BufferData(
+                ffi::ARRAY_BUFFER,
+                (quad_vertices.len() * std::mem::size_of::<f32>()) as isize,
+                quad_vertices.as_ptr() as *const _,
+                ffi::STATIC_DRAW,
+            );
+            gl.EnableVertexAttribArray(0);
+            gl.VertexAttribPointer(0, 2, ffi::FLOAT, ffi::FALSE as u8, 8, std::ptr::null());
+            gl.BindBuffer(ffi::ARRAY_BUFFER, 0);
+            gl.BindVertexArray(0);
 
             // ----- Create output FBO + texture -----
             let (output_fbo, output_texture) = if hdr_10bit {
@@ -1373,6 +1398,7 @@ impl WaylandCompositor {
 
                 // GL resources
                 quad_vao,
+                quad_vbo,
                 output_fbo,
                 output_texture,
                 linear_fbo,

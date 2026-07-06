@@ -63,12 +63,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let is_restart = env::var("JWM_RESTARTING").is_ok();
     if is_restart {
         info!("[main] Detected exec restart, skipping autostart");
+        unsafe { env::set_var("JWM_EXEC_RESTARTED", "1") };
         unsafe { env::remove_var("JWM_RESTARTING") };
     }
     ensure_dbus_session();
 
     jwm::miscellaneous::init_auto_command();
-    jwm::miscellaneous::init_auto_start();
+    if !is_restart {
+        jwm::miscellaneous::init_auto_start();
+    }
 
     run_jwm()?;
     Ok(())

@@ -4,8 +4,58 @@ use crate::backend::api::Backend;
 use crate::backend::common_define::{EventMaskBits, StdCursorKind};
 use crate::core::types::Rect;
 use crate::jwm::types::WMArgEnum;
+use image::{Rgba, RgbaImage};
 use log::{error, info, warn};
 use std::process::{Command, Stdio};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenshotTool {
+    Select,
+    Pencil,
+    Line,
+    Arrow,
+    Rectangle,
+    Ellipse,
+}
+
+impl Default for ScreenshotTool {
+    fn default() -> Self {
+        Self::Select
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ScreenshotAnnotation {
+    Freehand {
+        points: Vec<(f32, f32)>,
+        color: [u8; 4],
+        width: u32,
+    },
+    Line {
+        from: (f32, f32),
+        to: (f32, f32),
+        color: [u8; 4],
+        width: u32,
+    },
+    Arrow {
+        from: (f32, f32),
+        to: (f32, f32),
+        color: [u8; 4],
+        width: u32,
+    },
+    Rectangle {
+        from: (f32, f32),
+        to: (f32, f32),
+        color: [u8; 4],
+        width: u32,
+    },
+    Ellipse {
+        from: (f32, f32),
+        to: (f32, f32),
+        color: [u8; 4],
+        width: u32,
+    },
+}
 
 /// 截图选择状态
 #[derive(Debug, Default, Clone)]
@@ -22,6 +72,22 @@ pub struct ScreenshotState {
     pub end: (f64, f64),
     /// 保存路径
     pub output_path: Option<String>,
+    /// 当前标注工具
+    pub tool: ScreenshotTool,
+    /// 当前标注颜色
+    pub color: [u8; 4],
+    /// 当前标注线宽
+    pub line_width: u32,
+    /// 已完成的标注
+    pub annotations: Vec<ScreenshotAnnotation>,
+    /// 正在绘制标注
+    pub drawing_annotation: bool,
+    /// 当前标注起点
+    pub annotation_start: (f32, f32),
+    /// 当前标注终点
+    pub annotation_end: (f32, f32),
+    /// 当前自由绘制点集
+    pub current_points: Vec<(f32, f32)>,
 }
 
 impl ScreenshotState {
@@ -36,6 +102,12 @@ impl ScreenshotState {
         self.committed = false;
         self.start = (0.0, 0.0);
         self.end = (0.0, 0.0);
+        self.tool = ScreenshotTool::Select;
+        self.color = [255, 70, 70, 255];
+        self.line_width = 4;
+        self.annotations.clear();
+        self.drawing_annotation = false;
+        self.current_points.clear();
     }
 
     /// 开始拖动选择
@@ -63,6 +135,124 @@ impl ScreenshotState {
     /// 取消截图
     pub fn cancel(&mut self) {
         *self = Self::default();
+    }
+
+    pub fn set_tool(&mut self, tool: ScreenshotTool) {
+        self.tool = tool;
+    }
+
+    pub fn set_palette_color(&mut self, idx: usize) {
+        const COLORS: [[u8; 4]; 8] = [
+            [255, 70, 70, 255],
+            [255, 190, 60, 255],
+            [85, 215, 110, 255],
+            [80, 170, 255, 255],
+            [180, 110, 255, 255],
+            [255, 255, 255, 255],
+            [30, 30, 30, 255],
+            [255, 90, 180, 255],
+        ];
+        if let Some(color) = COLORS.get(idx) {
+            self.color = *color;
+        }
+    }
+
+    pub fn increase_line_width(&mut self) {
+        self.line_width = (self.line_width + 1).min(24);
+    }
+
+    pub fn decrease_line_width(&mut self) {
+        self.line_width = self.line_width.saturating_sub(1).max(1);
+    }
+
+    pub fn move_selection(&mut self, dx: f64, dy: f64) {
+        if !self.committed {
+            return;
+        }
+        self.start.0 += dx;
+        self.start.1 += dy;
+        self.end.0 += dx;
+        self.end.1 += dy;
+    }
+
+    pub fn begin_annotation(&mut self, x: f32, y: f32) {
+        self.drawing_annotation = true;
+        self.annotation_start = (x, y);
+        self.annotation_end = (x, y);
+        self.current_points.clear();
+        if self.tool == ScreenshotTool::Pencil {
+            self.current_points.push((x, y));
+        }
+    }
+
+    pub fn update_annotation(&mut self, x: f32, y: f32) {
+        if !self.drawing_annotation {
+            return;
+        }
+        self.annotation_end = (x, y);
+        if self.tool == ScreenshotTool::Pencil {
+            self.current_points.push((x, y));
+        }
+    }
+
+    pub fn commit_annotation(&mut self) {
+        if !self.drawing_annotation {
+            return;
+        }
+        let annotation = self.current_annotation_preview();
+        self.drawing_annotation = false;
+        if let Some(annotation) = annotation {
+            self.annotations.push(annotation);
+        }
+        self.current_points.clear();
+    }
+
+    pub fn current_annotation_preview(&self) -> Option<ScreenshotAnnotation> {
+        if !self.drawing_annotation {
+            return None;
+        }
+        let color = self.color;
+        let width = self.line_width;
+        let from = self.annotation_start;
+        let to = self.annotation_end;
+        match self.tool {
+            ScreenshotTool::Pencil if self.current_points.len() > 1 => {
+                Some(ScreenshotAnnotation::Freehand {
+                    points: self.current_points.clone(),
+                    color,
+                    width,
+                })
+            }
+            ScreenshotTool::Line => Some(ScreenshotAnnotation::Line {
+                from,
+                to,
+                color,
+                width,
+            }),
+            ScreenshotTool::Arrow => Some(ScreenshotAnnotation::Arrow {
+                from,
+                to,
+                color,
+                width,
+            }),
+            ScreenshotTool::Rectangle => Some(ScreenshotAnnotation::Rectangle {
+                from,
+                to,
+                color,
+                width,
+            }),
+            ScreenshotTool::Ellipse => Some(ScreenshotAnnotation::Ellipse {
+                from,
+                to,
+                color,
+                width,
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn undo_annotation(&mut self) {
+        self.annotations.pop();
     }
 
     /// 获取选择区域矩形
@@ -225,6 +415,7 @@ impl Jwm {
     pub(crate) fn cancel_screenshot_select(&mut self, backend: &mut dyn Backend) {
         info!("[take_screenshot] cancelling region selection");
         self.features.screenshot.cancel();
+        backend.compositor_set_annotation_mode(false);
         if backend.has_compositor() {
             backend.compositor_set_snap_preview(None);
         }
@@ -246,6 +437,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         to_clipboard: bool,
     ) {
+        self.features.screenshot.commit_annotation();
         let path_str = match self.features.screenshot.output_path.take() {
             Some(p) => p,
             None => {
@@ -262,9 +454,11 @@ impl Jwm {
         let y = sy.min(ey) as i32;
         let w = (sx - ex).abs() as u32;
         let h = (sy - ey).abs() as u32;
+        let annotations = self.features.screenshot.annotations.clone();
 
         // Clear state before capturing
         self.features.screenshot.cancel();
+        backend.compositor_set_annotation_mode(false);
         if backend.has_compositor() {
             backend.compositor_clear_snap_preview_immediate();
         }
@@ -286,7 +480,15 @@ impl Jwm {
 
         // When copying to clipboard, use a temp file as an intermediate
         let save_path = if to_clipboard {
-            format!("/tmp/.jwm-screenshot-clipboard-{}.png", std::process::id())
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_micros())
+                .unwrap_or_default();
+            format!(
+                "/tmp/.jwm-screenshot-clipboard-{}-{}.png",
+                std::process::id(),
+                stamp
+            )
         } else {
             path_str
         };
@@ -317,7 +519,228 @@ impl Jwm {
         };
 
         if to_clipboard && captured {
-            Self::copy_image_to_clipboard(backend, &save_path);
+            if annotations.is_empty() {
+                Self::copy_image_to_clipboard(backend, &save_path);
+            } else {
+                Self::bake_annotations_then_maybe_copy(
+                    backend,
+                    save_path,
+                    (x, y),
+                    annotations,
+                    true,
+                );
+            }
+        } else if captured && !annotations.is_empty() {
+            Self::bake_annotations_then_maybe_copy(backend, save_path, (x, y), annotations, false);
+        }
+    }
+
+    fn bake_annotations_then_maybe_copy(
+        backend: &dyn Backend,
+        png_path: String,
+        region_origin: (i32, i32),
+        annotations: Vec<ScreenshotAnnotation>,
+        to_clipboard: bool,
+    ) {
+        let use_wl_copy = Self::is_udev_backend(backend);
+        std::thread::spawn(move || {
+            let mut ready = false;
+            for _ in 0..60 {
+                if std::fs::metadata(&png_path)
+                    .map(|m| m.len() > 0)
+                    .unwrap_or(false)
+                {
+                    ready = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if !ready {
+                error!(
+                    "[take_screenshot] screenshot file did not appear: {}",
+                    png_path
+                );
+                return;
+            }
+
+            match Self::bake_annotations_into_png(&png_path, region_origin, &annotations) {
+                Ok(()) => info!("[take_screenshot] annotations baked into {}", png_path),
+                Err(e) => error!("[take_screenshot] failed to bake annotations: {e}"),
+            }
+
+            if to_clipboard {
+                Self::copy_image_path_to_clipboard(&png_path, use_wl_copy);
+            }
+        });
+    }
+
+    fn bake_annotations_into_png(
+        png_path: &str,
+        region_origin: (i32, i32),
+        annotations: &[ScreenshotAnnotation],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut image = image::open(png_path)?.to_rgba8();
+        for annotation in annotations {
+            Self::draw_annotation(&mut image, region_origin, annotation);
+        }
+        image.save(png_path)?;
+        Ok(())
+    }
+
+    fn draw_annotation(
+        image: &mut RgbaImage,
+        region_origin: (i32, i32),
+        annotation: &ScreenshotAnnotation,
+    ) {
+        match annotation {
+            ScreenshotAnnotation::Freehand {
+                points,
+                color,
+                width,
+            } => {
+                for pair in points.windows(2) {
+                    Self::draw_line(image, region_origin, pair[0], pair[1], *color, *width);
+                }
+            }
+            ScreenshotAnnotation::Line {
+                from,
+                to,
+                color,
+                width,
+            } => Self::draw_line(image, region_origin, *from, *to, *color, *width),
+            ScreenshotAnnotation::Arrow {
+                from,
+                to,
+                color,
+                width,
+            } => Self::draw_arrow(image, region_origin, *from, *to, *color, *width),
+            ScreenshotAnnotation::Rectangle {
+                from,
+                to,
+                color,
+                width,
+            } => Self::draw_rect(image, region_origin, *from, *to, *color, *width),
+            ScreenshotAnnotation::Ellipse {
+                from,
+                to,
+                color,
+                width,
+            } => Self::draw_ellipse(image, region_origin, *from, *to, *color, *width),
+        }
+    }
+
+    fn local_point(region_origin: (i32, i32), p: (f32, f32)) -> (i32, i32) {
+        (
+            (p.0.round() as i32) - region_origin.0,
+            (p.1.round() as i32) - region_origin.1,
+        )
+    }
+
+    fn put_brush(image: &mut RgbaImage, x: i32, y: i32, color: [u8; 4], width: u32) {
+        let radius = (width as i32).max(1) / 2;
+        let rgba = Rgba(color);
+        for yy in y - radius..=y + radius {
+            for xx in x - radius..=x + radius {
+                let dx = xx - x;
+                let dy = yy - y;
+                if dx * dx + dy * dy > radius * radius + radius {
+                    continue;
+                }
+                if xx >= 0 && yy >= 0 && xx < image.width() as i32 && yy < image.height() as i32 {
+                    image.put_pixel(xx as u32, yy as u32, rgba);
+                }
+            }
+        }
+    }
+
+    fn draw_line(
+        image: &mut RgbaImage,
+        region_origin: (i32, i32),
+        from: (f32, f32),
+        to: (f32, f32),
+        color: [u8; 4],
+        width: u32,
+    ) {
+        let (x0, y0) = Self::local_point(region_origin, from);
+        let (x1, y1) = Self::local_point(region_origin, to);
+        let dx = (x1 - x0).abs();
+        let dy = -(y1 - y0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        let (mut x, mut y) = (x0, y0);
+        loop {
+            Self::put_brush(image, x, y, color, width);
+            if x == x1 && y == y1 {
+                break;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+
+    fn draw_arrow(
+        image: &mut RgbaImage,
+        region_origin: (i32, i32),
+        from: (f32, f32),
+        to: (f32, f32),
+        color: [u8; 4],
+        width: u32,
+    ) {
+        Self::draw_line(image, region_origin, from, to, color, width);
+        let angle = (from.1 - to.1).atan2(from.0 - to.0);
+        let head = (width as f32 * 4.0).max(14.0);
+        for offset in [0.55_f32, -0.55_f32] {
+            let p = (
+                to.0 + (angle + offset).cos() * head,
+                to.1 + (angle + offset).sin() * head,
+            );
+            Self::draw_line(image, region_origin, to, p, color, width);
+        }
+    }
+
+    fn draw_rect(
+        image: &mut RgbaImage,
+        region_origin: (i32, i32),
+        from: (f32, f32),
+        to: (f32, f32),
+        color: [u8; 4],
+        width: u32,
+    ) {
+        let p1 = (from.0.min(to.0), from.1.min(to.1));
+        let p2 = (from.0.max(to.0), from.1.max(to.1));
+        Self::draw_line(image, region_origin, p1, (p2.0, p1.1), color, width);
+        Self::draw_line(image, region_origin, (p2.0, p1.1), p2, color, width);
+        Self::draw_line(image, region_origin, p2, (p1.0, p2.1), color, width);
+        Self::draw_line(image, region_origin, (p1.0, p2.1), p1, color, width);
+    }
+
+    fn draw_ellipse(
+        image: &mut RgbaImage,
+        region_origin: (i32, i32),
+        from: (f32, f32),
+        to: (f32, f32),
+        color: [u8; 4],
+        width: u32,
+    ) {
+        let cx = (from.0 + to.0) * 0.5;
+        let cy = (from.1 + to.1) * 0.5;
+        let rx = ((from.0 - to.0).abs() * 0.5).max(1.0);
+        let ry = ((from.1 - to.1).abs() * 0.5).max(1.0);
+        let steps = ((rx.max(ry) * 6.0) as usize).clamp(32, 720);
+        let mut prev = (cx + rx, cy);
+        for i in 1..=steps {
+            let t = i as f32 / steps as f32 * std::f32::consts::TAU;
+            let next = (cx + rx * t.cos(), cy + ry * t.sin());
+            Self::draw_line(image, region_origin, prev, next, color, width);
+            prev = next;
         }
     }
 
@@ -326,36 +749,109 @@ impl Jwm {
     /// 截图由合成器在下一帧异步捕获，所以 PNG 文件在调用时还不存在。
     /// 我们启动一个 shell 脚本轮询等待文件出现后再运行剪贴板工具。
     fn copy_image_to_clipboard(backend: &dyn Backend, png_path: &str) {
-        let copy_cmd = if Self::is_udev_backend(backend) {
-            format!("wl-copy -t image/png < '{}'", png_path)
-        } else {
-            format!("xclip -selection clipboard -t image/png -i '{}'", png_path)
+        Self::copy_image_path_to_clipboard(png_path, Self::is_udev_backend(backend));
+    }
+
+    fn copy_image_path_to_clipboard(png_path: &str, use_wl_copy: bool) {
+        let png_path = png_path.to_string();
+        info!("[take_screenshot] clipboard copy scheduled: {}", png_path);
+
+        std::thread::spawn(move || {
+            let mut ready = false;
+            for _ in 0..60 {
+                if std::fs::metadata(&png_path)
+                    .map(|m| m.len() > 0)
+                    .unwrap_or(false)
+                {
+                    ready = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if !ready {
+                error!(
+                    "[take_screenshot] clipboard source file did not appear: {}",
+                    png_path
+                );
+                return;
+            }
+
+            let wl_copy = use_wl_copy && Self::path_has_executable("wl-copy");
+            let xclip = Self::path_has_executable("xclip");
+            let (program, args): (&str, &[&str]) = if wl_copy {
+                ("wl-copy", &["-t", "image/png"])
+            } else if xclip {
+                (
+                    "xclip",
+                    &["-selection", "clipboard", "-t", "image/png", "-i"],
+                )
+            } else {
+                error!(
+                    "[take_screenshot] clipboard copy failed: neither wl-copy nor xclip is available"
+                );
+                return;
+            };
+
+            if use_wl_copy && !wl_copy && xclip {
+                warn!("[take_screenshot] wl-copy not found, falling back to xclip");
+            }
+
+            let file = match std::fs::File::open(&png_path) {
+                Ok(file) => file,
+                Err(e) => {
+                    error!("[take_screenshot] clipboard source open failed: {e}");
+                    return;
+                }
+            };
+
+            let output = Command::new(program)
+                .args(args)
+                .stdin(Stdio::from(file))
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output();
+
+            match output {
+                Ok(output) if output.status.success() => {
+                    info!("[take_screenshot] copied image to clipboard via {program}");
+                    let _ = std::fs::remove_file(&png_path);
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    error!(
+                        "[take_screenshot] clipboard copy via {program} failed: status={} stderr={}",
+                        output.status,
+                        stderr.trim()
+                    );
+                }
+                Err(e) => {
+                    error!("[take_screenshot] failed to run clipboard helper {program}: {e}");
+                }
+            }
+        });
+    }
+
+    fn path_has_executable(bin: &str) -> bool {
+        let Some(path) = std::env::var_os("PATH") else {
+            return false;
         };
-
-        // Poll up to 3 s for the file to appear (compositor writes it next frame),
-        // then copy to clipboard and remove the temp file.
-        let script = format!(
-            r#"for i in $(seq 1 60); do [ -s '{}' ] && {{ {}; rm -f '{}'; exit 0; }}; sleep 0.05; done"#,
-            png_path, copy_cmd, png_path,
-        );
-
-        info!("[take_screenshot] clipboard copy scheduled: {}", copy_cmd);
-
-        let mut command = Command::new("sh");
-        command.args(["-c", &script]);
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-
-        match command.spawn() {
-            Ok(_) => {
-                info!("[take_screenshot] clipboard copy helper spawned");
-            }
-            Err(e) => {
-                error!("[take_screenshot] failed to spawn clipboard helper: {e}");
-            }
-        }
+        std::env::split_paths(&path).any(|dir| {
+            let candidate = dir.join(bin);
+            candidate.is_file()
+                && std::fs::metadata(&candidate)
+                    .map(|m| {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            m.permissions().mode() & 0o111 != 0
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            true
+                        }
+                    })
+                    .unwrap_or(false)
+        })
     }
 }
 
@@ -414,5 +910,69 @@ mod tests {
 
         // 零尺寸选择应该返回 None
         assert!(state.get_selection_rect().is_none());
+    }
+
+    #[test]
+    fn test_annotation_workflow() {
+        let mut state = ScreenshotState::new();
+        state.start();
+        state.set_tool(ScreenshotTool::Arrow);
+        state.set_palette_color(3);
+        state.increase_line_width();
+
+        state.begin_annotation(10.0, 20.0);
+        state.update_annotation(110.0, 80.0);
+        state.commit_annotation();
+
+        assert_eq!(state.annotations.len(), 1);
+        match &state.annotations[0] {
+            ScreenshotAnnotation::Arrow {
+                from,
+                to,
+                color,
+                width,
+            } => {
+                assert_eq!(*from, (10.0, 20.0));
+                assert_eq!(*to, (110.0, 80.0));
+                assert_eq!(*color, [80, 170, 255, 255]);
+                assert_eq!(*width, 5);
+            }
+            other => panic!("expected arrow annotation, got {other:?}"),
+        }
+
+        state.undo_annotation();
+        assert!(state.annotations.is_empty());
+    }
+
+    #[test]
+    fn test_freehand_requires_multiple_points() {
+        let mut state = ScreenshotState::new();
+        state.start();
+        state.set_tool(ScreenshotTool::Pencil);
+        state.begin_annotation(10.0, 20.0);
+        state.commit_annotation();
+        assert!(state.annotations.is_empty());
+
+        state.begin_annotation(10.0, 20.0);
+        state.update_annotation(12.0, 24.0);
+        state.commit_annotation();
+        assert_eq!(state.annotations.len(), 1);
+    }
+
+    #[test]
+    fn test_move_committed_selection() {
+        let mut state = ScreenshotState::new();
+        state.start();
+        state.begin_drag(100.0, 120.0);
+        state.update_drag(240.0, 260.0);
+        state.commit();
+
+        state.move_selection(5.0, -10.0);
+
+        let rect = state.get_selection_rect().unwrap();
+        assert_eq!(rect.x, 105);
+        assert_eq!(rect.y, 110);
+        assert_eq!(rect.w, 140);
+        assert_eq!(rect.h, 140);
     }
 }

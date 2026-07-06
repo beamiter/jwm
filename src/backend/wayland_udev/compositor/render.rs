@@ -5,13 +5,36 @@ use smithay::backend::renderer::gles::ffi;
 
 impl WaylandCompositor {
     // =========================================================================
-    // Helper: draw a fullscreen quad (uses gl_VertexID in the vertex shader)
+    // Helper: draw a fullscreen quad
     // =========================================================================
+
+    pub(crate) unsafe fn bind_quad_vao(&self, gl: &ffi::Gles2) {
+        unsafe {
+            gl.BindVertexArray(self.quad_vao);
+            gl.BindBuffer(ffi::ARRAY_BUFFER, self.quad_vbo);
+            gl.EnableVertexAttribArray(0);
+            gl.VertexAttribPointer(0, 2, ffi::FLOAT, ffi::FALSE as u8, 8, std::ptr::null());
+            gl.BindBuffer(ffi::ARRAY_BUFFER, 0);
+        }
+    }
 
     #[allow(dead_code)]
     fn draw_quad(&self, gl: &ffi::Gles2) {
         unsafe {
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+        }
+    }
+
+    unsafe fn reset_external_gl_state(&self, gl: &ffi::Gles2) {
+        unsafe {
+            gl.UseProgram(0);
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+            gl.BindVertexArray(0);
+            gl.BindBuffer(ffi::ARRAY_BUFFER, 0);
+            gl.BindBuffer(ffi::ELEMENT_ARRAY_BUFFER, 0);
+            for attr in 0..8 {
+                gl.DisableVertexAttribArray(attr);
+            }
         }
     }
 
@@ -1551,6 +1574,9 @@ impl WaylandCompositor {
         self.dirty_region_tracker.clear();
         self.content_dirty_ids.clear();
         self.prev_focused = focused;
+        unsafe {
+            self.reset_external_gl_state(gl);
+        }
 
         // Predictive render: update scene activity periodically
         self.predictive_render_mgr.update_scene_activity();
@@ -1811,6 +1837,9 @@ impl WaylandCompositor {
                 }
 
                 let mut vbo = 0u32;
+                let mut vao = 0u32;
+                gl.GenVertexArrays(1, &mut vao);
+                gl.BindVertexArray(vao);
                 gl.GenBuffers(1, &mut vbo);
                 gl.BindBuffer(ffi::ARRAY_BUFFER, vbo);
                 gl.BufferData(
@@ -1827,7 +1856,10 @@ impl WaylandCompositor {
                 gl.DrawArrays(ffi::LINES, 0, num_verts);
 
                 gl.DisableVertexAttribArray(0);
+                gl.BindBuffer(ffi::ARRAY_BUFFER, 0);
+                gl.BindVertexArray(0);
                 gl.DeleteBuffers(1, &vbo);
+                gl.DeleteVertexArrays(1, &vao);
             }
 
             gl.LineWidth(1.0);

@@ -6,10 +6,135 @@ use crate::backend::common_define::{ConfigWindowBits, Mods, MouseButton, WindowI
 use crate::config::CONFIG;
 use crate::core::models::ClientKey;
 use crate::core::types::Rect;
+use crate::jwm::features::screenshot::{ScreenshotAnnotation, ScreenshotTool};
 use crate::jwm::types::{WMArgEnum, WMClickType};
 use log::{error, info};
 
 impl Jwm {
+    pub(crate) fn sync_screenshot_annotation_style(&self, backend: &mut dyn Backend) {
+        let color = self.features.screenshot.color;
+        backend.compositor_set_annotation_color([
+            color[0] as f32 / 255.0,
+            color[1] as f32 / 255.0,
+            color[2] as f32 / 255.0,
+            color[3] as f32 / 255.0,
+        ]);
+        backend.compositor_set_annotation_line_width(self.features.screenshot.line_width as f32);
+    }
+
+    fn emit_screenshot_polyline(
+        backend: &mut dyn Backend,
+        color: [u8; 4],
+        width: u32,
+        points: &[(f32, f32)],
+    ) {
+        if points.len() < 2 {
+            return;
+        }
+        backend.compositor_set_annotation_color([
+            color[0] as f32 / 255.0,
+            color[1] as f32 / 255.0,
+            color[2] as f32 / 255.0,
+            color[3] as f32 / 255.0,
+        ]);
+        backend.compositor_set_annotation_line_width(width as f32);
+        backend.compositor_annotation_begin_stroke();
+        for &(x, y) in points {
+            backend.compositor_annotation_add_point(x, y);
+        }
+    }
+
+    fn emit_screenshot_annotation(backend: &mut dyn Backend, annotation: &ScreenshotAnnotation) {
+        match annotation {
+            ScreenshotAnnotation::Freehand {
+                points,
+                color,
+                width,
+            } => Self::emit_screenshot_polyline(backend, *color, *width, points),
+            ScreenshotAnnotation::Line {
+                from,
+                to,
+                color,
+                width,
+            } => Self::emit_screenshot_polyline(backend, *color, *width, &[*from, *to]),
+            ScreenshotAnnotation::Arrow {
+                from,
+                to,
+                color,
+                width,
+            } => {
+                Self::emit_screenshot_polyline(backend, *color, *width, &[*from, *to]);
+                let angle = (from.1 - to.1).atan2(from.0 - to.0);
+                let head = (*width as f32 * 4.0).max(14.0);
+                for offset in [0.55_f32, -0.55_f32] {
+                    let p = (
+                        to.0 + (angle + offset).cos() * head,
+                        to.1 + (angle + offset).sin() * head,
+                    );
+                    Self::emit_screenshot_polyline(backend, *color, *width, &[*to, p]);
+                }
+            }
+            ScreenshotAnnotation::Rectangle {
+                from,
+                to,
+                color,
+                width,
+            } => {
+                let x0 = from.0.min(to.0);
+                let y0 = from.1.min(to.1);
+                let x1 = from.0.max(to.0);
+                let y1 = from.1.max(to.1);
+                let points = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)];
+                Self::emit_screenshot_polyline(backend, *color, *width, &points);
+            }
+            ScreenshotAnnotation::Ellipse {
+                from,
+                to,
+                color,
+                width,
+            } => {
+                let cx = (from.0 + to.0) * 0.5;
+                let cy = (from.1 + to.1) * 0.5;
+                let rx = (from.0 - to.0).abs() * 0.5;
+                let ry = (from.1 - to.1).abs() * 0.5;
+                if rx < 1.0 || ry < 1.0 {
+                    return;
+                }
+                let mut points = Vec::with_capacity(65);
+                for i in 0..=64 {
+                    let t = i as f32 / 64.0 * std::f32::consts::TAU;
+                    points.push((cx + rx * t.cos(), cy + ry * t.sin()));
+                }
+                Self::emit_screenshot_polyline(backend, *color, *width, &points);
+            }
+        }
+    }
+
+    pub(crate) fn sync_screenshot_annotation_overlay(
+        &self,
+        backend: &mut dyn Backend,
+        include_current: bool,
+    ) {
+        if !backend.has_compositor()
+            || !self.features.screenshot.active
+            || !self.features.screenshot.committed
+        {
+            return;
+        }
+        backend.compositor_set_annotation_mode(false);
+        backend.compositor_set_annotation_mode(true);
+        for annotation in &self.features.screenshot.annotations {
+            Self::emit_screenshot_annotation(backend, annotation);
+        }
+        if include_current {
+            if let Some(annotation) = self.features.screenshot.current_annotation_preview() {
+                Self::emit_screenshot_annotation(backend, &annotation);
+            }
+        }
+        self.sync_screenshot_annotation_style(backend);
+        backend.compositor_force_full_redraw();
+    }
+
     pub(crate) fn on_key_press_internal(
         &mut self,
         backend: &mut dyn Backend,
@@ -27,14 +152,92 @@ impl Jwm {
         if self.features.screenshot.active {
             if keysym == keys::KEY_Escape {
                 self.cancel_screenshot_select(backend);
-            } else if self.features.screenshot.committed {
-                // Selection done — choose save action
-                if keysym == keys::KEY_Return || keysym == keys::KEY_s {
-                    // Enter or 's' → save to file
+                return Ok(());
+            }
+
+            let ctrl = clean_state.contains(Mods::CONTROL);
+            let shift = clean_state.contains(Mods::SHIFT);
+
+            let tool_changed = if !ctrl && (keysym == keys::KEY_p || keysym == keys::KEY_f) {
+                self.features.screenshot.set_tool(ScreenshotTool::Pencil);
+                true
+            } else if !ctrl && keysym == keys::KEY_l {
+                self.features.screenshot.set_tool(ScreenshotTool::Line);
+                true
+            } else if !ctrl && keysym == keys::KEY_a {
+                self.features.screenshot.set_tool(ScreenshotTool::Arrow);
+                true
+            } else if !ctrl && keysym == keys::KEY_r {
+                self.features.screenshot.set_tool(ScreenshotTool::Rectangle);
+                true
+            } else if !ctrl && (keysym == keys::KEY_c || keysym == keys::KEY_o) {
+                self.features.screenshot.set_tool(ScreenshotTool::Ellipse);
+                true
+            } else {
+                false
+            };
+            if tool_changed {
+                if backend.has_compositor() {
+                    self.sync_screenshot_annotation_style(backend);
+                    self.sync_screenshot_annotation_overlay(backend, true);
+                }
+                return Ok(());
+            }
+
+            if !ctrl && (keys::KEY_1..=keys::KEY_8).contains(&keysym) {
+                self.features
+                    .screenshot
+                    .set_palette_color((keysym - keys::KEY_1) as usize);
+                if backend.has_compositor() {
+                    self.sync_screenshot_annotation_style(backend);
+                    self.sync_screenshot_annotation_overlay(backend, true);
+                }
+                return Ok(());
+            }
+
+            if self.features.screenshot.committed {
+                let nudge = if shift { 10.0 } else { 1.0 };
+
+                if keysym == keys::KEY_Return || (ctrl && keysym == keys::KEY_s) {
                     self.finish_screenshot_select(backend, false);
-                } else if keysym == keys::KEY_c {
-                    // 'c' → copy to clipboard
+                } else if ctrl && keysym == keys::KEY_c {
                     self.finish_screenshot_select(backend, true);
+                } else if ctrl && keysym == keys::KEY_z {
+                    self.features.screenshot.undo_annotation();
+                    self.sync_screenshot_annotation_overlay(backend, false);
+                } else if keysym == keys::KEY_BackSpace || keysym == keys::KEY_Delete {
+                    self.features.screenshot.undo_annotation();
+                    self.sync_screenshot_annotation_overlay(backend, false);
+                } else if ctrl && keysym == keys::KEY_Up {
+                    self.features.screenshot.increase_line_width();
+                    self.sync_screenshot_annotation_style(backend);
+                    self.sync_screenshot_annotation_overlay(backend, true);
+                } else if ctrl && keysym == keys::KEY_Down {
+                    self.features.screenshot.decrease_line_width();
+                    self.sync_screenshot_annotation_style(backend);
+                    self.sync_screenshot_annotation_overlay(backend, true);
+                } else if keysym == keys::KEY_Left
+                    || keysym == keys::KEY_Right
+                    || keysym == keys::KEY_Up
+                    || keysym == keys::KEY_Down
+                {
+                    let (dx, dy) = match keysym {
+                        keys::KEY_Left => (-nudge, 0.0),
+                        keys::KEY_Right => (nudge, 0.0),
+                        keys::KEY_Up => (0.0, -nudge),
+                        keys::KEY_Down => (0.0, nudge),
+                        _ => (0.0, 0.0),
+                    };
+                    self.features.screenshot.move_selection(dx, dy);
+                    if backend.has_compositor() {
+                        backend.compositor_set_snap_preview(
+                            self.features
+                                .screenshot
+                                .get_selection_rect()
+                                .map(|r| (r.x as f32, r.y as f32, r.w as f32, r.h as f32)),
+                        );
+                        backend.compositor_force_full_redraw();
+                    }
                 }
                 // Other keys are consumed silently
             }
@@ -230,10 +433,23 @@ impl Jwm {
         // Screenshot region selection intercept
         if self.features.screenshot.active {
             let btn = MouseButton::from_u8(detail_btn);
-            if btn == MouseButton::Left {
+            if btn == MouseButton::Left && self.features.screenshot.committed {
+                let (x, y) = self.last_mouse_root;
+                self.features
+                    .screenshot
+                    .begin_annotation(x as f32, y as f32);
+                if self.features.screenshot.tool == ScreenshotTool::Pencil
+                    && backend.has_compositor()
+                {
+                    backend.compositor_annotation_begin_stroke();
+                    backend.compositor_annotation_add_point(x as f32, y as f32);
+                    backend.compositor_force_full_redraw();
+                }
+            } else if btn == MouseButton::Left {
                 // Start dragging
                 self.features.screenshot.dragging = true;
                 self.features.screenshot.start = self.last_mouse_root;
+                self.features.screenshot.end = self.last_mouse_root;
                 // Immediately show a 1x1 preview to avoid animation delay
                 if backend.has_compositor() {
                     let (x, y) = self.last_mouse_root;
