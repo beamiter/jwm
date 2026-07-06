@@ -7,6 +7,78 @@ pub struct EdidHdrCapabilities {
     pub supports_hlg: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdidIdentity {
+    pub vendor: String,
+    pub product_code: u16,
+    pub serial_number: u32,
+    pub monitor_name: Option<String>,
+    pub monitor_serial: Option<String>,
+}
+
+pub fn parse_edid_identity_from_bytes(edid: &[u8]) -> Option<EdidIdentity> {
+    if edid.len() < 128 {
+        return None;
+    }
+    let header = &edid[0..8];
+    if header != [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00] {
+        return None;
+    }
+
+    let vendor_raw = u16::from_be_bytes([edid[8], edid[9]]);
+    let vendor = [
+        (((vendor_raw >> 10) & 0x1F) as u8 + b'A' - 1) as char,
+        (((vendor_raw >> 5) & 0x1F) as u8 + b'A' - 1) as char,
+        ((vendor_raw & 0x1F) as u8 + b'A' - 1) as char,
+    ]
+    .iter()
+    .collect::<String>();
+
+    let product_code = u16::from_le_bytes([edid[10], edid[11]]);
+    let serial_number = u32::from_le_bytes([edid[12], edid[13], edid[14], edid[15]]);
+    let mut monitor_name = None;
+    let mut monitor_serial = None;
+
+    for descriptor in edid[54..126].chunks_exact(18) {
+        if descriptor[0..3] != [0, 0, 0] {
+            continue;
+        }
+        let text = parse_descriptor_text(&descriptor[5..18]);
+        match descriptor[3] {
+            0xFC => monitor_name = text,
+            0xFF => monitor_serial = text,
+            _ => {}
+        }
+    }
+
+    Some(EdidIdentity {
+        vendor,
+        product_code,
+        serial_number,
+        monitor_name,
+        monitor_serial,
+    })
+}
+
+fn parse_descriptor_text(bytes: &[u8]) -> Option<String> {
+    let end = bytes
+        .iter()
+        .position(|b| *b == b'\n' || *b == b'\r' || *b == 0)
+        .unwrap_or(bytes.len());
+    let text = bytes[..end]
+        .iter()
+        .map(|b| {
+            if b.is_ascii_graphic() || *b == b' ' {
+                *b
+            } else {
+                b' '
+            }
+        })
+        .collect::<Vec<_>>();
+    let text = String::from_utf8_lossy(&text).trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
 pub fn parse_edid_hdr_from_bytes(edid: &[u8]) -> Option<EdidHdrCapabilities> {
     if edid.len() < 128 {
         return None;
@@ -137,6 +209,14 @@ mod tests {
         edid
     }
 
+    fn encode_vendor(vendor: &str) -> [u8; 2] {
+        let bytes = vendor.as_bytes();
+        let raw = (((bytes[0] - b'A' + 1) as u16) << 10)
+            | (((bytes[1] - b'A' + 1) as u16) << 5)
+            | ((bytes[2] - b'A' + 1) as u16);
+        raw.to_be_bytes()
+    }
+
     #[test]
     fn rejects_short_input() {
         assert!(parse_edid_hdr_from_bytes(&[]).is_none());
@@ -174,5 +254,29 @@ mod tests {
         let caps = parse_edid_hdr_from_bytes(&edid).expect("HDR caps parsed");
         assert!(!caps.supports_pq);
         assert!(caps.supports_hlg);
+    }
+
+    #[test]
+    fn parses_identity_from_base_block() {
+        let mut edid = vec![0u8; 128];
+        edid[0..8].copy_from_slice(&[0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]);
+        edid[8..10].copy_from_slice(&encode_vendor("JWM"));
+        edid[10..12].copy_from_slice(&0x1234u16.to_le_bytes());
+        edid[12..16].copy_from_slice(&0xAABBCCDDu32.to_le_bytes());
+        edid[54..72].copy_from_slice(&[
+            0x00, 0x00, 0x00, 0xFC, 0x00, b'J', b'W', b'M', b' ', b'D', b'i', b's', b'p', b'l',
+            b'a', b'y', b'\n', b' ',
+        ]);
+        edid[72..90].copy_from_slice(&[
+            0x00, 0x00, 0x00, 0xFF, 0x00, b'S', b'E', b'R', b'1', b'2', b'3', b'\n', b' ', b' ',
+            b' ', b' ', b' ', b' ',
+        ]);
+
+        let identity = parse_edid_identity_from_bytes(&edid).expect("identity parsed");
+        assert_eq!(identity.vendor, "JWM");
+        assert_eq!(identity.product_code, 0x1234);
+        assert_eq!(identity.serial_number, 0xAABBCCDD);
+        assert_eq!(identity.monitor_name.as_deref(), Some("JWM Display"));
+        assert_eq!(identity.monitor_serial.as_deref(), Some("SER123"));
     }
 }

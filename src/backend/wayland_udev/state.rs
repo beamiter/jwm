@@ -168,6 +168,95 @@ pub struct GestureSwipeTracker {
     pub dy: f64,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct CaptureCounters {
+    pub screencopy_queued_total: u64,
+    pub screencopy_failed_total: u64,
+    pub screencopy_fulfilled_total: u64,
+    pub screencopy_render_failed_total: u64,
+    pub image_copy_sessions_total: u64,
+    pub image_copy_queued_total: u64,
+    pub image_copy_failed_total: u64,
+    pub image_copy_fulfilled_total: u64,
+    pub image_copy_render_failed_total: u64,
+    pub image_copy_output_queued_total: u64,
+    pub image_copy_toplevel_queued_total: u64,
+    pub last_queued_unix_ms: Option<u64>,
+    pub last_fulfilled_unix_ms: Option<u64>,
+    pub last_failed_unix_ms: Option<u64>,
+    pub last_failure_reason: Option<String>,
+}
+
+impl CaptureCounters {
+    fn now_unix_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64
+    }
+
+    pub fn note_screencopy_queued(&mut self) {
+        self.screencopy_queued_total = self.screencopy_queued_total.saturating_add(1);
+        self.last_queued_unix_ms = Some(Self::now_unix_ms());
+    }
+
+    pub fn note_screencopy_failed(&mut self, reason: impl Into<String>) {
+        self.screencopy_failed_total = self.screencopy_failed_total.saturating_add(1);
+        self.note_failed(reason);
+    }
+
+    pub fn note_screencopy_fulfilled(&mut self) {
+        self.screencopy_fulfilled_total = self.screencopy_fulfilled_total.saturating_add(1);
+        self.last_fulfilled_unix_ms = Some(Self::now_unix_ms());
+    }
+
+    pub fn note_screencopy_render_failed(&mut self, reason: impl Into<String>) {
+        self.screencopy_render_failed_total = self.screencopy_render_failed_total.saturating_add(1);
+        self.note_failed(reason);
+    }
+
+    pub fn note_image_copy_session(&mut self) {
+        self.image_copy_sessions_total = self.image_copy_sessions_total.saturating_add(1);
+    }
+
+    pub fn note_image_copy_queued(&mut self, source: &str) {
+        self.image_copy_queued_total = self.image_copy_queued_total.saturating_add(1);
+        match source {
+            "output" => {
+                self.image_copy_output_queued_total =
+                    self.image_copy_output_queued_total.saturating_add(1);
+            }
+            "toplevel" => {
+                self.image_copy_toplevel_queued_total =
+                    self.image_copy_toplevel_queued_total.saturating_add(1);
+            }
+            _ => {}
+        }
+        self.last_queued_unix_ms = Some(Self::now_unix_ms());
+    }
+
+    pub fn note_image_copy_failed(&mut self, reason: impl Into<String>) {
+        self.image_copy_failed_total = self.image_copy_failed_total.saturating_add(1);
+        self.note_failed(reason);
+    }
+
+    pub fn note_image_copy_fulfilled(&mut self) {
+        self.image_copy_fulfilled_total = self.image_copy_fulfilled_total.saturating_add(1);
+        self.last_fulfilled_unix_ms = Some(Self::now_unix_ms());
+    }
+
+    pub fn note_image_copy_render_failed(&mut self, reason: impl Into<String>) {
+        self.image_copy_render_failed_total = self.image_copy_render_failed_total.saturating_add(1);
+        self.note_failed(reason);
+    }
+
+    fn note_failed(&mut self, reason: impl Into<String>) {
+        self.last_failed_unix_ms = Some(Self::now_unix_ms());
+        self.last_failure_reason = Some(reason.into());
+    }
+}
+
 pub struct JwmWaylandState {
     pub display_handle: DisplayHandle,
     pub loop_handle: smithay::reexports::calloop::LoopHandle<'static, JwmWaylandState>,
@@ -283,7 +372,7 @@ pub struct JwmWaylandState {
     /// Runtime bind counters for JWM-owned Wayland globals. Smithay-managed
     /// core globals are not counted here; this tracks the custom desktop,
     /// capture, color, power, and control protocols we implement directly.
-    pub protocol_bind_counts: HashMap<&'static str, u64>,
+    pub protocol_bind_counts: HashMap<&'static str, crate::backend::api::ProtocolBindStatus>,
 
     /// FIFO of pending `wlr-output-configuration::Apply` acks waiting for the
     /// udev backend to finish their modeset. Drained in order matching
@@ -344,6 +433,10 @@ pub struct JwmWaylandState {
     /// Pending ext-image-copy-capture frames (drained during render, like screencopy).
     pub image_capture_pending:
         Option<crate::backend::wayland_udev::image_copy_capture::PendingImageCaptureQueue>,
+
+    /// Runtime counters for capture protocols. These are protocol-dispatch
+    /// counters (queued/rejected), separate from the render-drain queue depth.
+    pub capture_counters: Arc<Mutex<CaptureCounters>>,
 
     /// wlr-foreign-toplevel-management state (taskbar window list + control).
     pub foreign_toplevel_mgmt:
@@ -1214,16 +1307,26 @@ impl XwmHandler for JwmWaylandState {
 
 impl JwmWaylandState {
     pub fn record_protocol_bind(&mut self, protocol: &'static str) {
-        *self.protocol_bind_counts.entry(protocol).or_insert(0) += 1;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        let entry = self
+            .protocol_bind_counts
+            .entry(protocol)
+            .or_insert_with(|| crate::backend::api::ProtocolBindStatus {
+                protocol: protocol.to_string(),
+                bind_count: 0,
+                last_bound_unix_ms: None,
+            });
+        entry.bind_count = entry.bind_count.saturating_add(1);
+        entry.last_bound_unix_ms = Some(now);
     }
 
-    pub fn protocol_bind_counts_snapshot(&self) -> Vec<(String, u64)> {
-        let mut counts: Vec<_> = self
-            .protocol_bind_counts
-            .iter()
-            .map(|(protocol, count)| ((*protocol).to_string(), *count))
-            .collect();
-        counts.sort_by(|a, b| a.0.cmp(&b.0));
+    pub fn protocol_bind_counts_snapshot(&self) -> Vec<crate::backend::api::ProtocolBindStatus> {
+        let mut counts: Vec<_> = self.protocol_bind_counts.values().cloned().collect();
+        counts.sort_by(|a, b| a.protocol.cmp(&b.protocol));
         counts
     }
 
@@ -1631,6 +1734,8 @@ impl JwmWaylandState {
                 workspace_state,
 
                 image_capture_pending,
+
+                capture_counters: Arc::new(Mutex::new(CaptureCounters::default())),
 
                 foreign_toplevel_mgmt,
 

@@ -13,6 +13,16 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 impl Jwm {
+    fn record_config_reload_result(&mut self, success: bool, error: Option<String>) {
+        self.config_reload_count = self.config_reload_count.saturating_add(1);
+        self.config_reload_last_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64);
+        self.config_reload_last_success = Some(success);
+        self.config_reload_last_error = error;
+    }
+
     pub fn cleanup(&mut self, backend: &mut dyn Backend) -> Result<(), Box<dyn std::error::Error>> {
         info!("[cleanup] Starting essential cleanup (letting Rust handle memory)");
         // Shut down IPC server (also handled by Drop, but explicit is clearer)
@@ -241,11 +251,33 @@ impl Jwm {
     pub(crate) fn do_config_reload(&mut self, backend: &mut dyn Backend) -> IpcResponse {
         match crate::config::reload_global() {
             Ok(()) => {
+                self.record_config_reload_result(true, None);
+                self.config_last_modified = crate::config::Config::get_config_modified_time().ok();
                 self.apply_config_changes(backend);
-                self.broadcast_ipc_event("config/reload", serde_json::json!({}));
+                self.broadcast_ipc_event(
+                    "config/reload",
+                    serde_json::json!({
+                        "success": true,
+                        "reload_count": self.config_reload_count,
+                        "last_reload_unix_ms": self.config_reload_last_unix_ms,
+                    }),
+                );
                 IpcResponse::ok(None)
             }
-            Err(e) => IpcResponse::err(format!("config reload failed: {e}")),
+            Err(e) => {
+                let error = format!("config reload failed: {e}");
+                self.record_config_reload_result(false, Some(error.clone()));
+                self.broadcast_ipc_event(
+                    "config/reload",
+                    serde_json::json!({
+                        "success": false,
+                        "reload_count": self.config_reload_count,
+                        "last_reload_unix_ms": self.config_reload_last_unix_ms,
+                        "error": error,
+                    }),
+                );
+                IpcResponse::err(error)
+            }
         }
     }
 

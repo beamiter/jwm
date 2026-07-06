@@ -911,6 +911,8 @@ impl UdevBackend {
             kms.borrow_mut()
                 .set_image_capture_pending(image_capture_queue.clone());
         }
+        kms.borrow_mut()
+            .set_capture_counters(self.state.capture_counters.clone());
     }
 
     fn recreate_compositor_for_current_kms(&mut self) {
@@ -1521,6 +1523,8 @@ impl UdevBackend {
                 kms.borrow_mut()
                     .set_image_capture_pending(image_capture_queue.clone());
             }
+            kms.borrow_mut()
+                .set_capture_counters(state.capture_counters.clone());
         }
 
         {
@@ -2654,6 +2658,30 @@ fn output_bounds(outputs: &[OutputInfo]) -> (i32, i32, i32, i32) {
         .unwrap_or(min_y + 1080);
 
     ((max_x - min_x).max(1), (max_y - min_y).max(1), min_x, min_y)
+}
+
+fn output_management_snapshot(
+    outputs: &[OutputInfo],
+    soft_disabled: &std::collections::HashSet<String>,
+) -> Vec<crate::backend::api::OutputManagementOutputSnapshot> {
+    let mut snapshot: Vec<_> = outputs
+        .iter()
+        .map(
+            |output| crate::backend::api::OutputManagementOutputSnapshot {
+                name: output.name.clone(),
+                stable_key: output.identity.stable_key.clone(),
+                enabled: !soft_disabled.contains(&output.name),
+                x: output.x,
+                y: output.y,
+                width: output.width,
+                height: output.height,
+                scale: output.scale,
+                refresh_rate: output.refresh_rate,
+            },
+        )
+        .collect();
+    snapshot.sort_by(|a, b| a.name.cmp(&b.name));
+    snapshot
 }
 
 fn output_at(outputs: &[OutputInfo], x: f64, y: f64) -> Option<OutputId> {
@@ -3930,7 +3958,78 @@ impl Backend for UdevBackend {
         })
     }
 
-    fn compositor_protocol_bind_counts(&self) -> Vec<(String, u64)> {
+    fn compositor_capture_status(&self) -> Option<crate::backend::api::CaptureStatus> {
+        let screencopy_pending = self
+            .state
+            .screencopy_pending
+            .as_ref()
+            .map(|queue| queue.lock_safe().len())
+            .unwrap_or(0);
+        let (image_pending, image_output_pending, image_toplevel_pending) = self
+            .state
+            .image_capture_pending
+            .as_ref()
+            .map(|queue| {
+                let queue = queue.lock_safe();
+                let output_count = queue
+                    .iter()
+                    .filter(|pending| {
+                        matches!(
+                            &pending.source,
+                            crate::backend::wayland_udev::image_copy_capture::CaptureSource::Output(_)
+                        )
+                    })
+                    .count();
+                let toplevel_count = queue
+                    .iter()
+                    .filter(|pending| {
+                        matches!(
+                            &pending.source,
+                            crate::backend::wayland_udev::image_copy_capture::CaptureSource::Toplevel(_)
+                        )
+                    })
+                    .count();
+                (queue.len(), output_count, toplevel_count)
+            })
+            .unwrap_or((0, 0, 0));
+        let dmabuf_format_count = self.state.dmabuf_render_formats.len();
+        let counters = self.state.capture_counters.lock_safe().clone();
+
+        Some(crate::backend::api::CaptureStatus {
+            screencopy: crate::backend::api::CaptureProtocolStatus {
+                enabled: self.state.screencopy_pending.is_some(),
+                pending_frames: screencopy_pending,
+            },
+            image_copy_capture: crate::backend::api::CaptureProtocolStatus {
+                enabled: self.state.image_capture_pending.is_some(),
+                pending_frames: image_pending,
+            },
+            image_copy_output_pending_frames: image_output_pending,
+            image_copy_toplevel_pending_frames: image_toplevel_pending,
+            screencopy_queued_total: counters.screencopy_queued_total,
+            screencopy_failed_total: counters.screencopy_failed_total,
+            screencopy_fulfilled_total: counters.screencopy_fulfilled_total,
+            screencopy_render_failed_total: counters.screencopy_render_failed_total,
+            image_copy_sessions_total: counters.image_copy_sessions_total,
+            image_copy_queued_total: counters.image_copy_queued_total,
+            image_copy_failed_total: counters.image_copy_failed_total,
+            image_copy_fulfilled_total: counters.image_copy_fulfilled_total,
+            image_copy_render_failed_total: counters.image_copy_render_failed_total,
+            image_copy_output_queued_total: counters.image_copy_output_queued_total,
+            image_copy_toplevel_queued_total: counters.image_copy_toplevel_queued_total,
+            last_queued_unix_ms: counters.last_queued_unix_ms,
+            last_fulfilled_unix_ms: counters.last_fulfilled_unix_ms,
+            last_failed_unix_ms: counters.last_failed_unix_ms,
+            last_failure_reason: counters.last_failure_reason.clone(),
+            dmabuf_advertised: self.state.dmabuf_main_device.is_some() && dmabuf_format_count > 0,
+            dmabuf_format_count,
+            cursor_capture_supported: self.state.image_capture_pending.is_some(),
+            sensitive_content_masking: false,
+            policy: "allow_all_visible_content".into(),
+        })
+    }
+
+    fn compositor_protocol_bind_counts(&self) -> Vec<crate::backend::api::ProtocolBindStatus> {
         self.state.protocol_bind_counts_snapshot()
     }
 
@@ -4143,6 +4242,10 @@ impl Backend for UdevBackend {
                             .min(u128::from(u64::MAX))
                             as u64;
                         let soft_disabled_before = self.state.soft_disabled_outputs.clone();
+                        let outputs_before = output_management_snapshot(
+                            &self.shared.lock_safe().outputs,
+                            &soft_disabled_before,
+                        );
                         let mut failed_outputs = Vec::new();
                         if let Some(ref kms) = self.kms {
                             let mut kms = kms.borrow_mut();
@@ -4204,19 +4307,25 @@ impl Backend for UdevBackend {
                                 rollback_reason
                             );
                         }
+                        // Refresh advertised outputs and trigger a relayout.
+                        self.sync_wayland_state_from_kms();
+                        let outputs_after = output_management_snapshot(
+                            &self.shared.lock_safe().outputs,
+                            &self.state.soft_disabled_outputs,
+                        );
                         self.last_output_management_tx =
                             Some(crate::backend::api::OutputManagementTransactionStatus {
                                 id: tx_id,
                                 requested_at_unix_ms,
                                 success: all_ok,
                                 changes: changes.clone(),
+                                outputs_before,
+                                outputs_after,
                                 failed_outputs,
                                 rollback_attempted,
                                 rollback_succeeded,
                                 rollback_reason,
                             });
-                        // Refresh advertised outputs and trigger a relayout.
-                        self.sync_wayland_state_from_kms();
                         self.state.needs_redraw = true;
                         self.state
                             .pending_events
@@ -4522,6 +4631,7 @@ mod udev_backend_selection_tests {
             refresh_rate: 60_000,
             hdr_capable: false,
             hdr_metadata: None,
+            identity: crate::backend::api::OutputIdentity::connector_only(name),
         }
     }
 
@@ -4668,7 +4778,21 @@ fn output_info_equivalent(a: &OutputInfo, b: &OutputInfo) -> bool {
         && a.scale.to_bits() == b.scale.to_bits()
         && a.refresh_rate == b.refresh_rate
         && a.hdr_capable == b.hdr_capable
+        && output_identity_equivalent(&a.identity, &b.identity)
         && hdr_metadata_equivalent(a.hdr_metadata.as_ref(), b.hdr_metadata.as_ref())
+}
+
+fn output_identity_equivalent(
+    a: &crate::backend::api::OutputIdentity,
+    b: &crate::backend::api::OutputIdentity,
+) -> bool {
+    a.connector == b.connector
+        && a.vendor == b.vendor
+        && a.product_code == b.product_code
+        && a.serial_number == b.serial_number
+        && a.monitor_name == b.monitor_name
+        && a.monitor_serial == b.monitor_serial
+        && a.stable_key == b.stable_key
 }
 
 fn hdr_metadata_equivalent(
@@ -4743,7 +4867,25 @@ fn scan_drm_outputs(dev_id: u64, path: &Path) -> Result<Vec<(u64, OutputInfo)>, 
 
         let name = format!("{:?}-{}", conn.interface(), conn.interface_id());
         let key = ((dev_id as u64) << 32) | (u32::from(*conn_handle) as u64);
-        let hdr_metadata = query_connector_hdr_metadata(&card, *conn_handle);
+        let (edid_identity, hdr_metadata) = query_connector_edid_metadata(&card, *conn_handle);
+        let stable_key = match &edid_identity {
+            Some(identity) => format!(
+                "{}:{}:{:04x}:{:08x}",
+                name, identity.vendor, identity.product_code, identity.serial_number
+            ),
+            None => name.clone(),
+        };
+        let identity = crate::backend::api::OutputIdentity {
+            connector: name.clone(),
+            vendor: edid_identity.as_ref().map(|i| i.vendor.clone()),
+            product_code: edid_identity.as_ref().map(|i| i.product_code),
+            serial_number: edid_identity.as_ref().map(|i| i.serial_number),
+            monitor_name: edid_identity.as_ref().and_then(|i| i.monitor_name.clone()),
+            monitor_serial: edid_identity
+                .as_ref()
+                .and_then(|i| i.monitor_serial.clone()),
+            stable_key,
+        };
 
         outputs.push((
             key,
@@ -4758,6 +4900,7 @@ fn scan_drm_outputs(dev_id: u64, path: &Path) -> Result<Vec<(u64, OutputInfo)>, 
                 refresh_rate,
                 hdr_capable: hdr_metadata.is_some(),
                 hdr_metadata,
+                identity,
             },
         ));
     }
@@ -4786,13 +4929,18 @@ fn attach_edid_caps_to_outputs(
     }
 }
 
-fn query_connector_hdr_metadata<D: drm::control::Device>(
+fn query_connector_edid_metadata<D: drm::control::Device>(
     dev: &D,
     conn_handle: connector::Handle,
-) -> Option<crate::backend::edid::EdidHdrCapabilities> {
-    use crate::backend::edid::parse_edid_hdr_from_bytes;
+) -> (
+    Option<crate::backend::edid::EdidIdentity>,
+    Option<crate::backend::edid::EdidHdrCapabilities>,
+) {
+    use crate::backend::edid::{parse_edid_hdr_from_bytes, parse_edid_identity_from_bytes};
 
-    let props = dev.get_properties(conn_handle).ok()?;
+    let Some(props) = dev.get_properties(conn_handle).ok() else {
+        return (None, None);
+    };
     let (handles, values) = props.as_props_and_values();
     for (prop_handle, value) in handles.iter().zip(values.iter()) {
         let Ok(info) = dev.get_property(*prop_handle) else {
@@ -4802,10 +4950,15 @@ fn query_connector_hdr_metadata<D: drm::control::Device>(
             continue;
         }
         if *value == 0 {
-            return None;
+            return (None, None);
         }
-        let blob = dev.get_property_blob(*value).ok()?;
-        return parse_edid_hdr_from_bytes(&blob);
+        let Some(blob) = dev.get_property_blob(*value).ok() else {
+            return (None, None);
+        };
+        return (
+            parse_edid_identity_from_bytes(&blob),
+            parse_edid_hdr_from_bytes(&blob),
+        );
     }
-    None
+    (None, None)
 }

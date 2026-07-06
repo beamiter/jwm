@@ -368,6 +368,10 @@ impl Dispatch<ExtImageCopyCaptureManagerV1, CaptureManagerData> for JwmWaylandSt
                         paint_cursors,
                     },
                 );
+                {
+                    let mut counters = state.capture_counters.lock_safe();
+                    counters.note_image_copy_session();
+                }
 
                 // Send buffer constraints to client.
                 match &capture_source {
@@ -485,7 +489,7 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, CaptureSessionData> for JwmWaylandSt
 
 impl Dispatch<ExtImageCopyCaptureFrameV1, CaptureFrameData> for JwmWaylandState {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
         resource: &ExtImageCopyCaptureFrameV1,
         request: ext_image_copy_capture_frame_v1::Request,
@@ -515,6 +519,17 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, CaptureFrameData> for JwmWaylandState 
                 match buffer {
                     Some(buffer) => {
                         let damage = std::mem::take(&mut *data.damage.lock_safe());
+                        {
+                            let mut counters = state.capture_counters.lock_safe();
+                            match &data.source {
+                                CaptureSource::Output(_) => {
+                                    counters.note_image_copy_queued("output");
+                                }
+                                CaptureSource::Toplevel(_) => {
+                                    counters.note_image_copy_queued("toplevel");
+                                }
+                            }
+                        }
                         data.pending_queue.lock_safe().push(PendingImageCapture {
                             frame: resource.clone(),
                             buffer,
@@ -522,10 +537,14 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, CaptureFrameData> for JwmWaylandState 
                             paint_cursors: data.paint_cursors,
                             damage,
                         });
+                        state.needs_redraw = true;
                         debug!("[image-capture] frame capture queued");
                     }
                     None => {
                         // capture without attach_buffer: fail rather than hang.
+                        let mut counters = state.capture_counters.lock_safe();
+                        counters
+                            .note_image_copy_failed("image-copy dispatch: capture without buffer");
                         resource.failed(ext_image_copy_capture_frame_v1::FailureReason::Unknown);
                     }
                 }

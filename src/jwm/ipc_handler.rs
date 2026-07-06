@@ -17,6 +17,428 @@ fn optional_protocol_enabled(default_enabled: bool, flag_name: &str) -> bool {
     default_enabled || env_flag("JWM_OPTIONAL_GLOBALS") || env_flag(flag_name)
 }
 
+fn parse_config_batch_changes(
+    args: &serde_json::Value,
+) -> Result<Vec<(String, serde_json::Value)>, String> {
+    if let Some(values) = args.get("values").and_then(|value| value.as_object()) {
+        let changes = values
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<Vec<_>>();
+        if changes.is_empty() {
+            return Err("set_config_batch: 'values' must not be empty".to_string());
+        }
+        return Ok(changes);
+    }
+
+    let raw_changes = args.get("changes").unwrap_or(args);
+    let changes = raw_changes
+        .as_array()
+        .ok_or_else(|| "set_config_batch: expected 'changes' array or 'values' object".to_string())?
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let key = item
+                .get("key")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| format!("set_config_batch: changes[{idx}] missing 'key' string"))?
+                .to_string();
+            let value = item
+                .get("value")
+                .cloned()
+                .ok_or_else(|| format!("set_config_batch: changes[{idx}] missing 'value'"))?;
+            Ok((key, value))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    if changes.is_empty() {
+        return Err("set_config_batch: 'changes' must not be empty".to_string());
+    }
+    Ok(changes)
+}
+
+fn parse_command_batch_entries(
+    args: &serde_json::Value,
+) -> Result<Vec<(String, serde_json::Value)>, String> {
+    let raw_commands = args.get("commands").unwrap_or(args);
+    let commands = raw_commands
+        .as_array()
+        .ok_or_else(|| "command_batch: expected 'commands' array".to_string())?
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let name = item
+                .get("command")
+                .or_else(|| item.get("name"))
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| {
+                    format!("command_batch: commands[{idx}] missing 'command' string")
+                })?;
+            if name == "command_batch" || name == "batch" {
+                return Err(format!(
+                    "command_batch: commands[{idx}] cannot nest '{name}'"
+                ));
+            }
+            let args = item.get("args").cloned().unwrap_or(serde_json::Value::Null);
+            Ok((name.to_string(), args))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    if commands.is_empty() {
+        return Err("command_batch: 'commands' must not be empty".to_string());
+    }
+    Ok(commands)
+}
+
+fn system_time_unix_ms(time: std::time::SystemTime) -> Option<u64> {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+}
+
+fn protocol_bind_count(
+    bind_counts: &[crate::backend::api::ProtocolBindStatus],
+    name: &str,
+) -> Option<u64> {
+    bind_counts
+        .iter()
+        .find(|status| status.protocol == name)
+        .map(|status| status.bind_count)
+}
+
+fn protocol_last_bound_unix_ms(
+    bind_counts: &[crate::backend::api::ProtocolBindStatus],
+    name: &str,
+) -> Option<u64> {
+    bind_counts
+        .iter()
+        .find(|status| status.protocol == name)
+        .and_then(|status| status.last_bound_unix_ms)
+}
+
+fn protocol_catalog(
+    protocols: &serde_json::Value,
+    bind_counts: &[crate::backend::api::ProtocolBindStatus],
+) -> Vec<serde_json::Value> {
+    let mut catalog = Vec::new();
+
+    if let Some(core) = protocols.get("core").and_then(|v| v.as_array()) {
+        for protocol in core {
+            let name = protocol.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            catalog.push(serde_json::json!({
+                "name": name,
+                "category": "core",
+                "enabled": protocol.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+                "published": protocol.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+                "bind_count": protocol_bind_count(bind_counts, name),
+                "last_bound_unix_ms": protocol_last_bound_unix_ms(bind_counts, name),
+                "bind_count_tracked": protocol_bind_count(bind_counts, name).is_some(),
+            }));
+        }
+    }
+
+    if let Some(optional) = protocols.get("optional").and_then(|v| v.as_array()) {
+        for protocol in optional {
+            let name = protocol.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let enabled = protocol
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let count = protocol_bind_count(bind_counts, name).unwrap_or(0);
+            catalog.push(serde_json::json!({
+                "name": name,
+                "category": "optional",
+                "enabled": enabled,
+                "published": enabled,
+                "default_enabled": protocol.get("default_enabled").and_then(|v| v.as_bool()).unwrap_or(false),
+                "env_flag": protocol.get("env_flag").and_then(|v| v.as_str()).unwrap_or(""),
+                "bind_count": count,
+                "last_bound_unix_ms": protocol_last_bound_unix_ms(bind_counts, name),
+                "bind_count_tracked": true,
+            }));
+        }
+    }
+
+    for status in bind_counts {
+        let known = catalog.iter().any(|entry| {
+            entry
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|entry_name| entry_name == status.protocol)
+                .unwrap_or(false)
+        });
+        if !known {
+            catalog.push(serde_json::json!({
+                "name": status.protocol,
+                "category": "runtime_only",
+                "enabled": true,
+                "published": true,
+                "bind_count": status.bind_count,
+                "last_bound_unix_ms": status.last_bound_unix_ms,
+                "bind_count_tracked": true,
+            }));
+        }
+    }
+
+    catalog.sort_by(|a, b| {
+        let a_name = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let b_name = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        a_name.cmp(b_name)
+    });
+    catalog
+}
+
+fn color_transfer_name(tf_named: Option<u32>) -> &'static str {
+    match tf_named {
+        Some(1) => "bt1886",
+        Some(2) => "gamma22",
+        Some(11) => "st2084_pq",
+        Some(13) => "hlg",
+        Some(14) => "ext_linear",
+        Some(_) => "unknown",
+        None => "custom_or_unset",
+    }
+}
+
+fn color_primaries_name(primaries_named: Option<u32>) -> &'static str {
+    match primaries_named {
+        Some(1) => "srgb",
+        Some(6) => "bt2020",
+        Some(_) => "unknown",
+        None => "custom_or_unset",
+    }
+}
+
+fn output_color_policy_json(
+    output: &crate::backend::api::OutputInfo,
+    kms_color: Option<&serde_json::Value>,
+    render_path_enabled: bool,
+    advanced_enabled: bool,
+) -> serde_json::Value {
+    use crate::backend::wayland_udev::color_management::{params_from_edid, srgb_params};
+
+    let policy_source = if !advanced_enabled {
+        "srgb_safe_default"
+    } else if output.hdr_metadata.is_some() {
+        "edid_hdr"
+    } else {
+        "srgb_no_edid"
+    };
+    let params = if advanced_enabled {
+        output
+            .hdr_metadata
+            .as_ref()
+            .map(params_from_edid)
+            .unwrap_or_else(srgb_params)
+    } else {
+        srgb_params()
+    };
+    let kms_ctm = kms_color
+        .and_then(|c| c.get("ctm_supported"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let kms_gamma = kms_color
+        .and_then(|c| c.get("gamma_lut_supported"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let wants_non_srgb = params.primaries_named != Some(1) || params.tf_named != Some(2);
+    let shader_fallback_required = render_path_enabled && wants_non_srgb && !(kms_ctm && kms_gamma);
+
+    serde_json::json!({
+        "advanced_enabled": advanced_enabled,
+        "render_path_enabled": render_path_enabled,
+        "policy_source": policy_source,
+        "selected_transfer_function": color_transfer_name(params.tf_named),
+        "selected_transfer_function_raw": params.tf_named,
+        "selected_primaries": color_primaries_name(params.primaries_named),
+        "selected_primaries_raw": params.primaries_named,
+        "min_luminance": params.min_lum,
+        "max_luminance": params.max_lum,
+        "reference_luminance": params.reference_lum,
+        "shader_fallback_required": shader_fallback_required,
+    })
+}
+
+fn render_decisions_json(
+    direct_scanout: Option<&serde_json::Value>,
+    blur: Option<&serde_json::Value>,
+    outputs: &[serde_json::Value],
+    tearing_hint_count: usize,
+    hdr_config_enabled: bool,
+    blur_config_enabled: bool,
+    color_render_path_enabled: bool,
+    color_advanced_enabled: bool,
+    kms_color_offload_enabled: bool,
+) -> serde_json::Value {
+    let direct_scanout_decision = match direct_scanout {
+        Some(scanout) => {
+            let enabled = scanout
+                .get("enabled")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let active = scanout
+                .get("active")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let compositor_reason = scanout
+                .get("compositor_reason")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let kms_blockers = scanout
+                .get("kms_outputs")
+                .and_then(|value| value.as_array())
+                .map(|outputs| {
+                    outputs
+                        .iter()
+                        .filter(|output| {
+                            output.get("eligible").and_then(|value| value.as_bool())
+                                == Some(false)
+                        })
+                        .map(|output| {
+                            serde_json::json!({
+                                "scope": "kms_output",
+                                "output": output.get("output_name").and_then(|value| value.as_str()).unwrap_or("unknown"),
+                                "reason": output.get("reason").and_then(|value| value.as_str()).unwrap_or("unknown"),
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let mut blockers = Vec::new();
+            if !active && !compositor_reason.is_empty() && compositor_reason != "active" {
+                blockers.push(serde_json::json!({
+                    "scope": "compositor",
+                    "reason": compositor_reason,
+                }));
+            }
+            blockers.extend(kms_blockers);
+            let reason = if active {
+                "active".to_string()
+            } else if !enabled {
+                "disabled".to_string()
+            } else {
+                compositor_reason.to_string()
+            };
+            serde_json::json!({
+                "configured": enabled,
+                "active": active,
+                "reason": reason,
+                "candidate_count": scanout.get("candidate_count").and_then(|value| value.as_u64()).unwrap_or(0),
+                "blockers": blockers,
+            })
+        }
+        None => serde_json::json!({
+            "configured": false,
+            "active": false,
+            "reason": "status_unavailable",
+            "candidate_count": 0,
+            "blockers": [{
+                "scope": "compositor",
+                "reason": "compositor not active or direct-scanout status unavailable",
+            }],
+        }),
+    };
+
+    let blur_decision = match blur {
+        Some(blur) => {
+            let strength = blur
+                .get("current_strength")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let temporal_enabled = blur
+                .get("temporal_enabled")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let active = blur_config_enabled && strength > 0;
+            let reason = if active {
+                "active"
+            } else if !blur_config_enabled {
+                "disabled_by_config"
+            } else {
+                "strength_zero"
+            };
+            serde_json::json!({
+                "configured": blur_config_enabled,
+                "active": active,
+                "reason": reason,
+                "current_strength": strength,
+                "temporal_active": temporal_enabled,
+                "temporal_reuse_rate_pct": blur.get("temporal_reuse_rate_pct").and_then(|value| value.as_f64()).unwrap_or(0.0),
+            })
+        }
+        None => serde_json::json!({
+            "configured": blur_config_enabled,
+            "active": false,
+            "reason": "status_unavailable",
+            "current_strength": 0,
+            "temporal_active": false,
+            "temporal_reuse_rate_pct": 0.0,
+        }),
+    };
+
+    let hdr_capable_output_count = outputs
+        .iter()
+        .filter(|output| output.get("hdr_capable").and_then(|value| value.as_bool()) == Some(true))
+        .count();
+    let hdr_decision = serde_json::json!({
+        "configured": hdr_config_enabled,
+        "active": hdr_config_enabled && hdr_capable_output_count > 0,
+        "reason": if hdr_config_enabled {
+            if hdr_capable_output_count > 0 {
+                "enabled_with_hdr_outputs"
+            } else {
+                "no_hdr_capable_outputs"
+            }
+        } else {
+            "disabled_by_config"
+        },
+        "capable_output_count": hdr_capable_output_count,
+    });
+
+    let shader_fallback_output_count = outputs
+        .iter()
+        .filter(|output| {
+            output
+                .get("color_management")
+                .and_then(|value| value.get("shader_fallback_required"))
+                .and_then(|value| value.as_bool())
+                == Some(true)
+        })
+        .count();
+    let color_pipeline_decision = serde_json::json!({
+        "configured": color_render_path_enabled,
+        "active": color_render_path_enabled,
+        "advanced_protocol_enabled": color_advanced_enabled,
+        "kms_offload_configured": kms_color_offload_enabled,
+        "shader_fallback_output_count": shader_fallback_output_count,
+        "reason": if !color_render_path_enabled {
+            "render_path_disabled_by_config"
+        } else if shader_fallback_output_count > 0 {
+            "shader_fallback_required_for_some_outputs"
+        } else if kms_color_offload_enabled {
+            "kms_offload_available_or_not_required"
+        } else {
+            "shader_path_active"
+        },
+    });
+
+    serde_json::json!({
+        "direct_scanout": direct_scanout_decision,
+        "blur": blur_decision,
+        "hdr": hdr_decision,
+        "tearing": {
+            "active": tearing_hint_count > 0,
+            "hint_count": tearing_hint_count,
+            "reason": if tearing_hint_count > 0 {
+                "client_requested_tearing_control"
+            } else {
+                "no_active_tearing_hints"
+            },
+        },
+        "color_pipeline": color_pipeline_decision,
+    })
+}
+
 fn wayland_protocol_status() -> serde_json::Value {
     let core = [
         "wl_compositor",
@@ -78,6 +500,16 @@ fn wayland_protocol_status() -> serde_json::Value {
         ("ext_workspace_manager_v1", true, "JWM_ENABLE_WORKSPACE"),
         (
             "ext_image_copy_capture_manager_v1",
+            true,
+            "JWM_ENABLE_IMAGE_COPY_CAPTURE",
+        ),
+        (
+            "ext_output_image_capture_source_manager_v1",
+            true,
+            "JWM_ENABLE_IMAGE_COPY_CAPTURE",
+        ),
+        (
+            "ext_foreign_toplevel_image_capture_source_manager_v1",
             true,
             "JWM_ENABLE_IMAGE_COPY_CAPTURE",
         ),
@@ -227,6 +659,14 @@ impl Jwm {
             return self.handle_set_config_command(backend, args);
         }
 
+        if name == "set_config_batch" {
+            return self.handle_set_config_batch_command(backend, args);
+        }
+
+        if name == "command_batch" || name == "batch" {
+            return self.handle_command_batch(backend, args);
+        }
+
         if name == "move_window_to_monitor" {
             return self.handle_move_window_to_monitor(backend, args);
         }
@@ -271,6 +711,7 @@ impl Jwm {
             "get_scrolling_status" => IpcResponse::ok(Some(self.query_scrolling_status())),
             "get_gesture_status" => IpcResponse::ok(Some(self.query_gesture_status())),
             "get_wayland_status" => IpcResponse::ok(Some(self.query_wayland_status(backend))),
+            "get_config_status" => IpcResponse::ok(Some(self.query_config_status())),
             "get_config" => IpcResponse::ok(Some(serde_json::json!({
                 "border_px": cfg.border_px(),
                 "gap_px": cfg.gap_px(),
@@ -345,6 +786,38 @@ impl Jwm {
                     "surfaces": detail,
                 })))
             }
+            "get_capture_status" => {
+                if let Some(status) = backend.compositor_capture_status() {
+                    IpcResponse::ok(Some(serde_json::to_value(status).unwrap_or_default()))
+                } else {
+                    IpcResponse::ok(Some(serde_json::json!({
+                        "screencopy": { "enabled": false, "pending_frames": 0 },
+                        "image_copy_capture": { "enabled": false, "pending_frames": 0 },
+                        "image_copy_output_pending_frames": 0,
+                        "image_copy_toplevel_pending_frames": 0,
+                        "screencopy_queued_total": 0,
+                        "screencopy_failed_total": 0,
+                        "screencopy_fulfilled_total": 0,
+                        "screencopy_render_failed_total": 0,
+                        "image_copy_sessions_total": 0,
+                        "image_copy_queued_total": 0,
+                        "image_copy_failed_total": 0,
+                        "image_copy_fulfilled_total": 0,
+                        "image_copy_render_failed_total": 0,
+                        "image_copy_output_queued_total": 0,
+                        "image_copy_toplevel_queued_total": 0,
+                        "last_queued_unix_ms": null,
+                        "last_fulfilled_unix_ms": null,
+                        "last_failed_unix_ms": null,
+                        "last_failure_reason": null,
+                        "dmabuf_advertised": false,
+                        "dmabuf_format_count": 0,
+                        "cursor_capture_supported": false,
+                        "sensitive_content_masking": false,
+                        "policy": "unavailable",
+                    })))
+                }
+            }
             "get_blur_status" => match backend.compositor_blur_status() {
                 Some(b) => {
                     let hz_table: Vec<serde_json::Value> = b
@@ -405,6 +878,9 @@ impl Jwm {
         let backend_family = get_backend_family();
         let caps = backend.capabilities();
         let outputs = backend.output_ops().enumerate_outputs();
+        let color_render_path_enabled = cfg.behavior().color_management_render_path;
+        let color_advanced_enabled =
+            crate::backend::wayland_udev::color_management::advanced_color_management_enabled();
         let output_details: Vec<serde_json::Value> = outputs
             .iter()
             .map(|o| {
@@ -425,6 +901,12 @@ impl Jwm {
                         "ctm_supported": c.ctm_supported,
                     })
                 });
+                let color_policy = output_color_policy_json(
+                    o,
+                    kms_color.as_ref(),
+                    color_render_path_enabled,
+                    color_advanced_enabled,
+                );
                 let hdr_metadata = o.hdr_metadata.as_ref().map(|m| {
                     serde_json::json!({
                         "max_luminance_nits": m.max_luminance_nits,
@@ -438,6 +920,15 @@ impl Jwm {
                 serde_json::json!({
                     "id": o.id.0,
                     "name": o.name,
+                    "identity": {
+                        "connector": o.identity.connector,
+                        "stable_key": o.identity.stable_key,
+                        "vendor": o.identity.vendor,
+                        "product_code": o.identity.product_code,
+                        "serial_number": o.identity.serial_number,
+                        "monitor_name": o.identity.monitor_name,
+                        "monitor_serial": o.identity.monitor_serial,
+                    },
                     "geometry": {
                         "x": o.x,
                         "y": o.y,
@@ -448,6 +939,7 @@ impl Jwm {
                     "refresh_rate_hz": o.refresh_rate,
                     "hdr_capable": o.hdr_capable,
                     "hdr_metadata": hdr_metadata,
+                    "color_management": color_policy,
                     "vrr": vrr,
                     "kms_color_pipeline": kms_color,
                 })
@@ -466,13 +958,17 @@ impl Jwm {
         let output_management = backend
             .compositor_output_management_status()
             .and_then(|s| serde_json::to_value(s).ok());
-        let protocol_bind_counts = backend
-            .compositor_protocol_bind_counts()
-            .into_iter()
-            .map(|(protocol, count)| {
+        let capture = backend
+            .compositor_capture_status()
+            .and_then(|s| serde_json::to_value(s).ok());
+        let protocol_bind_counts_raw = backend.compositor_protocol_bind_counts();
+        let protocol_bind_counts = protocol_bind_counts_raw
+            .iter()
+            .map(|status| {
                 serde_json::json!({
-                    "protocol": protocol,
-                    "bind_count": count,
+                    "protocol": status.protocol,
+                    "bind_count": status.bind_count,
+                    "last_bound_unix_ms": status.last_bound_unix_ms,
                 })
             })
             .collect::<Vec<_>>();
@@ -497,6 +993,18 @@ impl Jwm {
                     .collect::<Vec<_>>(),
             })
         });
+        let tearing_hint_count = backend.compositor_tearing_hint_count();
+        let render_decisions = render_decisions_json(
+            direct_scanout.as_ref(),
+            blur.as_ref(),
+            &output_details,
+            tearing_hint_count,
+            cfg.behavior().hdr_enabled,
+            cfg.behavior().blur_enabled,
+            color_render_path_enabled,
+            color_advanced_enabled,
+            cfg.behavior().kms_color_pipeline_offload,
+        );
 
         serde_json::json!({
             "backend_family": match backend_family {
@@ -510,7 +1018,12 @@ impl Jwm {
             },
             "protocols": if backend_family == BackendFamily::Wayland {
                 let mut protocols = wayland_protocol_status();
+                let catalog = protocol_catalog(&protocols, &protocol_bind_counts_raw);
                 if let Some(obj) = protocols.as_object_mut() {
+                    obj.insert(
+                        "catalog".to_string(),
+                        serde_json::json!(catalog),
+                    );
                     obj.insert(
                         "runtime_bind_counts".to_string(),
                         serde_json::json!({
@@ -534,19 +1047,22 @@ impl Jwm {
             "outputs": output_details,
             "workspaces": self.query_workspaces(),
             "windows": self.query_windows(),
+            "config": self.query_config_status(),
             "scrolling": self.query_scrolling_status(),
             "gestures": self.query_gesture_status(),
             "metrics": metrics,
             "direct_scanout": direct_scanout,
             "presentation_timing": presentation_timing,
             "output_management": output_management,
+            "capture": capture,
+            "render_decisions": render_decisions,
             "hdr": {
                 "config_enabled": cfg.behavior().hdr_enabled,
                 "config_peak_nits": cfg.behavior().hdr_peak_nits,
                 "capable_output_count": outputs.iter().filter(|o| o.hdr_capable).count(),
             },
             "tearing": {
-                "active_surface_count": backend.compositor_tearing_hint_count(),
+                "active_surface_count": tearing_hint_count,
             },
             "session_lock": {
                 "locked": backend.compositor_session_locked(),
@@ -554,6 +1070,9 @@ impl Jwm {
             },
             "color_management": {
                 "surface_count": color_surfaces.len(),
+                "advanced_enabled": color_advanced_enabled,
+                "render_path_enabled": color_render_path_enabled,
+                "output_count": outputs.len(),
             },
             "blur": blur,
             "not_yet_exposed": [],
@@ -627,6 +1146,96 @@ impl Jwm {
             serde_json::json!({ "key": key, "value": value }),
         );
         IpcResponse::ok(None)
+    }
+
+    fn handle_set_config_batch_command(
+        &mut self,
+        backend: &mut dyn Backend,
+        args: &serde_json::Value,
+    ) -> IpcResponse {
+        let changes = match parse_config_batch_changes(args) {
+            Ok(changes) => changes,
+            Err(e) => return IpcResponse::err(e),
+        };
+
+        let mut new_cfg = (**CONFIG.load()).clone();
+        if let Err(e) = new_cfg.set_values(&changes) {
+            return IpcResponse::err(e);
+        }
+        CONFIG.store(std::sync::Arc::new(new_cfg));
+
+        self.apply_config_changes(backend);
+        let changed_keys = changes
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        self.broadcast_ipc_event(
+            "config/changed",
+            serde_json::json!({
+                "batch": true,
+                "change_count": changed_keys.len(),
+                "keys": changed_keys,
+            }),
+        );
+        IpcResponse::ok(Some(serde_json::json!({
+            "applied": changes.len(),
+            "atomic": true,
+        })))
+    }
+
+    fn handle_command_batch(
+        &mut self,
+        backend: &mut dyn Backend,
+        args: &serde_json::Value,
+    ) -> IpcResponse {
+        let commands = match parse_command_batch_entries(args) {
+            Ok(commands) => commands,
+            Err(e) => return IpcResponse::err(e),
+        };
+        let stop_on_error = args
+            .get("stop_on_error")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+
+        let mut results = Vec::with_capacity(commands.len());
+        let mut failed_at = None;
+        for (idx, (name, command_args)) in commands.iter().enumerate() {
+            let response = self.handle_ipc_command(backend, name, command_args);
+            let success = response.success;
+            let error = response.error.clone();
+            results.push(serde_json::json!({
+                "index": idx,
+                "command": name,
+                "success": success,
+                "response": response,
+            }));
+            if !success {
+                failed_at = Some((idx, error.unwrap_or_else(|| "command failed".to_string())));
+                if stop_on_error {
+                    break;
+                }
+            }
+        }
+
+        let executed = results.len();
+        let success = failed_at.is_none();
+        let (failed_at_index, error) = failed_at
+            .as_ref()
+            .map(|(idx, error)| (Some(*idx), Some(error.clone())))
+            .unwrap_or((None, None));
+        let data = serde_json::json!({
+            "success": success,
+            "requested": commands.len(),
+            "executed": executed,
+            "failed_at": failed_at_index,
+            "stop_on_error": stop_on_error,
+            "results": results,
+        });
+        IpcResponse {
+            success,
+            data: Some(data),
+            error,
+        }
     }
 
     /// Move a specific window (by raw id) to an absolute monitor index.
@@ -974,6 +1583,24 @@ impl Jwm {
         })
     }
 
+    pub(crate) fn query_config_status(&self) -> serde_json::Value {
+        let path = crate::config::Config::resolve_load_path();
+        let modified_unix_ms = crate::config::Config::get_config_modified_time()
+            .ok()
+            .and_then(system_time_unix_ms);
+        serde_json::json!({
+            "path": path.display().to_string(),
+            "exists": path.exists(),
+            "modified_unix_ms": modified_unix_ms,
+            "reload": {
+                "attempt_count": self.config_reload_count,
+                "last_attempt_unix_ms": self.config_reload_last_unix_ms,
+                "last_success": self.config_reload_last_success,
+                "last_error": self.config_reload_last_error,
+            },
+        })
+    }
+
     pub(crate) fn query_tree(&self) -> Vec<TreeNode> {
         self.state
             .monitor_order
@@ -1039,5 +1666,195 @@ impl Jwm {
                 payload,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        output_color_policy_json, parse_command_batch_entries, parse_config_batch_changes,
+        render_decisions_json,
+    };
+    use crate::backend::api::{OutputIdentity, OutputInfo};
+    use crate::backend::common_define::OutputId;
+    use crate::backend::edid::EdidHdrCapabilities;
+
+    fn output(hdr_metadata: Option<EdidHdrCapabilities>) -> OutputInfo {
+        OutputInfo {
+            id: OutputId(1),
+            name: "HDMI-A-1".into(),
+            x: 0,
+            y: 0,
+            width: 3840,
+            height: 2160,
+            scale: 1.0,
+            refresh_rate: 60_000,
+            hdr_capable: hdr_metadata.is_some(),
+            hdr_metadata,
+            identity: OutputIdentity::connector_only("HDMI-A-1"),
+        }
+    }
+
+    #[test]
+    fn color_policy_uses_safe_srgb_when_advanced_disabled() {
+        let value = output_color_policy_json(
+            &output(Some(EdidHdrCapabilities {
+                max_luminance_nits: 1000.0,
+                min_luminance_nits: 0.05,
+                supports_bt2020: true,
+                supports_pq: true,
+                supports_hlg: false,
+            })),
+            None,
+            true,
+            false,
+        );
+
+        assert_eq!(value["policy_source"], "srgb_safe_default");
+        assert_eq!(value["selected_transfer_function"], "gamma22");
+        assert_eq!(value["selected_primaries"], "srgb");
+    }
+
+    #[test]
+    fn color_policy_reports_hdr_edid_when_advanced_enabled() {
+        let value = output_color_policy_json(
+            &output(Some(EdidHdrCapabilities {
+                max_luminance_nits: 1000.0,
+                min_luminance_nits: 0.05,
+                supports_bt2020: true,
+                supports_pq: true,
+                supports_hlg: false,
+            })),
+            None,
+            true,
+            true,
+        );
+
+        assert_eq!(value["policy_source"], "edid_hdr");
+        assert_eq!(value["selected_transfer_function"], "st2084_pq");
+        assert_eq!(value["selected_primaries"], "bt2020");
+        assert_eq!(value["shader_fallback_required"], true);
+    }
+
+    #[test]
+    fn config_batch_parser_accepts_changes_array() {
+        let changes = parse_config_batch_changes(&serde_json::json!({
+            "changes": [
+                {"key": "appearance.gap_px", "value": 8},
+                {"key": "status_bar.show_bar", "value": false}
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].0, "appearance.gap_px");
+        assert_eq!(changes[0].1, serde_json::json!(8));
+    }
+
+    #[test]
+    fn config_batch_parser_accepts_values_object() {
+        let changes = parse_config_batch_changes(&serde_json::json!({
+            "values": {
+                "appearance.gap_px": 8,
+                "status_bar.show_bar": false
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(changes.len(), 2);
+        assert!(
+            changes.iter().any(|(key, value)| {
+                key == "appearance.gap_px" && *value == serde_json::json!(8)
+            })
+        );
+        assert!(changes.iter().any(|(key, value)| {
+            key == "status_bar.show_bar" && *value == serde_json::json!(false)
+        }));
+    }
+
+    #[test]
+    fn command_batch_parser_accepts_commands_array() {
+        let commands = parse_command_batch_entries(&serde_json::json!({
+            "commands": [
+                {"command": "view", "args": {"tag": 1}},
+                {"name": "focusstack", "args": {"value": -1}}
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].0, "view");
+        assert_eq!(commands[0].1, serde_json::json!({"tag": 1}));
+        assert_eq!(commands[1].0, "focusstack");
+        assert_eq!(commands[1].1, serde_json::json!({"value": -1}));
+    }
+
+    #[test]
+    fn command_batch_parser_rejects_nested_batch() {
+        let err = parse_command_batch_entries(&serde_json::json!({
+            "commands": [
+                {"command": "command_batch", "args": {"commands": []}}
+            ]
+        }))
+        .unwrap_err();
+
+        assert!(err.contains("cannot nest"));
+    }
+
+    #[test]
+    fn render_decisions_reports_direct_scanout_blockers() {
+        let decisions = render_decisions_json(
+            Some(&serde_json::json!({
+                "enabled": true,
+                "active": false,
+                "candidate_count": 1,
+                "compositor_reason": "overlay present",
+                "kms_outputs": [
+                    {"output_name": "HDMI-A-1", "eligible": false, "reason": "cursor plane busy"}
+                ]
+            })),
+            None,
+            &[],
+            0,
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
+
+        assert_eq!(decisions["direct_scanout"]["active"], false);
+        assert_eq!(decisions["direct_scanout"]["reason"], "overlay present");
+        assert_eq!(
+            decisions["direct_scanout"]["blockers"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn render_decisions_reports_hdr_without_capable_outputs() {
+        let decisions = render_decisions_json(
+            None,
+            Some(&serde_json::json!({
+                "current_strength": 3,
+                "temporal_enabled": true,
+                "temporal_reuse_rate_pct": 80.0
+            })),
+            &[serde_json::json!({"hdr_capable": false})],
+            1,
+            true,
+            true,
+            true,
+            true,
+            false,
+        );
+
+        assert_eq!(decisions["blur"]["active"], true);
+        assert_eq!(decisions["hdr"]["active"], false);
+        assert_eq!(decisions["hdr"]["reason"], "no_hdr_capable_outputs");
+        assert_eq!(decisions["tearing"]["active"], true);
     }
 }

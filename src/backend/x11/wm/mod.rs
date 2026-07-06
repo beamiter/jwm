@@ -531,6 +531,7 @@ pub fn build_output_info(
     hdr_capable: bool,
     hdr_metadata: Option<crate::backend::edid::EdidHdrCapabilities>,
 ) -> OutputInfo {
+    let identity = crate::backend::api::OutputIdentity::connector_only(name.clone());
     OutputInfo {
         id,
         name,
@@ -542,6 +543,7 @@ pub fn build_output_info(
         refresh_rate,
         hdr_capable,
         hdr_metadata,
+        identity,
     }
 }
 

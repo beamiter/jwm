@@ -44,7 +44,7 @@ const PRIMARIES_BT2020: [i32; 8] = [
 
 const COLOR_MANAGER_VERSION: u32 = 1;
 
-fn advanced_color_management_enabled() -> bool {
+pub(crate) fn advanced_color_management_enabled() -> bool {
     std::env::var_os("JWM_COLOR_MANAGEMENT_ADVANCED").as_deref() == Some(std::ffi::OsStr::new("1"))
 }
 

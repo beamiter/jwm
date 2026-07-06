@@ -198,6 +198,10 @@ pub(super) struct KmsState {
     image_capture_pending:
         Option<crate::backend::wayland_udev::image_copy_capture::PendingImageCaptureQueue>,
 
+    /// Shared capture counters updated by protocol dispatch and render-drain.
+    capture_counters:
+        Option<std::sync::Arc<std::sync::Mutex<crate::backend::wayland::state::CaptureCounters>>>,
+
     outputs: Vec<KmsOutputState>,
 
     /// Reused offscreen renderbuffer for screencopy / image-copy-capture readback,
@@ -392,6 +396,57 @@ impl KmsState {
         queue: crate::backend::wayland_udev::image_copy_capture::PendingImageCaptureQueue,
     ) {
         self.image_capture_pending = Some(queue);
+    }
+
+    pub(super) fn set_capture_counters(
+        &mut self,
+        counters: std::sync::Arc<std::sync::Mutex<crate::backend::wayland::state::CaptureCounters>>,
+    ) {
+        self.capture_counters = Some(counters);
+    }
+
+    fn note_screencopy_fulfilled(
+        counters: Option<
+            &std::sync::Arc<std::sync::Mutex<crate::backend::wayland::state::CaptureCounters>>,
+        >,
+    ) {
+        if let Some(counters) = counters {
+            let mut counters = counters.lock_safe();
+            counters.note_screencopy_fulfilled();
+        }
+    }
+
+    fn note_screencopy_render_failed(
+        counters: Option<
+            &std::sync::Arc<std::sync::Mutex<crate::backend::wayland::state::CaptureCounters>>,
+        >,
+    ) {
+        if let Some(counters) = counters {
+            let mut counters = counters.lock_safe();
+            counters.note_screencopy_render_failed("screencopy render-drain failure");
+        }
+    }
+
+    fn note_image_capture_fulfilled(
+        counters: Option<
+            &std::sync::Arc<std::sync::Mutex<crate::backend::wayland::state::CaptureCounters>>,
+        >,
+    ) {
+        if let Some(counters) = counters {
+            let mut counters = counters.lock_safe();
+            counters.note_image_copy_fulfilled();
+        }
+    }
+
+    fn note_image_capture_render_failed(
+        counters: Option<
+            &std::sync::Arc<std::sync::Mutex<crate::backend::wayland::state::CaptureCounters>>,
+        >,
+    ) {
+        if let Some(counters) = counters {
+            let mut counters = counters.lock_safe();
+            counters.note_image_copy_render_failed("image-copy render-drain failure");
+        }
     }
 
     /// Get the size of the primary (first) output
@@ -1525,6 +1580,9 @@ impl KmsState {
         height: i32,
         elements: &[KmsRenderElement],
         pending: &crate::backend::wayland_udev::screencopy::PendingScreencopyQueue,
+        counters: Option<
+            &std::sync::Arc<std::sync::Mutex<crate::backend::wayland::state::CaptureCounters>>,
+        >,
     ) {
         use smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_frame_v1;
         use smithay::wayland::shm::with_buffer_contents_mut;
@@ -1567,6 +1625,7 @@ impl KmsState {
                     // let the client fall back to SHM.
                     if f.region.is_some() {
                         log::warn!("[screencopy] region capture into dmabuf unsupported");
+                        Self::note_screencopy_render_failed(counters);
                         f.frame.failed();
                         continue;
                     }
@@ -1587,7 +1646,9 @@ impl KmsState {
                             (tv_sec & 0xFFFFFFFF) as u32,
                             now.subsec_nanos(),
                         );
+                        Self::note_screencopy_fulfilled(counters);
                     } else {
+                        Self::note_screencopy_render_failed(counters);
                         f.frame.failed();
                     }
                 }
@@ -1606,6 +1667,7 @@ impl KmsState {
                 Some(rb) => rb,
                 None => {
                     for f in &frames {
+                        Self::note_screencopy_render_failed(counters);
                         f.frame.failed();
                     }
                     return;
@@ -1617,6 +1679,7 @@ impl KmsState {
             Err(e) => {
                 log::error!("[screencopy] bind offscreen failed: {e:?}");
                 for f in &frames {
+                    Self::note_screencopy_render_failed(counters);
                     f.frame.failed();
                 }
                 return;
@@ -1632,6 +1695,7 @@ impl KmsState {
         {
             log::error!("[screencopy] render_output failed: {e:?}");
             for f in &frames {
+                Self::note_screencopy_render_failed(counters);
                 f.frame.failed();
             }
             return;
@@ -1644,6 +1708,7 @@ impl KmsState {
             Err(e) => {
                 log::error!("[screencopy] copy_framebuffer failed: {e:?}");
                 for f in &frames {
+                    Self::note_screencopy_render_failed(counters);
                     f.frame.failed();
                 }
                 return;
@@ -1655,6 +1720,7 @@ impl KmsState {
             Err(e) => {
                 log::error!("[screencopy] map_texture failed: {e:?}");
                 for f in &frames {
+                    Self::note_screencopy_render_failed(counters);
                     f.frame.failed();
                 }
                 return;
@@ -1743,9 +1809,11 @@ impl KmsState {
                         tv_nsec,
                     );
                     log::debug!("[screencopy] frame ready for output {}", output.name());
+                    Self::note_screencopy_fulfilled(counters);
                 }
                 Err(e) => {
                     log::warn!("[screencopy] buffer access failed: {e:?}");
+                    Self::note_screencopy_render_failed(counters);
                     frame_info.frame.failed();
                 }
             }
@@ -1765,6 +1833,9 @@ impl KmsState {
         height: i32,
         elements: &[KmsRenderElement],
         pending: &crate::backend::wayland_udev::image_copy_capture::PendingImageCaptureQueue,
+        counters: Option<
+            &std::sync::Arc<std::sync::Mutex<crate::backend::wayland::state::CaptureCounters>>,
+        >,
     ) {
         use crate::backend::wayland_udev::image_copy_capture::CaptureSource;
         use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_frame_v1::FailureReason;
@@ -1814,7 +1885,9 @@ impl KmsState {
                             now.subsec_nanos(),
                         );
                         f.frame.ready();
+                        Self::note_image_capture_fulfilled(counters);
                     } else {
+                        Self::note_image_capture_render_failed(counters);
                         f.frame.failed(FailureReason::Unknown);
                     }
                 }
@@ -1829,6 +1902,7 @@ impl KmsState {
         let fail_all =
             |frames: &[crate::backend::wayland_udev::image_copy_capture::PendingImageCapture]| {
                 for f in frames {
+                    Self::note_image_capture_render_failed(counters);
                     f.frame.failed(FailureReason::Unknown);
                 }
             };
@@ -1930,9 +2004,11 @@ impl KmsState {
                         now.subsec_nanos(),
                     );
                     frame_info.frame.ready();
+                    Self::note_image_capture_fulfilled(counters);
                 }
                 Err(e) => {
                     log::warn!("[image-capture] buffer access failed: {e:?}");
+                    Self::note_image_capture_render_failed(counters);
                     frame_info.frame.failed(FailureReason::Unknown);
                 }
             }
@@ -1949,6 +2025,9 @@ impl KmsState {
         offscreen_cache: &mut Option<(i32, i32, GlesRenderbuffer)>,
         state: &crate::backend::wayland::state::JwmWaylandState,
         pending: &crate::backend::wayland_udev::image_copy_capture::PendingImageCaptureQueue,
+        counters: Option<
+            &std::sync::Arc<std::sync::Mutex<crate::backend::wayland::state::CaptureCounters>>,
+        >,
     ) {
         use crate::backend::wayland_udev::image_copy_capture::CaptureSource;
         use smithay::reexports::wayland_protocols::ext::image_copy_capture::v1::server::ext_image_copy_capture_frame_v1::FailureReason;
@@ -1979,15 +2058,18 @@ impl KmsState {
             };
 
             let Some(surface) = state.surface_for_window(win) else {
+                Self::note_image_capture_render_failed(counters);
                 frame_info.frame.failed(FailureReason::Unknown);
                 continue;
             };
             let Some(geo) = state.window_geometry.get(&win).copied() else {
+                Self::note_image_capture_render_failed(counters);
                 frame_info.frame.failed(FailureReason::Unknown);
                 continue;
             };
             let (width, height) = (geo.w as i32, geo.h as i32);
             if width <= 0 || height <= 0 {
+                Self::note_image_capture_render_failed(counters);
                 frame_info.frame.failed(FailureReason::Unknown);
                 continue;
             }
@@ -2028,7 +2110,9 @@ impl KmsState {
                         now.subsec_nanos(),
                     );
                     frame_info.frame.ready();
+                    Self::note_image_capture_fulfilled(counters);
                 } else {
+                    Self::note_image_capture_render_failed(counters);
                     frame_info.frame.failed(FailureReason::Unknown);
                 }
                 continue;
@@ -2039,6 +2123,7 @@ impl KmsState {
                 match Self::screencopy_offscreen_buffer(renderer, offscreen_cache, width, height) {
                     Some(rb) => rb,
                     None => {
+                        Self::note_image_capture_render_failed(counters);
                         frame_info.frame.failed(FailureReason::Unknown);
                         continue;
                     }
@@ -2048,6 +2133,7 @@ impl KmsState {
                 Ok(t) => t,
                 Err(e) => {
                     log::error!("[image-capture/toplevel] bind offscreen failed: {e:?}");
+                    Self::note_image_capture_render_failed(counters);
                     frame_info.frame.failed(FailureReason::Unknown);
                     continue;
                 }
@@ -2062,6 +2148,7 @@ impl KmsState {
                 damage_tracker.render_output(renderer, &mut target, 0, &elements, clear_color)
             {
                 log::error!("[image-capture/toplevel] render_output failed: {e:?}");
+                Self::note_image_capture_render_failed(counters);
                 frame_info.frame.failed(FailureReason::Unknown);
                 continue;
             }
@@ -2071,6 +2158,7 @@ impl KmsState {
                 Ok(m) => m,
                 Err(e) => {
                     log::error!("[image-capture/toplevel] copy_framebuffer failed: {e:?}");
+                    Self::note_image_capture_render_failed(counters);
                     frame_info.frame.failed(FailureReason::Unknown);
                     continue;
                 }
@@ -2079,6 +2167,7 @@ impl KmsState {
                 Ok(p) => p,
                 Err(e) => {
                     log::error!("[image-capture/toplevel] map_texture failed: {e:?}");
+                    Self::note_image_capture_render_failed(counters);
                     frame_info.frame.failed(FailureReason::Unknown);
                     continue;
                 }
@@ -2131,9 +2220,11 @@ impl KmsState {
                         now.subsec_nanos(),
                     );
                     frame_info.frame.ready();
+                    Self::note_image_capture_fulfilled(counters);
                 }
                 Err(e) => {
                     log::warn!("[image-capture/toplevel] buffer access failed: {e:?}");
+                    Self::note_image_capture_render_failed(counters);
                     frame_info.frame.failed(FailureReason::Unknown);
                 }
             }
@@ -2523,6 +2614,7 @@ impl KmsState {
             pending_screenshot_region: None,
             screencopy_pending: None,
             image_capture_pending: None,
+            capture_counters: None,
 
             outputs,
             screencopy_offscreen: None,
@@ -3340,6 +3432,7 @@ impl KmsState {
                     out_h,
                     &elements,
                     pending_queue,
+                    self.capture_counters.as_ref(),
                 );
             }
 
@@ -3354,6 +3447,7 @@ impl KmsState {
                     out_h,
                     &elements,
                     pending_queue,
+                    self.capture_counters.as_ref(),
                 );
             }
 
@@ -3429,6 +3523,7 @@ impl KmsState {
                 &mut self.image_capture_toplevel_offscreen,
                 state,
                 pending_queue,
+                self.capture_counters.as_ref(),
             );
         }
 

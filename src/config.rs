@@ -2308,7 +2308,7 @@ impl Config {
         Self::get_config_path_for(get_backend_family())
     }
 
-    fn resolve_load_path() -> std::path::PathBuf {
+    pub fn resolve_load_path() -> std::path::PathBuf {
         Self::get_default_config_path()
     }
 
@@ -2426,6 +2426,17 @@ impl Config {
         Ok(())
     }
 
+    /// Atomically apply a batch of hot-tunable in-memory overrides. The
+    /// current config is unchanged if any key/value pair is invalid.
+    pub fn set_values(&mut self, changes: &[(String, serde_json::Value)]) -> Result<(), String> {
+        let mut candidate = self.clone();
+        for (key, value) in changes {
+            candidate.set_value(key, value)?;
+        }
+        *self = candidate;
+        Ok(())
+    }
+
     pub fn reload(&mut self) -> Result<(), ConfigError> {
         let config_path = Self::resolve_load_path();
         if config_path.exists() {
@@ -2524,4 +2535,38 @@ pub fn reload_global() -> Result<(), ConfigError> {
     let new_config = Config::load_from_file(Config::resolve_load_path())?;
     CONFIG.store(Arc::new(new_config));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn set_values_applies_valid_batch_atomically() {
+        let mut cfg = Config::default();
+        let changes = vec![
+            ("appearance.gap_px".to_string(), serde_json::json!(12)),
+            ("layout.m_fact".to_string(), serde_json::json!(0.6)),
+        ];
+
+        cfg.set_values(&changes).unwrap();
+
+        assert_eq!(cfg.gap_px(), 12);
+        assert_eq!(cfg.m_fact(), 0.6);
+    }
+
+    #[test]
+    fn set_values_rejects_invalid_batch_without_partial_apply() {
+        let mut cfg = Config::default();
+        let original_gap = cfg.gap_px();
+        let original_m_fact = cfg.m_fact();
+        let changes = vec![
+            ("appearance.gap_px".to_string(), serde_json::json!(12)),
+            ("layout.m_fact".to_string(), serde_json::json!(9.0)),
+        ];
+
+        assert!(cfg.set_values(&changes).is_err());
+        assert_eq!(cfg.gap_px(), original_gap);
+        assert_eq!(cfg.m_fact(), original_m_fact);
+    }
 }

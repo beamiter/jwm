@@ -55,6 +55,32 @@ pub enum HitTarget {
 }
 
 #[derive(Clone, Debug)]
+pub struct OutputIdentity {
+    pub connector: String,
+    pub vendor: Option<String>,
+    pub product_code: Option<u16>,
+    pub serial_number: Option<u32>,
+    pub monitor_name: Option<String>,
+    pub monitor_serial: Option<String>,
+    pub stable_key: String,
+}
+
+impl OutputIdentity {
+    pub fn connector_only(connector: impl Into<String>) -> Self {
+        let connector = connector.into();
+        Self {
+            stable_key: connector.clone(),
+            connector,
+            vendor: None,
+            product_code: None,
+            serial_number: None,
+            monitor_name: None,
+            monitor_serial: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct OutputInfo {
     pub id: OutputId,
     pub name: String,
@@ -66,6 +92,7 @@ pub struct OutputInfo {
     pub refresh_rate: u32,
     pub hdr_capable: bool,
     pub hdr_metadata: Option<crate::backend::edid::EdidHdrCapabilities>,
+    pub identity: OutputIdentity,
 }
 
 #[derive(Clone, Debug)]
@@ -321,11 +348,26 @@ pub struct OutputManagementFailure {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OutputManagementOutputSnapshot {
+    pub name: String,
+    pub stable_key: String,
+    pub enabled: bool,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub scale: f32,
+    pub refresh_rate: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OutputManagementTransactionStatus {
     pub id: u64,
     pub requested_at_unix_ms: u64,
     pub success: bool,
     pub changes: Vec<OutputConfigChange>,
+    pub outputs_before: Vec<OutputManagementOutputSnapshot>,
+    pub outputs_after: Vec<OutputManagementOutputSnapshot>,
     pub failed_outputs: Vec<OutputManagementFailure>,
     pub rollback_attempted: bool,
     pub rollback_succeeded: bool,
@@ -337,6 +379,47 @@ pub struct OutputManagementStatus {
     pub pending_ack_count: usize,
     pub soft_disabled_outputs: Vec<String>,
     pub last_transaction: Option<OutputManagementTransactionStatus>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CaptureProtocolStatus {
+    pub enabled: bool,
+    pub pending_frames: usize,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CaptureStatus {
+    pub screencopy: CaptureProtocolStatus,
+    pub image_copy_capture: CaptureProtocolStatus,
+    pub image_copy_output_pending_frames: usize,
+    pub image_copy_toplevel_pending_frames: usize,
+    pub screencopy_queued_total: u64,
+    pub screencopy_failed_total: u64,
+    pub screencopy_fulfilled_total: u64,
+    pub screencopy_render_failed_total: u64,
+    pub image_copy_sessions_total: u64,
+    pub image_copy_queued_total: u64,
+    pub image_copy_failed_total: u64,
+    pub image_copy_fulfilled_total: u64,
+    pub image_copy_render_failed_total: u64,
+    pub image_copy_output_queued_total: u64,
+    pub image_copy_toplevel_queued_total: u64,
+    pub last_queued_unix_ms: Option<u64>,
+    pub last_fulfilled_unix_ms: Option<u64>,
+    pub last_failed_unix_ms: Option<u64>,
+    pub last_failure_reason: Option<String>,
+    pub dmabuf_advertised: bool,
+    pub dmabuf_format_count: usize,
+    pub cursor_capture_supported: bool,
+    pub sensitive_content_masking: bool,
+    pub policy: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProtocolBindStatus {
+    pub protocol: String,
+    pub bind_count: u64,
+    pub last_bound_unix_ms: Option<u64>,
 }
 
 // --- 事件定义 ---
@@ -1241,9 +1324,14 @@ pub trait Backend: Send {
         None
     }
 
+    /// Diagnostic status for screen/window capture protocols and pending queues.
+    fn compositor_capture_status(&self) -> Option<CaptureStatus> {
+        None
+    }
+
     /// Runtime bind counters for compositor-owned Wayland globals. Empty on
     /// backends that do not expose custom Wayland protocol globals.
-    fn compositor_protocol_bind_counts(&self) -> Vec<(String, u64)> {
+    fn compositor_protocol_bind_counts(&self) -> Vec<ProtocolBindStatus> {
         Vec::new()
     }
 

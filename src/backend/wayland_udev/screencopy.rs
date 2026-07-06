@@ -273,11 +273,11 @@ impl Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameData> for JwmWaylandState {
     ) {
         match request {
             zwlr_screencopy_frame_v1::Request::Copy { buffer } => {
-                queue_copy(resource, &buffer, data, false);
+                queue_copy(state, resource, &buffer, data, false);
                 state.needs_redraw = true;
             }
             zwlr_screencopy_frame_v1::Request::CopyWithDamage { buffer } => {
-                queue_copy(resource, &buffer, data, true);
+                queue_copy(state, resource, &buffer, data, true);
                 state.needs_redraw = true;
             }
             zwlr_screencopy_frame_v1::Request::Destroy => {}
@@ -287,6 +287,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameData> for JwmWaylandState {
 }
 
 fn queue_copy(
+    state: &mut JwmWaylandState,
     frame: &ZwlrScreencopyFrameV1,
     buffer: &WlBuffer,
     data: &ScreencopyFrameData,
@@ -296,6 +297,8 @@ fn queue_copy(
         Some(o) => o,
         None => {
             // Frame was created for an output that no longer exists; fail cleanly.
+            let mut counters = state.capture_counters.lock_safe();
+            counters.note_screencopy_failed("screencopy dispatch: missing output");
             frame.failed();
             return;
         }
@@ -313,6 +316,8 @@ fn queue_copy(
         overlay_cursor: data.overlay_cursor,
         with_damage,
     });
+    let mut counters = state.capture_counters.lock_safe();
+    counters.note_screencopy_queued();
 }
 
 // ---- Initialization ---------------------------------------------------------------

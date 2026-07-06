@@ -396,6 +396,9 @@ fn build_changes(
     }
 
     for name in data.disabled_heads.lock_safe().iter() {
+        if !state.outputs.iter().any(|output| output.name() == *name) {
+            return Err(format!("unknown output '{name}'"));
+        }
         changes.push(OutputConfigChange {
             name: name.clone(),
             enabled: false,
@@ -407,7 +410,36 @@ fn build_changes(
         });
     }
 
+    if !output_config_leaves_enabled_output(
+        state.outputs.iter().map(|output| output.name()),
+        &state.soft_disabled_outputs,
+        &changes,
+    ) {
+        return Err("configuration would leave no enabled outputs".into());
+    }
+
     Ok(changes)
+}
+
+fn output_config_leaves_enabled_output(
+    outputs: impl IntoIterator<Item = String>,
+    soft_disabled_outputs: &std::collections::HashSet<String>,
+    changes: &[OutputConfigChange],
+) -> bool {
+    let mut enabled_outputs: std::collections::HashSet<String> = outputs
+        .into_iter()
+        .filter(|name| !soft_disabled_outputs.contains(name))
+        .collect();
+
+    for change in changes {
+        if change.enabled {
+            enabled_outputs.insert(change.name.clone());
+        } else {
+            enabled_outputs.remove(&change.name);
+        }
+    }
+
+    !enabled_outputs.is_empty()
 }
 
 // --- Dispatch for configuration head ---
@@ -490,9 +522,11 @@ impl Dispatch<ZwlrOutputModeV1, OutputModeData> for JwmWaylandState {
 
 #[cfg(test)]
 mod tests {
-    use super::mode_is_change;
+    use super::{mode_is_change, output_config_leaves_enabled_output};
+    use crate::backend::api::OutputConfigChange;
     use smithay::output::Mode as SmithayMode;
     use smithay::utils::Size;
+    use std::collections::HashSet;
 
     fn mode(w: i32, h: i32, refresh: i32) -> SmithayMode {
         SmithayMode {
@@ -537,5 +571,45 @@ mod tests {
         let cur = mode(1920, 1080, 60_000);
         assert!(mode_is_change(Some(cur), (2560, 1440, 60_000)));
         assert!(mode_is_change(Some(cur), (2560, 1440, 0)));
+    }
+
+    fn change(name: &str, enabled: bool) -> OutputConfigChange {
+        OutputConfigChange {
+            name: name.to_string(),
+            enabled,
+            mode: None,
+            position: None,
+            transform: None,
+            scale: None,
+            adaptive_sync: None,
+        }
+    }
+
+    #[test]
+    fn output_config_allows_disabling_one_of_two_outputs() {
+        assert!(output_config_leaves_enabled_output(
+            ["HDMI-A-1".to_string(), "DP-1".to_string()],
+            &HashSet::new(),
+            &[change("DP-1", false)],
+        ));
+    }
+
+    #[test]
+    fn output_config_rejects_disabling_last_enabled_output() {
+        assert!(!output_config_leaves_enabled_output(
+            ["HDMI-A-1".to_string()],
+            &HashSet::new(),
+            &[change("HDMI-A-1", false)],
+        ));
+    }
+
+    #[test]
+    fn output_config_allows_reenabling_soft_disabled_output() {
+        let soft_disabled = HashSet::from(["HDMI-A-1".to_string()]);
+        assert!(output_config_leaves_enabled_output(
+            ["HDMI-A-1".to_string()],
+            &soft_disabled,
+            &[change("HDMI-A-1", true)],
+        ));
     }
 }

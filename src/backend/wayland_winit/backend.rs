@@ -614,6 +614,7 @@ impl WaylandWinitBackend {
             refresh_rate: 60_000,
             hdr_capable: true,
             hdr_metadata: None,
+            identity: crate::backend::api::OutputIdentity::connector_only("winit"),
         };
 
         if emit_events {
@@ -1294,6 +1295,9 @@ impl WaylandWinitBackend {
                                 refresh_rate: 60_000,
                                 hdr_capable: true,
                                 hdr_metadata: None,
+                                identity: crate::backend::api::OutputIdentity::connector_only(
+                                    "winit",
+                                ),
                             };
                             {
                                 let mut s = shared.lock_safe();

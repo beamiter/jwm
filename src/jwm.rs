@@ -140,6 +140,10 @@ pub struct Jwm {
     // Config hot-reload
     pub config_last_modified: Option<std::time::SystemTime>,
     pub config_reload_debounce: Option<std::time::Instant>,
+    pub config_reload_count: u64,
+    pub config_reload_last_unix_ms: Option<u64>,
+    pub config_reload_last_success: Option<bool>,
+    pub config_reload_last_error: Option<String>,
 
     /// Override-redirect windows (menus, tooltips, dmenu, etc.) that are
     /// currently mapped.  These are not managed by the WM but must be rendered
@@ -515,6 +519,10 @@ impl Jwm {
             },
             config_last_modified: crate::config::Config::get_config_modified_time().ok(),
             config_reload_debounce: None,
+            config_reload_count: 0,
+            config_reload_last_unix_ms: None,
+            config_reload_last_success: None,
+            config_reload_last_error: None,
             override_redirect_windows: HashSet::new(),
             or_window_geometries: HashMap::new(),
             scrolling_states: HashMap::new(),
