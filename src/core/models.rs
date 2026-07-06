@@ -86,7 +86,8 @@ impl ScrollingState {
                 .get(idx)
                 .copied()
                 .flatten()
-                .filter(|key| col.contains(key));
+                .filter(|key| col.contains(key))
+                .or_else(|| col.first().copied());
             retained_old_indices.push(idx);
             self.columns.push(col);
             self.column_width_factors
@@ -842,6 +843,7 @@ mod tests {
 
         assert_eq!(s.columns, vec![vec![a], vec![c]]);
         assert_eq!(s.column_width_factors, vec![1.0, 1.5]);
+        assert_eq!(s.focused_clients, vec![Some(a), Some(c)]);
         assert_eq!(s.focused_column_index(), Some(1));
         assert_eq!(s.target_for_column(1), Some(c));
     }
