@@ -2,7 +2,7 @@
 
 use crate::Jwm;
 use crate::backend::api::Backend;
-use crate::config::{BackendFamily, CONFIG, get_backend_family};
+use crate::config::{ArgumentConfig, BackendFamily, CONFIG, get_backend_family};
 use crate::core::layout::LayoutEnum;
 use crate::ipc::{
     self, IpcEvent, IpcResponse, MonitorInfoIpc, TreeNode, WindowInfo, WorkspaceInfo,
@@ -116,6 +116,53 @@ fn wayland_protocol_status() -> serde_json::Value {
             .collect::<Vec<_>>(),
         "env_enable_all": env_flag("JWM_OPTIONAL_GLOBALS"),
     })
+}
+
+fn recommended_scrolling_swipes(
+    bindings: &[crate::config::GestureSwipeConfig],
+) -> Vec<serde_json::Value> {
+    let recommendations = [
+        (
+            3u32,
+            "left",
+            "scrolling_focus_column",
+            ArgumentConfig::Int(1),
+        ),
+        (
+            3u32,
+            "right",
+            "scrolling_focus_column",
+            ArgumentConfig::Int(-1),
+        ),
+        (
+            3u32,
+            "up",
+            "scrolling_focus_window",
+            ArgumentConfig::Int(-1),
+        ),
+        (
+            3u32,
+            "down",
+            "scrolling_focus_window",
+            ArgumentConfig::Int(1),
+        ),
+    ];
+
+    recommendations
+        .into_iter()
+        .map(|(fingers, direction, function, argument)| {
+            let configured = bindings.iter().any(|binding| {
+                binding.fingers == fingers && binding.direction.eq_ignore_ascii_case(direction)
+            });
+            serde_json::json!({
+                "fingers": fingers,
+                "direction": direction,
+                "function": function,
+                "argument": argument,
+                "configured": configured,
+            })
+        })
+        .collect()
 }
 
 impl Jwm {
@@ -887,6 +934,7 @@ impl Jwm {
             "binding_count": bindings.len(),
             "scrolling_binding_count": scrolling_binding_count,
             "intercepted_fingers": intercepted_fingers,
+            "recommended_scrolling_swipes": recommended_scrolling_swipes(bindings),
             "bindings": binding_details,
         })
     }

@@ -1394,9 +1394,23 @@ fn print_unified_wayland_status(status: &serde_json::Value) {
             })
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "none".into());
+        let missing_recommended = gestures
+            .get("recommended_scrolling_swipes")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|entry| {
+                        !entry
+                            .get("configured")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
         println!(
-            "gestures: swipe_bindings={} scrolling_bindings={} intercepted_fingers={} threshold={:.1}",
-            bindings, scrolling_bindings, fingers, threshold
+            "gestures: swipe_bindings={} scrolling_bindings={} intercepted_fingers={} threshold={:.1} missing_recommended_scrolling={}",
+            bindings, scrolling_bindings, fingers, threshold, missing_recommended
         );
     }
 
@@ -1611,9 +1625,23 @@ fn run_wayland_status(json_output: bool) -> io::Result<()> {
             .get("scrolling_binding_count")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+        let missing_recommended = gestures
+            .get("recommended_scrolling_swipes")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|entry| {
+                        !entry
+                            .get("configured")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
         println!(
-            "gestures: swipe_bindings={} scrolling_bindings={}",
-            bindings, scrolling_bindings
+            "gestures: swipe_bindings={} scrolling_bindings={} missing_recommended_scrolling={}",
+            bindings, scrolling_bindings, missing_recommended
         );
     }
 
