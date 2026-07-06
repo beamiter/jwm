@@ -66,14 +66,14 @@ use smithay::wayland::selection::{SelectionHandler, SelectionTarget, SelectionSo
 use smithay::wayland::selection::data_device::{
     DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler,
     clear_data_device_selection, current_data_device_selection_userdata,
-    request_data_device_client_selection, set_data_device_selection,
+    request_data_device_client_selection, set_data_device_focus, set_data_device_selection,
 };
 use smithay::input::dnd::{DnDGrab, DndGrabHandler, GrabType, Source, DndTarget};
 use smithay::input::pointer::Focus;
 use smithay::wayland::selection::primary_selection::{
     PrimarySelectionHandler, PrimarySelectionState,
     clear_primary_selection, current_primary_selection_userdata,
-    request_primary_client_selection, set_primary_selection,
+    request_primary_client_selection, set_primary_focus, set_primary_selection,
 };
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::text_input::TextInputManagerState;
@@ -2577,6 +2577,12 @@ impl SeatHandler for JwmWaylandState {
 
     fn seat_state(&mut self) -> &mut SeatState<Self> {
         &mut self.seat_state
+    }
+
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&Self::KeyboardFocus>) {
+        let client = focused.and_then(|surface| surface.client());
+        set_data_device_focus(&self.display_handle, seat, client.clone());
+        set_primary_focus(&self.display_handle, seat, client);
     }
 }
 
