@@ -75,6 +75,7 @@ impl ScrollingState {
         let old_columns = std::mem::take(&mut self.columns);
         let old_widths = std::mem::take(&mut self.column_width_factors);
         let old_focuses = std::mem::take(&mut self.focused_clients);
+        let mut retained_old_indices = Vec::new();
 
         for (idx, col) in old_columns.into_iter().enumerate() {
             if col.is_empty() {
@@ -86,6 +87,7 @@ impl ScrollingState {
                 .copied()
                 .flatten()
                 .filter(|key| col.contains(key));
+            retained_old_indices.push(idx);
             self.columns.push(col);
             self.column_width_factors
                 .push(old_widths.get(idx).copied().unwrap_or(1.0));
@@ -94,9 +96,7 @@ impl ScrollingState {
 
         self.focused_column = self
             .focused_column
-            .and_then(|old_idx| {
-                old_columns_index_after_retain(old_idx, &self.columns, &old_focuses)
-            })
+            .and_then(|old_idx| old_column_index_after_retain(old_idx, &retained_old_indices))
             .or_else(|| {
                 self.focused_clients
                     .iter()
@@ -124,13 +124,8 @@ impl ScrollingState {
     }
 }
 
-fn old_columns_index_after_retain(
-    old_idx: usize,
-    retained_columns: &[Vec<ClientKey>],
-    old_focuses: &[Option<ClientKey>],
-) -> Option<usize> {
-    let focus = old_focuses.get(old_idx).copied().flatten()?;
-    retained_columns.iter().position(|col| col.contains(&focus))
+fn old_column_index_after_retain(old_idx: usize, retained_old_indices: &[usize]) -> Option<usize> {
+    retained_old_indices.iter().position(|idx| *idx == old_idx)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -828,6 +823,27 @@ mod tests {
         assert_eq!(s.columns, vec![vec![a], vec![b]]);
         assert_eq!(s.column_width_factors, vec![1.25, 1.5]);
         assert_eq!(s.focused_clients, vec![Some(a), Some(b)]);
+    }
+
+    #[test]
+    fn test_scrolling_state_preserves_focused_column_when_focus_client_disappears() {
+        let mut keys = slotmap::SlotMap::<ClientKey, ()>::with_key();
+        let a = keys.insert(());
+        let b = keys.insert(());
+        let c = keys.insert(());
+        let mut s = ScrollingState::new();
+        s.columns = vec![vec![a], vec![b, c]];
+        s.column_width_factors = vec![1.0, 1.5];
+        s.focused_clients = vec![Some(a), Some(b)];
+        s.focused_column = Some(1);
+
+        s.columns[1].remove(0);
+        s.retain_non_empty_columns();
+
+        assert_eq!(s.columns, vec![vec![a], vec![c]]);
+        assert_eq!(s.column_width_factors, vec![1.0, 1.5]);
+        assert_eq!(s.focused_column_index(), Some(1));
+        assert_eq!(s.target_for_column(1), Some(c));
     }
 
     #[test]
