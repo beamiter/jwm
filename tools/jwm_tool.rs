@@ -1322,6 +1322,46 @@ fn print_unified_wayland_status(status: &serde_json::Value) {
         }
     }
 
+    if let Some(scrolling) = status.get("scrolling").filter(|v| !v.is_null()) {
+        let active = scrolling
+            .get("active_monitor_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let first_active = scrolling
+            .get("monitors")
+            .and_then(|v| v.as_array())
+            .and_then(|monitors| {
+                monitors.iter().find(|monitor| {
+                    monitor
+                        .get("active")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                })
+            });
+        if let Some(monitor) = first_active {
+            let mon_num = monitor.get("monitor").and_then(|v| v.as_u64()).unwrap_or(0);
+            let columns = monitor
+                .get("column_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let focused_column = monitor
+                .get("focused_column")
+                .and_then(|v| v.as_u64())
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "none".into());
+            let viewport = monitor
+                .get("viewport_x")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            println!(
+                "scrolling: active_monitors={} first_monitor={} columns={} focused_column={} viewport_x={:.1}",
+                active, mon_num, columns, focused_column, viewport
+            );
+        } else {
+            println!("scrolling: active_monitors={}", active);
+        }
+    }
+
     if let Some(hdr) = status.get("hdr") {
         let enabled = hdr
             .get("config_enabled")
@@ -1441,6 +1481,7 @@ fn run_wayland_status(json_output: bool) -> io::Result<()> {
         "get_monitors",
         "get_workspaces",
         "get_windows",
+        "get_scrolling_status",
         "get_metrics",
         "get_hdr_status",
         "get_tearing_hints",
@@ -1506,6 +1547,14 @@ fn run_wayland_status(json_output: bool) -> io::Result<()> {
         response_array_len(queries, "get_workspaces")
     );
     println!("windows: {}", response_array_len(queries, "get_windows"));
+
+    if let Some(scrolling) = response_data(queries, "get_scrolling_status") {
+        let active = scrolling
+            .get("active_monitor_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        println!("scrolling: active_monitors={}", active);
+    }
 
     if let Some(metrics) = response_data(queries, "get_metrics") {
         let fps = metrics.get("fps").and_then(|v| v.as_f64()).unwrap_or(0.0);

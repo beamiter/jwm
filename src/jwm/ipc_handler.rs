@@ -3,6 +3,7 @@
 use crate::Jwm;
 use crate::backend::api::Backend;
 use crate::config::{BackendFamily, CONFIG, get_backend_family};
+use crate::core::layout::LayoutEnum;
 use crate::ipc::{
     self, IpcEvent, IpcResponse, MonitorInfoIpc, TreeNode, WindowInfo, WorkspaceInfo,
 };
@@ -220,6 +221,7 @@ impl Jwm {
                 let tree = self.query_tree();
                 IpcResponse::ok(Some(serde_json::to_value(tree).unwrap_or_default()))
             }
+            "get_scrolling_status" => IpcResponse::ok(Some(self.query_scrolling_status())),
             "get_wayland_status" => IpcResponse::ok(Some(self.query_wayland_status(backend))),
             "get_config" => IpcResponse::ok(Some(serde_json::json!({
                 "border_px": cfg.border_px(),
@@ -484,6 +486,7 @@ impl Jwm {
             "outputs": output_details,
             "workspaces": self.query_workspaces(),
             "windows": self.query_windows(),
+            "scrolling": self.query_scrolling_status(),
             "metrics": metrics,
             "direct_scanout": direct_scanout,
             "presentation_timing": presentation_timing,
@@ -739,6 +742,91 @@ impl Jwm {
                 })
             })
             .collect()
+    }
+
+    pub(crate) fn query_scrolling_status(&self) -> serde_json::Value {
+        let monitors = self
+            .state
+            .monitor_order
+            .iter()
+            .filter_map(|&mk| {
+                let mon = self.state.monitors.get(mk)?;
+                let layout = &*mon.lt[mon.sel_lt];
+                let state = self.scrolling_states.get(&mk);
+                let columns = state
+                    .map(|s| {
+                        s.columns
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, column)| {
+                                let windows = column
+                                    .iter()
+                                    .filter_map(|key| {
+                                        self.state.clients.get(*key).map(|client| {
+                                            serde_json::json!({
+                                                "id": client.win.raw(),
+                                                "name": client.name,
+                                                "class": client.class,
+                                                "focused": mon.sel == Some(*key),
+                                            })
+                                        })
+                                    })
+                                    .collect::<Vec<_>>();
+                                let focused_window = s
+                                    .focused_clients
+                                    .get(idx)
+                                    .copied()
+                                    .flatten()
+                                    .and_then(|key| self.state.clients.get(key))
+                                    .map(|client| client.win.raw());
+                                serde_json::json!({
+                                    "index": idx,
+                                    "width_factor": s.column_width_factors.get(idx).copied().unwrap_or(1.0),
+                                    "focused_window": focused_window,
+                                    "windows": windows,
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+
+                let focused_window = mon
+                    .sel
+                    .and_then(|key| self.state.clients.get(key))
+                    .map(|client| client.win.raw());
+
+                Some(serde_json::json!({
+                    "monitor": mon.num,
+                    "focused_monitor": self.state.sel_mon == Some(mk),
+                    "layout": format!("{layout:?}"),
+                    "active": *layout == LayoutEnum::SCROLLING,
+                    "active_tags": mon.get_active_tags(),
+                    "viewport_x": state.map(|s| s.viewport_x).unwrap_or(0.0),
+                    "focused_column": state.and_then(|s| s.focused_column_index()),
+                    "focused_window": focused_window,
+                    "attach_new_windows_to_focused_column": state
+                        .map(|s| s.attach_new_windows_to_focused_column)
+                        .unwrap_or(false),
+                    "column_count": state.map(|s| s.columns.len()).unwrap_or(0),
+                    "columns": columns,
+                }))
+            })
+            .collect::<Vec<_>>();
+
+        let active_monitor_count = monitors
+            .iter()
+            .filter(|monitor| {
+                monitor
+                    .get("active")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false)
+            })
+            .count();
+
+        serde_json::json!({
+            "active_monitor_count": active_monitor_count,
+            "monitors": monitors,
+        })
     }
 
     pub(crate) fn query_tree(&self) -> Vec<TreeNode> {
