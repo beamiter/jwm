@@ -353,6 +353,38 @@ build_and_install_jwm() {
 }
 
 # ============================================================
+# 安装 autostart.sh 到用户配置目录
+# ============================================================
+install_autostart_script() {
+    local src="$PROJECT_ROOT/autostart.sh"
+    local config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+    local dest_dir="$config_home/jwm"
+    local dest="$dest_dir/autostart.sh"
+    local backup=""
+
+    if [[ ! -f "$src" ]]; then
+        warn "autostart.sh 不存在，跳过安装: $src"
+        return
+    fi
+
+    mkdir -p "$dest_dir"
+
+    if [[ -f "$dest" ]]; then
+        if cmp -s "$src" "$dest"; then
+            ok "autostart.sh 已是最新: $dest"
+            return
+        fi
+
+        backup="$dest.backup.$(date +%Y%m%d%H%M%S)"
+        cp "$dest" "$backup"
+        warn "已备份旧 autostart.sh -> $backup"
+    fi
+
+    install -m755 "$src" "$dest"
+    ok "autostart.sh 安装完成: $dest"
+}
+
+# ============================================================
 # 重新生成 JWM 配置文件（覆盖旧配置，旧配置自动备份）
 # ============================================================
 regenerate_config() {
@@ -432,6 +464,7 @@ fi
 # 3. 处理 jwm
 if [[ "$SKIP_JWM" == false ]]; then
     build_and_install_jwm
+    install_autostart_script
     show_jwm_tool_help
 fi
 
