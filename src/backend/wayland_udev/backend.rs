@@ -1598,10 +1598,13 @@ impl UdevBackend {
                                 }
                             }
 
+                            let popup_hit = state.popup_surface_under(location).is_some();
                             let under = state.surface_under(location);
-                            let hit = under
-                                .as_ref()
-                                .and_then(|(win, _, _)| win.map(HitTarget::Surface));
+                            let hit = if popup_hit {
+                                None
+                            } else {
+                                under.as_ref().and_then(|(win, _, _)| win.map(HitTarget::Surface))
+                            };
                             let focus = under.map(|(_win, surface, origin)| (surface, origin));
 
                             if let Some(pointer) = state.seat.get_pointer() {
@@ -1678,10 +1681,15 @@ impl UdevBackend {
                                 }
                             }
 
+                            let popup_hit = state.popup_surface_under(location).is_some();
                             let under = state.surface_under(location);
-                            let hit = under
-                                .as_ref()
-                                .and_then(|(win, _, _)| win.map(HitTarget::Surface));
+                            let hit = if popup_hit {
+                                None
+                            } else {
+                                under
+                                    .as_ref()
+                                    .and_then(|(win, _, _)| win.map(HitTarget::Surface))
+                            };
                             let focus = under.map(|(_win, surface, origin)| (surface, origin));
 
                             if let Some(pointer) = state.seat.get_pointer() {
@@ -1760,10 +1768,15 @@ impl UdevBackend {
                                 }
                             }
 
+                            let popup_hit = state.popup_surface_under(location).is_some();
                             let under = state.surface_under(location);
-                            let hit = under
-                                .as_ref()
-                                .and_then(|(win, _, _)| win.map(HitTarget::Surface));
+                            let hit = if popup_hit {
+                                None
+                            } else {
+                                under
+                                    .as_ref()
+                                    .and_then(|(win, _, _)| win.map(HitTarget::Surface))
+                            };
                             let focus = under.map(|(_win, surface, origin)| (surface, origin));
 
                             if !in_screenshot {
@@ -1800,7 +1813,7 @@ impl UdevBackend {
                                 // requested keyboard interactivity (OnDemand/Exclusive), otherwise keep
                                 // the current focus (e.g. clicking a non-interactive panel shouldn't
                                 // steal focus from the active app).
-                                if pressed {
+                                if pressed && !popup_hit {
                                     if let Some(kbd) = state.seat.get_keyboard() {
                                         if let Some((_win, surface, _origin)) = state.surface_under(location) {
                                             let layer_interactivity = state
@@ -1830,7 +1843,20 @@ impl UdevBackend {
                                 }
                             }
 
-                            if pressed {
+                            if popup_hit {
+                                if std::env::var("JWM_DEBUG_BUTTONS")
+                                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                                    .unwrap_or(false)
+                                {
+                                    log::info!(
+                                        "[udev:btn->popup] button_code={} detail={} x={:.1} y={:.1}",
+                                        button_code,
+                                        detail_btn,
+                                        x,
+                                        y
+                                    );
+                                }
+                            } else if pressed {
                                 let mods_state = shared.lock_safe().mods_state;
 
                                 let debug_buttons = std::env::var("JWM_DEBUG_BUTTONS")

@@ -1875,40 +1875,8 @@ impl JwmWaylandState {
             }
         }
 
-        // Popups are always above their parent toplevel. Prefer them for hit-testing.
-        for win in self.window_stack.iter().rev() {
-            if !self.mapped_windows.contains(win) {
-                continue;
-            }
-
-            for (popup_surface, popup_rect) in self.popup_rects_for_toplevel(*win) {
-                let x0 = popup_rect.loc.x as f64;
-                let y0 = popup_rect.loc.y as f64;
-                let x1 = x0 + popup_rect.size.w as f64;
-                let y1 = y0 + popup_rect.size.h as f64;
-                if location.x >= x0 && location.y >= y0 && location.x < x1 && location.y < y1 {
-                    let origin = self
-                        .popup_buffer_origin(*win, &popup_surface, popup_rect)
-                        .unwrap_or(popup_rect.loc);
-                    if let Some((surface, surf_loc)) = under_from_surface_tree(
-                        &popup_surface,
-                        location,
-                        origin,
-                        WindowSurfaceType::ALL,
-                    ) {
-                        return Some((
-                            Some(*win),
-                            surface,
-                            (surf_loc.x as f64, surf_loc.y as f64).into(),
-                        ));
-                    }
-                    return Some((
-                        Some(*win),
-                        popup_surface,
-                        (origin.x as f64, origin.y as f64).into(),
-                    ));
-                }
-            }
+        if let Some((win, surface, origin)) = self.popup_surface_under(location) {
+            return Some((Some(win), surface, origin));
         }
 
         for win in self.window_stack.iter().rev() {
@@ -1954,6 +1922,49 @@ impl JwmWaylandState {
                     return Some((
                         Some(*win),
                         surface,
+                        (origin.x as f64, origin.y as f64).into(),
+                    ));
+                }
+            }
+        }
+
+        None
+    }
+
+    pub fn popup_surface_under(
+        &self,
+        location: Point<f64, Logical>,
+    ) -> Option<(WindowId, WlSurface, Point<f64, Logical>)> {
+        // Popups are always above their parent toplevel. Prefer them for hit-testing.
+        for win in self.window_stack.iter().rev() {
+            if !self.mapped_windows.contains(win) {
+                continue;
+            }
+
+            for (popup_surface, popup_rect) in self.popup_rects_for_toplevel(*win) {
+                let x0 = popup_rect.loc.x as f64;
+                let y0 = popup_rect.loc.y as f64;
+                let x1 = x0 + popup_rect.size.w as f64;
+                let y1 = y0 + popup_rect.size.h as f64;
+                if location.x >= x0 && location.y >= y0 && location.x < x1 && location.y < y1 {
+                    let origin = self
+                        .popup_buffer_origin(*win, &popup_surface, popup_rect)
+                        .unwrap_or(popup_rect.loc);
+                    if let Some((surface, surf_loc)) = under_from_surface_tree(
+                        &popup_surface,
+                        location,
+                        origin,
+                        WindowSurfaceType::ALL,
+                    ) {
+                        return Some((
+                            *win,
+                            surface,
+                            (surf_loc.x as f64, surf_loc.y as f64).into(),
+                        ));
+                    }
+                    return Some((
+                        *win,
+                        popup_surface,
                         (origin.x as f64, origin.y as f64).into(),
                     ));
                 }
