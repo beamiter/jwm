@@ -276,28 +276,35 @@ impl Jwm {
 
         let visible_keys: Vec<ClientKey> = raw_clients.iter().map(|&(k, _, _)| k).collect();
 
-        // Get or create scrolling state
-        let state = self
-            .scrolling_states
-            .entry(mon_key)
-            .or_insert_with(ScrollingState::new);
-
-        // Sync columns with currently visible clients
-        Self::sync_scrolling_columns(state, &visible_keys);
-
-        // Determine focus column and keep the per-column focus memory aligned
-        // with normal focus changes outside explicit scrolling commands.
         let sel = self.state.monitors.get(mon_key).and_then(|m| m.sel);
-        let focus_col = if let Some(sel_key) = sel {
-            state.remember_focus(sel_key);
-            state.focused_column_index().unwrap_or(0)
-        } else {
-            state.focused_column_index().unwrap_or(0)
+        let (columns_keys, column_width_factors, focus_col, viewport_x) = {
+            let state = match self.scrolling_state_for_monitor_mut_or_default(mon_key) {
+                Some(state) => state,
+                None => return,
+            };
+
+            // Sync columns with currently visible clients
+            Self::sync_scrolling_columns(state, &visible_keys);
+
+            // Determine focus column and keep the per-column focus memory aligned
+            // with normal focus changes outside explicit scrolling commands.
+            let focus_col = if let Some(sel_key) = sel {
+                state.remember_focus(sel_key);
+                state.focused_column_index().unwrap_or(0)
+            } else {
+                state.focused_column_index().unwrap_or(0)
+            };
+
+            (
+                state.columns.clone(),
+                state.column_width_factors.clone(),
+                focus_col,
+                state.viewport_x,
+            )
         };
 
         // Build layout clients grouped by column
-        let columns: Vec<Vec<LayoutClient<ClientKey>>> = state
-            .columns
+        let columns: Vec<Vec<LayoutClient<ClientKey>>> = columns_keys
             .iter()
             .map(|col| {
                 col.iter()
@@ -323,15 +330,17 @@ impl Jwm {
         let params = ScrollingParams {
             screen_area,
             column_width_ratio: mfact,
-            column_width_factors: state.column_width_factors.clone(),
+            column_width_factors,
             gap: effective_gap,
-            viewport_x: state.viewport_x,
+            viewport_x,
         };
 
         let (results, new_vp_x) = core_layout::calculate_scrolling(&params, &columns, focus_col);
 
         // Update viewport
-        self.scrolling_states.get_mut(&mon_key).unwrap().viewport_x = new_vp_x;
+        if let Some(state) = self.scrolling_state_for_monitor_mut(mon_key) {
+            state.viewport_x = new_vp_x;
+        }
 
         // Apply results
         for res in results {

@@ -30,7 +30,7 @@ impl Jwm {
         if !is_scrolling || !self.is_client_visible_on_monitor(client_key, mon_key) {
             return;
         }
-        if let Some(state) = self.scrolling_states.get_mut(&mon_key) {
+        if let Some(state) = self.scrolling_state_for_monitor_mut(mon_key) {
             state.remember_focus(client_key);
         }
     }

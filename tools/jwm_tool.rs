@@ -1327,6 +1327,10 @@ fn print_unified_wayland_status(status: &serde_json::Value) {
             .get("active_monitor_count")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+        let stored = scrolling
+            .get("stored_state_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let first_active = scrolling
             .get("monitors")
             .and_then(|v| v.as_array())
@@ -1354,11 +1358,14 @@ fn print_unified_wayland_status(status: &serde_json::Value) {
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
             println!(
-                "scrolling: active_monitors={} first_monitor={} columns={} focused_column={} viewport_x={:.1}",
-                active, mon_num, columns, focused_column, viewport
+                "scrolling: active_monitors={} stored_states={} first_monitor={} columns={} focused_column={} viewport_x={:.1}",
+                active, stored, mon_num, columns, focused_column, viewport
             );
         } else {
-            println!("scrolling: active_monitors={}", active);
+            println!(
+                "scrolling: active_monitors={} stored_states={}",
+                active, stored
+            );
         }
     }
 
@@ -1585,7 +1592,14 @@ fn run_wayland_status(json_output: bool) -> io::Result<()> {
             .get("active_monitor_count")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        println!("scrolling: active_monitors={}", active);
+        let stored = scrolling
+            .get("stored_state_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        println!(
+            "scrolling: active_monitors={} stored_states={}",
+            active, stored
+        );
     }
 
     if let Some(gestures) = response_data(queries, "get_gesture_status") {

@@ -15,7 +15,7 @@ impl Jwm {
         if **layout != LayoutEnum::SCROLLING {
             return None;
         }
-        let state = self.scrolling_states.get(&mon_key)?;
+        let state = self.scrolling_state_for_monitor(mon_key)?;
         Some((mon_key, state))
     }
 
@@ -37,7 +37,7 @@ impl Jwm {
 
         let sel = self.state.monitors.get(mon_key).and_then(|m| m.sel);
         let target = {
-            let state = match self.scrolling_states.get_mut(&mon_key) {
+            let state = match self.scrolling_state_for_monitor_mut(mon_key) {
                 Some(s) => s,
                 None => return Ok(()),
             };
@@ -68,7 +68,7 @@ impl Jwm {
         };
 
         if let Some(target) = target {
-            if let Some(state) = self.scrolling_states.get_mut(&mon_key) {
+            if let Some(state) = self.scrolling_state_for_monitor_mut(mon_key) {
                 state.remember_focus(target);
             }
             self.focus(backend, Some(target))?;
@@ -93,12 +93,11 @@ impl Jwm {
             None => return Ok(()),
         };
 
-        let state = match self.scrolling_states.get_mut(&mon_key) {
+        let sel = self.state.monitors.get(mon_key).and_then(|m| m.sel);
+        let state = match self.scrolling_state_for_monitor_mut(mon_key) {
             Some(s) => s,
             None => return Ok(()),
         };
-
-        let sel = self.state.monitors.get(mon_key).and_then(|m| m.sel);
         let cur_col = match sel.and_then(|k| state.columns.iter().position(|col| col.contains(&k)))
         {
             Some(c) => c,
@@ -145,7 +144,7 @@ impl Jwm {
         };
 
         let sel = self.state.monitors.get(mon_key).and_then(|m| m.sel);
-        let state = match self.scrolling_states.get_mut(&mon_key) {
+        let state = match self.scrolling_state_for_monitor_mut(mon_key) {
             Some(s) => s,
             None => return Ok(()),
         };
@@ -185,10 +184,10 @@ impl Jwm {
         };
 
         let sel = self.state.monitors.get(mon_key).and_then(|m| m.sel);
-        let state = self
-            .scrolling_states
-            .entry(mon_key)
-            .or_insert_with(ScrollingState::new);
+        let state = match self.scrolling_state_for_monitor_mut_or_default(mon_key) {
+            Some(state) => state,
+            None => return Ok(()),
+        };
         if let Some(sel_key) = sel {
             state.remember_focus(sel_key);
         }
@@ -226,7 +225,7 @@ impl Jwm {
             None => return Ok(()),
         };
 
-        let state = match self.scrolling_states.get_mut(&mon_key) {
+        let state = match self.scrolling_state_for_monitor_mut(mon_key) {
             Some(s) => s,
             None => return Ok(()),
         };
@@ -287,7 +286,7 @@ impl Jwm {
             None => return Ok(()),
         };
 
-        let state = match self.scrolling_states.get_mut(&mon_key) {
+        let state = match self.scrolling_state_for_monitor_mut(mon_key) {
             Some(s) => s,
             None => return Ok(()),
         };
@@ -376,7 +375,7 @@ impl Jwm {
 
         if new_pos != pos {
             let target = col[new_pos];
-            if let Some(state) = self.scrolling_states.get_mut(&mon_key) {
+            if let Some(state) = self.scrolling_state_for_monitor_mut(mon_key) {
                 state.remember_focus(target);
             }
             self.focus(backend, Some(target))?;

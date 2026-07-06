@@ -151,8 +151,10 @@ pub struct Jwm {
     /// synchronous GetGeometry round-trips on every frame.
     pub or_window_geometries: HashMap<WindowId, (i32, i32, u32, u32)>,
 
-    /// Per-monitor scrolling layout state
-    pub scrolling_states: HashMap<MonitorKey, ScrollingState>,
+    /// Per-monitor, per-active-tag scrolling layout state. This preserves
+    /// columns, focused column/window, column widths, and viewport when moving
+    /// between tags on the same monitor.
+    pub scrolling_states: HashMap<(MonitorKey, u32), ScrollingState>,
 
     /// Night light: last time we updated color temperature
     pub last_night_light_update: Option<std::time::Instant>,
@@ -174,6 +176,41 @@ pub struct Jwm {
 }
 
 impl Jwm {
+    pub(crate) fn scrolling_state_key(&self, mon_key: MonitorKey) -> Option<(MonitorKey, u32)> {
+        self.state
+            .monitors
+            .get(mon_key)
+            .map(|monitor| (mon_key, monitor.get_active_tags()))
+    }
+
+    pub(crate) fn scrolling_state_for_monitor(
+        &self,
+        mon_key: MonitorKey,
+    ) -> Option<&ScrollingState> {
+        let key = self.scrolling_state_key(mon_key)?;
+        self.scrolling_states.get(&key)
+    }
+
+    pub(crate) fn scrolling_state_for_monitor_mut(
+        &mut self,
+        mon_key: MonitorKey,
+    ) -> Option<&mut ScrollingState> {
+        let key = self.scrolling_state_key(mon_key)?;
+        self.scrolling_states.get_mut(&key)
+    }
+
+    pub(crate) fn scrolling_state_for_monitor_mut_or_default(
+        &mut self,
+        mon_key: MonitorKey,
+    ) -> Option<&mut ScrollingState> {
+        let key = self.scrolling_state_key(mon_key)?;
+        Some(
+            self.scrolling_states
+                .entry(key)
+                .or_insert_with(ScrollingState::new),
+        )
+    }
+
     fn enable_floating_keep_geometry(
         &mut self,
         backend: &mut dyn Backend,

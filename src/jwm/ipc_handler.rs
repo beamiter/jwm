@@ -754,7 +754,9 @@ impl Jwm {
             .filter_map(|&mk| {
                 let mon = self.state.monitors.get(mk)?;
                 let layout = &*mon.lt[mon.sel_lt];
-                let state = self.scrolling_states.get(&mk);
+                let active_tags = mon.get_active_tags();
+                let state_key = self.scrolling_state_key(mk);
+                let state = self.scrolling_state_for_monitor(mk);
                 let columns = state
                     .map(|s| {
                         s.columns
@@ -802,7 +804,11 @@ impl Jwm {
                     "focused_monitor": self.state.sel_mon == Some(mk),
                     "layout": format!("{layout:?}"),
                     "active": *layout == LayoutEnum::SCROLLING,
-                    "active_tags": mon.get_active_tags(),
+                    "active_tags": active_tags,
+                    "state_key": state_key.map(|(_, tag_mask)| serde_json::json!({
+                        "monitor": mon.num,
+                        "tag_mask": tag_mask,
+                    })),
                     "viewport_x": state.map(|s| s.viewport_x).unwrap_or(0.0),
                     "focused_column": state.and_then(|s| s.focused_column_index()),
                     "focused_window": focused_window,
@@ -827,6 +833,7 @@ impl Jwm {
 
         serde_json::json!({
             "active_monitor_count": active_monitor_count,
+            "stored_state_count": self.scrolling_states.len(),
             "monitors": monitors,
         })
     }
