@@ -285,11 +285,15 @@ impl Jwm {
         // Sync columns with currently visible clients
         Self::sync_scrolling_columns(state, &visible_keys);
 
-        // Determine focus column
+        // Determine focus column and keep the per-column focus memory aligned
+        // with normal focus changes outside explicit scrolling commands.
         let sel = self.state.monitors.get(mon_key).and_then(|m| m.sel);
-        let focus_col = sel
-            .and_then(|sel_key| state.columns.iter().position(|col| col.contains(&sel_key)))
-            .unwrap_or(0);
+        let focus_col = if let Some(sel_key) = sel {
+            state.remember_focus(sel_key);
+            state.focused_column_index().unwrap_or(0)
+        } else {
+            state.focused_column_index().unwrap_or(0)
+        };
 
         // Build layout clients grouped by column
         let columns: Vec<Vec<LayoutClient<ClientKey>>> = state

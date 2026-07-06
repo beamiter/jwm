@@ -6,6 +6,7 @@ use crate::backend::api::Backend;
 use crate::backend::common_define::WindowId;
 use crate::config::CONFIG;
 use crate::core::animation::AnimationKind;
+use crate::core::layout::LayoutEnum;
 use crate::core::models::ClientKey;
 use crate::core::types::Rect;
 use crate::jwm::Jwm;
@@ -15,6 +16,25 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 impl Jwm {
+    fn remember_scrolling_focus_for_client(&mut self, client_key: ClientKey) {
+        let mon_key = match self.state.clients.get(client_key).and_then(|c| c.mon) {
+            Some(mon_key) => mon_key,
+            None => return,
+        };
+        let is_scrolling = self
+            .state
+            .monitors
+            .get(mon_key)
+            .map(|monitor| *monitor.lt[monitor.sel_lt] == LayoutEnum::SCROLLING)
+            .unwrap_or(false);
+        if !is_scrolling || !self.is_client_visible_on_monitor(client_key, mon_key) {
+            return;
+        }
+        if let Some(state) = self.scrolling_states.get_mut(&mon_key) {
+            state.remember_focus(client_key);
+        }
+    }
+
     /// 处理 FocusIn 事件：当焦点被其他窗口抢占时，重新设置焦点
     pub(crate) fn focusin(
         &mut self,
@@ -334,6 +354,9 @@ impl Jwm {
         }
 
         self.update_monitor_selection_by_key(client_key_opt);
+        if let Some(client_key) = client_key_opt {
+            self.remember_scrolling_focus_for_client(client_key);
+        }
 
         self.mark_bar_update_needed_if_visible(None);
 
