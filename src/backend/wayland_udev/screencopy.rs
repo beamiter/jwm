@@ -72,13 +72,14 @@ pub struct ScreencopyFrameData {
 // Use () as global data - access pending_queue from JwmWaylandState.screencopy_pending
 impl GlobalDispatch<ZwlrScreencopyManagerV1, ()> for JwmWaylandState {
     fn bind(
-        _state: &mut Self,
+        state: &mut Self,
         _handle: &DisplayHandle,
         _client: &Client,
         resource: New<ZwlrScreencopyManagerV1>,
         _global_data: &(),
         data_init: &mut DataInit<'_, Self>,
     ) {
+        state.record_protocol_bind("zwlr_screencopy_manager_v1");
         data_init.init(resource, ());
     }
 }

@@ -1944,6 +1944,23 @@ impl WaylandCompositor {
         }
     }
 
+    pub(crate) fn get_direct_scanout_status(
+        &self,
+        kms_outputs: Vec<crate::backend::api::DirectScanoutOutputStatus>,
+    ) -> crate::backend::api::DirectScanoutStatus {
+        let ds_stats = self.direct_scanout_mgr.stats();
+        crate::backend::api::DirectScanoutStatus {
+            enabled: self.direct_scanout_mgr.is_enabled(),
+            active: self.direct_scanout_mgr.is_active(),
+            current_window: self.direct_scanout_mgr.current_scanout(),
+            scanout_count: ds_stats.scanout_count,
+            bypass_time_ms: ds_stats.bypass_time_ms,
+            candidate_count: self.direct_scanout_mgr.candidate_count(),
+            compositor_reason: self.direct_scanout_mgr.last_reason().to_string(),
+            kms_outputs,
+        }
+    }
+
     /// Collect compositor metrics from all subsystems.
     pub(crate) fn get_metrics(&self) -> crate::backend::api::CompositorMetrics {
         let avg = self.perf_metrics.avg_frame_time().as_secs_f32() * 1000.0;

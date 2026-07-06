@@ -2,11 +2,120 @@
 
 use crate::Jwm;
 use crate::backend::api::Backend;
-use crate::config::CONFIG;
+use crate::config::{BackendFamily, CONFIG, get_backend_family};
 use crate::ipc::{
     self, IpcEvent, IpcResponse, MonitorInfoIpc, TreeNode, WindowInfo, WorkspaceInfo,
 };
 use crate::ipc_server::IncomingIpc;
+
+fn env_flag(name: &str) -> bool {
+    std::env::var_os(name).as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
+fn optional_protocol_enabled(default_enabled: bool, flag_name: &str) -> bool {
+    default_enabled || env_flag("JWM_OPTIONAL_GLOBALS") || env_flag(flag_name)
+}
+
+fn wayland_protocol_status() -> serde_json::Value {
+    let core = [
+        "wl_compositor",
+        "wl_shm",
+        "wl_data_device_manager",
+        "primary_selection",
+        "xdg_wm_base",
+        "xdg_decoration",
+        "wl_output",
+        "xdg_output",
+        "zwlr_layer_shell_v1",
+        "xdg_activation_v1",
+        "text_input",
+        "input_method",
+        "virtual_keyboard",
+        "pointer_constraints",
+        "relative_pointer",
+        "session_lock",
+        "idle_inhibit",
+        "idle_notify",
+        "fractional_scale",
+        "cursor_shape",
+        "presentation_time",
+        "pointer_gestures",
+        "tablet",
+        "fifo",
+        "keyboard_shortcuts_inhibit",
+        "security_context",
+        "commit_timing",
+        "xdg_dialog",
+        "xdg_foreign",
+        "xdg_system_bell",
+        "pointer_warp",
+        "xwayland_keyboard_grab",
+        "data_control",
+        "ext_data_control",
+        "kde_server_decoration",
+        "ext_background_effect",
+    ];
+
+    let optional = [
+        ("zwlr_screencopy_manager_v1", true, "JWM_ENABLE_SCREENCOPY"),
+        (
+            "wp_tearing_control_manager_v1",
+            true,
+            "JWM_ENABLE_TEARING_CONTROL",
+        ),
+        ("wp_color_manager_v1", false, "JWM_ENABLE_COLOR_MANAGEMENT"),
+        (
+            "zwlr_output_manager_v1",
+            true,
+            "JWM_ENABLE_OUTPUT_MANAGEMENT",
+        ),
+        (
+            "zwlr_output_power_manager_v1",
+            true,
+            "JWM_ENABLE_OUTPUT_POWER",
+        ),
+        ("ext_workspace_manager_v1", true, "JWM_ENABLE_WORKSPACE"),
+        (
+            "ext_image_copy_capture_manager_v1",
+            true,
+            "JWM_ENABLE_IMAGE_COPY_CAPTURE",
+        ),
+        (
+            "zwlr_gamma_control_manager_v1",
+            true,
+            "JWM_ENABLE_GAMMA_CONTROL",
+        ),
+        (
+            "zwlr_foreign_toplevel_manager_v1",
+            true,
+            "JWM_ENABLE_FOREIGN_TOPLEVEL_MANAGEMENT",
+        ),
+        (
+            "zwlr_virtual_pointer_manager_v1",
+            true,
+            "JWM_ENABLE_VIRTUAL_POINTER",
+        ),
+    ];
+
+    serde_json::json!({
+        "core": core
+            .iter()
+            .map(|name| serde_json::json!({ "name": name, "enabled": true }))
+            .collect::<Vec<_>>(),
+        "optional": optional
+            .iter()
+            .map(|(name, default_enabled, flag)| {
+                serde_json::json!({
+                    "name": name,
+                    "enabled": optional_protocol_enabled(*default_enabled, flag),
+                    "default_enabled": default_enabled,
+                    "env_flag": flag,
+                })
+            })
+            .collect::<Vec<_>>(),
+        "env_enable_all": env_flag("JWM_OPTIONAL_GLOBALS"),
+    })
+}
 
 impl Jwm {
     pub(crate) fn process_ipc(&mut self, backend: &mut dyn Backend) {
@@ -111,6 +220,7 @@ impl Jwm {
                 let tree = self.query_tree();
                 IpcResponse::ok(Some(serde_json::to_value(tree).unwrap_or_default()))
             }
+            "get_wayland_status" => IpcResponse::ok(Some(self.query_wayland_status(backend))),
             "get_config" => IpcResponse::ok(Some(serde_json::json!({
                 "border_px": cfg.border_px(),
                 "gap_px": cfg.gap_px(),
@@ -238,6 +348,164 @@ impl Jwm {
             }
             _ => IpcResponse::err(format!("unknown query: {name}")),
         }
+    }
+
+    fn query_wayland_status(&self, backend: &dyn Backend) -> serde_json::Value {
+        let cfg = CONFIG.load();
+        let backend_family = get_backend_family();
+        let caps = backend.capabilities();
+        let outputs = backend.output_ops().enumerate_outputs();
+        let output_details: Vec<serde_json::Value> = outputs
+            .iter()
+            .map(|o| {
+                let vrr = backend.query_vrr_capabilities(o.id).map(|v| {
+                    serde_json::json!({
+                        "supported": v.supported,
+                        "current_enabled": v.current_enabled,
+                        "min_refresh_hz": v.min_refresh_hz,
+                        "max_refresh_hz": v.max_refresh_hz,
+                    })
+                });
+                let kms_color = backend.query_kms_color_pipeline_caps(o.id).map(|c| {
+                    serde_json::json!({
+                        "degamma_lut_supported": c.degamma_lut_supported,
+                        "degamma_lut_size": c.degamma_lut_size,
+                        "gamma_lut_supported": c.gamma_lut_supported,
+                        "gamma_lut_size": c.gamma_lut_size,
+                        "ctm_supported": c.ctm_supported,
+                    })
+                });
+                let hdr_metadata = o.hdr_metadata.as_ref().map(|m| {
+                    serde_json::json!({
+                        "max_luminance_nits": m.max_luminance_nits,
+                        "min_luminance_nits": m.min_luminance_nits,
+                        "supports_pq": m.supports_pq,
+                        "supports_hlg": m.supports_hlg,
+                        "supports_bt2020": m.supports_bt2020,
+                    })
+                });
+
+                serde_json::json!({
+                    "id": o.id.0,
+                    "name": o.name,
+                    "geometry": {
+                        "x": o.x,
+                        "y": o.y,
+                        "width": o.width,
+                        "height": o.height,
+                    },
+                    "scale": o.scale,
+                    "refresh_rate_hz": o.refresh_rate,
+                    "hdr_capable": o.hdr_capable,
+                    "hdr_metadata": hdr_metadata,
+                    "vrr": vrr,
+                    "kms_color_pipeline": kms_color,
+                })
+            })
+            .collect();
+
+        let metrics = backend
+            .compositor_get_metrics()
+            .and_then(|m| serde_json::to_value(m).ok());
+        let direct_scanout = backend
+            .compositor_direct_scanout_status()
+            .and_then(|s| serde_json::to_value(s).ok());
+        let presentation_timing = backend
+            .compositor_presentation_timing_status()
+            .and_then(|s| serde_json::to_value(s).ok());
+        let output_management = backend
+            .compositor_output_management_status()
+            .and_then(|s| serde_json::to_value(s).ok());
+        let protocol_bind_counts = backend
+            .compositor_protocol_bind_counts()
+            .into_iter()
+            .map(|(protocol, count)| {
+                serde_json::json!({
+                    "protocol": protocol,
+                    "bind_count": count,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let color_surfaces = backend.compositor_color_managed_surfaces();
+        let blur = backend.compositor_blur_status().map(|b| {
+            serde_json::json!({
+                "current_strength": b.current_strength,
+                "temporal_enabled": b.temporal_enabled,
+                "temporal_reuse_rate_pct": b.temporal_reuse_rate_pct,
+                "hz_table": b.hz_table
+                    .iter()
+                    .map(|(hz, strength)| serde_json::json!({ "hz": hz, "strength": strength }))
+                    .collect::<Vec<_>>(),
+                "per_monitor_hz": b.per_monitor_hz
+                    .iter()
+                    .map(|(monitor_id, hz)| serde_json::json!({ "monitor_id": monitor_id, "hz": hz }))
+                    .collect::<Vec<_>>(),
+                "blur_quality_by_monitor": b.blur_quality_by_monitor
+                    .iter()
+                    .map(|(monitor_id, quality)| serde_json::json!({ "monitor_id": monitor_id, "quality": quality }))
+                    .collect::<Vec<_>>(),
+            })
+        });
+
+        serde_json::json!({
+            "backend_family": match backend_family {
+                BackendFamily::X11 => "x11",
+                BackendFamily::Wayland => "wayland",
+            },
+            "version": env!("CARGO_PKG_VERSION"),
+            "capabilities": {
+                "can_warp_pointer": caps.can_warp_pointer,
+                "supports_client_list": caps.supports_client_list,
+            },
+            "protocols": if backend_family == BackendFamily::Wayland {
+                let mut protocols = wayland_protocol_status();
+                if let Some(obj) = protocols.as_object_mut() {
+                    obj.insert(
+                        "runtime_bind_counts".to_string(),
+                        serde_json::json!({
+                            "scope": "jwm_owned_globals",
+                            "counts": protocol_bind_counts,
+                        }),
+                    );
+                }
+                protocols
+            } else {
+                serde_json::json!({
+                    "core": [],
+                    "optional": [],
+                    "env_enable_all": env_flag("JWM_OPTIONAL_GLOBALS"),
+                    "runtime_bind_counts": {
+                        "scope": "none",
+                        "counts": [],
+                    },
+                })
+            },
+            "outputs": output_details,
+            "workspaces": self.query_workspaces(),
+            "windows": self.query_windows(),
+            "metrics": metrics,
+            "direct_scanout": direct_scanout,
+            "presentation_timing": presentation_timing,
+            "output_management": output_management,
+            "hdr": {
+                "config_enabled": cfg.behavior().hdr_enabled,
+                "config_peak_nits": cfg.behavior().hdr_peak_nits,
+                "capable_output_count": outputs.iter().filter(|o| o.hdr_capable).count(),
+            },
+            "tearing": {
+                "active_surface_count": backend.compositor_tearing_hint_count(),
+            },
+            "session_lock": {
+                "locked": backend.compositor_session_locked(),
+                "lock_surface_count": backend.compositor_session_lock_surface_count(),
+            },
+            "color_management": {
+                "surface_count": color_surfaces.len(),
+            },
+            "blur": blur,
+            "not_yet_exposed": [],
+        })
     }
 
     /// Apply a single in-memory config override (does not touch the file).

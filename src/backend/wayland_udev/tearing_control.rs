@@ -59,13 +59,14 @@ pub fn init_tearing_control_manager(dh: &DisplayHandle) -> TearingHintMap {
 
 impl GlobalDispatch<WpTearingControlManagerV1, ()> for JwmWaylandState {
     fn bind(
-        _state: &mut Self,
+        state: &mut Self,
         _handle: &DisplayHandle,
         _client: &Client,
         resource: New<WpTearingControlManagerV1>,
         _global_data: &(),
         data_init: &mut DataInit<'_, Self>,
     ) {
+        state.record_protocol_bind("wp_tearing_control_manager_v1");
         data_init.init(resource, ());
     }
 }

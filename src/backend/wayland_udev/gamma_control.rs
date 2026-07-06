@@ -43,13 +43,14 @@ pub fn init_gamma_control(dh: &DisplayHandle) {
 
 impl GlobalDispatch<ZwlrGammaControlManagerV1, GammaControlManagerData> for JwmWaylandState {
     fn bind(
-        _state: &mut Self,
+        state: &mut Self,
         _handle: &DisplayHandle,
         _client: &Client,
         resource: New<ZwlrGammaControlManagerV1>,
         _global_data: &GammaControlManagerData,
         data_init: &mut DataInit<'_, Self>,
     ) {
+        state.record_protocol_bind("zwlr_gamma_control_manager_v1");
         data_init.init(resource, GammaControlManagerData);
     }
 }

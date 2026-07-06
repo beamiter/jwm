@@ -167,6 +167,7 @@ impl GlobalDispatch<ZwlrForeignToplevelManagerV1, ForeignToplevelManagerData> fo
         _global_data: &ForeignToplevelManagerData,
         data_init: &mut DataInit<'_, Self>,
     ) {
+        state.record_protocol_bind("zwlr_foreign_toplevel_manager_v1");
         let mgr = data_init.init(resource, ForeignToplevelManagerData);
 
         // Send existing windows to the newly-bound manager.

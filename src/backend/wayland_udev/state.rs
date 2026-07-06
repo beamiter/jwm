@@ -280,6 +280,11 @@ pub struct JwmWaylandState {
     /// KMS-backed outputs currently available for mapping layer surfaces.
     pub outputs: Vec<Output>,
 
+    /// Runtime bind counters for JWM-owned Wayland globals. Smithay-managed
+    /// core globals are not counted here; this tracks the custom desktop,
+    /// capture, color, power, and control protocols we implement directly.
+    pub protocol_bind_counts: HashMap<&'static str, u64>,
+
     /// FIFO of pending `wlr-output-configuration::Apply` acks waiting for the
     /// udev backend to finish their modeset. Drained in order matching
     /// `BackendEvent::OutputConfigure` entries in `pending_events`.
@@ -1208,6 +1213,20 @@ impl XwmHandler for JwmWaylandState {
 }
 
 impl JwmWaylandState {
+    pub fn record_protocol_bind(&mut self, protocol: &'static str) {
+        *self.protocol_bind_counts.entry(protocol).or_insert(0) += 1;
+    }
+
+    pub fn protocol_bind_counts_snapshot(&self) -> Vec<(String, u64)> {
+        let mut counts: Vec<_> = self
+            .protocol_bind_counts
+            .iter()
+            .map(|(protocol, count)| ((*protocol).to_string(), *count))
+            .collect();
+        counts.sort_by(|a, b| a.0.cmp(&b.0));
+        counts
+    }
+
     fn sync_keyboard_shortcuts_inhibitors(
         &mut self,
         previous: Option<WindowId>,
@@ -1573,6 +1592,7 @@ impl JwmWaylandState {
                 active_toplevel: None,
 
                 outputs: Vec::new(),
+                protocol_bind_counts: HashMap::new(),
                 pending_output_acks: std::collections::VecDeque::new(),
                 soft_disabled_outputs: HashSet::new(),
                 gamma_sizes: HashMap::new(),

@@ -685,6 +685,8 @@ pub struct UdevBackend {
     compositor: Option<WaylandCompositor>,
     drag: Option<UdevDragState>,
     last_inactive_session_log: Option<Instant>,
+    output_management_tx_seq: u64,
+    last_output_management_tx: Option<crate::backend::api::OutputManagementTransactionStatus>,
 
     // Reusable per-frame scratch buffers (cleared+refilled each frame) to avoid
     // two heap allocations per frame in compositor_render_frame.
@@ -2588,6 +2590,8 @@ impl UdevBackend {
             compositor: None,
             drag: None,
             last_inactive_session_log: None,
+            output_management_tx_seq: 0,
+            last_output_management_tx: None,
             scratch_tex_updates: Vec::new(),
             scratch_full_scene: Vec::new(),
             offscreen_window_textures: HashMap::new(),
@@ -3884,6 +3888,41 @@ impl Backend for UdevBackend {
         self.compositor.as_ref().map(|c| c.get_blur_status())
     }
 
+    fn compositor_direct_scanout_status(&self) -> Option<crate::backend::api::DirectScanoutStatus> {
+        let compositor = self.compositor.as_ref()?;
+        let kms_outputs = self
+            .kms
+            .as_ref()
+            .map(|kms| kms.borrow().direct_scanout_output_statuses())
+            .unwrap_or_default();
+        Some(compositor.get_direct_scanout_status(kms_outputs))
+    }
+
+    fn compositor_presentation_timing_status(
+        &self,
+    ) -> Option<crate::backend::api::PresentationTimingStatus> {
+        self.kms
+            .as_ref()
+            .map(|kms| kms.borrow().presentation_timing_status())
+    }
+
+    fn compositor_output_management_status(
+        &self,
+    ) -> Option<crate::backend::api::OutputManagementStatus> {
+        let mut soft_disabled: Vec<String> =
+            self.state.soft_disabled_outputs.iter().cloned().collect();
+        soft_disabled.sort();
+        Some(crate::backend::api::OutputManagementStatus {
+            pending_ack_count: self.state.pending_output_acks.len(),
+            soft_disabled_outputs: soft_disabled,
+            last_transaction: self.last_output_management_tx.clone(),
+        })
+    }
+
+    fn compositor_protocol_bind_counts(&self) -> Vec<(String, u64)> {
+        self.state.protocol_bind_counts_snapshot()
+    }
+
     fn compositor_capture_thumbnail(
         &self,
         window: WindowId,
@@ -4083,6 +4122,17 @@ impl Backend for UdevBackend {
                     Some(BackendEvent::OutputConfigure { changes }) => {
                         handled_any = true;
                         let mut all_ok = true;
+                        self.output_management_tx_seq =
+                            self.output_management_tx_seq.saturating_add(1);
+                        let tx_id = self.output_management_tx_seq;
+                        let requested_at_unix_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis()
+                            .min(u128::from(u64::MAX))
+                            as u64;
+                        let soft_disabled_before = self.state.soft_disabled_outputs.clone();
+                        let mut failed_outputs = Vec::new();
                         if let Some(ref kms) = self.kms {
                             let mut kms = kms.borrow_mut();
                             for change in &changes {
@@ -4110,12 +4160,50 @@ impl Backend for UdevBackend {
                                         "[output-mgmt] configure_output('{}') failed: {e}",
                                         change.name
                                     );
+                                    failed_outputs.push(
+                                        crate::backend::api::OutputManagementFailure {
+                                            output_name: change.name.clone(),
+                                            reason: e,
+                                        },
+                                    );
                                     all_ok = false;
                                 }
                             }
                         } else {
+                            failed_outputs.push(crate::backend::api::OutputManagementFailure {
+                                output_name: "*".into(),
+                                reason: "no KMS backend available".into(),
+                            });
                             all_ok = false;
                         }
+                        let mut rollback_attempted = false;
+                        let rollback_succeeded = true;
+                        let mut rollback_reason = None;
+                        if !all_ok {
+                            rollback_attempted = true;
+                            self.state.soft_disabled_outputs = soft_disabled_before;
+                            rollback_reason = Some(
+                                "restored soft-disabled output set; DRM mode rollback is handled inside configure_output when possible"
+                                    .to_string(),
+                            );
+                        }
+                        if rollback_attempted && !rollback_succeeded {
+                            log::warn!(
+                                "[output-mgmt] transaction {tx_id} rollback failed: {:?}",
+                                rollback_reason
+                            );
+                        }
+                        self.last_output_management_tx =
+                            Some(crate::backend::api::OutputManagementTransactionStatus {
+                                id: tx_id,
+                                requested_at_unix_ms,
+                                success: all_ok,
+                                changes: changes.clone(),
+                                failed_outputs,
+                                rollback_attempted,
+                                rollback_succeeded,
+                                rollback_reason,
+                            });
                         // Refresh advertised outputs and trigger a relayout.
                         self.sync_wayland_state_from_kms();
                         self.state.needs_redraw = true;

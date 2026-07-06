@@ -399,13 +399,14 @@ fn make_ready_description(
 
 impl GlobalDispatch<WpColorManagerV1, ()> for JwmWaylandState {
     fn bind(
-        _state: &mut Self,
+        state: &mut Self,
         _handle: &DisplayHandle,
         _client: &Client,
         resource: New<WpColorManagerV1>,
         _global_data: &(),
         data_init: &mut DataInit<'_, Self>,
     ) {
+        state.record_protocol_bind("wp_color_manager_v1");
         let resource = data_init.init(resource, ());
         emit_manager_caps(&resource);
     }

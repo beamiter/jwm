@@ -127,6 +127,20 @@ enum Commands {
     /// 打印调试信息（PID、套接字、控制管道等）
     Debug,
 
+    /// 对比 niri / Hyprland 打印 wayland-udev 后端竞争力审计
+    WaylandAudit {
+        /// 输出 Markdown 表格，便于贴进文档或 issue
+        #[arg(long)]
+        markdown: bool,
+    },
+
+    /// 聚合 Wayland/KMS/合成器诊断状态
+    WaylandStatus {
+        /// 输出完整 JSON 响应集合
+        #[arg(long)]
+        json: bool,
+    },
+
     /// 向 JWM IPC 发送消息 (JSON)
     #[command(
         long_about = "通过 Unix 套接字向 JWM 发送 IPC 消息。\n\
@@ -896,6 +910,80 @@ fn debug_info() {
     ps_grep(" X");
 }
 
+// --- Wayland competitiveness audit ---
+
+struct AuditRow {
+    area: &'static str,
+    competitor_signal: &'static str,
+    jwm_now: &'static str,
+    next_move: &'static str,
+}
+
+const WAYLAND_AUDIT_ROWS: &[AuditRow] = &[
+    AuditRow {
+        area: "布局体验",
+        competitor_signal: "niri 的核心识别度来自 scrollable tiling；Hyprland 覆盖 dwindle/master/scrolling 等多布局。",
+        jwm_now: "JWM 已有多布局、tag、overview、Wayland scrolling layout 模块，但 Wayland UX 仍更像 X11 WM 移植。",
+        next_move: "把 scrolling layout 升为 Wayland 一等体验：独立每输出状态、自然触控板手势、overview 中可见列/窗口时间线。",
+    },
+    AuditRow {
+        area: "协议与生态",
+        competitor_signal: "niri/Hyprland 都依赖 layer-shell、screencopy、gamma、workspace、portal、XWayland 等生态协议形成日用闭环。",
+        jwm_now: "udev 后端已覆盖 layer-shell、xdg-output、IME、XWayland、screencopy、image-copy-capture、workspace、gamma、output-power/management、foreign-toplevel、virtual-pointer。",
+        next_move: "新增协议自检与默认策略：启动时输出缺失/禁用协议，给 waybar、kanshi、grim、OBS、wlsunset 一组回归脚本。",
+    },
+    AuditRow {
+        area: "显示管线",
+        competitor_signal: "Hyprland 强在动效/外观和游戏路径；niri 强在稳定的多显示器、混合 DPI、低干扰重排。",
+        jwm_now: "JWM 已有 DRM/KMS、dmabuf feedback、direct scanout、VRR/tearing、HDR metadata、scene-linear、KMS gamma/CTM offload、per-monitor blur 策略。",
+        next_move: "优先补三件可感知能力：每输出 presentation telemetry、direct-scanout 拒绝原因统计、混合 DPI/刷新率基准场景。",
+    },
+    AuditRow {
+        area: "控制面",
+        competitor_signal: "Hyprland 的 hyprctl 提供 monitors/workspaces/clients/devices/configerrors/rollinglog/JSON 等强控制面。",
+        jwm_now: "jwm-tool 已有 daemon/status/msg 和 IPC 查询，但 Wayland 后端的输出、协议、KMS、颜色、延迟诊断还分散。",
+        next_move: "把 compositor_get_metrics、VRR、KMS caps、color surfaces、session-lock、tearing hints 汇总成 `jwm-tool wayland-status --json`。",
+    },
+    AuditRow {
+        area: "配置与规则",
+        competitor_signal: "niri/Hyprland 的 live reload、窗口规则、工作区规则和动效参数是日用生产力入口。",
+        jwm_now: "JWM 已有配置热加载、规则、动画/blur/HDR/VRR 选项；Wayland 协议开关目前偏环境变量。",
+        next_move: "把 Wayland optional globals、HDR/VRR/tearing 策略、portal/capture 策略纳入 config_wayland.toml，并在 reload 后输出差异。",
+    },
+    AuditRow {
+        area: "可靠性",
+        competitor_signal: "niri 强调日用稳定、属性测试、profiling、输入延迟测量；Hyprland 依靠活跃生态快速修复兼容问题。",
+        jwm_now: "JWM 已有 benchmark/metrics 文档和若干单测，但 Wayland 端还缺跨客户端冒烟矩阵。",
+        next_move: "建立 `wayland-smoke`：foot/gtk/qt/electron/xwayland/waybar/grim/OBS/wlsunset/kanshi，记录截图、协议、帧统计。",
+    },
+];
+
+fn print_wayland_audit(markdown: bool) {
+    if markdown {
+        println!("# JWM wayland-udev 竞争力审计\n");
+        println!("| 领域 | niri / Hyprland 信号 | JWM 当前状态 | 下一步 |");
+        println!("| --- | --- | --- | --- |");
+        for row in WAYLAND_AUDIT_ROWS {
+            println!(
+                "| {} | {} | {} | {} |",
+                row.area, row.competitor_signal, row.jwm_now, row.next_move
+            );
+        }
+        return;
+    }
+
+    println!("=== JWM wayland-udev 竞争力审计 ===");
+    println!("目标: 对标 niri 的专注体验与 Hyprland 的生态/控制面，并继续进化。");
+    println!();
+    for row in WAYLAND_AUDIT_ROWS {
+        println!("[{}]", row.area);
+        println!("  对手信号: {}", row.competitor_signal);
+        println!("  JWM现在: {}", row.jwm_now);
+        println!("  下一步: {}", row.next_move);
+        println!();
+    }
+}
+
 // --- main ---
 
 fn main() -> io::Result<()> {
@@ -935,6 +1023,10 @@ fn main() -> io::Result<()> {
         }
 
         Commands::Debug => debug_info(),
+
+        Commands::WaylandAudit { markdown } => print_wayland_audit(markdown),
+
+        Commands::WaylandStatus { json } => run_wayland_status(json)?,
 
         Commands::Msg {
             name,
@@ -1034,6 +1126,474 @@ fn run_ipc_msg(name: &str, args_str: &str, subscribe: Option<&str>, raw: bool) -
         match serde_json::from_str::<serde_json::Value>(resp.trim()) {
             Ok(v) => println!("{}", serde_json::to_string_pretty(&v).unwrap_or(resp)),
             Err(_) => print!("{}", resp),
+        }
+    }
+
+    Ok(())
+}
+
+fn send_ipc_query(name: &str) -> io::Result<serde_json::Value> {
+    let sock_path = ipc_socket_path();
+    if !sock_path.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("IPC socket not found at {}", sock_path.display()),
+        ));
+    }
+
+    let mut stream = UnixStream::connect(&sock_path)?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+
+    let msg = serde_json::json!({ "query": name, "args": serde_json::Value::Null });
+    let mut line = serde_json::to_string(&msg).unwrap();
+    line.push('\n');
+    stream.write_all(line.as_bytes())?;
+
+    let resp = read_ipc_line(&mut stream)?;
+    serde_json::from_str::<serde_json::Value>(resp.trim())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{name}: {e}")))
+}
+
+fn response_data<'a>(
+    responses: &'a serde_json::Value,
+    name: &str,
+) -> Option<&'a serde_json::Value> {
+    responses.get(name)?.get("data")
+}
+
+fn response_array_len(responses: &serde_json::Value, name: &str) -> usize {
+    response_data(responses, name)
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0)
+}
+
+fn print_unified_wayland_status(status: &serde_json::Value) {
+    let version = status
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let backend = status
+        .get("backend_family")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let output_count = status
+        .get("outputs")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let workspace_count = status
+        .get("workspaces")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let window_count = status
+        .get("windows")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+
+    println!("=== JWM Wayland Status ===");
+    println!("version: {}", version);
+    println!("backend: {}", backend);
+    println!("socket: {}", ipc_socket_path().display());
+    println!("monitors: {}", output_count);
+    println!("workspaces: {}", workspace_count);
+    println!("windows: {}", window_count);
+
+    if let Some(metrics) = status.get("metrics").filter(|v| !v.is_null()) {
+        let fps = metrics.get("fps").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let input_p95 = metrics
+            .get("input_latency_p95_ms")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let direct_scanout = metrics
+            .get("direct_scanout_active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        println!(
+            "metrics: fps={:.1} input_p95_ms={:.2} direct_scanout={}",
+            fps, input_p95, direct_scanout
+        );
+    }
+
+    if let Some(scanout) = status.get("direct_scanout").filter(|v| !v.is_null()) {
+        let active = scanout
+            .get("active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let reason = scanout
+            .get("compositor_reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let first_kms = scanout
+            .get("kms_outputs")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|v| {
+                Some(format!(
+                    "{}: {}",
+                    v.get("output_name")?.as_str()?,
+                    v.get("reason")?.as_str()?
+                ))
+            });
+        match first_kms {
+            Some(kms) => println!(
+                "direct_scanout: active={} compositor_reason=\"{}\" kms=\"{}\"",
+                active, reason, kms
+            ),
+            None => println!(
+                "direct_scanout: active={} compositor_reason=\"{}\"",
+                active, reason
+            ),
+        }
+    }
+
+    if let Some(timing) = status.get("presentation_timing").filter(|v| !v.is_null()) {
+        let pending = timing
+            .get("any_frame_pending")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let first_output = timing
+            .get("outputs")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first());
+        if let Some(output) = first_output {
+            let name = output
+                .get("output_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let refresh = output
+                .get("refresh_interval_ms")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let last_vblank = output
+                .get("last_vblank_ago_ms")
+                .and_then(|v| v.as_u64())
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "never".into());
+            let pending_for = output
+                .get("frame_pending_for_ms")
+                .and_then(|v| v.as_u64())
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "none".into());
+            println!(
+                "presentation: pending={} first_output={} refresh_ms={:.2} last_vblank_ago_ms={} pending_for_ms={}",
+                pending, name, refresh, last_vblank, pending_for
+            );
+        } else {
+            println!("presentation: pending={} outputs=0", pending);
+        }
+    }
+
+    if let Some(output_mgmt) = status.get("output_management").filter(|v| !v.is_null()) {
+        let pending = output_mgmt
+            .get("pending_ack_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let soft_disabled = output_mgmt
+            .get("soft_disabled_outputs")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        let last = output_mgmt.get("last_transaction");
+        match last {
+            Some(tx) if !tx.is_null() => {
+                let id = tx.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                let success = tx.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+                let failures = tx
+                    .get("failed_outputs")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let rollback = tx
+                    .get("rollback_attempted")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                println!(
+                    "output_mgmt: pending_ack={} soft_disabled={} last_tx={} success={} failures={} rollback_attempted={}",
+                    pending, soft_disabled, id, success, failures, rollback
+                );
+            }
+            _ => println!(
+                "output_mgmt: pending_ack={} soft_disabled={} last_tx=none",
+                pending, soft_disabled
+            ),
+        }
+    }
+
+    if let Some(hdr) = status.get("hdr") {
+        let enabled = hdr
+            .get("config_enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let capable = hdr
+            .get("capable_output_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        println!(
+            "hdr: config_enabled={} capable_outputs={}",
+            enabled, capable
+        );
+    }
+
+    if let Some(protocols) = status.get("protocols") {
+        let optional = protocols
+            .get("optional")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                let enabled = a
+                    .iter()
+                    .filter(|p| p.get("enabled").and_then(|v| v.as_bool()) == Some(true))
+                    .count();
+                (enabled, a.len())
+            })
+            .unwrap_or((0, 0));
+        println!("optional_protocols: enabled={}/{}", optional.0, optional.1);
+    }
+
+    if let Some(tearing) = status.get("tearing") {
+        let count = tearing
+            .get("active_surface_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        println!("tearing_hints: active_surface_count={}", count);
+    }
+
+    if let Some(lock) = status.get("session_lock") {
+        let locked = lock
+            .get("locked")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let surfaces = lock
+            .get("lock_surface_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        println!("session_lock: locked={} surfaces={}", locked, surfaces);
+    }
+
+    if let Some(color) = status.get("color_management") {
+        let count = color
+            .get("surface_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        println!("color_management: surfaces={}", count);
+    }
+
+    match status.get("blur").filter(|v| !v.is_null()) {
+        Some(blur) => {
+            let strength = blur
+                .get("current_strength")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let reuse = blur
+                .get("temporal_reuse_rate_pct")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            println!("blur: strength={} temporal_reuse={:.1}%", strength, reuse);
+        }
+        None => println!("blur: unavailable"),
+    }
+}
+
+fn run_wayland_status(json_output: bool) -> io::Result<()> {
+    match send_ipc_query("get_wayland_status") {
+        Ok(resp) if resp.get("success").and_then(|v| v.as_bool()) == Some(true) => {
+            let status = resp.get("data").cloned().unwrap_or(serde_json::Value::Null);
+            let snapshot = serde_json::json!({
+                "generated_at": Local::now().to_rfc3339(),
+                "socket": ipc_socket_path(),
+                "wayland_status": status,
+            });
+
+            if json_output {
+                println!("{}", serde_json::to_string_pretty(&snapshot).unwrap());
+            } else {
+                print_unified_wayland_status(&snapshot["wayland_status"]);
+            }
+            return Ok(());
+        }
+        Ok(_) => {
+            // Connected to an older compositor that does not know
+            // get_wayland_status yet; fall through to legacy query fan-out.
+        }
+        Err(e) => {
+            let snapshot = serde_json::json!({
+                "generated_at": Local::now().to_rfc3339(),
+                "socket": ipc_socket_path(),
+                "success": false,
+                "error": e.to_string(),
+            });
+            if json_output {
+                println!("{}", serde_json::to_string_pretty(&snapshot).unwrap());
+            } else {
+                println!("=== JWM Wayland Status ===");
+                println!("version: unknown");
+                println!("socket: {}", ipc_socket_path().display());
+                println!("ipc: unavailable ({})", e);
+            }
+            return Ok(());
+        }
+    }
+
+    let queries = [
+        "get_version",
+        "get_monitors",
+        "get_workspaces",
+        "get_windows",
+        "get_metrics",
+        "get_hdr_status",
+        "get_tearing_hints",
+        "get_session_lock",
+        "get_color_management_status",
+        "get_blur_status",
+    ];
+
+    let mut responses = serde_json::Map::new();
+    for query in queries {
+        let value = match send_ipc_query(query) {
+            Ok(value) => value,
+            Err(e) => serde_json::json!({
+                "success": false,
+                "error": e.to_string(),
+            }),
+        };
+        responses.insert(query.to_string(), value);
+    }
+
+    let snapshot = serde_json::json!({
+        "generated_at": Local::now().to_rfc3339(),
+        "socket": ipc_socket_path(),
+        "queries": responses,
+    });
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&snapshot).unwrap());
+        return Ok(());
+    }
+
+    let queries = &snapshot["queries"];
+    let version = response_data(queries, "get_version")
+        .and_then(|v| v.get("version"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    println!("=== JWM Wayland Status ===");
+    println!("version: {}", version);
+    println!("socket: {}", ipc_socket_path().display());
+
+    let successful_queries = queries
+        .as_object()
+        .map(|m| {
+            m.values()
+                .filter(|v| v.get("success").and_then(|v| v.as_bool()) == Some(true))
+                .count()
+        })
+        .unwrap_or(0);
+    if successful_queries == 0 {
+        let first_error = queries
+            .as_object()
+            .and_then(|m| m.values().find_map(|v| v.get("error")))
+            .and_then(|v| v.as_str())
+            .unwrap_or("no successful IPC queries");
+        println!("ipc: unavailable ({})", first_error);
+        return Ok(());
+    }
+
+    println!("monitors: {}", response_array_len(queries, "get_monitors"));
+    println!(
+        "workspaces: {}",
+        response_array_len(queries, "get_workspaces")
+    );
+    println!("windows: {}", response_array_len(queries, "get_windows"));
+
+    if let Some(metrics) = response_data(queries, "get_metrics") {
+        let fps = metrics.get("fps").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let input_p95 = metrics
+            .get("input_latency_p95_ms")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let direct_scanout = metrics
+            .get("direct_scanout_active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        println!(
+            "metrics: fps={:.1} input_p95_ms={:.2} direct_scanout={}",
+            fps, input_p95, direct_scanout
+        );
+    }
+
+    if let Some(hdr) = response_data(queries, "get_hdr_status") {
+        let enabled = hdr
+            .get("config_enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let hdr_outputs = hdr
+            .get("outputs")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|o| {
+                        o.get("hdr_capable")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        println!(
+            "hdr: config_enabled={} capable_outputs={}",
+            enabled, hdr_outputs
+        );
+    }
+
+    if let Some(tearing) = response_data(queries, "get_tearing_hints") {
+        let count = tearing
+            .get("active_surface_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        println!("tearing_hints: active_surface_count={}", count);
+    }
+
+    if let Some(lock) = response_data(queries, "get_session_lock") {
+        let locked = lock
+            .get("locked")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let surfaces = lock
+            .get("lock_surface_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        println!("session_lock: locked={} surfaces={}", locked, surfaces);
+    }
+
+    if let Some(color) = response_data(queries, "get_color_management_status") {
+        let count = color
+            .get("surface_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        println!("color_management: surfaces={}", count);
+    }
+
+    match response_data(queries, "get_blur_status") {
+        Some(blur) => {
+            let strength = blur
+                .get("current_strength")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let reuse = blur
+                .get("temporal_reuse_rate_pct")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            println!("blur: strength={} temporal_reuse={:.1}%", strength, reuse);
+        }
+        None => {
+            let err = queries
+                .get("get_blur_status")
+                .and_then(|v| v.get("error"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unavailable");
+            println!("blur: {}", err);
         }
     }
 

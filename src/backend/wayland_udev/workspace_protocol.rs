@@ -87,6 +87,7 @@ impl GlobalDispatch<ExtWorkspaceManagerV1, WorkspaceManagerData> for JwmWaylandS
         _global_data: &WorkspaceManagerData,
         data_init: &mut DataInit<'_, Self>,
     ) {
+        state.record_protocol_bind("ext_workspace_manager_v1");
         let manager = data_init.init(resource, WorkspaceManagerData);
 
         if let Some(ref ws_state) = state.workspace_state {

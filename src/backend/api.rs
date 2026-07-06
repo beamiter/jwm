@@ -129,6 +129,45 @@ pub struct BlurStatus {
     pub blur_quality_by_monitor: Vec<(u32, String)>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DirectScanoutOutputStatus {
+    pub output_name: String,
+    pub eligible: bool,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DirectScanoutStatus {
+    pub enabled: bool,
+    pub active: bool,
+    pub current_window: Option<u64>,
+    pub scanout_count: u64,
+    pub bypass_time_ms: u64,
+    pub candidate_count: usize,
+    pub compositor_reason: String,
+    pub kms_outputs: Vec<DirectScanoutOutputStatus>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PresentationTimingOutputStatus {
+    pub output_name: String,
+    pub refresh_interval_ms: f64,
+    pub last_vblank_monotonic_ms: Option<u64>,
+    pub last_vblank_ago_ms: Option<u64>,
+    pub frame_pending: bool,
+    pub frame_pending_for_ms: Option<u64>,
+    pub watchdog_timeout_ms: u64,
+    pub frame_callback_roots: usize,
+    pub visible_surface_count: usize,
+    pub send_frame_callbacks: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PresentationTimingStatus {
+    pub any_frame_pending: bool,
+    pub outputs: Vec<PresentationTimingOutputStatus>,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ScreenInfo {
     pub width: i32,
@@ -262,7 +301,7 @@ pub struct Geometry {
 
 /// A single output's requested configuration, produced by the
 /// wlr-output-management protocol and applied by the backend.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputConfigChange {
     pub name: String,
     pub enabled: bool,
@@ -273,6 +312,31 @@ pub struct OutputConfigChange {
     pub transform: Option<i32>,
     pub scale: Option<f64>,
     pub adaptive_sync: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OutputManagementFailure {
+    pub output_name: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OutputManagementTransactionStatus {
+    pub id: u64,
+    pub requested_at_unix_ms: u64,
+    pub success: bool,
+    pub changes: Vec<OutputConfigChange>,
+    pub failed_outputs: Vec<OutputManagementFailure>,
+    pub rollback_attempted: bool,
+    pub rollback_succeeded: bool,
+    pub rollback_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OutputManagementStatus {
+    pub pending_ack_count: usize,
+    pub soft_disabled_outputs: Vec<String>,
+    pub last_transaction: Option<OutputManagementTransactionStatus>,
 }
 
 // --- 事件定义 ---
@@ -1159,6 +1223,28 @@ pub trait Backend: Send {
     /// has no compositor (CLI/headless paths) or no blur pass.
     fn compositor_blur_status(&self) -> Option<BlurStatus> {
         None
+    }
+
+    /// Diagnostic snapshot for fullscreen/direct-scanout eligibility. Wayland
+    /// udev fills this from both compositor scene checks and KMS output checks.
+    fn compositor_direct_scanout_status(&self) -> Option<DirectScanoutStatus> {
+        None
+    }
+
+    /// Per-output KMS presentation/vblank timing status.
+    fn compositor_presentation_timing_status(&self) -> Option<PresentationTimingStatus> {
+        None
+    }
+
+    /// Diagnostic status for wlr-output-management Apply transactions.
+    fn compositor_output_management_status(&self) -> Option<OutputManagementStatus> {
+        None
+    }
+
+    /// Runtime bind counters for compositor-owned Wayland globals. Empty on
+    /// backends that do not expose custom Wayland protocol globals.
+    fn compositor_protocol_bind_counts(&self) -> Vec<(String, u64)> {
+        Vec::new()
     }
 
     /// Enable or disable VRR for an output.

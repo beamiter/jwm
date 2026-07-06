@@ -146,13 +146,14 @@ impl GlobalDispatch<ExtOutputImageCaptureSourceManagerV1, OutputSourceManagerDat
     for JwmWaylandState
 {
     fn bind(
-        _state: &mut Self,
+        state: &mut Self,
         _handle: &DisplayHandle,
         _client: &Client,
         resource: New<ExtOutputImageCaptureSourceManagerV1>,
         _global_data: &OutputSourceManagerData,
         data_init: &mut DataInit<'_, Self>,
     ) {
+        state.record_protocol_bind("ext_output_image_capture_source_manager_v1");
         data_init.init(resource, OutputSourceManagerData);
     }
 }
@@ -207,13 +208,14 @@ impl GlobalDispatch<ExtForeignToplevelImageCaptureSourceManagerV1, ToplevelSourc
     for JwmWaylandState
 {
     fn bind(
-        _state: &mut Self,
+        state: &mut Self,
         _handle: &DisplayHandle,
         _client: &Client,
         resource: New<ExtForeignToplevelImageCaptureSourceManagerV1>,
         _global_data: &ToplevelSourceManagerData,
         data_init: &mut DataInit<'_, Self>,
     ) {
+        state.record_protocol_bind("ext_foreign_toplevel_image_capture_source_manager_v1");
         data_init.init(resource, ToplevelSourceManagerData);
     }
 }
@@ -308,13 +310,14 @@ impl Dispatch<ExtImageCaptureSourceV1, ImageCaptureSourceData> for JwmWaylandSta
 
 impl GlobalDispatch<ExtImageCopyCaptureManagerV1, CaptureManagerData> for JwmWaylandState {
     fn bind(
-        _state: &mut Self,
+        state: &mut Self,
         _handle: &DisplayHandle,
         _client: &Client,
         resource: New<ExtImageCopyCaptureManagerV1>,
         _global_data: &CaptureManagerData,
         data_init: &mut DataInit<'_, Self>,
     ) {
+        state.record_protocol_bind("ext_image_copy_capture_manager_v1");
         data_init.init(resource, CaptureManagerData);
     }
 }

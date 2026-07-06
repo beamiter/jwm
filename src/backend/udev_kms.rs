@@ -97,6 +97,7 @@ struct KmsOutputState {
     surfaces_on_output: HashSet<wayland_server::Weak<WlSurface>>,
 
     last_vblank: Option<std::time::Duration>,
+    last_vblank_received_at: Option<std::time::Instant>,
     refresh_interval: std::time::Duration,
 
     /// Cached `output.name()` — smithay's accessor allocates a fresh `String`
@@ -215,6 +216,11 @@ pub(super) struct KmsState {
 
     /// Latest vblank presentation timestamp (monotonic) for frame pacing feedback.
     last_presentation_time: Option<std::time::Instant>,
+
+    /// Last KMS-layer direct-scanout decision per output. This complements the
+    /// compositor scene eligibility: KMS can still reject because overlays,
+    /// cursor, config gates, or per-output state require composition.
+    last_direct_scanout_outputs: Vec<crate::backend::api::DirectScanoutOutputStatus>,
 }
 
 #[derive(Clone)]
@@ -2157,6 +2163,47 @@ impl KmsState {
             .collect()
     }
 
+    pub(super) fn direct_scanout_output_statuses(
+        &self,
+    ) -> Vec<crate::backend::api::DirectScanoutOutputStatus> {
+        self.last_direct_scanout_outputs.clone()
+    }
+
+    pub(super) fn presentation_timing_status(
+        &self,
+    ) -> crate::backend::api::PresentationTimingStatus {
+        let now = std::time::Instant::now();
+        crate::backend::api::PresentationTimingStatus {
+            any_frame_pending: self.outputs.iter().any(|o| o.frame_pending),
+            outputs: self
+                .outputs
+                .iter()
+                .map(|o| {
+                    let watchdog =
+                        (o.refresh_interval * 5).max(std::time::Duration::from_millis(100));
+                    crate::backend::api::PresentationTimingOutputStatus {
+                        output_name: o.output_name.clone(),
+                        refresh_interval_ms: o.refresh_interval.as_secs_f64() * 1000.0,
+                        last_vblank_monotonic_ms: o
+                            .last_vblank
+                            .map(|t| t.as_millis().min(u128::from(u64::MAX)) as u64),
+                        last_vblank_ago_ms: o.last_vblank_received_at.map(|t| {
+                            now.duration_since(t).as_millis().min(u128::from(u64::MAX)) as u64
+                        }),
+                        frame_pending: o.frame_pending,
+                        frame_pending_for_ms: o.frame_pending_since.map(|t| {
+                            now.duration_since(t).as_millis().min(u128::from(u64::MAX)) as u64
+                        }),
+                        watchdog_timeout_ms: watchdog.as_millis().min(u128::from(u64::MAX)) as u64,
+                        frame_callback_roots: o.frame_callback_roots.len(),
+                        visible_surface_count: o.frame_callback_visible.len(),
+                        send_frame_callbacks: o.send_frame_callbacks,
+                    }
+                })
+                .collect(),
+        }
+    }
+
     pub(super) fn dmabuf_render_formats(&self) -> Vec<DmabufFormat> {
         self.renderer
             .egl_context()
@@ -2425,6 +2472,7 @@ impl KmsState {
                 frame_callback_visible: HashSet::new(),
                 surfaces_on_output: HashSet::new(),
                 last_vblank: None,
+                last_vblank_received_at: None,
                 refresh_interval,
                 output_name,
                 color_pipeline_caps,
@@ -2480,6 +2528,7 @@ impl KmsState {
             screencopy_offscreen: None,
             image_capture_toplevel_offscreen: None,
             last_presentation_time: None,
+            last_direct_scanout_outputs: Vec::new(),
         }));
 
         let handle_clone = handle.clone();
@@ -2509,6 +2558,7 @@ impl KmsState {
             return;
         }
 
+        self.last_direct_scanout_outputs.clear();
         let mut any_skipped = false;
         for out_idx in 0..self.outputs.len() {
             // Outputs marked soft-disabled by wlr-output-management
@@ -2770,13 +2820,48 @@ impl KmsState {
             // direct scanout via the primary plane (zero-copy, no GPU composition).
             // Respects the `fullscreen_unredirect` config flag, mirroring the X11
             // backend's check_fullscreen_unredirect (which gates XComposite unredirect).
-            let direct_scanout_eligible = compositor.is_some()
-                && crate::config::CONFIG.load().behavior().fullscreen_unredirect
-                && elements.is_empty()  // no cursor on this output, no overlay layers
-                && state.window_stack.len() == 1
-                && state.window_stack.first().map_or(false, |win| {
-                    state.window_is_fullscreen.get(win).copied().unwrap_or(false)
-                        && state.mapped_windows.contains(win)
+            let fullscreen_unredirect = crate::config::CONFIG
+                .load()
+                .behavior()
+                .fullscreen_unredirect;
+            let (direct_scanout_eligible, direct_scanout_reason) = if compositor.is_none() {
+                (false, "compositor disabled".to_string())
+            } else if !fullscreen_unredirect {
+                (false, "fullscreen_unredirect disabled".to_string())
+            } else if !elements.is_empty() {
+                (
+                    false,
+                    "cursor or overlay/layer surface requires composition".to_string(),
+                )
+            } else if state.window_stack.len() != 1 {
+                (
+                    false,
+                    format!(
+                        "expected exactly 1 stacked window, got {}",
+                        state.window_stack.len()
+                    ),
+                )
+            } else {
+                let win = state.window_stack[0];
+                let fullscreen = state
+                    .window_is_fullscreen
+                    .get(&win)
+                    .copied()
+                    .unwrap_or(false);
+                let mapped = state.mapped_windows.contains(&win);
+                if fullscreen && mapped {
+                    (true, "eligible".to_string())
+                } else if !mapped {
+                    (false, format!("window {:?} is not mapped", win))
+                } else {
+                    (false, format!("window {:?} is not fullscreen", win))
+                }
+            };
+            self.last_direct_scanout_outputs
+                .push(crate::backend::api::DirectScanoutOutputStatus {
+                    output_name: out.output_name.clone(),
+                    eligible: direct_scanout_eligible,
+                    reason: direct_scanout_reason,
                 });
 
             let use_compositor = compositor.is_some() && !direct_scanout_eligible;
@@ -3380,6 +3465,7 @@ impl KmsState {
 
         if let Some(vblank_time) = presentation_time {
             out.last_vblank = Some(vblank_time);
+            out.last_vblank_received_at = Some(std::time::Instant::now());
             self.last_presentation_time = Some(std::time::Instant::now());
         }
 

@@ -99,6 +99,7 @@ impl GlobalDispatch<ZwlrOutputManagerV1, OutputManagerData> for JwmWaylandState 
         _global_data: &OutputManagerData,
         data_init: &mut DataInit<'_, Self>,
     ) {
+        state.record_protocol_bind("zwlr_output_manager_v1");
         let manager = data_init.init(resource, OutputManagerData);
 
         for output in &state.outputs {

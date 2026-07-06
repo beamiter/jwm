@@ -32,13 +32,14 @@ pub fn init_output_power_management(dh: &DisplayHandle) {
 
 impl GlobalDispatch<ZwlrOutputPowerManagerV1, OutputPowerManagerData> for JwmWaylandState {
     fn bind(
-        _state: &mut Self,
+        state: &mut Self,
         _handle: &DisplayHandle,
         _client: &Client,
         resource: New<ZwlrOutputPowerManagerV1>,
         _global_data: &OutputPowerManagerData,
         data_init: &mut DataInit<'_, Self>,
     ) {
+        state.record_protocol_bind("zwlr_output_power_manager_v1");
         data_init.init(resource, OutputPowerManagerData);
     }
 }

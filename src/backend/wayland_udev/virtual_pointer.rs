@@ -29,13 +29,14 @@ pub fn init_virtual_pointer_manager(dh: &DisplayHandle) {
 
 impl GlobalDispatch<ZwlrVirtualPointerManagerV1, VirtualPointerManagerData> for JwmWaylandState {
     fn bind(
-        _state: &mut Self,
+        state: &mut Self,
         _handle: &DisplayHandle,
         _client: &Client,
         resource: New<ZwlrVirtualPointerManagerV1>,
         _global_data: &VirtualPointerManagerData,
         data_init: &mut DataInit<'_, Self>,
     ) {
+        state.record_protocol_bind("zwlr_virtual_pointer_manager_v1");
         data_init.init(resource, VirtualPointerManagerData);
     }
 }
