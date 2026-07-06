@@ -878,9 +878,44 @@ impl Jwm {
             })
             .count();
 
+        let mut stored_states = self
+            .scrolling_states
+            .iter()
+            .map(|((mk, tag_mask), state)| {
+                let monitor_num = self.state.monitors.get(*mk).map(|mon| mon.num);
+                let focused_window = state
+                    .focused_column_index()
+                    .and_then(|idx| state.target_for_column(idx))
+                    .and_then(|key| self.state.clients.get(key))
+                    .map(|client| client.win.raw());
+                serde_json::json!({
+                    "monitor": monitor_num,
+                    "tag_mask": tag_mask,
+                    "column_count": state.columns.len(),
+                    "focused_column": state.focused_column_index(),
+                    "focused_window": focused_window,
+                    "viewport_x": state.viewport_x,
+                    "attach_new_windows_to_focused_column": state.attach_new_windows_to_focused_column,
+                })
+            })
+            .collect::<Vec<_>>();
+        stored_states.sort_by_key(|state| {
+            (
+                state
+                    .get("monitor")
+                    .and_then(|value| value.as_i64())
+                    .unwrap_or(i64::MAX),
+                state
+                    .get("tag_mask")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0),
+            )
+        });
+
         serde_json::json!({
             "active_monitor_count": active_monitor_count,
             "stored_state_count": self.scrolling_states.len(),
+            "stored_states": stored_states,
             "monitors": monitors,
         })
     }

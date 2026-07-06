@@ -1384,6 +1384,26 @@ fn print_unified_wayland_status(status: &serde_json::Value) {
             .get("stored_state_count")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+        let stored_tags = scrolling
+            .get("stored_states")
+            .and_then(|v| v.as_array())
+            .map(|states| {
+                states
+                    .iter()
+                    .filter_map(|state| {
+                        let monitor = state
+                            .get("monitor")
+                            .and_then(|v| v.as_i64())
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "?".into());
+                        let tag_mask = state.get("tag_mask").and_then(|v| v.as_u64())?;
+                        Some(format!("{}:{:#x}", monitor, tag_mask))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "none".into());
         let first_active = scrolling
             .get("monitors")
             .and_then(|v| v.as_array())
@@ -1411,13 +1431,13 @@ fn print_unified_wayland_status(status: &serde_json::Value) {
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
             println!(
-                "scrolling: active_monitors={} stored_states={} first_monitor={} columns={} focused_column={} viewport_x={:.1}",
-                active, stored, mon_num, columns, focused_column, viewport
+                "scrolling: active_monitors={} stored_states={} stored_tags={} first_monitor={} columns={} focused_column={} viewport_x={:.1}",
+                active, stored, stored_tags, mon_num, columns, focused_column, viewport
             );
         } else {
             println!(
-                "scrolling: active_monitors={} stored_states={}",
-                active, stored
+                "scrolling: active_monitors={} stored_states={} stored_tags={}",
+                active, stored, stored_tags
             );
         }
     }
