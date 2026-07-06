@@ -2,20 +2,41 @@
 """
 递归收集指定目录下所有文件内容到单个文件
 支持：
-- 命令行参数指定源目录和输出文件
+- 命令行参数指定多个源目录和输出文件
 - 指定若干文件的绝对（或相对）路径进行收集
 - 当只指定 -F 时，仅收集这些文件，不递归目录
 """
-import os
 import argparse
+import os
 from pathlib import Path
-from typing import Iterable, Set, Tuple, List, Optional
+from typing import Iterable, List, Optional, Set, Tuple
+
+
+def _display_path(
+    file_path: Path,
+    source_path: Optional[Path],
+    multiple_sources: bool
+) -> Path:
+    """
+    计算输出路径显示:
+    - 单源时尽量保持相对路径（兼容历史行为）
+    - 多源时带上源目录前缀，避免重复文件名导致歧义
+    """
+    if source_path is None:
+        return file_path
+    try:
+        rel = file_path.relative_to(source_path)
+        return source_path / rel if multiple_sources else rel
+    except ValueError:
+        return file_path
 
 
 def collect_from_directory(
     source_path: Path,
     exclude_dirs: Set[str],
-    exclude_files: Set[str]
+    exclude_files: Set[str],
+    seen_files: Set[Path],
+    multiple_sources: bool
 ) -> Tuple[List[str], int, int]:
     """
     从目录递归收集文件内容
@@ -45,11 +66,13 @@ def collect_from_directory(
         if file_path.name in exclude_files:
             continue
 
-        # 获取相对路径（相对于 source_path）
-        try:
-            relative_path = file_path.relative_to(source_path)
-        except ValueError:
-            relative_path = file_path
+        relative_path = _display_path(file_path, source_path, multiple_sources)
+
+        # 跳过重复路径（如多个源目录有重叠）
+        resolved_path = file_path.resolve()
+        if resolved_path in seen_files:
+            print(f"✗ 跳过(目录): {relative_path} (重复文件)")
+            continue
 
         try:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -57,6 +80,7 @@ def collect_from_directory(
 
             files_content.append(f"{relative_path}\n{content}")
             file_count += 1
+            seen_files.add(resolved_path)
             print(f"✓ 已收集(目录): {relative_path}")
         except Exception as e:
             error_count += 1
@@ -69,7 +93,8 @@ def collect_from_file_list(
     files: Iterable[str],
     exclude_dirs: Set[str],
     exclude_files: Set[str],
-    source_path: Optional[Path] = None
+    source_paths: Optional[Iterable[Path]] = None,
+    seen_files: Optional[Set[Path]] = None,
 ) -> Tuple[List[str], int, int]:
     """
     从给定文件路径列表中收集内容（支持绝对或相对路径）
@@ -78,7 +103,8 @@ def collect_from_file_list(
         files: 文件路径列表
         exclude_dirs: 要排除的目录名称集合
         exclude_files: 要排除的文件名称集合
-        source_path: 用于计算相对路径的基准目录（可选）
+        source_paths: 用于计算相对路径的基准目录列表（可选）
+        seen_files: 已收集文件路径集合，用于去重
 
     Returns:
         (files_content, file_count, error_count)
@@ -91,6 +117,12 @@ def collect_from_file_list(
     if not files:
         return files_content, file_count, error_count
 
+    if seen_files is None:
+        seen_files = set()
+
+    source_paths_list = list(source_paths) if source_paths is not None else []
+    multiple_sources = len(source_paths_list) > 1
+
     print("-" * 60)
     print("开始收集指定文件列表:")
     for fp in files:
@@ -100,6 +132,11 @@ def collect_from_file_list(
         if not file_path.exists() or not file_path.is_file():
             error_count += 1
             print(f"✗ 跳过(指定文件): {fp} (不是存在的文件)")
+            continue
+
+        # 跳过重复文件路径
+        if file_path in seen_files:
+            print(f"✗ 跳过(指定文件): {file_path} (重复文件)")
             continue
 
         # 检查是否属于排除目录（根据路径片段判断）
@@ -113,16 +150,16 @@ def collect_from_file_list(
             continue
 
         # 相对路径显示逻辑：
-        # - 如果提供了 source_path 且文件在该目录下，则用相对路径
-        # - 否则用绝对路径
-        if source_path is not None:
+        # - 如果文件属于 source_paths 下，则尝试按源目录上下文显示
+        # - 否则按绝对路径显示
+        relative_path = file_path
+        for source_path in source_paths_list:
             try:
-                relative_path = file_path.relative_to(source_path)
+                rel = file_path.relative_to(source_path)
             except ValueError:
-                # 不在 source_path 下
-                relative_path = file_path
-        else:
-            relative_path = file_path
+                continue
+            relative_path = source_path / rel if multiple_sources else rel
+            break
 
         try:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -130,6 +167,7 @@ def collect_from_file_list(
 
             files_content.append(f"{relative_path}\n{content}")
             file_count += 1
+            seen_files.add(file_path)
             print(f"✓ 已收集(指定文件): {relative_path}")
         except Exception as e:
             error_count += 1
@@ -139,7 +177,7 @@ def collect_from_file_list(
 
 
 def collect_files(
-    source_dir: Optional[str],
+    source_dirs: Optional[List[str]] = None,
     output_file='collected_files.txt',
     exclude_dirs: Optional[Set[str]] = None,
     exclude_files: Optional[Set[str]] = None,
@@ -150,7 +188,7 @@ def collect_files(
     统一收集入口：递归目录 + 指定文件列表
 
     Args:
-        source_dir: 源目录路径（如果 enable_dir_scan 为 False，可为 None）
+        source_dirs: 源目录路径列表（如果 enable_dir_scan 为 False，可为 None）
         output_file: 输出文件名
         exclude_dirs: 要排除的目录集合
         exclude_files: 要排除的文件集合
@@ -167,22 +205,34 @@ def collect_files(
     # 添加输出文件到排除列表（避免把自己收进去）
     exclude_files.add(os.path.basename(output_file))
 
-    source_path: Optional[Path] = None
+    source_paths: Optional[List[Path]] = None
     if enable_dir_scan:
-        if source_dir is None:
-            raise ValueError("启用目录扫描时必须提供 source_dir")
-        source_path = Path(source_dir).resolve()
+        if not source_dirs:
+            raise ValueError("启用目录扫描时必须提供 source")
 
-        # 检查源目录是否存在
-        if not source_path.exists():
-            print(f"错误: 目录 '{source_dir}' 不存在")
+        # 去重并标准化源目录
+        source_paths = []
+        seen_source = set()
+        for source_dir in source_dirs:
+            source_path = Path(source_dir).resolve()
+            if not source_path.exists():
+                print(f"错误: 目录 '{source_dir}' 不存在")
+                continue
+            if not source_path.is_dir():
+                print(f"错误: '{source_dir}' 不是一个目录")
+                continue
+            if source_path in seen_source:
+                continue
+            seen_source.add(source_path)
+            source_paths.append(source_path)
+
+        if not source_paths:
+            print("错误: 没有可用的源目录可扫描")
             return
 
-        if not source_path.is_dir():
-            print(f"错误: '{source_dir}' 不是一个目录")
-            return
-
-        print(f"源目录: {source_path}")
+        print(f"源目录数量: {len(source_paths)}")
+        for source_path in source_paths:
+            print(f"  - {source_path}")
     else:
         print("未启用目录递归扫描（只收集指定文件列表）")
 
@@ -195,17 +245,22 @@ def collect_files(
     all_contents: List[str] = []
     total_files = 0
     total_errors = 0
+    seen_files: Set[Path] = set()
 
     # 1) 目录递归收集（可选）
-    if enable_dir_scan and source_path is not None:
-        dir_contents, dir_count, dir_errors = collect_from_directory(
-            source_path=source_path,
-            exclude_dirs=exclude_dirs,
-            exclude_files=exclude_files
-        )
-        all_contents.extend(dir_contents)
-        total_files += dir_count
-        total_errors += dir_errors
+    if enable_dir_scan and source_paths is not None:
+        multiple_sources = len(source_paths) > 1
+        for source_path in source_paths:
+            dir_contents, dir_count, dir_errors = collect_from_directory(
+                source_path=source_path,
+                exclude_dirs=exclude_dirs,
+                exclude_files=exclude_files,
+                seen_files=seen_files,
+                multiple_sources=multiple_sources
+            )
+            all_contents.extend(dir_contents)
+            total_files += dir_count
+            total_errors += dir_errors
 
     # 2) 指定文件列表收集（如果有）
     if extra_files:
@@ -213,7 +268,8 @@ def collect_files(
             files=extra_files,
             exclude_dirs=exclude_dirs,
             exclude_files=exclude_files,
-            source_path=source_path,
+            source_paths=source_paths,
+            seen_files=seen_files,
         )
         all_contents.extend(extra_contents)
         total_files += extra_count
@@ -254,7 +310,10 @@ def main():
       # 收集当前目录（默认行为）
 
   %(prog)s -s /path/to/dir
-      # 收集指定目录
+      # 收集单个目录
+
+  %(prog)s -s ./src ./test
+      # 收集多个目录
 
   %(prog)s -s ./src -o output.txt
       # 指定输出文件
@@ -276,8 +335,9 @@ def main():
     # 注意：这里不再设置 default='.'，以便区分“是否显式指定 -s”
     parser.add_argument(
         '-s', '--source',
+        nargs='+',
         default=None,
-        help='源目录路径；若未指定且未使用 -F，则默认为当前目录'
+        help='源目录路径（可写多个）；若未指定且未使用 -F，则默认为当前目录'
     )
 
     parser.add_argument(
@@ -327,25 +387,25 @@ def main():
     exclude_files = set(args.exclude_files)
 
     # 判断是否启用目录扫描：
-    # 1) 如果用户显式指定了 -s，则启用目录扫描，source_dir=指定值
-    # 2) 如果未指定 -s 且未指定 -F，则默认启用目录扫描，source_dir='.'
+    # 1) 如果用户显式指定了 -s，则启用目录扫描，source_dirs=指定值
+    # 2) 如果未指定 -s 且未指定 -F，则默认启用目录扫描，source_dirs=['.']
     # 3) 如果未指定 -s 且指定了 -F，则仅收集文件列表，不扫描目录
     if args.source is not None:
         # 情况 1：显式指定 -s
         enable_dir_scan = True
-        source_dir = args.source
+        source_dirs = args.source
     else:
         if args.files:
             # 情况 3：没有 -s，但是有 -F => 只收集指定文件
             enable_dir_scan = False
-            source_dir = None
+            source_dirs = None
         else:
             # 情况 2：既没有 -s 也没有 -F => 默认扫描当前目录
             enable_dir_scan = True
-            source_dir = '.'
+            source_dirs = ['.']
 
     collect_files(
-        source_dir=source_dir,
+        source_dirs=source_dirs,
         output_file=args.output,
         exclude_dirs=exclude_dirs,
         exclude_files=exclude_files,
@@ -356,4 +416,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
