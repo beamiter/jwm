@@ -129,9 +129,11 @@ pub struct ColorManagedSurfaceInfo {
     pub tf_named: Option<u32>,
     pub tf_power: Option<u32>,
     pub primaries_named: Option<u32>,
+    pub primaries: Option<[i32; 8]>,
     pub min_lum: Option<u32>,
     pub max_lum: Option<u32>,
     pub reference_lum: Option<u32>,
+    pub mastering_primaries: Option<[i32; 8]>,
     pub mastering_min_lum: Option<u32>,
     pub mastering_max_lum: Option<u32>,
     pub max_cll: Option<u32>,
@@ -345,6 +347,12 @@ pub struct OutputConfigChange {
 pub struct OutputManagementFailure {
     pub output_name: String,
     pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drm_property: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_value: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -375,10 +383,27 @@ pub struct OutputManagementTransactionStatus {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OutputManagementRejectedConfig {
+    pub attempted_at_unix_ms: u64,
+    pub serial: u32,
+    pub action: String,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drm_property: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_value: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OutputManagementStatus {
     pub pending_ack_count: usize,
     pub soft_disabled_outputs: Vec<String>,
     pub last_transaction: Option<OutputManagementTransactionStatus>,
+    pub last_rejected: Option<OutputManagementRejectedConfig>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -413,6 +438,16 @@ pub struct CaptureStatus {
     pub cursor_capture_supported: bool,
     pub sensitive_content_masking: bool,
     pub policy: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct XWaylandStatus {
+    pub available: bool,
+    pub wm_ready: bool,
+    pub display: Option<String>,
+    pub mapped_window_count: usize,
+    pub associated_surface_count: usize,
+    pub pending_association_count: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1326,6 +1361,11 @@ pub trait Backend: Send {
 
     /// Diagnostic status for screen/window capture protocols and pending queues.
     fn compositor_capture_status(&self) -> Option<CaptureStatus> {
+        None
+    }
+
+    /// Diagnostic status for the embedded XWayland server/XWM.
+    fn compositor_xwayland_status(&self) -> Option<XWaylandStatus> {
         None
     }
 

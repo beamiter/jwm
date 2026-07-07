@@ -19,6 +19,22 @@ impl Jwm {
         Some((mon_key, state))
     }
 
+    pub(crate) fn scrolling_default_column_width_for_client(
+        &self,
+        client_key: crate::core::models::ClientKey,
+    ) -> Option<f32> {
+        let client = self.state.clients.get(client_key)?;
+        scrolling_column_width_rule_for_window(
+            &client.name,
+            &client.class,
+            &client.instance,
+            &crate::config::CONFIG
+                .load()
+                .behavior()
+                .scrolling_column_width_rules,
+        )
+    }
+
     /// Focus the column to the left/right of the current one
     pub(crate) fn scrolling_focus_column(
         &mut self,
@@ -382,5 +398,65 @@ impl Jwm {
             self.arrange(backend, Some(mon_key));
         }
         Ok(())
+    }
+}
+
+pub(crate) fn scrolling_column_width_rule_for_window(
+    name: &str,
+    class: &str,
+    instance: &str,
+    rules: &[String],
+) -> Option<f32> {
+    rules.iter().find_map(|rule| {
+        let (factor, pattern) = rule.split_once(':')?;
+        let factor = factor.trim().parse::<f32>().ok()?;
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            return None;
+        }
+        if name.contains(pattern) || class.contains(pattern) || instance.contains(pattern) {
+            Some(factor.clamp(0.25, 2.5))
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scrolling_column_width_rule_for_window;
+
+    #[test]
+    fn scrolling_column_width_rule_matches_class_name_or_instance() {
+        let rules = vec![
+            "1.35:Firefox".to_string(),
+            "0.75:scratch".to_string(),
+            "bad:Alacritty".to_string(),
+        ];
+
+        assert_eq!(
+            scrolling_column_width_rule_for_window("", "Firefox", "", &rules),
+            Some(1.35)
+        );
+        assert_eq!(
+            scrolling_column_width_rule_for_window("scratch term", "Alacritty", "term", &rules),
+            Some(0.75)
+        );
+        assert_eq!(
+            scrolling_column_width_rule_for_window("Terminal", "Alacritty", "term", &rules),
+            None
+        );
+    }
+
+    #[test]
+    fn scrolling_column_width_rule_clamps_factor() {
+        assert_eq!(
+            scrolling_column_width_rule_for_window("", "Huge", "", &["8.0:Huge".to_string()]),
+            Some(2.5)
+        );
+        assert_eq!(
+            scrolling_column_width_rule_for_window("", "Tiny", "", &["0.01:Tiny".to_string()]),
+            Some(0.25)
+        );
     }
 }

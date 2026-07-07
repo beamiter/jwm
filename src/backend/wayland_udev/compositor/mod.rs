@@ -481,9 +481,13 @@ pub(crate) struct ExposeEntry {
 #[allow(dead_code)]
 pub(crate) struct OverviewEntry {
     pub window_id: u64,
+    /// Normalized scrolling overview-strip x position when available.
     pub x: f32,
+    /// Normalized row position inside the scrolling column when available.
     pub y: f32,
+    /// Normalized scrolling overview-strip column width when available.
     pub w: f32,
+    /// Normalized row height inside the scrolling column when available.
     pub h: f32,
     pub focused: bool,
     #[allow(dead_code)]

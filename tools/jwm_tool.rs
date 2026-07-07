@@ -1173,6 +1173,13 @@ const WAYLAND_SMOKE_TARGETS: &[SmokeTarget] = &[
     },
     SmokeTarget {
         area: "xwayland",
+        name: "legacy_window_types",
+        commands: &["xmessage", "xclock", "xeyes"],
+        required_protocols: &["xwayland_keyboard_grab"],
+        coverage: "XWayland dialog/utility/override-redirect style legacy windows",
+    },
+    SmokeTarget {
+        area: "xwayland",
         name: "steam",
         commands: &["steam"],
         required_protocols: &[
@@ -1181,6 +1188,13 @@ const WAYLAND_SMOKE_TARGETS: &[SmokeTarget] = &[
             "presentation_time",
         ],
         coverage: "XWayland fullscreen game and focus-steal behavior",
+    },
+    SmokeTarget {
+        area: "xwayland",
+        name: "legacy_tray",
+        commands: &["stalonetray", "nm-applet", "blueman-applet"],
+        required_protocols: &["xwayland_keyboard_grab"],
+        coverage: "legacy X11 tray/status icons and override-redirect helpers",
     },
     SmokeTarget {
         area: "xwayland",
@@ -1224,6 +1238,7 @@ fn smoke_target_json(
     target: &SmokeTarget,
     path_dirs: &[PathBuf],
     published_protocols: Option<&HashSet<String>>,
+    xwayland_status: Option<&serde_json::Value>,
 ) -> serde_json::Value {
     let found = target.commands.iter().find_map(|command| {
         executable_in_dirs(command, path_dirs).map(|path| {
@@ -1260,6 +1275,27 @@ fn smoke_target_json(
         ),
     };
 
+    let xwayland = if target.area == "xwayland" {
+        let ready = xwayland_status
+            .and_then(|status| status.get("wm_ready"))
+            .and_then(|value| value.as_bool());
+        serde_json::json!({
+            "known": xwayland_status.is_some(),
+            "wm_ready": ready,
+            "display": xwayland_status
+                .and_then(|status| status.get("display"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "mapped_window_count": xwayland_status
+                .and_then(|status| status.get("mapped_window_count"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            "satisfied": ready,
+        })
+    } else {
+        serde_json::Value::Null
+    };
+
     serde_json::json!({
         "area": target.area,
         "name": target.name,
@@ -1271,6 +1307,7 @@ fn smoke_target_json(
             "missing": missing,
             "satisfied": satisfied,
         },
+        "xwayland": xwayland,
         "coverage": target.coverage,
         "available": found.is_some(),
         "found": found,
@@ -1323,6 +1360,7 @@ fn wayland_status_smoke_json(status: Result<&serde_json::Value, &String>) -> ser
                 "render_decisions": data.get("render_decisions").is_some_and(|v| !v.is_null()),
                 "output_management": data.get("output_management").is_some_and(|v| !v.is_null()),
                 "presentation_timing": data.get("presentation_timing").is_some_and(|v| !v.is_null()),
+                "xwayland": data.get("xwayland").cloned().unwrap_or(serde_json::Value::Null),
                 "metrics_snapshot": data.get("metrics").cloned().unwrap_or(serde_json::Value::Null),
                 "render_decisions_snapshot": data.get("render_decisions").cloned().unwrap_or(serde_json::Value::Null),
                 "capture_snapshot": data.get("capture").cloned().unwrap_or(serde_json::Value::Null),
@@ -1344,6 +1382,101 @@ fn smoke_log_summary_json() -> serde_json::Value {
         "tail_line_count": tail.len(),
         "tail": tail,
     })
+}
+
+fn smoke_artifacts_json() -> serde_json::Value {
+    serde_json::json!({
+        "screenshot_hashes": {
+            "mode": "schema_reserved",
+            "invasive_runner_required": true,
+            "hash_algorithm": "sha256",
+            "entries": [],
+            "entry_schema": {
+                "target": "smoke target name",
+                "client": "launched command",
+                "output": "output name or monitor index",
+                "width": "captured width",
+                "height": "captured height",
+                "sha256": "hex digest of RGBA or PNG bytes",
+            },
+        },
+        "gui_runner": {
+            "implemented": false,
+            "reason": "current wayland-smoke is non-invasive and does not launch GUI clients",
+        },
+    })
+}
+
+fn smoke_ci_profile_json(
+    env_info: &serde_json::Value,
+    status: Result<&serde_json::Value, &String>,
+) -> serde_json::Value {
+    let backend = status
+        .ok()
+        .and_then(|data| data.get("backend_family"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let session_type = env_info
+        .get("xdg_session_type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let nested_wayland = env_info
+        .get("wayland_display")
+        .and_then(|value| value.as_str())
+        .is_some();
+
+    serde_json::json!({
+        "nested_wayland_available": nested_wayland,
+        "recommended_backend": if nested_wayland { "wayland-winit" } else { "wayland-udev" },
+        "current_backend_family": backend,
+        "session_type": session_type,
+        "kms_required_for_full_coverage": true,
+        "notes": [
+            "Use wayland-winit for nested CI protocol/client preflight when DRM/KMS is unavailable.",
+            "Keep manual KMS runs for modeset, VRR, direct scanout, HDR metadata, and output-management rollback.",
+        ],
+    })
+}
+
+fn smoke_manual_kms_checklist_json() -> serde_json::Value {
+    serde_json::json!([
+        {
+            "id": "kms-output-transaction",
+            "area": "output",
+            "command": "jwm-tool wayland-status --json",
+            "evidence": "output_management.last_transaction, failed_outputs, rollback fields, outputs_before/after",
+        },
+        {
+            "id": "direct-scanout-game",
+            "area": "game",
+            "command": "jwm-tool wayland-status --json",
+            "evidence": "direct_scanout and render_decisions.direct_scanout blockers/active state",
+        },
+        {
+            "id": "vrr-tearing",
+            "area": "game",
+            "command": "jwm-tool wayland-status --json",
+            "evidence": "outputs[].vrr, tearing.active_surface_count, presentation_timing outputs",
+        },
+        {
+            "id": "hdr-color",
+            "area": "color",
+            "command": "jwm-tool wayland-status --json",
+            "evidence": "outputs[].hdr_metadata, color_management.session_policy, render_decisions.color_pipeline",
+        },
+        {
+            "id": "capture-dmabuf",
+            "area": "capture",
+            "command": "jwm-tool wayland-smoke --save",
+            "evidence": "capture snapshot queue counters, dmabuf_advertised, dmabuf_format_count",
+        },
+        {
+            "id": "xwayland-fullscreen",
+            "area": "xwayland",
+            "command": "jwm-tool wayland-smoke --save",
+            "evidence": "xwayland readiness, mapped_window_count, fullscreen/game target availability",
+        }
+    ])
 }
 
 fn default_smoke_report_dir() -> PathBuf {
@@ -1375,9 +1508,20 @@ fn wayland_smoke_snapshot() -> serde_json::Value {
         .as_ref()
         .ok()
         .and_then(published_protocols_from_status);
+    let xwayland_status = wayland_status
+        .as_ref()
+        .ok()
+        .and_then(|status| status.get("xwayland"));
     let targets = WAYLAND_SMOKE_TARGETS
         .iter()
-        .map(|target| smoke_target_json(target, &path_dirs, published_protocols.as_ref()))
+        .map(|target| {
+            smoke_target_json(
+                target,
+                &path_dirs,
+                published_protocols.as_ref(),
+                xwayland_status,
+            )
+        })
         .collect::<Vec<_>>();
     let available = targets
         .iter()
@@ -1404,18 +1548,36 @@ fn wayland_smoke_snapshot() -> serde_json::Value {
     } else {
         0
     };
+    let xwayland_target_count = targets
+        .iter()
+        .filter(|target| target.get("area").and_then(|value| value.as_str()) == Some("xwayland"))
+        .count();
+    let xwayland_ready_targets = targets
+        .iter()
+        .filter(|target| target.get("area").and_then(|value| value.as_str()) == Some("xwayland"))
+        .filter(|target| {
+            target
+                .get("xwayland")
+                .and_then(|value| value.get("satisfied"))
+                .and_then(|value| value.as_bool())
+                == Some(true)
+        })
+        .count();
+
+    let environment = serde_json::json!({
+        "wayland_display": env::var("WAYLAND_DISPLAY").ok(),
+        "display": env::var("DISPLAY").ok(),
+        "xdg_session_type": env::var("XDG_SESSION_TYPE").ok(),
+        "xdg_current_desktop": env::var("XDG_CURRENT_DESKTOP").ok(),
+        "xdg_runtime_dir": env::var("XDG_RUNTIME_DIR").ok(),
+        "ipc_socket": ipc_socket_path(),
+        "ipc_socket_exists": ipc_socket_path().exists(),
+    });
+    let ci_profile = smoke_ci_profile_json(&environment, wayland_status.as_ref());
 
     serde_json::json!({
         "generated_at": Local::now().to_rfc3339(),
-        "environment": {
-            "wayland_display": env::var("WAYLAND_DISPLAY").ok(),
-            "display": env::var("DISPLAY").ok(),
-            "xdg_session_type": env::var("XDG_SESSION_TYPE").ok(),
-            "xdg_current_desktop": env::var("XDG_CURRENT_DESKTOP").ok(),
-            "xdg_runtime_dir": env::var("XDG_RUNTIME_DIR").ok(),
-            "ipc_socket": ipc_socket_path(),
-            "ipc_socket_exists": ipc_socket_path().exists(),
-        },
+        "environment": environment,
         "summary": {
             "target_count": targets.len(),
             "available_count": available,
@@ -1423,9 +1585,14 @@ fn wayland_smoke_snapshot() -> serde_json::Value {
             "protocols_known": protocols_known,
             "protocol_satisfied_count": protocol_satisfied,
             "protocol_missing_target_count": protocol_missing_targets,
+            "xwayland_target_count": xwayland_target_count,
+            "xwayland_ready_target_count": xwayland_ready_targets,
         },
         "jwm_status": wayland_status_smoke_json(wayland_status.as_ref()),
         "logs": smoke_log_summary_json(),
+        "artifacts": smoke_artifacts_json(),
+        "ci_profile": ci_profile,
+        "manual_kms_checklist": smoke_manual_kms_checklist_json(),
         "targets": targets,
     })
 }
@@ -1436,12 +1603,15 @@ fn print_wayland_smoke(json_output: bool, save: Option<Option<PathBuf>>) -> io::
         let dir = dir.unwrap_or_else(default_smoke_report_dir);
         let path = smoke_report_path(&dir);
         if let Some(object) = snapshot.as_object_mut() {
-            object.insert(
-                "artifacts".to_string(),
-                serde_json::json!({
-                    "report_path": path.display().to_string(),
-                }),
-            );
+            if let Some(artifacts) = object
+                .get_mut("artifacts")
+                .and_then(|value| value.as_object_mut())
+            {
+                artifacts.insert(
+                    "report_path".to_string(),
+                    serde_json::json!(path.display().to_string()),
+                );
+            }
         }
         save_wayland_smoke_snapshot_at(&snapshot, &path)?;
         Some(path)
@@ -1471,7 +1641,7 @@ fn print_wayland_smoke(json_output: bool, save: Option<Option<PathBuf>>) -> io::
     );
     let summary = &snapshot["summary"];
     println!(
-        "targets: available={}/{} missing={} protocol_satisfied={} protocol_missing_targets={} protocols_known={}",
+        "targets: available={}/{} missing={} protocol_satisfied={} protocol_missing_targets={} protocols_known={} xwayland_ready={}/{}",
         summary["available_count"].as_u64().unwrap_or(0),
         summary["target_count"].as_u64().unwrap_or(0),
         summary["missing_count"].as_u64().unwrap_or(0),
@@ -1479,7 +1649,9 @@ fn print_wayland_smoke(json_output: bool, save: Option<Option<PathBuf>>) -> io::
         summary["protocol_missing_target_count"]
             .as_u64()
             .unwrap_or(0),
-        summary["protocols_known"].as_bool().unwrap_or(false)
+        summary["protocols_known"].as_bool().unwrap_or(false),
+        summary["xwayland_ready_target_count"].as_u64().unwrap_or(0),
+        summary["xwayland_target_count"].as_u64().unwrap_or(0)
     );
     let jwm_status = &snapshot["jwm_status"];
     println!(
@@ -1500,6 +1672,43 @@ fn print_wayland_smoke(json_output: bool, save: Option<Option<PathBuf>>) -> io::
         logs["exists"].as_bool().unwrap_or(false),
         logs["tail_line_count"].as_u64().unwrap_or(0),
         logs["path"].as_str().unwrap_or("unknown")
+    );
+    let artifacts = &snapshot["artifacts"];
+    println!(
+        "artifacts: screenshot_hashes={} gui_runner_implemented={}",
+        artifacts
+            .get("screenshot_hashes")
+            .and_then(|value| value.get("mode"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown"),
+        artifacts
+            .get("gui_runner")
+            .and_then(|value| value.get("implemented"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+    );
+    let ci_profile = &snapshot["ci_profile"];
+    println!(
+        "ci_profile: recommended_backend={} nested_wayland={} kms_required={}",
+        ci_profile
+            .get("recommended_backend")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown"),
+        ci_profile
+            .get("nested_wayland_available")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        ci_profile
+            .get("kms_required_for_full_coverage")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+    );
+    println!(
+        "manual_kms_checklist: items={}",
+        snapshot["manual_kms_checklist"]
+            .as_array()
+            .map(|items| items.len())
+            .unwrap_or(0)
     );
 
     if let Some(targets) = snapshot["targets"].as_array() {
@@ -1534,13 +1743,27 @@ fn print_wayland_smoke(json_output: bool, save: Option<Option<PathBuf>>) -> io::
                 }
                 None => "proto=unknown".to_string(),
             };
+            let xwayland_status = if target["area"].as_str() == Some("xwayland") {
+                match target
+                    .get("xwayland")
+                    .and_then(|value| value.get("satisfied"))
+                    .and_then(|value| value.as_bool())
+                {
+                    Some(true) => " xwayland=ready".to_string(),
+                    Some(false) => " xwayland=not-ready".to_string(),
+                    None => " xwayland=unknown".to_string(),
+                }
+            } else {
+                String::new()
+            };
             println!(
-                "{}.{:<18} {:<7} found={} {} coverage={}",
+                "{}.{:<18} {:<7} found={} {}{} coverage={}",
                 target["area"].as_str().unwrap_or("unknown"),
                 target["name"].as_str().unwrap_or("unknown"),
                 status,
                 found,
                 protocol_status,
+                xwayland_status,
                 target["coverage"].as_str().unwrap_or("")
             );
         }
@@ -1703,7 +1926,10 @@ fn run_ipc_msg(name: &str, args_str: &str, subscribe: Option<&str>, raw: bool) -
 
 #[cfg(test)]
 mod tests {
-    use super::{SmokeTarget, smoke_target_json, split_path_list};
+    use super::{
+        SmokeTarget, smoke_artifacts_json, smoke_ci_profile_json, smoke_manual_kms_checklist_json,
+        smoke_target_json, split_path_list,
+    };
     use std::collections::HashSet;
 
     #[test]
@@ -1725,7 +1951,7 @@ mod tests {
             coverage: "test coverage",
         };
 
-        let value = smoke_target_json(&target, &[], None);
+        let value = smoke_target_json(&target, &[], None, None);
 
         assert_eq!(value["available"], false);
         assert!(value["found"].is_null());
@@ -1744,7 +1970,7 @@ mod tests {
         };
         let protocols = HashSet::from(["xdg_wm_base".to_string()]);
 
-        let value = smoke_target_json(&target, &[], Some(&protocols));
+        let value = smoke_target_json(&target, &[], Some(&protocols), None);
 
         assert_eq!(value["protocols"]["known"], true);
         assert_eq!(value["protocols"]["satisfied"], false);
@@ -1752,6 +1978,80 @@ mod tests {
             value["protocols"]["missing"],
             serde_json::json!(["zwlr_screencopy_manager_v1"])
         );
+    }
+
+    #[test]
+    fn smoke_target_json_reports_xwayland_readiness() {
+        let target = SmokeTarget {
+            area: "xwayland",
+            name: "xterm",
+            commands: &["definitely-not-a-jwm-smoke-test-command"],
+            required_protocols: &["xwayland_keyboard_grab"],
+            coverage: "test coverage",
+        };
+        let protocols = HashSet::from(["xwayland_keyboard_grab".to_string()]);
+        let xwayland = serde_json::json!({
+            "wm_ready": true,
+            "display": ":42",
+            "mapped_window_count": 2,
+        });
+
+        let value = smoke_target_json(&target, &[], Some(&protocols), Some(&xwayland));
+
+        assert_eq!(value["xwayland"]["known"], true);
+        assert_eq!(value["xwayland"]["wm_ready"], true);
+        assert_eq!(value["xwayland"]["display"], ":42");
+        assert_eq!(value["xwayland"]["satisfied"], true);
+    }
+
+    #[test]
+    fn smoke_artifacts_reserve_screenshot_hash_schema() {
+        let artifacts = smoke_artifacts_json();
+
+        assert_eq!(artifacts["screenshot_hashes"]["mode"], "schema_reserved");
+        assert_eq!(artifacts["screenshot_hashes"]["hash_algorithm"], "sha256");
+        assert!(
+            artifacts["screenshot_hashes"]["entries"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(artifacts["gui_runner"]["implemented"], false);
+    }
+
+    #[test]
+    fn smoke_ci_profile_prefers_winit_when_nested_wayland_exists() {
+        let env_info = serde_json::json!({
+            "wayland_display": "wayland-1",
+            "xdg_session_type": "wayland",
+        });
+        let status = serde_json::json!({
+            "backend_family": "wayland",
+        });
+
+        let profile = smoke_ci_profile_json(&env_info, Ok(&status));
+
+        assert_eq!(profile["nested_wayland_available"], true);
+        assert_eq!(profile["recommended_backend"], "wayland-winit");
+        assert_eq!(profile["kms_required_for_full_coverage"], true);
+    }
+
+    #[test]
+    fn smoke_manual_kms_checklist_covers_core_drm_paths() {
+        let checklist = smoke_manual_kms_checklist_json();
+        let ids = checklist
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item.get("id").and_then(|value| value.as_str()))
+            .collect::<HashSet<_>>();
+
+        assert!(ids.contains("kms-output-transaction"));
+        assert!(ids.contains("direct-scanout-game"));
+        assert!(ids.contains("vrr-tearing"));
+        assert!(ids.contains("hdr-color"));
+        assert!(ids.contains("capture-dmabuf"));
+        assert!(ids.contains("xwayland-fullscreen"));
     }
 }
 
@@ -2032,6 +2332,31 @@ fn print_unified_wayland_status(status: &serde_json::Value) {
                     .get("rollback_attempted")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                let first_failure = tx
+                    .get("failed_outputs")
+                    .and_then(|v| v.as_array())
+                    .and_then(|failures| failures.first());
+                let failure_detail = first_failure
+                    .map(|failure| {
+                        let output = failure
+                            .get("output_name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let field = failure
+                            .get("field")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let prop = failure
+                            .get("drm_property")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("-");
+                        let value = failure
+                            .get("requested_value")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("-");
+                        format!("{output}:{field}/{prop}={value}")
+                    })
+                    .unwrap_or_else(|| "none".into());
                 let before_outputs = tx
                     .get("outputs_before")
                     .and_then(|v| v.as_array())
@@ -2067,12 +2392,13 @@ fn print_unified_wayland_status(status: &serde_json::Value) {
                     })
                     .unwrap_or(0);
                 println!(
-                    "output_mgmt: pending_ack={} soft_disabled={} last_tx={} success={} failures={} rollback_attempted={} outputs={}/{} enabled={}/{}",
+                    "output_mgmt: pending_ack={} soft_disabled={} last_tx={} success={} failures={} first_failure={} rollback_attempted={} outputs={}/{} enabled={}/{}",
                     pending,
                     soft_disabled,
                     id,
                     success,
                     failures,
+                    failure_detail,
                     rollback,
                     before_outputs,
                     after_outputs,
@@ -2084,6 +2410,36 @@ fn print_unified_wayland_status(status: &serde_json::Value) {
                 "output_mgmt: pending_ack={} soft_disabled={} last_tx=none",
                 pending, soft_disabled
             ),
+        }
+        if let Some(rejected) = output_mgmt.get("last_rejected").filter(|v| !v.is_null()) {
+            let action = rejected
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let output = rejected
+                .get("output_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("*");
+            let field = rejected
+                .get("field")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let prop = rejected
+                .get("drm_property")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-");
+            let value = rejected
+                .get("requested_value")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-");
+            let reason = rejected
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            println!(
+                "output_mgmt_rejected: action={} output={} field={} drm_property={} requested={} reason={}",
+                action, output, field, prop, value, reason
+            );
         }
     }
 
@@ -2170,6 +2526,10 @@ fn print_unified_wayland_status(status: &serde_json::Value) {
             .get("stored_state_count")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+        let width_rules = scrolling
+            .get("column_width_rule_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let stored_tags = scrolling
             .get("stored_states")
             .and_then(|v| v.as_array())
@@ -2216,14 +2576,41 @@ fn print_unified_wayland_status(status: &serde_json::Value) {
                 .get("viewport_x")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
+            let strip_columns = monitor
+                .get("overview_strip")
+                .and_then(|v| v.get("column_count"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let strip_focus = monitor
+                .get("overview_strip")
+                .and_then(|v| v.get("focused_column"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "none".into());
+            let overview_order = monitor
+                .get("overview_strip")
+                .and_then(|v| v.get("overview_order"))
+                .and_then(|v| v.as_array())
+                .map(|v| v.len())
+                .unwrap_or(0);
             println!(
-                "scrolling: active_monitors={} stored_states={} stored_tags={} first_monitor={} columns={} focused_column={} viewport_x={:.1}",
-                active, stored, stored_tags, mon_num, columns, focused_column, viewport
+                "scrolling: active_monitors={} stored_states={} width_rules={} stored_tags={} first_monitor={} columns={} focused_column={} viewport_x={:.1} strip_columns={} strip_focus={} overview_order={}",
+                active,
+                stored,
+                width_rules,
+                stored_tags,
+                mon_num,
+                columns,
+                focused_column,
+                viewport,
+                strip_columns,
+                strip_focus,
+                overview_order
             );
         } else {
             println!(
-                "scrolling: active_monitors={} stored_states={} stored_tags={}",
-                active, stored, stored_tags
+                "scrolling: active_monitors={} stored_states={} width_rules={} stored_tags={}",
+                active, stored, width_rules, stored_tags
             );
         }
     }
@@ -2297,10 +2684,21 @@ fn print_unified_wayland_status(status: &serde_json::Value) {
                     .iter()
                     .filter(|p| p.get("enabled").and_then(|v| v.as_bool()) == Some(true))
                     .count();
-                (enabled, a.len())
+                let config_enabled = a
+                    .iter()
+                    .filter(|p| p.get("config_enabled").and_then(|v| v.as_bool()) == Some(true))
+                    .count();
+                let env_enabled = a
+                    .iter()
+                    .filter(|p| p.get("env_enabled").and_then(|v| v.as_bool()) == Some(true))
+                    .count();
+                (enabled, a.len(), config_enabled, env_enabled)
             })
-            .unwrap_or((0, 0));
-        println!("optional_protocols: enabled={}/{}", optional.0, optional.1);
+            .unwrap_or((0, 0, 0, 0));
+        println!(
+            "optional_protocols: enabled={}/{} config_enabled={} env_enabled={}",
+            optional.0, optional.1, optional.2, optional.3
+        );
 
         if let Some(catalog) = protocols.get("catalog").and_then(|v| v.as_array()) {
             let published = catalog
@@ -2369,6 +2767,33 @@ fn print_unified_wayland_status(status: &serde_json::Value) {
         println!("session_lock: locked={} surfaces={}", locked, surfaces);
     }
 
+    if let Some(xwayland) = status.get("xwayland").filter(|v| !v.is_null()) {
+        let available = xwayland
+            .get("available")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let wm_ready = xwayland
+            .get("wm_ready")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let display = xwayland
+            .get("display")
+            .and_then(|v| v.as_str())
+            .unwrap_or("none");
+        let mapped = xwayland
+            .get("mapped_window_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let pending = xwayland
+            .get("pending_association_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        println!(
+            "xwayland: available={} wm_ready={} display={} mapped_windows={} pending_assoc={}",
+            available, wm_ready, display, mapped, pending
+        );
+    }
+
     if let Some(color) = status.get("color_management") {
         let count = color
             .get("surface_count")
@@ -2386,6 +2811,89 @@ fn print_unified_wayland_status(status: &serde_json::Value) {
             .get("output_count")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+        let hdr_surfaces = color
+            .get("hdr_surface_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let transfer_functions = color
+            .get("transfer_functions")
+            .and_then(|v| v.as_object())
+            .map(|counts| {
+                counts
+                    .iter()
+                    .map(|(name, count)| format!("{}:{}", name, count.as_u64().unwrap_or(0)))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "none".into());
+        let primaries = color
+            .get("primaries")
+            .and_then(|v| v.as_object())
+            .map(|counts| {
+                counts
+                    .iter()
+                    .map(|(name, count)| format!("{}:{}", name, count.as_u64().unwrap_or(0)))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "none".into());
+        let max_lum = color
+            .get("max_luminance_peak")
+            .and_then(|v| v.as_u64())
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".into());
+        let policy = color
+            .get("session_policy")
+            .filter(|v| !v.is_null())
+            .map(|policy| {
+                let sdr_on_hdr = policy
+                    .get("sdr_on_hdr_policy")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let mixed = policy
+                    .get("mixed_hdr_policy")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let hdr_outputs = policy
+                    .get("hdr_output_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let sdr_outputs = policy
+                    .get("sdr_output_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                format!(
+                    "sdr_on_hdr={} mixed={} hdr_outputs={} sdr_outputs={}",
+                    sdr_on_hdr, mixed, hdr_outputs, sdr_outputs
+                )
+            })
+            .unwrap_or_else(|| "unknown".into());
+        let first_surface = color
+            .get("surface_samples")
+            .and_then(|v| v.as_array())
+            .and_then(|surfaces| surfaces.first())
+            .map(|surface| {
+                let id = surface
+                    .get("surface_object_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let tf = surface
+                    .get("transfer_function")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let prim = surface
+                    .get("primaries")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let hdr = surface
+                    .get("hdr")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                format!("{id}:{tf}/{prim}/hdr={hdr}")
+            })
+            .unwrap_or_else(|| "none".into());
         let shader_fallback_outputs = status
             .get("outputs")
             .and_then(|v| v.as_array())
@@ -2403,8 +2911,18 @@ fn print_unified_wayland_status(status: &serde_json::Value) {
             })
             .unwrap_or(0);
         println!(
-            "color_management: surfaces={} advanced={} render_path={} outputs={} shader_fallback_outputs={}",
-            count, advanced, render_path, output_count, shader_fallback_outputs
+            "color_management: surfaces={} hdr_surfaces={} advanced={} render_path={} outputs={} shader_fallback_outputs={} tf=[{}] primaries=[{}] max_lum={} policy=[{}] first_surface={}",
+            count,
+            hdr_surfaces,
+            advanced,
+            render_path,
+            output_count,
+            shader_fallback_outputs,
+            transfer_functions,
+            primaries,
+            max_lum,
+            policy,
+            first_surface
         );
     }
 
@@ -2476,6 +2994,7 @@ fn run_wayland_status(json_output: bool) -> io::Result<()> {
         "get_hdr_status",
         "get_tearing_hints",
         "get_session_lock",
+        "get_xwayland_status",
         "get_color_management_status",
         "get_capture_status",
         "get_blur_status",
@@ -2677,7 +3196,26 @@ fn run_wayland_status(json_output: bool) -> io::Result<()> {
             .get("surface_count")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        println!("color_management: surfaces={}", count);
+        let hdr_surfaces = color
+            .get("hdr_surface_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let transfer_functions = color
+            .get("transfer_functions")
+            .and_then(|v| v.as_object())
+            .map(|counts| {
+                counts
+                    .iter()
+                    .map(|(name, count)| format!("{}:{}", name, count.as_u64().unwrap_or(0)))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "none".into());
+        println!(
+            "color_management: surfaces={} hdr_surfaces={} tf=[{}]",
+            count, hdr_surfaces, transfer_functions
+        );
     }
 
     if let Some(capture) = response_data(queries, "get_capture_status") {

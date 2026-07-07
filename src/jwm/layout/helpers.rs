@@ -1,9 +1,11 @@
 use crate::backend::common_define::WindowId;
 use crate::config::CONFIG;
+use crate::core::layout::LayoutEnum;
 use crate::core::models::{ClientKey, MonitorKey, WMMonitor};
 use crate::core::types::Rect;
 use crate::jwm::Jwm;
 use log::{info, warn};
+use std::collections::HashMap;
 
 impl Jwm {
     pub(crate) fn nexttiled(
@@ -360,9 +362,42 @@ impl Jwm {
         clients: &[ClientKey],
     ) -> Vec<(WindowId, f32, f32, f32, f32, bool, String)> {
         let mut layout = Vec::new();
+        let selected_client = self
+            .state
+            .sel_mon
+            .and_then(|mon_key| self.state.monitors.get(mon_key))
+            .and_then(|monitor| monitor.sel);
+        let strip_geometry = self
+            .state
+            .sel_mon
+            .and_then(|mon_key| {
+                let monitor = self.state.monitors.get(mon_key)?;
+                if *monitor.lt[monitor.sel_lt] != LayoutEnum::SCROLLING {
+                    return None;
+                }
+                let visible = self
+                    .state
+                    .monitor_clients
+                    .get(mon_key)
+                    .map(|monitor_clients| {
+                        monitor_clients
+                            .iter()
+                            .copied()
+                            .filter(|&ck| self.is_client_visible_by_key(ck))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_else(|| clients.to_vec());
+                self.scrolling_state_for_monitor(mon_key)
+                    .map(|state| state.overview_strip_geometry(&visible))
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .map(|geometry| (geometry.client, geometry))
+            .collect::<HashMap<_, _>>();
+
         for (i, &ck) in clients.iter().enumerate() {
             if let Some(client) = self.state.clients.get(ck) {
-                let is_selected = i == 0;
+                let is_selected = selected_client.map_or(i == 0, |selected| selected == ck);
                 let title = if client.name.is_empty() {
                     client.class.clone()
                 } else if !client.class.is_empty()
@@ -372,8 +407,16 @@ impl Jwm {
                 } else {
                     client.name.clone()
                 };
-                // x/y/w/h are ignored by the compositor (prism handles positioning)
-                layout.push((client.win, 0.0, 0.0, 0.0, 0.0, is_selected, title));
+                let geometry = strip_geometry.get(&ck).copied();
+                layout.push((
+                    client.win,
+                    geometry.map(|g| g.x_ratio).unwrap_or(0.0),
+                    geometry.map(|g| g.y_ratio).unwrap_or(0.0),
+                    geometry.map(|g| g.width_ratio).unwrap_or(0.0),
+                    geometry.map(|g| g.height_ratio).unwrap_or(0.0),
+                    is_selected,
+                    title,
+                ));
             }
         }
         layout

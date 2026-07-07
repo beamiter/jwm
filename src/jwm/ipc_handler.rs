@@ -13,8 +13,20 @@ fn env_flag(name: &str) -> bool {
     std::env::var_os(name).as_deref() == Some(std::ffi::OsStr::new("1"))
 }
 
-fn optional_protocol_enabled(default_enabled: bool, flag_name: &str) -> bool {
-    default_enabled || env_flag("JWM_OPTIONAL_GLOBALS") || env_flag(flag_name)
+fn optional_protocol_enabled(config_enabled: bool, flag_name: &str) -> bool {
+    optional_protocol_enabled_from_flags(
+        config_enabled,
+        env_flag("JWM_OPTIONAL_GLOBALS"),
+        env_flag(flag_name),
+    )
+}
+
+fn optional_protocol_enabled_from_flags(
+    config_enabled: bool,
+    env_enable_all: bool,
+    env_flag_enabled: bool,
+) -> bool {
+    config_enabled || env_enable_all || env_flag_enabled
 }
 
 fn parse_config_batch_changes(
@@ -207,6 +219,128 @@ fn color_primaries_name(primaries_named: Option<u32>) -> &'static str {
         Some(_) => "unknown",
         None => "custom_or_unset",
     }
+}
+
+fn color_surface_is_hdr(surface: &crate::backend::api::ColorManagedSurfaceInfo) -> bool {
+    matches!(color_transfer_name(surface.tf_named), "st2084_pq" | "hlg")
+        || color_primaries_name(surface.primaries_named) == "bt2020"
+        || surface.max_lum.is_some_and(|value| value > 300)
+        || surface.max_cll.is_some_and(|value| value > 300)
+}
+
+fn color_managed_surface_json(
+    surface: &crate::backend::api::ColorManagedSurfaceInfo,
+) -> serde_json::Value {
+    serde_json::json!({
+        "surface_object_id": surface.surface_object_id,
+        "identity": surface.identity,
+        "transfer_function": color_transfer_name(surface.tf_named),
+        "tf_named": surface.tf_named,
+        "tf_power": surface.tf_power,
+        "primaries": color_primaries_name(surface.primaries_named),
+        "primaries_named": surface.primaries_named,
+        "primaries_xy": surface.primaries,
+        "hdr": color_surface_is_hdr(surface),
+        "luminance": {
+            "min": surface.min_lum,
+            "max": surface.max_lum,
+            "reference": surface.reference_lum,
+        },
+        "mastering": {
+            "primaries_xy": surface.mastering_primaries,
+            "min_luminance": surface.mastering_min_lum,
+            "max_luminance": surface.mastering_max_lum,
+        },
+        "content_light": {
+            "max_cll": surface.max_cll,
+            "max_fall": surface.max_fall,
+        },
+    })
+}
+
+fn color_surface_summary_json(
+    surfaces: &[crate::backend::api::ColorManagedSurfaceInfo],
+) -> serde_json::Value {
+    let mut transfer_functions = std::collections::BTreeMap::<String, usize>::new();
+    let mut primaries = std::collections::BTreeMap::<String, usize>::new();
+    let mut hdr_surface_count = 0usize;
+    let mut max_luminance_peak = None::<u32>;
+
+    for surface in surfaces {
+        *transfer_functions
+            .entry(color_transfer_name(surface.tf_named).to_string())
+            .or_default() += 1;
+        *primaries
+            .entry(color_primaries_name(surface.primaries_named).to_string())
+            .or_default() += 1;
+        if color_surface_is_hdr(surface) {
+            hdr_surface_count += 1;
+        }
+        if let Some(max_lum) = surface.max_lum {
+            max_luminance_peak = Some(max_luminance_peak.map_or(max_lum, |peak| peak.max(max_lum)));
+        }
+    }
+
+    serde_json::json!({
+        "surface_count": surfaces.len(),
+        "hdr_surface_count": hdr_surface_count,
+        "transfer_functions": transfer_functions,
+        "primaries": primaries,
+        "max_luminance_peak": max_luminance_peak,
+    })
+}
+
+fn color_session_policy_json(
+    outputs: &[crate::backend::api::OutputInfo],
+    hdr_enabled: bool,
+    render_path_enabled: bool,
+    scene_linear_enabled: bool,
+    advanced_enabled: bool,
+) -> serde_json::Value {
+    let hdr_output_count = outputs.iter().filter(|output| output.hdr_capable).count();
+    let sdr_output_count = outputs.len().saturating_sub(hdr_output_count);
+    let mixed_hdr_outputs = hdr_output_count > 0 && sdr_output_count > 0;
+    let hdr_active = hdr_enabled && hdr_output_count > 0;
+
+    let sdr_on_hdr_policy = if !hdr_active {
+        "hdr_disabled_or_no_hdr_outputs"
+    } else if render_path_enabled && advanced_enabled {
+        "preserve_sdr_with_surface_color_transform"
+    } else {
+        "legacy_sdr_passthrough_on_hdr_output"
+    };
+
+    let mixed_hdr_policy = if !mixed_hdr_outputs {
+        "single_output_class"
+    } else if render_path_enabled && scene_linear_enabled {
+        "scene_linear_per_output_encode"
+    } else if render_path_enabled {
+        "per_surface_transform_without_scene_linear_blending"
+    } else {
+        "safe_srgb_legacy_compositing"
+    };
+
+    let mut blockers = Vec::new();
+    if hdr_active && !advanced_enabled {
+        blockers.push("advanced_color_management_disabled");
+    }
+    if hdr_active && !render_path_enabled {
+        blockers.push("color_management_render_path_disabled");
+    }
+    if mixed_hdr_outputs && !scene_linear_enabled {
+        blockers.push("scene_linear_compositing_disabled");
+    }
+
+    serde_json::json!({
+        "hdr_output_count": hdr_output_count,
+        "sdr_output_count": sdr_output_count,
+        "mixed_hdr_outputs": mixed_hdr_outputs,
+        "hdr_active": hdr_active,
+        "sdr_on_hdr_policy": sdr_on_hdr_policy,
+        "mixed_hdr_policy": mixed_hdr_policy,
+        "scene_linear_enabled": scene_linear_enabled,
+        "blockers": blockers,
+    })
 }
 
 fn output_color_policy_json(
@@ -440,6 +574,8 @@ fn render_decisions_json(
 }
 
 fn wayland_protocol_status() -> serde_json::Value {
+    let cfg = CONFIG.load();
+    let behavior = cfg.behavior();
     let core = [
         "wl_compositor",
         "wl_shm",
@@ -480,53 +616,89 @@ fn wayland_protocol_status() -> serde_json::Value {
     ];
 
     let optional = [
-        ("zwlr_screencopy_manager_v1", true, "JWM_ENABLE_SCREENCOPY"),
+        (
+            "zwlr_screencopy_manager_v1",
+            true,
+            "JWM_ENABLE_SCREENCOPY",
+            "behavior.wayland_enable_screencopy",
+            behavior.wayland_enable_screencopy,
+        ),
         (
             "wp_tearing_control_manager_v1",
             true,
             "JWM_ENABLE_TEARING_CONTROL",
+            "behavior.wayland_enable_tearing_control",
+            behavior.wayland_enable_tearing_control,
         ),
-        ("wp_color_manager_v1", false, "JWM_ENABLE_COLOR_MANAGEMENT"),
+        (
+            "wp_color_manager_v1",
+            false,
+            "JWM_ENABLE_COLOR_MANAGEMENT",
+            "behavior.wayland_enable_color_management",
+            behavior.wayland_enable_color_management,
+        ),
         (
             "zwlr_output_manager_v1",
             true,
             "JWM_ENABLE_OUTPUT_MANAGEMENT",
+            "behavior.wayland_enable_output_management",
+            behavior.wayland_enable_output_management,
         ),
         (
             "zwlr_output_power_manager_v1",
             true,
             "JWM_ENABLE_OUTPUT_POWER",
+            "behavior.wayland_enable_output_power",
+            behavior.wayland_enable_output_power,
         ),
-        ("ext_workspace_manager_v1", true, "JWM_ENABLE_WORKSPACE"),
+        (
+            "ext_workspace_manager_v1",
+            true,
+            "JWM_ENABLE_WORKSPACE",
+            "behavior.wayland_enable_workspace",
+            behavior.wayland_enable_workspace,
+        ),
         (
             "ext_image_copy_capture_manager_v1",
             true,
             "JWM_ENABLE_IMAGE_COPY_CAPTURE",
+            "behavior.wayland_enable_image_copy_capture",
+            behavior.wayland_enable_image_copy_capture,
         ),
         (
             "ext_output_image_capture_source_manager_v1",
             true,
             "JWM_ENABLE_IMAGE_COPY_CAPTURE",
+            "behavior.wayland_enable_image_copy_capture",
+            behavior.wayland_enable_image_copy_capture,
         ),
         (
             "ext_foreign_toplevel_image_capture_source_manager_v1",
             true,
             "JWM_ENABLE_IMAGE_COPY_CAPTURE",
+            "behavior.wayland_enable_image_copy_capture",
+            behavior.wayland_enable_image_copy_capture,
         ),
         (
             "zwlr_gamma_control_manager_v1",
             true,
             "JWM_ENABLE_GAMMA_CONTROL",
+            "behavior.wayland_enable_gamma_control",
+            behavior.wayland_enable_gamma_control,
         ),
         (
             "zwlr_foreign_toplevel_manager_v1",
             true,
             "JWM_ENABLE_FOREIGN_TOPLEVEL_MANAGEMENT",
+            "behavior.wayland_enable_foreign_toplevel_management",
+            behavior.wayland_enable_foreign_toplevel_management,
         ),
         (
             "zwlr_virtual_pointer_manager_v1",
             true,
             "JWM_ENABLE_VIRTUAL_POINTER",
+            "behavior.wayland_enable_virtual_pointer",
+            behavior.wayland_enable_virtual_pointer,
         ),
     ];
 
@@ -537,12 +709,15 @@ fn wayland_protocol_status() -> serde_json::Value {
             .collect::<Vec<_>>(),
         "optional": optional
             .iter()
-            .map(|(name, default_enabled, flag)| {
+            .map(|(name, default_enabled, flag, config_key, config_enabled)| {
                 serde_json::json!({
                     "name": name,
-                    "enabled": optional_protocol_enabled(*default_enabled, flag),
+                    "enabled": optional_protocol_enabled(*config_enabled, flag),
                     "default_enabled": default_enabled,
+                    "config_key": config_key,
+                    "config_enabled": config_enabled,
                     "env_flag": flag,
+                    "env_enabled": env_flag(flag),
                 })
             })
             .collect::<Vec<_>>(),
@@ -762,29 +937,35 @@ impl Jwm {
             }))),
             "get_color_management_status" => {
                 let surfaces = backend.compositor_color_managed_surfaces();
-                let detail: Vec<serde_json::Value> = surfaces
-                    .iter()
-                    .map(|s| {
-                        serde_json::json!({
-                            "surface_object_id": s.surface_object_id,
-                            "identity": s.identity,
-                            "tf_named": s.tf_named,
-                            "tf_power": s.tf_power,
-                            "primaries_named": s.primaries_named,
-                            "min_lum": s.min_lum,
-                            "max_lum": s.max_lum,
-                            "reference_lum": s.reference_lum,
-                            "mastering_min_lum": s.mastering_min_lum,
-                            "mastering_max_lum": s.mastering_max_lum,
-                            "max_cll": s.max_cll,
-                            "max_fall": s.max_fall,
-                        })
-                    })
-                    .collect();
+                let detail: Vec<serde_json::Value> =
+                    surfaces.iter().map(color_managed_surface_json).collect();
+                let summary = color_surface_summary_json(&surfaces);
                 IpcResponse::ok(Some(serde_json::json!({
+                    "summary": summary,
                     "surface_count": surfaces.len(),
+                    "hdr_surface_count": summary
+                        .get("hdr_surface_count")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0),
+                    "transfer_functions": summary.get("transfer_functions").cloned().unwrap_or_default(),
+                    "primaries": summary.get("primaries").cloned().unwrap_or_default(),
+                    "max_luminance_peak": summary.get("max_luminance_peak").cloned().unwrap_or(serde_json::Value::Null),
                     "surfaces": detail,
                 })))
+            }
+            "get_xwayland_status" => {
+                if let Some(status) = backend.compositor_xwayland_status() {
+                    IpcResponse::ok(Some(serde_json::to_value(status).unwrap_or_default()))
+                } else {
+                    IpcResponse::ok(Some(serde_json::json!({
+                        "available": false,
+                        "wm_ready": false,
+                        "display": std::env::var("DISPLAY").ok(),
+                        "mapped_window_count": 0,
+                        "associated_surface_count": 0,
+                        "pending_association_count": 0,
+                    })))
+                }
             }
             "get_capture_status" => {
                 if let Some(status) = backend.compositor_capture_status() {
@@ -961,6 +1142,19 @@ impl Jwm {
         let capture = backend
             .compositor_capture_status()
             .and_then(|s| serde_json::to_value(s).ok());
+        let xwayland = backend
+            .compositor_xwayland_status()
+            .and_then(|s| serde_json::to_value(s).ok())
+            .unwrap_or_else(|| {
+                serde_json::json!({
+                    "available": false,
+                    "wm_ready": false,
+                    "display": std::env::var("DISPLAY").ok(),
+                    "mapped_window_count": 0,
+                    "associated_surface_count": 0,
+                    "pending_association_count": 0,
+                })
+            });
         let protocol_bind_counts_raw = backend.compositor_protocol_bind_counts();
         let protocol_bind_counts = protocol_bind_counts_raw
             .iter()
@@ -974,6 +1168,19 @@ impl Jwm {
             .collect::<Vec<_>>();
 
         let color_surfaces = backend.compositor_color_managed_surfaces();
+        let color_surface_summary = color_surface_summary_json(&color_surfaces);
+        let color_session_policy = color_session_policy_json(
+            &outputs,
+            cfg.behavior().hdr_enabled,
+            color_render_path_enabled,
+            cfg.behavior().scene_linear_compositing,
+            color_advanced_enabled,
+        );
+        let color_surface_samples = color_surfaces
+            .iter()
+            .take(8)
+            .map(color_managed_surface_json)
+            .collect::<Vec<_>>();
         let blur = backend.compositor_blur_status().map(|b| {
             serde_json::json!({
                 "current_strength": b.current_strength,
@@ -1055,6 +1262,7 @@ impl Jwm {
             "presentation_timing": presentation_timing,
             "output_management": output_management,
             "capture": capture,
+            "xwayland": xwayland,
             "render_decisions": render_decisions,
             "hdr": {
                 "config_enabled": cfg.behavior().hdr_enabled,
@@ -1070,9 +1278,27 @@ impl Jwm {
             },
             "color_management": {
                 "surface_count": color_surfaces.len(),
+                "hdr_surface_count": color_surface_summary
+                    .get("hdr_surface_count")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0),
                 "advanced_enabled": color_advanced_enabled,
                 "render_path_enabled": color_render_path_enabled,
                 "output_count": outputs.len(),
+                "transfer_functions": color_surface_summary
+                    .get("transfer_functions")
+                    .cloned()
+                    .unwrap_or_default(),
+                "primaries": color_surface_summary
+                    .get("primaries")
+                    .cloned()
+                    .unwrap_or_default(),
+                "max_luminance_peak": color_surface_summary
+                    .get("max_luminance_peak")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                "session_policy": color_session_policy,
+                "surface_samples": color_surface_samples,
             },
             "blur": blur,
             "not_yet_exposed": [],
@@ -1403,6 +1629,7 @@ impl Jwm {
     }
 
     pub(crate) fn query_scrolling_status(&self) -> serde_json::Value {
+        let cfg = CONFIG.load();
         let monitors = self
             .state
             .monitor_order
@@ -1413,6 +1640,18 @@ impl Jwm {
                 let active_tags = mon.get_active_tags();
                 let state_key = self.scrolling_state_key(mk);
                 let state = self.scrolling_state_for_monitor(mk);
+                let visible_clients = self
+                    .state
+                    .monitor_clients
+                    .get(mk)
+                    .map(|clients| {
+                        clients
+                            .iter()
+                            .copied()
+                            .filter(|&ck| self.is_client_visible_by_key(ck))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
                 let columns = state
                     .map(|s| {
                         s.columns
@@ -1449,6 +1688,67 @@ impl Jwm {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
+                let overview_order = state
+                    .map(|s| s.ordered_visible_clients(&visible_clients))
+                    .unwrap_or_else(|| visible_clients.clone())
+                    .into_iter()
+                    .filter_map(|key| self.state.clients.get(key).map(|client| client.win.raw()))
+                    .collect::<Vec<_>>();
+                let overview_strip = state.map(|s| {
+                    let focused_column = s.focused_column_index();
+                    let weights = s
+                        .columns
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, _)| {
+                            s.column_width_factors
+                                .get(idx)
+                                .copied()
+                                .unwrap_or(1.0)
+                                .max(0.1)
+                        })
+                        .collect::<Vec<_>>();
+                    let total_weight = weights.iter().sum::<f32>().max(0.1);
+                    let mut cursor = 0.0f32;
+                    let strip_columns = s
+                        .columns
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, column)| {
+                            let width = weights.get(idx).copied().unwrap_or(1.0) / total_weight;
+                            let x = cursor / total_weight;
+                            cursor += weights.get(idx).copied().unwrap_or(1.0);
+                            let windows = column
+                                .iter()
+                                .filter_map(|key| {
+                                    self.state.clients.get(*key).map(|client| {
+                                        serde_json::json!({
+                                            "id": client.win.raw(),
+                                            "focused": mon.sel == Some(*key),
+                                        })
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+                            serde_json::json!({
+                                "index": idx,
+                                "x_ratio": x,
+                                "width_ratio": width,
+                                "focused": focused_column == Some(idx),
+                                "window_count": windows.len(),
+                                "windows": windows,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+
+                    serde_json::json!({
+                        "visible": !s.columns.is_empty(),
+                        "column_count": s.columns.len(),
+                        "focused_column": focused_column,
+                        "viewport_x": s.viewport_x,
+                        "columns": strip_columns,
+                        "overview_order": overview_order,
+                    })
+                });
 
                 let focused_window = mon
                     .sel
@@ -1472,6 +1772,7 @@ impl Jwm {
                         .map(|s| s.attach_new_windows_to_focused_column)
                         .unwrap_or(false),
                     "column_count": state.map(|s| s.columns.len()).unwrap_or(0),
+                    "overview_strip": overview_strip,
                     "columns": columns,
                 }))
             })
@@ -1524,6 +1825,8 @@ impl Jwm {
         serde_json::json!({
             "active_monitor_count": active_monitor_count,
             "stored_state_count": self.scrolling_states.len(),
+            "column_width_rule_count": cfg.behavior().scrolling_column_width_rules.len(),
+            "column_width_rules": cfg.behavior().scrolling_column_width_rules.clone(),
             "stored_states": stored_states,
             "monitors": monitors,
         })
@@ -1672,10 +1975,11 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::{
-        output_color_policy_json, parse_command_batch_entries, parse_config_batch_changes,
-        render_decisions_json,
+        color_managed_surface_json, color_session_policy_json, color_surface_summary_json,
+        optional_protocol_enabled_from_flags, output_color_policy_json,
+        parse_command_batch_entries, parse_config_batch_changes, render_decisions_json,
     };
-    use crate::backend::api::{OutputIdentity, OutputInfo};
+    use crate::backend::api::{ColorManagedSurfaceInfo, OutputIdentity, OutputInfo};
     use crate::backend::common_define::OutputId;
     use crate::backend::edid::EdidHdrCapabilities;
 
@@ -1734,6 +2038,108 @@ mod tests {
         assert_eq!(value["selected_transfer_function"], "st2084_pq");
         assert_eq!(value["selected_primaries"], "bt2020");
         assert_eq!(value["shader_fallback_required"], true);
+    }
+
+    #[test]
+    fn color_surface_summary_reports_hdr_and_named_distributions() {
+        let surfaces = vec![
+            ColorManagedSurfaceInfo {
+                surface_object_id: "surface-a".into(),
+                identity: 1,
+                tf_named: Some(2),
+                tf_power: None,
+                primaries_named: Some(1),
+                primaries: None,
+                min_lum: None,
+                max_lum: None,
+                reference_lum: None,
+                mastering_primaries: None,
+                mastering_min_lum: None,
+                mastering_max_lum: None,
+                max_cll: None,
+                max_fall: None,
+            },
+            ColorManagedSurfaceInfo {
+                surface_object_id: "surface-b".into(),
+                identity: 2,
+                tf_named: Some(11),
+                tf_power: None,
+                primaries_named: Some(6),
+                primaries: Some([
+                    708000, 292000, 170000, 797000, 131000, 46000, 312700, 329000,
+                ]),
+                min_lum: Some(500),
+                max_lum: Some(1000),
+                reference_lum: Some(203),
+                mastering_primaries: None,
+                mastering_min_lum: None,
+                mastering_max_lum: Some(1000),
+                max_cll: Some(1000),
+                max_fall: Some(400),
+            },
+        ];
+
+        let summary = color_surface_summary_json(&surfaces);
+        assert_eq!(summary["surface_count"], 2);
+        assert_eq!(summary["hdr_surface_count"], 1);
+        assert_eq!(summary["transfer_functions"]["gamma22"], 1);
+        assert_eq!(summary["transfer_functions"]["st2084_pq"], 1);
+        assert_eq!(summary["primaries"]["srgb"], 1);
+        assert_eq!(summary["primaries"]["bt2020"], 1);
+        assert_eq!(summary["max_luminance_peak"], 1000);
+
+        let detail = color_managed_surface_json(&surfaces[1]);
+        assert_eq!(detail["transfer_function"], "st2084_pq");
+        assert_eq!(detail["primaries"], "bt2020");
+        assert_eq!(detail["hdr"], true);
+        assert_eq!(detail["primaries_xy"][0], 708000);
+    }
+
+    #[test]
+    fn color_session_policy_reports_mixed_hdr_path_and_blockers() {
+        let hdr = output(Some(EdidHdrCapabilities {
+            max_luminance_nits: 1000.0,
+            min_luminance_nits: 0.05,
+            supports_bt2020: true,
+            supports_pq: true,
+            supports_hlg: false,
+        }));
+        let mut sdr = output(None);
+        sdr.id = OutputId(2);
+        sdr.name = "DP-1".into();
+        sdr.identity = OutputIdentity::connector_only("DP-1");
+
+        let full = color_session_policy_json(&[hdr.clone(), sdr.clone()], true, true, true, true);
+        assert_eq!(full["mixed_hdr_outputs"], true);
+        assert_eq!(
+            full["sdr_on_hdr_policy"],
+            "preserve_sdr_with_surface_color_transform"
+        );
+        assert_eq!(full["mixed_hdr_policy"], "scene_linear_per_output_encode");
+        assert_eq!(full["blockers"].as_array().unwrap().len(), 0);
+
+        let legacy = color_session_policy_json(&[hdr, sdr], true, false, false, false);
+        assert_eq!(
+            legacy["sdr_on_hdr_policy"],
+            "legacy_sdr_passthrough_on_hdr_output"
+        );
+        assert_eq!(legacy["mixed_hdr_policy"], "safe_srgb_legacy_compositing");
+        assert_eq!(
+            legacy["blockers"],
+            serde_json::json!([
+                "advanced_color_management_disabled",
+                "color_management_render_path_disabled",
+                "scene_linear_compositing_disabled"
+            ])
+        );
+    }
+
+    #[test]
+    fn optional_protocol_enabled_respects_config_and_env_overrides() {
+        assert!(optional_protocol_enabled_from_flags(true, false, false));
+        assert!(optional_protocol_enabled_from_flags(false, true, false));
+        assert!(optional_protocol_enabled_from_flags(false, false, true));
+        assert!(!optional_protocol_enabled_from_flags(false, false, false));
     }
 
     #[test]

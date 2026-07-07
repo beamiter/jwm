@@ -191,6 +191,39 @@ pub struct BehaviorConfig {
     #[serde(default)]
     pub wlr_output_mgmt_allow_modeset: bool,
 
+    // --- Wayland optional protocol globals ---
+    /// Publish zwlr_screencopy_manager_v1 for grim/slurp-style screenshots.
+    #[serde(default = "default_true")]
+    pub wayland_enable_screencopy: bool,
+    /// Publish wp_tearing_control_manager_v1 for game/latency hints.
+    #[serde(default = "default_true")]
+    pub wayland_enable_tearing_control: bool,
+    /// Publish wp_color_manager_v1. Default off until users opt into advanced
+    /// client color protocol negotiation.
+    #[serde(default)]
+    pub wayland_enable_color_management: bool,
+    /// Publish zwlr_output_manager_v1 for kanshi/wlr-randr.
+    #[serde(default = "default_true")]
+    pub wayland_enable_output_management: bool,
+    /// Publish zwlr_output_power_manager_v1 for DPMS tools.
+    #[serde(default = "default_true")]
+    pub wayland_enable_output_power: bool,
+    /// Publish ext_workspace_manager_v1 for bars/task switchers.
+    #[serde(default = "default_true")]
+    pub wayland_enable_workspace: bool,
+    /// Publish ext-image-copy-capture protocol globals.
+    #[serde(default = "default_true")]
+    pub wayland_enable_image_copy_capture: bool,
+    /// Publish zwlr_gamma_control_manager_v1 for wlsunset/gammastep.
+    #[serde(default = "default_true")]
+    pub wayland_enable_gamma_control: bool,
+    /// Publish zwlr_foreign_toplevel_manager_v1 for taskbars/window tools.
+    #[serde(default = "default_true")]
+    pub wayland_enable_foreign_toplevel_management: bool,
+    /// Publish zwlr_virtual_pointer_manager_v1 for remote-control tools.
+    #[serde(default = "default_true")]
+    pub wayland_enable_virtual_pointer: bool,
+
     // --- Feature 1: Window borders ---
     /// Enable window border/outline rendering.
     #[serde(default = "default_true")]
@@ -551,6 +584,13 @@ pub struct BehaviorConfig {
     /// Class names that should NEVER swallow their parent (popups, menus, etc).
     #[serde(default)]
     pub swallow_exceptions: Vec<String>,
+
+    // --- Scrolling layout identity ---
+    /// Default scrolling column width rules. Format: "factor:pattern"; pattern
+    /// is matched as a substring against window name, class, or instance when a
+    /// new window creates a new scrolling column. Example: "1.35:Firefox".
+    #[serde(default)]
+    pub scrolling_column_width_rules: Vec<String>,
 
     // --- Touchpad gestures (Wayland only) ---
     /// Touchpad swipe-gesture bindings. 3+ finger swipes are intercepted only
@@ -1025,6 +1065,16 @@ impl Default for Config {
                     vrr_max_fps: default_vrr_max_fps(),
                     game_classes: Vec::new(),
                     wlr_output_mgmt_allow_modeset: false,
+                    wayland_enable_screencopy: true,
+                    wayland_enable_tearing_control: true,
+                    wayland_enable_color_management: false,
+                    wayland_enable_output_management: true,
+                    wayland_enable_output_power: true,
+                    wayland_enable_workspace: true,
+                    wayland_enable_image_copy_capture: true,
+                    wayland_enable_gamma_control: true,
+                    wayland_enable_foreign_toplevel_management: true,
+                    wayland_enable_virtual_pointer: true,
                     border_enabled: true,
                     border_width: default_border_width(),
                     border_color_focused: default_border_color_focused(),
@@ -1123,6 +1173,7 @@ impl Default for Config {
                     swallow_enabled: false,
                     swallow_terminals: Vec::new(),
                     swallow_exceptions: Vec::new(),
+                    scrolling_column_width_rules: Vec::new(),
                     gesture_swipe: Vec::new(),
                     gesture_swipe_threshold: default_gesture_swipe_threshold(),
                     do_not_disturb: false,
@@ -1750,6 +1801,26 @@ impl Config {
                 problems.push(format!(
                     "behavior.wallpaper_tags[{i}]: monitor={} (must be >=-1)",
                     wt.monitor
+                ));
+            }
+        }
+
+        for (i, rule) in b.scrolling_column_width_rules.iter().enumerate() {
+            let Some((factor, pattern)) = rule.split_once(':') else {
+                problems.push(format!(
+                    "behavior.scrolling_column_width_rules[{i}]='{rule}' must use 'factor:pattern'"
+                ));
+                continue;
+            };
+            match factor.trim().parse::<f32>() {
+                Ok(value) if value.is_finite() && value > 0.0 => {}
+                _ => problems.push(format!(
+                    "behavior.scrolling_column_width_rules[{i}]='{rule}' has invalid factor"
+                )),
+            }
+            if pattern.trim().is_empty() {
+                problems.push(format!(
+                    "behavior.scrolling_column_width_rules[{i}]='{rule}' has empty pattern"
                 ));
             }
         }

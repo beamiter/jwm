@@ -204,6 +204,23 @@ impl Jwm {
                     None => Vec::new(),
                 }
             };
+            let visible = {
+                let is_scrolling = self
+                    .state
+                    .monitors
+                    .get(sel_mon_key)
+                    .map(|monitor| {
+                        *monitor.lt[monitor.sel_lt] == crate::core::layout::LayoutEnum::SCROLLING
+                    })
+                    .unwrap_or(false);
+                if is_scrolling {
+                    self.scrolling_state_for_monitor(sel_mon_key)
+                        .map(|state| state.ordered_visible_clients(&visible))
+                        .unwrap_or(visible)
+                } else {
+                    visible
+                }
+            };
 
             if visible.is_empty() {
                 return Ok(());

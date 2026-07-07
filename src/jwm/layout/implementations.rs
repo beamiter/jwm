@@ -275,6 +275,13 @@ impl Jwm {
         let default_border = CONFIG.load().border_px() as i32;
 
         let visible_keys: Vec<ClientKey> = raw_clients.iter().map(|&(k, _, _)| k).collect();
+        let default_column_widths = visible_keys
+            .iter()
+            .filter_map(|&key| {
+                self.scrolling_default_column_width_for_client(key)
+                    .map(|width| (key, width))
+            })
+            .collect::<std::collections::HashMap<_, _>>();
 
         let sel = self.state.monitors.get(mon_key).and_then(|m| m.sel);
         let (columns_keys, column_width_factors, focus_col, viewport_x) = {
@@ -284,7 +291,14 @@ impl Jwm {
             };
 
             // Sync columns with currently visible clients
-            Self::sync_scrolling_columns(state, &visible_keys);
+            let newly_inserted = Self::sync_scrolling_columns(state, &visible_keys);
+            for key in newly_inserted {
+                if let Some(width_factor) = default_column_widths.get(&key).copied() {
+                    if let Some(col_idx) = state.columns.iter().position(|col| col.contains(&key)) {
+                        state.column_width_factors[col_idx] = width_factor;
+                    }
+                }
+            }
 
             // Determine focus column and keep the per-column focus memory aligned
             // with normal focus changes outside explicit scrolling commands.
@@ -353,7 +367,7 @@ impl Jwm {
     pub(crate) fn sync_scrolling_columns(
         state: &mut ScrollingState,
         visible_clients: &[ClientKey],
-    ) {
+    ) -> Vec<ClientKey> {
         state.ensure_column_metadata();
 
         // 1. Remove clients that are no longer visible
@@ -373,9 +387,11 @@ impl Jwm {
             .collect();
 
         // 4. Insert new clients as individual columns (at the end)
-        for key in new_clients {
+        for key in new_clients.iter().copied() {
             state.insert_new_client(key);
         }
+
+        new_clients
     }
 
     pub(crate) fn fullscreen_layout(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {

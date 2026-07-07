@@ -4,6 +4,7 @@ use crate::backend::api::LayerSurfaceInfo;
 use crate::backend::common_define::WindowId;
 use crate::core::layout::LayoutEnum;
 use slotmap::DefaultKey;
+use std::collections::HashSet;
 use std::fmt;
 use std::rc::Rc;
 
@@ -18,6 +19,17 @@ pub struct ScrollingState {
     pub focused_column: Option<usize>,
     pub attach_new_windows_to_focused_column: bool,
     pub viewport_x: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScrollingOverviewGeometry {
+    pub client: ClientKey,
+    pub column_index: usize,
+    pub x_ratio: f32,
+    pub width_ratio: f32,
+    pub y_ratio: f32,
+    pub height_ratio: f32,
+    pub focused_column: bool,
 }
 
 impl ScrollingState {
@@ -122,6 +134,118 @@ impl ScrollingState {
         self.column_width_factors.push(1.0);
         self.focused_clients.push(Some(client_key));
         self.focused_column = Some(self.columns.len() - 1);
+    }
+
+    /// Return visible clients in stable scrolling-strip order: left-to-right
+    /// columns first, then any visible clients not yet synced into the strip.
+    pub fn ordered_visible_clients(&self, visible_clients: &[ClientKey]) -> Vec<ClientKey> {
+        let visible: HashSet<ClientKey> = visible_clients.iter().copied().collect();
+        let mut seen = HashSet::new();
+        let mut ordered = Vec::with_capacity(visible_clients.len());
+
+        for key in self.columns.iter().flatten().copied() {
+            if visible.contains(&key) && seen.insert(key) {
+                ordered.push(key);
+            }
+        }
+
+        for key in visible_clients.iter().copied() {
+            if seen.insert(key) {
+                ordered.push(key);
+            }
+        }
+
+        ordered
+    }
+
+    /// Return normalized strip geometry for overview rendering. Columns keep
+    /// their configured width factors; visible clients not yet synced into a
+    /// column are appended as one-window synthetic columns.
+    pub fn overview_strip_geometry(
+        &self,
+        visible_clients: &[ClientKey],
+    ) -> Vec<ScrollingOverviewGeometry> {
+        let visible: HashSet<ClientKey> = visible_clients.iter().copied().collect();
+        let mut seen = HashSet::new();
+        let orphan_count = visible_clients
+            .iter()
+            .copied()
+            .filter(|key| !self.columns.iter().any(|column| column.contains(key)))
+            .count();
+        let column_weights = self
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(idx, _)| {
+                self.column_width_factors
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(1.0)
+                    .max(0.1)
+            })
+            .collect::<Vec<_>>();
+        let total_weight = column_weights.iter().sum::<f32>() + orphan_count as f32;
+        if total_weight <= 0.0 {
+            return Vec::new();
+        }
+
+        let focused_column = self.focused_column_index();
+        let mut cursor = 0.0f32;
+        let mut geometry = Vec::with_capacity(visible_clients.len());
+
+        for (column_index, column) in self.columns.iter().enumerate() {
+            let weight = column_weights.get(column_index).copied().unwrap_or(1.0);
+            let column_x = cursor / total_weight;
+            let column_width = weight / total_weight;
+            cursor += weight;
+
+            let column_visible = column
+                .iter()
+                .copied()
+                .filter(|key| visible.contains(key))
+                .collect::<Vec<_>>();
+            let row_height = if column_visible.is_empty() {
+                1.0
+            } else {
+                1.0 / column_visible.len() as f32
+            };
+
+            for (row_idx, client) in column_visible.into_iter().enumerate() {
+                seen.insert(client);
+                geometry.push(ScrollingOverviewGeometry {
+                    client,
+                    column_index,
+                    x_ratio: column_x,
+                    width_ratio: column_width,
+                    y_ratio: row_idx as f32 * row_height,
+                    height_ratio: row_height,
+                    focused_column: focused_column == Some(column_index),
+                });
+            }
+        }
+
+        let mut synthetic_column_index = self.columns.len();
+        for client in visible_clients.iter().copied() {
+            if !seen.insert(client) {
+                continue;
+            }
+
+            let column_x = cursor / total_weight;
+            let column_width = 1.0 / total_weight;
+            cursor += 1.0;
+            geometry.push(ScrollingOverviewGeometry {
+                client,
+                column_index: synthetic_column_index,
+                x_ratio: column_x,
+                width_ratio: column_width,
+                y_ratio: 0.0,
+                height_ratio: 1.0,
+                focused_column: false,
+            });
+            synthetic_column_index += 1;
+        }
+
+        geometry
     }
 }
 
@@ -879,5 +1003,50 @@ mod tests {
 
         assert_eq!(s.columns, vec![vec![a], vec![b]]);
         assert_eq!(s.focused_column_index(), Some(1));
+    }
+
+    #[test]
+    fn test_scrolling_state_orders_visible_clients_for_overview() {
+        let mut keys = slotmap::SlotMap::<ClientKey, ()>::with_key();
+        let a = keys.insert(());
+        let b = keys.insert(());
+        let c = keys.insert(());
+        let d = keys.insert(());
+        let e = keys.insert(());
+        let mut s = ScrollingState::new();
+        s.columns = vec![vec![c, a], vec![b], vec![d]];
+
+        let ordered = s.ordered_visible_clients(&[a, b, e, c]);
+
+        assert_eq!(ordered, vec![c, a, b, e]);
+    }
+
+    #[test]
+    fn test_scrolling_state_builds_overview_strip_geometry() {
+        let mut keys = slotmap::SlotMap::<ClientKey, ()>::with_key();
+        let a = keys.insert(());
+        let b = keys.insert(());
+        let c = keys.insert(());
+        let e = keys.insert(());
+        let mut s = ScrollingState::new();
+        s.columns = vec![vec![c, a], vec![b]];
+        s.column_width_factors = vec![2.0, 1.0];
+        s.set_focused_column(1);
+
+        let geometry = s.overview_strip_geometry(&[a, b, c, e]);
+
+        assert_eq!(
+            geometry.iter().map(|g| g.client).collect::<Vec<_>>(),
+            vec![c, a, b, e]
+        );
+        assert!((geometry[0].x_ratio - 0.0).abs() < 0.0001);
+        assert!((geometry[0].width_ratio - 0.5).abs() < 0.0001);
+        assert!((geometry[0].y_ratio - 0.0).abs() < 0.0001);
+        assert!((geometry[0].height_ratio - 0.5).abs() < 0.0001);
+        assert!((geometry[1].y_ratio - 0.5).abs() < 0.0001);
+        assert!(!geometry[0].focused_column);
+        assert!(geometry[2].focused_column);
+        assert!((geometry[3].x_ratio - 0.75).abs() < 0.0001);
+        assert_eq!(geometry[3].column_index, 2);
     }
 }

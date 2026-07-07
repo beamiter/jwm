@@ -2732,6 +2732,35 @@ fn output_management_snapshot(
     snapshot
 }
 
+fn output_management_failure(
+    output_name: impl Into<String>,
+    reason: String,
+) -> crate::backend::api::OutputManagementFailure {
+    let mut failure = crate::backend::api::OutputManagementFailure {
+        output_name: output_name.into(),
+        reason,
+        field: None,
+        drm_property: None,
+        requested_value: None,
+    };
+
+    let lower = failure.reason.to_ascii_lowercase();
+    if lower.contains("mode") || lower.contains("use_mode") {
+        failure.field = Some("mode".into());
+        failure.drm_property = Some("MODE_ID".into());
+    } else if lower.contains("transform") {
+        failure.field = Some("transform".into());
+        failure.drm_property = Some("rotation/reflection".into());
+    } else if lower.contains("scale") {
+        failure.field = Some("scale".into());
+    } else if lower.contains("kms") || lower.contains("drm") {
+        failure.field = Some("backend".into());
+        failure.drm_property = Some("DRM_DEVICE".into());
+    }
+
+    failure
+}
+
 fn output_at(outputs: &[OutputInfo], x: f64, y: f64) -> Option<OutputId> {
     outputs
         .iter()
@@ -4070,6 +4099,7 @@ impl Backend for UdevBackend {
             pending_ack_count: self.state.pending_output_acks.len(),
             soft_disabled_outputs: soft_disabled,
             last_transaction: self.last_output_management_tx.clone(),
+            last_rejected: self.state.last_output_management_rejection.clone(),
         })
     }
 
@@ -4141,6 +4171,21 @@ impl Backend for UdevBackend {
             cursor_capture_supported: self.state.image_capture_pending.is_some(),
             sensitive_content_masking: false,
             policy: "allow_all_visible_content".into(),
+        })
+    }
+
+    fn compositor_xwayland_status(&self) -> Option<crate::backend::api::XWaylandStatus> {
+        Some(crate::backend::api::XWaylandStatus {
+            available: true,
+            wm_ready: self.state.x11_wm.is_some(),
+            display: std::env::var("DISPLAY").ok(),
+            mapped_window_count: self.state.x11_surfaces.len(),
+            associated_surface_count: self.state.x11_surfaces.len(),
+            pending_association_count: self
+                .state
+                .x11_surface_to_window
+                .len()
+                .saturating_sub(self.state.x11_surfaces.len()),
         })
     }
 
@@ -4281,9 +4326,11 @@ impl Backend for UdevBackend {
                     tf_named: record.params.tf_named,
                     tf_power: record.params.tf_power,
                     primaries_named: record.params.primaries_named,
+                    primaries: record.params.primaries,
                     min_lum: record.params.min_lum,
                     max_lum: record.params.max_lum,
                     reference_lum: record.params.reference_lum,
+                    mastering_primaries: record.params.mastering_primaries,
                     mastering_min_lum: record.params.mastering_min_lum,
                     mastering_max_lum: record.params.mastering_max_lum,
                     max_cll: record.params.max_cll,
@@ -4389,20 +4436,25 @@ impl Backend for UdevBackend {
                                         "[output-mgmt] configure_output('{}') failed: {e}",
                                         change.name
                                     );
-                                    failed_outputs.push(
-                                        crate::backend::api::OutputManagementFailure {
-                                            output_name: change.name.clone(),
-                                            reason: e,
-                                        },
-                                    );
+                                    let mut failure =
+                                        output_management_failure(change.name.clone(), e);
+                                    if let Some((w, h, refresh)) = change.mode {
+                                        failure.requested_value =
+                                            Some(format!("{w}x{h}@{refresh}"));
+                                    } else if let Some(scale) = change.scale {
+                                        failure.requested_value = Some(scale.to_string());
+                                    } else if let Some(transform) = change.transform {
+                                        failure.requested_value = Some(transform.to_string());
+                                    }
+                                    failed_outputs.push(failure);
                                     all_ok = false;
                                 }
                             }
                         } else {
-                            failed_outputs.push(crate::backend::api::OutputManagementFailure {
-                                output_name: "*".into(),
-                                reason: "no KMS backend available".into(),
-                            });
+                            failed_outputs.push(output_management_failure(
+                                "*",
+                                "no KMS backend available".into(),
+                            ));
                             all_ok = false;
                         }
                         let mut rollback_attempted = false;

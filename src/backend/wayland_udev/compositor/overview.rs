@@ -204,6 +204,62 @@ const FONT_6X10: &[u8; 950] = &[
     0x00,0x00,0x08,0x15,0x02,0x00,0x00,0x00,0x00,0x00,
 ];
 
+#[derive(Debug, Clone, PartialEq)]
+struct OverviewStripWindowSegment {
+    y_ratio: f32,
+    height_ratio: f32,
+    focused: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct OverviewStripSegment {
+    x_ratio: f32,
+    width_ratio: f32,
+    focused: bool,
+    windows: Vec<OverviewStripWindowSegment>,
+}
+
+fn overview_strip_segments(entries: &[OverviewEntry]) -> Vec<OverviewStripSegment> {
+    let mut segments: Vec<OverviewStripSegment> = Vec::new();
+
+    for entry in entries {
+        let x_ratio = entry.x.clamp(0.0, 1.0);
+        let width_ratio = entry.w.clamp(0.0, 1.0 - x_ratio);
+        if width_ratio <= 0.0001 {
+            continue;
+        }
+
+        let window = OverviewStripWindowSegment {
+            y_ratio: entry.y.clamp(0.0, 1.0),
+            height_ratio: entry.h.clamp(0.0, 1.0).max(0.0001),
+            focused: entry.focused,
+        };
+
+        if let Some(segment) = segments.iter_mut().find(|segment| {
+            (segment.x_ratio - x_ratio).abs() < 0.0005
+                && (segment.width_ratio - width_ratio).abs() < 0.0005
+        }) {
+            segment.focused |= entry.focused;
+            segment.windows.push(window);
+        } else {
+            segments.push(OverviewStripSegment {
+                x_ratio,
+                width_ratio,
+                focused: entry.focused,
+                windows: vec![window],
+            });
+        }
+    }
+
+    segments.sort_by(|a, b| {
+        a.x_ratio
+            .partial_cmp(&b.x_ratio)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    segments
+}
+
 // ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
@@ -340,6 +396,120 @@ impl WaylandCompositor {
         self.overview_title_textures = textures;
     }
 
+    fn render_overview_scroll_strip(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        segments: &[OverviewStripSegment],
+    ) {
+        if segments.is_empty() {
+            return;
+        }
+
+        let (mon_x, mon_y, mon_w, mon_h) = self.overview_monitor;
+        let mw = mon_w.max(1) as f32;
+        let mh = mon_h.max(1) as f32;
+        let margin = (mw * 0.055).clamp(24.0, 72.0);
+        let strip_x = mon_x as f32 + margin;
+        let strip_w = (mw - margin * 2.0).max(24.0);
+        let strip_h = 12.0f32;
+        let strip_y = mon_y as f32 + (mh - 34.0).max(12.0);
+        let opacity = self.overview_opacity.clamp(0.0, 1.0);
+
+        unsafe {
+            gl.Disable(ffi::SCISSOR_TEST);
+            gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            gl.UseProgram(self.border_program);
+            gl.UniformMatrix4fv(
+                self.border_uniforms.projection,
+                1,
+                ffi::FALSE as u8,
+                projection.as_ptr(),
+            );
+            gl.BindVertexArray(self.quad_vao);
+
+            self.draw_overview_strip_rect(
+                gl,
+                strip_x,
+                strip_y,
+                strip_w,
+                strip_h,
+                6.0,
+                [0.02, 0.025, 0.035, 0.48 * opacity],
+            );
+
+            let gap = 3.0f32.min(strip_w / 80.0);
+            for segment in segments {
+                let x = strip_x + segment.x_ratio * strip_w + gap * 0.5;
+                let w = (segment.width_ratio * strip_w - gap).max(1.0);
+                if w <= 1.0 {
+                    continue;
+                }
+
+                let color = if segment.focused {
+                    [0.34, 0.68, 1.0, 0.88 * opacity]
+                } else {
+                    [0.30, 0.36, 0.46, 0.72 * opacity]
+                };
+                self.draw_overview_strip_rect(gl, x, strip_y + 2.0, w, strip_h - 4.0, 4.0, color);
+
+                if segment.windows.len() > 1 {
+                    for window in &segment.windows {
+                        let wx = x + window.y_ratio * w + 0.75;
+                        let ww = (window.height_ratio * w - 1.5).max(1.0);
+                        let tick_color = if window.focused {
+                            [0.92, 0.97, 1.0, 0.95 * opacity]
+                        } else {
+                            [0.78, 0.84, 0.92, 0.62 * opacity]
+                        };
+                        self.draw_overview_strip_rect(
+                            gl,
+                            wx,
+                            strip_y + 4.0,
+                            ww,
+                            strip_h - 8.0,
+                            2.0,
+                            tick_color,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_overview_strip_rect(
+        &self,
+        gl: &ffi::Gles2,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        color: [f32; 4],
+    ) {
+        if w <= 0.0 || h <= 0.0 || color[3] <= 0.0 {
+            return;
+        }
+
+        unsafe {
+            gl.Uniform4f(self.border_uniforms.rect, x, y, w, h);
+            gl.Uniform4f(
+                self.border_uniforms.border_color,
+                color[0],
+                color[1],
+                color[2],
+                color[3],
+            );
+            gl.Uniform2f(self.border_uniforms.size, w, h);
+            gl.Uniform1f(
+                self.border_uniforms.radius,
+                radius.min(w * 0.5).min(h * 0.5),
+            );
+            gl.Uniform1f(self.border_uniforms.border_width, w.max(h));
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+        }
+    }
+
     /// Render the 3D hexagonal prism carousel overview.
     /// Each window becomes a face on a rotating prism; the selected face rotates to front.
     pub(crate) fn render_overview(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
@@ -351,6 +521,7 @@ impl WaylandCompositor {
         if n == 0 {
             return;
         }
+        let strip_segments = overview_strip_segments(&self.overview_entries);
 
         unsafe {
             gl.Enable(ffi::BLEND);
@@ -679,6 +850,8 @@ impl WaylandCompositor {
                     gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
                 }
             }
+
+            self.render_overview_scroll_strip(gl, projection, &strip_segments);
         }
     }
 
@@ -757,5 +930,42 @@ impl WaylandCompositor {
             }
         }
         self.overview_title_textures.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(window_id: u64, x: f32, y: f32, w: f32, h: f32, focused: bool) -> OverviewEntry {
+        OverviewEntry {
+            window_id,
+            x,
+            y,
+            w,
+            h,
+            focused,
+            title: format!("win-{window_id}"),
+        }
+    }
+
+    #[test]
+    fn overview_strip_segments_group_windows_by_column_geometry() {
+        let segments = overview_strip_segments(&[
+            entry(1, 0.5, 0.0, 0.25, 1.0, true),
+            entry(2, 0.0, 0.0, 0.5, 0.5, false),
+            entry(3, 0.0, 0.5, 0.5, 0.5, false),
+            entry(4, 0.0, 0.0, 0.0, 0.0, false),
+        ]);
+
+        assert_eq!(segments.len(), 2);
+        assert!((segments[0].x_ratio - 0.0).abs() < 0.0001);
+        assert!((segments[0].width_ratio - 0.5).abs() < 0.0001);
+        assert_eq!(segments[0].windows.len(), 2);
+        assert!(!segments[0].focused);
+        assert!((segments[1].x_ratio - 0.5).abs() < 0.0001);
+        assert_eq!(segments[1].windows.len(), 1);
+        assert!(segments[1].focused);
+        assert!(segments[1].windows[0].focused);
     }
 }

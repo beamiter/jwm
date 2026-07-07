@@ -82,6 +82,88 @@ pub struct OutputConfigHeadData {
 }
 unsafe impl Send for OutputConfigHeadData {}
 
+#[derive(Debug, Clone)]
+struct OutputConfigValidationError {
+    reason: String,
+    output_name: Option<String>,
+    field: Option<&'static str>,
+    drm_property: Option<&'static str>,
+    requested_value: Option<String>,
+}
+
+impl OutputConfigValidationError {
+    fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            output_name: None,
+            field: None,
+            drm_property: None,
+            requested_value: None,
+        }
+    }
+
+    fn for_output(output_name: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            output_name: Some(output_name.into()),
+            field: None,
+            drm_property: None,
+            requested_value: None,
+        }
+    }
+
+    fn field(
+        output_name: impl Into<String>,
+        field: &'static str,
+        drm_property: Option<&'static str>,
+        requested_value: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            reason: reason.into(),
+            output_name: Some(output_name.into()),
+            field: Some(field),
+            drm_property,
+            requested_value: Some(requested_value.into()),
+        }
+    }
+
+    fn into_rejection(
+        self,
+        serial: u32,
+        action: &'static str,
+    ) -> crate::backend::api::OutputManagementRejectedConfig {
+        crate::backend::api::OutputManagementRejectedConfig {
+            attempted_at_unix_ms: now_unix_ms(),
+            serial,
+            action: action.to_string(),
+            reason: self.reason,
+            output_name: self.output_name,
+            field: self.field.map(str::to_string),
+            drm_property: self.drm_property.map(str::to_string),
+            requested_value: self.requested_value,
+        }
+    }
+}
+
+impl std::fmt::Display for OutputConfigValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn mode_value(w: i32, h: i32, refresh: i32) -> String {
+    format!("{w}x{h}@{refresh}")
+}
+
 /// Initialize the wlr-output-management global.
 pub fn init_output_management(dh: &DisplayHandle) {
     dh.create_global::<JwmWaylandState, ZwlrOutputManagerV1, _>(4, OutputManagerData);
@@ -284,6 +366,8 @@ impl Dispatch<ZwlrOutputConfigurationV1, OutputConfigData> for JwmWaylandState {
                     }
                     Err(e) => {
                         warn!("[output-mgmt] apply rejected: {e}");
+                        state.last_output_management_rejection =
+                            Some(e.into_rejection(data.serial, "apply"));
                         resource.failed();
                     }
                 }
@@ -292,6 +376,8 @@ impl Dispatch<ZwlrOutputConfigurationV1, OutputConfigData> for JwmWaylandState {
                 Ok(_) => resource.succeeded(),
                 Err(e) => {
                     debug!("[output-mgmt] test rejected: {e}");
+                    state.last_output_management_rejection =
+                        Some(e.into_rejection(data.serial, "test"));
                     resource.failed();
                 }
             },
@@ -322,7 +408,7 @@ fn mode_is_change(current: Option<smithay::output::Mode>, requested: (i32, i32, 
 fn build_changes(
     state: &JwmWaylandState,
     data: &OutputConfigData,
-) -> Result<Vec<OutputConfigChange>, String> {
+) -> Result<Vec<OutputConfigChange>, OutputConfigValidationError> {
     let mut changes = Vec::new();
     let allow_modeset = crate::config::CONFIG
         .load()
@@ -339,7 +425,9 @@ fn build_changes(
             .outputs
             .iter()
             .find(|o| o.name() == name)
-            .ok_or_else(|| format!("unknown output '{name}'"))?;
+            .ok_or_else(|| {
+                OutputConfigValidationError::for_output(&name, format!("unknown output '{name}'"))
+            })?;
 
         let pending = head_data.pending.lock_safe().clone();
 
@@ -347,7 +435,13 @@ fn build_changes(
         let requested_mode = pending.mode.or(pending.custom_mode);
         if let Some((w, h, refresh)) = requested_mode {
             if w <= 0 || h <= 0 {
-                return Err(format!("invalid mode {w}x{h} for '{name}'"));
+                return Err(OutputConfigValidationError::field(
+                    &name,
+                    "mode",
+                    Some("MODE_ID"),
+                    mode_value(w, h, refresh),
+                    format!("invalid mode {w}x{h} for '{name}'"),
+                ));
             }
             // For modes selected via set_mode, ensure they belong to the output.
             if pending.mode.is_some() {
@@ -357,7 +451,13 @@ fn build_changes(
                         && (refresh == 0 || (m.refresh - refresh).abs() <= 200)
                 });
                 if !known {
-                    return Err(format!("mode {w}x{h}@{refresh} not on '{name}'"));
+                    return Err(OutputConfigValidationError::field(
+                        &name,
+                        "mode",
+                        Some("MODE_ID"),
+                        mode_value(w, h, refresh),
+                        format!("mode {w}x{h}@{refresh} not on '{name}'"),
+                    ));
                 }
             }
             // Reject up-front when a real modeset is requested but the safety
@@ -365,22 +465,40 @@ fn build_changes(
             // change at the KMS layer and still report succeeded() to the
             // client — lying about which fields were applied.
             if !allow_modeset && mode_is_change(output.current_mode(), (w, h, refresh)) {
-                return Err(format!(
-                    "mode change to {w}x{h}@{refresh} for '{name}' rejected: \
-                     behavior.wlr_output_mgmt_allow_modeset = false"
+                return Err(OutputConfigValidationError::field(
+                    &name,
+                    "mode",
+                    Some("MODE_ID"),
+                    mode_value(w, h, refresh),
+                    format!(
+                        "mode change to {w}x{h}@{refresh} for '{name}' rejected: \
+                         behavior.wlr_output_mgmt_allow_modeset = false"
+                    ),
                 ));
             }
         }
 
         if let Some(t) = pending.transform {
             if !(0..=7).contains(&t) {
-                return Err(format!("invalid transform {t} for '{name}'"));
+                return Err(OutputConfigValidationError::field(
+                    &name,
+                    "transform",
+                    Some("rotation/reflection"),
+                    t.to_string(),
+                    format!("invalid transform {t} for '{name}'"),
+                ));
             }
         }
 
         if let Some(s) = pending.scale {
             if s <= 0.0 {
-                return Err(format!("invalid scale {s} for '{name}'"));
+                return Err(OutputConfigValidationError::field(
+                    &name,
+                    "scale",
+                    None,
+                    s.to_string(),
+                    format!("invalid scale {s} for '{name}'"),
+                ));
             }
         }
 
@@ -397,7 +515,10 @@ fn build_changes(
 
     for name in data.disabled_heads.lock_safe().iter() {
         if !state.outputs.iter().any(|output| output.name() == *name) {
-            return Err(format!("unknown output '{name}'"));
+            return Err(OutputConfigValidationError::for_output(
+                name,
+                format!("unknown output '{name}'"),
+            ));
         }
         changes.push(OutputConfigChange {
             name: name.clone(),
@@ -415,7 +536,9 @@ fn build_changes(
         &state.soft_disabled_outputs,
         &changes,
     ) {
-        return Err("configuration would leave no enabled outputs".into());
+        return Err(OutputConfigValidationError::new(
+            "configuration would leave no enabled outputs",
+        ));
     }
 
     Ok(changes)
@@ -522,7 +645,7 @@ impl Dispatch<ZwlrOutputModeV1, OutputModeData> for JwmWaylandState {
 
 #[cfg(test)]
 mod tests {
-    use super::{mode_is_change, output_config_leaves_enabled_output};
+    use super::{OutputConfigValidationError, mode_is_change, output_config_leaves_enabled_output};
     use crate::backend::api::OutputConfigChange;
     use smithay::output::Mode as SmithayMode;
     use smithay::utils::Size;
@@ -611,5 +734,29 @@ mod tests {
             &soft_disabled,
             &[change("HDMI-A-1", true)],
         ));
+    }
+
+    #[test]
+    fn validation_error_preserves_structured_rejection_context() {
+        let rejection = OutputConfigValidationError::field(
+            "DP-1",
+            "mode",
+            Some("MODE_ID"),
+            "3840x2160@144000",
+            "mode change rejected",
+        )
+        .into_rejection(42, "apply");
+
+        assert_eq!(rejection.serial, 42);
+        assert_eq!(rejection.action, "apply");
+        assert_eq!(rejection.output_name.as_deref(), Some("DP-1"));
+        assert_eq!(rejection.field.as_deref(), Some("mode"));
+        assert_eq!(rejection.drm_property.as_deref(), Some("MODE_ID"));
+        assert_eq!(
+            rejection.requested_value.as_deref(),
+            Some("3840x2160@144000")
+        );
+        assert_eq!(rejection.reason, "mode change rejected");
+        assert!(rejection.attempted_at_unix_ms > 0);
     }
 }

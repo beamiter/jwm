@@ -51,7 +51,7 @@ power is visible, predictable, testable, and delightful in daily use.
 | Visual system | Overview, blur, animations, custom shader support | Strong animation/effect/rule culture | Blur, transitions, overview, shaders, HDR/color path | Tie effects to performance budgets and expose rejection/degrade reasons |
 | Game path | Stable compositor behavior and input latency focus | Tearing, VRR, direct/game-oriented knobs | Direct scanout, VRR, tearing hints, pointer constraints | Report direct-scanout rejection reasons and frame pacing per output |
 | Capture/portal | Screen/window capture and sensitive-window masking | Portal ecosystem is expected | jwm-portal plus screencopy/image-copy-capture | Add capture smoke tests and per-client capture policy |
-| Config reload | Live reload as normal workflow | Live reload and huge rule surface | Config reload exists; Wayland globals still partly env-driven | Move optional Wayland globals and output/color policy into `config_wayland.toml` |
+| Config reload | Live reload as normal workflow | Live reload and huge rule surface | Config reload exists; Wayland globals and output/color policy are now visible in status | Keep reducing env-only knobs and expose reload diffs |
 | Reliability | Property tests, profiling, input-latency measurement | Large user base catches compatibility issues | Metrics docs and many subsystem tests | Add reproducible Wayland client matrix and regression reports |
 
 ## Priority Plan
@@ -80,8 +80,20 @@ JWM's tag/layout model.
 - Wire touchpad swipe into column/workspace navigation with client gesture
   suppression only when the WM claims the gesture.
 - Show scroll strips in overview so users understand where windows live.
+  `get_wayland_status` now exposes an overview-ready scrolling strip per
+  monitor, including normalized column positions, focused column, window order,
+  and viewport offset. Opening overview in scrolling layout now orders windows
+  by left-to-right scrolling columns and keeps the currently focused window as
+  the selected overview entry. The Wayland compositor overview now consumes the
+  same normalized geometry to draw a bottom scroll strip with column widths and
+  per-window ticks, so IPC diagnostics and the visual overlay describe the same
+  scrolling identity.
 - Add rules for fixed-width columns, centered focused column, and per-app
   default column size.
+  Scrolling columns already support per-column width factors and centered
+  focused columns; `behavior.scrolling_column_width_rules` now lets users set
+  per-app default column width factors with `factor:pattern` rules applied when
+  a new window creates a new scrolling column.
 
 ### P2: Hyprland-Class Control Plane
 
@@ -106,6 +118,13 @@ KMS and latency.
   `render_decisions` now aggregates direct-scanout blockers, blur activation,
   HDR output capability, tearing hints, and color-pipeline shader fallback into
   one JSON object, with a concise `jwm-tool wayland-status` summary.
+- Move optional Wayland globals and output/color policy into config.
+  `behavior.wayland_enable_*` now configures screencopy, tearing-control,
+  color-management protocol, output-management, output-power, workspace,
+  image-copy-capture, gamma-control, foreign-toplevel-management, and
+  virtual-pointer globals from `config_wayland.toml`; legacy `JWM_ENABLE_*`
+  variables and `JWM_OPTIONAL_GLOBALS=1` still act as compatibility overrides.
+  `wayland-status` reports config/env enablement for optional protocols.
 
 ### P3: Wayland Smoke Matrix
 
@@ -121,13 +140,24 @@ Daily-driver trust comes from repeatable client behavior.
   coverage from the live protocol catalog.
 - Test XWayland clients: xterm, Steam, legacy tray/window types, fullscreen
   game, clipboard bridge.
+  The smoke matrix now includes XWayland readiness from live compositor status:
+  XWM ready state, DISPLAY, mapped X11 window count, pending associations, and
+  dedicated targets for xterm/xeyes, legacy window types, Steam/fullscreen
+  games, tray helpers, and X11/Wayland clipboard bridge tools.
 - Store screenshot hashes, protocol availability, frame metrics, and logs.
   `jwm-tool wayland-smoke --save [DIR]` now writes a timestamped JSON report
   containing protocol coverage, target availability, frame/status snapshots,
-  render decisions, capture/presentation summaries, and the recent daemon log
-  tail. Screenshot hashes are reserved for the future invasive GUI runner.
+  render decisions, capture/presentation summaries, recent daemon log tail,
+  artifact metadata, a reserved screenshot-hash schema, and manual KMS checklist
+  items. Screenshot hashes remain reserved for the future invasive GUI runner,
+  but the report schema now defines the hash algorithm and per-capture fields.
 - Run under `wayland-winit` for nested CI where KMS is unavailable, then keep a
   manual KMS checklist for DRM-specific behavior.
+  Smoke reports now include a `ci_profile` that recommends `wayland-winit` when
+  nested Wayland is available and marks KMS as required for full coverage. The
+  embedded manual checklist names the output transaction, direct scanout,
+  VRR/tearing, HDR/color, capture dmabuf, and XWayland fullscreen evidence to
+  collect during real DRM runs.
 
 ### P4: Output Configuration With Rollback
 
@@ -150,6 +180,10 @@ visible advantage.
   function, KMS LUT/CTM support, shader fallback.
 - Per-surface color debug query and screenshot test scene.
 - Explicit policy for SDR-on-HDR and mixed-HDR multi-monitor sessions.
+  `wayland-status` now reports a color session policy summarizing HDR vs SDR
+  output counts, mixed-HDR detection, SDR-on-HDR handling, mixed-output policy,
+  scene-linear enablement, and blockers that explain why the compositor is on a
+  safer fallback path.
 
 ## CLI Hook
 
@@ -175,18 +209,36 @@ vblank age. It also reports wlr-output-management transaction status: pending
 acks, soft-disabled outputs, last Apply result, failed outputs, and rollback
 attempts. The protocol section now includes a catalog of advertised globals,
 whether each is published, whether bind counts are tracked, and runtime bind
-counts plus last-bound timestamps for JWM-owned Wayland globals. Output diagnostics now include a stable
-monitor identity assembled from connector name plus EDID vendor/product/serial
-and descriptor text when the DRM connector exposes EDID. Output-management
-transactions also retain before/after output snapshots so failed applies and
-rollbacks can be compared without reconstructing state from logs. Apply/Test
-validation rejects configurations that would leave the session with no enabled
-outputs. Per-output color diagnostics report the selected color policy,
-transfer function, primaries, luminance values, render-path gate, and whether a
-shader fallback is required because KMS CTM/LUT offload is unavailable. Capture
+counts plus last-bound timestamps for JWM-owned Wayland globals. Output
+diagnostics now include a stable monitor identity assembled from connector name
+plus EDID vendor/product/serial and descriptor text when the DRM connector
+exposes EDID. Output-management transactions also retain before/after output
+snapshots so failed applies and rollbacks can be compared without reconstructing
+state from logs. Apply/Test validation rejects configurations that would leave
+the session with no enabled outputs, and `wayland-status` reports the last
+rejected Apply/Test with structured output name, field, DRM property, requested
+value, and reason. Failed Apply transactions also expose the first failing
+output/property in the human summary. Per-output color diagnostics report the
+selected color policy, transfer function, primaries, luminance values,
+render-path gate, and whether a shader fallback is required because KMS CTM/LUT
+offload is unavailable. Per-surface color diagnostics now keep the raw
+wp-color-management parametric values while also reporting readable
+transfer-function/primaries names, HDR surface counts, distribution summaries,
+max luminance peaks, and sample surfaces in `wayland-status`. Color session
+policy now spells out SDR-on-HDR and mixed-HDR behavior plus blockers for
+advanced color, render-path, or scene-linear gates. Capture
 diagnostics report screencopy and ext-image-copy-capture queue depths, dmabuf
 advertising state, cursor-capture support, and the current visible-content
 capture policy; runtime counters record queued, fulfilled, dispatch-failed, and
 render-failed captures and split modern image-copy requests by output vs
 toplevel source, with last queued/fulfilled/failed timestamps and the latest
-failure reason for smoke-test triage.
+failure reason for smoke-test triage. The scrolling section now includes
+overview strip geometry and overview ordering so tools and the compositor can
+show users where each scrolling column lives. Scrolling status also reports
+default column-width rule counts so users can confirm per-app width policy is
+loaded. Optional Wayland globals are now config-driven through
+`behavior.wayland_enable_*`, and protocol diagnostics include config keys plus
+environment override state. Smoke reports now carry structured artifact
+metadata, a reserved screenshot-hash schema, CI profile guidance, and a manual
+KMS checklist so regression evidence can be compared without reverse-engineering
+the report format.
