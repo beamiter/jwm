@@ -402,6 +402,7 @@ pub struct JwmWaylandState {
     pub surface_to_window: HashMap<ObjectId, WindowId>,
 
     pub pending_initial_configure: HashMap<WindowId, Instant>,
+    pending_size_reconfigure: HashMap<WindowId, ((u32, u32), Instant)>,
 
     pub popups: HashMap<ObjectId, PopupSurface>,
     pub popup_order: Vec<ObjectId>,
@@ -1826,6 +1827,7 @@ impl JwmWaylandState {
                 surface_to_window: HashMap::new(),
 
                 pending_initial_configure: HashMap::new(),
+                pending_size_reconfigure: HashMap::new(),
 
                 popups: HashMap::new(),
                 popup_order: Vec::new(),
@@ -1987,6 +1989,60 @@ impl JwmWaylandState {
         if signaled {
             self.needs_redraw = true;
         }
+    }
+
+    pub(crate) fn enforce_toplevel_configure_size(&mut self, win: WindowId, surface: &WlSurface) {
+        if self.is_dialog_like_toplevel(win) {
+            self.pending_size_reconfigure.remove(&win);
+            return;
+        }
+
+        let Some(expected) = self.window_geometry.get(&win).copied() else {
+            self.pending_size_reconfigure.remove(&win);
+            return;
+        };
+        let Some(committed) = self.surface_window_geometry_rect(surface) else {
+            return;
+        };
+
+        let expected_size = (expected.w.max(1), expected.h.max(1));
+        let committed_size = (
+            committed.size.w.max(1) as u32,
+            committed.size.h.max(1) as u32,
+        );
+
+        let close_enough = committed_size.0.abs_diff(expected_size.0) <= 4
+            && committed_size.1.abs_diff(expected_size.1) <= 4;
+        if committed_size == expected_size || close_enough {
+            self.pending_size_reconfigure.remove(&win);
+            return;
+        }
+
+        if let Some((pending_size, last_sent)) = self.pending_size_reconfigure.get(&win).copied() {
+            if pending_size == expected_size && last_sent.elapsed() < Duration::from_millis(100) {
+                return;
+            }
+        }
+
+        let Some(toplevel) = self.toplevels.get(&win).cloned() else {
+            return;
+        };
+
+        toplevel.with_pending_state(|state| {
+            state.size = Some((expected_size.0 as i32, expected_size.1 as i32).into());
+        });
+        if toplevel.is_initial_configure_sent() {
+            toplevel.send_pending_configure();
+        } else {
+            toplevel.send_configure();
+        }
+        self.pending_size_reconfigure
+            .insert(win, (expected_size, Instant::now()));
+        self.needs_redraw = true;
+        debug!(
+            "[udev/wayland] reconfigure size mismatch win={win:?} committed={}x{} expected={}x{}",
+            committed_size.0, committed_size.1, expected_size.0, expected_size.1
+        );
     }
 
     /// Preferred fractional scale for the output a window currently occupies,
@@ -2766,6 +2822,8 @@ impl CompositorHandler for JwmWaylandState {
                                 }
                             }
                         }
+                    } else {
+                        self.enforce_toplevel_configure_size(win, surface);
                     }
                     self.needs_redraw = true;
                 }
@@ -2899,6 +2957,7 @@ impl CompositorHandler for JwmWaylandState {
             self.toplevels.remove(&win);
             self.layer_surfaces.remove(&win);
             self.pending_initial_configure.remove(&win);
+            self.pending_size_reconfigure.remove(&win);
             self.window_geometry.remove(&win);
             self.window_stack.retain(|w| *w != win);
             self.mapped_windows.remove(&win);

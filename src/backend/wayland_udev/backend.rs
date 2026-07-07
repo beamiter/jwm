@@ -338,7 +338,11 @@ impl WindowOps for WaylandWindowOps {
                             s.size = Some((w as i32, h as i32).into());
                         }
                     });
-                    toplevel.send_pending_configure();
+                    if toplevel.is_initial_configure_sent() {
+                        toplevel.send_pending_configure();
+                    } else {
+                        toplevel.send_configure();
+                    }
                 }
                 if let Some(x11) = state.x11_surfaces.get(&win) {
                     let bw = border as i32;
@@ -3114,6 +3118,23 @@ impl Backend for UdevBackend {
                                 _ => (0, 0, w as i32, h as i32),
                             }
                         });
+                        let (target_w, target_h) = if has_viewport_state
+                            && (cw as u32 != w || ch as u32 != h)
+                        {
+                            self.state.enforce_toplevel_configure_size(win, &surface);
+                            if crf_log_this {
+                                log::info!(
+                                    "[crf] win={win_id:#x} viewport size mismatch committed={}x{} scene={}x{}",
+                                    cw,
+                                    ch,
+                                    w,
+                                    h
+                                );
+                            }
+                            (w.max(1) as i32, h.max(1) as i32)
+                        } else {
+                            (cw, ch)
+                        };
                         let composited = kms_ref.with_gles_renderer(|renderer| {
                             let _ = import_surface_tree(renderer, &surface);
                             let elements: Vec<kms::KmsRenderElement> =
@@ -3126,21 +3147,26 @@ impl Backend for UdevBackend {
                                     Kind::Unspecified,
                                 );
                             let need_new = match offscreen.get(&win_id) {
-                                Some((_, ow, oh)) => *ow != cw as u32 || *oh != ch as u32,
+                                Some((_, ow, oh)) => {
+                                    *ow != target_w as u32 || *oh != target_h as u32
+                                }
                                 None => true,
                             };
                             if need_new {
                                 match Offscreen::<GlesTexture>::create_buffer(
                                     renderer,
                                     Fourcc::Abgr8888,
-                                    Size::<i32, _>::from((cw, ch)),
+                                    Size::<i32, _>::from((target_w, target_h)),
                                 ) {
                                     Ok(t) => {
-                                        offscreen.insert(win_id, (t, cw as u32, ch as u32));
+                                        offscreen.insert(
+                                            win_id,
+                                            (t, target_w as u32, target_h as u32),
+                                        );
                                     }
                                     Err(e) => {
                                         log::error!(
-                                            "[crf] win={win_id:#x} offscreen create {cw}x{ch} failed: {e:?}"
+                                            "[crf] win={win_id:#x} offscreen create {target_w}x{target_h} failed: {e:?}"
                                         );
                                         return None;
                                     }
@@ -3154,7 +3180,7 @@ impl Backend for UdevBackend {
                                     return None;
                                 }
                             };
-                            let phys: Size<i32, Physical> = (cw, ch).into();
+                            let phys: Size<i32, Physical> = (target_w, target_h).into();
                             let mut dt = OutputDamageTracker::new(
                                 phys,
                                 Scale::from(1.0f64),
@@ -3178,7 +3204,7 @@ impl Backend for UdevBackend {
                         if let Some(tid) = composited {
                             if crf_log_this {
                                 log::info!(
-                                    "[crf] win={win_id:#x} composited subsurfaces -> tex={tid} {cw}x{ch}"
+                                    "[crf] win={win_id:#x} composited subsurfaces -> tex={tid} {target_w}x{target_h}"
                                 );
                             }
                             // render_output flips Y in its projection, so the
@@ -3187,8 +3213,8 @@ impl Backend for UdevBackend {
                             tex_updates.push((
                                 win_id,
                                 tid,
-                                cw as u32,
-                                ch as u32,
+                                target_w as u32,
+                                target_h as u32,
                                 true,
                                 false,
                                 [0.0, 0.0, 1.0, 1.0],
