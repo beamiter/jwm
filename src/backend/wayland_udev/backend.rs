@@ -1300,8 +1300,7 @@ impl UdevBackend {
             // Clear D-Bus from our process env so that every subsequently spawned
             // child starts without a pre-existing bus address and either skips
             // D-Bus registration or starts its own session.
-            let restarting = std::env::var_os("JWM_RESTARTING").is_some()
-                || std::env::var_os("JWM_EXEC_RESTARTED").is_some();
+            let restarting = std::env::var_os("JWM_RESTARTING").is_some();
             let nested = !restarting && std::env::var_os("WAYLAND_DISPLAY").is_some();
             // SAFETY: JWM's backend is single-threaded and we set this once at startup.
             unsafe {
@@ -1316,9 +1315,6 @@ impl UdevBackend {
                     );
                     std::env::set_var("DBUS_SESSION_BUS_ADDRESS", "");
                 }
-            }
-            unsafe {
-                std::env::remove_var("JWM_EXEC_RESTARTED");
             }
             ensure_fcitx_env_for_primary_session(nested);
             spawn_env_import(&[

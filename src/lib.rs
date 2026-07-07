@@ -7,7 +7,6 @@ pub mod core;
 pub mod ipc;
 pub mod ipc_server;
 pub mod jwm;
-pub mod miscellaneous;
 pub mod renderer;
 pub mod sync_ext;
 pub mod terminal_prober;

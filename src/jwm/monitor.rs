@@ -48,7 +48,7 @@ impl Jwm {
         }
         self.add_monitor(info);
 
-        // Wayland clients can appear before outputs are fully initialized (early autostart).
+        // Wayland clients can appear before outputs are fully initialized.
         // Those clients end up with `mon=None`, meaning JWM will treat them as invisible:
         // - click-to-focus won't stick (focus() falls back to visible clients)
         // - arrange() won't resize them
