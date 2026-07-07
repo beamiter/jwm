@@ -1132,6 +1132,7 @@ impl UdevBackend {
             event_loop
                 .handle()
                 .insert_source(timer, move |_, _, state| {
+                    state.signal_due_commit_timing_barriers();
                     state.ensure_initial_configure_timeout(initial_configure_timeout);
                     TimeoutAction::ToDuration(tick)
                 })

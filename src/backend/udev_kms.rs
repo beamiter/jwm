@@ -47,7 +47,7 @@ use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server;
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Buffer as BufferCoord, Size};
+use smithay::utils::{Buffer as BufferCoord, Monotonic, Size, Time};
 use smithay::utils::{DeviceFd, Physical, Point, Rectangle, Scale, Transform};
 use smithay::wayland::compositor::{TraversalAction, with_states, with_surface_tree_downward};
 use smithay::wayland::dmabuf::get_dmabuf;
@@ -322,6 +322,7 @@ impl KmsState {
         let output = out.output.clone();
         let visible = out.frame_callback_visible.clone();
         let refresh = out.refresh_interval;
+        let commit_deadline = presentation_time.map(Time::<Monotonic>::from);
 
         for root in &out.frame_callback_roots {
             let mut root_tree_visible = visible.contains(&root.downgrade());
@@ -365,6 +366,12 @@ impl KmsState {
                     |_, _, _| true,
                 );
             }
+
+            crate::backend::wayland::state::JwmWaylandState::signal_surface_pacing_barriers(
+                root,
+                commit_deadline,
+                true,
+            );
 
             send_frames_surface_tree(root, &output, now, throttle, |surface, _states| {
                 if (surface.id() == root.id() && root_tree_visible)

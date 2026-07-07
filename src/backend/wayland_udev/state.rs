@@ -39,7 +39,9 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::protocol::wl_shm;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::{Client, DisplayHandle, Resource};
-use smithay::utils::{Logical, Point, Rectangle, Serial, SERIAL_COUNTER as SCOUNTER};
+use smithay::utils::{
+    Clock, Logical, Monotonic, Point, Rectangle, Serial, Time, SERIAL_COUNTER as SCOUNTER,
+};
 use smithay::desktop::{
     find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output,
     utils::under_from_surface_tree, LayerSurface as DesktopLayerSurface, PopupKind,
@@ -50,7 +52,10 @@ use smithay::backend::renderer::utils::on_commit_buffer_handler;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::Format as DmabufFormat;
 use smithay::wayland::buffer::BufferHandler;
-use smithay::wayland::compositor::{with_states, BufferAssignment, CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes};
+use smithay::wayland::compositor::{
+    with_states, with_surface_tree_downward, BufferAssignment, CompositorClientState,
+    CompositorHandler, CompositorState, SurfaceAttributes, TraversalAction,
+};
 use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
 use smithay::wayland::output::OutputManagerState;
 use smithay::wayland::shell::wlr_layer::{Anchor, Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData, WlrLayerShellHandler, WlrLayerShellState};
@@ -97,12 +102,14 @@ use smithay::wayland::alpha_modifier::AlphaModifierState;
 use smithay::wayland::background_effect::{BackgroundEffectState, ExtBackgroundEffectHandler};
 use smithay::wayland::foreign_toplevel_list::{ForeignToplevelListState, ForeignToplevelListHandler, ForeignToplevelHandle};
 use smithay::wayland::tablet_manager::TabletManagerState;
-use smithay::wayland::fifo::FifoManagerState;
+use smithay::wayland::fifo::{FifoBarrierCachedState, FifoManagerState};
 use smithay::wayland::keyboard_shortcuts_inhibit::{
     KeyboardShortcutsInhibitState, KeyboardShortcutsInhibitor, KeyboardShortcutsInhibitorSeat,
 };
 use smithay::wayland::security_context::SecurityContextState;
-use smithay::wayland::commit_timing::CommitTimingManagerState;
+use smithay::wayland::commit_timing::{
+    CommitTimerBarrierStateUserData, CommitTimerStateUserData, CommitTimingManagerState,
+};
 use smithay::wayland::shell::xdg::dialog::{XdgDialogState, XdgDialogHandler, ToplevelDialogHint};
 use smithay::wayland::xdg_foreign::{XdgForeignState, XdgForeignHandler};
 use smithay::wayland::xdg_system_bell::{XdgSystemBellState, XdgSystemBellHandler};
@@ -316,10 +323,10 @@ pub struct JwmWaylandState {
     pub alpha_modifier_state: AlphaModifierState,
     pub foreign_toplevel_list_state: ForeignToplevelListState,
     pub tablet_manager_state: TabletManagerState,
-    pub fifo_state: Option<FifoManagerState>,
+    pub fifo_state: FifoManagerState,
     pub keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
     pub security_context_state: SecurityContextState,
-    pub commit_timing_state: Option<CommitTimingManagerState>,
+    pub commit_timing_state: CommitTimingManagerState,
     pub xdg_dialog_state: XdgDialogState,
     pub xdg_foreign_state: XdgForeignState,
     pub xdg_system_bell_state: XdgSystemBellState,
@@ -1694,25 +1701,16 @@ impl JwmWaylandState {
         let alpha_modifier_state = AlphaModifierState::new::<JwmWaylandState>(dh);
         let foreign_toplevel_list_state = ForeignToplevelListState::new::<JwmWaylandState>(dh);
         let tablet_manager_state = TabletManagerState::new::<JwmWaylandState>(dh);
-        let fifo_state = if env_flag("JWM_ENABLE_FIFO") {
-            // wp-fifo-v1 installs surface commit blockers. Keep it gated until
-            // the compositor drives and signals those barriers on presentation.
-            Some(FifoManagerState::new::<JwmWaylandState>(dh))
-        } else {
-            None
-        };
+        // Use unmanaged mode for commit-pacing protocols. Smithay's managed
+        // mode installs pre-commit blockers; without deeper transaction
+        // scheduling integration those blockers can deadlock Vulkan/wgpu
+        // clients that chain wp-fifo and wp-commit-timing commits.
+        let fifo_state = FifoManagerState::unmanaged::<JwmWaylandState>(dh);
         let keyboard_shortcuts_inhibit_state =
             KeyboardShortcutsInhibitState::new::<JwmWaylandState>(dh);
         let security_context_state =
             SecurityContextState::new::<JwmWaylandState, _>(dh, |_client| true);
-        let commit_timing_state = if env_flag("JWM_ENABLE_COMMIT_TIMING") {
-            // wp-commit-timing-v1 also installs commit blockers. Advertising it
-            // without signaling deadlines can visually freeze clients using
-            // Vulkan/wgpu frame pacing.
-            Some(CommitTimingManagerState::new::<JwmWaylandState>(dh))
-        } else {
-            None
-        };
+        let commit_timing_state = CommitTimingManagerState::unmanaged::<JwmWaylandState>(dh);
         let xdg_dialog_state = XdgDialogState::new::<JwmWaylandState>(dh);
         let xdg_foreign_state = XdgForeignState::new::<JwmWaylandState>(dh);
         let xdg_system_bell_state = XdgSystemBellState::new::<JwmWaylandState>(dh);
@@ -1914,6 +1912,80 @@ impl JwmWaylandState {
             }
 
             self.pending_initial_configure.remove(&win);
+        }
+    }
+
+    pub fn signal_surface_pacing_barriers(
+        surface: &WlSurface,
+        commit_deadline: Option<Time<Monotonic>>,
+        signal_fifo: bool,
+    ) -> bool {
+        let mut signaled = false;
+
+        with_surface_tree_downward(
+            surface,
+            (),
+            |_, _, _| TraversalAction::DoChildren(()),
+            |_surface, states, _| {
+                if signal_fifo {
+                    let fifo_barrier = {
+                        let mut cached = states.cached_state.get::<FifoBarrierCachedState>();
+                        cached.current().barrier.take()
+                    };
+                    if let Some(barrier) = fifo_barrier {
+                        barrier.signal();
+                        signaled = true;
+                    }
+                }
+
+                if let Some(deadline) = commit_deadline {
+                    if let Some(commit_timer) =
+                        states.data_map.get::<CommitTimerBarrierStateUserData>()
+                    {
+                        if commit_timer.lock().unwrap().signal_until(deadline) {
+                            signaled = true;
+                        }
+                    }
+                }
+            },
+            |_, _, _| true,
+        );
+
+        signaled
+    }
+
+    pub fn signal_due_commit_timing_barriers(&mut self) {
+        let deadline = Clock::<Monotonic>::new().now();
+        let mut roots: Vec<WlSurface> = Vec::new();
+
+        roots.extend(
+            self.toplevels
+                .values()
+                .map(|surface| surface.wl_surface().clone()),
+        );
+        roots.extend(self.popups.values().map(|popup| popup.wl_surface().clone()));
+        roots.extend(
+            self.im_popups
+                .iter()
+                .map(|popup| popup.wl_surface().clone()),
+        );
+        roots.extend(self.layer_surfaces.values().cloned());
+        roots.extend(
+            self.lock_surfaces
+                .values()
+                .map(|lock| lock.wl_surface().clone()),
+        );
+        if let Some(icon) = &self.dnd_icon {
+            roots.push(icon.surface.clone());
+        }
+
+        let mut signaled = false;
+        for root in roots {
+            signaled |= Self::signal_surface_pacing_barriers(&root, Some(deadline), false);
+        }
+
+        if signaled {
+            self.needs_redraw = true;
         }
     }
 
@@ -2559,6 +2631,21 @@ impl CompositorHandler for JwmWaylandState {
                     return;
                 }
                 smithay::wayland::compositor::add_blocker(surface, blocker);
+            },
+        );
+
+        // wp-commit-timing is advertised in unmanaged mode so clients can use
+        // the protocol without Smithay installing commit blockers. We still
+        // must consume one pending timestamp per commit; otherwise a client
+        // that updates the target timestamp again trips TimestampExists.
+        smithay::wayland::compositor::add_pre_commit_hook::<JwmWaylandState, _>(
+            surface,
+            |_state, _dh, surface| {
+                with_states(surface, |states| {
+                    if let Some(timer_state) = states.data_map.get::<CommitTimerStateUserData>() {
+                        timer_state.borrow_mut().timestamp.take();
+                    }
+                });
             },
         );
     }
