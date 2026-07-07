@@ -281,6 +281,15 @@ impl WaylandCompositor {
                 title: title.clone(),
             })
             .collect();
+        self.overview_selection = if active {
+            self.overview_entries
+                .iter()
+                .find(|entry| entry.focused)
+                .or_else(|| self.overview_entries.first())
+                .map(|entry| entry.window_id)
+        } else {
+            None
+        };
         self.needs_render = true;
     }
 

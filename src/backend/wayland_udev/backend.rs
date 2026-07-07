@@ -3855,12 +3855,14 @@ impl Backend for UdevBackend {
                 })
                 .collect();
             c.set_overview_mode(active, &entries);
+            self.request_render();
         }
     }
 
     fn compositor_set_overview_monitor(&mut self, x: i32, y: i32, w: u32, h: u32) {
         if let Some(c) = self.compositor.as_mut() {
             c.set_overview_monitor(x, y, w, h);
+            self.request_render();
         }
     }
 
@@ -3893,6 +3895,7 @@ impl Backend for UdevBackend {
     fn compositor_set_overview_selection(&mut self, window: WindowId) {
         if let Some(c) = self.compositor.as_mut() {
             c.set_overview_selection(window.raw());
+            self.request_render();
         }
     }
 

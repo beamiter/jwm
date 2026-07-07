@@ -1,70 +1,8 @@
 use super::*;
+use crate::backend::compositor_common::math::{
+    mat4_mul, perspective_matrix, rotate_y_matrix, scale_matrix, translate_matrix,
+};
 use smithay::backend::renderer::gles::ffi;
-
-// ---------------------------------------------------------------------------
-// 4x4 matrix helpers (column-major, OpenGL convention)
-// ---------------------------------------------------------------------------
-
-fn mat4_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
-    let mut r = [0.0f32; 16];
-    for i in 0..4 {
-        for j in 0..4 {
-            r[i * 4 + j] = a[i * 4 + 0] * b[0 * 4 + j]
-                + a[i * 4 + 1] * b[1 * 4 + j]
-                + a[i * 4 + 2] * b[2 * 4 + j]
-                + a[i * 4 + 3] * b[3 * 4 + j];
-        }
-    }
-    r
-}
-
-fn mat4_identity() -> [f32; 16] {
-    let mut m = [0.0f32; 16];
-    m[0] = 1.0;
-    m[5] = 1.0;
-    m[10] = 1.0;
-    m[15] = 1.0;
-    m
-}
-
-fn mat4_translate(x: f32, y: f32, z: f32) -> [f32; 16] {
-    let mut m = mat4_identity();
-    m[12] = x;
-    m[13] = y;
-    m[14] = z;
-    m
-}
-
-fn mat4_rotate_y(angle: f32) -> [f32; 16] {
-    let c = angle.cos();
-    let s = angle.sin();
-    let mut m = mat4_identity();
-    m[0] = c;
-    m[2] = -s;
-    m[8] = s;
-    m[10] = c;
-    m
-}
-
-fn mat4_scale(sx: f32, sy: f32, sz: f32) -> [f32; 16] {
-    let mut m = [0.0f32; 16];
-    m[0] = sx;
-    m[5] = sy;
-    m[10] = sz;
-    m[15] = 1.0;
-    m
-}
-
-fn mat4_perspective(fov: f32, aspect: f32, near: f32, far: f32) -> [f32; 16] {
-    let f = 1.0 / (fov * 0.5).tan();
-    let mut m = [0.0f32; 16];
-    m[0] = f / aspect;
-    m[5] = f;
-    m[10] = (far + near) / (near - far);
-    m[11] = -1.0;
-    m[14] = (2.0 * far * near) / (near - far);
-    m
-}
 
 // ---------------------------------------------------------------------------
 // Minimal 6x10 bitmap font (ASCII 32-126, 95 chars x 10 bytes = 950 bytes)
@@ -271,6 +209,31 @@ const FONT_6X10: &[u8; 950] = &[
 // ---------------------------------------------------------------------------
 
 impl WaylandCompositor {
+    fn project_overview_point(
+        mvp: &[f32; 16],
+        model_pt: [f32; 3],
+        vp_w: f32,
+        vp_h: f32,
+        vp_x: f32,
+        vp_y: f32,
+    ) -> Option<(f32, f32)> {
+        let [mx, my, mz] = model_pt;
+        let clip_x = mvp[0] * mx + mvp[4] * my + mvp[8] * mz + mvp[12];
+        let clip_y = mvp[1] * mx + mvp[5] * my + mvp[9] * mz + mvp[13];
+        let clip_w = mvp[3] * mx + mvp[7] * my + mvp[11] * mz + mvp[15];
+        if clip_w.abs() <= f32::EPSILON || !clip_w.is_finite() {
+            return None;
+        }
+        let ndc_x = clip_x / clip_w;
+        let ndc_y = clip_y / clip_w;
+        if !ndc_x.is_finite() || !ndc_y.is_finite() {
+            return None;
+        }
+        let sx = (ndc_x * 0.5 + 0.5) * vp_w + vp_x;
+        let sy = (1.0 - (ndc_y * 0.5 + 0.5)) * vp_h + vp_y;
+        Some((sx, sy))
+    }
+
     /// Rasterize a title string into RGBA pixels using the built-in bitmap font.
     /// Returns (pixels, width, height) or None if title is empty.
     #[allow(dead_code)]
@@ -408,14 +371,12 @@ impl WaylandCompositor {
                 b"u_opacity\0".as_ptr() as *const _,
             );
 
+            let (mon_x, mon_y, mon_w, mon_h) = self.overview_monitor;
+            let mw = mon_w.max(1) as f32;
+            let mh = mon_h.max(1) as f32;
+
             if rect_loc >= 0 {
-                gl.Uniform4f(
-                    rect_loc,
-                    0.0,
-                    0.0,
-                    self.screen_w as f32,
-                    self.screen_h as f32,
-                );
+                gl.Uniform4f(rect_loc, mon_x as f32, mon_y as f32, mw, mh);
             }
             if proj_loc >= 0 {
                 gl.UniformMatrix4fv(proj_loc, 1, ffi::FALSE as u8, projection.as_ptr());
@@ -427,17 +388,27 @@ impl WaylandCompositor {
             gl.BindVertexArray(self.quad_vao);
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
 
+            let scissor_y = self.screen_h as i32 - (mon_y + mon_h as i32);
+            gl.Enable(ffi::SCISSOR_TEST);
+            gl.Scissor(mon_x, scissor_y, mon_w as i32, mon_h as i32);
+            gl.Viewport(mon_x, scissor_y, mon_w as i32, mon_h as i32);
+
             // ------------------------------------------------------------------
             // 2. Compute prism geometry
             // ------------------------------------------------------------------
-            let aspect = self.screen_w as f32 / self.screen_h as f32;
-            let fov = 1.0f32; // ~57 degrees
-            let near = 0.1f32;
-            let far = 100.0f32;
-            let persp = mat4_perspective(fov, aspect, near, far);
+            let face_w = mw * 0.8;
+            let face_h = mh * 0.8;
+            let face_aspect = face_w / face_h;
+            let apothem = face_aspect * 3.0_f32.sqrt();
 
-            let camera_z = -3.5f32;
-            let prism_radius = 1.2f32;
+            let fov_y = std::f32::consts::FRAC_PI_4;
+            let camera_z = (apothem + 1.0 / (fov_y * 0.5).tan()) * 1.2;
+            let monitor_aspect = mw / mh;
+            let persp = perspective_matrix(fov_y, monitor_aspect, 0.1, camera_z * 4.0);
+            let view = translate_matrix(0.0, 0.0, -camera_z);
+            let global_rot = rotate_y_matrix(self.overview_rotation);
+            let anim_scale = self.overview_opacity.clamp(0.0, 1.0);
+            let scale_mat = scale_matrix(anim_scale, anim_scale, anim_scale);
             let face_angle = std::f32::consts::TAU / (n as f32);
 
             // Determine selected index for rotation target
@@ -466,29 +437,22 @@ impl WaylandCompositor {
             let mut faces: Vec<FaceData> = Vec::with_capacity(n);
 
             for i in 0..n {
-                let angle = face_angle * (i as f32) + rotation;
-                let x = prism_radius * angle.sin();
-                let z = prism_radius * angle.cos();
+                let angle = face_angle * (i as f32);
+                let face_rot = rotate_y_matrix(angle);
+                let face_translate = translate_matrix(0.0, 0.0, apothem);
+                let face_model = mat4_mul(&face_rot, &face_translate);
+                let model = mat4_mul(&scale_mat, &face_model);
+                let model = mat4_mul(&global_rot, &model);
+                let mv = mat4_mul(&view, &model);
+                let mvp = mat4_mul(&persp, &mv);
 
-                // Model transform: translate face to position, rotate to face outward
-                let translate = mat4_translate(x, 0.0, z + camera_z);
-                let rot = mat4_rotate_y(angle);
-
-                // Scale face to reasonable aspect (0.7 width, aspect-corrected height)
-                let face_scale = 0.7;
-                let scale = mat4_scale(face_scale, face_scale / aspect, 1.0);
-
-                // MVP = perspective * translate * rotate * scale
-                let model = mat4_mul(&translate, &mat4_mul(&rot, &scale));
-                let mvp = mat4_mul(&persp, &model);
-
-                // Brightness based on Z proximity (closer = brighter)
-                let norm_z = (z + prism_radius) / (2.0 * prism_radius);
-                let brightness = (0.3 + 0.7 * norm_z).clamp(0.3, 1.0);
+                let total_angle = angle + rotation;
+                let cos_facing = total_angle.cos();
+                let brightness = (0.25 + 0.65 * cos_facing.max(0.0)) * anim_scale;
 
                 faces.push(FaceData {
                     index: i,
-                    z,
+                    z: mv[14],
                     mvp,
                     brightness,
                 });
@@ -501,25 +465,43 @@ impl WaylandCompositor {
             // 4. Render each face using cube_program
             // ------------------------------------------------------------------
             gl.UseProgram(self.cube_program);
-            gl.Uniform1f(self.cube_uniforms.aspect, aspect);
+            gl.Uniform1f(self.cube_uniforms.aspect, face_aspect);
             gl.BindVertexArray(self.quad_vao);
 
             let tex_loc =
                 gl.GetUniformLocation(self.cube_program, b"u_texture\0".as_ptr() as *const _);
 
+            let mut drawn_faces = 0usize;
+            let mut missing_window_faces = 0usize;
+            let mut missing_texture_faces = 0usize;
+
             for face in &faces {
+                if face.brightness < 0.05 {
+                    continue;
+                }
+
                 let entry = &self.overview_entries[face.index];
                 let win = match self.windows.get(&entry.window_id) {
                     Some(w) => w,
-                    None => continue,
+                    None => {
+                        missing_window_faces += 1;
+                        continue;
+                    }
                 };
                 let texture = match win.gl_texture {
                     Some(t) => t,
-                    None => continue,
+                    None => {
+                        missing_texture_faces += 1;
+                        continue;
+                    }
                 };
 
-                // Apply overview_opacity to brightness for fade-in/out
-                let bright = face.brightness * self.overview_opacity;
+                let [cu, cv, cw, ch] = win.content_uv;
+                let (uv_x, uv_y, uv_w, uv_h) = if win.y_inverted {
+                    (cu, cv, cw, ch)
+                } else {
+                    (cu, cv + ch, cw, -ch)
+                };
 
                 gl.UniformMatrix4fv(
                     self.cube_uniforms.mvp,
@@ -527,8 +509,8 @@ impl WaylandCompositor {
                     ffi::FALSE as u8,
                     face.mvp.as_ptr(),
                 );
-                gl.Uniform4f(self.cube_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
-                gl.Uniform1f(self.cube_uniforms.brightness, bright);
+                gl.Uniform4f(self.cube_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
+                gl.Uniform1f(self.cube_uniforms.brightness, face.brightness);
 
                 gl.ActiveTexture(ffi::TEXTURE0);
                 self.bind_window_texture(gl, texture);
@@ -537,50 +519,107 @@ impl WaylandCompositor {
                 }
 
                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                drawn_faces += 1;
+            }
+
+            gl.Disable(ffi::SCISSOR_TEST);
+            gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+
+            if drawn_faces == 0 || missing_window_faces > 0 || missing_texture_faces > 0 {
+                static LAST_OVERVIEW_LOG: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let prev = LAST_OVERVIEW_LOG.load(std::sync::atomic::Ordering::Relaxed);
+                if now > prev {
+                    LAST_OVERVIEW_LOG.store(now, std::sync::atomic::Ordering::Relaxed);
+                    log::info!(
+                        "[overview] entries={} faces={} drawn={} missing_window={} missing_texture={}",
+                        self.overview_entries.len(),
+                        faces.len(),
+                        drawn_faces,
+                        missing_window_faces,
+                        missing_texture_faces
+                    );
+                }
             }
 
             // ------------------------------------------------------------------
-            // 5. Selection highlight border on front-most face
+            // 5. Selection highlight border on the projected selected face
             // ------------------------------------------------------------------
-            if let Some(front_face) = faces.last() {
-                let entry = &self.overview_entries[front_face.index];
+            let vp_x = mon_x as f32;
+            let vp_y = mon_y as f32;
+            for face in faces.iter().rev() {
+                if face.brightness < 0.05 {
+                    continue;
+                }
+
+                let entry = &self.overview_entries[face.index];
                 let is_selected = self.overview_selection == Some(entry.window_id)
                     || entry.focused
-                    || front_face.index == selected_idx;
-
-                if is_selected {
-                    // Draw a highlight border using the border_program in screen-space
-                    // Project center of front face to get approximate screen position
-                    let cx = self.screen_w as f32 * 0.5;
-                    let cy = self.screen_h as f32 * 0.5;
-                    let face_w = self.screen_w as f32 * 0.35;
-                    let face_h = self.screen_h as f32 * 0.55;
-                    let bx = cx - face_w * 0.5 - 4.0;
-                    let by = cy - face_h * 0.5 - 4.0;
-                    let bw = face_w + 8.0;
-                    let bh = face_h + 8.0;
-
-                    gl.UseProgram(self.border_program);
-                    gl.UniformMatrix4fv(
-                        self.border_uniforms.projection,
-                        1,
-                        ffi::FALSE as u8,
-                        projection.as_ptr(),
-                    );
-                    gl.Uniform4f(self.border_uniforms.rect, bx, by, bw, bh);
-                    gl.Uniform4f(
-                        self.border_uniforms.border_color,
-                        0.4,
-                        0.7,
-                        1.0,
-                        self.overview_opacity * 0.9,
-                    );
-                    gl.Uniform2f(self.border_uniforms.size, bw, bh);
-                    gl.Uniform1f(self.border_uniforms.radius, 12.0);
-                    gl.Uniform1f(self.border_uniforms.border_width, 3.0);
-
-                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                    || face.index == selected_idx;
+                if !is_selected {
+                    continue;
                 }
+
+                let corners = [
+                    [-face_aspect, -1.0, 0.0],
+                    [face_aspect, -1.0, 0.0],
+                    [-face_aspect, 1.0, 0.0],
+                    [face_aspect, 1.0, 0.0],
+                ];
+                let mut min_x = f32::MAX;
+                let mut min_y = f32::MAX;
+                let mut max_x = f32::MIN;
+                let mut max_y = f32::MIN;
+                for corner in corners {
+                    let Some((sx, sy)) =
+                        Self::project_overview_point(&face.mvp, corner, mw, mh, vp_x, vp_y)
+                    else {
+                        continue;
+                    };
+                    min_x = min_x.min(sx);
+                    min_y = min_y.min(sy);
+                    max_x = max_x.max(sx);
+                    max_y = max_y.max(sy);
+                }
+                if min_x == f32::MAX || min_y == f32::MAX {
+                    break;
+                }
+
+                let bw = 3.0;
+                let pad = bw + 2.0;
+                let bx = min_x - pad;
+                let by = min_y - pad;
+                let rect_w = max_x - min_x + pad * 2.0;
+                let rect_h = max_y - min_y + pad * 2.0;
+                if rect_w <= 1.0 || rect_h <= 1.0 {
+                    break;
+                }
+
+                gl.UseProgram(self.border_program);
+                gl.UniformMatrix4fv(
+                    self.border_uniforms.projection,
+                    1,
+                    ffi::FALSE as u8,
+                    projection.as_ptr(),
+                );
+                gl.Uniform4f(self.border_uniforms.rect, bx, by, rect_w, rect_h);
+                gl.Uniform4f(
+                    self.border_uniforms.border_color,
+                    0.4,
+                    0.7,
+                    1.0,
+                    self.overview_opacity * 0.9,
+                );
+                gl.Uniform2f(self.border_uniforms.size, rect_w, rect_h);
+                gl.Uniform1f(self.border_uniforms.radius, 8.0);
+                gl.Uniform1f(self.border_uniforms.border_width, bw);
+
+                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                break;
             }
 
             // ------------------------------------------------------------------
