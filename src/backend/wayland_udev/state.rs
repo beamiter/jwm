@@ -515,6 +515,27 @@ impl JwmWaylandState {
         if app_id.is_empty() {
             return false;
         }
+
+        let has_same_app_peer = self.mapped_windows.iter().any(|peer| {
+            *peer != win
+                && self
+                    .window_app_id
+                    .get(peer)
+                    .is_some_and(|peer_app_id| peer_app_id.eq_ignore_ascii_case(app_id))
+        });
+        if has_same_app_peer
+            && self
+                .window_title
+                .get(&win)
+                .is_some_and(|title| Self::looks_like_product_dialog_title(app_id, title))
+            && self
+                .window_geometry
+                .get(&win)
+                .is_some_and(|geo| geo.w == 800 && geo.h == 600)
+        {
+            return true;
+        }
+
         let Some(activation_app_id) = self.window_activation_app_id.get(&win) else {
             return false;
         };
@@ -522,13 +543,17 @@ impl JwmWaylandState {
             return false;
         }
 
-        self.mapped_windows.iter().any(|peer| {
-            *peer != win
-                && self
-                    .window_app_id
-                    .get(peer)
-                    .is_some_and(|peer_app_id| peer_app_id == app_id)
-        })
+        has_same_app_peer
+    }
+
+    fn looks_like_product_dialog_title(app_id: &str, title: &str) -> bool {
+        let app_id = app_id.trim();
+        let title = title.trim();
+
+        // VS Code/Electron file-operation dialogs may omit parent and xdg-dialog hints after
+        // the first instance.  They still expose a generic product title and a provisional
+        // 800x600 size while another VS Code toplevel is already mapped.
+        app_id.eq_ignore_ascii_case("code") && title.eq_ignore_ascii_case("Visual Studio Code")
     }
 
     fn toplevel_buffer_origin(&self, win: WindowId) -> Option<Point<i32, Logical>> {
@@ -3255,6 +3280,12 @@ impl XdgShellHandler for JwmWaylandState {
             window: win,
             kind: PropertyKind::Class,
         });
+        if self.is_dialog_like_toplevel(win) {
+            self.push_event(BackendEvent::PropertyChanged {
+                window: win,
+                kind: PropertyKind::WindowType,
+            });
+        }
     }
 
     fn title_changed(&mut self, surface: ToplevelSurface) {
@@ -3294,6 +3325,12 @@ impl XdgShellHandler for JwmWaylandState {
             window: win,
             kind: PropertyKind::Title,
         });
+        if self.is_dialog_like_toplevel(win) {
+            self.push_event(BackendEvent::PropertyChanged {
+                window: win,
+                kind: PropertyKind::WindowType,
+            });
+        }
     }
 
     fn parent_changed(&mut self, surface: ToplevelSurface) {
