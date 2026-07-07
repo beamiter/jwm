@@ -53,10 +53,25 @@ impl DamageTracker {
     }
 
     pub(crate) fn mark_region_dirty(&mut self, x: i32, y: i32, w: u32, h: u32) {
-        let x1 = x.max(0) as u32;
-        let y1 = y.max(0) as u32;
-        let x2 = (x + w as i32).min(self.screen_w as i32) as u32;
-        let y2 = (y + h as i32).min(self.screen_h as i32) as u32;
+        if w == 0 || h == 0 {
+            return;
+        }
+
+        let screen_w = i64::from(self.screen_w);
+        let screen_h = i64::from(self.screen_h);
+        let x1_i = i64::from(x).clamp(0, screen_w);
+        let y1_i = i64::from(y).clamp(0, screen_h);
+        let x2_i = (i64::from(x) + i64::from(w)).clamp(0, screen_w);
+        let y2_i = (i64::from(y) + i64::from(h)).clamp(0, screen_h);
+
+        if x2_i <= x1_i || y2_i <= y1_i {
+            return;
+        }
+
+        let x1 = x1_i as u32;
+        let y1 = y1_i as u32;
+        let x2 = x2_i as u32;
+        let y2 = y2_i as u32;
 
         let tile_x1 = x1 / self.tile_w;
         let tile_y1 = y1 / self.tile_h;
@@ -164,6 +179,23 @@ mod tests {
         let mut tracker = DamageTracker::new(1920, 1080);
         tracker.clear();
         tracker.mark_region_dirty(10, 10, 50, 50);
+        assert!(tracker.dirty_tile_count() > 0);
+        assert!(tracker.dirty_fraction() < 1.0);
+    }
+
+    #[test]
+    fn offscreen_negative_region_is_ignored_without_overflow() {
+        let mut tracker = DamageTracker::new(1920, 1080);
+        tracker.clear();
+        tracker.mark_region_dirty(-119, -119, 39, 39);
+        assert_eq!(tracker.dirty_tile_count(), 0);
+    }
+
+    #[test]
+    fn partially_offscreen_region_is_clipped() {
+        let mut tracker = DamageTracker::new(1920, 1080);
+        tracker.clear();
+        tracker.mark_region_dirty(1900, 1060, 100, 100);
         assert!(tracker.dirty_tile_count() > 0);
         assert!(tracker.dirty_fraction() < 1.0);
     }
