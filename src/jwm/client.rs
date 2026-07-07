@@ -3,7 +3,7 @@
 use crate::Jwm;
 use crate::backend::api::{Backend, Geometry, StackMode, WindowChanges, WindowType};
 use crate::backend::common_define::{EventMaskBits, Mods, WindowId};
-use crate::config::CONFIG;
+use crate::config::{BackendFamily, CONFIG, get_backend_family};
 use crate::core::animation::AnimationKind;
 use crate::core::models::{ClientKey, MonitorKey, WMClient, WMMonitor};
 use crate::core::types::Rect;
@@ -109,20 +109,34 @@ impl Jwm {
                         client.geometry.w,
                         client.geometry.h,
                     );
-                    // Start from 85% scale centered on target
-                    let sw = (target.w as f32 * 0.85) as i32;
-                    let sh = (target.h as f32 * 0.85) as i32;
-                    let sx = target.x + (target.w - sw) / 2;
-                    let sy = target.y + (target.h - sh) / 2;
-                    let from = Rect::new(sx, sy, sw, sh);
-                    self.animations.start(
-                        client_key,
-                        from,
-                        target,
-                        cfg.animation_duration(),
-                        cfg.animation_easing(),
-                        AnimationKind::Appear,
-                    );
+                    let skip_wayland_dialog_probe = get_backend_family() == BackendFamily::Wayland
+                        && target.w == 800
+                        && target.h == 600
+                        && backend
+                            .property_ops()
+                            .get_window_types(client.win)
+                            .contains(&WindowType::Dialog);
+                    if skip_wayland_dialog_probe {
+                        info!(
+                            "[manage] skip appear animation for provisional Wayland dialog {:?}",
+                            client.win
+                        );
+                    } else {
+                        // Start from 85% scale centered on target
+                        let sw = (target.w as f32 * 0.85) as i32;
+                        let sh = (target.h as f32 * 0.85) as i32;
+                        let sx = target.x + (target.w - sw) / 2;
+                        let sy = target.y + (target.h - sh) / 2;
+                        let from = Rect::new(sx, sy, sw, sh);
+                        self.animations.start(
+                            client_key,
+                            from,
+                            target,
+                            cfg.animation_duration(),
+                            cfg.animation_easing(),
+                            AnimationKind::Appear,
+                        );
+                    }
                 }
             }
         }

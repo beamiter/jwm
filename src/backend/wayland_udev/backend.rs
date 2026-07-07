@@ -327,9 +327,15 @@ impl WindowOps for WaylandWindowOps {
                         border,
                     },
                 );
+                let choose_natural_size =
+                    state.is_dialog_like_toplevel(win) && w == 800 && h == 600;
                 if let Some(toplevel) = state.try_lookup_toplevel(win) {
                     toplevel.with_pending_state(|s| {
-                        s.size = Some((w as i32, h as i32).into());
+                        if choose_natural_size {
+                            s.size = None;
+                        } else {
+                            s.size = Some((w as i32, h as i32).into());
+                        }
                     });
                     toplevel.send_pending_configure();
                 }
@@ -538,20 +544,34 @@ impl PropertyOps for WaylandPropertyOps {
     fn get_window_types(&self, win: WindowId) -> Vec<WindowType> {
         // Best-effort classification so JWM can treat status bars/docks correctly.
         // For layer-shell surfaces, exclusive_zone is the canonical hint.
-        let (title, app_id, layer_info) = unsafe {
+        let (title, app_id, layer_info, is_dialog_like) = unsafe {
             self.with_state_mut(|state| {
                 (
                     state.window_title.get(&win).cloned().unwrap_or_default(),
                     state.window_app_id.get(&win).cloned().unwrap_or_default(),
                     state.window_layer_info.get(&win).copied(),
+                    state.is_dialog_like_toplevel(win),
                 )
             })
         };
+
+        if is_dialog_like {
+            return vec![WindowType::Dialog];
+        }
 
         if let Some(info) = layer_info {
             if info.exclusive_zone != 0 {
                 return vec![WindowType::Dock];
             }
+            let anchored =
+                info.anchor_top || info.anchor_bottom || info.anchor_left || info.anchor_right;
+            if info.anchor_top && info.anchor_bottom && info.anchor_left && info.anchor_right {
+                return vec![WindowType::Desktop];
+            }
+            if anchored {
+                return vec![WindowType::Notification];
+            }
+            return vec![WindowType::Dialog];
         }
 
         let cfg = crate::config::CONFIG.load();
@@ -3155,8 +3175,8 @@ impl Backend for UdevBackend {
                             tex_updates.push((
                                 win_id,
                                 tid,
-                                w,
-                                h,
+                                cw as u32,
+                                ch as u32,
                                 true,
                                 false,
                                 [0.0, 0.0, 1.0, 1.0],
@@ -3238,7 +3258,25 @@ impl Backend for UdevBackend {
                         } else {
                             [0.0, 0.0, 1.0, 1.0]
                         };
-                        tex_updates.push((win_id, tid, w, h, has_alpha, y_inverted, content_uv));
+                        if crf_log_this {
+                            log::info!(
+                                "[crf] win={win_id:#x} tex_size={}x{} scene={}x{} uv={:?}",
+                                tex_size.w,
+                                tex_size.h,
+                                w,
+                                h,
+                                content_uv
+                            );
+                        }
+                        tex_updates.push((
+                            win_id,
+                            tid,
+                            tex_size.w.max(1) as u32,
+                            tex_size.h.max(1) as u32,
+                            has_alpha,
+                            y_inverted,
+                            content_uv,
+                        ));
                     }
                 }
             }
@@ -3302,6 +3340,16 @@ impl Backend for UdevBackend {
                         } else {
                             [0.0, 0.0, 1.0, 1.0]
                         };
+                        if crf_log_this {
+                            log::info!(
+                                "[crf] popup win={popup_win_id:#x} tex_size={}x{} scene={}x{} uv={:?}",
+                                tex_size.w,
+                                tex_size.h,
+                                pw,
+                                ph,
+                                content_uv
+                            );
+                        }
                         tex_updates.push((
                             popup_win_id,
                             tid,

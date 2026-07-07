@@ -9,11 +9,77 @@ use crate::backend::api::{
 };
 use crate::backend::common_define::{KeySym, Mods, OutputId, WindowId};
 use crate::backend::error::BackendError;
-use crate::config::CONFIG;
+use crate::config::{BackendFamily, CONFIG, get_backend_family};
+use crate::core::animation::AnimationKind;
 use crate::core::controller::WMController;
 use crate::jwm::Jwm;
 use log::{debug, error, info, warn};
 use std::sync::atomic::Ordering;
+
+fn sync_configured_client_geometry(
+    wm: &mut Jwm,
+    win: WindowId,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) {
+    let Some(client_key) = wm.wintoclient(win) else {
+        return;
+    };
+
+    let width_i = width as i32;
+    let height_i = height as i32;
+
+    {
+        let Some(client) = wm.state.clients.get_mut(client_key) else {
+            return;
+        };
+
+        if client.geometry.x == x
+            && client.geometry.y == y
+            && client.geometry.w == width_i
+            && client.geometry.h == height_i
+        {
+            return;
+        }
+
+        info!(
+            "[wayland_configure_sync] win={:?} {}x{}+{}+{} -> {}x{}+{}+{}",
+            win,
+            client.geometry.w,
+            client.geometry.h,
+            client.geometry.x,
+            client.geometry.y,
+            width,
+            height,
+            x,
+            y
+        );
+
+        client.geometry.x = x;
+        client.geometry.y = y;
+        client.geometry.w = width_i;
+        client.geometry.h = height_i;
+
+        if client.state.is_floating {
+            client.geometry.floating_x = x;
+            client.geometry.floating_y = y;
+            client.geometry.floating_w = width_i;
+            client.geometry.floating_h = height_i;
+        }
+    }
+
+    if wm
+        .animations
+        .active
+        .get(&client_key)
+        .is_some_and(|anim| anim.kind == AnimationKind::Appear)
+    {
+        info!("[wayland_configure_sync] cancel stale appear animation win={win:?}");
+        wm.animations.remove(client_key);
+    }
+}
 
 // =================================================================================
 // WMController trait 实现 - 事件处理器接口
@@ -96,6 +162,10 @@ impl WMController for Jwm {
         width: u32,
         height: u32,
     ) {
+        if get_backend_family() == BackendFamily::Wayland {
+            sync_configured_client_geometry(self, win, x, y, width, height);
+        }
+
         // Keep the OR geometry cache up to date so build_compositor_scene
         // doesn't need a synchronous GetGeometry round-trip per frame.
         if self.override_redirect_windows.contains(&win) {

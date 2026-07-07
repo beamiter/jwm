@@ -1,4 +1,4 @@
-use crate::backend::api::{BackendEvent, Geometry, LayerSurfaceInfo, PropertyKind};
+use crate::backend::api::{BackendEvent, Geometry, LayerSurfaceInfo, PropertyKind, WindowType};
 use crate::backend::common_define::WindowId;
 use crate::sync_ext::MutexExt;
 
@@ -391,6 +391,7 @@ pub struct JwmWaylandState {
 
     pub next_window_raw: u64,
     pub toplevels: HashMap<WindowId, ToplevelSurface>,
+    pub layer_surfaces: HashMap<WindowId, WlSurface>,
     pub surface_to_window: HashMap<ObjectId, WindowId>,
 
     pub pending_initial_configure: HashMap<WindowId, Instant>,
@@ -412,7 +413,9 @@ pub struct JwmWaylandState {
     pub mapped_windows: HashSet<WindowId>,
     pub window_title: HashMap<WindowId, String>,
     pub window_app_id: HashMap<WindowId, String>,
+    pub window_activation_app_id: HashMap<WindowId, String>,
     pub window_is_fullscreen: HashMap<WindowId, bool>,
+    pub window_type_overrides: HashMap<WindowId, Vec<WindowType>>,
 
     pub window_layer_info: HashMap<WindowId, LayerSurfaceInfo>,
 
@@ -475,6 +478,56 @@ impl JwmWaylandState {
                 .geometry
                 .map(|r| r.loc)
                 .unwrap_or_else(|| (0, 0).into())
+        })
+    }
+
+    pub(crate) fn surface_window_geometry_rect(
+        &self,
+        surface: &WlSurface,
+    ) -> Option<Rectangle<i32, Logical>> {
+        with_states(surface, |states| {
+            let mut cached = states.cached_state.get::<SurfaceCachedState>();
+            cached.current().geometry
+        })
+    }
+
+    pub(crate) fn is_dialog_like_toplevel(&self, win: WindowId) -> bool {
+        if self
+            .window_type_overrides
+            .get(&win)
+            .is_some_and(|types| types.contains(&WindowType::Dialog))
+        {
+            return true;
+        }
+
+        if self
+            .toplevels
+            .get(&win)
+            .and_then(|toplevel| toplevel.parent())
+            .is_some()
+        {
+            return true;
+        }
+
+        let Some(app_id) = self.window_app_id.get(&win) else {
+            return false;
+        };
+        if app_id.is_empty() {
+            return false;
+        }
+        let Some(activation_app_id) = self.window_activation_app_id.get(&win) else {
+            return false;
+        };
+        if !activation_app_id.eq_ignore_ascii_case(app_id) {
+            return false;
+        }
+
+        self.mapped_windows.iter().any(|peer| {
+            *peer != win
+                && self
+                    .window_app_id
+                    .get(peer)
+                    .is_some_and(|peer_app_id| peer_app_id == app_id)
         })
     }
 
@@ -798,7 +851,27 @@ impl smithay::wayland::security_context::SecurityContextHandler for JwmWaylandSt
 // xdg-dialog-v1 – modal dialog hints
 // ---------------------------------------------------------------------------
 impl XdgDialogHandler for JwmWaylandState {
-    fn dialog_hint_changed(&mut self, _toplevel: ToplevelSurface, _hint: ToplevelDialogHint) {
+    fn dialog_hint_changed(&mut self, toplevel: ToplevelSurface, hint: ToplevelDialogHint) {
+        if let Some(win) = self
+            .surface_to_window
+            .get(&toplevel.wl_surface().id())
+            .copied()
+        {
+            match hint {
+                ToplevelDialogHint::Dialog | ToplevelDialogHint::Modal => {
+                    self.window_type_overrides
+                        .insert(win, vec![WindowType::Dialog]);
+                }
+                ToplevelDialogHint::Unknown => {
+                    self.window_type_overrides.remove(&win);
+                }
+            }
+            info!("[udev/wayland] dialog_hint_changed win={win:?} hint={hint:?}");
+            self.push_event(BackendEvent::PropertyChanged {
+                window: win,
+                kind: PropertyKind::WindowType,
+            });
+        }
         self.needs_redraw = true;
     }
 }
@@ -913,6 +986,10 @@ impl XdgActivationHandler for JwmWaylandState {
                     win_id, token_data.app_id
                 );
                 self.active_toplevel = Some(win_id);
+                if let Some(app_id) = token_data.app_id.as_deref() {
+                    self.window_activation_app_id
+                        .insert(win_id, app_id.to_string());
+                }
                 self.needs_redraw = true;
             }
         }
@@ -1701,6 +1778,7 @@ impl JwmWaylandState {
                 gamma_sizes: HashMap::new(),
                 next_window_raw: 1,
                 toplevels: HashMap::new(),
+                layer_surfaces: HashMap::new(),
                 surface_to_window: HashMap::new(),
 
                 pending_initial_configure: HashMap::new(),
@@ -1722,7 +1800,9 @@ impl JwmWaylandState {
                 mapped_windows: HashSet::new(),
                 window_title: HashMap::new(),
                 window_app_id: HashMap::new(),
+                window_activation_app_id: HashMap::new(),
                 window_is_fullscreen: HashMap::new(),
+                window_type_overrides: HashMap::new(),
 
                 window_layer_info: HashMap::new(),
 
@@ -1777,7 +1857,11 @@ impl JwmWaylandState {
                     .unwrap_or((800, 600));
 
                 toplevel.with_pending_state(|s| {
-                    s.size = Some((w as i32, h as i32).into());
+                    if self.is_dialog_like_toplevel(win) && w == 800 && h == 600 {
+                        s.size = None;
+                    } else {
+                        s.size = Some((w as i32, h as i32).into());
+                    }
                 });
                 let _ = toplevel.send_configure();
                 self.needs_redraw = true;
@@ -2255,6 +2339,9 @@ impl JwmWaylandState {
         if let Some(t) = self.toplevels.get(&win) {
             return Some(t.wl_surface().clone());
         }
+        if let Some(surface) = self.layer_surfaces.get(&win) {
+            return Some(surface.clone());
+        }
         // Fall back to X11 surface. Prefer the manually-resolved legacy association
         // (XWayland < 23.1, WL_SURFACE_ID path) before smithay's own accessor, which is
         // only populated for the modern xwayland_shell protocol.
@@ -2520,6 +2607,33 @@ impl CompositorHandler for JwmWaylandState {
                             });
                         });
                     }
+
+                    if self.is_dialog_like_toplevel(win) {
+                        if let Some(rect) = self.surface_window_geometry_rect(surface) {
+                            let new_w = rect.size.w.max(1) as u32;
+                            let new_h = rect.size.h.max(1) as u32;
+                            let should_update = self
+                                .window_geometry
+                                .get(&win)
+                                .map(|geo| geo.w != new_w || geo.h != new_h)
+                                .unwrap_or(false);
+                            if should_update {
+                                if let Some(geo) = self.window_geometry.get_mut(&win) {
+                                    geo.w = new_w;
+                                    geo.h = new_h;
+                                    self.pending_events.lock().unwrap().push_back(
+                                        BackendEvent::WindowConfigured {
+                                            window: win,
+                                            x: geo.x,
+                                            y: geo.y,
+                                            width: new_w,
+                                            height: new_h,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    }
                     self.needs_redraw = true;
                 }
                 BufferState::Removed => {
@@ -2650,13 +2764,16 @@ impl CompositorHandler for JwmWaylandState {
             }
 
             self.toplevels.remove(&win);
+            self.layer_surfaces.remove(&win);
             self.pending_initial_configure.remove(&win);
             self.window_geometry.remove(&win);
             self.window_stack.retain(|w| *w != win);
             self.mapped_windows.remove(&win);
             self.window_title.remove(&win);
             self.window_app_id.remove(&win);
+            self.window_activation_app_id.remove(&win);
             self.window_is_fullscreen.remove(&win);
+            self.window_type_overrides.remove(&win);
             self.window_layer_info.remove(&win);
             self.window_border_color.remove(&win);
 
@@ -3054,13 +3171,16 @@ impl XdgShellHandler for JwmWaylandState {
         if let Some(win) = self.surface_to_window.remove(&surface.wl_surface().id()) {
             info!("[udev/wayland] toplevel_destroyed win={win:?}");
             self.toplevels.remove(&win);
+            self.layer_surfaces.remove(&win);
             self.pending_initial_configure.remove(&win);
             self.window_geometry.remove(&win);
             self.window_stack.retain(|w| *w != win);
             self.mapped_windows.remove(&win);
             self.window_title.remove(&win);
             self.window_app_id.remove(&win);
+            self.window_activation_app_id.remove(&win);
             self.window_is_fullscreen.remove(&win);
+            self.window_type_overrides.remove(&win);
             self.window_border_color.remove(&win);
             self.compositor_dead_windows.push(win.raw());
             self.push_event(BackendEvent::WindowDestroyed(win));
@@ -3189,6 +3309,10 @@ impl XdgShellHandler for JwmWaylandState {
             window: win,
             kind: PropertyKind::TransientFor,
         });
+        self.push_event(BackendEvent::PropertyChanged {
+            window: win,
+            kind: PropertyKind::WindowType,
+        });
     }
 }
 
@@ -3258,6 +3382,8 @@ impl WlrLayerShellHandler for JwmWaylandState {
 
         // Track as a JWM window so status bars (and other docks) can be detected via title/app_id.
         self.surface_to_window.insert(obj_id, win);
+        self.layer_surfaces
+            .insert(win, surface.wl_surface().clone());
         self.window_layer_info.insert(win, layer_info);
 
         // Placeholder geometry until the layer map arranges and we observe it in `commit()`.
