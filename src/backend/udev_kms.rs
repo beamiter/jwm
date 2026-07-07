@@ -304,6 +304,89 @@ impl std::fmt::Display for KmsInitError {
 impl std::error::Error for KmsInitError {}
 
 impl KmsState {
+    fn deliver_frame_callbacks(
+        out: &mut KmsOutputState,
+        flush_tx: &Sender<()>,
+        flush_pending: &AtomicBool,
+        presentation_time: Option<std::time::Duration>,
+    ) {
+        if !out.send_frame_callbacks {
+            return;
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or(std::time::Duration::ZERO);
+
+        let throttle = out.frame_callback_throttle;
+        let output = out.output.clone();
+        let visible = out.frame_callback_visible.clone();
+        let refresh = out.refresh_interval;
+
+        for root in &out.frame_callback_roots {
+            let mut root_tree_visible = visible.contains(&root.downgrade());
+            if !root_tree_visible {
+                with_surface_tree_downward(
+                    root,
+                    (),
+                    |_, _, _| TraversalAction::DoChildren(()),
+                    |surface, _states, _| {
+                        if visible.contains(&surface.downgrade()) {
+                            root_tree_visible = true;
+                        }
+                    },
+                    |_, _, _| true,
+                );
+            }
+
+            // Send presentation feedback for wp_presentation protocol when this
+            // callback is tied to an actual vblank. Empty-damage callback
+            // delivery below intentionally omits presentation feedback.
+            if let Some(vblank_time) = presentation_time {
+                with_surface_tree_downward(
+                    root,
+                    (),
+                    |_, _, _| TraversalAction::DoChildren(()),
+                    |_surface, states, _| {
+                        let mut cached =
+                            states.cached_state.get::<PresentationFeedbackCachedState>();
+                        let feedback = cached.current();
+                        for cb in feedback.callbacks.drain(..) {
+                            cb.presented(
+                                &output,
+                                vblank_time,
+                                Refresh::fixed(refresh),
+                                0,
+                                smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync
+                                    | smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwClock,
+                            );
+                        }
+                    },
+                    |_, _, _| true,
+                );
+            }
+
+            send_frames_surface_tree(root, &output, now, throttle, |surface, _states| {
+                if (surface.id() == root.id() && root_tree_visible)
+                    || visible.contains(&surface.downgrade())
+                {
+                    Some(output.clone())
+                } else {
+                    None
+                }
+            });
+        }
+
+        out.send_frame_callbacks = false;
+        out.frame_callback_roots.clear();
+        out.frame_callback_visible.clear();
+
+        // Frame callbacks are Wayland events; flush them promptly.
+        if !flush_pending.swap(true, Ordering::SeqCst) {
+            let _ = flush_tx.send(());
+        }
+    }
+
     fn load_xcursor_images(&mut self, icon: &str) -> Option<&Vec<Image>> {
         if self.cursor_images.contains_key(icon) {
             return self.cursor_images.get(icon);
@@ -3452,6 +3535,8 @@ impl KmsState {
             }
 
             // Re-borrow for render_frame + queue_frame.
+            let flush_tx = self.flush_tx.clone();
+            let flush_pending = self.flush_pending.clone();
             let out = &mut self.outputs[out_idx];
 
             match out.drm_output.render_frame(
@@ -3462,9 +3547,10 @@ impl KmsState {
             ) {
                 Ok(res) => {
                     if res.is_empty {
-                        out.send_frame_callbacks = false;
-                        out.frame_callback_roots.clear();
-                        out.frame_callback_visible.clear();
+                        out.send_frame_callbacks = true;
+                        out.frame_callback_roots = frame_roots;
+                        out.frame_callback_visible = visible_surfaces;
+                        Self::deliver_frame_callbacks(out, &flush_tx, &flush_pending, None);
                         continue;
                     }
 
@@ -3542,6 +3628,8 @@ impl KmsState {
         crtc: crtc::Handle,
         metadata: &mut Option<DrmEventMetadata>,
     ) {
+        let flush_tx = self.flush_tx.clone();
+        let flush_pending = self.flush_pending.clone();
         let Some(out) = self.outputs.iter_mut().find(|o| o.crtc == crtc) else {
             return;
         };
@@ -3564,67 +3652,7 @@ impl KmsState {
             self.last_presentation_time = Some(std::time::Instant::now());
         }
 
-        if out.send_frame_callbacks {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or(std::time::Duration::ZERO);
-
-            let throttle = out.frame_callback_throttle;
-            let output = out.output.clone();
-            let visible = out.frame_callback_visible.clone();
-            let refresh = out.refresh_interval;
-
-            for root in &out.frame_callback_roots {
-                // Send presentation feedback for wp_presentation protocol
-                if let Some(vblank_time) = presentation_time {
-                    with_surface_tree_downward(
-                        root,
-                        (),
-                        |_, _, _| TraversalAction::DoChildren(()),
-                        |_surface, states, _| {
-                            let mut cached =
-                                states.cached_state.get::<PresentationFeedbackCachedState>();
-                            let feedback = cached.current();
-                            for cb in feedback.callbacks.drain(..) {
-                                cb.presented(
-                                    &output,
-                                    vblank_time,
-                                    Refresh::fixed(refresh),
-                                    0,
-                                    smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync
-                                    | smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwClock,
-                                );
-                            }
-                        },
-                        |_, _, _| true,
-                    );
-                }
-
-                send_frames_surface_tree(root, &output, now, throttle, |surface, states| {
-                    let data = states.data_map.get::<RendererSurfaceStateUserData>();
-                    let Some(data) = data else {
-                        return None;
-                    };
-                    if data.lock_safe().view().is_none() {
-                        return None;
-                    }
-                    if visible.contains(&surface.downgrade()) {
-                        Some(output.clone())
-                    } else {
-                        None
-                    }
-                });
-            }
-
-            out.send_frame_callbacks = false;
-            out.frame_callback_roots.clear();
-            out.frame_callback_visible.clear();
-
-            // Frame callbacks are Wayland events; flush them promptly.
-            if !self.flush_pending.swap(true, Ordering::SeqCst) {
-                let _ = self.flush_tx.send(());
-            }
-        }
+        Self::deliver_frame_callbacks(out, &flush_tx, &flush_pending, presentation_time);
     }
 }
 

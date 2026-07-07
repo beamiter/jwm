@@ -40,6 +40,7 @@ use smithay::backend::renderer::{
 use smithay::utils::{Physical, Scale, Size, Transform};
 use smithay::wayland::compositor::{get_children, with_states};
 use smithay::wayland::shell::xdg::SurfaceCachedState;
+use smithay::wayland::viewporter::ViewportCachedState;
 
 use smithay::backend::drm::{DrmNode, NodeType};
 use smithay::backend::input::{
@@ -3086,13 +3087,23 @@ impl Backend for UdevBackend {
                     );
                 }
                 if let Some(surface) = surface_opt {
+                    let has_viewport_state = with_states(&surface, |states| {
+                        let mut cached = states.cached_state.get::<ViewportCachedState>();
+                        let current = cached.current();
+                        current.src.is_some() || current.dst.is_some()
+                    });
                     // Electron/CEF clients (e.g. feishu) render their content into
                     // wl_subsurfaces while the root toplevel surface carries no
                     // buffer. Reading only the root surface therefore yields a
                     // transparent window. When subsurfaces are present, composite
                     // the whole surface tree into a single per-window offscreen
                     // texture so all existing per-window effects keep working.
-                    if !get_children(&surface).is_empty() {
+                    //
+                    // Clients that use wp_viewport (notably iced/wgpu) also need
+                    // this path: the raw texture fast path bypasses Smithay's
+                    // viewport/fractional-scale handling and can leave the
+                    // visible content stale even though buffers keep committing.
+                    if !get_children(&surface).is_empty() || has_viewport_state {
                         let (gx, gy, cw, ch) = with_states(&surface, |states| {
                             let mut cached = states.cached_state.get::<SurfaceCachedState>();
                             match cached.current().geometry {
