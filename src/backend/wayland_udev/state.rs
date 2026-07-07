@@ -528,20 +528,7 @@ impl JwmWaylandState {
                     .get(peer)
                     .is_some_and(|peer_app_id| peer_app_id.eq_ignore_ascii_case(app_id))
         });
-        if has_dialog_hint && Self::should_honor_dialog_hint(has_parent, has_same_app_peer) {
-            return true;
-        }
-
-        if has_same_app_peer
-            && self
-                .window_title
-                .get(&win)
-                .is_some_and(|title| Self::looks_like_product_dialog_title(app_id, title))
-            && self
-                .window_geometry
-                .get(&win)
-                .is_some_and(|geo| geo.w == 800 && geo.h == 600)
-        {
+        if has_dialog_hint && Self::should_honor_dialog_hint(has_parent) {
             return true;
         }
 
@@ -555,21 +542,11 @@ impl JwmWaylandState {
         has_same_app_peer
     }
 
-    fn should_honor_dialog_hint(has_parent: bool, has_same_app_peer: bool) -> bool {
+    fn should_honor_dialog_hint(has_parent: bool) -> bool {
         // Some toolkits mark independent first windows as xdg-dialog-v1 dialogs.
-        // Treat the hint as popup-like only when there is a parent relationship
-        // or an already-mapped toplevel from the same app that this can belong to.
-        has_parent || has_same_app_peer
-    }
-
-    fn looks_like_product_dialog_title(app_id: &str, title: &str) -> bool {
-        let app_id = app_id.trim();
-        let title = title.trim();
-
-        // VS Code/Electron file-operation dialogs may omit parent and xdg-dialog hints after
-        // the first instance.  They still expose a generic product title and a provisional
-        // 800x600 size while another VS Code toplevel is already mapped.
-        app_id.eq_ignore_ascii_case("code") && title.eq_ignore_ascii_case("Visual Studio Code")
+        // Without an explicit parent, the hint is too weak: jterm1/jterm4 expose
+        // it on normal independent terminals, so repeated launches must tile.
+        has_parent
     }
 
     fn toplevel_buffer_origin(&self, win: WindowId) -> Option<Point<i32, Logical>> {
@@ -3710,12 +3687,16 @@ mod xwayland_legacy_assoc_tests {
 
     #[test]
     fn independent_first_window_dialog_hint_is_not_popup_like() {
-        assert!(!JwmWaylandState::should_honor_dialog_hint(false, false));
+        assert!(!JwmWaylandState::should_honor_dialog_hint(false));
     }
 
     #[test]
-    fn dialog_hint_is_honored_for_parent_or_same_app_peer() {
-        assert!(JwmWaylandState::should_honor_dialog_hint(true, false));
-        assert!(JwmWaylandState::should_honor_dialog_hint(false, true));
+    fn dialog_hint_is_honored_for_parent() {
+        assert!(JwmWaylandState::should_honor_dialog_hint(true));
+    }
+
+    #[test]
+    fn unparented_dialog_hint_is_not_popup_like() {
+        assert!(!JwmWaylandState::should_honor_dialog_hint(false));
     }
 }
