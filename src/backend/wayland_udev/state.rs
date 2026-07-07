@@ -2038,10 +2038,32 @@ impl JwmWaylandState {
         }
         self.pending_size_reconfigure
             .insert(win, (expected_size, Instant::now()));
+        self.send_surface_frame_callbacks_now(surface);
         self.needs_redraw = true;
         debug!(
             "[udev/wayland] reconfigure size mismatch win={win:?} committed={}x{} expected={}x{}",
             committed_size.0, committed_size.1, expected_size.0, expected_size.1
+        );
+    }
+
+    fn send_surface_frame_callbacks_now(&mut self, surface: &WlSurface) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or(std::time::Duration::ZERO)
+            .as_millis()
+            .min(u128::from(u32::MAX)) as u32;
+
+        with_surface_tree_downward(
+            surface,
+            (),
+            |_, _, _| TraversalAction::DoChildren(()),
+            |_surface, states, _| {
+                let mut cached = states.cached_state.get::<SurfaceAttributes>();
+                for callback in cached.current().frame_callbacks.drain(..) {
+                    callback.done(now);
+                }
+            },
+            |_, _, _| true,
         );
     }
 
