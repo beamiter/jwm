@@ -492,22 +492,19 @@ impl JwmWaylandState {
     }
 
     pub(crate) fn is_dialog_like_toplevel(&self, win: WindowId) -> bool {
-        if self
-            .window_type_overrides
-            .get(&win)
-            .is_some_and(|types| types.contains(&WindowType::Dialog))
-        {
-            return true;
-        }
-
-        if self
+        let has_parent = self
             .toplevels
             .get(&win)
             .and_then(|toplevel| toplevel.parent())
-            .is_some()
-        {
+            .is_some();
+        if has_parent {
             return true;
         }
+
+        let has_dialog_hint = self
+            .window_type_overrides
+            .get(&win)
+            .is_some_and(|types| types.contains(&WindowType::Dialog));
 
         let Some(app_id) = self.window_app_id.get(&win) else {
             return false;
@@ -523,6 +520,10 @@ impl JwmWaylandState {
                     .get(peer)
                     .is_some_and(|peer_app_id| peer_app_id.eq_ignore_ascii_case(app_id))
         });
+        if has_dialog_hint && Self::should_honor_dialog_hint(has_parent, has_same_app_peer) {
+            return true;
+        }
+
         if has_same_app_peer
             && self
                 .window_title
@@ -544,6 +545,13 @@ impl JwmWaylandState {
         }
 
         has_same_app_peer
+    }
+
+    fn should_honor_dialog_hint(has_parent: bool, has_same_app_peer: bool) -> bool {
+        // Some toolkits mark independent first windows as xdg-dialog-v1 dialogs.
+        // Treat the hint as popup-like only when there is a parent relationship
+        // or an already-mapped toplevel from the same app that this can belong to.
+        has_parent || has_same_app_peer
     }
 
     fn looks_like_product_dialog_title(app_id: &str, title: &str) -> bool {
@@ -3482,7 +3490,7 @@ fn match_x11_window_by_surface_id(
 
 #[cfg(test)]
 mod xwayland_legacy_assoc_tests {
-    use super::match_x11_window_by_surface_id;
+    use super::{JwmWaylandState, match_x11_window_by_surface_id};
     use crate::backend::common_define::WindowId;
 
     #[test]
@@ -3517,5 +3525,16 @@ mod xwayland_legacy_assoc_tests {
     fn empty_candidates_returns_none() {
         let empty: Vec<(WindowId, Option<u32>)> = Vec::new();
         assert_eq!(match_x11_window_by_surface_id(empty, 5), None);
+    }
+
+    #[test]
+    fn independent_first_window_dialog_hint_is_not_popup_like() {
+        assert!(!JwmWaylandState::should_honor_dialog_hint(false, false));
+    }
+
+    #[test]
+    fn dialog_hint_is_honored_for_parent_or_same_app_peer() {
+        assert!(JwmWaylandState::should_honor_dialog_hint(true, false));
+        assert!(JwmWaylandState::should_honor_dialog_hint(false, true));
     }
 }
