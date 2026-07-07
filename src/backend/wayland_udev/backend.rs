@@ -2926,6 +2926,10 @@ impl Backend for UdevBackend {
 
     fn request_render(&mut self) {
         self.state.needs_redraw = true;
+        if let Some(kms) = &self.kms {
+            kms.borrow_mut().request_render();
+        }
+        self.request_flush();
     }
 
     fn take_screenshot_to_file(&mut self, path: &std::path::Path) -> Result<bool, BackendError> {
@@ -2978,7 +2982,7 @@ impl Backend for UdevBackend {
     }
 
     fn compositor_needs_render(&self) -> bool {
-        self.compositor.as_ref().map_or(false, |c| c.needs_render())
+        self.state.needs_redraw || self.compositor.as_ref().map_or(false, |c| c.needs_render())
     }
 
     fn set_compositor_enabled(&mut self, enabled: bool) -> Result<bool, BackendError> {
