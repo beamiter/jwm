@@ -316,10 +316,10 @@ pub struct JwmWaylandState {
     pub alpha_modifier_state: AlphaModifierState,
     pub foreign_toplevel_list_state: ForeignToplevelListState,
     pub tablet_manager_state: TabletManagerState,
-    pub fifo_state: FifoManagerState,
+    pub fifo_state: Option<FifoManagerState>,
     pub keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
     pub security_context_state: SecurityContextState,
-    pub commit_timing_state: CommitTimingManagerState,
+    pub commit_timing_state: Option<CommitTimingManagerState>,
     pub xdg_dialog_state: XdgDialogState,
     pub xdg_foreign_state: XdgForeignState,
     pub xdg_system_bell_state: XdgSystemBellState,
@@ -1694,12 +1694,25 @@ impl JwmWaylandState {
         let alpha_modifier_state = AlphaModifierState::new::<JwmWaylandState>(dh);
         let foreign_toplevel_list_state = ForeignToplevelListState::new::<JwmWaylandState>(dh);
         let tablet_manager_state = TabletManagerState::new::<JwmWaylandState>(dh);
-        let fifo_state = FifoManagerState::new::<JwmWaylandState>(dh);
+        let fifo_state = if env_flag("JWM_ENABLE_FIFO") {
+            // wp-fifo-v1 installs surface commit blockers. Keep it gated until
+            // the compositor drives and signals those barriers on presentation.
+            Some(FifoManagerState::new::<JwmWaylandState>(dh))
+        } else {
+            None
+        };
         let keyboard_shortcuts_inhibit_state =
             KeyboardShortcutsInhibitState::new::<JwmWaylandState>(dh);
         let security_context_state =
             SecurityContextState::new::<JwmWaylandState, _>(dh, |_client| true);
-        let commit_timing_state = CommitTimingManagerState::new::<JwmWaylandState>(dh);
+        let commit_timing_state = if env_flag("JWM_ENABLE_COMMIT_TIMING") {
+            // wp-commit-timing-v1 also installs commit blockers. Advertising it
+            // without signaling deadlines can visually freeze clients using
+            // Vulkan/wgpu frame pacing.
+            Some(CommitTimingManagerState::new::<JwmWaylandState>(dh))
+        } else {
+            None
+        };
         let xdg_dialog_state = XdgDialogState::new::<JwmWaylandState>(dh);
         let xdg_foreign_state = XdgForeignState::new::<JwmWaylandState>(dh);
         let xdg_system_bell_state = XdgSystemBellState::new::<JwmWaylandState>(dh);
