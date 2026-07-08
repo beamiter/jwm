@@ -48,7 +48,10 @@ use smithay::wayland::compositor::{
 use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
 use smithay::wayland::output::OutputManagerState;
 use smithay::wayland::shell::wlr_layer::{Anchor, Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData, WlrLayerShellHandler, WlrLayerShellState};
-use smithay::wayland::shell::xdg::{PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface, XdgShellHandler, XdgShellState};
+use smithay::wayland::shell::xdg::{
+    PopupSurface, PositionerState, SurfaceCachedState, ToplevelState, ToplevelSurface,
+    XdgShellHandler, XdgShellState,
+};
 use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
 use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
@@ -470,6 +473,22 @@ pub struct ImPopupAnchor {
 }
 
 impl JwmWaylandState {
+    pub(crate) fn set_toplevel_tiled_state(state: &mut ToplevelState, tiled: bool) {
+        let edges = [
+            xdg_toplevel::State::TiledLeft,
+            xdg_toplevel::State::TiledRight,
+            xdg_toplevel::State::TiledTop,
+            xdg_toplevel::State::TiledBottom,
+        ];
+        for edge in edges {
+            if tiled {
+                state.states.set(edge);
+            } else {
+                state.states.unset(edge);
+            }
+        }
+    }
+
     fn surface_window_geometry_loc(&self, surface: &WlSurface) -> Point<i32, Logical> {
         // xdg_surface.set_window_geometry sets this. When non-zero, the compositor must shift the
         // wl_surface buffer origin by -loc so the window-geometry aligns with the WM's x/y.
@@ -1469,6 +1488,7 @@ impl JwmWaylandState {
                     .window_geometry
                     .get(&prev_win)
                     .map(|g| (g.w as i32, g.h as i32).into());
+                let tiled = !self.is_dialog_like_toplevel(prev_win);
                 toplevel.with_pending_state(|s| {
                     s.states.unset(xdg_toplevel::State::Activated);
                     // Preserve the configured size. smithay clears s.size after each
@@ -1477,6 +1497,7 @@ impl JwmWaylandState {
                     if let Some(sz) = size {
                         s.size = Some(sz);
                     }
+                    Self::set_toplevel_tiled_state(s, tiled);
                 });
                 toplevel.send_pending_configure();
             }
@@ -1488,12 +1509,14 @@ impl JwmWaylandState {
                 .window_geometry
                 .get(&new_win)
                 .map(|g| (g.w as i32, g.h as i32).into());
+            let tiled = !self.is_dialog_like_toplevel(new_win);
             if let Some(toplevel) = self.toplevels.get(&new_win).cloned() {
                 toplevel.with_pending_state(|s| {
                     s.states.set(xdg_toplevel::State::Activated);
                     if let Some(sz) = size {
                         s.size = Some(sz);
                     }
+                    Self::set_toplevel_tiled_state(s, tiled);
                 });
                 toplevel.send_pending_configure();
             }
@@ -1890,8 +1913,10 @@ impl JwmWaylandState {
                 toplevel.with_pending_state(|s| {
                     if self.is_dialog_like_toplevel(win) && w == 800 && h == 600 {
                         s.size = None;
+                        Self::set_toplevel_tiled_state(s, false);
                     } else {
                         s.size = Some((w as i32, h as i32).into());
+                        Self::set_toplevel_tiled_state(s, true);
                     }
                 });
                 let _ = toplevel.send_configure();
@@ -2015,6 +2040,7 @@ impl JwmWaylandState {
 
         toplevel.with_pending_state(|state| {
             state.size = Some((expected_size.0 as i32, expected_size.1 as i32).into());
+            Self::set_toplevel_tiled_state(state, true);
         });
         if toplevel.is_initial_configure_sent() {
             toplevel.send_pending_configure();

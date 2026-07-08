@@ -334,8 +334,10 @@ impl WindowOps for WaylandWindowOps {
                     toplevel.with_pending_state(|s| {
                         if choose_natural_size {
                             s.size = None;
+                            JwmWaylandState::set_toplevel_tiled_state(s, false);
                         } else {
                             s.size = Some((w as i32, h as i32).into());
+                            JwmWaylandState::set_toplevel_tiled_state(s, true);
                         }
                     });
                     if toplevel.is_initial_configure_sent() {
@@ -607,6 +609,7 @@ impl PropertyOps for WaylandPropertyOps {
                 if let Some(toplevel) = state.try_lookup_toplevel(win) {
                     toplevel.with_pending_state(|s| {
                         if on {
+                            JwmWaylandState::set_toplevel_tiled_state(s, false);
                             s.states.set(xdg_toplevel::State::Fullscreen);
                         } else {
                             s.states.unset(xdg_toplevel::State::Fullscreen);
@@ -3082,6 +3085,8 @@ impl Backend for UdevBackend {
         // Taken out so the per-window loop can borrow it mutably while `self.kms`
         // is also borrowed; restored at the end of Phase 1.
         let mut offscreen = std::mem::take(&mut self.offscreen_window_textures);
+        let mut clear_texture_windows = Vec::new();
+        let mut flush_after_resize_configure = false;
         // Rate-limit diagnostic logging: log at most once per second.
         static LAST_CRF_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let crf_now_secs = std::time::SystemTime::now()
@@ -3147,23 +3152,28 @@ impl Backend for UdevBackend {
                                 _ => (0, 0, w as i32, h as i32),
                             }
                         });
-                        let (target_w, target_h) = if has_viewport_state
-                            && (cw as u32 != w || ch as u32 != h)
-                        {
+                        let committed_w = cw.max(1) as u32;
+                        let committed_h = ch.max(1) as u32;
+                        let wait_for_configured_size = has_viewport_state
+                            && (committed_w.abs_diff(w) > 4 || committed_h.abs_diff(h) > 4);
+                        if wait_for_configured_size {
                             self.state.enforce_toplevel_configure_size(win, &surface);
+                            self.state.needs_redraw = true;
+                            flush_after_resize_configure = true;
+                            offscreen.remove(&win_id);
+                            clear_texture_windows.push(win_id);
                             if crf_log_this {
                                 log::info!(
-                                    "[crf] win={win_id:#x} viewport size mismatch committed={}x{} scene={}x{}",
-                                    cw,
-                                    ch,
+                                    "[crf] win={win_id:#x} viewport size mismatch committed={}x{} scene={}x{}; deferring texture update",
+                                    committed_w,
+                                    committed_h,
                                     w,
                                     h
                                 );
                             }
-                            (w.max(1) as i32, h.max(1) as i32)
-                        } else {
-                            (cw, ch)
-                        };
+                            continue;
+                        }
+                        let (target_w, target_h) = (cw.max(1), ch.max(1));
                         let composited = kms_ref.with_gles_renderer(|renderer| {
                             let _ = import_surface_tree(renderer, &surface);
                             let elements: Vec<kms::KmsRenderElement> =
@@ -3233,7 +3243,7 @@ impl Backend for UdevBackend {
                         if let Some(tid) = composited {
                             if crf_log_this {
                                 log::info!(
-                                    "[crf] win={win_id:#x} composited subsurfaces -> tex={tid} {target_w}x{target_h}"
+                                    "[crf] win={win_id:#x} composited surface tree -> tex={tid} {target_w}x{target_h}"
                                 );
                             }
                             // render_output flips Y in its projection, so the
@@ -3347,6 +3357,9 @@ impl Backend for UdevBackend {
                     }
                 }
             }
+        }
+        if flush_after_resize_configure {
+            self.request_flush();
         }
         if crf_log_this || (!scene.is_empty() && tex_updates.len() != scene.len()) {
             log::info!(
@@ -3596,6 +3609,9 @@ impl Backend for UdevBackend {
 
         // Phase 2: Update compositor window textures then render into FBO.
         let result = if let (Some(compositor), Some(kms)) = (&mut self.compositor, &self.kms) {
+            for &win_id in &clear_texture_windows {
+                compositor.clear_window_texture(win_id);
+            }
             for &(win_id, tid, w, h, has_alpha, y_inverted, content_uv) in &tex_updates {
                 compositor
                     .update_window_texture(win_id, tid, w, h, has_alpha, y_inverted, content_uv);

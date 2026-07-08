@@ -701,6 +701,23 @@ impl WaylandCompositor {
         self.predictive_render_mgr.record_window_damage(window_id);
     }
 
+    /// Drop the currently sampled texture without treating the window as
+    /// unmapped. Used while an xdg client is expected to redraw at a newly
+    /// configured size; keeping the old texture would stretch it to the new
+    /// layout rect for one or more frames.
+    pub(crate) fn clear_window_texture(&mut self, window_id: u64) {
+        if let Some(win) = self.windows.get_mut(&window_id) {
+            win.gl_texture = None;
+            win.width = 0;
+            win.height = 0;
+            win.fading_out = false;
+            win.content_uv = [0.0, 0.0, 1.0, 1.0];
+        }
+        self.content_dirty_ids.insert(window_id);
+        self.predictive_render_mgr.record_window_damage(window_id);
+        self.needs_render = true;
+    }
+
     /// Set window class/app_id and apply per-class rules (frosted glass, opacity, etc.)
     ///
     /// Called once per window every frame from the render dispatch, so the
