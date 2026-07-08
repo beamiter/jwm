@@ -8,8 +8,9 @@ use chrono::Local;
 use futures::StreamExt;
 use gpui::{
     App, Application, Bounds, Context, IntoElement, MouseButton, ParentElement, Pixels, Render,
-    SharedString, Styled, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowKind,
-    WindowOptions, div, point, prelude::*, px, rgb, size,
+    ScrollDelta, ScrollWheelEvent, SharedString, Styled, Task, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, prelude::*,
+    px, rgb, size,
 };
 use gpui_component::{
     Root, Selectable, Sizable, Size, black, blue_400, blue_500, cyan_500, emerald_500, emerald_600,
@@ -486,20 +487,26 @@ impl GpuiComponentBar {
                     cx.notify();
                 }),
             )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, _, _, cx| {
-                    if let Some(device) = this.audio_manager.get_master_device().cloned() {
-                        let new_volume = (device.volume - 5).clamp(0, 100);
-                        let _ = this.audio_manager.set_volume(
-                            &device.name,
-                            new_volume,
-                            device.is_muted,
-                        );
-                    }
-                    cx.notify();
-                }),
-            )
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                let delta_y = match event.delta {
+                    ScrollDelta::Pixels(delta) => f32::from(delta.y),
+                    ScrollDelta::Lines(delta) => delta.y,
+                };
+
+                if delta_y == 0.0 {
+                    return;
+                }
+
+                if let Some(device) = this.audio_manager.get_master_device().cloned() {
+                    let step = if delta_y > 0.0 { 5 } else { -5 };
+                    let new_volume = (device.volume + step).clamp(0, 100);
+                    let _ =
+                        this.audio_manager
+                            .set_volume(&device.name, new_volume, device.is_muted);
+                }
+
+                cx.notify();
+            }))
             .child(Self::chip_button(
                 "volume",
                 volume_label,
