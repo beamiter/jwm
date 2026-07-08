@@ -400,11 +400,6 @@ fn app() -> Html {
         let args = serde_wasm_bindgen::to_value(&DeltaArgs { delta }).unwrap_or(JsValue::NULL);
         invoke_async("adjust_volume", args);
     });
-    let volume_right = Callback::from(move |e: MouseEvent| {
-        e.prevent_default();
-        let args = serde_wasm_bindgen::to_value(&DeltaArgs { delta: -5 }).unwrap_or(JsValue::NULL);
-        invoke_async("adjust_volume", args);
-    });
 
     let brightness_click = Callback::from(move |_: MouseEvent| {
         let args = serde_wasm_bindgen::to_value(&DeltaArgs { delta: 5 }).unwrap_or(JsValue::NULL);
@@ -565,7 +560,6 @@ fn app() -> Html {
                     class={volume_pill_class}
                     onclick={toggle_mute}
                     onwheel={volume_wheel}
-                    oncontextmenu={volume_right}
                     title="左键静音 / 滚轮调节"
                 >
                     <span class="nf-icon">{ volume_ico }</span>{ format!(" {}", volume_label) }
