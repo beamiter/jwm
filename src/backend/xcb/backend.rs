@@ -31,7 +31,9 @@ use crate::backend::x11::wm::{
     window_changes_from_configure_request_parts, window_type_from_atom, wm_delete_window_message,
     wm_take_focus_message,
 };
-use crate::backend::xcb::batch::{BatchedGeometryRequest, XcbRequestBatcher};
+use crate::backend::xcb::batch::{
+    BatchedAttributesRequest, BatchedGeometryRequest, XcbRequestBatcher,
+};
 use crate::backend::xcb::compositor_protocol::{
     XcbCompositorProtocol, XcbSharedCompositor, XcbSharedCompositorConnection,
     create_shared_compositor_connection,
@@ -1195,11 +1197,16 @@ impl XcbBackend {
             .send_request(&xcb::randr::GetScreenResources { window: self.root });
         let resources = self.conn.wait_for_reply(cookie).ok()?;
 
-        for output in resources.outputs() {
+        let mut info_cookies = Vec::with_capacity(resources.outputs().len());
+        for &output in resources.outputs() {
             let cookie = self.conn.send_request(&xcb::randr::GetOutputInfo {
-                output: *output,
+                output,
                 config_timestamp: 0,
             });
+            info_cookies.push((output, cookie));
+        }
+
+        for (output, cookie) in info_cookies {
             let info = self.conn.wait_for_reply(cookie).ok()?;
             if info.crtc() != xcb::randr::Crtc::none()
                 && info.connection() == xcb::randr::Connection::Connected
@@ -1253,11 +1260,21 @@ impl XcbBackend {
 
         match batch.flush_and_collect() {
             Ok(geometries) => {
+                let mut attr_batch = BatchedAttributesRequest::new(&self.conn);
+                for &(x11w, _) in &windows {
+                    attr_batch.queue_attributes(x11w);
+                }
+                let attributes = attr_batch.flush_and_collect().unwrap_or_default();
                 let mut registered = 0usize;
                 for (x11w, wid) in &windows {
                     if let Some((x, y, w, h)) = geometries.get(x11w) {
                         compositor.add_window(*x11w, *x as i32, *y as i32, *w as u32, *h as u32);
-                        self.apply_compositor_window_metadata(compositor, *x11w, *wid);
+                        self.apply_compositor_window_metadata_with_attributes(
+                            compositor,
+                            *x11w,
+                            *wid,
+                            attributes.get(x11w),
+                        );
                         registered += 1;
                     }
                 }
@@ -1291,14 +1308,31 @@ impl XcbBackend {
         x11w: u32,
         wid: WindowId,
     ) {
+        self.apply_compositor_window_metadata_with_attributes(compositor, x11w, wid, None);
+    }
+
+    fn apply_compositor_window_metadata_with_attributes(
+        &self,
+        compositor: &mut XcbSharedCompositor,
+        x11w: u32,
+        wid: WindowId,
+        attributes: Option<&x::GetWindowAttributesReply>,
+    ) {
         let (_, cls) = self.property_ops.get_class(wid);
         if !cls.is_empty() {
             compositor.set_window_class(x11w, &cls);
         }
-        if let Ok(attr) = self.window_ops.get_window_attributes(wid) {
-            if attr.override_redirect {
-                compositor.set_window_override_redirect(x11w, true);
-            }
+        let override_redirect = attributes
+            .map(|attr| attr.override_redirect())
+            .or_else(|| {
+                self.window_ops
+                    .get_window_attributes(wid)
+                    .ok()
+                    .map(|attr| attr.override_redirect)
+            })
+            .unwrap_or(false);
+        if override_redirect {
+            compositor.set_window_override_redirect(x11w, true);
         }
     }
 
@@ -3996,81 +4030,82 @@ impl XcbOutputOps {
                         .unwrap_or_default();
 
                     let mut outputs = Vec::new();
+                    let mut info_cookies = Vec::new();
                     for (idx, monitor) in reply.monitors().enumerate() {
                         if monitor.width() == 0 || monitor.height() == 0 {
                             continue;
                         }
                         let first_output = monitor.outputs().first().copied();
-                        let refresh = first_output
-                            .and_then(|output| {
-                                let output_info = self
-                                    .conn
-                                    .wait_for_reply(self.conn.send_request(
-                                        &xcb::randr::GetOutputInfo {
-                                            output,
-                                            config_timestamp: 0,
-                                        },
-                                    ))
-                                    .ok()?;
-                                if output_info.crtc() == xcb::randr::Crtc::none() {
-                                    return None;
-                                }
-                                self.conn
-                                    .wait_for_reply(self.conn.send_request(
-                                        &xcb::randr::GetCrtcInfo {
-                                            crtc: output_info.crtc(),
-                                            config_timestamp: 0,
-                                        },
-                                    ))
-                                    .ok()
-                            })
-                            .and_then(|crtc_info| {
-                                modes
-                                    .iter()
-                                    .find(|mode| mode.id == crtc_info.mode().resource_id())
-                                    .map(Self::calc_refresh_mhz)
-                            })
-                            .unwrap_or(DEFAULT_OUTPUT_REFRESH_MHZ);
-
-                        let (hdr_capable, hdr_metadata) = if let Some(output) = first_output {
-                            let caps = self.query_output_edid_hdr(output);
-                            (
-                                self.query_output_hdr_capable(output) || caps.is_some(),
-                                caps,
-                            )
-                        } else {
-                            (false, None)
-                        };
-
                         let id = first_output
                             .map(|output| OutputId(output.resource_id() as u64))
                             .unwrap_or(OutputId(idx as u64));
-                        let name = first_output
-                            .and_then(|output| {
-                                self.conn
-                                    .wait_for_reply(self.conn.send_request(
-                                        &xcb::randr::GetOutputInfo {
-                                            output,
-                                            config_timestamp: 0,
-                                        },
-                                    ))
-                                    .ok()
-                                    .and_then(|info| String::from_utf8(info.name().to_vec()).ok())
-                            })
-                            .filter(|name| !name.is_empty())
-                            .unwrap_or_else(|| format!("Monitor-{}", idx));
-
                         outputs.push(build_output_info(
                             id,
-                            name,
+                            String::new(),
                             monitor.x() as i32,
                             monitor.y() as i32,
                             monitor.width() as i32,
                             monitor.height() as i32,
-                            refresh,
-                            hdr_capable,
-                            hdr_metadata,
+                            DEFAULT_OUTPUT_REFRESH_MHZ,
+                            false,
+                            None,
                         ));
+                        if let Some(output) = first_output {
+                            let output_idx = outputs.len() - 1;
+                            info_cookies.push((
+                                output_idx,
+                                output,
+                                self.conn.send_request(&xcb::randr::GetOutputInfo {
+                                    output,
+                                    config_timestamp: 0,
+                                }),
+                            ));
+                        }
+                    }
+
+                    let mut crtc_cookies = Vec::new();
+                    for (idx, output, cookie) in info_cookies {
+                        if let Ok(info) = self.conn.wait_for_reply(cookie) {
+                            if let Some(output_info) = outputs.get_mut(idx) {
+                                if let Ok(name) = String::from_utf8(info.name().to_vec()) {
+                                    if !name.is_empty() {
+                                        output_info.name = name;
+                                    }
+                                }
+                            }
+                            if info.crtc() != xcb::randr::Crtc::none() {
+                                crtc_cookies.push((
+                                    idx,
+                                    output,
+                                    self.conn.send_request(&xcb::randr::GetCrtcInfo {
+                                        crtc: info.crtc(),
+                                        config_timestamp: 0,
+                                    }),
+                                ));
+                            }
+                        }
+                    }
+
+                    for (idx, output, cookie) in crtc_cookies {
+                        if let Ok(crtc_info) = self.conn.wait_for_reply(cookie) {
+                            if let Some(output_info) = outputs.get_mut(idx) {
+                                output_info.refresh_rate = modes
+                                    .iter()
+                                    .find(|mode| mode.id == crtc_info.mode().resource_id())
+                                    .map(Self::calc_refresh_mhz)
+                                    .unwrap_or(DEFAULT_OUTPUT_REFRESH_MHZ);
+                                let caps = self.query_output_edid_hdr(output);
+                                output_info.hdr_capable =
+                                    self.query_output_hdr_capable(output) || caps.is_some();
+                                output_info.hdr_metadata = caps;
+                            }
+                        }
+                    }
+
+                    for (idx, output) in outputs.iter_mut().enumerate() {
+                        if output.name.is_empty() {
+                            output.name = format!("Monitor-{idx}");
+                        }
                     }
                     if !outputs.is_empty() {
                         return outputs;
@@ -4085,11 +4120,15 @@ impl XcbOutputOps {
         if let Ok(resources) = self.conn.wait_for_reply(cookie) {
             let modes = resources.modes().to_vec();
             let mut outputs = Vec::new();
-            for (idx, crtc) in resources.crtcs().iter().enumerate() {
+            let mut crtc_cookies = Vec::with_capacity(resources.crtcs().len());
+            for (idx, &crtc) in resources.crtcs().iter().enumerate() {
                 let info_cookie = self.conn.send_request(&xcb::randr::GetCrtcInfo {
-                    crtc: *crtc,
+                    crtc,
                     config_timestamp: 0,
                 });
+                crtc_cookies.push((idx, crtc, info_cookie));
+            }
+            for (idx, crtc, info_cookie) in crtc_cookies {
                 if let Ok(info) = self.conn.wait_for_reply(info_cookie) {
                     if info.width() == 0 || info.height() == 0 {
                         continue;

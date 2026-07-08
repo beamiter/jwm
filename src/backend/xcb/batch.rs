@@ -27,13 +27,16 @@ impl XcbRequestBatcher {
     }
 
     pub fn mark_op(&self, conn: &xcb::Connection) -> Result<(), BackendError> {
-        let count = self.pending_ops.fetch_add(1, Ordering::SeqCst);
+        let count = self.pending_ops.fetch_add(1, Ordering::AcqRel) + 1;
         let threshold = self.flush_op_threshold.load(Ordering::Relaxed);
-        let should_flush = if count > 0 && count % threshold == 0 {
+        let should_flush = if threshold > 0 && count >= threshold {
             true
-        } else if let Ok(last) = self.last_flush.lock() {
+        } else if count == 1 || count % 4 == 0 {
             let timeout_ms = self.flush_time_threshold_ms.load(Ordering::Relaxed);
-            last.elapsed() > Duration::from_millis(timeout_ms)
+            self.last_flush
+                .lock()
+                .map(|last| last.elapsed() > Duration::from_millis(timeout_ms))
+                .unwrap_or(false)
         } else {
             false
         };
@@ -52,7 +55,7 @@ impl XcbRequestBatcher {
     fn do_flush(&self, conn: &xcb::Connection) -> Result<(), BackendError> {
         conn.flush()
             .map_err(|e| BackendError::Message(format!("xcb flush failed: {e}")))?;
-        self.pending_ops.store(0, Ordering::SeqCst);
+        self.pending_ops.store(0, Ordering::Release);
         if let Ok(mut last) = self.last_flush.lock() {
             *last = Instant::now();
         }
