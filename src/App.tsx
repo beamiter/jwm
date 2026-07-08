@@ -237,10 +237,6 @@ const VolumeControl = ({ snapshot }: { snapshot: AudioSnapshot | null }) => {
     const delta = e.deltaY < 0 ? 5 : -5;
     invoke("adjust_volume", { delta }).catch((e2) => console.error(e2));
   };
-  const onContextMenu = (e: React.MouseEvent) => {
-    e.preventDefault();
-    invoke("adjust_volume", { delta: -5 }).catch((e2) => console.error(e2));
-  };
 
   const muted = !snapshot || snapshot.is_muted || !snapshot.has_device;
   const vol = snapshot?.volume ?? 0;
@@ -252,7 +248,6 @@ const VolumeControl = ({ snapshot }: { snapshot: AudioSnapshot | null }) => {
       className={cls}
       onClick={onClick}
       onWheel={onWheel}
-      onContextMenu={onContextMenu}
       title="左键静音 / 滚轮调节"
     >
       <span className="nf-icon">{volumeIcon(snapshot)}</span> {label}
