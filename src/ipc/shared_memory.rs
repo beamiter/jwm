@@ -47,7 +47,7 @@ pub fn shared_memory_worker(
         match shared_buffer.wait_for_message(Some(Duration::from_secs(2))) {
             Ok(true) => {
                 if let Ok(Some(message)) = shared_buffer.try_read_latest_message() {
-                    if prev_timestamp != message.timestamp.into() {
+                    if prev_timestamp != <u64 as Into<u128>>::into(message.timestamp) {
                         prev_timestamp = message.timestamp.into();
                         if let Ok(mut state) = shared_state.lock() {
                             let need_update = state
@@ -96,10 +96,7 @@ pub fn periodic_update_task(egui_ctx: egui::Context) {
 }
 
 /// Send a generic command via shared buffer
-pub fn send_command(
-    shared_buffer: &Option<Arc<SharedRingBuffer>>,
-    command: SharedCommand,
-) {
+pub fn send_command(shared_buffer: &Option<Arc<SharedRingBuffer>>, command: SharedCommand) {
     if let Some(shared_buffer) = shared_buffer {
         match shared_buffer.send_command(command) {
             Ok(true) => info!("Sent command: {:?} by shared_buffer", command),
