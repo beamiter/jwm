@@ -67,6 +67,23 @@ impl BarModule for AudioModule {
         // Store button rect for popup positioning
         self.button_rect = Some(label_response.rect);
 
+        if label_response.hovered() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll > 1.0 {
+                if let Some(device_name) = state.get_master_audio_device().map(|d| d.name.clone()) {
+                    if let Err(e) = state.audio_manager.adjust_volume(&device_name, 5) {
+                        error!("Failed to adjust volume: {}", e);
+                    }
+                }
+            } else if scroll < -1.0 {
+                if let Some(device_name) = state.get_master_audio_device().map(|d| d.name.clone()) {
+                    if let Err(e) = state.audio_manager.adjust_volume(&device_name, -5) {
+                        error!("Failed to adjust volume: {}", e);
+                    }
+                }
+            }
+        }
+
         if label_response.clicked() {
             self.show_popup = !self.show_popup;
         }
