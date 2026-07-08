@@ -887,20 +887,23 @@ impl WaylandCompositor {
                 } else {
                     self.inactive_opacity
                 };
+                let class_opacity = self.lookup_opacity_rule(&wt.class_name);
                 let rule_opacity = wt
                     .opacity_override
-                    .or_else(|| self.lookup_opacity_rule(&wt.class_name))
+                    .or(class_opacity)
                     .unwrap_or(base_opacity);
                 let has_explicit_transparency = rule_opacity < 1.0;
+                let use_texture_alpha =
+                    wt.has_alpha && !(wt.is_moving && !has_explicit_transparency);
 
                 // --- Compute dim factor ---
                 let inactive_dim_factor = if is_focused { 1.0 } else { self.inactive_dim };
-                let dim = if wt.has_alpha {
+                let dim = if use_texture_alpha {
                     (rule_opacity * fade * inactive_dim_factor).clamp(0.0, 1.0)
                 } else {
                     inactive_dim_factor
                 };
-                let opacity = if wt.has_alpha {
+                let opacity = if use_texture_alpha {
                     -1.0
                 } else if has_explicit_transparency || fade < 1.0 {
                     (rule_opacity * fade).clamp(0.0, 1.0)

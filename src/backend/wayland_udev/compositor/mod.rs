@@ -411,6 +411,7 @@ pub(crate) struct WindowState {
     pub is_fullscreen: bool,
     pub is_urgent: bool,
     pub is_pip: bool,
+    pub is_moving: bool,
     pub is_frosted: bool,
     pub frosted_strength: f32,
     pub class_name: String,

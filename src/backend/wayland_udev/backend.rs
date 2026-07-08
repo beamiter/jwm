@@ -37,8 +37,10 @@ use smithay::backend::renderer::utils::{RendererSurfaceStateUserData, import_sur
 use smithay::backend::renderer::{
     Bind, BufferType, Color32F, Offscreen, Renderer, Texture, buffer_has_alpha, buffer_type,
 };
-use smithay::utils::{Physical, Scale, Size, Transform};
-use smithay::wayland::compositor::{get_children, with_states};
+use smithay::utils::{Physical, Rectangle, Scale, Size, Transform};
+use smithay::wayland::compositor::{
+    RectangleKind, RegionAttributes, SurfaceAttributes, get_children, with_states,
+};
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 use smithay::wayland::viewporter::ViewportCachedState;
 
@@ -81,6 +83,41 @@ fn gesture_swipe_should_intercept(
     bindings: &[crate::config::GestureSwipeConfig],
 ) -> bool {
     fingers >= 3 && bindings.iter().any(|binding| binding.fingers == fingers)
+}
+
+fn region_fully_covers_rect(region: &RegionAttributes, target: Rectangle<i32, Logical>) -> bool {
+    if target.size.w <= 0 || target.size.h <= 0 {
+        return false;
+    }
+
+    let mut covered = Vec::new();
+    for &(kind, rect) in &region.rects {
+        let Some(rect) = rect.intersection(target) else {
+            continue;
+        };
+        match kind {
+            RectangleKind::Add => covered.push(rect),
+            RectangleKind::Subtract => {
+                covered = Rectangle::subtract_rects_many_in_place(covered, [rect]);
+            }
+        }
+    }
+
+    target.subtract_rects(covered).is_empty()
+}
+
+fn surface_declares_opaque_rect(
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    target: Rectangle<i32, Logical>,
+) -> bool {
+    with_states(surface, |states| {
+        let mut cached = states.cached_state.get::<SurfaceAttributes>();
+        let current = cached.current();
+        let Some(region) = current.opaque_region.as_ref() else {
+            return false;
+        };
+        region_fully_covers_rect(region, target)
+    })
 }
 
 // libinput/evdev does not generate key repeat events for us (X11 does).
@@ -3085,7 +3122,6 @@ impl Backend for UdevBackend {
         // Taken out so the per-window loop can borrow it mutably while `self.kms`
         // is also borrowed; restored at the end of Phase 1.
         let mut offscreen = std::mem::take(&mut self.offscreen_window_textures);
-        let mut clear_texture_windows = Vec::new();
         let mut flush_after_resize_configure = false;
         // Rate-limit diagnostic logging: log at most once per second.
         static LAST_CRF_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -3160,11 +3196,9 @@ impl Backend for UdevBackend {
                             self.state.enforce_toplevel_configure_size(win, &surface);
                             self.state.needs_redraw = true;
                             flush_after_resize_configure = true;
-                            offscreen.remove(&win_id);
-                            clear_texture_windows.push(win_id);
                             if crf_log_this {
                                 log::info!(
-                                    "[crf] win={win_id:#x} viewport size mismatch committed={}x{} scene={}x{}; deferring texture update",
+                                    "[crf] win={win_id:#x} viewport size mismatch committed={}x{} scene={}x{}; keeping previous texture while deferring update",
                                     committed_w,
                                     committed_h,
                                     w,
@@ -3246,6 +3280,11 @@ impl Backend for UdevBackend {
                                     "[crf] win={win_id:#x} composited surface tree -> tex={tid} {target_w}x{target_h}"
                                 );
                             }
+                            let opaque_target = Rectangle::<i32, Logical>::new(
+                                (gx, gy).into(),
+                                (cw.max(1), ch.max(1)).into(),
+                            );
+                            let has_alpha = !surface_declares_opaque_rect(&surface, opaque_target);
                             // render_output flips Y in its projection, so the
                             // offscreen is stored top-to-bottom => y_inverted=false.
                             // Content is already cropped to geometry => full UV.
@@ -3254,7 +3293,7 @@ impl Backend for UdevBackend {
                                 tid,
                                 target_w as u32,
                                 target_h as u32,
-                                true,
+                                has_alpha,
                                 false,
                                 [0.0, 0.0, 1.0, 1.0],
                             ));
@@ -3335,9 +3374,15 @@ impl Backend for UdevBackend {
                         } else {
                             [0.0, 0.0, 1.0, 1.0]
                         };
+                        let opaque_target = Rectangle::<i32, Logical>::new(
+                            geo_offset.into(),
+                            (w.max(1) as i32, h.max(1) as i32).into(),
+                        );
+                        let has_alpha =
+                            has_alpha && !surface_declares_opaque_rect(&surface, opaque_target);
                         if crf_log_this {
                             log::info!(
-                                "[crf] win={win_id:#x} tex_size={}x{} scene={}x{} uv={:?}",
+                                "[crf] win={win_id:#x} tex_size={}x{} scene={}x{} uv={:?} effective_alpha={has_alpha}",
                                 tex_size.w,
                                 tex_size.h,
                                 w,
@@ -3609,9 +3654,6 @@ impl Backend for UdevBackend {
 
         // Phase 2: Update compositor window textures then render into FBO.
         let result = if let (Some(compositor), Some(kms)) = (&mut self.compositor, &self.kms) {
-            for &win_id in &clear_texture_windows {
-                compositor.clear_window_texture(win_id);
-            }
             for &(win_id, tid, w, h, has_alpha, y_inverted, content_uv) in &tex_updates {
                 compositor
                     .update_window_texture(win_id, tid, w, h, has_alpha, y_inverted, content_uv);

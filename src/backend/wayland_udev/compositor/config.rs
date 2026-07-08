@@ -462,12 +462,12 @@ impl WaylandCompositor {
     }
 
     pub(crate) fn notify_window_move_start(&mut self, window: u64) {
-        if !self.wobbly_enabled {
-            return;
-        }
         if let Some(win) = self.windows.get_mut(&window) {
-            let grid_n = 9;
-            win.wobbly = Some(WobblyState::new(grid_n, 0, grid_n / 2));
+            win.is_moving = true;
+            if self.wobbly_enabled {
+                let grid_n = 9;
+                win.wobbly = Some(WobblyState::new(grid_n, 0, grid_n / 2));
+            }
         }
     }
 
@@ -481,6 +481,7 @@ impl WaylandCompositor {
 
     pub(crate) fn notify_window_move_end(&mut self, window: u64) {
         if let Some(win) = self.windows.get_mut(&window) {
+            win.is_moving = false;
             if let Some(wobbly) = win.wobbly.as_mut() {
                 wobbly.end_drag();
             }
@@ -582,6 +583,7 @@ impl WaylandCompositor {
                 is_fullscreen: false,
                 is_urgent: false,
                 is_pip: false,
+                is_moving: false,
                 is_frosted: false,
                 frosted_strength: 0.0,
                 class_name: String::new(),
@@ -675,6 +677,7 @@ impl WaylandCompositor {
                 is_fullscreen: false,
                 is_urgent: false,
                 is_pip: false,
+                is_moving: false,
                 is_frosted: false,
                 frosted_strength: 0.0,
                 class_name: String::new(),
@@ -699,23 +702,6 @@ impl WaylandCompositor {
 
         // Feed performance infrastructure
         self.predictive_render_mgr.record_window_damage(window_id);
-    }
-
-    /// Drop the currently sampled texture without treating the window as
-    /// unmapped. Used while an xdg client is expected to redraw at a newly
-    /// configured size; keeping the old texture would stretch it to the new
-    /// layout rect for one or more frames.
-    pub(crate) fn clear_window_texture(&mut self, window_id: u64) {
-        if let Some(win) = self.windows.get_mut(&window_id) {
-            win.gl_texture = None;
-            win.width = 0;
-            win.height = 0;
-            win.fading_out = false;
-            win.content_uv = [0.0, 0.0, 1.0, 1.0];
-        }
-        self.content_dirty_ids.insert(window_id);
-        self.predictive_render_mgr.record_window_damage(window_id);
-        self.needs_render = true;
     }
 
     /// Set window class/app_id and apply per-class rules (frosted glass, opacity, etc.)
