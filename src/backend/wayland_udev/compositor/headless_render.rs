@@ -191,6 +191,36 @@ fn read_center(gl: &glow::Context, w: i32, h: i32) -> [u8; 4] {
     buf
 }
 
+fn create_quad_vao(gl: &glow::Context) -> (glow::VertexArray, glow::Buffer) {
+    let vertices: [f32; 8] = [
+        0.0, 0.0, //
+        1.0, 0.0, //
+        0.0, 1.0, //
+        1.0, 1.0,
+    ];
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            vertices.as_ptr().cast::<u8>(),
+            vertices.len() * std::mem::size_of::<f32>(),
+        )
+    };
+
+    let (vao, vbo) = unsafe {
+        let vao = gl.create_vertex_array().unwrap();
+        let vbo = gl.create_buffer().unwrap();
+        gl.bind_vertex_array(Some(vao));
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+        gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STATIC_DRAW);
+        gl.enable_vertex_attrib_array(0);
+        gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 8, 0);
+        gl.bind_buffer(glow::ARRAY_BUFFER, None);
+        gl.bind_vertex_array(None);
+        (vao, vbo)
+    };
+
+    (vao, vbo)
+}
+
 #[track_caller]
 fn assert_pixel(got: [u8; 4], want: [u8; 4], tol: i32, label: &str) {
     for i in 0..4 {
@@ -211,8 +241,8 @@ fn assert_pixel(got: [u8; 4], want: [u8; 4], tol: i32, label: &str) {
 /// NEAREST/CLAMP_TO_EDGE, so every neighbour fetch returns the same texel —
 /// this is what makes blur passes a pure identity on a flat color. `uniforms`
 /// runs after the program is bound and the input texture is live on unit 0.
-/// Vertex shaders must be `gl_VertexID`-based (no vertex attributes), matching
-/// the real fullscreen-quad passes.
+/// Vertex shaders read the same location-0 quad attribute as the real
+/// compositor fullscreen passes.
 fn render_quad(
     gl: &glow::Context,
     prog: glow::Program,
@@ -302,12 +332,17 @@ fn render_quad(
         gl.bind_texture(glow::TEXTURE_2D, Some(input_tex));
         uniforms(gl);
 
+        let (vao, vbo) = create_quad_vao(gl);
+        gl.bind_vertex_array(Some(vao));
         gl.clear_color(0.0, 0.0, 0.0, 1.0);
         gl.clear(glow::COLOR_BUFFER_BIT);
         gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         gl.finish();
         let px = read_center(gl, w, h);
 
+        gl.bind_vertex_array(None);
+        gl.delete_buffer(vbo);
+        gl.delete_vertex_array(vao);
         gl.delete_framebuffer(fbo);
         gl.delete_texture(out_tex);
         gl.delete_texture(input_tex);
@@ -577,6 +612,9 @@ fn main_window_shader_renders_opacity_and_dim() {
         gl.uniform_1_f32(u("u_ripple_progress").as_ref(), -1.0);
         gl.uniform_1_f32(u("u_ripple_amplitude").as_ref(), 0.0);
 
+        let (vao, vbo) = create_quad_vao(gl);
+        gl.bind_vertex_array(Some(vao));
+
         // Case 1: forced-opaque, no dim -> the texel passes through unchanged.
         gl.uniform_1_f32(u("u_opacity").as_ref(), 1.0);
         gl.uniform_1_f32(u("u_dim").as_ref(), 1.0);
@@ -597,6 +635,10 @@ fn main_window_shader_renders_opacity_and_dim() {
         gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         gl.finish();
         assert_pixel(read_center(gl, W, H), [100, 50, 25, 255], 2, "dim-0.5");
+
+        gl.bind_vertex_array(None);
+        gl.delete_buffer(vbo);
+        gl.delete_vertex_array(vao);
     }
 }
 
@@ -731,6 +773,9 @@ fn main_window_shader_color_management_identity_is_passthrough() {
         gl.uniform_1_i32(u("u_encode_tf").as_ref(), 0); // Linear
         gl.uniform_1_f32(u("u_encode_gamma").as_ref(), 1.0);
 
+        let (vao, vbo) = create_quad_vao(gl);
+        gl.bind_vertex_array(Some(vao));
+
         gl.clear_color(0.0, 0.0, 0.0, 1.0);
         gl.clear(glow::COLOR_BUFFER_BIT);
         gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -743,6 +788,10 @@ fn main_window_shader_color_management_identity_is_passthrough() {
         gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         gl.finish();
         assert_pixel(read_center(gl, W, H), [180, 90, 30, 255], 2, "cm-off");
+
+        gl.bind_vertex_array(None);
+        gl.delete_buffer(vbo);
+        gl.delete_vertex_array(vao);
     }
 }
 
