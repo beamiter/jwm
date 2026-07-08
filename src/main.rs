@@ -721,7 +721,6 @@ impl IcedBar {
 
         mouse_area(pill)
             .on_press(Message::AudioToggleMute)
-            .on_right_press(Message::AudioAdjust(-5))
             .on_scroll(|delta| {
                 let d = match delta {
                     mouse::ScrollDelta::Lines { y, .. } => y,
