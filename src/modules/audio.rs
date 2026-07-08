@@ -100,7 +100,9 @@ impl BarModule for AudioModule {
         };
 
         // Get device info first
-        let device_info = state.get_master_audio_device().map(|d| (d.name.clone(), d.volume, d.is_muted, d.has_switch_control));
+        let device_info = state
+            .get_master_audio_device()
+            .map(|d| (d.name.clone(), d.volume, d.is_muted, d.has_switch_control));
 
         // Position popup to the right of button
         let popup_pos = egui::pos2(button_rect.right() + 10.0, button_rect.top());
@@ -111,7 +113,16 @@ impl BarModule for AudioModule {
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     if let Some((device_name, volume, is_muted, has_switch)) = device_info {
-                        draw_simple_volume_control(ui, state, &device_name, volume, is_muted, has_switch, &mut self.last_volume_change, &self.volume_change_debounce);
+                        draw_simple_volume_control(
+                            ui,
+                            state,
+                            &device_name,
+                            volume,
+                            is_muted,
+                            has_switch,
+                            &mut self.last_volume_change,
+                            &self.volume_change_debounce,
+                        );
                     } else {
                         ui.label("No audio device");
                     }
@@ -124,7 +135,8 @@ impl BarModule for AudioModule {
             let pointer_pos = ctx.pointer_latest_pos();
 
             let is_on_button = pointer_pos.map_or(false, |p| button_rect.contains(p));
-            let is_on_popup = popup_rect.map_or(false, |r| pointer_pos.map_or(false, |p| r.contains(p)));
+            let is_on_popup =
+                popup_rect.map_or(false, |r| pointer_pos.map_or(false, |p| r.contains(p)));
 
             if !is_on_button && !is_on_popup {
                 self.show_popup = false;
@@ -133,7 +145,16 @@ impl BarModule for AudioModule {
     }
 }
 
-fn draw_simple_volume_control(ui: &mut egui::Ui, state: &mut AppState, device_name: &str, mut current_volume: i32, is_muted: bool, has_switch_control: bool, last_volume_change: &mut Instant, volume_change_debounce: &Duration) {
+fn draw_simple_volume_control(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    device_name: &str,
+    mut current_volume: i32,
+    is_muted: bool,
+    has_switch_control: bool,
+    last_volume_change: &mut Instant,
+    volume_change_debounce: &Duration,
+) {
     ui.horizontal(|ui| {
         // Volume slider
         let slider_response = ui.add(
@@ -147,7 +168,11 @@ fn draw_simple_volume_control(ui: &mut egui::Ui, state: &mut AppState, device_na
             let now = std::time::Instant::now();
             if now.duration_since(*last_volume_change) > *volume_change_debounce {
                 *last_volume_change = now;
-                if let Err(e) = state.audio_manager.set_volume(device_name, current_volume, is_muted) {
+                if let Err(e) =
+                    state
+                        .audio_manager
+                        .set_volume(device_name, current_volume, is_muted)
+                {
                     error!("Failed to set volume: {}", e);
                 }
             }

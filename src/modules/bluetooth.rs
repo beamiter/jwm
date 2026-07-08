@@ -140,7 +140,11 @@ impl BarModule for BluetoothModule {
                     format!("Bluetooth: {} device(s) connected", count),
                 )
             } else {
-                ("", colors::TEXT_SUBTLE, "Bluetooth on, no devices".to_string())
+                (
+                    "",
+                    colors::TEXT_SUBTLE,
+                    "Bluetooth on, no devices".to_string(),
+                )
             }
         };
 
@@ -174,14 +178,20 @@ impl BarModule for BluetoothModule {
                 ui.separator();
 
                 if self.bt_state.devices.is_empty() {
-                    ui.label(egui::RichText::new("No connected devices").color(colors::TEXT_SUBTLE));
+                    ui.label(
+                        egui::RichText::new("No connected devices").color(colors::TEXT_SUBTLE),
+                    );
                 } else {
                     for device in &self.bt_state.devices {
                         ui.horizontal(|ui| {
                             let status = if device.connected { "🟢" } else { "⚪" };
                             ui.label(status);
                             ui.label(&device.name);
-                            ui.label(egui::RichText::new(&device.mac).color(colors::TEXT_SUBTLE).small());
+                            ui.label(
+                                egui::RichText::new(&device.mac)
+                                    .color(colors::TEXT_SUBTLE)
+                                    .small(),
+                            );
                         });
                     }
                 }

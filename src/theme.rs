@@ -81,11 +81,11 @@ pub mod colors {
     pub const SUCCESS: Color32 = GREEN;
 
     // Battery related colors
-    pub const BATTERY_HIGH: Color32 = Color32::from_rgb(76, 175, 80);    // Green
-    pub const BATTERY_MEDIUM: Color32 = Color32::from_rgb(255, 193, 7);  // Yellow
-    pub const BATTERY_LOW: Color32 = Color32::from_rgb(244, 67, 54);     // Red
-    pub const CHARGING: Color32 = Color32::from_rgb(33, 150, 243);       // Blue
-    pub const UNAVAILABLE: Color32 = Color32::from_rgb(158, 158, 158);   // Gray
+    pub const BATTERY_HIGH: Color32 = Color32::from_rgb(76, 175, 80); // Green
+    pub const BATTERY_MEDIUM: Color32 = Color32::from_rgb(255, 193, 7); // Yellow
+    pub const BATTERY_LOW: Color32 = Color32::from_rgb(244, 67, 54); // Red
+    pub const CHARGING: Color32 = Color32::from_rgb(33, 150, 243); // Blue
+    pub const UNAVAILABLE: Color32 = Color32::from_rgb(158, 158, 158); // Gray
 }
 
 /// Icons and symbols
@@ -205,7 +205,9 @@ pub fn setup_custom_fonts(ctx: &egui::Context) -> Result<()> {
     let font_families: Vec<String> = FONT_FAMILIES.iter().map(|s| s.to_string()).collect();
 
     for font_name in &font_families {
-        if fonts.font_data.contains_key(font_name.as_str()) || seen_fonts.contains(font_name.as_str()) {
+        if fonts.font_data.contains_key(font_name.as_str())
+            || seen_fonts.contains(font_name.as_str())
+        {
             info!("Font {} already loaded, skipping", font_name);
             continue;
         }
@@ -213,10 +215,7 @@ pub fn setup_custom_fonts(ctx: &egui::Context) -> Result<()> {
         info!("Attempting to load font: {}", font_name);
 
         let font_result = system_source
-            .select_best_match(
-                &[FamilyName::Title(font_name.clone())],
-                &Properties::new(),
-            )
+            .select_best_match(&[FamilyName::Title(font_name.clone())], &Properties::new())
             .and_then(|handle| {
                 handle
                     .load()

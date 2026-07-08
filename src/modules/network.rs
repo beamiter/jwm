@@ -62,9 +62,9 @@ impl NetworkModule {
                             if line.trim_start().starts_with(&iface) {
                                 // Format: iface: status link level noise ...
                                 let parts: Vec<&str> = line.split_whitespace().collect();
-                                parts.get(3).and_then(|s| {
-                                    s.trim_end_matches('.').parse::<i32>().ok()
-                                })
+                                parts
+                                    .get(3)
+                                    .and_then(|s| s.trim_end_matches('.').parse::<i32>().ok())
                             } else {
                                 None
                             }
@@ -159,14 +159,26 @@ impl BarModule for NetworkModule {
                 (
                     icon,
                     colors::SUCCESS,
-                    format!("{}: {} ({})", primary.interface, ip_str,
-                        if primary.is_wifi { "WiFi" } else { "Wired" }),
+                    format!(
+                        "{}: {} ({})",
+                        primary.interface,
+                        ip_str,
+                        if primary.is_wifi { "WiFi" } else { "Wired" }
+                    ),
                 )
             } else {
-                ("❌", colors::ERROR, format!("{}: disconnected", primary.interface))
+                (
+                    "❌",
+                    colors::ERROR,
+                    format!("{}: disconnected", primary.interface),
+                )
             }
         } else {
-            ("❌", colors::TEXT_SUBTLE, "No network interface".to_string())
+            (
+                "❌",
+                colors::TEXT_SUBTLE,
+                "No network interface".to_string(),
+            )
         };
 
         let resp = ui.add(egui::Button::new(egui::RichText::new(icon).color(color)));
@@ -190,7 +202,11 @@ impl BarModule for NetworkModule {
                 for info in &self.info {
                     ui.horizontal(|ui| {
                         let icon = if info.is_wifi { "📡" } else { "🔗" };
-                        let status_color = if info.connected { colors::SUCCESS } else { colors::ERROR };
+                        let status_color = if info.connected {
+                            colors::SUCCESS
+                        } else {
+                            colors::ERROR
+                        };
                         ui.label(egui::RichText::new(icon).color(status_color));
                         ui.label(egui::RichText::new(&info.interface).strong());
                         if info.connected {
@@ -198,7 +214,10 @@ impl BarModule for NetworkModule {
                                 ui.label(ip);
                             }
                             if let Some(signal) = info.signal_strength {
-                                ui.label(egui::RichText::new(format!("{}dBm", signal)).color(colors::TEXT_SUBTLE));
+                                ui.label(
+                                    egui::RichText::new(format!("{}dBm", signal))
+                                        .color(colors::TEXT_SUBTLE),
+                                );
                             }
                         } else {
                             ui.label(egui::RichText::new("down").color(colors::ERROR));

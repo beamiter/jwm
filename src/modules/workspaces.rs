@@ -102,22 +102,12 @@ impl BarModule for WorkspacesModule {
             // Handle interactions
             if label_response.clicked() {
                 info!("{} clicked", tag_bit);
-                ipc::send_tag_command(
-                    &self.shared_buffer,
-                    &state.current_message,
-                    tag_bit,
-                    true,
-                );
+                ipc::send_tag_command(&self.shared_buffer, &state.current_message, tag_bit, true);
             }
 
             if label_response.secondary_clicked() {
                 info!("{} secondary_clicked", tag_bit);
-                ipc::send_tag_command(
-                    &self.shared_buffer,
-                    &state.current_message,
-                    tag_bit,
-                    false,
-                );
+                ipc::send_tag_command(&self.shared_buffer, &state.current_message, tag_bit, false);
             }
         }
     }

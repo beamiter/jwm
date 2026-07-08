@@ -54,16 +54,18 @@ async fn main() -> anyhow::Result<()> {
     eframe::run_native(
         "egui_bar",
         native_options,
-        Box::new(move |cc| match EguiBarApp::new(cc, shared_path, rt_handle) {
-            Ok(app) => {
-                info!("Application created successfully");
-                Ok(Box::new(app))
-            }
-            Err(e) => {
-                log::error!("Failed to create application: {}", e);
-                std::process::exit(1);
-            }
-        }),
+        Box::new(
+            move |cc| match EguiBarApp::new(cc, shared_path, rt_handle) {
+                Ok(app) => {
+                    info!("Application created successfully");
+                    Ok(Box::new(app))
+                }
+                Err(e) => {
+                    log::error!("Failed to create application: {}", e);
+                    std::process::exit(1);
+                }
+            },
+        ),
     )
     .map_err(|e| anyhow::anyhow!("eframe error: {}", e))
 }

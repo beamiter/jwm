@@ -51,10 +51,7 @@ impl MediaModule {
         let is_playing = playback_status == mpris::PlaybackStatus::Playing;
 
         let metadata = player.get_metadata().ok()?;
-        let title = metadata
-            .title()
-            .unwrap_or("")
-            .to_string();
+        let title = metadata.title().unwrap_or("").to_string();
         let artist = metadata
             .artists()
             .and_then(|a| a.first().map(|s| s.to_string()))

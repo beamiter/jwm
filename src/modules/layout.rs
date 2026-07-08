@@ -59,9 +59,7 @@ impl BarModule for LayoutModule {
         let layout_type = Self::detect_layout_type(&layout_symbol);
 
         // Display layout symbol button
-        let button_text = egui::RichText::new(&layout_symbol)
-            .monospace()
-            .size(12.0);
+        let button_text = egui::RichText::new(&layout_symbol).monospace().size(12.0);
 
         let button_bg_color = match layout_type {
             "tiled" => with_alpha(colors::BLUE, 70),
@@ -141,7 +139,8 @@ impl BarModule for LayoutModule {
             let pointer_pos = ctx.pointer_latest_pos();
 
             let is_on_button = pointer_pos.map_or(false, |p| button_rect.contains(p));
-            let is_on_popup = popup_rect.map_or(false, |r| pointer_pos.map_or(false, |p| r.contains(p)));
+            let is_on_popup =
+                popup_rect.map_or(false, |r| pointer_pos.map_or(false, |p| r.contains(p)));
 
             if !is_on_button && !is_on_popup {
                 self.show_popup = false;

@@ -25,7 +25,11 @@ pub struct EguiBarApp {
 
 impl EguiBarApp {
     /// Create new application instance
-    pub fn new(cc: &eframe::CreationContext<'_>, shared_path: String, rt_handle: tokio::runtime::Handle) -> Result<Self> {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        shared_path: String,
+        rt_handle: tokio::runtime::Handle,
+    ) -> Result<Self> {
         theme::apply_theme(&cc.egui_ctx);
         let state = AppState::new();
         let shared_state = Arc::new(Mutex::new(SharedAppState::new()));
@@ -122,7 +126,10 @@ impl EguiBarApp {
     /// Render all module popups
     fn render_popups(&mut self, ctx: &egui::Context) {
         // Render module popups
-        for module in self.modules.right.iter_mut()
+        for module in self
+            .modules
+            .right
+            .iter_mut()
             .chain(self.modules.left.iter_mut())
             .chain(self.modules.center.iter_mut())
         {
@@ -131,8 +138,6 @@ impl EguiBarApp {
             }
         }
     }
-
-
 }
 
 impl eframe::App for EguiBarApp {
@@ -143,7 +148,10 @@ impl eframe::App for EguiBarApp {
         self.state.update();
 
         // Update all modules
-        for module in self.modules.left.iter_mut()
+        for module in self
+            .modules
+            .left
+            .iter_mut()
             .chain(self.modules.center.iter_mut())
             .chain(self.modules.right.iter_mut())
         {

@@ -1,14 +1,14 @@
-pub mod workspaces;
-pub mod layout;
-pub mod clock;
-pub mod cpu;
-pub mod memory;
-pub mod battery;
 pub mod audio;
-pub mod network;
+pub mod battery;
 pub mod bluetooth;
 pub mod brightness;
+pub mod clock;
+pub mod cpu;
+pub mod layout;
 pub mod media;
+pub mod memory;
+pub mod network;
+pub mod workspaces;
 
 use crate::state::AppState;
 use shared_structures::SharedRingBuffer;
@@ -80,7 +80,11 @@ impl ModuleRegistry {
             .filter_map(|name| create_module(name, shared_buffer))
             .collect();
 
-        Self { left, center, right }
+        Self {
+            left,
+            center,
+            right,
+        }
     }
 }
 
@@ -90,7 +94,9 @@ fn create_module(
     shared_buffer: &Option<Arc<SharedRingBuffer>>,
 ) -> Option<Box<dyn BarModule>> {
     match name {
-        "workspaces" => Some(Box::new(workspaces::WorkspacesModule::new(shared_buffer.clone()))),
+        "workspaces" => Some(Box::new(workspaces::WorkspacesModule::new(
+            shared_buffer.clone(),
+        ))),
         "layout" => Some(Box::new(layout::LayoutModule::new(shared_buffer.clone()))),
         "clock" => Some(Box::new(clock::ClockModule::new())),
         "cpu" => Some(Box::new(cpu::CpuModule::new())),
