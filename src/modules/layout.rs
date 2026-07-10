@@ -43,6 +43,25 @@ impl LayoutModule {
             "unknown"
         }
     }
+
+    fn layout_button(
+        ui: &mut egui::Ui,
+        icon: &str,
+        active: bool,
+        accent: Color32,
+    ) -> egui::Response {
+        let fill = if active {
+            with_alpha(accent, 90)
+        } else {
+            Color32::TRANSPARENT
+        };
+
+        ui.add(
+            Button::new(egui::RichText::new(icon).size(18.0))
+                .min_size(Vec2::new(30.0, 26.0))
+                .fill(fill),
+        )
+    }
 }
 
 impl BarModule for LayoutModule {
@@ -90,6 +109,8 @@ impl BarModule for LayoutModule {
             return;
         }
 
+        let layout_symbol = Self::get_layout_symbol(state);
+        let layout_type = Self::detect_layout_type(&layout_symbol);
         let monitor_num = state
             .current_message
             .as_ref()
@@ -101,35 +122,36 @@ impl BarModule for LayoutModule {
             None => return,
         };
 
-        let popup_pos = egui::pos2(button_rect.left(), button_rect.bottom() + 5.0);
+        // Keep the layout choices beside the trigger instead of covering it.
+        let popup_pos = egui::pos2(button_rect.right() + 5.0, button_rect.top());
         let popup_id = egui::Id::new("layout_popup");
 
         egui::Area::new(popup_id)
             .fixed_pos(popup_pos)
             .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        // Tiled layout button
-                        if ui.button("Tiled []=").clicked() {
-                            info!("Setting layout to tiled");
-                            ipc::send_layout_command(&self.shared_buffer, monitor_num, 0);
-                            self.show_popup = false;
-                        }
+                ui.horizontal(|ui| {
+                    if Self::layout_button(ui, "▦", layout_type == "tiled", colors::BLUE).clicked()
+                    {
+                        info!("Setting layout to tiled");
+                        ipc::send_layout_command(&self.shared_buffer, monitor_num, 0);
+                        self.show_popup = false;
+                    }
 
-                        // Floating layout button
-                        if ui.button("Floating ><>").clicked() {
-                            info!("Setting layout to floating");
-                            ipc::send_layout_command(&self.shared_buffer, monitor_num, 1);
-                            self.show_popup = false;
-                        }
+                    if Self::layout_button(ui, "▱", layout_type == "floating", colors::CYAN)
+                        .clicked()
+                    {
+                        info!("Setting layout to floating");
+                        ipc::send_layout_command(&self.shared_buffer, monitor_num, 1);
+                        self.show_popup = false;
+                    }
 
-                        // Monocle layout button
-                        if ui.button("Monocle [M]").clicked() {
-                            info!("Setting layout to monocle");
-                            ipc::send_layout_command(&self.shared_buffer, monitor_num, 2);
-                            self.show_popup = false;
-                        }
-                    });
+                    if Self::layout_button(ui, "▣", layout_type == "monocle", colors::VIOLET)
+                        .clicked()
+                    {
+                        info!("Setting layout to monocle");
+                        ipc::send_layout_command(&self.shared_buffer, monitor_num, 2);
+                        self.show_popup = false;
+                    }
                 });
             });
 
