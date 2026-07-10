@@ -57,6 +57,8 @@ jobs:
             libxkbcommon-dev \
             libx11-dev \
             libx11-xcb-dev \
+            libxext-dev \
+            libxxf86vm-dev \
             libxcb1-dev \
             libxcb-composite0-dev \
             libxcb-damage0-dev \
