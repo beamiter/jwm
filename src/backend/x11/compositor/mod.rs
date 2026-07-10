@@ -5,6 +5,7 @@ mod font;
 mod overview;
 mod pipeline;
 mod postprocess;
+mod slime;
 mod tfp;
 mod transitions;
 mod types;
@@ -169,6 +170,7 @@ pub(crate) use rules_common::{
     parse_blur_quality_by_monitor, parse_blur_strength_by_hz,
 };
 pub use shader_cache::ShaderCache;
+use slime::{SlimeIpc, SlimeState};
 pub use subpixel_integration::{SubpixelCompositorIntegration, SubpixelRenderParams};
 pub use subpixel_render::{SubpixelMetrics, SubpixelMode, SubpixelRenderManager, WindowType};
 pub use texture_pool::TexturePool;
@@ -455,6 +457,10 @@ where
     magnifier_radius: f32,
     magnifier_zoom: f32,
     magnifier_uniforms: MagnifierUniforms,
+
+    // --- Realtime slime hand refraction ---
+    slime_ipc: Option<SlimeIpc>,
+    slime_state: SlimeState,
 
     // --- Window 3D tilt ---
     tilt_program: glow::Program,

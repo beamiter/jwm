@@ -242,6 +242,13 @@ pub(super) struct MagnifierUniforms {
     pub(super) magnifier_center: Option<glow::UniformLocation>,
     pub(super) magnifier_radius: Option<glow::UniformLocation>,
     pub(super) magnifier_zoom: Option<glow::UniformLocation>,
+    pub(super) slime_enabled: Option<glow::UniformLocation>,
+    pub(super) slime_points: Option<glow::UniformLocation>,
+    pub(super) slime_bbox: Option<glow::UniformLocation>,
+    pub(super) slime_screen_size: Option<glow::UniformLocation>,
+    pub(super) slime_scale: Option<glow::UniformLocation>,
+    pub(super) slime_strength: Option<glow::UniformLocation>,
+    pub(super) slime_opacity: Option<glow::UniformLocation>,
     pub(super) colorblind_mode: Option<glow::UniformLocation>,
 }
 

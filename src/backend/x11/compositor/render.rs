@@ -368,6 +368,24 @@ impl<C: CompositorConnection> Compositor<C> {
         scene: &[(u32, i32, i32, u32, u32)],
         focused: Option<u32>,
     ) -> bool {
+        // Realtime post-processing cannot run while the X server presents a
+        // fullscreen client directly. Restore redirection as soon as a pose is
+        // visible, including the first packet received during unredirect.
+        if self.slime_state.is_visible() {
+            if let Some(previous) = self.unredirected_window.take() {
+                let _ = self.conn.redirect_window_manual(previous);
+                let _ = self.conn.flush_x11();
+                if let Some(wt) = self.windows.get_mut(&previous) {
+                    wt.needs_pixmap_refresh = true;
+                }
+                self.needs_render = true;
+                log::info!(
+                    "compositor: re-redirected fullscreen window 0x{:x} for slime effect",
+                    previous
+                );
+            }
+            return false;
+        }
         if !self.fullscreen_unredirect {
             return false;
         }
@@ -446,6 +464,11 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // Phase 2: Begin frame profiling
         self.frame_profiler.begin_frame();
+
+        // Drain the lossy pose channel before deciding whether fullscreen can
+        // bypass the compositor. Only the newest inference result is retained.
+        let slime_updated = self.poll_slime_ipc();
+        let slime_active = self.slime_state.is_visible();
 
         // P6A: Process deferred X11 operations at start of render frame
         self.process_deferred_x11_ops();
@@ -559,7 +582,7 @@ impl<C: CompositorConnection> Compositor<C> {
                             height: h,
                             is_fullscreen: wt.is_fullscreen,
                             has_alpha: wt.has_rgba,
-                            has_blur: wt.is_frosted,
+                            has_blur: wt.is_frosted || slime_active,
                             has_shadow: self.shadow_enabled,
                             has_corner_radius: corner_radius > 0.0,
                             opacity: wt.fade_opacity,
@@ -701,6 +724,8 @@ impl<C: CompositorConnection> Compositor<C> {
             || self.annotation_active
             || wallpaper_just_loaded
             || wobbly_active
+            || slime_updated
+            || slime_active
             || explicit_render;
         let hash = Self::scene_hash(scene, focused);
         let scene_changed = hash != self.last_scene_hash;
@@ -2091,6 +2116,45 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.gl.uniform_1_f32(
                         self.magnifier_uniforms.magnifier_zoom.as_ref(),
                         self.magnifier_zoom,
+                    );
+                }
+
+                // Slime hand refraction uniforms
+                let slime_opacity = self.slime_state.opacity();
+                let slime_enabled = slime_opacity > 0.0;
+                self.gl.uniform_1_i32(
+                    self.magnifier_uniforms.slime_enabled.as_ref(),
+                    if slime_enabled { 1 } else { 0 },
+                );
+                self.gl.uniform_1_f32(
+                    self.magnifier_uniforms.slime_opacity.as_ref(),
+                    slime_opacity,
+                );
+                if slime_enabled {
+                    self.gl.uniform_2_f32_slice(
+                        self.magnifier_uniforms.slime_points.as_ref(),
+                        self.slime_state.points(),
+                    );
+                    let [min_x, min_y, max_x, max_y] = self.slime_state.bbox();
+                    self.gl.uniform_4_f32(
+                        self.magnifier_uniforms.slime_bbox.as_ref(),
+                        min_x,
+                        min_y,
+                        max_x,
+                        max_y,
+                    );
+                    self.gl.uniform_2_f32(
+                        self.magnifier_uniforms.slime_screen_size.as_ref(),
+                        self.screen_w as f32,
+                        self.screen_h as f32,
+                    );
+                    self.gl.uniform_1_f32(
+                        self.magnifier_uniforms.slime_scale.as_ref(),
+                        self.slime_state.scale(),
+                    );
+                    self.gl.uniform_1_f32(
+                        self.magnifier_uniforms.slime_strength.as_ref(),
+                        self.slime_state.strength(),
                     );
                 }
 

@@ -287,12 +287,8 @@ impl SlimeState {
             return false;
         }
 
-        let (base_x, base_y, base_w, base_h) = window_rect.unwrap_or((
-            0.0,
-            0.0,
-            screen_size.0,
-            screen_size.1,
-        ));
+        let (base_x, base_y, base_w, base_h) =
+            window_rect.unwrap_or((0.0, 0.0, screen_size.0, screen_size.1));
         let content = packet.content_rect.unwrap_or([0.0, 0.0, 1.0, 1.0]);
         if !content.iter().all(|v| v.is_finite()) || content[2] <= 0.0 || content[3] <= 0.0 {
             return false;
@@ -310,9 +306,8 @@ impl SlimeState {
         }
 
         let raw_point = |idx: usize| (target[idx * 2], target[idx * 2 + 1]);
-        let distance = |a: (f32, f32), b: (f32, f32)| {
-            ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()
-        };
+        let distance =
+            |a: (f32, f32), b: (f32, f32)| ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt();
         let palm_long = distance(raw_point(0), raw_point(9));
         let palm_wide = distance(raw_point(5), raw_point(17));
         let max_scale = (screen_size.0.min(screen_size.1).max(1.0) * 0.42).max(20.0);
@@ -333,8 +328,7 @@ impl SlimeState {
         }
         // Slow motion is heavily smoothed; fast gestures catch up quickly.
         let alpha = if pose_is_continuous {
-            (0.34 + 0.48 * (max_motion / raw_scale.max(1.0)).clamp(0.0, 1.0))
-                .clamp(0.34, 0.82)
+            (0.34 + 0.48 * (max_motion / raw_scale.max(1.0)).clamp(0.0, 1.0)).clamp(0.34, 0.82)
         } else {
             1.0
         };
@@ -379,9 +373,10 @@ impl<C: CompositorConnection> Compositor<C> {
         let mut changed = false;
         if let Some(packet) = packet {
             let window_rect = match packet.window {
-                Some(window) => self.windows.get(&window).map(|wt| {
-                    (wt.x as f32, wt.y as f32, wt.w as f32, wt.h as f32)
-                }),
+                Some(window) => self
+                    .windows
+                    .get(&window)
+                    .map(|wt| (wt.x as f32, wt.y as f32, wt.w as f32, wt.h as f32)),
                 None => None,
             };
             // A packet naming an unknown/stale XID must not accidentally map to

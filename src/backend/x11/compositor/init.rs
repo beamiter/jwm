@@ -733,6 +733,14 @@ impl<C: CompositorConnection> Compositor<C> {
                 magnifier_radius: gl
                     .get_uniform_location(postprocess_program, "u_magnifier_radius"),
                 magnifier_zoom: gl.get_uniform_location(postprocess_program, "u_magnifier_zoom"),
+                slime_enabled: gl.get_uniform_location(postprocess_program, "u_slime_enabled"),
+                slime_points: gl.get_uniform_location(postprocess_program, "u_slime_points[0]"),
+                slime_bbox: gl.get_uniform_location(postprocess_program, "u_slime_bbox"),
+                slime_screen_size: gl
+                    .get_uniform_location(postprocess_program, "u_slime_screen_size"),
+                slime_scale: gl.get_uniform_location(postprocess_program, "u_slime_scale"),
+                slime_strength: gl.get_uniform_location(postprocess_program, "u_slime_strength"),
+                slime_opacity: gl.get_uniform_location(postprocess_program, "u_slime_opacity"),
                 colorblind_mode: gl.get_uniform_location(postprocess_program, "u_colorblind_mode"),
             }
         };
@@ -1101,6 +1109,17 @@ impl<C: CompositorConnection> Compositor<C> {
             None
         };
 
+        // The pose data plane is optional: compositor startup must not fail if
+        // the runtime directory is read-only or another experimental instance
+        // already owns the socket.
+        let slime_ipc = match SlimeIpc::bind_default() {
+            Ok(ipc) => Some(ipc),
+            Err(err) => {
+                log::warn!("compositor: slime pose IPC disabled: {err}");
+                None
+            }
+        };
+
         // Parse P4: blur_strength_by_hz configuration
         let blur_strength_by_hz = parse_blur_strength_by_hz(&behavior.blur_strength_by_hz);
 
@@ -1310,6 +1329,9 @@ impl<C: CompositorConnection> Compositor<C> {
             magnifier_radius: behavior.magnifier_radius,
             magnifier_zoom: behavior.magnifier_zoom,
             magnifier_uniforms,
+            // Realtime slime hand refraction
+            slime_ipc,
+            slime_state: SlimeState::default(),
             // Window tilt
             tilt_program,
             tilt_uniforms,

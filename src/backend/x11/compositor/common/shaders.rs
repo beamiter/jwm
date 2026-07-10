@@ -506,6 +506,14 @@ uniform int   u_magnifier_enabled;
 uniform vec2  u_magnifier_center;  // normalized [0,1] screen coords
 uniform float u_magnifier_radius;  // in normalized coords
 uniform float u_magnifier_zoom;    // zoom factor (e.g. 2.0)
+// Slime hand-refraction uniforms. Points and bbox use top-left screen pixels.
+uniform int   u_slime_enabled;
+uniform vec2  u_slime_points[21];
+uniform vec4  u_slime_bbox;        // min_x, min_y, max_x, max_y
+uniform vec2  u_slime_screen_size;
+uniform float u_slime_scale;       // palm scale in pixels
+uniform float u_slime_strength;    // refraction displacement in pixels
+uniform float u_slime_opacity;
 // Colorblind correction uniform
 uniform int   u_colorblind_mode;   // 0=none, 1=deuteranopia, 2=protanopia, 3=tritanopia
 // HDR tone mapping uniforms
@@ -516,6 +524,50 @@ uniform int   u_eotf_mode;            // 0=sRGB gamma, 1=PQ (ST2084), 2=HLG
 uniform int   u_output_colorspace;    // 0=BT.709/sRGB, 1=BT.2020
 in vec2 v_uv;
 out vec4 frag_color;
+
+float slime_capsule_sdf(vec2 p, vec2 a, vec2 b, float radius) {
+    vec2 pa = p - a;
+    vec2 ba = b - a;
+    float h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0);
+    return length(pa - ba * h) - radius;
+}
+
+float slime_hand_sdf(vec2 p) {
+    float radius = max(u_slime_scale * 0.115, 3.0);
+    float d = 100000.0;
+
+    // Five finger chains. MediaPipe landmarks are laid out as four joints per
+    // finger after the wrist: thumb 1..4, index 5..8, ... pinky 17..20.
+    for (int finger = 0; finger < 5; ++finger) {
+        int base = 1 + finger * 4;
+        float finger_radius = radius * (finger == 0 ? 1.12 : 1.0);
+        d = min(d, slime_capsule_sdf(
+            p, u_slime_points[0], u_slime_points[base], finger_radius * 1.18
+        ));
+        for (int joint = 0; joint < 3; ++joint) {
+            float taper = 1.0 - float(joint) * 0.13;
+            d = min(d, slime_capsule_sdf(
+                p,
+                u_slime_points[base + joint],
+                u_slime_points[base + joint + 1],
+                finger_radius * taper
+            ));
+        }
+    }
+
+    // Fill the palm with overlapping capsules and a central metaball.
+    d = min(d, slime_capsule_sdf(p, u_slime_points[5], u_slime_points[9], radius * 1.65));
+    d = min(d, slime_capsule_sdf(p, u_slime_points[9], u_slime_points[13], radius * 1.70));
+    d = min(d, slime_capsule_sdf(p, u_slime_points[13], u_slime_points[17], radius * 1.65));
+    d = min(d, slime_capsule_sdf(p, u_slime_points[0], u_slime_points[9], radius * 2.20));
+    d = min(d, slime_capsule_sdf(p, u_slime_points[5], u_slime_points[17], radius * 2.10));
+    vec2 palm_center = (
+        u_slime_points[0] + u_slime_points[5] + u_slime_points[9]
+        + u_slime_points[13] + u_slime_points[17]
+    ) / 5.0;
+    d = min(d, length(p - palm_center) - radius * 2.55);
+    return d;
+}
 
 void main() {
     // FBO textures have Y=0 at bottom, but scene was rendered with top-left-origin
@@ -534,6 +586,60 @@ void main() {
     }
 
     vec4 c = texture(u_texture, sample_uv);
+
+    // Slime-glass hand. The expensive SDF is evaluated only inside the CPU
+    // supplied hand bounding box. Refraction is applied before color/HDR passes.
+    if (u_slime_enabled == 1 && u_slime_opacity > 0.0) {
+        vec2 pixel = vec2(
+            uv.x * u_slime_screen_size.x,
+            (1.0 - uv.y) * u_slime_screen_size.y
+        );
+        if (pixel.x >= u_slime_bbox.x && pixel.y >= u_slime_bbox.y
+            && pixel.x <= u_slime_bbox.z && pixel.y <= u_slime_bbox.w) {
+            float d = slime_hand_sdf(pixel);
+            float aa = 2.0;
+            float mask = (1.0 - smoothstep(-aa, aa, d)) * u_slime_opacity;
+            if (mask > 0.001) {
+                float epsilon = max(1.25, u_slime_scale * 0.018);
+                vec2 gradient = vec2(
+                    slime_hand_sdf(pixel + vec2(epsilon, 0.0))
+                        - slime_hand_sdf(pixel - vec2(epsilon, 0.0)),
+                    slime_hand_sdf(pixel + vec2(0.0, epsilon))
+                        - slime_hand_sdf(pixel - vec2(0.0, epsilon))
+                );
+                float gradient_len = length(gradient);
+                vec2 normal = gradient_len > 0.0001
+                    ? gradient / gradient_len
+                    : vec2(0.0, -1.0);
+
+                float depth = clamp(-d / max(u_slime_scale * 0.62, 1.0), 0.0, 1.0);
+                float edge_weight = 1.0 - depth;
+                vec2 uv_normal = vec2(
+                    normal.x / u_slime_screen_size.x,
+                    -normal.y / u_slime_screen_size.y
+                );
+                vec2 offset = uv_normal * u_slime_strength
+                    * (0.28 + edge_weight * 0.72) * mask;
+                vec2 refracted_uv = clamp(sample_uv + offset, vec2(0.001), vec2(0.999));
+                vec2 dispersion = uv_normal * u_slime_strength * 0.16;
+
+                vec3 glass;
+                glass.r = texture(u_texture, clamp(refracted_uv + dispersion, vec2(0.001), vec2(0.999))).r;
+                glass.g = texture(u_texture, refracted_uv).g;
+                glass.b = texture(u_texture, clamp(refracted_uv - dispersion, vec2(0.001), vec2(0.999))).b;
+                c.rgb = mix(c.rgb, glass, mask * 0.94);
+
+                float rim = (1.0 - smoothstep(0.0, max(u_slime_scale * 0.105, 2.0), abs(d)))
+                    * u_slime_opacity;
+                vec2 light_dir = normalize(vec2(-0.58, -0.82));
+                float specular = pow(max(dot(normal, light_dir), 0.0), 18.0);
+                float fresnel = pow(edge_weight, 1.55);
+                c.rgb += vec3(0.82, 0.93, 1.0)
+                    * (specular * 0.34 + fresnel * 0.10) * mask;
+                c.rgb = mix(c.rgb, vec3(0.94, 0.98, 1.0), rim * 0.24);
+            }
+        }
+    }
 
     // Colorblind correction (Daltonization) — applied before other color adjustments
     if (u_colorblind_mode > 0) {
