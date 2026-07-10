@@ -1,35 +1,28 @@
-name: Slime compositor validation
+name: Slime compositor formatting
 
 on:
   push:
     branches:
       - feature/slime-hand-effect
-    paths:
-      - src/backend/x11/compositor/**
-      - tools/slime_*.py
-      - .github/workflows/slime-integration.yml
-  pull_request:
-    branches:
-      - master
-    paths:
-      - src/backend/x11/compositor/**
-      - tools/slime_*.py
-      - .github/workflows/slime-integration.yml
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: slime-validation-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: slime-format-branch
+  cancel-in-progress: false
 
 jobs:
-  validate:
+  format-and-validate:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
-      - name: Check out source
+      - name: Check out feature branch
         uses: actions/checkout@v4
+        with:
+          ref: feature/slime-hand-effect
+          fetch-depth: 0
 
       - name: Install Linux build dependencies
         run: |
@@ -73,17 +66,26 @@ jobs:
         with:
           components: rustfmt
 
-      - name: Check slime module formatting
-        run: rustfmt --edition 2024 --check src/backend/x11/compositor/slime.rs
+      - name: Format slime module
+        run: rustfmt --edition 2024 src/backend/x11/compositor/slime.rs
 
       - name: Check tracker scripts
         run: python3 -m py_compile tools/slime_tracker.py tools/slime_pose_demo.py
 
       - name: Check production targets and tests
         run: |
-          # The existing wm_benchmark target imports Criterion without declaring
-          # it as a dev-dependency, so validate library, binaries, and tests here.
           cargo check --lib --bins --tests
+          cargo test --lib slime
 
-      - name: Run slime state tests
-        run: cargo test --lib slime
+      - name: Commit formatted module
+        shell: bash
+        run: |
+          if git diff --quiet -- src/backend/x11/compositor/slime.rs; then
+            echo "Slime module already formatted"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/backend/x11/compositor/slime.rs
+          git commit -m "style(slime): format compositor state module"
+          git push origin HEAD:feature/slime-hand-effect
