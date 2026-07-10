@@ -497,12 +497,11 @@ impl WaylandCompositor {
             || self.debug_hud_enabled
             || (self.edge_glow_enabled && self.edge_glow_active);
 
-        // Check if any window texture has been updated
-        let has_dirty = scene.iter().any(|&(win_id, _, _, _, _)| {
-            self.windows
-                .get(&win_id)
-                .map_or(false, |ws| ws.gl_texture.is_some() && ws.fade_opacity > 0.0)
-        });
+        // Texture existence is stable after a window's first frame and must
+        // not keep the render loop alive. Only content committed since the
+        // previous frame is dirty here; geometry damage is tracked above.
+        let has_dirty =
+            !self.content_dirty_ids.is_empty() || !self.dirty_region_tracker.regions().is_empty();
 
         // Skip frame if nothing changed
         if !self.needs_render && !force_render && !has_dirty {
@@ -514,7 +513,7 @@ impl WaylandCompositor {
 
         // Rate-limited diagnostic logging (once per second when scene is non-empty)
         static LAST_RF_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let rf_log_this = !scene.is_empty() && {
+        let rf_log_this = log::log_enabled!(log::Level::Debug) && !scene.is_empty() && {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -528,21 +527,21 @@ impl WaylandCompositor {
             }
         };
         if rf_log_this {
-            log::info!(
+            log::debug!(
                 "[rf] windows={} scene={} force={force_render} dirty={has_dirty}",
                 self.windows.len(),
                 scene.len()
             );
             for &(win_id, x, y, w, h) in scene {
                 if let Some(ws) = self.windows.get(&win_id) {
-                    log::info!(
+                    log::debug!(
                         "[rf] win={win_id:#x} tex={:?} fade={:.3} pos=({x},{y}) size={w}x{h} y_inv={}",
                         ws.gl_texture,
                         ws.fade_opacity,
                         ws.y_inverted
                     );
                 } else {
-                    log::info!(
+                    log::debug!(
                         "[rf] win={win_id:#x} NOT in compositor.windows pos=({x},{y}) size={w}x{h}"
                     );
                 }

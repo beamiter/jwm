@@ -3129,7 +3129,10 @@ impl Backend for UdevBackend {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let crf_log_this = !scene.is_empty() && {
+        // Per-window texture diagnostics are useful when debugging a client,
+        // but walking every surface and formatting its state once per second
+        // is unnecessary work in normal sessions.
+        let crf_log_this = log::log_enabled!(log::Level::Debug) && !scene.is_empty() && {
             let prev = LAST_CRF_LOG.load(std::sync::atomic::Ordering::Relaxed);
             if crf_now_secs > prev {
                 LAST_CRF_LOG.store(crf_now_secs, std::sync::atomic::Ordering::Relaxed);
@@ -3156,7 +3159,7 @@ impl Backend for UdevBackend {
                         .as_ref()
                         .map(|s| get_children(s).len())
                         .unwrap_or(0);
-                    log::info!(
+                    log::debug!(
                         "[crf] win={win_id:#x} class={class:?} x11={is_x11} surface={} subsurfaces={children} size={w}x{h}",
                         surface_opt.is_some()
                     );
@@ -3197,7 +3200,7 @@ impl Backend for UdevBackend {
                             self.state.needs_redraw = true;
                             flush_after_resize_configure = true;
                             if crf_log_this {
-                                log::info!(
+                                log::debug!(
                                     "[crf] win={win_id:#x} viewport size mismatch committed={}x{} scene={}x{}; keeping previous texture while deferring update",
                                     committed_w,
                                     committed_h,
@@ -3276,7 +3279,7 @@ impl Backend for UdevBackend {
                         });
                         if let Some(tid) = composited {
                             if crf_log_this {
-                                log::info!(
+                                log::debug!(
                                     "[crf] win={win_id:#x} composited surface tree -> tex={tid} {target_w}x{target_h}"
                                 );
                             }
@@ -3343,7 +3346,7 @@ impl Backend for UdevBackend {
                             };
                             if crf_log_this {
                                 let (has_buf, buf_type_str) = log_buf.unwrap_or((false, "no_rsd"));
-                                log::info!("[crf] win={win_id:#x} import_ok={} has_buf={has_buf} buf={buf_type_str} tex={:?} y_inv={:?} alpha={:?}",
+                                log::debug!("[crf] win={win_id:#x} import_ok={} has_buf={has_buf} buf={buf_type_str} tex={:?} y_inv={:?} alpha={:?}",
                                     import_result.is_ok(),
                                     tex_info.map(|(id, _, _, _)| id),
                                     tex_info.map(|(_, yi, _, _)| yi),
@@ -3381,7 +3384,7 @@ impl Backend for UdevBackend {
                         let has_alpha =
                             has_alpha && !surface_declares_opaque_rect(&surface, opaque_target);
                         if crf_log_this {
-                            log::info!(
+                            log::debug!(
                                 "[crf] win={win_id:#x} tex_size={}x{} scene={}x{} uv={:?} effective_alpha={has_alpha}",
                                 tex_size.w,
                                 tex_size.h,
@@ -3407,7 +3410,7 @@ impl Backend for UdevBackend {
             self.request_flush();
         }
         if crf_log_this || (!scene.is_empty() && tex_updates.len() != scene.len()) {
-            log::info!(
+            log::debug!(
                 "[crf] tex_updates={} scene={}",
                 tex_updates.len(),
                 scene.len()
@@ -3775,7 +3778,7 @@ impl Backend for UdevBackend {
                 })
                 .unwrap_or(false);
             if crf_log_this {
-                log::info!("[crf] render_frame returned {rendered}");
+                log::debug!("[crf] render_frame returned {rendered}");
             }
             if rendered {
                 kms.borrow_mut().request_render();
