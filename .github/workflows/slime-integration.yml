@@ -8,6 +8,13 @@ on:
       - tools/integrate_slime_effect.py
       - src/backend/x11/compositor/slime.rs
       - .github/workflows/slime-integration.yml
+  pull_request:
+    branches:
+      - master
+    paths:
+      - tools/integrate_slime_effect.py
+      - src/backend/x11/compositor/slime.rs
+      - .github/workflows/slime-integration.yml
   workflow_dispatch:
 
 permissions:
