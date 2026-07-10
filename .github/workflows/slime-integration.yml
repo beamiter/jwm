@@ -42,6 +42,8 @@ jobs:
             build-essential \
             pkg-config \
             libglib2.0-dev \
+            libcairo2-dev \
+            libpango1.0-dev \
             libdbus-1-dev \
             libudev-dev \
             libinput-dev \
