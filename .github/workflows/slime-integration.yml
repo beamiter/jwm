@@ -47,9 +47,24 @@ jobs:
         run: cargo fmt --all
 
       - name: Check all targets
-        run: cargo check --all-targets
+        id: cargo_check
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check --all-targets 2>&1 | tee slime-cargo-check.log
+
+      - name: Upload cargo diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slime-cargo-check
+          path: slime-cargo-check.log
+          if-no-files-found: error
+          retention-days: 3
 
       - name: Commit generated integration
+        if: steps.cargo_check.outcome == 'success'
         shell: bash
         run: |
           if git diff --quiet; then
@@ -61,3 +76,7 @@ jobs:
           git add src/backend/x11/compositor
           git commit -m "feat(slime): wire realtime hand refraction into X11 compositor"
           git push origin HEAD:feature/slime-hand-effect
+
+      - name: Fail when cargo check failed
+        if: steps.cargo_check.outcome != 'success'
+        run: exit 1
