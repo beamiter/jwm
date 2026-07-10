@@ -1,5 +1,5 @@
 #!/bin/bash
-# install_jwm_scripts.sh - 编译并安装 JWM 及 status bar
+# install_jwm_scripts.sh - 编译并安装 JWM，并按需构建 status bar
 set -euo pipefail
 
 # ============================================================
@@ -81,7 +81,7 @@ JWM_BAR_NAME="egui_bar"
 JWM_BAR_SET_BY_ARGS=false
 
 # CLONE_BARS：仅用于把这些 bar 仓库拉到本地（git clone / pull），
-# 不参与编译安装。编译安装的对象只有 JWM_BAR_NAME 对应的那个 bar。
+# 不参与编译。实际构建的对象只有 JWM_BAR_NAME 对应的那个 bar。
 # 取消注释你希望保留本地副本的 bar 即可。
 CLONE_BARS=(
     # dioxus_bar
@@ -120,31 +120,31 @@ usage() {
 
 选项:
   -m, --mode <debug|release>  构建模式（默认: release）
-  -b, --bar <bar_name>        指定要编译并安装的 bar，同时把该 bar 加入克隆列表；
-                              可重复传入或使用逗号分隔；第一个显式传入的 bar 会被编译安装，
-                              其余仅作为额外的本地克隆目标（不参与编译安装）。
+  -b, --bar <bar_name>        指定要构建的 bar，同时把该 bar 加入克隆列表；
+                              可重复传入或使用逗号分隔；第一个显式传入的 bar 会被构建，
+                              其余仅作为额外的本地克隆目标（不参与构建）。
                               jwm 启动时通过 config.toml 的 status_bar.name 选择 bar，
                               不再使用 cargo feature。
   -l, --list-bars             列出所有可用的 bar
   -j, --jobs <N>              并行编译任务数（传给 cargo）
   --gen-config                安装后重新生成默认配置（备份旧配置为 .toml.backup）
-  --skip-bar                  跳过 bar 编译安装（仍会按 CLONE_BARS 同步代码）
+  --skip-bar                  跳过 bar 构建（仍会按 CLONE_BARS 同步代码）
   --skip-jwm                  跳过 jwm 编译安装（仅处理 bar）
   -h, --help                  显示此帮助信息
 
 说明:
-  - CLONE_BARS（脚本顶部）只用于把哪些 bar 仓库 git clone/pull 到本地，不会编译安装。
-  - 真正会被编译并安装到 /usr/local/bin 的 bar 只有 JWM_BAR_NAME（即 -b 的第一个参数，
-    或脚本顶部默认的 x11rb_wgpu_bar）。
+  - CLONE_BARS（脚本顶部）只用于把哪些 bar 仓库 git clone/pull 到本地，不会构建。
+  - 真正会被构建的 bar 只有 JWM_BAR_NAME（即 -b 的第一个参数，或脚本顶部默认值）。
+  - bar 不会安装到 /usr/local/bin；构建产物保留在 submodules/<bar>/target/<mode>/<bar>。
   - jwm 通过 config.toml 的 status_bar.name 在运行时选择 bar，切换 bar 不需要重编 jwm。
 
 示例:
-  $(basename "$0")                           # 编译安装 jwm + 默认 bar，按 CLONE_BARS 同步其它仓库
+  $(basename "$0")                           # 编译安装 jwm + 构建默认 bar，按 CLONE_BARS 同步其它仓库
   $(basename "$0") --gen-config              # 同上，并重新生成默认配置
   $(basename "$0") -m debug                  # debug 模式编译安装
-  $(basename "$0") -b xcb_bar                # 编译安装 xcb_bar
-  $(basename "$0") -b xcb_bar,egui_bar       # 编译安装 xcb_bar；同时把 egui_bar 仓库拉到本地
-  $(basename "$0") -b xcb_bar --skip-jwm     # 仅编译安装 xcb_bar
+  $(basename "$0") -b xcb_bar                # 构建 xcb_bar
+  $(basename "$0") -b xcb_bar,egui_bar       # 构建 xcb_bar；同时把 egui_bar 仓库拉到本地
+  $(basename "$0") -b xcb_bar --skip-jwm     # 仅构建 xcb_bar
   $(basename "$0") --gen-config --skip-bar   # 仅重新生成配置，不编译 bar
 EOF
     exit 0
@@ -296,9 +296,9 @@ sync_bar_repo() {
 }
 
 # ============================================================
-# 编译并安装 bar
+# 编译 bar（不安装到系统路径）
 # ============================================================
-build_and_install_bar() {
+build_bar() {
     local bar="$1"
     local bar_dir="$SUBMODULES_DIR/$bar"
 
@@ -317,9 +317,7 @@ build_and_install_bar() {
         exit 1
     fi
 
-    info "安装 $bar -> /usr/local/bin/$bar"
-    sudo install "$bin_path" /usr/local/bin/
-    ok "$bar 安装完成"
+    ok "$bar 构建完成: $bin_path"
 }
 
 # ============================================================
@@ -329,7 +327,7 @@ build_and_install_jwm() {
     info "编译 jwm（$BUILD_MODE 模式）..."
 
     if [[ -n "$JWM_BAR_NAME" ]]; then
-        info "将编译并安装 bar: $JWM_BAR_NAME（jwm 通过 config.toml 的 status_bar.name 选择 bar，无需 cargo feature）"
+        info "将构建 bar: $JWM_BAR_NAME（不安装到 /usr/local/bin；jwm 通过 config.toml 的 status_bar.name 选择 bar）"
     fi
 
     cd "$PROJECT_ROOT"
@@ -409,7 +407,7 @@ echo ""
 info "========================================="
 info " JWM 安装脚本"
 info " 构建模式: $BUILD_MODE"
-info " JWM Bar (compiled & installed): $JWM_BAR_NAME"
+info " JWM Bar (built only): $JWM_BAR_NAME"
 if [[ ${#CLONE_BARS[@]} -gt 0 ]]; then
     info " 拉取仓库: ${CLONE_BARS[*]}"
 fi
@@ -424,9 +422,9 @@ if [[ ${#CLONE_BARS[@]} -gt 0 ]]; then
     done
 fi
 
-# 2. 仅编译并安装 JWM_BAR_NAME 对应的 bar
+# 2. 仅构建 JWM_BAR_NAME 对应的 bar，不安装到系统路径
 if [[ "$SKIP_BAR" == false && -n "$JWM_BAR_NAME" ]]; then
-    build_and_install_bar "$JWM_BAR_NAME"
+    build_bar "$JWM_BAR_NAME"
 fi
 
 # 3. 处理 jwm
