@@ -50,7 +50,7 @@ const fn default_score() -> f32 {
 /// Lossy pose data plane for the slime effect.
 ///
 /// A small receiver thread owns the datagram socket and continuously replaces a
-/// single pending packet.  This gives us two useful properties:
+/// single pending packet. This gives us two useful properties:
 ///
 /// * old inference results can never queue up and add visual latency;
 /// * `Compositor::needs_render(&self)` can cheaply observe `has_pending()` and
@@ -257,7 +257,13 @@ impl SlimeState {
     }
 
     fn begin_fade(&mut self) {
-        if self.last_update.is_some() {
+        let Some(last) = self.last_update else {
+            return;
+        };
+        // Trackers commonly report an inactive pose every frame while no hand is
+        // visible. Start the fade once, but do not restart it at full opacity on
+        // every repeated inactive packet.
+        if last.elapsed() < HOLD_TIME {
             let now = Instant::now();
             self.last_update = Some(now.checked_sub(HOLD_TIME).unwrap_or(now));
         }
@@ -426,5 +432,18 @@ mod tests {
         state.begin_fade();
         assert!(state.opacity() > 0.9);
         assert!(state.is_visible());
+    }
+
+    #[test]
+    fn repeated_inactive_packets_do_not_restart_fade() {
+        let mut state = SlimeState::default();
+        state.last_update = Some(Instant::now());
+        state.begin_fade();
+        state.last_update = state
+            .last_update
+            .map(|last| last - Duration::from_millis(80));
+        let opacity_before = state.opacity();
+        state.begin_fade();
+        assert!(state.opacity() <= opacity_before + 0.02);
     }
 }
