@@ -297,6 +297,37 @@ void main() {
 "#;
 
 // ---------------------------------------------------------------------------
+// Screenshot annotation lines
+// ---------------------------------------------------------------------------
+
+/// A line vertex shader intentionally consumes the submitted positions.
+///
+/// The compositor's regular/HUD vertex shader generates a quad from
+/// `gl_VertexID`, which is correct for panels but makes `GL_LINES` annotation
+/// geometry collapse into HUD-quad coordinates.
+pub const LINE_VERTEX_SHADER: &str = r#"#version 330 core
+
+uniform mat4 u_projection;
+
+layout(location = 0) in vec2 a_position;
+
+void main() {
+    gl_Position = u_projection * vec4(a_position, 0.0, 1.0);
+}
+"#;
+
+pub const LINE_FRAGMENT_SHADER: &str = r#"#version 330 core
+
+uniform vec4 u_color;
+
+out vec4 frag_color;
+
+void main() {
+    frag_color = u_color;
+}
+"#;
+
+// ---------------------------------------------------------------------------
 // Feature 11b: HUD text overlay (pre-rasterized bitmap font texture)
 // ---------------------------------------------------------------------------
 

@@ -1228,6 +1228,18 @@ impl Backend for X11rbBackend {
         }
     }
 
+    fn compositor_set_annotation_color(&mut self, rgba: [f32; 4]) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_annotation_color(rgba);
+        }
+    }
+
+    fn compositor_set_annotation_line_width(&mut self, width: f32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_annotation_line_width(width);
+        }
+    }
+
     fn compositor_annotation_add_point(&mut self, x: f32, y: f32) {
         if let Some(c) = self.compositor.as_mut() {
             c.annotation_add_point(x, y);

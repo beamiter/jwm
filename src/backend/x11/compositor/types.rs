@@ -177,6 +177,11 @@ pub(super) struct HudTextUniforms {
     pub(super) texture: Option<glow::UniformLocation>,
 }
 
+pub(super) struct LineUniforms {
+    pub(super) projection: Option<glow::UniformLocation>,
+    pub(super) color: Option<glow::UniformLocation>,
+}
+
 pub(super) struct OverviewEntry {
     pub(super) x11_win: u32,
     pub(super) target_w: f32,

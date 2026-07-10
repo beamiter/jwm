@@ -41,6 +41,14 @@ impl<C: CompositorConnection> Compositor<C> {
         });
     }
 
+    pub(crate) fn set_annotation_color(&mut self, rgba: [f32; 4]) {
+        self.annotation_color = rgba;
+    }
+
+    pub(crate) fn set_annotation_line_width(&mut self, width: f32) {
+        self.annotation_line_width = width.max(1.0);
+    }
+
     /// Render all annotation strokes as GL_LINES.
     pub(super) fn render_annotations(&self, proj: &[f32; 16]) {
         if self.annotation_strokes.is_empty() {
@@ -48,10 +56,16 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         unsafe {
-            // Use the HUD program with a solid color for drawing lines
-            self.gl.use_program(Some(self.hud_program));
+            self.gl.use_program(Some(self.annotation_line_program));
             self.gl
-                .uniform_matrix_4_f32_slice(self.hud_uniforms.projection.as_ref(), false, proj);
+                .uniform_matrix_4_f32_slice(
+                    self.annotation_line_uniforms.projection.as_ref(),
+                    false,
+                    proj,
+                );
+            self.gl.enable(glow::BLEND);
+            self.gl
+                .blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
 
             for stroke in &self.annotation_strokes {
                 if stroke.points.len() < 2 {
@@ -90,18 +104,13 @@ impl<C: CompositorConnection> Compositor<C> {
                     .vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 8, 0);
                 self.gl.enable_vertex_attrib_array(0);
 
-                // Set color via bg_color uniform (reusing HUD shader)
                 self.gl.uniform_4_f32(
-                    self.hud_uniforms.bg_color.as_ref(),
+                    self.annotation_line_uniforms.color.as_ref(),
                     stroke.color[0],
                     stroke.color[1],
                     stroke.color[2],
                     stroke.color[3],
                 );
-                self.gl
-                    .uniform_2_f32(self.hud_uniforms.size.as_ref(), 1.0, 1.0);
-                self.gl
-                    .uniform_4_f32(self.hud_uniforms.rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
 
                 let num_verts = (stroke.points.len() - 1) * 2;
                 self.gl.draw_arrays(glow::LINES, 0, num_verts as i32);
@@ -112,6 +121,8 @@ impl<C: CompositorConnection> Compositor<C> {
             }
 
             self.gl.line_width(1.0);
+            self.gl
+                .blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
             self.gl.use_program(None);
         }
     }

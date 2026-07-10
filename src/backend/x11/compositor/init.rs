@@ -769,6 +769,19 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         };
 
+        let annotation_line_program = shader_cache.get_or_compile(
+            &gl,
+            "annotation_line",
+            shaders::LINE_VERTEX_SHADER,
+            shaders::LINE_FRAGMENT_SHADER,
+        )?;
+        let annotation_line_uniforms = unsafe {
+            LineUniforms {
+                projection: gl.get_uniform_location(annotation_line_program, "u_projection"),
+                color: gl.get_uniform_location(annotation_line_program, "u_color"),
+            }
+        };
+
         // Compile tag-switch transition shader
         let transition_program = shader_cache.get_or_compile(
             &gl,
@@ -1233,6 +1246,8 @@ impl<C: CompositorConnection> Compositor<C> {
             hud_uniforms,
             hud_text_program,
             hud_text_uniforms,
+            annotation_line_program,
+            annotation_line_uniforms,
             hud_text_texture: None,
             hud_text_width: 0,
             hud_text_height: 0,

@@ -369,6 +369,8 @@ where
     hud_uniforms: HudUniforms,
     hud_text_program: glow::Program,
     hud_text_uniforms: HudTextUniforms,
+    annotation_line_program: glow::Program,
+    annotation_line_uniforms: LineUniforms,
     hud_text_texture: Option<glow::Texture>,
     hud_text_width: u32,
     hud_text_height: u32,
@@ -739,6 +741,7 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
             self.gl.delete_program(self.postprocess_program);
             self.gl.delete_program(self.hud_program);
             self.gl.delete_program(self.hud_text_program);
+            self.gl.delete_program(self.annotation_line_program);
             if let Some(tex) = self.hud_text_texture.take() {
                 self.gl.delete_texture(tex);
             }
