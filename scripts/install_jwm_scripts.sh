@@ -76,8 +76,8 @@ ALL_BARS=(
 # ============================================================
 # 默认值
 # ============================================================
-BUILD_MODE="debug"
-JWM_BAR_NAME="gpui_component_bar"
+BUILD_MODE="release"
+JWM_BAR_NAME="egui_bar"
 JWM_BAR_SET_BY_ARGS=false
 
 # CLONE_BARS：仅用于把这些 bar 仓库拉到本地（git clone / pull），
