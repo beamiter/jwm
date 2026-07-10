@@ -64,7 +64,7 @@ use crate::backend::common_define::ColorScheme;
 use crate::backend::common_define::EventMaskBits;
 use crate::backend::common_define::SchemeType;
 use crate::backend::common_define::{KeySym, Mods};
-use crate::config::CONFIG;
+use crate::config::{BackendFamily, CONFIG, get_backend_family};
 use crate::core::layout::LayoutEnum;
 use crate::core::models::{ClientKey, MonitorKey, ScrollingState, WMClient, WMMonitor};
 use crate::ipc_server::IpcServer;
@@ -1160,7 +1160,7 @@ impl Jwm {
 
     pub fn show_keybindings(
         &mut self,
-        _backend: &mut dyn Backend,
+        backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
         info!("[show_keybindings]");
@@ -1246,38 +1246,98 @@ impl Jwm {
 
         let text = lines.join("\n");
 
-        let dmenu_font = cfg.dmenu_font();
-        let mut command = Command::new("dmenu");
-        command.args([
-            "-l",
-            &lines.len().to_string(),
-            "-fn",
-            dmenu_font,
-            "-p",
-            "Keybindings:",
-        ]);
-        command.stdin(std::process::Stdio::piped());
-        command.stdout(std::process::Stdio::null());
-        command.stderr(std::process::Stdio::inherit());
+        let menu_candidates = Self::keybinding_menu_candidates(lines.len(), cfg.dmenu_font());
+        let mut last_error = None;
 
-        Self::apply_child_pre_exec(&mut command);
-        Self::setup_smithay_child_env(&mut command, _backend);
+        for (program, args) in menu_candidates {
+            let mut command = Command::new(program);
+            command.args(args);
+            command.stdin(std::process::Stdio::piped());
+            command.stdout(std::process::Stdio::null());
+            command.stderr(std::process::Stdio::inherit());
 
-        match command.spawn() {
-            Ok(mut child) => {
-                if let Some(stdin) = child.stdin.take() {
-                    use std::io::Write;
-                    let mut stdin = stdin;
-                    let _ = stdin.write_all(text.as_bytes());
+            Self::apply_child_pre_exec(&mut command);
+            Self::setup_smithay_child_env(&mut command, backend);
+
+            match command.spawn() {
+                Ok(mut child) => {
+                    if let Some(stdin) = child.stdin.take() {
+                        use std::io::Write;
+                        let mut stdin = stdin;
+                        let _ = stdin.write_all(text.as_bytes());
+                    }
+                    debug!("[show_keybindings] opened with {program}");
+                    return Ok(());
                 }
-            }
-            Err(e) => {
-                error!("[show_keybindings] failed to spawn dmenu: {:?}", e);
-                return Err(e.into());
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => last_error = Some(e),
+                Err(e) => return Err(e.into()),
             }
         }
 
-        Ok(())
+        let error = last_error.unwrap_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no supported menu program was found",
+            )
+        });
+        error!(
+            "[show_keybindings] no supported menu found; install fuzzel, wofi, bemenu, rofi, or dmenu"
+        );
+        Err(error.into())
+    }
+
+    /// Menu programs that can render a newline-delimited dmenu-style list.
+    /// Native Wayland menus are preferred for Wayland sessions, while the
+    /// standard X11 order remains unchanged for X11 users.
+    fn keybinding_menu_candidates(
+        line_count: usize,
+        font: &str,
+    ) -> Vec<(&'static str, Vec<String>)> {
+        let prompt = "Keybindings:".to_string();
+        let lines = line_count.to_string();
+        let dmenu = || {
+            vec![
+                "-l".to_string(),
+                lines.clone(),
+                "-fn".to_string(),
+                font.to_string(),
+                "-p".to_string(),
+                prompt.clone(),
+            ]
+        };
+        let rofi = || vec!["-dmenu".to_string(), "-p".to_string(), prompt.clone()];
+        let fuzzel = || {
+            vec![
+                "--dmenu".to_string(),
+                "--prompt".to_string(),
+                prompt.clone(),
+            ]
+        };
+        let wofi = || {
+            vec![
+                "--dmenu".to_string(),
+                "--prompt".to_string(),
+                prompt.clone(),
+            ]
+        };
+        let bemenu = || vec!["-p".to_string(), prompt.clone()];
+
+        match get_backend_family() {
+            BackendFamily::Wayland => vec![
+                ("fuzzel", fuzzel()),
+                ("wofi", wofi()),
+                ("bemenu", bemenu()),
+                ("rofi", rofi()),
+                ("dmenu", dmenu()),
+            ],
+            BackendFamily::X11 => vec![
+                ("dmenu", dmenu()),
+                ("rofi", rofi()),
+                ("bemenu", bemenu()),
+                ("fuzzel", fuzzel()),
+                ("wofi", wofi()),
+            ],
+        }
     }
 
     /// Compute the night light color temperature factor (0.0 = neutral, up to

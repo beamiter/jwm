@@ -48,7 +48,9 @@ impl StatusBarBuilder {
         let final_occupied = occupied_tags_mask & config_mask;
         let final_urgent = urgent_tags_mask & config_mask;
 
-        log::info!(
+        // This runs for every status-bar refresh (focus, title, tag and
+        // monitor updates), so keep it out of the normal session log.
+        log::debug!(
             "[StatusBar] Tag masks - Occupied: {:b}, Urgent: {:b}",
             final_occupied,
             final_urgent
