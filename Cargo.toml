@@ -27,9 +27,8 @@ smithay-client-toolkit = { version = "0.19", optional = true }
 wayland-client = { version = "0.31", optional = true }
 wayland-protocols-wlr = { version = "0.3", optional = true, features = ["client"] }
 raw-window-handle = { version = "0.6", optional = true }
-eframe = "0.34.3"
-egui = "0.34.3"
-egui_plot = "0.35.0"
+eframe = "0.35.0"
+egui = "0.35.0"
 toml = "1.1.2"
 
 [features]

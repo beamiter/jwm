@@ -47,7 +47,6 @@ async fn main() -> anyhow::Result<()> {
             .with_decorations(false)
             .with_resizable(true)
             .with_transparent(transparent),
-        vsync: true,
         ..Default::default()
     };
 

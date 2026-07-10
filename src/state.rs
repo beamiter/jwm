@@ -14,8 +14,6 @@ pub struct UiState {
     pub need_resize: bool,
     /// Time display format toggle
     pub show_seconds: bool,
-    /// Debug window visibility
-    pub show_debug_window: bool,
     /// Last UI update time
     pub last_ui_update: Instant,
     /// Button height for calculations
@@ -28,16 +26,9 @@ impl UiState {
             scale_factor: ui::DEFAULT_SCALE_FACTOR,
             need_resize: false,
             show_seconds: false,
-            show_debug_window: false,
             last_ui_update: Instant::now(),
             button_height: 0.0,
         }
-    }
-
-    /// Toggle debug window
-    pub fn toggle_debug_window(&mut self) {
-        self.show_debug_window = !self.show_debug_window;
-        self.need_resize = true;
     }
 
     /// Toggle time format

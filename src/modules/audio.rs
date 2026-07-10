@@ -23,7 +23,7 @@ impl BarModule for AudioModule {
     }
 
     fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
-        let (volume_icon, tooltip) = if let Some(device) = state.get_master_audio_device() {
+        let (volume_icon, volume) = if let Some(device) = state.get_master_audio_device() {
             let icon = if device.is_muted || device.volume == 0 {
                 icons::VOLUME_MUTED
             } else if device.volume < 30 {
@@ -34,21 +34,21 @@ impl BarModule for AudioModule {
                 icons::VOLUME_HIGH
             };
 
-            let tooltip = format!(
-                "{}: {}%{}",
-                device.description,
-                device.volume,
-                if device.is_muted { " (muted)" } else { "" }
-            );
-
-            (icon, tooltip)
+            (icon, Some(device.volume))
         } else {
-            (icons::VOLUME_MUTED, "No audio device".to_string())
+            (icons::VOLUME_MUTED, None)
         };
 
-        let label_response = ui.button(volume_icon).on_hover_text(tooltip);
+        let mut label_clicked = false;
+        let mut label_hovered = false;
+        ui.horizontal(|ui| {
+            let label_response = ui.button(volume_icon);
+            label_clicked = label_response.clicked();
+            label_hovered = label_response.hovered();
+            ui.label(volume.map_or_else(|| "--".to_string(), |value| format!("{value}%")));
+        });
 
-        if label_response.hovered() {
+        if label_hovered {
             let scroll = ui.input(|i| {
                 i.raw
                     .events
@@ -74,7 +74,7 @@ impl BarModule for AudioModule {
             }
         }
 
-        if label_response.clicked() {
+        if label_clicked {
             if let Some(device) = state.get_master_audio_device() {
                 if device.has_switch_control {
                     let device_name = device.name.clone();

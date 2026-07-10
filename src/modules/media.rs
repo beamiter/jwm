@@ -7,7 +7,6 @@ use super::BarModule;
 
 #[derive(Debug, Clone, Default)]
 struct MediaInfo {
-    player_name: String,
     title: String,
     artist: String,
     is_playing: bool,
@@ -45,8 +44,6 @@ impl MediaModule {
             .ok()
             .or_else(|| finder.find_all().ok().and_then(|mut v| v.pop()))?;
 
-        let player_name = player.identity().to_string();
-
         let playback_status = player.get_playback_status().ok()?;
         let is_playing = playback_status == mpris::PlaybackStatus::Playing;
 
@@ -58,7 +55,6 @@ impl MediaModule {
             .unwrap_or_default();
 
         Some(MediaInfo {
-            player_name,
             title,
             artist,
             is_playing,

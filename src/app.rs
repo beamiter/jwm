@@ -183,7 +183,7 @@ impl eframe::App for EguiBarApp {
                     .stroke(Stroke::new(1.0, colors::STROKE_SUBTLE))
                     .inner_margin(egui::Margin::symmetric(10, 2)),
             )
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 self.draw_main_ui(ui);
                 self.render_popups(&ctx);
             });
