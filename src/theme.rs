@@ -101,8 +101,11 @@ pub mod icons {
     pub const VOLUME_HIGH: &str = "🔊";
 
     // System icons
-    pub const CPU_ICON: &str = "🔥";
-    pub const MEMORY_ICON: &str = "💾";
+    pub const CPU_ICON: &str = "\u{F4BC}";
+    pub const MEMORY_ICON: &str = "\u{F035B}";
+    pub const BATTERY_ICON: &str = "\u{F0079}";
+    pub const BATTERY_CHARGING_ICON: &str = "\u{F0084}";
+    pub const TIME_ICON: &str = "\u{F0954}";
     pub const SCREENSHOT_ICON: &str = "📸";
     pub const SETTINGS_ICON: &str = "⚙️";
 

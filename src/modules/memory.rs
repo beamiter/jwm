@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use crate::theme::colors;
+use crate::theme::{colors, icons};
 
 use super::BarModule;
 
@@ -24,7 +24,8 @@ impl BarModule for MemoryModule {
         let (available_gb, used_gb) = state.get_memory_display_info();
 
         ui.label(
-            egui::RichText::new(format!("{:.1}G", available_gb)).color(colors::MEMORY_AVAILABLE),
+            egui::RichText::new(format!("{} {:.1}G", icons::MEMORY_ICON, available_gb))
+                .color(colors::MEMORY_AVAILABLE),
         );
 
         ui.label(egui::RichText::new(format!("{:.1}G", used_gb)).color(colors::MEMORY_USED));

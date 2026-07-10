@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use crate::theme::colors;
+use crate::theme::{colors, icons};
 
 use super::BarModule;
 
@@ -37,7 +37,12 @@ impl BarModule for CpuModule {
         if let Some(snapshot) = state.system_monitor.get_snapshot() {
             let cpu_color = Self::get_cpu_color(snapshot.cpu_average as f64 / 100.0);
             ui.label(
-                egui::RichText::new(format!("{}%", snapshot.cpu_average as i32)).color(cpu_color),
+                egui::RichText::new(format!(
+                    "{} {}%",
+                    icons::CPU_ICON,
+                    snapshot.cpu_average as i32
+                ))
+                .color(cpu_color),
             );
 
             if snapshot.cpu_average > 0.8 * 100.0 {

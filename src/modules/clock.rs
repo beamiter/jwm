@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use crate::theme::colors;
+use crate::theme::{colors, icons};
 
 use super::BarModule;
 
@@ -32,7 +32,7 @@ impl BarModule for ClockModule {
         if ui
             .selectable_label(
                 true,
-                egui::RichText::new(current_time)
+                egui::RichText::new(format!("{} {}", icons::TIME_ICON, current_time))
                     .color(colors::GREEN)
                     .small(),
             )

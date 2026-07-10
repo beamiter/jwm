@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use crate::theme::colors;
+use crate::theme::{colors, icons};
 
 use super::BarModule;
 
@@ -32,14 +32,9 @@ impl BarModule for BatteryModule {
             };
 
             let battery_icon = if is_charging {
-                "🔌"
+                icons::BATTERY_CHARGING_ICON
             } else {
-                match battery_percent {
-                    p if p > 75.0 => "🔋",
-                    p if p > 50.0 => "🔋",
-                    p if p > 25.0 => "🪫",
-                    _ => "🪫",
-                }
+                icons::BATTERY_ICON
             };
 
             ui.label(egui::RichText::new(battery_icon).color(battery_color));
@@ -47,10 +42,6 @@ impl BarModule for BatteryModule {
 
             if battery_percent < 20.0 && !is_charging {
                 ui.label(egui::RichText::new("⚠️").color(colors::WARNING));
-            }
-
-            if is_charging {
-                ui.label(egui::RichText::new("⚡").color(colors::CHARGING));
             }
         } else {
             ui.label(egui::RichText::new("❓").color(colors::UNAVAILABLE));
