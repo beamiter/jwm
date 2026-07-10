@@ -37,14 +37,20 @@ impl X11RequestBatcher {
 
     /// Record an operation and maybe flush
     pub fn mark_op<C: Connection>(&self, conn: &C) -> Result<(), BackendError> {
-        let count = self.pending_ops.fetch_add(1, Ordering::SeqCst);
+        // Keep the batching semantics identical to the native XCB backend:
+        // `threshold = 8` flushes the eighth queued operation, not the
+        // ninth. AcqRel is sufficient here; the counter is only used for
+        // batching decisions and does not publish request payloads.
+        let count = self.pending_ops.fetch_add(1, Ordering::AcqRel) + 1;
         let threshold = self.flush_op_threshold.load(Ordering::Relaxed);
 
         // Check if we should flush
-        let should_flush = if count > 0 && count % threshold == 0 {
+        let should_flush = if threshold > 0 && count >= threshold {
             // Operation threshold reached
             true
-        } else if let Ok(last) = self.last_flush.lock() {
+        } else if (count == 1 || count % 4 == 0)
+            && let Ok(last) = self.last_flush.lock()
+        {
             // Time threshold reached?
             let timeout_ms = self.flush_time_threshold_ms.load(Ordering::Relaxed);
             last.elapsed() > Duration::from_millis(timeout_ms)

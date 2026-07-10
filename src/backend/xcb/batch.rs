@@ -321,7 +321,11 @@ mod tests {
 
     #[test]
     fn test_geometry_batch_pending_count() {
-        let (conn, _) = xcb::Connection::connect(None).expect("connect xcb for test");
+        // This test only covers local queue bookkeeping. Keep headless CI
+        // usable when no X server is available.
+        let Ok((conn, _)) = xcb::Connection::connect(None) else {
+            return;
+        };
         let mut batch = BatchedGeometryRequest::new(&conn);
         batch.queue_geometry(1);
         batch.queue_geometry(2);

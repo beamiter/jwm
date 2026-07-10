@@ -2821,14 +2821,18 @@ impl XcbWindowOps {
             border as u16,
             false,
         );
-        self.conn
-            .send_and_check_request(&x::SendEvent {
-                propagate: false,
-                destination: x::SendEventDest::Window(window),
-                event_mask: x::EventMask::STRUCTURE_NOTIFY,
-                event: &event,
-            })
-            .map_err(xcb_err)
+        // ConfigureNotify is advisory ICCCM bookkeeping after the actual
+        // ConfigureWindow request. Waiting for a checked request here adds a
+        // server round-trip per layout/drag update. Queue it and let the
+        // existing request batcher flush it with the geometry change, just as
+        // the X11RB backend does.
+        self.conn.send_request(&x::SendEvent {
+            propagate: false,
+            destination: x::SendEventDest::Window(window),
+            event_mask: x::EventMask::STRUCTURE_NOTIFY,
+            event: &event,
+        });
+        self.batcher.mark_op(&self.conn)
     }
 
     fn detect_numlock_mask(&self) -> x::ModMask {
