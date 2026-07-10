@@ -44,6 +44,7 @@ jobs:
             libglib2.0-dev \
             libcairo2-dev \
             libpango1.0-dev \
+            libasound2-dev \
             libdbus-1-dev \
             libudev-dev \
             libinput-dev \
