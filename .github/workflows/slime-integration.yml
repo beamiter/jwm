@@ -4,24 +4,13 @@ on:
   push:
     branches:
       - feature/slime-hand-effect
-    paths:
-      - tools/integrate_slime_effect.py
-      - src/backend/x11/compositor/slime.rs
-      - .github/workflows/slime-integration.yml
-  pull_request:
-    branches:
-      - master
-    paths:
-      - tools/integrate_slime_effect.py
-      - src/backend/x11/compositor/slime.rs
-      - .github/workflows/slime-integration.yml
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: slime-integration-${{ github.ref }}
+  group: slime-integration-branch
   cancel-in-progress: false
 
 jobs:
@@ -77,46 +66,91 @@ jobs:
         with:
           components: rustfmt
 
-      - name: Apply guarded integration edits
-        run: python3 tools/integrate_slime_effect.py
-
-      - name: Format Rust sources
-        run: cargo fmt --all
-
-      - name: Check library, binaries, and tests
-        id: cargo_check
-        continue-on-error: true
-        shell: bash
+      - name: Apply fade-state fix
         run: |
-          set -o pipefail
-          # The repository's existing wm_benchmark target imports Criterion
-          # without declaring it as a dev-dependency. Validate all production
-          # targets and tests here without conflating that unrelated bench issue.
-          cargo check --lib --bins --tests 2>&1 | tee slime-cargo-check.log
+          python3 - <<'PY'
+          from pathlib import Path
 
-      - name: Upload cargo diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: slime-cargo-check
-          path: slime-cargo-check.log
-          if-no-files-found: error
-          retention-days: 3
+          path = Path("src/backend/x11/compositor/slime.rs")
+          text = path.read_text(encoding="utf-8")
+          old = '''    fn begin_fade(&mut self) {
+              if self.last_update.is_some() {
+                  let now = Instant::now();
+                  self.last_update = Some(now.checked_sub(HOLD_TIME).unwrap_or(now));
+              }
+          }
+          '''
+          new = '''    fn begin_fade(&mut self) {
+              let Some(last) = self.last_update else {
+                  return;
+              };
+              // Trackers commonly send an inactive packet every frame while no
+              // hand is visible. Start the fade once, but never restart it from
+              // full opacity on each repeated inactive packet.
+              if last.elapsed() < HOLD_TIME {
+                  let now = Instant::now();
+                  self.last_update = Some(now.checked_sub(HOLD_TIME).unwrap_or(now));
+              }
+          }
+          '''
+          if new not in text:
+              if text.count(old) != 1:
+                  raise SystemExit("fade-state patch anchor changed")
+              path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
 
-      - name: Commit generated integration
-        if: steps.cargo_check.outcome == 'success'
+      - name: Add repeated-inactive regression test
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/backend/x11/compositor/slime.rs")
+          text = path.read_text(encoding="utf-8")
+          marker = "fn repeated_inactive_packets_do_not_restart_fade()"
+          if marker not in text:
+              anchor = '''    #[test]
+              fn begin_fade_keeps_a_short_transition() {
+                  let mut state = SlimeState::default();
+                  state.last_update = Some(Instant::now());
+                  state.begin_fade();
+                  assert!(state.opacity() > 0.9);
+                  assert!(state.is_visible());
+              }
+          '''
+              replacement = anchor + '''
+              #[test]
+              fn repeated_inactive_packets_do_not_restart_fade() {
+                  let mut state = SlimeState::default();
+                  state.last_update = Some(Instant::now());
+                  state.begin_fade();
+                  state.last_update = state
+                      .last_update
+                      .map(|last| last - Duration::from_millis(80));
+                  let opacity_before = state.opacity();
+                  state.begin_fade();
+                  assert!(state.opacity() <= opacity_before + 0.02);
+              }
+          '''
+              if text.count(anchor) != 1:
+                  raise SystemExit("slime test patch anchor changed")
+              path.write_text(text.replace(anchor, replacement, 1), encoding="utf-8")
+          PY
+
+      - name: Format and validate
+        run: |
+          cargo fmt --all
+          cargo check --lib --bins --tests
+          cargo test --lib repeated_inactive_packets_do_not_restart_fade
+
+      - name: Commit fade fix
         shell: bash
         run: |
           if git diff --quiet; then
-            echo "Integration already up to date"
+            echo "Fade fix already present"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/backend/x11/compositor
-          git commit -m "feat(slime): wire realtime hand refraction into X11 compositor"
+          git add src/backend/x11/compositor/slime.rs
+          git commit -m "fix(slime): do not restart fade on repeated inactive poses"
           git push origin HEAD:feature/slime-hand-effect
-
-      - name: Fail when cargo check failed
-        if: steps.cargo_check.outcome != 'success'
-        run: exit 1
