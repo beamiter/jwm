@@ -1,11 +1,17 @@
-/* Adwaita-inspired status bar: rely on the toolkit's spacing, typography and
- * neutral surfaces, with one accent colour for interactive state. */
-@define-color accent_color #3584e4;
-@define-color accent_bg_color #3584e4;
-@define-color accent_fg_color #ffffff;
-@define-color success_bg_color #2ec27e;
-@define-color warning_bg_color #e5a50a;
-@define-color error_bg_color #e01b24;
+/* Visual hierarchy aligned with relm_bar's compact Adwaita panel. */
+@define-color bar_light_bg #fafafa;
+@define-color bar_light_subtle #f2f2f2;
+@define-color bar_light_border rgba(0, 0, 6, 0.14);
+@define-color bar_light_text #242424;
+@define-color bar_dark_bg #242424;
+@define-color bar_dark_subtle #3a3a3a;
+@define-color bar_dark_border rgba(255, 255, 255, 0.13);
+@define-color bar_dark_text #ffffff;
+@define-color adw_blue #3584e4;
+@define-color adw_blue_hover #62a0ea;
+@define-color adw_yellow #f6d32d;
+@define-color adw_orange #ff7800;
+@define-color adw_red #e01b24;
 
 window,
 window.transparent-window,
@@ -13,179 +19,234 @@ window.theme-light,
 window.theme-dark {
   background: transparent;
   background-image: none;
-  border: 0;
+  border: none;
   box-shadow: none;
 }
 
-.panel-root {
-  margin: 0;
-  padding: 4px 6px;
-  border: 1px solid alpha(currentColor, 0.12);
-  border-radius: 12px;
-  background-color: alpha(@theme_bg_color, 0.96);
-  color: @theme_fg_color;
-  box-shadow: 0 2px 6px alpha(#000000, 0.16);
+button {
+  min-height: 28px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background-image: none;
+  box-shadow: none;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 
-window.theme-dark .panel-root {
-  background-color: alpha(@theme_bg_color, 0.94);
-  border-color: alpha(@theme_fg_color, 0.12);
+button:focus-visible {
+  outline: 2px solid alpha(@adw_blue, 0.85);
+  outline-offset: 2px;
+}
+
+.panel-root {
+  margin: 3px;
+  padding: 3px 6px;
+  border-radius: 12px;
 }
 
 .workspace-strip,
 .status-strip,
 .layout-selector {
   padding: 0;
-  background: transparent;
+  border-radius: 9px;
 }
 
-button {
-  min-height: 28px;
-  padding: 3px 9px;
-  border-radius: 7px;
-  border: 1px solid alpha(currentColor, 0.12);
-  background-image: none;
-  background-color: alpha(@theme_fg_color, 0.08);
-  color: @theme_fg_color;
-  box-shadow: none;
-  font-weight: 500;
+window.theme-light .panel-root {
+  background-color: alpha(@bar_light_bg, 0.96);
+  border: 1px solid @bar_light_border;
+  box-shadow: 0 1px 3px rgba(0, 0, 6, 0.16);
+  color: @bar_light_text;
 }
 
-button:hover {
-  background-color: alpha(@theme_fg_color, 0.14);
+window.theme-dark .panel-root {
+  background-color: alpha(@bar_dark_bg, 0.96);
+  border: 1px solid @bar_dark_border;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+  color: @bar_dark_text;
 }
 
-button:active {
-  background-color: alpha(@theme_fg_color, 0.20);
-}
-
-button:focus-visible {
-  outline: 2px solid alpha(@accent_color, 0.65);
-  outline-offset: 2px;
-}
-
-/* Workspaces use a compact, segmented-control-like presentation. */
+/* Workspaces use a flat segmented treatment; status determines emphasis. */
 .tab-button {
-  min-width: 32px;
-  min-height: 28px;
+  min-width: 34px;
   margin: 0 1px;
-  padding: 2px 5px;
-  border-radius: 6px;
-  font-size: 14px;
+  padding: 0 5px;
+  font-size: 15px;
   font-weight: 600;
 }
 
-.tab-button.empty {
-  background-color: transparent;
-  border-color: transparent;
-  color: alpha(@theme_fg_color, 0.55);
+window.theme-light .tab-button.empty { color: alpha(@bar_light_text, 0.55); }
+window.theme-dark .tab-button.empty { color: alpha(@bar_dark_text, 0.55); }
+
+window.theme-light .tab-button.empty:hover,
+window.theme-light .tab-button.occupied:hover { background-color: alpha(@bar_light_text, 0.08); }
+
+window.theme-dark .tab-button.empty:hover,
+window.theme-dark .tab-button.occupied:hover { background-color: alpha(@bar_dark_text, 0.10); }
+
+window.theme-light .tab-button.occupied {
+  background-color: alpha(@adw_blue, 0.12);
+  color: shade(@adw_blue, 0.78);
 }
 
-.tab-button.empty:hover,
-.tab-button.occupied {
-  background-color: alpha(@theme_fg_color, 0.09);
-  border-color: alpha(@theme_fg_color, 0.10);
-  color: @theme_fg_color;
+window.theme-dark .tab-button.occupied {
+  background-color: alpha(@adw_blue, 0.26);
+  color: #c0d8ff;
 }
 
 .tab-button.selected,
 .tab-button.filled {
-  background-color: @accent_bg_color;
-  border-color: alpha(@accent_bg_color, 0.8);
-  color: @accent_fg_color;
+  background-color: @adw_blue;
+  border-color: alpha(#000000, 0.12);
+  color: white;
+  font-weight: 700;
 }
 
 .tab-button.selected:hover,
-.tab-button.filled:hover {
-  background-color: shade(@accent_bg_color, 1.08);
-}
+.tab-button.filled:hover { background-color: @adw_blue_hover; }
 
 .tab-button.urgent {
-  background-color: @error_bg_color;
-  border-color: @error_bg_color;
+  background-color: @adw_orange;
+  border-color: alpha(#000000, 0.18);
   color: #ffffff;
+  font-weight: 700;
 }
 
-/* System metrics are quiet by default; their colour only conveys state. */
-.metric-label {
-  min-width: 58px;
-  min-height: 24px;
-  padding: 2px 7px;
-  border: 1px solid alpha(currentColor, 0.12);
-  border-radius: 6px;
-  background-color: alpha(@theme_fg_color, 0.06);
-  color: @theme_fg_color;
-  font-family: monospace;
-  font-size: 11px;
-  font-weight: 600;
-}
+.tab-button.urgent:hover { background-color: #ff9b36; }
 
-.metric-label.level-ok { color: @theme_fg_color; }
-.metric-label.level-warn { color: @warning_bg_color; }
-.metric-label.level-high { color: #ff7800; }
-.metric-label.level-crit {
-  background-color: alpha(@error_bg_color, 0.16);
-  border-color: alpha(@error_bg_color, 0.55);
-  color: @error_bg_color;
-}
-
-/* Keep all actions in the same control family; only the clock is primary. */
-.time-button {
-  min-width: 132px;
-  font-family: monospace;
-  font-size: 12px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
-.time-button,
-.volume-button {
-  background-color: alpha(@theme_fg_color, 0.08);
-}
-
-.volume-button {
-  min-width: 92px;
-  font-family: monospace;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
+/* Compact controls share a quiet secondary surface. */
+.layout-toggle,
+.layout-option,
+.volume-button,
 .theme-button,
 .screenshot-button,
+.time-button,
+.metric-label,
+.monitor-badge {
+  border: 1px solid transparent;
+  background-image: none;
+}
+
+window.theme-light .layout-toggle,
+window.theme-light .layout-option,
+window.theme-light .volume-button,
+window.theme-light .theme-button,
+window.theme-light .screenshot-button,
+window.theme-light .metric-label,
+window.theme-light .monitor-badge {
+  background-color: @bar_light_subtle;
+  border-color: alpha(@bar_light_text, 0.10);
+  color: @bar_light_text;
+}
+
+window.theme-dark .layout-toggle,
+window.theme-dark .layout-option,
+window.theme-dark .volume-button,
+window.theme-dark .theme-button,
+window.theme-dark .screenshot-button,
+window.theme-dark .metric-label,
+window.theme-dark .monitor-badge {
+  background-color: @bar_dark_subtle;
+  border-color: alpha(@bar_dark_text, 0.12);
+  color: @bar_dark_text;
+}
+
+window.theme-light .layout-toggle:hover,
+window.theme-light .layout-option:hover,
+window.theme-light .volume-button:hover,
+window.theme-light .theme-button:hover,
+window.theme-light .screenshot-button:hover { background-color: #e7e7e7; }
+
+window.theme-dark .layout-toggle:hover,
+window.theme-dark .layout-option:hover,
+window.theme-dark .volume-button:hover,
+window.theme-dark .theme-button:hover,
+window.theme-dark .screenshot-button:hover { background-color: #4a4a4a; }
+
+button:active { box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.18); }
+
 .layout-toggle {
-  min-width: 32px;
-  padding-left: 7px;
-  padding-right: 7px;
+  min-width: 44px;
+  padding: 0 8px;
+  font-family: monospace;
+  font-weight: 700;
 }
 
 .layout-toggle.open {
-  background-color: alpha(@accent_color, 0.18);
-  border-color: alpha(@accent_color, 0.55);
-  color: @accent_color;
+  background-color: alpha(@adw_blue, 0.20);
+  border-color: alpha(@adw_blue, 0.45);
+  color: @adw_blue;
 }
+
+.layout-toggle.closed { color: inherit; }
 
 .layout-option {
   min-width: 34px;
   min-height: 24px;
-  padding: 2px 6px;
-  border-radius: 6px;
+  padding: 0 6px;
   font-family: monospace;
   font-size: 11px;
+  font-weight: 700;
 }
 
 .layout-option.current {
-  background-color: @accent_bg_color;
-  border-color: @accent_bg_color;
-  color: @accent_fg_color;
+  background-color: @adw_blue;
+  border-color: alpha(#000000, 0.12);
+  color: white;
 }
 
+.volume-button {
+  min-width: 88px;
+  padding: 0 8px;
+  font-family: monospace;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.theme-button,
+.screenshot-button {
+  min-width: 36px;
+  padding: 0 7px;
+  font-size: 13px;
+}
+
+/* The clock is deliberately the sole primary control in the status strip. */
+.time-button {
+  min-width: 124px;
+  padding: 0 10px;
+  background-color: @adw_blue;
+  border-color: alpha(#000000, 0.14);
+  color: #ffffff;
+  font-family: monospace;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.time-button:hover { background-color: @adw_blue_hover; }
+.time-button:active { background-color: shade(@adw_blue, 0.85); }
+
+.metric-label {
+  min-width: 58px;
+  min-height: 24px;
+  padding: 0 7px;
+  border-radius: 7px;
+  font-family: monospace;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.metric-label.level-ok { color: #1a7f46; }
+.metric-label.level-warn { background-color: alpha(@adw_yellow, 0.32); color: #6b5200; }
+.metric-label.level-high { background-color: alpha(@adw_orange, 0.25); color: #9a3d00; }
+.metric-label.level-crit { background-color: alpha(@adw_red, 0.25); color: #b3141b; }
+
+window.theme-dark .metric-label.level-ok { color: #78e1a8; }
+window.theme-dark .metric-label.level-warn { background-color: #665c00; color: #fff5b1; }
+window.theme-dark .metric-label.level-high { background-color: #7a3d00; color: #ffd0a8; }
+window.theme-dark .metric-label.level-crit { background-color: #7a1d24; color: #ffb4ab; }
+
 .monitor-badge {
-  min-width: 28px;
+  min-width: 32px;
   min-height: 28px;
-  padding: 2px 5px;
-  border: 1px solid alpha(currentColor, 0.12);
-  border-radius: 6px;
-  background-color: alpha(@theme_fg_color, 0.08);
-  color: @theme_fg_color;
+  padding: 0 5px;
+  border-radius: 8px;
   font-size: 14px;
 }

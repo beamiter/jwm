@@ -1,7 +1,5 @@
 use chrono::Local;
 use gdk4::prelude::*;
-#[cfg(all(target_os = "linux", feature = "x11"))]
-use gdk4_x11::x11::xlib::{XFlush, XMoveWindow};
 use gtk4::gio::{self};
 use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow, Builder, Button, EventControllerScroll, EventControllerScrollFlags, Label, Revealer, glib};
@@ -363,7 +361,7 @@ impl TabBarApp {
 
     fn apply_styles() {
         let provider = gtk4::CssProvider::new();
-        provider.load_from_data(include_str!("styles.css"));
+        provider.load_from_string(include_str!("styles.css"));
         if let Some(display) = gtk4::gdk::Display::default() {
             gtk4::style_context_add_provider_for_display(
                 &display,
@@ -785,34 +783,6 @@ impl TabBarApp {
     }
 
     #[allow(dead_code)]
-    #[cfg(all(target_os = "linux", feature = "x11"))]
-    fn resize_window_to_monitor(
-        &self,
-        expected_x: i32,
-        expected_y: i32,
-        expected_width: i32,
-        expected_height: i32,
-    ) {
-        self.window
-            .set_default_size(expected_width, expected_height);
-        if let Some(display) = gtk4::gdk::Display::default() {
-            unsafe {
-                if let Some(x11_display) = display.downcast_ref::<gdk4_x11::X11Display>() {
-                    let xdisplay = x11_display.xdisplay();
-                    if let Some(surface) = self.window.surface() {
-                        if let Some(x11_surface) = surface.downcast_ref::<gdk4_x11::X11Surface>() {
-                            let xwindow = x11_surface.xid();
-                            XMoveWindow(xdisplay as *mut _, xwindow, expected_x, expected_y);
-                            XFlush(xdisplay as *mut _);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    #[cfg(not(all(target_os = "linux", feature = "x11")))]
     fn resize_window_to_monitor(
         &self,
         _expected_x: i32,
