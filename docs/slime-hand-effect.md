@@ -18,10 +18,10 @@ Override the location with `JWM_SLIME_SOCKET=/path/to/socket`.
 
 A receiver thread continuously replaces a single pending packet. The compositor
 therefore consumes the newest pose rather than replaying stale inference frames.
-Landmarks are converted into finger capsules and palm metaballs in the
-post-process shader. The SDF gradient supplies the refraction normal, RGB
-channels receive slightly different offsets, and the edge receives a white
-Fresnel-like highlight.
+Landmarks are converted into tapered finger capsules and smoothly fused palm
+metaballs in the post-process shader. The animated SDF gradient supplies the
+refraction normal, RGB channels receive slightly different offsets, and the
+surface receives a moving optical flow, caustic, and layered edge highlight.
 
 While the effect is visible, direct scanout and fullscreen unredirect are
 suppressed because both paths bypass compositor post-processing.
@@ -124,8 +124,9 @@ forward-compatible diagnostics.
 2. JWM retains only the newest datagram.
 3. Window-relative landmarks are mapped and adaptively smoothed in screen pixels.
 4. The existing post-process FBO supplies the composited scene texture.
-5. A hand SDF joins landmark bulbs, bone capsules, and palm fills.
-6. SDF gradients drive refraction, chromatic dispersion, rim light, and specular.
+5. A hand SDF smoothly joins tapered bone capsules and palm metaballs.
+6. Animated SDF gradients drive refraction, chromatic dispersion, optical flow,
+   rim light, caustics, and specular.
 7. Existing accessibility, color correction, and HDR passes run afterwards.
 8. The pose is held briefly and faded when inference disappears or stops.
 

@@ -2156,6 +2156,10 @@ impl<C: CompositorConnection> Compositor<C> {
                         self.magnifier_uniforms.slime_strength.as_ref(),
                         self.slime_state.strength(),
                     );
+                    self.gl.uniform_1_f32(
+                        self.magnifier_uniforms.slime_time.as_ref(),
+                        self.compositor_start_time.elapsed().as_secs_f32(),
+                    );
                 }
 
                 // Colorblind correction uniform

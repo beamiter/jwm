@@ -514,6 +514,7 @@ uniform vec2  u_slime_screen_size;
 uniform float u_slime_scale;       // palm scale in pixels
 uniform float u_slime_strength;    // refraction displacement in pixels
 uniform float u_slime_opacity;
+uniform float u_slime_time;
 // Colorblind correction uniform
 uniform int   u_colorblind_mode;   // 0=none, 1=deuteranopia, 2=protanopia, 3=tritanopia
 // HDR tone mapping uniforms
@@ -525,11 +526,18 @@ uniform int   u_output_colorspace;    // 0=BT.709/sRGB, 1=BT.2020
 in vec2 v_uv;
 out vec4 frag_color;
 
-float slime_capsule_sdf(vec2 p, vec2 a, vec2 b, float radius) {
+float slime_tapered_capsule_sdf(
+    vec2 p, vec2 a, vec2 b, float radius_a, float radius_b
+) {
     vec2 pa = p - a;
     vec2 ba = b - a;
     float h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0);
-    return length(pa - ba * h) - radius;
+    return length(pa - ba * h) - mix(radius_a, radius_b, h);
+}
+
+float slime_smooth_union(float a, float b, float radius) {
+    float h = clamp(0.5 + 0.5 * (b - a) / max(radius, 0.0001), 0.0, 1.0);
+    return mix(b, a, h) - radius * h * (1.0 - h);
 }
 
 float slime_hand_sdf(vec2 p) {
@@ -540,33 +548,67 @@ float slime_hand_sdf(vec2 p) {
     // finger after the wrist: thumb 1..4, index 5..8, ... pinky 17..20.
     for (int finger = 0; finger < 5; ++finger) {
         int base = 1 + finger * 4;
-        float finger_radius = radius * (finger == 0 ? 1.12 : 1.0);
-        d = min(d, slime_capsule_sdf(
-            p, u_slime_points[0], u_slime_points[base], finger_radius * 1.18
-        ));
+        float width = finger == 0 ? 1.14
+            : (finger == 1 ? 1.0
+            : (finger == 2 ? 1.04 : (finger == 3 ? 0.96 : 0.84)));
+        float finger_radius = radius * width;
+        float bridge = slime_tapered_capsule_sdf(
+            p,
+            u_slime_points[0],
+            u_slime_points[base],
+            radius * 1.26,
+            finger_radius
+        );
+        d = slime_smooth_union(d, bridge, radius * 0.72);
         for (int joint = 0; joint < 3; ++joint) {
-            float taper = 1.0 - float(joint) * 0.13;
-            d = min(d, slime_capsule_sdf(
+            float taper_a = 1.0 - float(joint) * 0.12;
+            float taper_b = 1.0 - float(joint + 1) * 0.12;
+            float segment = slime_tapered_capsule_sdf(
                 p,
                 u_slime_points[base + joint],
                 u_slime_points[base + joint + 1],
-                finger_radius * taper
-            ));
+                finger_radius * taper_a,
+                finger_radius * taper_b
+            );
+            d = slime_smooth_union(d, segment, radius * 0.48);
         }
     }
 
-    // Fill the palm with overlapping capsules and a central metaball.
-    d = min(d, slime_capsule_sdf(p, u_slime_points[5], u_slime_points[9], radius * 1.65));
-    d = min(d, slime_capsule_sdf(p, u_slime_points[9], u_slime_points[13], radius * 1.70));
-    d = min(d, slime_capsule_sdf(p, u_slime_points[13], u_slime_points[17], radius * 1.65));
-    d = min(d, slime_capsule_sdf(p, u_slime_points[0], u_slime_points[9], radius * 2.20));
-    d = min(d, slime_capsule_sdf(p, u_slime_points[5], u_slime_points[17], radius * 2.10));
+    // Fill the palm with soft metaballs. Smooth unions make adjacent fingers
+    // pull into each other instead of exposing hard capsule seams.
+    float palm_blend = radius * 1.05;
+    d = slime_smooth_union(d, slime_tapered_capsule_sdf(
+        p, u_slime_points[5], u_slime_points[9], radius * 1.58, radius * 1.68
+    ), palm_blend);
+    d = slime_smooth_union(d, slime_tapered_capsule_sdf(
+        p, u_slime_points[9], u_slime_points[13], radius * 1.68, radius * 1.62
+    ), palm_blend);
+    d = slime_smooth_union(d, slime_tapered_capsule_sdf(
+        p, u_slime_points[13], u_slime_points[17], radius * 1.62, radius * 1.48
+    ), palm_blend);
+    d = slime_smooth_union(d, slime_tapered_capsule_sdf(
+        p, u_slime_points[0], u_slime_points[9], radius * 1.82, radius * 2.10
+    ), palm_blend);
+    d = slime_smooth_union(d, slime_tapered_capsule_sdf(
+        p, u_slime_points[5], u_slime_points[17], radius * 1.86, radius * 1.72
+    ), palm_blend);
     vec2 palm_center = (
         u_slime_points[0] + u_slime_points[5] + u_slime_points[9]
         + u_slime_points[13] + u_slime_points[17]
     ) / 5.0;
-    d = min(d, length(p - palm_center) - radius * 2.55);
+    d = slime_smooth_union(
+        d, length(p - palm_center) - radius * 2.34, palm_blend
+    );
     return d;
+}
+
+float slime_surface_sdf(vec2 p) {
+    float d = slime_hand_sdf(p);
+    float scale = max(u_slime_scale, 1.0);
+    float wave = sin(p.x / scale * 4.1 + u_slime_time * 1.55)
+        + sin(p.y / scale * 3.6 - u_slime_time * 1.20);
+    float near_edge = 1.0 - smoothstep(scale * 0.06, scale * 0.32, abs(d));
+    return d + wave * scale * 0.009 * near_edge;
 }
 
 void main() {
@@ -596,16 +638,16 @@ void main() {
         );
         if (pixel.x >= u_slime_bbox.x && pixel.y >= u_slime_bbox.y
             && pixel.x <= u_slime_bbox.z && pixel.y <= u_slime_bbox.w) {
-            float d = slime_hand_sdf(pixel);
+            float d = slime_surface_sdf(pixel);
             float aa = 2.0;
             float mask = (1.0 - smoothstep(-aa, aa, d)) * u_slime_opacity;
             if (mask > 0.001) {
                 float epsilon = max(1.25, u_slime_scale * 0.018);
                 vec2 gradient = vec2(
-                    slime_hand_sdf(pixel + vec2(epsilon, 0.0))
-                        - slime_hand_sdf(pixel - vec2(epsilon, 0.0)),
-                    slime_hand_sdf(pixel + vec2(0.0, epsilon))
-                        - slime_hand_sdf(pixel - vec2(0.0, epsilon))
+                    slime_surface_sdf(pixel + vec2(epsilon, 0.0))
+                        - slime_surface_sdf(pixel - vec2(epsilon, 0.0)),
+                    slime_surface_sdf(pixel + vec2(0.0, epsilon))
+                        - slime_surface_sdf(pixel - vec2(0.0, epsilon))
                 );
                 float gradient_len = length(gradient);
                 vec2 normal = gradient_len > 0.0001
@@ -618,24 +660,40 @@ void main() {
                     normal.x / u_slime_screen_size.x,
                     -normal.y / u_slime_screen_size.y
                 );
+                vec2 uv_tangent = vec2(
+                    -normal.y / u_slime_screen_size.x,
+                    -normal.x / u_slime_screen_size.y
+                );
+                float flow = sin(
+                    u_slime_time * 1.35
+                    + pixel.x / max(u_slime_scale * 0.48, 1.0)
+                    - pixel.y / max(u_slime_scale * 0.62, 1.0)
+                );
                 vec2 offset = uv_normal * u_slime_strength
-                    * (0.28 + edge_weight * 0.72) * mask;
+                    * (0.28 + edge_weight * 0.72) * mask
+                    + uv_tangent * u_slime_strength * 0.12 * flow * depth * mask;
                 vec2 refracted_uv = clamp(sample_uv + offset, vec2(0.001), vec2(0.999));
-                vec2 dispersion = uv_normal * u_slime_strength * 0.16;
+                vec2 dispersion = uv_normal * u_slime_strength
+                    * (0.12 + edge_weight * 0.06);
 
                 vec3 glass;
                 glass.r = texture(u_texture, clamp(refracted_uv + dispersion, vec2(0.001), vec2(0.999))).r;
                 glass.g = texture(u_texture, refracted_uv).g;
                 glass.b = texture(u_texture, clamp(refracted_uv - dispersion, vec2(0.001), vec2(0.999))).b;
+                glass *= vec3(0.965, 1.025, 1.01);
                 c.rgb = mix(c.rgb, glass, mask * 0.94);
 
-                float rim = (1.0 - smoothstep(0.0, max(u_slime_scale * 0.105, 2.0), abs(d)))
+                float rim = (1.0 - smoothstep(
+                    0.0, max(u_slime_scale * 0.12, 2.0), max(-d, 0.0)
+                ))
                     * u_slime_opacity;
                 vec2 light_dir = normalize(vec2(-0.58, -0.82));
                 float specular = pow(max(dot(normal, light_dir), 0.0), 18.0);
                 float fresnel = pow(edge_weight, 1.55);
+                float caustic = pow(0.5 + 0.5 * flow, 8.0) * depth;
                 c.rgb += vec3(0.82, 0.93, 1.0)
                     * (specular * 0.34 + fresnel * 0.10) * mask;
+                c.rgb += vec3(0.34, 0.78, 0.62) * caustic * 0.055 * mask;
                 c.rgb = mix(c.rgb, vec3(0.94, 0.98, 1.0), rim * 0.24);
             }
         }

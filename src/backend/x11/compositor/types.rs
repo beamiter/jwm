@@ -249,6 +249,7 @@ pub(super) struct MagnifierUniforms {
     pub(super) slime_scale: Option<glow::UniformLocation>,
     pub(super) slime_strength: Option<glow::UniformLocation>,
     pub(super) slime_opacity: Option<glow::UniformLocation>,
+    pub(super) slime_time: Option<glow::UniformLocation>,
     pub(super) colorblind_mode: Option<glow::UniformLocation>,
 }
 

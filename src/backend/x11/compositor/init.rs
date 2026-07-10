@@ -741,6 +741,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 slime_scale: gl.get_uniform_location(postprocess_program, "u_slime_scale"),
                 slime_strength: gl.get_uniform_location(postprocess_program, "u_slime_strength"),
                 slime_opacity: gl.get_uniform_location(postprocess_program, "u_slime_opacity"),
+                slime_time: gl.get_uniform_location(postprocess_program, "u_slime_time"),
                 colorblind_mode: gl.get_uniform_location(postprocess_program, "u_colorblind_mode"),
             }
         };
