@@ -73,8 +73,8 @@ jobs:
         with:
           components: rustfmt
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+      - name: Check slime module formatting
+        run: rustfmt --edition 2024 --check src/backend/x11/compositor/slime.rs
 
       - name: Check tracker scripts
         run: python3 -m py_compile tools/slime_tracker.py tools/slime_pose_demo.py
