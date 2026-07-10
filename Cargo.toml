@@ -3,9 +3,6 @@ name = "gtk_bar"
 version = "0.1.0"
 edition = "2024"
 
-[features]
-x11 = []
-
 [dependencies]
 log = "0.4.29"
 shared_structures = { git = "https://github.com/beamiter/shared_structures.git", features = ["use-futex"] }
@@ -13,5 +10,5 @@ xbar_core = { git = "https://github.com/beamiter/xbar_core.git" }
 chrono = "0.4.44"
 
 async-channel = "2.5.0"
-gtk4 = "0.10.3"
-gdk4 = "0.10.3"
+gtk4 = { version = "0.11.4", features = ["v4_14"] }
+gdk4 = { version = "0.11.4", features = ["v4_14"] }

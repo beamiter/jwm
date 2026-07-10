@@ -706,16 +706,16 @@ impl TabBarApp {
                 st.last_muted = muted;
                 self.update_volume_display_inner(vol, muted);
             } else {
-                self.volume_button.set_label(" 🔊 --% ");
+                self.volume_button.set_label("Vol --%");
             }
         }
     }
 
     fn update_volume_display_inner(&self, volume: i32, muted: bool) {
         let label = if muted {
-            format!(" 🔇 {}% ", volume)
+            format!("Muted {}%", volume)
         } else {
-            format!(" 🔊 {}% ", volume)
+            format!("Vol {}%", volume)
         };
         self.volume_button.set_label(&label);
     }
@@ -733,16 +733,16 @@ impl TabBarApp {
             .add_css_class(if is_dark { "theme-dark" } else { "theme-light" });
 
         self.theme_button
-            .set_label(if is_dark { " 🌙 " } else { " ☀️ " });
+            .set_label(if is_dark { "☾" } else { "☀" });
     }
 
     // ========= 工具 =========
     fn monitor_num_to_icon(monitor_num: u8) -> &'static str {
         match monitor_num {
-            0 => "🥇",
-            1 => "🥈",
-            2 => "🥉",
-            _ => "🖥",
+            0 => "1",
+            1 => "2",
+            2 => "3",
+            _ => "•",
         }
     }
 
