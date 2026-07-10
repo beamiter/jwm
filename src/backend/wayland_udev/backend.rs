@@ -12,9 +12,10 @@ use crate::backend::api::{
     InputOps, KeyOps, OutputInfo, OutputOps, PropertyOps, ResizeEdge, ScreenInfo, WindowOps,
     WindowType,
 };
-use crate::backend::common_define::{Mods, OutputId, StdCursorKind, WindowId};
+use crate::backend::common_define::{KeySym, Mods, OutputId, StdCursorKind, WindowId};
 use crate::backend::error::BackendError;
 use crate::config::CONFIG;
+use crate::jwm::{Jwm, WMFuncType};
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -85,6 +86,33 @@ fn gesture_swipe_should_intercept(
     fingers >= 3 && bindings.iter().any(|binding| binding.fingers == fingers)
 }
 
+/// A shortcut is eligible for libinput-style key repeat only when repeating it
+/// has a predictable, incremental result. In particular, never repeat actions
+/// that spawn processes, close windows, toggle state, or capture the screen.
+fn shortcut_is_repeatable(func: Option<WMFuncType>) -> bool {
+    let Some(func) = func else {
+        return false;
+    };
+    macro_rules! eq {
+        ($f:path) => {
+            std::ptr::fn_addr_eq(func, $f as WMFuncType)
+        };
+    }
+
+    eq!(Jwm::focusstack)
+        || eq!(Jwm::loopview)
+        || eq!(Jwm::setmfact)
+        || eq!(Jwm::setcfact)
+        || eq!(Jwm::incnmaster)
+        || eq!(Jwm::movestack)
+        || eq!(Jwm::cyclelayout)
+        || eq!(Jwm::scrolling_focus_column)
+        || eq!(Jwm::scrolling_move_column)
+        || eq!(Jwm::scrolling_consume)
+        || eq!(Jwm::scrolling_expel)
+        || eq!(Jwm::scrolling_focus_window)
+}
+
 fn region_fully_covers_rect(region: &RegionAttributes, target: Rectangle<i32, Logical>) -> bool {
     if target.size.w <= 0 || target.size.h <= 0 {
         return false;
@@ -135,6 +163,13 @@ struct RepeatState {
     next_fire: Instant,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ShortcutBinding {
+    mods: Mods,
+    keysym: KeySym,
+    repeatable: bool,
+}
+
 struct SendWrapper<T>(T);
 
 unsafe impl<T> Send for SendWrapper<T> {}
@@ -159,10 +194,7 @@ struct SharedState {
     cursor_kind: StdCursorKind,
     cursor_dirty: bool,
     /// Cached key bindings (mods, keysym) for key event suppression.
-    key_bindings: Vec<(
-        crate::backend::common_define::Mods,
-        crate::backend::common_define::KeySym,
-    )>,
+    key_bindings: Vec<ShortcutBinding>,
     /// xkb keycode (0..=255) -> base (unmodified) keysym.
     keysym_table: Vec<crate::backend::common_define::KeySym>,
     /// xkb keycodes that were intercepted on press and should be intercepted on release.
@@ -1197,7 +1229,11 @@ impl UdevBackend {
                 .load()
                 .get_keys()
                 .into_iter()
-                .map(|k| (k.mask & allowed_shortcut_mods(), k.key_sym))
+                .map(|k| ShortcutBinding {
+                    mods: k.mask & allowed_shortcut_mods(),
+                    keysym: k.key_sym,
+                    repeatable: shortcut_is_repeatable(k.func_opt),
+                })
                 .collect::<Vec<_>>();
 
             let mut s = shared.lock_safe();
@@ -2160,7 +2196,10 @@ impl UdevBackend {
                                             let is_wm_shortcut = s
                                                 .key_bindings
                                                 .iter()
-                                                .any(|(m, ks)| *ks == keysym && *m == clean_mods);
+                                                .any(|binding| {
+                                                    binding.keysym == keysym
+                                                        && binding.mods == clean_mods
+                                                });
                                             let is_screenshot_control = s.screenshot_grab_active
                                                 && matches!(
                                                     keysym,
@@ -2254,12 +2293,17 @@ impl UdevBackend {
                                         .copied()
                                         .unwrap_or(0);
                                     let clean_mods = Mods::from_bits_truncate(mods_state) & allowed_shortcut_mods();
-                                    let is_bound = s
+                                    let is_repeatable = s
                                         .key_bindings
                                         .iter()
-                                        .any(|(m, ks)| *ks == keysym && *m == clean_mods);
+                                        .find(|binding| {
+                                            binding.keysym == keysym
+                                                && binding.mods == clean_mods
+                                        })
+                                        .map(|binding| binding.repeatable)
+                                        .unwrap_or(false);
 
-                                    if is_bound {
+                                    if is_repeatable {
                                         s.repeat = Some(RepeatState {
                                             keycode: keycode_u8,
                                             mods_raw: mods_state,
@@ -4845,6 +4889,17 @@ mod udev_backend_selection_tests {
             3,
             &[swipe_binding(3, "left")]
         ));
+    }
+
+    #[test]
+    fn key_repeat_only_allows_incremental_window_manager_actions() {
+        assert!(shortcut_is_repeatable(Some(Jwm::focusstack)));
+        assert!(shortcut_is_repeatable(Some(Jwm::setmfact)));
+        assert!(shortcut_is_repeatable(Some(Jwm::scrolling_focus_column)));
+
+        assert!(!shortcut_is_repeatable(Some(Jwm::spawn)));
+        assert!(!shortcut_is_repeatable(Some(Jwm::killclient)));
+        assert!(!shortcut_is_repeatable(Some(Jwm::take_screenshot)));
     }
 
     fn test_output(id: OutputId, name: &str) -> OutputInfo {
