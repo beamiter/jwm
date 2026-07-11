@@ -1,6 +1,9 @@
 use crate::backend::api::{
-    Backend, BackendEvent, Capabilities, ColorAllocator, CursorProvider, EventHandler, HitTarget,
-    InputOps, KeyOps, OutputInfo, OutputOps, PropertyOps, ResizeEdge, ScreenInfo, WindowOps,
+    Backend, BackendDiagnostics, BackendEvent, Capabilities, ColorAllocator, CompositorAnnotation,
+    CompositorBenchmark, CompositorControl, CompositorMedia, CompositorWindowEffects,
+    CompositorWorkspaceEffects, CursorProvider, EventHandler, HitTarget, InputOps, KeyOps,
+    DisplayControl, OutputInfo, OutputOps, PropertyOps, ResizeEdge, ScreenInfo, WindowOps,
+    RenderScheduler,
 };
 use crate::backend::common_define::{KeySym, Mods, OutputId, WindowId};
 use crate::backend::error::BackendError;
@@ -1979,6 +1982,18 @@ fn process_input_event_windowed<B: InputBackend>(
     }
 }
 
+impl CompositorBenchmark for WaylandX11Backend {}
+impl BackendDiagnostics for WaylandX11Backend {}
+impl CompositorControl for WaylandX11Backend {}
+impl CompositorMedia for WaylandX11Backend {}
+impl CompositorWorkspaceEffects for WaylandX11Backend {}
+impl CompositorWindowEffects for WaylandX11Backend {}
+impl CompositorAnnotation for WaylandX11Backend {}
+impl DisplayControl for WaylandX11Backend {}
+impl RenderScheduler for WaylandX11Backend {
+    fn request_render(&mut self) { self.needs_render = true; self.request_flush(); }
+}
+
 impl Backend for WaylandX11Backend {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
@@ -2057,11 +2072,6 @@ impl Backend for WaylandX11Backend {
 
     fn handle_button_release(&mut self, _time: u32) -> Result<bool, BackendError> {
         Ok(false)
-    }
-
-    fn request_render(&mut self) {
-        self.needs_render = true;
-        self.request_flush();
     }
 
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError> {

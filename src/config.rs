@@ -971,6 +971,26 @@ pub struct KeyConfig {
     pub argument: ArgumentConfig,
 }
 
+/// Repeat is policy attached to a binding, not inferred by platform backends
+/// from window-manager function addresses.
+fn key_function_is_repeatable(function: &str) -> bool {
+    matches!(
+        function,
+        "focusstack"
+            | "loopview"
+            | "setmfact"
+            | "setcfact"
+            | "incnmaster"
+            | "movestack"
+            | "cyclelayout"
+            | "scrolling_focus_column"
+            | "scrolling_move_column"
+            | "scrolling_consume"
+            | "scrolling_expel"
+            | "scrolling_focus_window"
+    )
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ArgumentConfig {
@@ -2270,7 +2290,10 @@ impl Config {
         let function = self.parse_function(&key_config.function)?;
         let arg = self.convert_argument(&key_config.argument);
 
-        Some(WMKey::new(modifiers, keysym, Some(function), arg))
+        Some(
+            WMKey::new(modifiers, keysym, Some(function), arg)
+                .with_repeatable(key_function_is_repeatable(&key_config.function)),
+        )
     }
 
     fn generate_tag_keys(&self, tag: usize) -> Vec<WMKey> {
@@ -2617,7 +2640,18 @@ pub fn reload_global() -> Result<(), ConfigError> {
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Config, key_function_is_repeatable};
+
+    #[test]
+    fn key_repeat_policy_only_allows_incremental_actions() {
+        assert!(key_function_is_repeatable("focusstack"));
+        assert!(key_function_is_repeatable("setmfact"));
+        assert!(key_function_is_repeatable("scrolling_focus_column"));
+
+        assert!(!key_function_is_repeatable("spawn"));
+        assert!(!key_function_is_repeatable("killclient"));
+        assert!(!key_function_is_repeatable("take_screenshot"));
+    }
 
     #[test]
     fn set_values_applies_valid_batch_atomically() {

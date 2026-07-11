@@ -1,6 +1,7 @@
 #![warn(dead_code, unused, unreachable_pub)]
 #![warn(clippy::all, clippy::pedantic)]
 
+pub mod application;
 pub mod backend;
 pub mod config;
 pub mod core;

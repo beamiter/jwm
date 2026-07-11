@@ -1,4 +1,5 @@
-use crate::backend::api::{Backend, Geometry, ResizeEdge};
+use crate::backend::api::{Backend, Geometry};
+pub use crate::backend::api::InteractionAction;
 use crate::backend::common_define::WindowId;
 use crate::backend::common_define::{KeySym, Mods, MouseButton};
 use crate::core::layout::LayoutEnum;
@@ -78,6 +79,8 @@ pub struct WMKey {
     pub key_sym: KeySym,
     pub func_opt: Option<WMFuncType>,
     pub arg: WMArgEnum,
+    /// Whether holding this binding may safely trigger it repeatedly.
+    pub repeatable: bool,
 }
 
 impl WMKey {
@@ -87,7 +90,14 @@ impl WMKey {
             key_sym: keysym,
             func_opt: func,
             arg,
+            repeatable: false,
         }
+    }
+
+    #[must_use]
+    pub fn with_repeatable(mut self, repeatable: bool) -> Self {
+        self.repeatable = repeatable;
+        self
     }
 }
 
@@ -119,12 +129,6 @@ impl WMRule {
             monitor,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum InteractionAction {
-    Move,
-    Resize(ResizeEdge),
 }
 
 #[derive(Debug, Clone)]

@@ -1,6 +1,8 @@
 use crate::backend::api::{
-    Backend, BackendEvent, Capabilities, ColorAllocator, CursorProvider, EventHandler, HitTarget,
-    InputOps, KeyOps, OutputInfo, OutputOps, PropertyOps, ScreenInfo, WindowOps,
+    Backend, BackendDiagnostics, BackendEvent, Capabilities, ColorAllocator, CompositorAnnotation,
+    CompositorBenchmark, CompositorControl, CompositorMedia, CompositorWindowEffects,
+    CompositorWorkspaceEffects, CursorProvider, EventHandler, HitTarget, InputOps, KeyOps,
+    DisplayControl, OutputInfo, OutputOps, PropertyOps, RenderScheduler, ScreenInfo, WindowOps,
 };
 use crate::backend::common_define::{KeySym, Mods, OutputId, WindowId};
 use crate::backend::error::BackendError;
@@ -1811,6 +1813,18 @@ fn process_input_event_windowed<B: InputBackend>(
     }
 }
 
+impl CompositorBenchmark for WaylandWinitBackend {}
+impl BackendDiagnostics for WaylandWinitBackend {}
+impl CompositorControl for WaylandWinitBackend {}
+impl CompositorMedia for WaylandWinitBackend {}
+impl CompositorWorkspaceEffects for WaylandWinitBackend {}
+impl CompositorWindowEffects for WaylandWinitBackend {}
+impl CompositorAnnotation for WaylandWinitBackend {}
+impl DisplayControl for WaylandWinitBackend {}
+impl RenderScheduler for WaylandWinitBackend {
+    fn request_render(&mut self) { self.needs_render = true; self.request_flush(); }
+}
+
 impl Backend for WaylandWinitBackend {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
@@ -1873,11 +1887,6 @@ impl Backend for WaylandWinitBackend {
         self.needs_render = true;
         self.request_flush();
         Ok(())
-    }
-
-    fn request_render(&mut self) {
-        self.needs_render = true;
-        self.request_flush();
     }
 
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError> {

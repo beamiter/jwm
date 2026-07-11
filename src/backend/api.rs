@@ -239,6 +239,17 @@ pub enum ResizeEdge {
     BottomRight,
 }
 
+/// A backend-owned interactive window operation.
+///
+/// X11 transports use this while tracking an active pointer grab. Keeping the
+/// type in the platform contract prevents transports from depending on JWM
+/// policy modules.
+#[derive(Debug, Clone, Copy)]
+pub enum InteractionAction {
+    Move,
+    Resize(ResizeEdge),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetWmAction {
     Add,
@@ -1079,6 +1090,251 @@ pub trait CursorProvider: Send {
     fn cleanup(&mut self) -> Result<(), BackendError>;
 }
 
+/// Benchmark capability exposed by compositor-backed platforms.
+///
+/// Keeping this separate lets orchestration and IPC depend on a focused port
+/// and allows non-compositing backends to use the no-op defaults.
+pub trait CompositorBenchmark: Send {
+    /// Start collecting `frames` samples after `warmup` frames.
+    fn compositor_benchmark_start(&mut self, _frames: u32, _warmup: u32) -> bool {
+        false
+    }
+
+    fn compositor_benchmark_stop(&mut self) -> Option<String> {
+        None
+    }
+
+    fn compositor_benchmark_report(&self) -> Option<String> {
+        None
+    }
+
+    fn compositor_benchmark_is_complete(&self) -> bool {
+        false
+    }
+
+    fn compositor_benchmark_set_auto_exit(&mut self, _enabled: bool) {}
+}
+
+/// Read-only operational information exposed by a backend.
+///
+/// This focused interface starts with performance telemetry. Protocol and
+/// output status snapshots can migrate here incrementally without growing the
+/// control surface of `Backend` further.
+pub trait BackendDiagnostics: Send {
+    fn compositor_fps(&self) -> f32 {
+        0.0
+    }
+
+    fn compositor_get_metrics(&self) -> Option<CompositorMetrics> {
+        None
+    }
+
+    fn compositor_tearing_hint_count(&self) -> usize {
+        0
+    }
+
+    fn compositor_session_lock_surface_count(&self) -> usize {
+        0
+    }
+
+    fn compositor_session_locked(&self) -> bool {
+        false
+    }
+
+    fn compositor_color_managed_surfaces(&self) -> Vec<ColorManagedSurfaceInfo> {
+        Vec::new()
+    }
+
+    fn compositor_blur_status(&self) -> Option<BlurStatus> {
+        None
+    }
+
+    fn compositor_direct_scanout_status(&self) -> Option<DirectScanoutStatus> {
+        None
+    }
+
+    fn compositor_presentation_timing_status(&self) -> Option<PresentationTimingStatus> {
+        None
+    }
+
+    fn compositor_output_management_status(&self) -> Option<OutputManagementStatus> {
+        None
+    }
+
+    fn compositor_capture_status(&self) -> Option<CaptureStatus> {
+        None
+    }
+
+    fn compositor_xwayland_status(&self) -> Option<XWaylandStatus> {
+        None
+    }
+
+    fn compositor_protocol_bind_counts(&self) -> Vec<ProtocolBindStatus> {
+        Vec::new()
+    }
+}
+
+/// Runtime controls for compositor-wide visual state.
+pub trait CompositorControl: Send {
+    fn compositor_set_color_temperature(&mut self, _temperature: f32) {}
+    fn compositor_set_saturation(&mut self, _saturation: f32) {}
+    fn compositor_set_brightness(&mut self, _brightness: f32) {}
+    fn compositor_set_contrast(&mut self, _contrast: f32) {}
+    fn compositor_set_invert_colors(&mut self, _invert: bool) {}
+    fn compositor_set_grayscale(&mut self, _grayscale: bool) {}
+    fn compositor_set_debug_hud(&mut self, _enabled: bool) {}
+    fn compositor_set_debug_hud_extended(&mut self, _enabled: bool) {}
+
+    fn compositor_toggle_slime_effect(&mut self) -> Option<bool> {
+        None
+    }
+
+    fn compositor_set_transition_mode(&mut self, _mode: &str) {}
+    fn compositor_apply_config(&mut self) {}
+}
+
+/// Capture, thumbnail, recording and media-timing operations.
+pub trait CompositorMedia: Send {
+    fn take_screenshot_to_file(
+        &mut self,
+        _path: &std::path::Path,
+    ) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
+    fn take_screenshot_region_to_file(
+        &mut self,
+        _path: &std::path::Path,
+        _x: i32,
+        _y: i32,
+        _width: u32,
+        _height: u32,
+    ) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
+    fn compositor_capture_thumbnail(
+        &self,
+        _window: WindowId,
+        _max_size: u32,
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        None
+    }
+
+    fn compositor_request_live_thumbnail(
+        &mut self,
+        _window: u32,
+        _max_size: u32,
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        None
+    }
+
+    fn compositor_start_recording(&mut self, _path: &str) {}
+    fn compositor_stop_recording(&mut self) {}
+
+    fn compositor_notify_audio_timing(
+        &mut self,
+        _window: WindowId,
+        _fps: f32,
+        _buffer_latency_ms: u32,
+    ) {
+    }
+}
+
+/// Workspace transition and interactive preview effects.
+pub trait CompositorWorkspaceEffects: Send {
+    fn compositor_notify_tag_switch(
+        &mut self,
+        _duration: std::time::Duration,
+        _direction: i32,
+        _exclude_top: u32,
+        _monitor_rect: (i32, i32, u32, u32),
+    ) {
+    }
+
+    fn compositor_set_magnifier(&mut self, _enabled: bool) {}
+    fn compositor_set_snap_preview(&mut self, _preview: Option<(f32, f32, f32, f32)>) {}
+    fn compositor_clear_snap_preview_immediate(&mut self) {}
+
+    fn compositor_set_overview_mode(
+        &mut self,
+        _active: bool,
+        _windows: &[(WindowId, f32, f32, f32, f32, bool, String)],
+    ) {
+    }
+
+    fn compositor_set_overview_monitor(&mut self, _x: i32, _y: i32, _width: u32, _height: u32) {}
+    fn compositor_set_monitors(&mut self, _monitors: &[(u32, i32, i32, u32, u32, u32)]) {}
+    fn compositor_set_overview_selection(&mut self, _window: WindowId) {}
+
+    fn compositor_set_expose_mode(
+        &mut self,
+        _active: bool,
+        _windows: Vec<(WindowId, i32, i32, u32, u32)>,
+    ) {
+    }
+
+    fn compositor_expose_click(&mut self, _x: f32, _y: f32) -> Option<WindowId> {
+        None
+    }
+}
+
+/// Per-window compositor visual state.
+pub trait CompositorWindowEffects: Send {
+    fn compositor_set_frame_extents(
+        &mut self,
+        _window: WindowId,
+        _left: u32,
+        _right: u32,
+        _top: u32,
+        _bottom: u32,
+    ) {
+    }
+
+    fn compositor_set_window_shaped(&mut self, _window: WindowId, _shaped: bool) {}
+    fn compositor_set_window_urgent(&mut self, _window: WindowId, _urgent: bool) {}
+    fn compositor_set_window_pip(&mut self, _window: WindowId, _pip: bool) {}
+    fn compositor_force_full_redraw(&mut self) {}
+    fn compositor_set_mouse_position(&mut self, _x: f32, _y: f32) {}
+    fn compositor_deactivate_edge_glow(&mut self) {}
+    fn compositor_unsuppress_edge_glow(&mut self) {}
+    fn compositor_notify_window_move_start(&mut self, _window: WindowId) {}
+    fn compositor_notify_window_move_delta(&mut self, _window: WindowId, _dx: f32, _dy: f32) {}
+    fn compositor_notify_window_move_end(&mut self, _window: WindowId) {}
+    fn compositor_set_dock_position(&mut self, _x: f32, _y: f32) {}
+    fn compositor_set_peek_mode(&mut self, _active: bool) {}
+    fn compositor_set_window_groups(&mut self, _groups: Vec<(u32, Vec<(u32, String, bool)>)>) {}
+    fn compositor_zoom_to_fit(&mut self, _window: Option<u32>) {}
+}
+
+/// Accessibility color correction and interactive screen annotations.
+pub trait CompositorAnnotation: Send {
+    fn compositor_set_colorblind_mode(&mut self, _mode: &str) {}
+    fn compositor_set_annotation_mode(&mut self, _active: bool) {}
+    fn compositor_set_annotation_color(&mut self, _rgba: [f32; 4]) {}
+    fn compositor_set_annotation_line_width(&mut self, _width: f32) {}
+    fn compositor_annotation_add_point(&mut self, _x: f32, _y: f32) {}
+    fn compositor_annotation_begin_stroke(&mut self) {}
+}
+
+/// Output hardware capabilities and runtime display controls.
+pub trait DisplayControl: Send {
+    fn query_vrr_capabilities(&self, _output: OutputId) -> Option<VrrCapabilities> { None }
+    fn query_kms_color_pipeline_caps(&self, _output: OutputId) -> Option<KmsColorPipelineCaps> { None }
+    fn set_vrr_enabled(&mut self, _output: OutputId, _enabled: bool) -> Result<(), BackendError> { Ok(()) }
+    fn set_hdr_metadata(&mut self, _output: OutputId, _enabled: bool) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported("HDR metadata push not implemented"))
+    }
+}
+
+/// Lightweight compositor scheduling and state queries.
+pub trait RenderScheduler: Send {
+    fn request_render(&mut self) {}
+    fn has_compositor(&self) -> bool { false }
+    fn compositor_needs_render(&self) -> bool { false }
+    fn compositor_overlay_window(&self) -> Option<WindowId> { None }
+}
+
 pub trait EventHandler {
     fn handle_event(
         &mut self,
@@ -1103,7 +1359,17 @@ pub trait EventHandler {
     fn render_compositor_immediate(&mut self, _backend: &mut dyn Backend) {}
 }
 
-pub trait Backend: Send {
+pub trait Backend:
+    CompositorBenchmark
+    + BackendDiagnostics
+    + CompositorControl
+    + CompositorMedia
+    + CompositorWorkspaceEffects
+    + CompositorWindowEffects
+    + CompositorAnnotation
+    + DisplayControl
+    + RenderScheduler
+{
     fn capabilities(&self) -> Capabilities;
     fn root_window(&self) -> Option<WindowId>;
     fn as_any(&self) -> &dyn Any;
@@ -1176,16 +1442,6 @@ pub trait Backend: Send {
 
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError>;
 
-    fn request_render(&mut self) {}
-
-    fn has_compositor(&self) -> bool {
-        false
-    }
-
-    fn compositor_needs_render(&self) -> bool {
-        false
-    }
-
     fn compositor_render_frame(
         &mut self,
         _scene: &[(u64, i32, i32, u32, u32)],
@@ -1194,376 +1450,10 @@ pub trait Backend: Send {
         Ok(false)
     }
 
-    /// Returns the compositor overlay window ID, if any.
-    /// This window must be filtered out from normal window tracking to avoid
-    /// feedback loops where the compositor tries to render itself.
-    fn compositor_overlay_window(&self) -> Option<WindowId> {
-        None
-    }
+    fn set_compositor_enabled(&mut self, _enabled: bool) -> Result<bool, BackendError> { Ok(false) }
+    fn has_partial_damage(&self) -> bool { false }
+    fn set_partial_damage(&mut self, _enabled: bool) -> Result<bool, BackendError> { Ok(false) }
 
-    /// Enable or disable the compositor at runtime.
-    /// Returns `Ok(true)` if the state actually changed.
-    fn set_compositor_enabled(&mut self, _enabled: bool) -> Result<bool, BackendError> {
-        Ok(false)
-    }
-
-    /// Whether experimental partial-damage (scissored) redraw is enabled.
-    fn has_partial_damage(&self) -> bool {
-        false
-    }
-
-    /// Enable or disable experimental partial-damage redraw at runtime.
-    /// Returns `Ok(true)` if a compositor was present to apply it to.
-    fn set_partial_damage(&mut self, _enabled: bool) -> Result<bool, BackendError> {
-        Ok(false)
-    }
-
-    /// Request a compositor-level screenshot.
-    ///
-    /// On backends that own the framebuffer (udev/KMS) this captures the
-    /// rendered output directly and saves it as a PNG file.  Other backends
-    /// return `Ok(false)` to signal that the caller should fall back to an
-    /// external tool.
-    fn take_screenshot_to_file(&mut self, _path: &std::path::Path) -> Result<bool, BackendError> {
-        Ok(false)
-    }
-
-    /// Request a compositor-level screenshot of a specific region.
-    fn take_screenshot_region_to_file(
-        &mut self,
-        _path: &std::path::Path,
-        _x: i32,
-        _y: i32,
-        _w: u32,
-        _h: u32,
-    ) -> Result<bool, BackendError> {
-        Ok(false)
-    }
-
-    // --- New compositor feature APIs ---
-
-    /// Set color temperature for night mode (0.0 = neutral, >0 = warm).
-    fn compositor_set_color_temperature(&mut self, _temp: f32) {}
-
-    /// Set saturation (1.0 = normal, 0.0 = grayscale).
-    fn compositor_set_saturation(&mut self, _sat: f32) {}
-
-    /// Set brightness (1.0 = normal).
-    fn compositor_set_brightness(&mut self, _val: f32) {}
-
-    /// Set contrast (1.0 = normal).
-    fn compositor_set_contrast(&mut self, _val: f32) {}
-
-    /// Toggle color inversion (accessibility).
-    fn compositor_set_invert_colors(&mut self, _invert: bool) {}
-
-    /// Toggle grayscale mode (accessibility).
-    fn compositor_set_grayscale(&mut self, _gs: bool) {}
-
-    /// Toggle debug HUD overlay.
-    fn compositor_set_debug_hud(&mut self, _enabled: bool) {}
-
-    /// Toggle extended debug HUD (frame profiler + per-zone breakdown).
-    /// Pairs with `compositor_set_debug_hud`; has small per-frame cost.
-    fn compositor_set_debug_hud_extended(&mut self, _enabled: bool) {}
-
-    /// Toggle the realtime slime/water effect. Returns its new state when the
-    /// backend owns a compatible X11 compositor.
-    fn compositor_toggle_slime_effect(&mut self) -> Option<bool> {
-        None
-    }
-
-    /// Set tag-switch transition mode ("slide" or "cube").
-    fn compositor_set_transition_mode(&mut self, _mode: &str) {}
-
-    /// Hot-reload all compositor settings from the current config.
-    fn compositor_apply_config(&mut self) {}
-
-    /// Get current FPS from compositor debug stats.
-    fn compositor_fps(&self) -> f32 {
-        0.0
-    }
-
-    /// Get detailed compositor performance metrics.
-    fn compositor_get_metrics(&self) -> Option<CompositorMetrics> {
-        None
-    }
-
-    /// Start compositor benchmark (collect N frames after warmup).
-    fn compositor_benchmark_start(&mut self, _frames: u32, _warmup: u32) -> bool {
-        false
-    }
-
-    /// Stop benchmark early and return JSON report.
-    fn compositor_benchmark_stop(&mut self) -> Option<String> {
-        None
-    }
-
-    /// Get benchmark report JSON (only available when complete).
-    fn compositor_benchmark_report(&self) -> Option<String> {
-        None
-    }
-
-    /// Check if benchmark has completed.
-    fn compositor_benchmark_is_complete(&self) -> bool {
-        false
-    }
-
-    /// Enable auto-exit mode: exits with JSON report when benchmark completes.
-    fn compositor_benchmark_set_auto_exit(&mut self, _enabled: bool) {}
-
-    /// Query VRR capabilities of an output.
-    fn query_vrr_capabilities(&self, _output: OutputId) -> Option<VrrCapabilities> {
-        None
-    }
-
-    /// Query per-CRTC KMS color pipeline capabilities (degamma/CTM/gamma LUT).
-    /// Returns `None` for non-KMS backends. The probe iterates DRM properties
-    /// so it's not free — cache the result if you call it on a hot path.
-    fn query_kms_color_pipeline_caps(&self, _output: OutputId) -> Option<KmsColorPipelineCaps> {
-        None
-    }
-
-    /// Number of client surfaces that have requested wp-tearing-control hints
-    /// (regardless of vsync vs async). Wayland-only; X11 returns 0.
-    fn compositor_tearing_hint_count(&self) -> usize {
-        0
-    }
-
-    /// Number of currently active session-lock surfaces (one per output when
-    /// the session is locked by a screen-locker client).
-    fn compositor_session_lock_surface_count(&self) -> usize {
-        0
-    }
-
-    /// Whether the session is currently locked.
-    fn compositor_session_locked(&self) -> bool {
-        false
-    }
-
-    /// Snapshot of all surfaces that currently have a wp-color-management-v1
-    /// image description attached. Empty on non-wayland_udev backends.
-    fn compositor_color_managed_surfaces(&self) -> Vec<ColorManagedSurfaceInfo> {
-        Vec::new()
-    }
-
-    /// Diagnostic snapshot of the blur pipeline. Returns None when the backend
-    /// has no compositor (CLI/headless paths) or no blur pass.
-    fn compositor_blur_status(&self) -> Option<BlurStatus> {
-        None
-    }
-
-    /// Diagnostic snapshot for fullscreen/direct-scanout eligibility. Wayland
-    /// udev fills this from both compositor scene checks and KMS output checks.
-    fn compositor_direct_scanout_status(&self) -> Option<DirectScanoutStatus> {
-        None
-    }
-
-    /// Per-output KMS presentation/vblank timing status.
-    fn compositor_presentation_timing_status(&self) -> Option<PresentationTimingStatus> {
-        None
-    }
-
-    /// Diagnostic status for wlr-output-management Apply transactions.
-    fn compositor_output_management_status(&self) -> Option<OutputManagementStatus> {
-        None
-    }
-
-    /// Diagnostic status for screen/window capture protocols and pending queues.
-    fn compositor_capture_status(&self) -> Option<CaptureStatus> {
-        None
-    }
-
-    /// Diagnostic status for the embedded XWayland server/XWM.
-    fn compositor_xwayland_status(&self) -> Option<XWaylandStatus> {
-        None
-    }
-
-    /// Runtime bind counters for compositor-owned Wayland globals. Empty on
-    /// backends that do not expose custom Wayland protocol globals.
-    fn compositor_protocol_bind_counts(&self) -> Vec<ProtocolBindStatus> {
-        Vec::new()
-    }
-
-    /// Enable or disable VRR for an output.
-    fn set_vrr_enabled(&mut self, _output: OutputId, _enabled: bool) -> Result<(), BackendError> {
-        Ok(())
-    }
-
-    /// Push (or clear) the HDR_OUTPUT_METADATA blob on a connector. When
-    /// `enabled` is true the backend builds a CTA-861.3 Static Metadata
-    /// Type 1 blob from the output's EDID caps + configured peak nits.
-    fn set_hdr_metadata(&mut self, _output: OutputId, _enabled: bool) -> Result<(), BackendError> {
-        Err(BackendError::Unsupported(
-            "HDR metadata push not implemented",
-        ))
-    }
-
-    /// Capture a window thumbnail (returns RGBA pixels, width, height).
-    fn compositor_capture_thumbnail(
-        &self,
-        _window: WindowId,
-        _max_size: u32,
-    ) -> Option<(Vec<u8>, u32, u32)> {
-        None
-    }
-
-    /// Set frame extents for a window (used for blur mask).
-    fn compositor_set_frame_extents(
-        &mut self,
-        _window: WindowId,
-        _left: u32,
-        _right: u32,
-        _top: u32,
-        _bottom: u32,
-    ) {
-    }
-
-    /// Set window shaped flag (for shadow adjustments).
-    fn compositor_set_window_shaped(&mut self, _window: WindowId, _shaped: bool) {}
-
-    /// Notify the compositor that a tag/workspace switch is about to happen.
-    /// `direction` uses +1 for forward (higher tag) and -1 for backward
-    /// (lower tag). `exclude_top` skips a top strip from the transition so
-    /// persistent UI like a status bar is not included in the old snapshot.
-    /// `mon_rect` is (x, y, w, h) of the monitor where the tag switch occurs,
-    /// so the transition animation is clipped to that monitor only.
-    fn compositor_notify_tag_switch(
-        &mut self,
-        _duration: std::time::Duration,
-        _direction: i32,
-        _exclude_top: u32,
-        _mon_rect: (i32, i32, u32, u32),
-    ) {
-    }
-
-    /// Force the compositor to redraw the full output on the next frame.
-    fn compositor_force_full_redraw(&mut self) {}
-
-    /// Set mouse position for compositor effects (magnifier, tilt, edge glow).
-    fn compositor_set_mouse_position(&mut self, _x: f32, _y: f32) {}
-
-    /// Immediately deactivate edge glow (e.g. pointer entered a window).
-    fn compositor_deactivate_edge_glow(&mut self) {}
-
-    /// Clear edge-glow suppression (pointer returned to desktop).
-    fn compositor_unsuppress_edge_glow(&mut self) {}
-
-    /// Set window urgent state for attention animation.
-    fn compositor_set_window_urgent(&mut self, _window: WindowId, _urgent: bool) {}
-
-    /// Set window PiP state for visual treatment.
-    fn compositor_set_window_pip(&mut self, _window: WindowId, _pip: bool) {}
-
-    /// Toggle magnifier effect.
-    fn compositor_set_magnifier(&mut self, _enabled: bool) {}
-
-    /// Notify the compositor about audio stream timing for a window.
-    /// Used for audio-video synchronization: helps the compositor know when to present
-    /// video frames to match the audio stream's clock.
-    /// `window`: the window with the audio stream
-    /// `fps`: target frame rate of the audio stream
-    /// `buffer_latency_ms`: audio buffer latency in milliseconds
-    fn compositor_notify_audio_timing(
-        &mut self,
-        _window: WindowId,
-        _fps: f32,
-        _buffer_latency_ms: u32,
-    ) {
-    }
-
-    /// Set overview mode for Alt-Tab window preview.
-    fn compositor_set_overview_mode(
-        &mut self,
-        _active: bool,
-        _windows: &[(WindowId, f32, f32, f32, f32, bool, String)],
-    ) {
-    }
-
-    /// Set monitor bounds for overview rendering (multi-monitor support).
-    fn compositor_set_overview_monitor(&mut self, _x: i32, _y: i32, _w: u32, _h: u32) {}
-
-    /// Update compositor with current monitor geometries for per-monitor wallpaper.
-    /// Each entry: (monitor_index, x, y, w, h, active_tags).
-    /// `active_tags` is a bitmask of currently-visible tag indices on that monitor;
-    /// it lets the compositor pick a tag-specific wallpaper when configured.
-    fn compositor_set_monitors(&mut self, _monitors: &[(u32, i32, i32, u32, u32, u32)]) {}
-
-    /// Update overview selection highlight.
-    fn compositor_set_overview_selection(&mut self, _window: WindowId) {}
-
-    /// Notify compositor of window move start (for wobbly windows).
-    fn compositor_notify_window_move_start(&mut self, _window: WindowId) {}
-
-    /// Notify compositor of window move delta (for wobbly windows).
-    fn compositor_notify_window_move_delta(&mut self, _window: WindowId, _dx: f32, _dy: f32) {}
-
-    /// Notify compositor of window move end (for wobbly windows).
-    fn compositor_notify_window_move_end(&mut self, _window: WindowId) {}
-
-    /// Set the dock/taskbar position for genie minimize target.
-    fn compositor_set_dock_position(&mut self, _x: f32, _y: f32) {}
-
-    /// Set expose/mission control mode. windows: Vec<(window_id, x, y, w, h)>.
-    fn compositor_set_expose_mode(
-        &mut self,
-        _active: bool,
-        _windows: Vec<(WindowId, i32, i32, u32, u32)>,
-    ) {
-    }
-
-    /// Set snap preview rectangle. None = hide preview (with fade-out animation).
-    fn compositor_set_snap_preview(&mut self, _preview: Option<(f32, f32, f32, f32)>) {}
-
-    /// Instantly clear snap preview (no fade-out). Used before screenshot capture.
-    fn compositor_clear_snap_preview_immediate(&mut self) {}
-
-    /// Toggle window peek (boss key) mode.
-    fn compositor_set_peek_mode(&mut self, _active: bool) {}
-
-    /// Set window tab groups. Each entry: (group_id, Vec<(window_id, title, is_active)>).
-    fn compositor_set_window_groups(&mut self, _groups: Vec<(u32, Vec<(u32, String, bool)>)>) {}
-
-    /// Request a live thumbnail for a window. Returns (pixels, width, height).
-    fn compositor_request_live_thumbnail(
-        &mut self,
-        _window: u32,
-        _max_size: u32,
-    ) -> Option<(Vec<u8>, u32, u32)> {
-        None
-    }
-
-    /// Zoom-to-fit a window (or reset if None).
-    fn compositor_zoom_to_fit(&mut self, _window: Option<u32>) {}
-
-    /// Expose mode click at screen coordinates. Returns the selected window or None.
-    fn compositor_expose_click(&mut self, _x: f32, _y: f32) -> Option<WindowId> {
-        None
-    }
-
-    /// Set colorblind correction mode (Phase 6.1).
-    fn compositor_set_colorblind_mode(&mut self, _mode: &str) {}
-
-    /// Set annotation mode (Phase 6.2).
-    fn compositor_set_annotation_mode(&mut self, _active: bool) {}
-
-    /// Set annotation stroke color.
-    fn compositor_set_annotation_color(&mut self, _rgba: [f32; 4]) {}
-
-    /// Set annotation stroke line width.
-    fn compositor_set_annotation_line_width(&mut self, _width: f32) {}
-
-    /// Add annotation point (Phase 6.2).
-    fn compositor_annotation_add_point(&mut self, _x: f32, _y: f32) {}
-
-    /// Begin a new annotation stroke (e.g. on pen-down / button press).
-    fn compositor_annotation_begin_stroke(&mut self) {}
-
-    /// Start screen recording (Phase 7.3).
-    fn compositor_start_recording(&mut self, _path: &str) {}
-
-    /// Stop screen recording (Phase 7.3).
-    fn compositor_stop_recording(&mut self) {}
 }
 
 // 兼容性定义

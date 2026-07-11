@@ -7,11 +7,13 @@
 //! backends expose the same higher-level feature surface.
 
 use crate::backend::api::{
-    AllowMode, AllowedAction, Backend, BackendEvent, Capabilities, CloseResult, ColorAllocator,
-    CursorProvider, EventHandler, EwmhFacade, EwmhFeature, Geometry, HitTarget, IconData, InputOps,
-    KeyOps, LayerSurfaceInfo, MotifWmHints, NetWmState, NormalHints, NotifyMode, OutputInfo,
-    OutputOps, PropertyKind, PropertyOps, ResizeEdge, ScreenInfo, StackMode, StrutPartial,
-    VrrCapabilities, WindowAttributes, WindowChanges, WindowOps, WindowType, WmHints,
+    AllowMode, AllowedAction, Backend, BackendDiagnostics, BackendEvent, Capabilities, CloseResult,
+    ColorAllocator, CompositorAnnotation, CompositorBenchmark, CompositorControl, CompositorMedia,
+    CompositorWindowEffects, CompositorWorkspaceEffects, CursorProvider, EventHandler, EwmhFacade,
+    DisplayControl, EwmhFeature, Geometry, HitTarget, IconData, InputOps, KeyOps, LayerSurfaceInfo,
+    MotifWmHints, NetWmState, NormalHints, NotifyMode, OutputInfo, OutputOps, PropertyKind,
+    PropertyOps, ResizeEdge, ScreenInfo, StackMode, StrutPartial, VrrCapabilities, WindowAttributes,
+    RenderScheduler, WindowChanges, WindowOps, WindowType, WmHints,
 };
 use crate::backend::common_define::{
     ArgbColor, ColorScheme, CursorHandle, EventMaskBits, KeySym, Mods, OutputId, Pixel, SchemeType,
@@ -39,7 +41,7 @@ use crate::backend::xcb::compositor_protocol::{
     create_shared_compositor_connection,
 };
 use crate::backend::xcb::present::load_present_manager as load_xcb_present_manager;
-use crate::jwm::InteractionAction;
+use crate::backend::api::InteractionAction;
 use calloop::signals::{Signal, Signals};
 use calloop::{
     EventLoop,
@@ -1817,6 +1819,390 @@ impl XcbBackend {
     }
 }
 
+impl CompositorBenchmark for XcbBackend {
+    fn compositor_benchmark_start(&mut self, frames: u32, warmup: u32) -> bool {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.benchmark_start(frames, warmup);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn compositor_benchmark_stop(&mut self) -> Option<String> {
+        self.compositor
+            .as_mut()
+            .and_then(|compositor| compositor.benchmark_stop())
+    }
+
+    fn compositor_benchmark_report(&self) -> Option<String> {
+        self.compositor
+            .as_ref()
+            .and_then(|compositor| compositor.benchmark_report())
+    }
+
+    fn compositor_benchmark_is_complete(&self) -> bool {
+        self.compositor
+            .as_ref()
+            .is_some_and(|compositor| compositor.benchmark_is_complete())
+    }
+
+    fn compositor_benchmark_set_auto_exit(&mut self, enabled: bool) {
+        self.benchmark_auto_exit = enabled;
+    }
+}
+
+impl BackendDiagnostics for XcbBackend {
+    fn compositor_fps(&self) -> f32 {
+        self.compositor
+            .as_ref()
+            .map_or(0.0, |compositor| compositor.frame_stats_fps())
+    }
+
+    fn compositor_get_metrics(&self) -> Option<crate::backend::api::CompositorMetrics> {
+        self.compositor
+            .as_ref()
+            .map(|compositor| compositor.get_metrics())
+    }
+}
+
+impl CompositorControl for XcbBackend {
+    fn compositor_set_color_temperature(&mut self, temperature: f32) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_color_temperature(temperature);
+        }
+    }
+
+    fn compositor_set_saturation(&mut self, saturation: f32) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_saturation(saturation);
+        }
+    }
+
+    fn compositor_set_brightness(&mut self, brightness: f32) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_brightness(brightness);
+        }
+    }
+
+    fn compositor_set_contrast(&mut self, contrast: f32) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_contrast(contrast);
+        }
+    }
+
+    fn compositor_set_invert_colors(&mut self, invert: bool) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_invert_colors(invert);
+        }
+    }
+
+    fn compositor_set_grayscale(&mut self, grayscale: bool) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_grayscale(grayscale);
+        }
+    }
+
+    fn compositor_set_debug_hud(&mut self, enabled: bool) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_debug_hud(enabled);
+        }
+    }
+
+    fn compositor_set_debug_hud_extended(&mut self, enabled: bool) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_debug_hud_extended(enabled);
+        }
+    }
+
+    fn compositor_toggle_slime_effect(&mut self) -> Option<bool> {
+        self.compositor
+            .as_mut()
+            .map(|compositor| compositor.toggle_slime_effect())
+    }
+
+    fn compositor_set_transition_mode(&mut self, mode: &str) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_transition_mode(mode);
+        }
+    }
+
+    fn compositor_apply_config(&mut self) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.apply_config();
+        }
+    }
+}
+
+impl CompositorMedia for XcbBackend {
+    fn take_screenshot_to_file(&mut self, path: &std::path::Path) -> XcbResult<bool> {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.request_screenshot(path.to_path_buf());
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn take_screenshot_region_to_file(
+        &mut self,
+        path: &std::path::Path,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> XcbResult<bool> {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.request_screenshot_region(path.to_path_buf(), x, y, width, height);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn compositor_capture_thumbnail(
+        &self,
+        window: WindowId,
+        max_size: u32,
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        let x11_window = self.ids.x11(window).ok()?;
+        self.compositor
+            .as_ref()?
+            .capture_window_thumbnail(x11_window, max_size)
+    }
+
+    fn compositor_notify_audio_timing(&mut self, window: WindowId, fps: f32, latency_ms: u32) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            if let Ok(x11_window) = self.ids.x11(window) {
+                compositor.notify_audio_timing(x11_window, fps, latency_ms);
+            }
+        }
+    }
+
+    fn compositor_request_live_thumbnail(
+        &mut self,
+        window: u32,
+        max_size: u32,
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        self.compositor
+            .as_ref()?
+            .request_live_thumbnail(window, max_size)
+    }
+
+    fn compositor_start_recording(&mut self, path: &str) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.start_recording(path);
+        }
+    }
+
+    fn compositor_stop_recording(&mut self) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.stop_recording();
+        }
+    }
+}
+
+impl CompositorWorkspaceEffects for XcbBackend {
+    fn compositor_notify_tag_switch(
+        &mut self,
+        duration: Duration,
+        direction: i32,
+        exclude_top: u32,
+        monitor_rect: (i32, i32, u32, u32),
+    ) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.notify_tag_switch(duration, direction, exclude_top, monitor_rect);
+        }
+    }
+
+    fn compositor_set_magnifier(&mut self, enabled: bool) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_magnifier(enabled);
+        }
+    }
+
+    fn compositor_set_snap_preview(&mut self, preview: Option<(f32, f32, f32, f32)>) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_snap_preview(preview);
+        }
+    }
+
+    fn compositor_clear_snap_preview_immediate(&mut self) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.clear_snap_preview_immediate();
+        }
+    }
+
+    fn compositor_set_overview_mode(
+        &mut self,
+        active: bool,
+        windows: &[(WindowId, f32, f32, f32, f32, bool, String)],
+    ) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            let windows = windows
+                .iter()
+                .filter_map(|(window, x, y, width, height, selected, title)| {
+                    self.ids.x11(*window).ok().map(|x11_window| {
+                        (x11_window, *x, *y, *width, *height, *selected, title.clone())
+                    })
+                })
+                .collect();
+            compositor.set_overview_mode(active, windows);
+        }
+    }
+
+    fn compositor_set_overview_monitor(&mut self, x: i32, y: i32, width: u32, height: u32) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_overview_monitor(x, y, width, height);
+        }
+    }
+
+    fn compositor_set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32, u32)]) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_monitors(monitors);
+        }
+    }
+
+    fn compositor_set_overview_selection(&mut self, window: WindowId) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            if let Ok(x11_window) = self.ids.x11(window) {
+                compositor.set_overview_selection(x11_window);
+            }
+        }
+    }
+
+    fn compositor_set_expose_mode(
+        &mut self,
+        active: bool,
+        windows: Vec<(WindowId, i32, i32, u32, u32)>,
+    ) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            let windows = windows
+                .iter()
+                .filter_map(|(window, x, y, width, height)| {
+                    self.ids
+                        .x11(*window)
+                        .ok()
+                        .map(|x11_window| (x11_window, *x, *y, *width, *height))
+                })
+                .collect();
+            compositor.set_expose_mode(active, windows);
+        }
+    }
+
+    fn compositor_expose_click(&mut self, x: f32, y: f32) -> Option<WindowId> {
+        let x11_window = self.compositor.as_mut()?.expose_click(x, y)?;
+        Some(self.ids.intern_raw(x11_window))
+    }
+}
+
+impl CompositorWindowEffects for XcbBackend {
+    fn compositor_set_frame_extents(
+        &mut self,
+        window: WindowId,
+        left: u32,
+        right: u32,
+        top: u32,
+        bottom: u32,
+    ) {
+        if let (Some(compositor), Ok(x11_window)) =
+            (self.compositor.as_mut(), self.ids.x11(window))
+        {
+            compositor.set_frame_extents(x11_window, left, right, top, bottom);
+        }
+    }
+
+    fn compositor_set_window_shaped(&mut self, window: WindowId, shaped: bool) {
+        if let (Some(compositor), Ok(x11_window)) =
+            (self.compositor.as_mut(), self.ids.x11(window))
+        {
+            compositor.set_window_shaped(x11_window, shaped);
+        }
+    }
+
+    fn compositor_set_window_urgent(&mut self, window: WindowId, urgent: bool) {
+        if let (Some(compositor), Ok(x11_window)) =
+            (self.compositor.as_mut(), self.ids.x11(window))
+        {
+            compositor.set_window_urgent(x11_window, urgent);
+        }
+    }
+
+    fn compositor_set_window_pip(&mut self, window: WindowId, pip: bool) {
+        if let (Some(compositor), Ok(x11_window)) =
+            (self.compositor.as_mut(), self.ids.x11(window))
+        {
+            compositor.set_window_pip(x11_window, pip);
+        }
+    }
+
+    fn compositor_force_full_redraw(&mut self) {
+        if let Some(compositor) = self.compositor.as_mut() { compositor.force_full_redraw(); }
+    }
+    fn compositor_set_mouse_position(&mut self, x: f32, y: f32) {
+        if let Some(compositor) = self.compositor.as_mut() { compositor.set_mouse_position(x, y); }
+    }
+    fn compositor_deactivate_edge_glow(&mut self) {
+        if let Some(compositor) = self.compositor.as_mut() { compositor.deactivate_edge_glow(); }
+    }
+    fn compositor_unsuppress_edge_glow(&mut self) {
+        if let Some(compositor) = self.compositor.as_mut() { compositor.unsuppress_edge_glow(); }
+    }
+    fn compositor_notify_window_move_start(&mut self, window: WindowId) {
+        if let (Some(compositor), Ok(x11_window)) = (self.compositor.as_mut(), self.ids.x11(window)) {
+            compositor.notify_window_move_start(x11_window);
+        }
+    }
+    fn compositor_notify_window_move_delta(&mut self, window: WindowId, dx: f32, dy: f32) {
+        if let (Some(compositor), Ok(x11_window)) = (self.compositor.as_mut(), self.ids.x11(window)) {
+            compositor.notify_window_move_delta(x11_window, dx, dy);
+        }
+    }
+    fn compositor_notify_window_move_end(&mut self, window: WindowId) {
+        if let (Some(compositor), Ok(x11_window)) = (self.compositor.as_mut(), self.ids.x11(window)) {
+            compositor.notify_window_move_end(x11_window);
+        }
+    }
+    fn compositor_set_dock_position(&mut self, x: f32, y: f32) {
+        if let Some(compositor) = self.compositor.as_mut() { compositor.set_dock_position(x, y); }
+    }
+    fn compositor_set_peek_mode(&mut self, active: bool) {
+        if let Some(compositor) = self.compositor.as_mut() { compositor.set_peek_mode(active); }
+    }
+    fn compositor_set_window_groups(&mut self, groups: Vec<(u32, Vec<(u32, String, bool)>)>) {
+        if let Some(compositor) = self.compositor.as_mut() { compositor.set_window_groups(groups); }
+    }
+    fn compositor_zoom_to_fit(&mut self, window: Option<u32>) {
+        if let Some(compositor) = self.compositor.as_mut() { compositor.zoom_to_fit(window); }
+    }
+}
+
+impl CompositorAnnotation for XcbBackend {
+    fn compositor_set_colorblind_mode(&mut self, mode: &str) { if let Some(c) = self.compositor.as_mut() { c.set_colorblind_mode(mode); } }
+    fn compositor_set_annotation_mode(&mut self, active: bool) { if let Some(c) = self.compositor.as_mut() { c.set_annotation_mode(active); } }
+    fn compositor_set_annotation_color(&mut self, rgba: [f32; 4]) { if let Some(c) = self.compositor.as_mut() { c.set_annotation_color(rgba); } }
+    fn compositor_set_annotation_line_width(&mut self, width: f32) { if let Some(c) = self.compositor.as_mut() { c.set_annotation_line_width(width); } }
+    fn compositor_annotation_add_point(&mut self, x: f32, y: f32) { if let Some(c) = self.compositor.as_mut() { c.annotation_add_point(x, y); } }
+    fn compositor_annotation_begin_stroke(&mut self) { if let Some(c) = self.compositor.as_mut() { c.annotation_new_stroke(); } }
+}
+
+impl DisplayControl for XcbBackend {
+    fn query_vrr_capabilities(&self, output: OutputId) -> Option<VrrCapabilities> {
+        let config = crate::config::CONFIG.load();
+        if !config.behavior().vrr_enabled || !self.output_ops.enumerate_outputs().iter().any(|candidate| candidate.id == output) { return None; }
+        Some(VrrCapabilities { supported: self.query_output_vrr_capable(output.0 as u32), current_enabled: false, min_refresh_hz: config.behavior().vrr_min_fps, max_refresh_hz: config.behavior().vrr_max_fps })
+    }
+    fn set_vrr_enabled(&mut self, _output: OutputId, _enabled: bool) -> XcbResult<()> { Err(BackendError::Unsupported("X11 set_vrr_enabled not implemented")) }
+    fn set_hdr_metadata(&mut self, output: OutputId, enabled: bool) -> XcbResult<()> { self.set_output_hdr_properties(output.0 as u32, enabled); Ok(()) }
+}
+
+impl RenderScheduler for XcbBackend {
+    fn request_render(&mut self) { let _ = self.conn.flush(); }
+    fn has_compositor(&self) -> bool { self.compositor.is_some() }
+    fn compositor_needs_render(&self) -> bool { self.compositor.as_ref().is_some_and(|c| c.needs_render()) }
+    fn compositor_overlay_window(&self) -> Option<WindowId> { self.compositor.as_ref().map(|c| self.ids.intern_raw(c.overlay_window())) }
+}
+
 impl Backend for XcbBackend {
     fn capabilities(&self) -> Capabilities {
         self.caps
@@ -1836,14 +2222,6 @@ impl Backend for XcbBackend {
             .map_err(|e| {
                 BackendError::Message(format!("Another window manager is already running: {e}"))
             })
-    }
-
-    fn request_render(&mut self) {
-        let _ = self.conn.flush();
-    }
-
-    fn has_compositor(&self) -> bool {
-        self.compositor.is_some()
     }
 
     fn set_compositor_enabled(&mut self, enabled: bool) -> XcbResult<bool> {
@@ -1889,16 +2267,6 @@ impl Backend for XcbBackend {
             .is_some_and(|c| c.set_partial_damage(enabled)))
     }
 
-    fn compositor_needs_render(&self) -> bool {
-        self.compositor.as_ref().is_some_and(|c| c.needs_render())
-    }
-
-    fn compositor_overlay_window(&self) -> Option<WindowId> {
-        self.compositor
-            .as_ref()
-            .map(|c| self.ids.intern_raw(c.overlay_window()))
-    }
-
     fn compositor_render_frame(
         &mut self,
         scene: &[(u64, i32, i32, u32, u32)],
@@ -1925,411 +2293,6 @@ impl Backend for XcbBackend {
         compositor.clear_needs_render();
         self.scratch_x11_scene = x11_scene;
         Ok(rendered)
-    }
-
-    fn take_screenshot_to_file(&mut self, path: &std::path::Path) -> XcbResult<bool> {
-        if let Some(compositor) = self.compositor.as_mut() {
-            compositor.request_screenshot(path.to_path_buf());
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    fn take_screenshot_region_to_file(
-        &mut self,
-        path: &std::path::Path,
-        x: i32,
-        y: i32,
-        w: u32,
-        h: u32,
-    ) -> XcbResult<bool> {
-        if let Some(compositor) = self.compositor.as_mut() {
-            compositor.request_screenshot_region(path.to_path_buf(), x, y, w, h);
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    fn compositor_set_color_temperature(&mut self, temp: f32) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_color_temperature(temp);
-        }
-    }
-
-    fn compositor_set_saturation(&mut self, sat: f32) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_saturation(sat);
-        }
-    }
-
-    fn compositor_set_brightness(&mut self, val: f32) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_brightness(val);
-        }
-    }
-
-    fn compositor_set_contrast(&mut self, val: f32) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_contrast(val);
-        }
-    }
-
-    fn compositor_set_invert_colors(&mut self, invert: bool) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_invert_colors(invert);
-        }
-    }
-
-    fn compositor_set_grayscale(&mut self, gs: bool) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_grayscale(gs);
-        }
-    }
-
-    fn compositor_set_debug_hud(&mut self, enabled: bool) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_debug_hud(enabled);
-        }
-    }
-
-    fn compositor_set_debug_hud_extended(&mut self, enabled: bool) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_debug_hud_extended(enabled);
-        }
-    }
-    fn compositor_toggle_slime_effect(&mut self) -> Option<bool> {
-        self.compositor
-            .as_mut()
-            .map(|compositor| compositor.toggle_slime_effect())
-    }
-
-    fn compositor_set_transition_mode(&mut self, mode: &str) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_transition_mode(mode);
-        }
-    }
-
-    fn compositor_apply_config(&mut self) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.apply_config();
-        }
-    }
-
-    fn compositor_fps(&self) -> f32 {
-        self.compositor
-            .as_ref()
-            .map_or(0.0, |c| c.frame_stats_fps())
-    }
-
-    fn compositor_get_metrics(&self) -> Option<crate::backend::api::CompositorMetrics> {
-        self.compositor.as_ref().map(|c| c.get_metrics())
-    }
-
-    fn compositor_benchmark_start(&mut self, frames: u32, warmup: u32) -> bool {
-        if let Some(c) = self.compositor.as_mut() {
-            c.benchmark_start(frames, warmup);
-            true
-        } else {
-            false
-        }
-    }
-
-    fn compositor_benchmark_stop(&mut self) -> Option<String> {
-        self.compositor.as_mut().and_then(|c| c.benchmark_stop())
-    }
-
-    fn compositor_benchmark_report(&self) -> Option<String> {
-        self.compositor.as_ref().and_then(|c| c.benchmark_report())
-    }
-
-    fn compositor_benchmark_is_complete(&self) -> bool {
-        self.compositor
-            .as_ref()
-            .is_some_and(|c| c.benchmark_is_complete())
-    }
-
-    fn compositor_benchmark_set_auto_exit(&mut self, enabled: bool) {
-        self.benchmark_auto_exit = enabled;
-    }
-
-    fn compositor_capture_thumbnail(
-        &self,
-        window: WindowId,
-        max_size: u32,
-    ) -> Option<(Vec<u8>, u32, u32)> {
-        let x11w = self.ids.x11(window).ok()?;
-        self.compositor
-            .as_ref()?
-            .capture_window_thumbnail(x11w, max_size)
-    }
-
-    fn compositor_set_frame_extents(
-        &mut self,
-        window: WindowId,
-        left: u32,
-        right: u32,
-        top: u32,
-        bottom: u32,
-    ) {
-        if let Some(c) = self.compositor.as_mut() {
-            if let Ok(x11w) = self.ids.x11(window) {
-                c.set_frame_extents(x11w, left, right, top, bottom);
-            }
-        }
-    }
-
-    fn compositor_set_window_shaped(&mut self, window: WindowId, shaped: bool) {
-        if let Some(c) = self.compositor.as_mut() {
-            if let Ok(x11w) = self.ids.x11(window) {
-                c.set_window_shaped(x11w, shaped);
-            }
-        }
-    }
-
-    fn compositor_notify_tag_switch(
-        &mut self,
-        duration: Duration,
-        direction: i32,
-        exclude_top: u32,
-        mon_rect: (i32, i32, u32, u32),
-    ) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.notify_tag_switch(duration, direction, exclude_top, mon_rect);
-        }
-    }
-
-    fn compositor_force_full_redraw(&mut self) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.force_full_redraw();
-        }
-    }
-
-    fn compositor_set_mouse_position(&mut self, x: f32, y: f32) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_mouse_position(x, y);
-        }
-    }
-
-    fn compositor_deactivate_edge_glow(&mut self) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.deactivate_edge_glow();
-        }
-    }
-
-    fn compositor_unsuppress_edge_glow(&mut self) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.unsuppress_edge_glow();
-        }
-    }
-
-    fn compositor_set_window_urgent(&mut self, window: WindowId, urgent: bool) {
-        if let Some(c) = self.compositor.as_mut() {
-            if let Ok(x11w) = self.ids.x11(window) {
-                c.set_window_urgent(x11w, urgent);
-            }
-        }
-    }
-
-    fn compositor_set_window_pip(&mut self, window: WindowId, pip: bool) {
-        if let Some(c) = self.compositor.as_mut() {
-            if let Ok(x11w) = self.ids.x11(window) {
-                c.set_window_pip(x11w, pip);
-            }
-        }
-    }
-
-    fn compositor_set_magnifier(&mut self, enabled: bool) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_magnifier(enabled);
-        }
-    }
-
-    fn compositor_notify_audio_timing(&mut self, window: WindowId, fps: f32, latency_ms: u32) {
-        if let Some(c) = self.compositor.as_mut() {
-            if let Ok(x11w) = self.ids.x11(window) {
-                c.notify_audio_timing(x11w, fps, latency_ms);
-            }
-        }
-    }
-
-    fn compositor_set_overview_mode(
-        &mut self,
-        active: bool,
-        windows: &[(WindowId, f32, f32, f32, f32, bool, String)],
-    ) {
-        if let Some(c) = self.compositor.as_mut() {
-            let x11_windows = windows
-                .iter()
-                .filter_map(|(wid, x, y, w, h, sel, title)| {
-                    self.ids
-                        .x11(*wid)
-                        .ok()
-                        .map(|x11w| (x11w, *x, *y, *w, *h, *sel, title.clone()))
-                })
-                .collect();
-            c.set_overview_mode(active, x11_windows);
-        }
-    }
-
-    fn compositor_set_overview_monitor(&mut self, x: i32, y: i32, w: u32, h: u32) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_overview_monitor(x, y, w, h);
-        }
-    }
-
-    fn compositor_set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32, u32)]) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_monitors(monitors);
-        }
-    }
-
-    fn compositor_set_overview_selection(&mut self, window: WindowId) {
-        if let Some(c) = self.compositor.as_mut() {
-            if let Ok(x11w) = self.ids.x11(window) {
-                c.set_overview_selection(x11w);
-            }
-        }
-    }
-
-    fn compositor_notify_window_move_start(&mut self, window: WindowId) {
-        if let Some(c) = self.compositor.as_mut() {
-            if let Ok(x11w) = self.ids.x11(window) {
-                c.notify_window_move_start(x11w);
-            }
-        }
-    }
-
-    fn compositor_notify_window_move_delta(&mut self, window: WindowId, dx: f32, dy: f32) {
-        if let Some(c) = self.compositor.as_mut() {
-            if let Ok(x11w) = self.ids.x11(window) {
-                c.notify_window_move_delta(x11w, dx, dy);
-            }
-        }
-    }
-
-    fn compositor_notify_window_move_end(&mut self, window: WindowId) {
-        if let Some(c) = self.compositor.as_mut() {
-            if let Ok(x11w) = self.ids.x11(window) {
-                c.notify_window_move_end(x11w);
-            }
-        }
-    }
-
-    fn compositor_set_dock_position(&mut self, x: f32, y: f32) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_dock_position(x, y);
-        }
-    }
-
-    fn compositor_set_expose_mode(
-        &mut self,
-        active: bool,
-        windows: Vec<(WindowId, i32, i32, u32, u32)>,
-    ) {
-        if let Some(c) = self.compositor.as_mut() {
-            let x11_windows = windows
-                .iter()
-                .filter_map(|(wid, x, y, w, h)| {
-                    self.ids.x11(*wid).ok().map(|x11w| (x11w, *x, *y, *w, *h))
-                })
-                .collect();
-            c.set_expose_mode(active, x11_windows);
-        }
-    }
-
-    fn compositor_set_snap_preview(&mut self, preview: Option<(f32, f32, f32, f32)>) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_snap_preview(preview);
-        }
-    }
-
-    fn compositor_clear_snap_preview_immediate(&mut self) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.clear_snap_preview_immediate();
-        }
-    }
-
-    fn compositor_set_peek_mode(&mut self, active: bool) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_peek_mode(active);
-        }
-    }
-
-    fn compositor_set_window_groups(&mut self, groups: Vec<(u32, Vec<(u32, String, bool)>)>) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_window_groups(groups);
-        }
-    }
-
-    fn compositor_request_live_thumbnail(
-        &mut self,
-        window: u32,
-        max_size: u32,
-    ) -> Option<(Vec<u8>, u32, u32)> {
-        self.compositor
-            .as_ref()?
-            .request_live_thumbnail(window, max_size)
-    }
-
-    fn compositor_zoom_to_fit(&mut self, window: Option<u32>) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.zoom_to_fit(window);
-        }
-    }
-
-    fn compositor_expose_click(&mut self, x: f32, y: f32) -> Option<WindowId> {
-        let x11_win = self.compositor.as_mut()?.expose_click(x, y)?;
-        Some(self.ids.intern_raw(x11_win))
-    }
-
-    fn compositor_set_colorblind_mode(&mut self, mode: &str) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_colorblind_mode(mode);
-        }
-    }
-
-    fn compositor_set_annotation_mode(&mut self, active: bool) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_annotation_mode(active);
-        }
-    }
-
-    fn compositor_set_annotation_color(&mut self, rgba: [f32; 4]) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_annotation_color(rgba);
-        }
-    }
-
-    fn compositor_set_annotation_line_width(&mut self, width: f32) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_annotation_line_width(width);
-        }
-    }
-
-    fn compositor_annotation_add_point(&mut self, x: f32, y: f32) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.annotation_add_point(x, y);
-        }
-    }
-
-    fn compositor_annotation_begin_stroke(&mut self) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.annotation_new_stroke();
-        }
-    }
-
-    fn compositor_start_recording(&mut self, path: &str) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.start_recording(path);
-        }
-    }
-
-    fn compositor_stop_recording(&mut self) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.stop_recording();
-        }
     }
 
     fn window_ops(&self) -> &dyn WindowOps {
@@ -2429,41 +2392,6 @@ impl Backend for XcbBackend {
         if let Some(ewmh) = self.ewmh.as_ref() {
             ewmh.set_workarea(areas)?;
         }
-        Ok(())
-    }
-
-    fn query_vrr_capabilities(&self, output: OutputId) -> Option<VrrCapabilities> {
-        let cfg = crate::config::CONFIG.load();
-        let behavior = cfg.behavior();
-        if !behavior.vrr_enabled {
-            return None;
-        }
-
-        let output_exists = self
-            .output_ops
-            .enumerate_outputs()
-            .into_iter()
-            .any(|o| o.id == output);
-        if !output_exists {
-            return None;
-        }
-
-        Some(VrrCapabilities {
-            supported: self.query_output_vrr_capable(output.0 as u32),
-            current_enabled: false,
-            min_refresh_hz: behavior.vrr_min_fps,
-            max_refresh_hz: behavior.vrr_max_fps,
-        })
-    }
-
-    fn set_vrr_enabled(&mut self, _output: OutputId, _enabled: bool) -> XcbResult<()> {
-        Err(BackendError::Unsupported(
-            "X11 set_vrr_enabled not implemented",
-        ))
-    }
-
-    fn set_hdr_metadata(&mut self, output: OutputId, enabled: bool) -> XcbResult<()> {
-        self.set_output_hdr_properties(output.0 as u32, enabled);
         Ok(())
     }
 
@@ -5552,9 +5480,10 @@ mod parity_tests {
         let xcb_render_start = xcb_backend_impl
             .find("fn compositor_render_frame")
             .expect("missing xcb compositor_render_frame");
-        let xcb_render_end = xcb_backend_impl[xcb_render_start..]
-            .find("fn take_screenshot_to_file")
-            .map(|idx| xcb_render_start + idx)
+        let xcb_after_signature = xcb_render_start + "fn compositor_render_frame".len();
+        let xcb_render_end = xcb_backend_impl[xcb_after_signature..]
+            .find("\n    fn ")
+            .map(|idx| xcb_after_signature + idx)
             .expect("missing xcb function after compositor_render_frame");
         let xcb_render_body = &xcb_backend_impl[xcb_render_start..xcb_render_end];
 
@@ -5563,9 +5492,10 @@ mod parity_tests {
         let x11rb_render_start = x11rb_backend_impl
             .find("fn compositor_render_frame")
             .expect("missing x11rb compositor_render_frame");
-        let x11rb_render_end = x11rb_backend_impl[x11rb_render_start..]
-            .find("fn take_screenshot_to_file")
-            .map(|idx| x11rb_render_start + idx)
+        let x11rb_after_signature = x11rb_render_start + "fn compositor_render_frame".len();
+        let x11rb_render_end = x11rb_backend_impl[x11rb_after_signature..]
+            .find("\n    fn ")
+            .map(|idx| x11rb_after_signature + idx)
             .expect("missing x11rb function after compositor_render_frame");
         let x11rb_render_body = &x11rb_backend_impl[x11rb_render_start..x11rb_render_end];
 

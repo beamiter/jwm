@@ -378,7 +378,7 @@ impl NewWM {
 /// 设置旧模式测试数据
 pub fn setup_old_wm(num_monitors: usize, num_clients: usize) -> OldWM {
     let mut wm = OldWM::new();
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     // 添加监视器
     for i in 0..num_monitors {
@@ -387,7 +387,7 @@ pub fn setup_old_wm(num_monitors: usize, num_clients: usize) -> OldWM {
 
     // 添加客户端
     for i in 0..num_clients {
-        let monitor_num = rng.gen_range(0..num_monitors) as i32;
+        let monitor_num = rng.random_range(0..num_monitors) as i32;
         wm.add_client(i as u32, monitor_num);
     }
 
@@ -397,7 +397,7 @@ pub fn setup_old_wm(num_monitors: usize, num_clients: usize) -> OldWM {
 /// 设置新模式测试数据
 pub fn setup_new_wm(num_monitors: usize, num_clients: usize) -> NewWM {
     let mut wm = NewWM::new();
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     // 添加监视器
     for i in 0..num_monitors {
@@ -406,7 +406,7 @@ pub fn setup_new_wm(num_monitors: usize, num_clients: usize) -> NewWM {
 
     // 添加客户端
     for i in 0..num_clients {
-        let monitor_num = rng.gen_range(0..num_monitors) as i32;
+        let monitor_num = rng.random_range(0..num_monitors) as i32;
         wm.add_client(i as u32, monitor_num);
     }
 
@@ -469,9 +469,9 @@ fn benchmark_add_clients(c: &mut Criterion) {
                         wm
                     },
                     |mut wm| {
-                        let mut rng = rand::thread_rng();
+                        let mut rng = rand::rng();
                         for i in 0..100 {
-                            let monitor_num = rng.gen_range(0..num_mon) as i32;
+                            let monitor_num = rng.random_range(0..num_mon) as i32;
                             wm.add_client(i as u32, monitor_num);
                         }
                     },
@@ -493,9 +493,9 @@ fn benchmark_add_clients(c: &mut Criterion) {
                         wm
                     },
                     |mut wm| {
-                        let mut rng = rand::thread_rng();
+                        let mut rng = rand::rng();
                         for i in 0..100 {
-                            let monitor_num = rng.gen_range(0..num_mon) as i32;
+                            let monitor_num = rng.random_range(0..num_mon) as i32;
                             wm.add_client(i as u32, monitor_num);
                         }
                     },
@@ -519,9 +519,9 @@ fn benchmark_find_clients(c: &mut Criterion) {
             BenchmarkId::new("Old_WM", &config_name),
             &old_wm,
             |b, wm| {
-                let mut rng = rand::thread_rng();
+                let mut rng = rand::rng();
                 b.iter(|| {
-                    let win = rng.gen_range(0..num_clients) as u32;
+                    let win = rng.random_range(0..num_clients) as u32;
                     wm.find_client(win)
                 })
             },
@@ -533,9 +533,9 @@ fn benchmark_find_clients(c: &mut Criterion) {
             BenchmarkId::new("New_WM", &config_name),
             &new_wm,
             |b, wm| {
-                let mut rng = rand::thread_rng();
+                let mut rng = rand::rng();
                 b.iter(|| {
-                    let win = rng.gen_range(0..num_clients) as u32;
+                    let win = rng.random_range(0..num_clients) as u32;
                     wm.find_client(win)
                 })
             },
@@ -559,9 +559,9 @@ fn benchmark_remove_clients(c: &mut Criterion) {
                 b.iter_with_setup(
                     || setup_old_wm(num_mon, num_cli),
                     |mut wm| {
-                        let mut rng = rand::thread_rng();
+                        let mut rng = rand::rng();
                         for _ in 0..10 {
-                            let win = rng.gen_range(0..num_cli) as u32;
+                            let win = rng.random_range(0..num_cli) as u32;
                             wm.remove_client(win);
                         }
                     },
@@ -577,9 +577,9 @@ fn benchmark_remove_clients(c: &mut Criterion) {
                 b.iter_with_setup(
                     || setup_new_wm(num_mon, num_cli),
                     |mut wm| {
-                        let mut rng = rand::thread_rng();
+                        let mut rng = rand::rng();
                         for _ in 0..10 {
-                            let win = rng.gen_range(0..num_cli) as u32;
+                            let win = rng.random_range(0..num_cli) as u32;
                             wm.remove_client(win);
                         }
                     },
@@ -605,13 +605,13 @@ fn benchmark_update_clients(c: &mut Criterion) {
                 b.iter_with_setup(
                     || setup_old_wm(num_mon, num_cli),
                     |mut wm| {
-                        let mut rng = rand::thread_rng();
-                        let win = rng.gen_range(0..num_cli) as u32;
+                        let mut rng = rand::rng();
+                        let win = rng.random_range(0..num_cli) as u32;
                         let geom = ClientGeometry {
-                            x: rng.gen_range(0..1920),
-                            y: rng.gen_range(0..1080),
-                            w: rng.gen_range(100..800),
-                            h: rng.gen_range(100..600),
+                            x: rng.random_range(0..1920),
+                            y: rng.random_range(0..1080),
+                            w: rng.random_range(100..800),
+                            h: rng.random_range(100..600),
                         };
                         wm.update_client_geometry(win, geom);
                     },
@@ -627,13 +627,13 @@ fn benchmark_update_clients(c: &mut Criterion) {
                 b.iter_with_setup(
                     || setup_new_wm(num_mon, num_cli),
                     |mut wm| {
-                        let mut rng = rand::thread_rng();
-                        let win = rng.gen_range(0..num_cli) as u32;
+                        let mut rng = rand::rng();
+                        let win = rng.random_range(0..num_cli) as u32;
                         let geom = ClientGeometry {
-                            x: rng.gen_range(0..1920),
-                            y: rng.gen_range(0..1080),
-                            w: rng.gen_range(100..800),
-                            h: rng.gen_range(100..600),
+                            x: rng.random_range(0..1920),
+                            y: rng.random_range(0..1080),
+                            w: rng.random_range(100..800),
+                            h: rng.random_range(100..600),
                         };
                         wm.update_client_geometry(win, geom);
                     },
@@ -660,9 +660,9 @@ fn benchmark_swap_clients(c: &mut Criterion) {
                 b.iter_with_setup(
                     || setup_old_wm(num_mon, num_cli),
                     |mut wm| {
-                        let mut rng = rand::thread_rng();
-                        let win1 = rng.gen_range(0..num_cli) as u32;
-                        let win2 = rng.gen_range(0..num_cli) as u32;
+                        let mut rng = rand::rng();
+                        let win1 = rng.random_range(0..num_cli) as u32;
+                        let win2 = rng.random_range(0..num_cli) as u32;
                         wm.swap_adjacent_clients(win1, win2);
                     },
                 )
@@ -677,9 +677,9 @@ fn benchmark_swap_clients(c: &mut Criterion) {
                 b.iter_with_setup(
                     || setup_new_wm(num_mon, num_cli),
                     |mut wm| {
-                        let mut rng = rand::thread_rng();
-                        let win1 = rng.gen_range(0..num_cli) as u32;
-                        let win2 = rng.gen_range(0..num_cli) as u32;
+                        let mut rng = rand::rng();
+                        let win1 = rng.random_range(0..num_cli) as u32;
+                        let win2 = rng.random_range(0..num_cli) as u32;
                         wm.swap_adjacent_clients_safe(win1, win2);
                     },
                 )

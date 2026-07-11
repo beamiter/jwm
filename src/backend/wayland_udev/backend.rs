@@ -8,14 +8,15 @@ mod kms;
 use self::kms::KmsState;
 use super::compositor::WaylandCompositor;
 use crate::backend::api::{
-    Backend, BackendEvent, Capabilities, ColorAllocator, CursorProvider, EventHandler, HitTarget,
-    InputOps, KeyOps, OutputInfo, OutputOps, PropertyOps, ResizeEdge, ScreenInfo, WindowOps,
-    WindowType,
+    Backend, BackendDiagnostics, BackendEvent, Capabilities, ColorAllocator, CompositorAnnotation,
+    CompositorBenchmark, CompositorControl, CompositorMedia, CompositorWindowEffects,
+    CompositorWorkspaceEffects, CursorProvider, EventHandler, HitTarget, InputOps, KeyOps,
+    DisplayControl, OutputInfo, OutputOps, PropertyOps, ResizeEdge, ScreenInfo, WindowOps,
+    RenderScheduler, WindowType,
 };
 use crate::backend::common_define::{KeySym, Mods, OutputId, StdCursorKind, WindowId};
 use crate::backend::error::BackendError;
 use crate::config::CONFIG;
-use crate::jwm::{Jwm, WMFuncType};
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -84,33 +85,6 @@ fn gesture_swipe_should_intercept(
     bindings: &[crate::config::GestureSwipeConfig],
 ) -> bool {
     fingers >= 3 && bindings.iter().any(|binding| binding.fingers == fingers)
-}
-
-/// A shortcut is eligible for libinput-style key repeat only when repeating it
-/// has a predictable, incremental result. In particular, never repeat actions
-/// that spawn processes, close windows, toggle state, or capture the screen.
-fn shortcut_is_repeatable(func: Option<WMFuncType>) -> bool {
-    let Some(func) = func else {
-        return false;
-    };
-    macro_rules! eq {
-        ($f:path) => {
-            std::ptr::fn_addr_eq(func, $f as WMFuncType)
-        };
-    }
-
-    eq!(Jwm::focusstack)
-        || eq!(Jwm::loopview)
-        || eq!(Jwm::setmfact)
-        || eq!(Jwm::setcfact)
-        || eq!(Jwm::incnmaster)
-        || eq!(Jwm::movestack)
-        || eq!(Jwm::cyclelayout)
-        || eq!(Jwm::scrolling_focus_column)
-        || eq!(Jwm::scrolling_move_column)
-        || eq!(Jwm::scrolling_consume)
-        || eq!(Jwm::scrolling_expel)
-        || eq!(Jwm::scrolling_focus_window)
 }
 
 fn region_fully_covers_rect(region: &RegionAttributes, target: Rectangle<i32, Logical>) -> bool {
@@ -1232,7 +1206,7 @@ impl UdevBackend {
                 .map(|k| ShortcutBinding {
                     mods: k.mask & allowed_shortcut_mods(),
                     keysym: k.key_sym,
-                    repeatable: shortcut_is_repeatable(k.func_opt),
+                    repeatable: k.repeatable,
                 })
                 .collect::<Vec<_>>();
 
@@ -2856,6 +2830,556 @@ fn output_at(outputs: &[OutputInfo], x: f64, y: f64) -> Option<OutputId> {
         .map(|o| o.id)
 }
 
+impl CompositorBenchmark for UdevBackend {}
+
+impl BackendDiagnostics for UdevBackend {
+    fn compositor_fps(&self) -> f32 {
+        self.compositor
+            .as_ref()
+            .map_or(0.0, |compositor| compositor.fps())
+    }
+
+    fn compositor_get_metrics(&self) -> Option<crate::backend::api::CompositorMetrics> {
+        self.compositor
+            .as_ref()
+            .map(|compositor| compositor.get_metrics())
+    }
+
+    fn compositor_blur_status(&self) -> Option<crate::backend::api::BlurStatus> {
+        self.compositor
+            .as_ref()
+            .map(|compositor| compositor.get_blur_status())
+    }
+
+    fn compositor_direct_scanout_status(&self) -> Option<crate::backend::api::DirectScanoutStatus> {
+        let compositor = self.compositor.as_ref()?;
+        let kms_outputs = self
+            .kms
+            .as_ref()
+            .map(|kms| kms.borrow().direct_scanout_output_statuses())
+            .unwrap_or_default();
+        Some(compositor.get_direct_scanout_status(kms_outputs))
+    }
+
+    fn compositor_presentation_timing_status(
+        &self,
+    ) -> Option<crate::backend::api::PresentationTimingStatus> {
+        self.kms
+            .as_ref()
+            .map(|kms| kms.borrow().presentation_timing_status())
+    }
+
+    fn compositor_output_management_status(
+        &self,
+    ) -> Option<crate::backend::api::OutputManagementStatus> {
+        let mut soft_disabled: Vec<String> =
+            self.state.soft_disabled_outputs.iter().cloned().collect();
+        soft_disabled.sort();
+        Some(crate::backend::api::OutputManagementStatus {
+            pending_ack_count: self.state.pending_output_acks.len(),
+            soft_disabled_outputs: soft_disabled,
+            last_transaction: self.last_output_management_tx.clone(),
+            last_rejected: self.state.last_output_management_rejection.clone(),
+        })
+    }
+
+    fn compositor_capture_status(&self) -> Option<crate::backend::api::CaptureStatus> {
+        let screencopy_pending = self
+            .state
+            .screencopy_pending
+            .as_ref()
+            .map(|queue| queue.lock_safe().len())
+            .unwrap_or(0);
+        let (image_pending, image_output_pending, image_toplevel_pending) = self
+            .state
+            .image_capture_pending
+            .as_ref()
+            .map(|queue| {
+                let queue = queue.lock_safe();
+                let output_count = queue
+                    .iter()
+                    .filter(|pending| {
+                        matches!(
+                            &pending.source,
+                            crate::backend::wayland_udev::image_copy_capture::CaptureSource::Output(_)
+                        )
+                    })
+                    .count();
+                let toplevel_count = queue
+                    .iter()
+                    .filter(|pending| {
+                        matches!(
+                            &pending.source,
+                            crate::backend::wayland_udev::image_copy_capture::CaptureSource::Toplevel(_)
+                        )
+                    })
+                    .count();
+                (queue.len(), output_count, toplevel_count)
+            })
+            .unwrap_or((0, 0, 0));
+        let dmabuf_format_count = self.state.dmabuf_render_formats.len();
+        let counters = self.state.capture_counters.lock_safe().clone();
+
+        Some(crate::backend::api::CaptureStatus {
+            screencopy: crate::backend::api::CaptureProtocolStatus {
+                enabled: self.state.screencopy_pending.is_some(),
+                pending_frames: screencopy_pending,
+            },
+            image_copy_capture: crate::backend::api::CaptureProtocolStatus {
+                enabled: self.state.image_capture_pending.is_some(),
+                pending_frames: image_pending,
+            },
+            image_copy_output_pending_frames: image_output_pending,
+            image_copy_toplevel_pending_frames: image_toplevel_pending,
+            screencopy_queued_total: counters.screencopy_queued_total,
+            screencopy_failed_total: counters.screencopy_failed_total,
+            screencopy_fulfilled_total: counters.screencopy_fulfilled_total,
+            screencopy_render_failed_total: counters.screencopy_render_failed_total,
+            image_copy_sessions_total: counters.image_copy_sessions_total,
+            image_copy_queued_total: counters.image_copy_queued_total,
+            image_copy_failed_total: counters.image_copy_failed_total,
+            image_copy_fulfilled_total: counters.image_copy_fulfilled_total,
+            image_copy_render_failed_total: counters.image_copy_render_failed_total,
+            image_copy_output_queued_total: counters.image_copy_output_queued_total,
+            image_copy_toplevel_queued_total: counters.image_copy_toplevel_queued_total,
+            last_queued_unix_ms: counters.last_queued_unix_ms,
+            last_fulfilled_unix_ms: counters.last_fulfilled_unix_ms,
+            last_failed_unix_ms: counters.last_failed_unix_ms,
+            last_failure_reason: counters.last_failure_reason.clone(),
+            dmabuf_advertised: self.state.dmabuf_main_device.is_some() && dmabuf_format_count > 0,
+            dmabuf_format_count,
+            cursor_capture_supported: self.state.image_capture_pending.is_some(),
+            sensitive_content_masking: false,
+            policy: "allow_all_visible_content".into(),
+        })
+    }
+
+    fn compositor_xwayland_status(&self) -> Option<crate::backend::api::XWaylandStatus> {
+        Some(crate::backend::api::XWaylandStatus {
+            available: true,
+            wm_ready: self.state.x11_wm.is_some(),
+            display: std::env::var("DISPLAY").ok(),
+            mapped_window_count: self.state.x11_surfaces.len(),
+            associated_surface_count: self.state.x11_surfaces.len(),
+            pending_association_count: self
+                .state
+                .x11_surface_to_window
+                .len()
+                .saturating_sub(self.state.x11_surfaces.len()),
+        })
+    }
+
+    fn compositor_protocol_bind_counts(&self) -> Vec<crate::backend::api::ProtocolBindStatus> {
+        self.state.protocol_bind_counts_snapshot()
+    }
+
+    fn compositor_tearing_hint_count(&self) -> usize {
+        self.state
+            .tearing_hints
+            .as_ref()
+            .map(|hints| hints.lock_safe().len())
+            .unwrap_or(0)
+    }
+
+    fn compositor_session_lock_surface_count(&self) -> usize {
+        self.state.lock_surfaces.len()
+    }
+
+    fn compositor_session_locked(&self) -> bool {
+        self.state.session_locked
+    }
+
+    fn compositor_color_managed_surfaces(
+        &self,
+    ) -> Vec<crate::backend::api::ColorManagedSurfaceInfo> {
+        let Some(color_manager) = self.state.color_manager.as_ref() else {
+            return Vec::new();
+        };
+        color_manager
+            .snapshot_surface_descriptions()
+            .into_iter()
+            .map(
+                |(object_id, record)| crate::backend::api::ColorManagedSurfaceInfo {
+                    surface_object_id: format!("{:?}", object_id),
+                    identity: record.identity,
+                    tf_named: record.params.tf_named,
+                    tf_power: record.params.tf_power,
+                    primaries_named: record.params.primaries_named,
+                    primaries: record.params.primaries,
+                    min_lum: record.params.min_lum,
+                    max_lum: record.params.max_lum,
+                    reference_lum: record.params.reference_lum,
+                    mastering_primaries: record.params.mastering_primaries,
+                    mastering_min_lum: record.params.mastering_min_lum,
+                    mastering_max_lum: record.params.mastering_max_lum,
+                    max_cll: record.params.max_cll,
+                    max_fall: record.params.max_fall,
+                },
+            )
+            .collect()
+    }
+}
+
+impl CompositorControl for UdevBackend {
+    fn compositor_apply_config(&mut self) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.apply_config();
+        }
+    }
+
+    fn compositor_set_color_temperature(&mut self, temperature: f32) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_color_temperature(temperature);
+        }
+    }
+
+    fn compositor_set_saturation(&mut self, saturation: f32) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_saturation(saturation);
+        }
+    }
+
+    fn compositor_set_brightness(&mut self, brightness: f32) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_brightness(brightness);
+        }
+    }
+
+    fn compositor_set_contrast(&mut self, contrast: f32) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_contrast(contrast);
+        }
+    }
+
+    fn compositor_set_invert_colors(&mut self, invert: bool) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_invert_colors(invert);
+        }
+    }
+
+    fn compositor_set_grayscale(&mut self, grayscale: bool) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_grayscale(grayscale);
+        }
+    }
+
+    fn compositor_set_debug_hud(&mut self, enabled: bool) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_debug_hud(enabled);
+        }
+    }
+
+    fn compositor_set_debug_hud_extended(&mut self, enabled: bool) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_debug_hud_extended(enabled);
+        }
+    }
+
+    fn compositor_set_transition_mode(&mut self, mode: &str) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_transition_mode(mode);
+        }
+    }
+}
+
+impl CompositorMedia for UdevBackend {
+    fn take_screenshot_to_file(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<bool, BackendError> {
+        if let Some(kms) = &self.kms {
+            kms.borrow_mut().request_screenshot(path.to_path_buf());
+            self.state.needs_redraw = true;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn take_screenshot_region_to_file(
+        &mut self,
+        path: &std::path::Path,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> Result<bool, BackendError> {
+        if let Some(kms) = &self.kms {
+            kms.borrow_mut()
+                .request_screenshot_region(path.to_path_buf(), x, y, width, height);
+            self.state.needs_redraw = true;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn compositor_start_recording(&mut self, path: &str) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.start_recording(path);
+        }
+    }
+
+    fn compositor_stop_recording(&mut self) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.stop_recording();
+        }
+    }
+
+    fn compositor_notify_audio_timing(
+        &mut self,
+        window: WindowId,
+        fps: f32,
+        buffer_latency_ms: u32,
+    ) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.notify_audio_timing(window.raw(), fps, buffer_latency_ms);
+        }
+    }
+
+    fn compositor_capture_thumbnail(
+        &self,
+        window: WindowId,
+        max_size: u32,
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        let compositor = self.compositor.as_ref()?;
+        let kms = self.kms.as_ref()?;
+        kms.borrow_mut()
+            .with_renderer(|renderer| unsafe {
+                compositor.capture_thumbnail(renderer, window.raw(), max_size)
+            })
+            .ok()?
+    }
+
+    fn compositor_request_live_thumbnail(
+        &mut self,
+        window: u32,
+        max_size: u32,
+    ) -> Option<(Vec<u8>, u32, u32)> {
+        let compositor = self.compositor.as_ref()?;
+        let kms = self.kms.as_ref()?;
+        kms.borrow_mut()
+            .with_renderer(|renderer| unsafe {
+                compositor.capture_thumbnail(renderer, u64::from(window), max_size)
+            })
+            .ok()?
+    }
+}
+
+impl CompositorWorkspaceEffects for UdevBackend {
+    fn compositor_notify_tag_switch(
+        &mut self,
+        duration: Duration,
+        direction: i32,
+        exclude_top: u32,
+        monitor_rect: (i32, i32, u32, u32),
+    ) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.notify_tag_switch(duration, direction, exclude_top, monitor_rect);
+        }
+    }
+
+    fn compositor_set_magnifier(&mut self, enabled: bool) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_magnifier(enabled);
+        }
+    }
+
+    fn compositor_set_snap_preview(&mut self, preview: Option<(f32, f32, f32, f32)>) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_snap_preview(preview);
+        }
+    }
+
+    fn compositor_clear_snap_preview_immediate(&mut self) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.clear_snap_preview_immediate();
+        }
+    }
+
+    fn compositor_set_overview_mode(
+        &mut self,
+        active: bool,
+        windows: &[(WindowId, f32, f32, f32, f32, bool, String)],
+    ) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            let entries = windows
+                .iter()
+                .map(|(window, x, y, width, height, selected, title)| {
+                    (window.raw(), *x, *y, *width, *height, *selected, title.clone())
+                })
+                .collect::<Vec<_>>();
+            compositor.set_overview_mode(active, &entries);
+            self.request_render();
+        }
+    }
+
+    fn compositor_set_overview_monitor(&mut self, x: i32, y: i32, width: u32, height: u32) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_overview_monitor(x, y, width, height);
+            self.request_render();
+        }
+    }
+
+    fn compositor_set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32, u32)]) {
+        let refresh_rates = {
+            let shared = self.shared.lock_safe();
+            monitors
+                .iter()
+                .map(|&(id, x, y, _, _, _)| {
+                    let hz = shared
+                        .outputs
+                        .iter()
+                        .find(|output| output.x == x && output.y == y)
+                        .map(|output| (output.refresh_rate / 1000).max(1))
+                        .unwrap_or(60);
+                    (id, hz)
+                })
+                .collect::<Vec<_>>()
+        };
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_monitors(monitors);
+            compositor.apply_per_monitor_refresh_rates(&refresh_rates);
+        }
+    }
+
+    fn compositor_set_overview_selection(&mut self, window: WindowId) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_overview_selection(window.raw());
+            self.request_render();
+        }
+    }
+
+    fn compositor_set_expose_mode(
+        &mut self,
+        active: bool,
+        windows: Vec<(WindowId, i32, i32, u32, u32)>,
+    ) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            let entries = windows
+                .iter()
+                .map(|(window, x, y, width, height)| {
+                    (window.raw(), *x, *y, *width, *height)
+                })
+                .collect();
+            compositor.set_expose_mode(active, entries);
+        }
+    }
+
+    fn compositor_expose_click(&mut self, x: f32, y: f32) -> Option<WindowId> {
+        self.compositor
+            .as_ref()?
+            .expose_click(x, y)
+            .map(WindowId::from_raw)
+    }
+}
+
+impl CompositorWindowEffects for UdevBackend {
+    fn compositor_set_frame_extents(
+        &mut self,
+        window: WindowId,
+        left: u32,
+        right: u32,
+        top: u32,
+        bottom: u32,
+    ) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_frame_extents(window.raw(), left, right, top, bottom);
+        }
+    }
+
+    fn compositor_set_window_shaped(&mut self, window: WindowId, shaped: bool) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_window_shaped(window.raw(), shaped);
+        }
+    }
+
+    fn compositor_set_window_urgent(&mut self, window: WindowId, urgent: bool) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_window_urgent(window.raw(), urgent);
+        }
+    }
+
+    fn compositor_set_window_pip(&mut self, window: WindowId, pip: bool) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_window_pip(window.raw(), pip);
+        }
+    }
+
+    fn compositor_force_full_redraw(&mut self) { if let Some(c) = self.compositor.as_mut() { c.force_full_redraw(); } }
+    fn compositor_set_mouse_position(&mut self, x: f32, y: f32) { if let Some(c) = self.compositor.as_mut() { c.set_mouse_position(x, y); } }
+    fn compositor_deactivate_edge_glow(&mut self) { if let Some(c) = self.compositor.as_mut() { c.deactivate_edge_glow(); } }
+    fn compositor_unsuppress_edge_glow(&mut self) { if let Some(c) = self.compositor.as_mut() { c.unsuppress_edge_glow(); } }
+    fn compositor_notify_window_move_start(&mut self, window: WindowId) { if let Some(c) = self.compositor.as_mut() { c.notify_window_move_start(window.raw()); } }
+    fn compositor_notify_window_move_delta(&mut self, window: WindowId, dx: f32, dy: f32) { if let Some(c) = self.compositor.as_mut() { c.notify_window_move_delta(window.raw(), dx, dy); } }
+    fn compositor_notify_window_move_end(&mut self, window: WindowId) { if let Some(c) = self.compositor.as_mut() { c.notify_window_move_end(window.raw()); } }
+    fn compositor_set_dock_position(&mut self, x: f32, y: f32) { if let Some(c) = self.compositor.as_mut() { c.set_dock_position(x, y); } }
+    fn compositor_set_peek_mode(&mut self, active: bool) { if let Some(c) = self.compositor.as_mut() { c.set_peek_mode(active); } }
+    fn compositor_set_window_groups(&mut self, groups: Vec<(u32, Vec<(u32, String, bool)>)>) { if let Some(c) = self.compositor.as_mut() { c.set_window_groups(groups); } }
+    fn compositor_zoom_to_fit(&mut self, window: Option<u32>) { if let Some(c) = self.compositor.as_mut() { c.zoom_to_fit(window); } }
+}
+
+impl CompositorAnnotation for UdevBackend {
+    fn compositor_set_colorblind_mode(&mut self, mode: &str) { if let Some(c) = self.compositor.as_mut() { c.set_colorblind_mode(mode); } }
+    fn compositor_set_annotation_mode(&mut self, active: bool) { if let Some(c) = self.compositor.as_mut() { c.set_annotation_mode(active); } }
+    fn compositor_set_annotation_color(&mut self, rgba: [f32; 4]) { if let Some(c) = self.compositor.as_mut() { c.set_annotation_color(rgba[0], rgba[1], rgba[2], rgba[3]); } }
+    fn compositor_set_annotation_line_width(&mut self, width: f32) { if let Some(c) = self.compositor.as_mut() { c.set_annotation_line_width(width); } }
+    fn compositor_annotation_add_point(&mut self, x: f32, y: f32) { if let Some(c) = self.compositor.as_mut() { c.annotation_add_point(x, y); } }
+    fn compositor_annotation_begin_stroke(&mut self) { if let Some(c) = self.compositor.as_mut() { c.annotation_new_stroke(); } }
+}
+
+impl DisplayControl for UdevBackend {
+    fn query_vrr_capabilities(&self, output: OutputId) -> Option<crate::backend::api::VrrCapabilities> {
+        let kms = self.kms.as_ref()?;
+        let shared = self.shared.lock_safe();
+        let index = shared.outputs.iter().position(|candidate| candidate.id == output)?;
+        drop(shared);
+        kms.borrow_mut().query_vrr_for_output(index)
+    }
+    fn query_kms_color_pipeline_caps(&self, output: OutputId) -> Option<crate::backend::api::KmsColorPipelineCaps> {
+        let kms = self.kms.as_ref()?;
+        let shared = self.shared.lock_safe();
+        let index = shared.outputs.iter().position(|candidate| candidate.id == output)?;
+        drop(shared);
+        kms.borrow_mut().query_color_pipeline_caps_for_output(index)
+    }
+    fn set_vrr_enabled(&mut self, output: OutputId, enabled: bool) -> Result<(), BackendError> {
+        let kms = self.kms.as_ref().ok_or(BackendError::Unsupported("no KMS"))?;
+        let shared = self.shared.lock_safe();
+        let index = shared.outputs.iter().position(|candidate| candidate.id == output).ok_or(BackendError::NotFound("output not found"))?;
+        drop(shared);
+        kms.borrow_mut().set_vrr_for_output(index, enabled).map_err(BackendError::Message)
+    }
+    fn set_hdr_metadata(&mut self, output: OutputId, enabled: bool) -> Result<(), BackendError> {
+        let kms = self.kms.as_ref().ok_or(BackendError::Unsupported("no KMS"))?;
+        let shared = self.shared.lock_safe();
+        let info = shared.outputs.iter().find(|candidate| candidate.id == output).ok_or(BackendError::NotFound("output not found"))?;
+        let index = shared.outputs.iter().position(|candidate| candidate.id == output).ok_or(BackendError::NotFound("output not found"))?;
+        let caps = info.hdr_metadata.clone();
+        drop(shared);
+        if enabled {
+            let caps = caps.ok_or(BackendError::Unsupported("output does not advertise HDR in EDID"))?;
+            let peak = crate::config::CONFIG.load().behavior().hdr_peak_nits.round().clamp(0.0, u16::MAX as f32) as u16;
+            let blob = crate::backend::hdr_metadata::build_from_edid(&caps, peak);
+            kms.borrow_mut().set_hdr_metadata_for_output(index, Some(&blob)).map_err(BackendError::Message)
+        } else {
+            kms.borrow_mut().set_hdr_metadata_for_output(index, None).map_err(BackendError::Message)
+        }
+    }
+}
+
+impl RenderScheduler for UdevBackend {
+    fn request_render(&mut self) {
+        self.state.needs_redraw = true;
+        if let Some(kms) = &self.kms { kms.borrow_mut().request_render(); }
+        self.request_flush();
+    }
+    fn has_compositor(&self) -> bool { self.compositor.is_some() }
+    fn compositor_needs_render(&self) -> bool {
+        self.state.needs_redraw || self.compositor.as_ref().is_some_and(|c| c.needs_render())
+    }
+}
+
 impl Backend for UdevBackend {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
@@ -3043,47 +3567,6 @@ impl Backend for UdevBackend {
         &mut *self.color_allocator
     }
 
-    fn request_render(&mut self) {
-        self.state.needs_redraw = true;
-        if let Some(kms) = &self.kms {
-            kms.borrow_mut().request_render();
-        }
-        self.request_flush();
-    }
-
-    fn take_screenshot_to_file(&mut self, path: &std::path::Path) -> Result<bool, BackendError> {
-        if let Some(kms) = &self.kms {
-            kms.borrow_mut().request_screenshot(path.to_path_buf());
-            // Force a redraw so the screenshot is captured on the next frame.
-            self.state.needs_redraw = true;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    fn take_screenshot_region_to_file(
-        &mut self,
-        path: &std::path::Path,
-        x: i32,
-        y: i32,
-        w: u32,
-        h: u32,
-    ) -> Result<bool, BackendError> {
-        if let Some(kms) = &self.kms {
-            kms.borrow_mut()
-                .request_screenshot_region(path.to_path_buf(), x, y, w, h);
-            self.state.needs_redraw = true;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    fn has_compositor(&self) -> bool {
-        self.compositor.is_some()
-    }
-
     fn has_partial_damage(&self) -> bool {
         self.compositor
             .as_ref()
@@ -3098,10 +3581,6 @@ impl Backend for UdevBackend {
             }
             None => Ok(false),
         }
-    }
-
-    fn compositor_needs_render(&self) -> bool {
-        self.state.needs_redraw || self.compositor.as_ref().map_or(false, |c| c.needs_render())
     }
 
     fn set_compositor_enabled(&mut self, enabled: bool) -> Result<bool, BackendError> {
@@ -3839,612 +4318,6 @@ impl Backend for UdevBackend {
         Ok(result)
     }
 
-    fn compositor_apply_config(&mut self) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.apply_config();
-        }
-    }
-
-    fn compositor_set_color_temperature(&mut self, temp: f32) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_color_temperature(temp);
-        }
-    }
-
-    fn compositor_set_saturation(&mut self, sat: f32) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_saturation(sat);
-        }
-    }
-
-    fn compositor_set_brightness(&mut self, val: f32) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_brightness(val);
-        }
-    }
-
-    fn compositor_set_contrast(&mut self, val: f32) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_contrast(val);
-        }
-    }
-
-    fn compositor_set_invert_colors(&mut self, invert: bool) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_invert_colors(invert);
-        }
-    }
-
-    fn compositor_set_grayscale(&mut self, gs: bool) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_grayscale(gs);
-        }
-    }
-
-    fn compositor_set_debug_hud(&mut self, enabled: bool) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_debug_hud(enabled);
-        }
-    }
-
-    fn compositor_set_debug_hud_extended(&mut self, enabled: bool) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_debug_hud_extended(enabled);
-        }
-    }
-
-    fn compositor_set_transition_mode(&mut self, mode: &str) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_transition_mode(mode);
-        }
-    }
-
-    fn compositor_fps(&self) -> f32 {
-        self.compositor.as_ref().map_or(0.0, |c| c.fps())
-    }
-
-    fn compositor_set_frame_extents(
-        &mut self,
-        window: WindowId,
-        left: u32,
-        right: u32,
-        top: u32,
-        bottom: u32,
-    ) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_frame_extents(window.raw(), left, right, top, bottom);
-        }
-    }
-
-    fn compositor_set_window_shaped(&mut self, window: WindowId, shaped: bool) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_window_shaped(window.raw(), shaped);
-        }
-    }
-
-    fn compositor_notify_tag_switch(
-        &mut self,
-        duration: Duration,
-        direction: i32,
-        exclude_top: u32,
-        mon_rect: (i32, i32, u32, u32),
-    ) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.notify_tag_switch(duration, direction, exclude_top, mon_rect);
-        }
-    }
-
-    fn compositor_force_full_redraw(&mut self) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.force_full_redraw();
-        }
-    }
-
-    fn compositor_set_mouse_position(&mut self, x: f32, y: f32) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_mouse_position(x, y);
-        }
-    }
-
-    fn compositor_deactivate_edge_glow(&mut self) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.deactivate_edge_glow();
-        }
-    }
-
-    fn compositor_unsuppress_edge_glow(&mut self) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.unsuppress_edge_glow();
-        }
-    }
-
-    fn compositor_set_window_urgent(&mut self, window: WindowId, urgent: bool) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_window_urgent(window.raw(), urgent);
-        }
-    }
-
-    fn compositor_set_window_pip(&mut self, window: WindowId, pip: bool) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_window_pip(window.raw(), pip);
-        }
-    }
-
-    fn compositor_set_magnifier(&mut self, enabled: bool) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_magnifier(enabled);
-        }
-    }
-
-    fn compositor_set_overview_mode(
-        &mut self,
-        active: bool,
-        windows: &[(WindowId, f32, f32, f32, f32, bool, String)],
-    ) {
-        if let Some(c) = self.compositor.as_mut() {
-            let entries: Vec<(u64, f32, f32, f32, f32, bool, String)> = windows
-                .iter()
-                .map(|(id, x, y, w, h, focused, title)| {
-                    (id.raw(), *x, *y, *w, *h, *focused, title.clone())
-                })
-                .collect();
-            c.set_overview_mode(active, &entries);
-            self.request_render();
-        }
-    }
-
-    fn compositor_set_overview_monitor(&mut self, x: i32, y: i32, w: u32, h: u32) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_overview_monitor(x, y, w, h);
-            self.request_render();
-        }
-    }
-
-    fn compositor_set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32, u32)]) {
-        // Build per-monitor (id, hz) pairs from the live output list.
-        // Wayland blur is a single global pass shared by every monitor, so the
-        // compositor will use the highest Hz to budget blur strength — but we
-        // still record all rates for parity with X11 / future per-output use.
-        let monitor_hz_pairs: Vec<(u32, u32)> = {
-            let shared = self.shared.lock_safe();
-            monitors
-                .iter()
-                .map(|&(id, mx, my, _, _, _)| {
-                    let hz = shared
-                        .outputs
-                        .iter()
-                        .find(|o| o.x == mx && o.y == my)
-                        .map(|o| (o.refresh_rate / 1000).max(1))
-                        .unwrap_or(60);
-                    (id, hz)
-                })
-                .collect()
-        };
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_monitors(monitors);
-            c.apply_per_monitor_refresh_rates(&monitor_hz_pairs);
-        }
-    }
-
-    fn compositor_set_overview_selection(&mut self, window: WindowId) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_overview_selection(window.raw());
-            self.request_render();
-        }
-    }
-
-    fn compositor_notify_window_move_start(&mut self, window: WindowId) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.notify_window_move_start(window.raw());
-        }
-    }
-
-    fn compositor_notify_window_move_delta(&mut self, window: WindowId, dx: f32, dy: f32) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.notify_window_move_delta(window.raw(), dx, dy);
-        }
-    }
-
-    fn compositor_notify_window_move_end(&mut self, window: WindowId) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.notify_window_move_end(window.raw());
-        }
-    }
-
-    fn compositor_set_dock_position(&mut self, x: f32, y: f32) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_dock_position(x, y);
-        }
-    }
-
-    fn compositor_set_expose_mode(
-        &mut self,
-        active: bool,
-        windows: Vec<(WindowId, i32, i32, u32, u32)>,
-    ) {
-        if let Some(c) = self.compositor.as_mut() {
-            let entries: Vec<(u64, i32, i32, u32, u32)> = windows
-                .iter()
-                .map(|(id, x, y, w, h)| (id.raw(), *x, *y, *w, *h))
-                .collect();
-            c.set_expose_mode(active, entries);
-        }
-    }
-
-    fn compositor_set_snap_preview(&mut self, preview: Option<(f32, f32, f32, f32)>) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_snap_preview(preview);
-        }
-    }
-
-    fn compositor_clear_snap_preview_immediate(&mut self) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.clear_snap_preview_immediate();
-        }
-    }
-
-    fn compositor_set_peek_mode(&mut self, active: bool) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_peek_mode(active);
-        }
-    }
-
-    fn compositor_set_window_groups(&mut self, groups: Vec<(u32, Vec<(u32, String, bool)>)>) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_window_groups(groups);
-        }
-    }
-
-    fn compositor_zoom_to_fit(&mut self, window: Option<u32>) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.zoom_to_fit(window);
-        }
-    }
-
-    fn compositor_expose_click(&mut self, x: f32, y: f32) -> Option<WindowId> {
-        if let Some(c) = self.compositor.as_ref() {
-            c.expose_click(x, y).map(WindowId::from_raw)
-        } else {
-            None
-        }
-    }
-
-    fn compositor_set_colorblind_mode(&mut self, mode: &str) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_colorblind_mode(mode);
-        }
-    }
-
-    fn compositor_set_annotation_mode(&mut self, active: bool) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_annotation_mode(active);
-        }
-    }
-
-    fn compositor_set_annotation_color(&mut self, rgba: [f32; 4]) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_annotation_color(rgba[0], rgba[1], rgba[2], rgba[3]);
-        }
-    }
-
-    fn compositor_set_annotation_line_width(&mut self, width: f32) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.set_annotation_line_width(width);
-        }
-    }
-
-    fn compositor_annotation_add_point(&mut self, x: f32, y: f32) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.annotation_add_point(x, y);
-        }
-    }
-
-    fn compositor_annotation_begin_stroke(&mut self) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.annotation_new_stroke();
-        }
-    }
-
-    fn compositor_start_recording(&mut self, path: &str) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.start_recording(path);
-        }
-    }
-
-    fn compositor_stop_recording(&mut self) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.stop_recording();
-        }
-    }
-
-    fn compositor_notify_audio_timing(
-        &mut self,
-        window: WindowId,
-        fps: f32,
-        buffer_latency_ms: u32,
-    ) {
-        if let Some(c) = self.compositor.as_mut() {
-            c.notify_audio_timing(window.raw(), fps, buffer_latency_ms);
-        }
-    }
-
-    fn compositor_get_metrics(&self) -> Option<crate::backend::api::CompositorMetrics> {
-        self.compositor.as_ref().map(|c| c.get_metrics())
-    }
-
-    fn compositor_blur_status(&self) -> Option<crate::backend::api::BlurStatus> {
-        self.compositor.as_ref().map(|c| c.get_blur_status())
-    }
-
-    fn compositor_direct_scanout_status(&self) -> Option<crate::backend::api::DirectScanoutStatus> {
-        let compositor = self.compositor.as_ref()?;
-        let kms_outputs = self
-            .kms
-            .as_ref()
-            .map(|kms| kms.borrow().direct_scanout_output_statuses())
-            .unwrap_or_default();
-        Some(compositor.get_direct_scanout_status(kms_outputs))
-    }
-
-    fn compositor_presentation_timing_status(
-        &self,
-    ) -> Option<crate::backend::api::PresentationTimingStatus> {
-        self.kms
-            .as_ref()
-            .map(|kms| kms.borrow().presentation_timing_status())
-    }
-
-    fn compositor_output_management_status(
-        &self,
-    ) -> Option<crate::backend::api::OutputManagementStatus> {
-        let mut soft_disabled: Vec<String> =
-            self.state.soft_disabled_outputs.iter().cloned().collect();
-        soft_disabled.sort();
-        Some(crate::backend::api::OutputManagementStatus {
-            pending_ack_count: self.state.pending_output_acks.len(),
-            soft_disabled_outputs: soft_disabled,
-            last_transaction: self.last_output_management_tx.clone(),
-            last_rejected: self.state.last_output_management_rejection.clone(),
-        })
-    }
-
-    fn compositor_capture_status(&self) -> Option<crate::backend::api::CaptureStatus> {
-        let screencopy_pending = self
-            .state
-            .screencopy_pending
-            .as_ref()
-            .map(|queue| queue.lock_safe().len())
-            .unwrap_or(0);
-        let (image_pending, image_output_pending, image_toplevel_pending) = self
-            .state
-            .image_capture_pending
-            .as_ref()
-            .map(|queue| {
-                let queue = queue.lock_safe();
-                let output_count = queue
-                    .iter()
-                    .filter(|pending| {
-                        matches!(
-                            &pending.source,
-                            crate::backend::wayland_udev::image_copy_capture::CaptureSource::Output(_)
-                        )
-                    })
-                    .count();
-                let toplevel_count = queue
-                    .iter()
-                    .filter(|pending| {
-                        matches!(
-                            &pending.source,
-                            crate::backend::wayland_udev::image_copy_capture::CaptureSource::Toplevel(_)
-                        )
-                    })
-                    .count();
-                (queue.len(), output_count, toplevel_count)
-            })
-            .unwrap_or((0, 0, 0));
-        let dmabuf_format_count = self.state.dmabuf_render_formats.len();
-        let counters = self.state.capture_counters.lock_safe().clone();
-
-        Some(crate::backend::api::CaptureStatus {
-            screencopy: crate::backend::api::CaptureProtocolStatus {
-                enabled: self.state.screencopy_pending.is_some(),
-                pending_frames: screencopy_pending,
-            },
-            image_copy_capture: crate::backend::api::CaptureProtocolStatus {
-                enabled: self.state.image_capture_pending.is_some(),
-                pending_frames: image_pending,
-            },
-            image_copy_output_pending_frames: image_output_pending,
-            image_copy_toplevel_pending_frames: image_toplevel_pending,
-            screencopy_queued_total: counters.screencopy_queued_total,
-            screencopy_failed_total: counters.screencopy_failed_total,
-            screencopy_fulfilled_total: counters.screencopy_fulfilled_total,
-            screencopy_render_failed_total: counters.screencopy_render_failed_total,
-            image_copy_sessions_total: counters.image_copy_sessions_total,
-            image_copy_queued_total: counters.image_copy_queued_total,
-            image_copy_failed_total: counters.image_copy_failed_total,
-            image_copy_fulfilled_total: counters.image_copy_fulfilled_total,
-            image_copy_render_failed_total: counters.image_copy_render_failed_total,
-            image_copy_output_queued_total: counters.image_copy_output_queued_total,
-            image_copy_toplevel_queued_total: counters.image_copy_toplevel_queued_total,
-            last_queued_unix_ms: counters.last_queued_unix_ms,
-            last_fulfilled_unix_ms: counters.last_fulfilled_unix_ms,
-            last_failed_unix_ms: counters.last_failed_unix_ms,
-            last_failure_reason: counters.last_failure_reason.clone(),
-            dmabuf_advertised: self.state.dmabuf_main_device.is_some() && dmabuf_format_count > 0,
-            dmabuf_format_count,
-            cursor_capture_supported: self.state.image_capture_pending.is_some(),
-            sensitive_content_masking: false,
-            policy: "allow_all_visible_content".into(),
-        })
-    }
-
-    fn compositor_xwayland_status(&self) -> Option<crate::backend::api::XWaylandStatus> {
-        Some(crate::backend::api::XWaylandStatus {
-            available: true,
-            wm_ready: self.state.x11_wm.is_some(),
-            display: std::env::var("DISPLAY").ok(),
-            mapped_window_count: self.state.x11_surfaces.len(),
-            associated_surface_count: self.state.x11_surfaces.len(),
-            pending_association_count: self
-                .state
-                .x11_surface_to_window
-                .len()
-                .saturating_sub(self.state.x11_surfaces.len()),
-        })
-    }
-
-    fn compositor_protocol_bind_counts(&self) -> Vec<crate::backend::api::ProtocolBindStatus> {
-        self.state.protocol_bind_counts_snapshot()
-    }
-
-    fn compositor_capture_thumbnail(
-        &self,
-        window: WindowId,
-        max_size: u32,
-    ) -> Option<(Vec<u8>, u32, u32)> {
-        let compositor = self.compositor.as_ref()?;
-        let kms = self.kms.as_ref()?;
-        kms.borrow_mut()
-            .with_renderer(|gl| unsafe { compositor.capture_thumbnail(gl, window.raw(), max_size) })
-            .ok()?
-    }
-
-    fn compositor_request_live_thumbnail(
-        &mut self,
-        window: u32,
-        max_size: u32,
-    ) -> Option<(Vec<u8>, u32, u32)> {
-        let compositor = self.compositor.as_ref()?;
-        let kms = self.kms.as_ref()?;
-        kms.borrow_mut()
-            .with_renderer(|gl| unsafe {
-                compositor.capture_thumbnail(gl, window as u64, max_size)
-            })
-            .ok()?
-    }
-
-    fn query_vrr_capabilities(
-        &self,
-        output: OutputId,
-    ) -> Option<crate::backend::api::VrrCapabilities> {
-        let kms = self.kms.as_ref()?;
-        let shared = self.shared.lock_safe();
-        let output_idx = shared.outputs.iter().position(|o| o.id == output)?;
-        drop(shared);
-        kms.borrow_mut().query_vrr_for_output(output_idx)
-    }
-
-    fn query_kms_color_pipeline_caps(
-        &self,
-        output: OutputId,
-    ) -> Option<crate::backend::api::KmsColorPipelineCaps> {
-        let kms = self.kms.as_ref()?;
-        let shared = self.shared.lock_safe();
-        let output_idx = shared.outputs.iter().position(|o| o.id == output)?;
-        drop(shared);
-        kms.borrow_mut()
-            .query_color_pipeline_caps_for_output(output_idx)
-    }
-
-    fn set_vrr_enabled(&mut self, output: OutputId, enabled: bool) -> Result<(), BackendError> {
-        let kms = self
-            .kms
-            .as_ref()
-            .ok_or(BackendError::Unsupported("no KMS"))?;
-        let shared = self.shared.lock_safe();
-        let output_idx = shared
-            .outputs
-            .iter()
-            .position(|o| o.id == output)
-            .ok_or(BackendError::NotFound("output not found"))?;
-        drop(shared);
-        kms.borrow_mut()
-            .set_vrr_for_output(output_idx, enabled)
-            .map_err(|e| BackendError::Message(e))
-    }
-
-    fn set_hdr_metadata(&mut self, output: OutputId, enabled: bool) -> Result<(), BackendError> {
-        let kms = self
-            .kms
-            .as_ref()
-            .ok_or(BackendError::Unsupported("no KMS"))?;
-        let shared = self.shared.lock_safe();
-        let info = shared
-            .outputs
-            .iter()
-            .find(|o| o.id == output)
-            .ok_or(BackendError::NotFound("output not found"))?;
-        let output_idx = shared
-            .outputs
-            .iter()
-            .position(|o| o.id == output)
-            .ok_or(BackendError::NotFound("output not found"))?;
-        let caps = info.hdr_metadata.clone();
-        drop(shared);
-
-        if enabled {
-            let caps = caps.ok_or(BackendError::Unsupported(
-                "output does not advertise HDR in EDID",
-            ))?;
-            let peak = crate::config::CONFIG.load().behavior().hdr_peak_nits;
-            let peak_u16 = peak.round().clamp(0.0, u16::MAX as f32) as u16;
-            let blob = crate::backend::hdr_metadata::build_from_edid(&caps, peak_u16);
-            kms.borrow_mut()
-                .set_hdr_metadata_for_output(output_idx, Some(&blob))
-                .map_err(BackendError::Message)
-        } else {
-            kms.borrow_mut()
-                .set_hdr_metadata_for_output(output_idx, None)
-                .map_err(BackendError::Message)
-        }
-    }
-
-    fn compositor_tearing_hint_count(&self) -> usize {
-        self.state
-            .tearing_hints
-            .as_ref()
-            .map(|m| m.lock_safe().len())
-            .unwrap_or(0)
-    }
-
-    fn compositor_session_lock_surface_count(&self) -> usize {
-        self.state.lock_surfaces.len()
-    }
-
-    fn compositor_session_locked(&self) -> bool {
-        self.state.session_locked
-    }
-
-    fn compositor_color_managed_surfaces(
-        &self,
-    ) -> Vec<crate::backend::api::ColorManagedSurfaceInfo> {
-        let Some(cm) = self.state.color_manager.as_ref() else {
-            return Vec::new();
-        };
-        cm.snapshot_surface_descriptions()
-            .into_iter()
-            .map(
-                |(obj_id, record)| crate::backend::api::ColorManagedSurfaceInfo {
-                    surface_object_id: format!("{:?}", obj_id),
-                    identity: record.identity,
-                    tf_named: record.params.tf_named,
-                    tf_power: record.params.tf_power,
-                    primaries_named: record.params.primaries_named,
-                    primaries: record.params.primaries,
-                    min_lum: record.params.min_lum,
-                    max_lum: record.params.max_lum,
-                    reference_lum: record.params.reference_lum,
-                    mastering_primaries: record.params.mastering_primaries,
-                    mastering_min_lum: record.params.mastering_min_lum,
-                    mastering_max_lum: record.params.mastering_max_lum,
-                    max_cll: record.params.max_cll,
-                    max_fall: record.params.max_fall,
-                },
-            )
-            .collect()
-    }
-
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError> {
         // Initialize compositor from config if KMS is ready and compositor not yet created.
         if self.kms.is_some() && self.compositor.is_none() {
@@ -4889,17 +4762,6 @@ mod udev_backend_selection_tests {
             3,
             &[swipe_binding(3, "left")]
         ));
-    }
-
-    #[test]
-    fn key_repeat_only_allows_incremental_window_manager_actions() {
-        assert!(shortcut_is_repeatable(Some(Jwm::focusstack)));
-        assert!(shortcut_is_repeatable(Some(Jwm::setmfact)));
-        assert!(shortcut_is_repeatable(Some(Jwm::scrolling_focus_column)));
-
-        assert!(!shortcut_is_repeatable(Some(Jwm::spawn)));
-        assert!(!shortcut_is_repeatable(Some(Jwm::killclient)));
-        assert!(!shortcut_is_repeatable(Some(Jwm::take_screenshot)));
     }
 
     fn test_output(id: OutputId, name: &str) -> OutputInfo {

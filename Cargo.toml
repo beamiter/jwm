@@ -66,6 +66,9 @@ gbm = "0.18.0"
 egl = "0.2.7"
 xcb = { version = "1.7.0", features = ["composite", "shape", "randr", "damage", "present", "xfixes"] }
 
+[dev-dependencies]
+criterion = "0.8.2"
+
 [[bench]]
 name = "wm_benchmark"
 harness = false

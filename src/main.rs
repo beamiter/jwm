@@ -1,18 +1,9 @@
 // src/main.rs
-use jwm::Jwm;
 use log::{error, info, warn};
-use std::os::unix::process::CommandExt;
-use std::{env, process::Command, sync::atomic::Ordering};
+use std::{env, process::Command};
 use xbar_core::initialize_logging;
 
 use jwm::config::{BackendFamily, set_backend_family};
-
-// 导入后端
-use jwm::backend::wayland_udev::backend::UdevBackend;
-use jwm::backend::wayland_winit::backend::WaylandWinitBackend;
-use jwm::backend::wayland_x11::backend::WaylandX11Backend;
-use jwm::backend::x11rb::backend::X11rbBackend;
-use jwm::backend::xcb::backend::XcbBackend;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Suppress verbose third-party crate spam unless the caller already set RUST_LOG.
@@ -62,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     ensure_dbus_session();
 
-    run_jwm()?;
+    jwm::application::run()?;
     Ok(())
 }
 
@@ -91,126 +82,6 @@ fn install_panic_hook() {
         eprintln!("[panic] {payload} @ {location}\nBacktrace:\n{backtrace:?}");
         error!("[panic] {payload} @ {location} | backtrace={backtrace:?}");
     }));
-}
-
-fn run_jwm() -> Result<(), Box<dyn std::error::Error>> {
-    loop {
-        info!("[main] Starting JWM instance");
-
-        let mut backend = select_backend()?;
-
-        backend.check_existing_wm()?;
-
-        let mut jwm = Jwm::new(&mut *backend)?;
-        jwm.setup(&mut *backend)?;
-        jwm.setup_initial_windows(&mut *backend)?;
-
-        // JWM_BENCHMARK=N: auto-start benchmark collecting N frames then exit with JSON
-        if let Ok(val) = env::var("JWM_BENCHMARK") {
-            if let Ok(frames) = val.parse::<u32>() {
-                let warmup = env::var("JWM_BENCHMARK_WARMUP")
-                    .ok()
-                    .and_then(|v| v.parse::<u32>().ok())
-                    .unwrap_or(60);
-                backend.compositor_benchmark_start(frames, warmup);
-                backend.compositor_benchmark_set_auto_exit(true);
-                info!(
-                    "Benchmark mode: collecting {} frames (warmup={})",
-                    frames, warmup
-                );
-            }
-        }
-
-        jwm.run(&mut *backend)?;
-        jwm.cleanup(&mut *backend)?;
-
-        if jwm.is_restarting.load(Ordering::SeqCst) {
-            info!("[main] Restarting JWM via exec (picks up new binary from disk)...");
-            drop(jwm);
-            drop(backend);
-
-            // exec() 替换当前进程 image，这样 restart 后一定使用磁盘上的新 binary
-            let args: Vec<String> = env::args().collect();
-            let err = Command::new(&args[0])
-                .args(&args[1..])
-                .env("JWM_RESTARTING", "1")
-                .exec();
-            // exec() 只在失败时返回，回退到进程内 restart
-            error!("[main] exec failed: {err}, falling back to in-process restart");
-            continue;
-        }
-
-        if let Err(_) = Command::new("jwm-tool").arg("quit").spawn() {
-            error!("[main] Failed to quit jwm daemon");
-        }
-        break;
-    }
-    Ok(())
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BackendChoice {
-    X11RB,
-    XCB,
-    WaylandUdev,
-    WaylandX11,
-    WaylandWinit,
-}
-
-fn select_backend() -> Result<Box<dyn jwm::backend::api::Backend>, Box<dyn std::error::Error>> {
-    // Selection rule:
-    // - If JWM_BACKEND is set, honor it.
-    // - Otherwise, default to x11rb.
-    let resolved = if let Ok(val) = env::var("JWM_BACKEND") {
-        let val = val.to_lowercase();
-        match val.as_str() {
-            "x11rb" => BackendChoice::X11RB,
-            "xcb" | "x11-xcb" => BackendChoice::XCB,
-            "wayland-udev" | "udev" | "wayland" => BackendChoice::WaylandUdev,
-            "wayland-x11" | "x11-wayland" | "windowed" => BackendChoice::WaylandX11,
-            "wayland-winit" | "winit" => BackendChoice::WaylandWinit,
-            other => {
-                return Err(format!(
-                    "Unknown JWM_BACKEND={other:?}; expected 'x11rb'|'xcb'|'wayland-udev'|'wayland-x11'|'wayland-winit'"
-                )
-                .into());
-            }
-        }
-    } else {
-        BackendChoice::X11RB
-    };
-
-    // Register backend family with the config system BEFORE CONFIG is first accessed.
-    let family = match resolved {
-        BackendChoice::X11RB | BackendChoice::XCB => BackendFamily::X11,
-        BackendChoice::WaylandUdev | BackendChoice::WaylandX11 | BackendChoice::WaylandWinit => {
-            BackendFamily::Wayland
-        }
-    };
-    set_backend_family(family);
-
-    match resolved {
-        BackendChoice::X11RB => {
-            info!("Initializing X11RB Backend (config: config_x11.toml)");
-            Ok(Box::new(X11rbBackend::new()?))
-        }
-        BackendChoice::XCB => {
-            info!("Initializing XCB Backend (config: config_x11.toml)");
-            Ok(Box::new(XcbBackend::new()?))
-        }
-        BackendChoice::WaylandUdev => {
-            info!("Initializing Wayland/Udev Backend (config: config_wayland.toml)");
-            Ok(Box::new(UdevBackend::new()?))
-        }
-        BackendChoice::WaylandX11 => {
-            info!("Initializing Wayland-on-X11 Backend (config: config_wayland.toml)");
-            Ok(Box::new(WaylandX11Backend::new()?))
-        }
-        BackendChoice::WaylandWinit => {
-            info!("Initializing Wayland/Winit Backend (config: config_wayland.toml)");
-            Ok(Box::new(WaylandWinitBackend::new()?))
-        }
-    }
 }
 
 pub fn setup_locale() {
