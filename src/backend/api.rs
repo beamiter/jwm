@@ -1263,6 +1263,12 @@ pub trait Backend: Send {
     /// Pairs with `compositor_set_debug_hud`; has small per-frame cost.
     fn compositor_set_debug_hud_extended(&mut self, _enabled: bool) {}
 
+    /// Toggle the realtime slime/water effect. Returns its new state when the
+    /// backend owns a compatible X11 compositor.
+    fn compositor_toggle_slime_effect(&mut self) -> Option<bool> {
+        None
+    }
+
     /// Set tag-switch transition mode ("slide" or "cube").
     fn compositor_set_transition_mode(&mut self, _mode: &str) {}
 

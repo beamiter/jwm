@@ -183,6 +183,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "restart" => Ok((Jwm::restart, parse_int_arg(args, 0))),
         "togglecompositor" => Ok((Jwm::togglecompositor, parse_int_arg(args, 0))),
         "togglepartialdamage" => Ok((Jwm::togglepartialdamage, parse_int_arg(args, 0))),
+        "toggle_slime" => Ok((Jwm::toggle_slime, parse_int_arg(args, 0))),
         "toggle_overview" => Ok((Jwm::toggle_overview, parse_int_arg(args, 0))),
         "cycle_overview" => Ok((Jwm::cycle_overview, parse_int_arg(args, 1))),
         "toggle_magnifier" => Ok((Jwm::toggle_magnifier, parse_int_arg(args, 0))),

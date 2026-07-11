@@ -236,6 +236,16 @@ impl Default for SlimeState {
 }
 
 impl SlimeState {
+    fn clear(&mut self) {
+        self.last_update = None;
+        self.was_visible = false;
+        self.initialized = false;
+        self.ripple_tips_initialized = false;
+        self.wave_tips_initialized = false;
+        self.ripples.clear();
+        self.pending_wave_injections.clear();
+    }
+
     pub(super) fn opacity(&self) -> f32 {
         let Some(last) = self.last_update else {
             return 0.0;
@@ -545,31 +555,52 @@ impl SlimeState {
 }
 
 impl<C: CompositorConnection> Compositor<C> {
+    pub(crate) fn toggle_slime_effect(&mut self) -> bool {
+        self.slime_effect_enabled = !self.slime_effect_enabled;
+        if !self.slime_effect_enabled {
+            self.slime_state.clear();
+        }
+        self.needs_render = true;
+        self.damage_tracker.mark_all_dirty();
+        self.dirty_region_tracker.mark_all_dirty();
+        log::info!(
+            "compositor: slime effect {}",
+            if self.slime_effect_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+        self.slime_effect_enabled
+    }
+
     pub(super) fn poll_slime_ipc(&mut self) -> bool {
         let packet = self.slime_ipc.as_ref().and_then(SlimeIpc::take_latest);
         let mut changed = false;
-        if let Some(packet) = packet {
-            let window_rect = match packet.window {
-                Some(window) => self
-                    .windows
-                    .get(&window)
-                    .map(|wt| (wt.x as f32, wt.y as f32, wt.w as f32, wt.h as f32)),
-                None => None,
-            };
-            // A packet naming an unknown/stale XID must not accidentally map to
-            // the full screen. Screen coordinates are selected only by omitting
-            // `window` explicitly.
-            if packet.window.is_none() || window_rect.is_some() {
-                changed |= self.slime_state.update(
-                    packet,
-                    window_rect,
-                    (self.screen_w as f32, self.screen_h as f32),
-                );
+        if self.slime_effect_enabled {
+            if let Some(packet) = packet {
+                let window_rect = match packet.window {
+                    Some(window) => self
+                        .windows
+                        .get(&window)
+                        .map(|wt| (wt.x as f32, wt.y as f32, wt.w as f32, wt.h as f32)),
+                    None => None,
+                };
+                // A packet naming an unknown/stale XID must not accidentally map to
+                // the full screen. Screen coordinates are selected only by omitting
+                // `window` explicitly.
+                if packet.window.is_none() || window_rect.is_some() {
+                    changed |= self.slime_state.update(
+                        packet,
+                        window_rect,
+                        (self.screen_w as f32, self.screen_h as f32),
+                    );
+                }
             }
-        }
-        changed |= self.slime_state.mark_visibility();
-        if self.slime_state.is_visible() {
-            self.ensure_postprocess_fbo();
+            changed |= self.slime_state.mark_visibility();
+            if self.slime_state.is_visible() {
+                self.ensure_postprocess_fbo();
+            }
         }
         if changed {
             self.needs_render = true;

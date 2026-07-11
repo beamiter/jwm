@@ -13,7 +13,16 @@ python3 tools/slime_pose_demo.py \
   --refract-px 14
 
 python3 tools/slime_pose_demo.py \
+  --socket "$XDG_RUNTIME_DIR/jwm-slime.sock" \
+  --refract-px 12
+
+python3 tools/slime_pose_demo.py \
   --socket /tmp/jwm-slime-test.sock \
+  --refract-px 20 \
+  --scale 1.25
+
+python3 tools/slime_pose_demo.py \
+  --socket "$XDG_RUNTIME_DIR/jwm-slime.sock" \
   --refract-px 20 \
   --scale 1.25
 
@@ -22,4 +31,8 @@ python3 tools/slime_pose_demo.py \
   --window 0x40000c \
   --refract-px 14
 
+python3 tools/slime_pose_demo.py \
+  --socket "$XDG_RUNTIME_DIR/jwm-slime.sock" \
+  --window 0x40000c \
+  --refract-px 14
 

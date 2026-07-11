@@ -1369,6 +1369,9 @@ impl<C: CompositorConnection> Compositor<C> {
             // Realtime slime hand refraction
             slime_ipc,
             slime_state: SlimeState::default(),
+            slime_effect_enabled: std::env::var("JWM_SLIME_ENABLED")
+                .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+                .unwrap_or(true),
             // Window tilt
             tilt_program,
             tilt_uniforms,

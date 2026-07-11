@@ -464,6 +464,7 @@ where
     // --- Realtime slime hand refraction ---
     slime_ipc: Option<SlimeIpc>,
     slime_state: SlimeState,
+    slime_effect_enabled: bool,
 
     // --- Window 3D tilt ---
     tilt_program: glow::Program,

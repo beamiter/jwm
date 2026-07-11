@@ -950,6 +950,11 @@ impl Backend for X11rbBackend {
             c.set_debug_hud_extended(enabled);
         }
     }
+    fn compositor_toggle_slime_effect(&mut self) -> Option<bool> {
+        self.compositor
+            .as_mut()
+            .map(|compositor| compositor.toggle_slime_effect())
+    }
     fn compositor_set_transition_mode(&mut self, mode: &str) {
         if let Some(c) = self.compositor.as_mut() {
             c.set_transition_mode(mode);

@@ -1301,6 +1301,12 @@ impl Config {
             },
             KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
+                key: "F11".to_string(),
+                function: "toggle_slime".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Shift".to_string()],
                 key: "a".to_string(),
                 function: "toggle_annotation".to_string(),
                 argument: ArgumentConfig::Int(0),
@@ -2092,6 +2098,7 @@ impl Config {
             "togglecompositor" => Some(Jwm::togglecompositor),
             "togglepartialdamage" => Some(Jwm::togglepartialdamage),
             "toggle_debug_hud" => Some(Jwm::toggle_debug_hud),
+            "toggle_slime" => Some(Jwm::toggle_slime),
             "toggle_overview" => Some(Jwm::toggle_overview),
             "cycle_overview" => Some(Jwm::cycle_overview),
             "toggle_magnifier" => Some(Jwm::toggle_magnifier),

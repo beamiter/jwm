@@ -143,6 +143,19 @@ impl Jwm {
         Ok(())
     }
 
+    /// Toggle the realtime fingertip-driven water/slime compositor effect.
+    pub fn toggle_slime(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match backend.compositor_toggle_slime_effect() {
+            Some(enabled) => log::info!("Slime effect {}", if enabled { "ON" } else { "OFF" }),
+            None => log::warn!("Slime effect is unavailable on this backend"),
+        }
+        Ok(())
+    }
+
     /// 切换部分重绘(scissor 局部刷新,实验性,默认关)
     pub fn togglepartialdamage(
         &mut self,
