@@ -2518,6 +2518,13 @@ impl Config {
             "behavior.blur_enabled" => self.inner.behavior.blur_enabled = as_bool()?,
             "behavior.shadow_enabled" => self.inner.behavior.shadow_enabled = as_bool()?,
             "behavior.compositor" => self.inner.behavior.compositor = as_bool()?,
+            "behavior.recording_fps" => {
+                let v = as_u32()?;
+                if !(1..=240).contains(&v) {
+                    return Err(format!("behavior.recording_fps={v} out of [1, 240]"));
+                }
+                self.inner.behavior.recording_fps = v;
+            }
             _ => {
                 return Err(format!(
                     "set_config: unknown or non-hot-tunable key '{key}'"
@@ -2680,5 +2687,18 @@ mod tests {
         assert!(cfg.set_values(&changes).is_err());
         assert_eq!(cfg.gap_px(), original_gap);
         assert_eq!(cfg.m_fact(), original_m_fact);
+    }
+
+    #[test]
+    fn recording_fps_hot_override_is_range_checked() {
+        let mut cfg = Config::default();
+        cfg.set_value("behavior.recording_fps", &serde_json::json!(30))
+            .unwrap();
+        assert_eq!(cfg.behavior().recording_fps, 30);
+        assert!(
+            cfg.set_value("behavior.recording_fps", &serde_json::json!(0))
+                .is_err()
+        );
+        assert_eq!(cfg.behavior().recording_fps, 30);
     }
 }

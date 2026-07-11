@@ -11,6 +11,10 @@ pub struct RecordingState {
     pub segments: Vec<String>,
     /// 当前正在录制的分段
     pub current_segment: Option<String>,
+    /// Whether the final output has passed ffprobe validation.
+    pub finalized: bool,
+    /// Prevent duplicate `recording/finalized` events while polling status.
+    pub finalization_reported: bool,
 }
 
 impl RecordingState {
@@ -24,6 +28,8 @@ impl RecordingState {
         self.output_path = Some(output_path);
         self.segments.clear();
         self.current_segment = None;
+        self.finalized = false;
+        self.finalization_reported = false;
     }
 
     /// 停止录制
@@ -153,5 +159,15 @@ mod tests {
         state.finish_current_segment();
         assert_eq!(state.segments.len(), 1);
         assert!(state.current_segment.is_none());
+    }
+
+    #[test]
+    fn new_recording_resets_finalization_flags() {
+        let mut state = RecordingState::new();
+        state.finalized = true;
+        state.finalization_reported = true;
+        state.start("/tmp/new.mp4".to_string());
+        assert!(!state.finalized);
+        assert!(!state.finalization_reported);
     }
 }

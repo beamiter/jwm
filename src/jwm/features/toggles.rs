@@ -394,8 +394,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.features.recording.active = !self.features.recording.active;
-        if self.features.recording.active {
+        if !self.features.recording.active {
             let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
             let cfg_dir = CONFIG.load().behavior().recording_output_dir.clone();
             let videos_dir = if !cfg_dir.is_empty() {
@@ -418,37 +417,70 @@ impl Jwm {
                 .join(format!("recording-{}.mp4", timestamp))
                 .to_string_lossy()
                 .to_string();
-            let seg_path = format!("/tmp/jwm-rec-{}-seg0.mp4", timestamp);
-
-            self.features.recording.output_path = Some(output_path.clone());
-            self.features.recording.segments = Vec::new();
-            self.features.recording.current_segment = Some(seg_path.clone());
-
-            info!(
-                "[toggle_recording] start → {} (segment: {})",
-                output_path, seg_path
-            );
-            backend.compositor_start_recording(&seg_path);
+            self.start_recording(backend, &output_path)?;
         } else {
-            backend.compositor_stop_recording();
-            // Collect current segment
-            if let Some(seg) = self.features.recording.current_segment.take() {
-                self.features.recording.segments.push(seg);
-            }
-            let segments = std::mem::take(&mut self.features.recording.segments);
-            let output_path = self
-                .features
-                .recording
-                .output_path
-                .take()
-                .unwrap_or_default();
-            info!(
-                "[toggle_recording] stop → {} ({} segments)",
-                output_path,
-                segments.len()
-            );
-            Self::finalize_recording(segments, output_path);
+            self.stop_recording(backend)?;
         }
+        Ok(())
+    }
+
+    /// Start a recording with an explicit final output path.
+    pub(crate) fn start_recording(
+        &mut self,
+        backend: &mut dyn Backend,
+        output_path: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.features.recording.active {
+            return Err("recording is already active".into());
+        }
+        if !backend.has_compositor() {
+            return Err("screen recording requires an active compositor".into());
+        }
+        let output = std::path::Path::new(output_path);
+        if !output.is_absolute() {
+            return Err("recording output path must be absolute".into());
+        }
+        if output.extension().and_then(|v| v.to_str()) != Some("mp4") {
+            return Err("recording output path must end in .mp4".into());
+        }
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if output.exists() {
+            return Err(format!("recording output already exists: {output_path}").into());
+        }
+
+        let nonce = chrono::Local::now().format("%Y%m%d-%H%M%S-%3f");
+        let seg_path = format!("/tmp/jwm-rec-{}-{nonce}-seg0.mp4", std::process::id());
+        self.features.recording.start(output_path.to_string());
+        self.features.recording.start_segment(seg_path.clone());
+        info!("[recording] start → {output_path} (segment: {seg_path})");
+        backend.compositor_start_recording(&seg_path);
+        Ok(())
+    }
+
+    /// Stop the active recording. This operation is intentionally idempotent.
+    pub(crate) fn stop_recording(
+        &mut self,
+        backend: &mut dyn Backend,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.features.recording.active {
+            return Ok(());
+        }
+        backend.compositor_stop_recording();
+        self.features.recording.stop();
+        let segments = std::mem::take(&mut self.features.recording.segments);
+        let output_path = self
+            .features
+            .recording
+            .output_path
+            .clone()
+            .unwrap_or_default();
+        info!(
+            "[recording] stop → {output_path} ({} segments)",
+            segments.len()
+        );
+        Self::finalize_recording(segments, output_path);
         Ok(())
     }
 

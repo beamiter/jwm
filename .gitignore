@@ -1,5 +1,9 @@
 /target
 /portal/target
+/video-demo/demo-client/target
+/video-demo/generated
+/video-demo/tmp
+__pycache__/
 Cargo.lock
 **/*.rs.bk
 *.pdb

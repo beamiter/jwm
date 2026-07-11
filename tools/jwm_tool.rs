@@ -169,7 +169,8 @@ enum Commands {
                       布局: setmfact, setcfact, incnmaster, setlayout, cyclelayout, togglebar\n  \
                       标签: view, tag, toggleview, toggletag, loopview\n  \
                       显示器: focusmon, tagmon\n  \
-                      其他: spawn, quit, restart, reload_config, set_config, set_config_batch, command_batch\n\n\
+                      其他: spawn, quit, restart, reload_config, set_config, set_config_batch, command_batch\n  \
+                      录屏: start_recording, stop_recording, get_recording_status, toggle_recording\n\n\
                       \x1b[1m可用查询:\x1b[0m\n  \
                       get_windows, get_workspaces, get_monitors, get_tree, get_config, get_config_status, get_version\n\n\
                       \x1b[1m可用布局:\x1b[0m\n  \

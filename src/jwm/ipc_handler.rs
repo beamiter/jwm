@@ -9,6 +9,27 @@ use crate::ipc::{
 };
 use crate::ipc_server::IncomingIpc;
 
+fn recording_file_is_valid(path: &str) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0)
+        && std::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "default=nw=1:nk=1",
+                path,
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+}
+
 fn env_flag(name: &str) -> bool {
     std::env::var_os(name).as_deref() == Some(std::ffi::OsStr::new("1"))
 }
@@ -850,6 +871,49 @@ impl Jwm {
             return self.handle_set_hdr_metadata_command(backend, args);
         }
 
+        if name == "start_recording" {
+            let Some(path) = args.get("path").and_then(|value| value.as_str()) else {
+                return IpcResponse::err("start_recording: expected string field 'path'");
+            };
+            return match self.start_recording(backend, path) {
+                Ok(()) => {
+                    self.broadcast_ipc_event(
+                        "recording/started",
+                        serde_json::json!({"output_path": path}),
+                    );
+                    IpcResponse::ok(Some(
+                        serde_json::json!({"active": true, "output_path": path}),
+                    ))
+                }
+                Err(error) => {
+                    self.broadcast_ipc_event(
+                        "recording/error",
+                        serde_json::json!({"operation": "start", "error": error.to_string()}),
+                    );
+                    IpcResponse::err(error.to_string())
+                }
+            };
+        }
+
+        if name == "stop_recording" {
+            let was_active = self.features.recording.active;
+            let output_path = self.features.recording.output_path.clone();
+            return match self.stop_recording(backend) {
+                Ok(()) => {
+                    if was_active {
+                        self.broadcast_ipc_event(
+                            "recording/stopped",
+                            serde_json::json!({"output_path": output_path}),
+                        );
+                    }
+                    IpcResponse::ok(Some(
+                        serde_json::json!({"active": false, "output_path": output_path}),
+                    ))
+                }
+                Err(error) => IpcResponse::err(error.to_string()),
+            };
+        }
+
         match ipc::dispatch_command(name, args) {
             Ok((func, arg)) => match func(self, backend, &arg) {
                 Ok(()) => IpcResponse::ok(None),
@@ -860,7 +924,7 @@ impl Jwm {
     }
 
     pub(crate) fn handle_ipc_query(
-        &self,
+        &mut self,
         name: &str,
         _args: &serde_json::Value,
         backend: &dyn Backend,
@@ -896,10 +960,35 @@ impl Jwm {
                 "tags_length": cfg.tags_length(),
                 "show_bar": cfg.show_bar(),
                 "do_not_disturb": self.do_not_disturb,
+                "recording_fps": cfg.behavior().recording_fps,
+                "recording_encoder": cfg.behavior().recording_encoder,
             }))),
             "get_dnd" => IpcResponse::ok(Some(serde_json::json!({
                 "enabled": self.do_not_disturb,
             }))),
+            "get_recording_status" => {
+                let output_path = self.features.recording.output_path.clone();
+                let active = self.features.recording.active;
+                let finalized =
+                    !active && output_path.as_deref().is_some_and(recording_file_is_valid);
+                self.features.recording.finalized = finalized;
+                let should_broadcast = finalized && !self.features.recording.finalization_reported;
+                if should_broadcast {
+                    self.features.recording.finalization_reported = true;
+                    self.broadcast_ipc_event(
+                        "recording/finalized",
+                        serde_json::json!({"output_path": output_path.clone()}),
+                    );
+                }
+                IpcResponse::ok(Some(serde_json::json!({
+                    "active": active,
+                    "finalized": finalized,
+                    "output_path": output_path,
+                    "segment_path": self.features.recording.current_segment.clone(),
+                    "fps": cfg.behavior().recording_fps,
+                    "encoder": cfg.behavior().recording_encoder,
+                })))
+            }
             "get_hdr_status" => {
                 let outputs: Vec<serde_json::Value> = backend
                     .output_ops()
@@ -1030,6 +1119,7 @@ impl Jwm {
             "get_version" => IpcResponse::ok(Some(serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "name": "jwm",
+                "backend": std::env::var("JWM_BACKEND").unwrap_or_else(|_| "x11rb".to_string()),
             }))),
             "get_metrics" => {
                 if let Some(metrics) = backend.compositor_get_metrics() {

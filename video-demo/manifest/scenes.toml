@@ -1,0 +1,48 @@
+[profiles]
+smoke = ["layout-tile", "layout-grid", "layout-scrolling"]
+layouts = ["layout-tile", "layout-grid", "layout-scrolling"]
+
+[[scene]]
+id = "layout-tile"
+title = "Tile 主从布局"
+layout = "tile"
+windows = 6
+duration = 4.0
+status = "ready"
+narration = "Tile 使用清晰的主区和堆栈区组织窗口，并支持焦点与顺序调整。"
+
+[[scene]]
+id = "layout-grid"
+title = "Grid 网格布局"
+layout = "grid"
+windows = 6
+duration = 4.0
+status = "ready"
+narration = "Grid 根据窗口数量计算网格，让窗口均匀占用可用空间。"
+
+[[scene]]
+id = "layout-scrolling"
+title = "Scrolling 滚动布局"
+layout = "scrolling"
+windows = 6
+duration = 4.0
+status = "ready"
+narration = "Scrolling 使用列式视口管理窗口，并让焦点窗口保持可见。"
+
+[[scene]]
+id = "effect-wobbly"
+title = "Wobbly Windows"
+layout = "float"
+windows = 2
+duration = 6.0
+status = "manual-review"
+narration = "Wobbly Windows 需要真实指针拖动和当前 compositor 配置，暂不进入无人值守 profile。"
+
+[[scene]]
+id = "effect-overview"
+title = "Overview"
+layout = "tile"
+windows = 6
+duration = 6.0
+status = "experimental"
+narration = "Overview 的视觉结果需要人工目视确认，基础 IPC 触发已由 JWM 提供。"
