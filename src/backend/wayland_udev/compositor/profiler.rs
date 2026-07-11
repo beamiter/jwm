@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy)]
@@ -14,7 +14,7 @@ const MAX_SAMPLES: usize = 120;
 pub struct FrameProfiler {
     enabled: bool,
     frame_start: Option<Instant>,
-    zones: HashMap<&'static str, Vec<f32>>,
+    zones: HashMap<&'static str, VecDeque<f32>>,
     active_zone: Option<(&'static str, Instant)>,
     last_frame_ms: f32,
 }
@@ -73,11 +73,11 @@ impl FrameProfiler {
             let samples = self
                 .zones
                 .entry(name)
-                .or_insert_with(|| Vec::with_capacity(MAX_SAMPLES));
+                .or_insert_with(|| VecDeque::with_capacity(MAX_SAMPLES));
             if samples.len() >= MAX_SAMPLES {
-                samples.remove(0);
+                samples.pop_front();
             }
-            samples.push(duration_ms);
+            samples.push_back(duration_ms);
         }
     }
 

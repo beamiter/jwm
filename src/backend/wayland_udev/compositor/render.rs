@@ -2,8 +2,7 @@
 #[allow(unused_imports)]
 use super::*;
 use smithay::backend::renderer::gles::ffi;
-use crate::backend::compositor_common::capture::{clip_region, flip_rgba_vertical};
-use crate::backend::compositor_common::screenshot::save_png_async;
+use crate::backend::compositor_common::capture::clip_region;
 
 impl WaylandCompositor {
     // =========================================================================
@@ -285,6 +284,23 @@ impl WaylandCompositor {
         shader_encode_tf: i32,
         shader_encode_gamma: f32,
     ) -> bool {
+        // A calm desktop must be cheap even when the backend asks us to check
+        // for a frame.  Do this before profiler/fence/hot-reload bookkeeping:
+        // those are useful only when a frame can actually be produced.  The
+        // animation check keeps time-based effects live without relying on a
+        // separate caller to keep `needs_render` armed.
+        let recording_transition_pending = self.pending_recording_start.is_some()
+            || self.pending_recording_stop;
+        if !self.needs_render
+            && !self.screenshot_requests.has_pending()
+            && !self.screenshot_readback.has_pending()
+            && !self.recording.is_active()
+            && !recording_transition_pending
+            && !self.has_active_animations()
+        {
+            return false;
+        }
+
         // =================================================================
         // 0. Performance infrastructure - frame start
         // =================================================================
@@ -497,7 +513,8 @@ impl WaylandCompositor {
         // These operations need a frame even on an otherwise static desktop.
         // Keep the demand calculation next to the other compositor work so
         // KMS scheduling, screenshots, and recording all agree on liveness.
-        let screenshot_pending = self.screenshot_requests.has_pending();
+        let screenshot_pending =
+            self.screenshot_requests.has_pending() || self.screenshot_readback.has_pending();
         let recording_active = self.recording.is_active();
 
         let force_render = any_animating
@@ -519,7 +536,10 @@ impl WaylandCompositor {
         }
         // If animations are still running, keep the flag set so the next
         // tick_animations call re-invokes compositor_render_frame automatically.
-        self.needs_render = any_animating || self.has_active_animations() || recording_active;
+        self.needs_render = any_animating
+            || self.has_active_animations()
+            || recording_active
+            || self.screenshot_readback.has_pending();
 
         // Rate-limited diagnostic logging (once per second when scene is non-empty)
         static LAST_RF_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1522,6 +1542,9 @@ impl WaylandCompositor {
                 self.capture_pending_screenshots(gl);
             }
         }
+        unsafe {
+            self.screenshot_readback.drain_ready(gl);
+        }
 
         // =================================================================
         // 19b. Extended Debug HUD
@@ -1591,6 +1614,16 @@ impl WaylandCompositor {
             .record_compositor(std::time::Duration::from_secs_f32(frame_ms / 1000.0));
         self.adaptive_scheduler
             .on_frame_completed(std::time::Duration::from_secs_f32(frame_ms / 1000.0));
+        // Sampling is internally throttled and makes the IPC metric useful
+        // even when the debug HUD is off.
+        self.sys_stats.maybe_sample();
+        self.perf_metrics
+            .set_cpu_load(self.sys_stats.cpu_pct().clamp(0.0, 100.0) as u32);
+        self.perf_metrics.set_gpu_load(
+            self.perf_metrics
+                .estimate_gpu_load(self.frame_rate_limiter.target_fps() as f32)
+                .min(100),
+        );
         self.dirty_region_tracker.clear();
         self.content_dirty_ids.clear();
         self.prev_focused = focused;
@@ -1623,10 +1656,7 @@ impl WaylandCompositor {
                     crate::backend::compositor_common::screenshot::ScreenshotRequest::Full(path) => {
                         let w = self.screen_w;
                         let h = self.screen_h;
-                        let mut pixels = vec![0u8; (w * h * 4) as usize];
-                        gl.ReadPixels(0, 0, w as i32, h as i32, ffi::RGBA, ffi::UNSIGNED_BYTE, pixels.as_mut_ptr() as *mut _);
-                        flip_rgba_vertical(&mut pixels, w, h);
-                        save_png_async(path, pixels, w, h);
+                        self.screenshot_readback.enqueue(gl, path, 0, 0, w, h);
                     }
                     crate::backend::compositor_common::screenshot::ScreenshotRequest::Region { path, x, y, width, height } => {
                         let Some(region) = clip_region(self.screen_w, self.screen_h, x, y, width, height) else {
@@ -1634,13 +1664,21 @@ impl WaylandCompositor {
                             continue;
                         };
                         let (x, y, w, h) = (region.x, region.y, region.width, region.height);
-                        let mut pixels = vec![0u8; (w * h * 4) as usize];
-                        gl.ReadPixels(x as i32, self.screen_h.saturating_sub(y + h) as i32, w as i32, h as i32, ffi::RGBA, ffi::UNSIGNED_BYTE, pixels.as_mut_ptr() as *mut _);
-                        flip_rgba_vertical(&mut pixels, w, h);
-                        save_png_async(path, pixels, w, h);
+                        self.screenshot_readback.enqueue(
+                            gl,
+                            path,
+                            x as i32,
+                            self.screen_h.saturating_sub(y + h) as i32,
+                            w,
+                            h,
+                        );
                     }
                 }
             }
+            // The next compositor tick polls the fence with a zero timeout.
+            // Keep it armed until every queued readback has been handed to
+            // the PNG worker.
+            self.needs_render = self.screenshot_readback.has_pending();
         }
     }
 
@@ -1676,9 +1714,19 @@ impl WaylandCompositor {
 
         if self.debug_hud_extended {
             use std::fmt::Write;
+            let p95_ms = self
+                .perf_metrics
+                .frame_time_percentile(0.95)
+                .as_secs_f32()
+                * 1000.0;
+            let p99_ms = self
+                .perf_metrics
+                .frame_time_percentile(0.99)
+                .as_secs_f32()
+                * 1000.0;
             let _ = write!(
                 hud_text,
-                "\n--- Profiler (ms avg/min/max, last 120 frames) ---",
+                "\nFrame tail: p95={p95_ms:.2}ms p99={p99_ms:.2}ms\n--- Profiler (ms avg/min/max, last 120 frames) ---",
             );
             for (name, stats) in self.frame_profiler.all_zone_stats() {
                 let _ = write!(

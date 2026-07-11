@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 pub(crate) struct PassStats {
@@ -18,7 +18,7 @@ pub(crate) struct GLCallStats {
 }
 
 pub(crate) struct RenderStats {
-    passes: HashMap<&'static str, Vec<f32>>,
+    passes: HashMap<&'static str, VecDeque<f32>>,
     current_frame: HashMap<&'static str, Instant>,
     max_samples: usize,
     frame_count: u64,
@@ -55,9 +55,9 @@ impl RenderStats {
         if let Some(start) = self.current_frame.remove(name) {
             let elapsed_ms = start.elapsed().as_secs_f32() * 1000.0;
             let samples = self.passes.entry(name).or_default();
-            samples.push(elapsed_ms);
+            samples.push_back(elapsed_ms);
             if samples.len() > self.max_samples {
-                samples.remove(0);
+                samples.pop_front();
             }
         }
     }

@@ -142,6 +142,21 @@ impl DirtyRegionTracker {
         }
     }
 
+    /// Current covered fraction without updating the cached merged rectangle.
+    /// This is used by read-only metrics collection so IPC cannot perturb the
+    /// render-path cache.
+    pub fn current_dirty_fraction(&self) -> f32 {
+        let screen_area = self.screen_w as f32 * self.screen_h as f32;
+        if screen_area == 0.0 || self.regions.is_empty() {
+            return 0.0;
+        }
+        let mut merged = self.regions[0];
+        for rect in self.regions.iter().skip(1) {
+            merged = merged.union(rect);
+        }
+        (merged.area() / screen_area).min(1.0)
+    }
+
     pub fn is_region_dirty(&self, rect: &DirtyRect) -> bool {
         for existing in &self.regions {
             if existing.intersects(rect) {
@@ -163,5 +178,19 @@ impl DirtyRegionTracker {
 
     pub fn region_count(&self) -> usize {
         self.regions.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_dirty_fraction_is_read_only() {
+        let mut tracker = DirtyRegionTracker::new(100, 100);
+        tracker.mark_dirty(DirtyRect::new(0.0, 0.0, 20.0, 20.0));
+
+        assert_eq!(tracker.current_dirty_fraction(), 0.04);
+        assert_eq!(tracker.region_count(), 1);
     }
 }

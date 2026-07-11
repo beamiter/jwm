@@ -43,6 +43,7 @@ mod profiler;
 #[allow(dead_code, unreachable_pub)]
 mod recording;
 mod render;
+mod screenshot_readback;
 #[allow(dead_code, unreachable_pub)]
 mod render_batcher;
 #[allow(dead_code, unreachable_pub)]
@@ -852,6 +853,7 @@ pub(crate) struct WaylandCompositor {
 
     // --- Screenshot ---
     screenshot_requests: crate::backend::compositor_common::screenshot::ScreenshotQueue,
+    screenshot_readback: screenshot_readback::ScreenshotReadback,
 
     // --- Recording control ---
     pending_recording_start: Option<String>,
@@ -1661,6 +1663,7 @@ impl WaylandCompositor {
 
                 // Screenshot
                 screenshot_requests: Default::default(),
+                screenshot_readback: screenshot_readback::ScreenshotReadback::new(),
 
                 // Recording control
                 pending_recording_start: None,
@@ -1969,6 +1972,16 @@ impl WaylandCompositor {
         let avg = self.perf_metrics.avg_frame_time().as_secs_f32() * 1000.0;
         let max = self.perf_metrics.max_frame_time().as_secs_f32() * 1000.0;
         let min = self.perf_metrics.min_frame_time().as_secs_f32() * 1000.0;
+        let p95 = self
+            .perf_metrics
+            .frame_time_percentile(0.95)
+            .as_secs_f32()
+            * 1000.0;
+        let p99 = self
+            .perf_metrics
+            .frame_time_percentile(0.99)
+            .as_secs_f32()
+            * 1000.0;
         let temporal_rate = if self.temporal_blur_total_count > 0 {
             100.0 * self.temporal_blur_reuse_count as f32 / self.temporal_blur_total_count as f32
         } else {
@@ -1981,6 +1994,8 @@ impl WaylandCompositor {
             avg_frame_time_ms: avg,
             max_frame_time_ms: max,
             min_frame_time_ms: min,
+            frame_time_p95_ms: p95,
+            frame_time_p99_ms: p99,
             gpu_load_percent: self.perf_metrics.gpu_load(),
             cpu_load_percent: self.perf_metrics.cpu_load(),
             draw_calls: 0,
@@ -1992,7 +2007,7 @@ impl WaylandCompositor {
             temporal_blur_total_count: self.temporal_blur_total_count,
             temporal_blur_reuse_rate: temporal_rate,
             dirty_regions_count: self.dirty_region_tracker.region_count(),
-            dirty_fraction_percent: 0.0,
+            dirty_fraction_percent: self.dirty_region_tracker.current_dirty_fraction() * 100.0,
             window_count: self.windows.len(),
             blur_quality: format!("{:?}", self.blur_quality),
             vrr_enabled: self.vrr_active,
@@ -2005,7 +2020,10 @@ impl WaylandCompositor {
             direct_scanout_active: self.direct_scanout_mgr.is_active(),
             direct_scanout_count: ds_stats.scanout_count,
             direct_scanout_bypass_time_ms: ds_stats.bypass_time_ms,
-            gl_state_changes_avoided: 0,
+            gl_state_changes_avoided: self
+                .gl_state_tracker
+                .redundant_changes_avoided()
+                .min(u32::MAX as u64) as u32,
             profiling_enabled: self.frame_profiler.is_enabled(),
             dirty_region_merge_count: 0,
         }

@@ -94,6 +94,20 @@ impl PerfMetrics {
             .unwrap_or(Duration::ZERO)
     }
 
+    /// Percentile of the recent frame-time window.  This intentionally copies
+    /// at most 300 samples: it is only queried by IPC/HUD, never the frame
+    /// hot path, and keeps the recording path allocation-free.
+    pub fn frame_time_percentile(&self, percentile: f32) -> Duration {
+        if self.frame_times.is_empty() {
+            return Duration::ZERO;
+        }
+        let mut samples: Vec<Duration> = self.frame_times.iter().copied().collect();
+        samples.sort_unstable();
+        let p = percentile.clamp(0.0, 1.0);
+        let index = ((samples.len() - 1) as f32 * p).round() as usize;
+        samples[index]
+    }
+
     pub fn min_frame_time(&self) -> Duration {
         self.frame_times
             .iter()
@@ -123,5 +137,28 @@ impl PerfMetrics {
 impl Default for PerfMetrics {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percentile_uses_bounded_recent_samples() {
+        let mut metrics = PerfMetrics::new();
+        for ms in 1..=100 {
+            metrics.record_frame(Duration::from_millis(ms));
+        }
+
+        assert_eq!(metrics.frame_time_percentile(0.0), Duration::from_millis(1));
+        assert_eq!(
+            metrics.frame_time_percentile(1.0),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            metrics.frame_time_percentile(0.95),
+            Duration::from_millis(95)
+        );
     }
 }

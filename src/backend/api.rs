@@ -16,6 +16,10 @@ pub struct CompositorMetrics {
     pub avg_frame_time_ms: f32,
     pub max_frame_time_ms: f32,
     pub min_frame_time_ms: f32,
+    /// Recent frame-time tail latency, calculated over the compositor's
+    /// bounded sample window. These distinguish smooth averages from jank.
+    pub frame_time_p95_ms: f32,
+    pub frame_time_p99_ms: f32,
     pub gpu_load_percent: u32,
     pub cpu_load_percent: u32,
     pub draw_calls: u32,
