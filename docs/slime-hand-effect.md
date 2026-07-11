@@ -18,10 +18,11 @@ Override the location with `JWM_SLIME_SOCKET=/path/to/socket`.
 
 A receiver thread continuously replaces a single pending packet. The compositor
 therefore consumes the newest pose rather than replaying stale inference frames.
-Landmarks are converted into tapered finger capsules and smoothly fused palm
-metaballs in the post-process shader. The animated SDF gradient supplies the
-refraction normal, RGB channels receive slightly different offsets, and the
-surface receives a moving optical flow, caustic, and layered edge highlight.
+Motion-filtered fingertip landmarks inject short capsule impulses into a
+half-resolution, persistent `RG16F` wave field. Two ping-pong textures retain the
+current and previous height while a 9-tap isotropic Verlet step propagates each
+wake and applies amplitude-dependent damping. The field remains alive for roughly
+1.5 seconds independently of the current pose.
 
 While the effect is visible, direct scanout and fullscreen unredirect are
 suppressed because both paths bypass compositor post-processing.
@@ -123,10 +124,16 @@ forward-compatible diagnostics.
 1. The tracker captures and runs inference outside JWM.
 2. JWM retains only the newest datagram.
 3. Window-relative landmarks are mapped and adaptively smoothed in screen pixels.
+   Five fingertip tracks emit distance-spaced ripple events while rejecting
+   stationary landmark jitter.
 4. The existing post-process FBO supplies the composited scene texture.
-5. A hand SDF smoothly joins tapered bone capsules and palm metaballs.
-6. Animated SDF gradients drive refraction, chromatic dispersion, optical flow,
-   rim light, caustics, and specular.
+   A feathered 9-tap cool blur covers the selected window as the calm water
+   surface; packets without a window apply the skin to the whole screen.
+5. The GPU runs two wave-equation substeps per display frame. Old disturbances
+   keep propagating after the hand disappears and then damp out automatically.
+6. A 9-sample Sobel gradient and Laplacian drive refraction, lens curvature,
+   chromatic dispersion, Schlick Fresnel, dual-lobe specular, and caustics. A
+   low-opacity hand SDF provides secondary tracking feedback.
 7. Existing accessibility, color correction, and HDR passes run afterwards.
 8. The pose is held briefly and faded when inference disappears or stops.
 

@@ -245,12 +245,38 @@ pub(super) struct MagnifierUniforms {
     pub(super) slime_enabled: Option<glow::UniformLocation>,
     pub(super) slime_points: Option<glow::UniformLocation>,
     pub(super) slime_bbox: Option<glow::UniformLocation>,
+    pub(super) slime_surface_rect: Option<glow::UniformLocation>,
     pub(super) slime_screen_size: Option<glow::UniformLocation>,
     pub(super) slime_scale: Option<glow::UniformLocation>,
     pub(super) slime_strength: Option<glow::UniformLocation>,
     pub(super) slime_opacity: Option<glow::UniformLocation>,
     pub(super) slime_time: Option<glow::UniformLocation>,
+    pub(super) slime_ripple_count: Option<glow::UniformLocation>,
+    pub(super) slime_ripples: Option<glow::UniformLocation>,
+    pub(super) slime_ripple_directions: Option<glow::UniformLocation>,
+    pub(super) slime_wave: Option<glow::UniformLocation>,
+    pub(super) slime_wave_texel: Option<glow::UniformLocation>,
     pub(super) colorblind_mode: Option<glow::UniformLocation>,
+}
+
+pub(super) struct SlimeWaveUniforms {
+    pub(super) projection: Option<glow::UniformLocation>,
+    pub(super) rect: Option<glow::UniformLocation>,
+    pub(super) state: Option<glow::UniformLocation>,
+    pub(super) texel: Option<glow::UniformLocation>,
+    pub(super) aspect: Option<glow::UniformLocation>,
+    pub(super) injection_count: Option<glow::UniformLocation>,
+    pub(super) injections: Option<glow::UniformLocation>,
+    pub(super) injection_params: Option<glow::UniformLocation>,
+    pub(super) noise_time: Option<glow::UniformLocation>,
+}
+
+pub(super) struct SlimeWaveSimulation {
+    pub(super) fbos: [glow::Framebuffer; 2],
+    pub(super) textures: [glow::Texture; 2],
+    pub(super) front: usize,
+    pub(super) width: u32,
+    pub(super) height: u32,
 }
 
 pub(super) struct ParticleUniforms {

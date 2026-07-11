@@ -1,10 +1,183 @@
-use super::Compositor;
 use super::math::ortho;
+use super::{Compositor, SlimeWaveSimulation};
 use glow::HasContext;
 
 use super::CompositorConnection;
 
 impl<C: CompositorConnection> Compositor<C> {
+    unsafe fn create_slime_wave_target(
+        gl: &glow::Context,
+        width: u32,
+        height: u32,
+    ) -> Result<(glow::Framebuffer, glow::Texture), String> {
+        unsafe {
+            let texture = gl.create_texture().map_err(|err| err.to_string())?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            const GL_RG16F: u32 = 0x822f;
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                GL_RG16F as i32,
+                width as i32,
+                height as i32,
+                0,
+                glow::RG,
+                glow::HALF_FLOAT,
+                glow::PixelUnpackData::Slice(None),
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            let fbo = gl.create_framebuffer().map_err(|err| err.to_string())?;
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(texture),
+                0,
+            );
+            if gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
+                gl.delete_framebuffer(fbo);
+                gl.delete_texture(texture);
+                return Err("slime wave RG16F framebuffer is incomplete".to_string());
+            }
+            gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+            Ok((fbo, texture))
+        }
+    }
+
+    fn ensure_slime_wave_simulation(&mut self) -> bool {
+        if self.slime_wave_simulation.is_some() {
+            return true;
+        }
+        let width = (self.screen_w / 2).max(1);
+        let height = (self.screen_h / 2).max(1);
+        let created = unsafe {
+            let first = Self::create_slime_wave_target(&self.gl, width, height);
+            let second = Self::create_slime_wave_target(&self.gl, width, height);
+            match (first, second) {
+                (Ok((fbo_a, tex_a)), Ok((fbo_b, tex_b))) => Some(SlimeWaveSimulation {
+                    fbos: [fbo_a, fbo_b],
+                    textures: [tex_a, tex_b],
+                    front: 0,
+                    width,
+                    height,
+                }),
+                (Ok((fbo, texture)), Err(err)) | (Err(err), Ok((fbo, texture))) => {
+                    self.gl.delete_framebuffer(fbo);
+                    self.gl.delete_texture(texture);
+                    log::warn!("compositor: slime wave target creation failed: {err}");
+                    None
+                }
+                (Err(first), Err(second)) => {
+                    log::warn!("compositor: slime wave targets unavailable: {first}; {second}");
+                    None
+                }
+            }
+        };
+        self.slime_wave_simulation = created;
+        self.slime_wave_simulation.is_some()
+    }
+
+    pub(super) fn run_slime_wave_simulation(&mut self) {
+        if !self.ensure_slime_wave_simulation() {
+            return;
+        }
+        let (segments, injection_params, injection_count) = self.slime_state.take_wave_injections();
+        let mut simulation = self.slime_wave_simulation.take().unwrap();
+        unsafe {
+            self.gl.use_program(Some(self.slime_wave_program));
+            let projection = ortho(
+                0.0,
+                simulation.width as f32,
+                simulation.height as f32,
+                0.0,
+                -1.0,
+                1.0,
+            );
+            self.gl.uniform_matrix_4_f32_slice(
+                self.slime_wave_uniforms.projection.as_ref(),
+                false,
+                &projection,
+            );
+            self.gl.uniform_4_f32(
+                self.slime_wave_uniforms.rect.as_ref(),
+                0.0,
+                0.0,
+                simulation.width as f32,
+                simulation.height as f32,
+            );
+            self.gl
+                .uniform_1_i32(self.slime_wave_uniforms.state.as_ref(), 0);
+            self.gl.uniform_2_f32(
+                self.slime_wave_uniforms.texel.as_ref(),
+                1.0 / simulation.width as f32,
+                1.0 / simulation.height as f32,
+            );
+            self.gl.uniform_1_f32(
+                self.slime_wave_uniforms.aspect.as_ref(),
+                simulation.width as f32 / simulation.height as f32,
+            );
+            self.gl.uniform_1_f32(
+                self.slime_wave_uniforms.noise_time.as_ref(),
+                self.compositor_start_time.elapsed().as_secs_f32(),
+            );
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+            self.gl
+                .viewport(0, 0, simulation.width as i32, simulation.height as i32);
+            for step in 0..2 {
+                let back = 1 - simulation.front;
+                self.gl
+                    .bind_framebuffer(glow::FRAMEBUFFER, Some(simulation.fbos[back]));
+                self.gl.active_texture(glow::TEXTURE0);
+                self.gl.bind_texture(
+                    glow::TEXTURE_2D,
+                    Some(simulation.textures[simulation.front]),
+                );
+                let count = if step == 0 { injection_count } else { 0 };
+                self.gl
+                    .uniform_1_i32(self.slime_wave_uniforms.injection_count.as_ref(), count);
+                if count > 0 {
+                    self.gl.uniform_4_f32_slice(
+                        self.slime_wave_uniforms.injections.as_ref(),
+                        &segments[..count as usize * 4],
+                    );
+                    self.gl.uniform_2_f32_slice(
+                        self.slime_wave_uniforms.injection_params.as_ref(),
+                        &injection_params[..count as usize * 2],
+                    );
+                }
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                simulation.front = back;
+            }
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.gl
+                .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+        }
+        self.slime_wave_simulation = Some(simulation);
+    }
+
     /// Lazily create postprocess FBO if it doesn't exist yet.
     pub(super) fn ensure_postprocess_fbo(&mut self) {
         if self.postprocess_fbo.is_none() {

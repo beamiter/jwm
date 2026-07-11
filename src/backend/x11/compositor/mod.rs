@@ -350,6 +350,9 @@ where
     // --- Feature 8: Color temperature / color management ---
     postprocess_program: glow::Program,
     postprocess_uniforms: PostprocessUniforms,
+    slime_wave_program: glow::Program,
+    slime_wave_uniforms: SlimeWaveUniforms,
+    slime_wave_simulation: Option<SlimeWaveSimulation>,
     /// FBO for post-process pass (captures the composited scene)
     postprocess_fbo: Option<(glow::Framebuffer, glow::Texture)>,
     color_temperature: f32,
@@ -745,6 +748,7 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
             self.gl.delete_program(self.temporal_blur_mix_program);
             self.gl.delete_program(self.border_program);
             self.gl.delete_program(self.postprocess_program);
+            self.gl.delete_program(self.slime_wave_program);
             self.gl.delete_program(self.hud_program);
             self.gl.delete_program(self.hud_text_program);
             self.gl.delete_program(self.annotation_line_program);
@@ -775,6 +779,14 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
             if let Some((fbo, tex)) = self.postprocess_fbo.take() {
                 self.gl.delete_framebuffer(fbo);
                 self.gl.delete_texture(tex);
+            }
+            if let Some(simulation) = self.slime_wave_simulation.take() {
+                for fbo in simulation.fbos {
+                    self.gl.delete_framebuffer(fbo);
+                }
+                for texture in simulation.textures {
+                    self.gl.delete_texture(texture);
+                }
             }
             if let Some((fbo, tex)) = self.transition_fbo.take() {
                 self.gl.delete_framebuffer(fbo);

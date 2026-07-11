@@ -724,6 +724,28 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         };
 
+        let slime_wave_program = shader_cache.get_or_compile(
+            &gl,
+            "slime_wave_sim",
+            shaders::BLUR_DOWN_VERTEX,
+            shaders::SLIME_WAVE_SIM_FRAGMENT_SHADER,
+        )?;
+        let slime_wave_uniforms = unsafe {
+            SlimeWaveUniforms {
+                projection: gl.get_uniform_location(slime_wave_program, "u_projection"),
+                rect: gl.get_uniform_location(slime_wave_program, "u_rect"),
+                state: gl.get_uniform_location(slime_wave_program, "u_state"),
+                texel: gl.get_uniform_location(slime_wave_program, "u_texel"),
+                aspect: gl.get_uniform_location(slime_wave_program, "u_aspect"),
+                injection_count: gl
+                    .get_uniform_location(slime_wave_program, "u_injection_count"),
+                injections: gl.get_uniform_location(slime_wave_program, "u_injections[0]"),
+                injection_params: gl
+                    .get_uniform_location(slime_wave_program, "u_injection_params[0]"),
+                noise_time: gl.get_uniform_location(slime_wave_program, "u_noise_time"),
+            }
+        };
+
         let magnifier_uniforms = unsafe {
             MagnifierUniforms {
                 magnifier_enabled: gl
@@ -736,12 +758,23 @@ impl<C: CompositorConnection> Compositor<C> {
                 slime_enabled: gl.get_uniform_location(postprocess_program, "u_slime_enabled"),
                 slime_points: gl.get_uniform_location(postprocess_program, "u_slime_points[0]"),
                 slime_bbox: gl.get_uniform_location(postprocess_program, "u_slime_bbox"),
+                slime_surface_rect: gl
+                    .get_uniform_location(postprocess_program, "u_slime_surface_rect"),
                 slime_screen_size: gl
                     .get_uniform_location(postprocess_program, "u_slime_screen_size"),
                 slime_scale: gl.get_uniform_location(postprocess_program, "u_slime_scale"),
                 slime_strength: gl.get_uniform_location(postprocess_program, "u_slime_strength"),
                 slime_opacity: gl.get_uniform_location(postprocess_program, "u_slime_opacity"),
                 slime_time: gl.get_uniform_location(postprocess_program, "u_slime_time"),
+                slime_ripple_count: gl
+                    .get_uniform_location(postprocess_program, "u_slime_ripple_count"),
+                slime_ripples: gl
+                    .get_uniform_location(postprocess_program, "u_slime_ripples[0]"),
+                slime_ripple_directions: gl
+                    .get_uniform_location(postprocess_program, "u_slime_ripple_directions[0]"),
+                slime_wave: gl.get_uniform_location(postprocess_program, "u_slime_wave"),
+                slime_wave_texel: gl
+                    .get_uniform_location(postprocess_program, "u_slime_wave_texel"),
                 colorblind_mode: gl.get_uniform_location(postprocess_program, "u_colorblind_mode"),
             }
         };
@@ -1245,6 +1278,9 @@ impl<C: CompositorConnection> Compositor<C> {
             // Feature 8: color management
             postprocess_program,
             postprocess_uniforms,
+            slime_wave_program,
+            slime_wave_uniforms,
+            slime_wave_simulation: None,
             postprocess_fbo,
             color_temperature: behavior.color_temperature,
             saturation: behavior.saturation,

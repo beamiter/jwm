@@ -2016,6 +2016,16 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // === Pass 4: Post-processing (features 8/9/10) ===
         if postprocess_active {
+            if self.slime_state.is_visible() {
+                self.run_slime_wave_simulation();
+            }
+            let slime_wave = self.slime_wave_simulation.as_ref().map(|simulation| {
+                (
+                    simulation.textures[simulation.front],
+                    simulation.width,
+                    simulation.height,
+                )
+            });
             let (_, pp_tex) = self.postprocess_fbo.as_ref().unwrap();
             let pp_tex = *pp_tex;
             unsafe {
@@ -2121,7 +2131,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
                 // Slime hand refraction uniforms
                 let slime_opacity = self.slime_state.opacity();
-                let slime_enabled = slime_opacity > 0.0;
+                let slime_enabled = self.slime_state.is_visible() && slime_wave.is_some();
                 self.gl.uniform_1_i32(
                     self.magnifier_uniforms.slime_enabled.as_ref(),
                     if slime_enabled { 1 } else { 0 },
@@ -2143,6 +2153,15 @@ impl<C: CompositorConnection> Compositor<C> {
                         max_x,
                         max_y,
                     );
+                    let [surface_min_x, surface_min_y, surface_max_x, surface_max_y] =
+                        self.slime_state.surface_rect();
+                    self.gl.uniform_4_f32(
+                        self.magnifier_uniforms.slime_surface_rect.as_ref(),
+                        surface_min_x,
+                        surface_min_y,
+                        surface_max_x,
+                        surface_max_y,
+                    );
                     self.gl.uniform_2_f32(
                         self.magnifier_uniforms.slime_screen_size.as_ref(),
                         self.screen_w as f32,
@@ -2159,6 +2178,34 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.gl.uniform_1_f32(
                         self.magnifier_uniforms.slime_time.as_ref(),
                         self.compositor_start_time.elapsed().as_secs_f32(),
+                    );
+                    let (wave_texture, wave_width, wave_height) = slime_wave.unwrap();
+                    self.gl.uniform_1_i32(
+                        self.magnifier_uniforms.slime_wave.as_ref(),
+                        1,
+                    );
+                    self.gl.uniform_2_f32(
+                        self.magnifier_uniforms.slime_wave_texel.as_ref(),
+                        1.0 / wave_width as f32,
+                        1.0 / wave_height as f32,
+                    );
+                    self.gl.active_texture(glow::TEXTURE1);
+                    self.gl
+                        .bind_texture(glow::TEXTURE_2D, Some(wave_texture));
+                    self.gl.active_texture(glow::TEXTURE0);
+                    let (ripples, ripple_directions, ripple_count) =
+                        self.slime_state.ripple_uniforms();
+                    self.gl.uniform_1_i32(
+                        self.magnifier_uniforms.slime_ripple_count.as_ref(),
+                        ripple_count,
+                    );
+                    self.gl.uniform_4_f32_slice(
+                        self.magnifier_uniforms.slime_ripples.as_ref(),
+                        &ripples[..ripple_count as usize * 4],
+                    );
+                    self.gl.uniform_2_f32_slice(
+                        self.magnifier_uniforms.slime_ripple_directions.as_ref(),
+                        &ripple_directions[..ripple_count as usize * 2],
                     );
                 }
 

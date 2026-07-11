@@ -444,6 +444,11 @@ fn x11_shaders() -> Vec<(&'static str, Stage, &'static str)> {
             F,
             s::MAGNIFIER_POSTPROCESS_FRAGMENT_SHADER,
         ),
+        (
+            "SLIME_WAVE_SIM_FRAGMENT_SHADER",
+            F,
+            s::SLIME_WAVE_SIM_FRAGMENT_SHADER,
+        ),
         ("TILT_VERTEX_SHADER", V, s::TILT_VERTEX_SHADER),
         ("TILT_FRAGMENT_SHADER", F, s::TILT_FRAGMENT_SHADER),
         ("WOBBLY_VERTEX_SHADER", V, s::WOBBLY_VERTEX_SHADER),

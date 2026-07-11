@@ -492,6 +492,79 @@ void main() {
 // Magnifier post-process shader (extends postprocess with magnifier)
 // ---------------------------------------------------------------------------
 
+pub const SLIME_WAVE_SIM_FRAGMENT_SHADER: &str = r#"#version 330 core
+
+uniform sampler2D u_state; // R=current height, G=previous height
+uniform vec2 u_texel;
+uniform float u_aspect;
+uniform int u_injection_count;
+uniform vec4 u_injections[10]; // previous.xy, current.xy in top-left UV space
+uniform vec2 u_injection_params[10]; // radius, force
+uniform float u_noise_time;
+in vec2 v_uv;
+out vec4 frag_color;
+
+float capsule_distance(vec2 p, vec2 a, vec2 b) {
+    vec2 pa = p - a;
+    vec2 ba = b - a;
+    float h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.000001), 0.0, 1.0);
+    return length(pa - ba * h);
+}
+
+void main() {
+    vec2 uv = v_uv;
+    vec2 axial = vec2(u_texel.x, 0.0);
+    vec2 vertical = vec2(0.0, u_texel.y);
+    float current = texture(u_state, uv).r;
+    float previous = texture(u_state, uv).g;
+    float average = (
+        texture(u_state, uv - axial).r
+        + texture(u_state, uv + axial).r
+        + texture(u_state, uv - vertical).r
+        + texture(u_state, uv + vertical).r
+    ) * 0.20;
+    average += (
+        texture(u_state, uv - axial - vertical).r
+        + texture(u_state, uv + axial - vertical).r
+        + texture(u_state, uv - axial + vertical).r
+        + texture(u_state, uv + axial + vertical).r
+    ) * 0.05;
+
+    float next = average * 2.0 - previous;
+    float amplitude_damping = mix(
+        0.982, 0.997, smoothstep(0.0, 0.10, abs(next))
+    );
+    next *= amplitude_damping;
+    next += sin(dot(uv, vec2(91.7, 57.3)) + u_noise_time * 0.7) * 0.000012;
+
+    vec2 p = vec2(uv.x * u_aspect, uv.y);
+    for (int index = 0; index < 10; ++index) {
+        if (index >= u_injection_count) {
+            break;
+        }
+        vec4 segment = u_injections[index];
+        vec2 a = vec2(segment.x * u_aspect, segment.y);
+        vec2 b = vec2(segment.z * u_aspect, segment.w);
+        float radius = u_injection_params[index].x;
+        float force = u_injection_params[index].y;
+        float distance_to_finger = capsule_distance(p, a, b);
+        float normalized_distance = distance_to_finger / max(radius, 0.00001);
+        float positive_core = 1.0 - smoothstep(0.18, 0.68, normalized_distance);
+        float negative_ring = smoothstep(0.48, 0.82, normalized_distance)
+            * (1.0 - smoothstep(0.82, 1.28, normalized_distance));
+        // A near-zero-mean bipolar impulse launches a crest and trough instead
+        // of adding a static positive mound. Opposite phases then cancel when
+        // waves meet, making interference visible.
+        next += (positive_core - negative_ring * 0.72) * force;
+    }
+
+    float edge_distance = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    next *= mix(0.86, 1.0, smoothstep(0.0, 0.045, edge_distance));
+    next = clamp(next, -0.55, 0.55);
+    frag_color = vec4(next, current, 0.0, 1.0);
+}
+"#;
+
 pub const MAGNIFIER_POSTPROCESS_FRAGMENT_SHADER: &str = r#"#version 330 core
 
 uniform sampler2D u_texture;
@@ -510,11 +583,17 @@ uniform float u_magnifier_zoom;    // zoom factor (e.g. 2.0)
 uniform int   u_slime_enabled;
 uniform vec2  u_slime_points[21];
 uniform vec4  u_slime_bbox;        // min_x, min_y, max_x, max_y
+uniform vec4  u_slime_surface_rect; // target window in top-left screen pixels
 uniform vec2  u_slime_screen_size;
 uniform float u_slime_scale;       // palm scale in pixels
 uniform float u_slime_strength;    // refraction displacement in pixels
 uniform float u_slime_opacity;
 uniform float u_slime_time;
+uniform int   u_slime_ripple_count;
+uniform vec4  u_slime_ripples[48]; // center_x, center_y, normalized_age, amplitude
+uniform vec2  u_slime_ripple_directions[48];
+uniform sampler2D u_slime_wave;
+uniform vec2  u_slime_wave_texel;
 // Colorblind correction uniform
 uniform int   u_colorblind_mode;   // 0=none, 1=deuteranopia, 2=protanopia, 3=tritanopia
 // HDR tone mapping uniforms
@@ -552,14 +631,6 @@ float slime_hand_sdf(vec2 p) {
             : (finger == 1 ? 1.0
             : (finger == 2 ? 1.04 : (finger == 3 ? 0.96 : 0.84)));
         float finger_radius = radius * width;
-        float bridge = slime_tapered_capsule_sdf(
-            p,
-            u_slime_points[0],
-            u_slime_points[base],
-            radius * 1.26,
-            finger_radius
-        );
-        d = slime_smooth_union(d, bridge, radius * 0.72);
         for (int joint = 0; joint < 3; ++joint) {
             float taper_a = 1.0 - float(joint) * 0.12;
             float taper_b = 1.0 - float(joint + 1) * 0.12;
@@ -628,20 +699,143 @@ void main() {
     }
 
     vec4 c = texture(u_texture, sample_uv);
+    vec2 slime_pixel = vec2(
+        uv.x * u_slime_screen_size.x,
+        (1.0 - uv.y) * u_slime_screen_size.y
+    );
 
-    // Slime-glass hand. The expensive SDF is evaluated only inside the CPU
-    // supplied hand bounding box. Refraction is applied before color/HDR passes.
-    if (u_slime_enabled == 1 && u_slime_opacity > 0.0) {
-        vec2 pixel = vec2(
-            uv.x * u_slime_screen_size.x,
-            (1.0 - uv.y) * u_slime_screen_size.y
+    // A softly blurred window-wide film gives the undisturbed area a water
+    // surface baseline, so propagated waves read as relief instead of isolated
+    // transparent lines.
+    if (u_slime_enabled == 1
+        && slime_pixel.x >= u_slime_surface_rect.x
+        && slime_pixel.y >= u_slime_surface_rect.y
+        && slime_pixel.x <= u_slime_surface_rect.z
+        && slime_pixel.y <= u_slime_surface_rect.w) {
+        vec2 blur_step = vec2(
+            2.6 / u_slime_screen_size.x,
+            2.6 / u_slime_screen_size.y
         );
+        vec3 water_skin = texture(u_texture, sample_uv).rgb * 0.20;
+        water_skin += texture(u_texture, sample_uv + vec2( blur_step.x, 0.0)).rgb * 0.12;
+        water_skin += texture(u_texture, sample_uv + vec2(-blur_step.x, 0.0)).rgb * 0.12;
+        water_skin += texture(u_texture, sample_uv + vec2(0.0,  blur_step.y)).rgb * 0.12;
+        water_skin += texture(u_texture, sample_uv + vec2(0.0, -blur_step.y)).rgb * 0.12;
+        water_skin += texture(u_texture, sample_uv + vec2( blur_step.x,  blur_step.y)).rgb * 0.08;
+        water_skin += texture(u_texture, sample_uv + vec2(-blur_step.x,  blur_step.y)).rgb * 0.08;
+        water_skin += texture(u_texture, sample_uv + vec2( blur_step.x, -blur_step.y)).rgb * 0.08;
+        water_skin += texture(u_texture, sample_uv + vec2(-blur_step.x, -blur_step.y)).rgb * 0.08;
+        water_skin *= vec3(0.965, 1.005, 1.035);
+        float feather = 7.0;
+        float surface_mask = smoothstep(
+            u_slime_surface_rect.x, u_slime_surface_rect.x + feather, slime_pixel.x
+        ) * smoothstep(
+            u_slime_surface_rect.y, u_slime_surface_rect.y + feather, slime_pixel.y
+        ) * (1.0 - smoothstep(
+            u_slime_surface_rect.z - feather, u_slime_surface_rect.z, slime_pixel.x
+        )) * (1.0 - smoothstep(
+            u_slime_surface_rect.w - feather, u_slime_surface_rect.w, slime_pixel.y
+        ));
+        c.rgb = mix(c.rgb, water_skin, surface_mask * 0.64);
+    }
+
+    // Fingertip water ripples and the faint glass-hand guide share a CPU-supplied
+    // bounding box. Refraction is applied before color/HDR passes.
+    if (u_slime_enabled == 1) {
+        vec2 pixel = slime_pixel;
         if (pixel.x >= u_slime_bbox.x && pixel.y >= u_slime_bbox.y
             && pixel.x <= u_slime_bbox.z && pixel.y <= u_slime_bbox.w) {
-            float d = slime_surface_sdf(pixel);
-            float aa = 2.0;
-            float mask = (1.0 - smoothstep(-aa, aa, d)) * u_slime_opacity;
-            if (mask > 0.001) {
+            // Pose coordinates are top-left based while the wave texture is
+            // sampled in GL's bottom-left convention.
+            vec2 wave_uv = vec2(uv.x, 1.0 - uv.y);
+            vec2 tx = vec2(u_slime_wave_texel.x, 0.0);
+            vec2 ty = vec2(0.0, u_slime_wave_texel.y);
+            float center = texture(u_slime_wave, wave_uv).r;
+            float left = texture(u_slime_wave, wave_uv - tx).r;
+            float right = texture(u_slime_wave, wave_uv + tx).r;
+            float top = texture(u_slime_wave, wave_uv - ty).r;
+            float bottom = texture(u_slime_wave, wave_uv + ty).r;
+            float top_left = texture(u_slime_wave, wave_uv - tx - ty).r;
+            float top_right = texture(u_slime_wave, wave_uv + tx - ty).r;
+            float bottom_left = texture(u_slime_wave, wave_uv - tx + ty).r;
+            float bottom_right = texture(u_slime_wave, wave_uv + tx + ty).r;
+            vec2 grad = vec2(
+                (top_right + 2.0 * right + bottom_right)
+                    - (top_left + 2.0 * left + bottom_left),
+                (bottom_left + 2.0 * bottom + bottom_right)
+                    - (top_left + 2.0 * top + top_right)
+            );
+            float grad_len = length(grad);
+            float lap = (left + right + top + bottom) * 0.25 - center;
+            vec2 grad_dir = grad_len > 0.00001 ? grad / grad_len : vec2(0.0);
+            vec2 refraction_px = grad * (0.72 * u_slime_strength * 92.0);
+            vec2 lens_px = grad_dir * lap * (0.26 * u_slime_strength * 230.0);
+            vec2 total_px = refraction_px + lens_px;
+            vec2 total_offset = vec2(
+                total_px.x / u_slime_screen_size.x,
+                -total_px.y / u_slime_screen_size.y
+            );
+            float dispersion = 0.015 + clamp(grad_len * 0.20, 0.0, 0.14);
+            vec2 refracted_uv = clamp(sample_uv + total_offset, vec2(0.001), vec2(0.999));
+            vec3 liquid;
+            liquid.r = texture(u_texture, clamp(
+                refracted_uv + total_offset * dispersion, vec2(0.001), vec2(0.999)
+            )).r;
+            liquid.g = texture(u_texture, refracted_uv).g;
+            liquid.b = texture(u_texture, clamp(
+                refracted_uv - total_offset * dispersion, vec2(0.001), vec2(0.999)
+            )).b;
+
+            float activity = smoothstep(0.00035, 0.008, grad_len + abs(center) * 0.42);
+            float wave_brightness = 1.0 + clamp(center * 4.2, -0.55, 0.68);
+            liquid *= wave_brightness;
+            liquid = mix(liquid, liquid * vec3(0.72, 0.88, 1.12), activity * 0.28);
+
+            vec3 normal = normalize(vec3(
+                -grad.x, -grad.y, 0.32 / (u_slime_strength + 0.01)
+            ));
+            float cos_theta = clamp(normal.z, 0.0, 1.0);
+            float fresnel = 0.02 + 0.98 * pow(1.0 - cos_theta, 5.0);
+            vec2 reflection_uv = clamp(
+                sample_uv - total_offset * 1.6, vec2(0.001), vec2(0.999)
+            );
+            vec3 reflection = texture(u_texture, reflection_uv).rgb * vec3(0.80, 0.90, 1.08);
+            liquid = mix(liquid, reflection, fresnel * activity * 0.62);
+
+            vec3 light_dir = normalize(vec3(0.4, 0.7, 1.0));
+            float ndoth = max(dot(normal, light_dir), 0.0);
+            float specular = pow(ndoth, 180.0) * 2.2 + pow(ndoth, 28.0) * 0.35;
+            float caustic_mask = smoothstep(0.04, 0.10, abs(center))
+                * smoothstep(0.01, 0.06, abs(lap));
+            liquid += vec3(0.86, 0.95, 1.0)
+                * (specular * activity * 1.35 + caustic_mask * 0.58);
+            float signed_curvature = clamp(lap * 26.0, -1.0, 1.0) * activity;
+            float interference = smoothstep(0.008, 0.045, abs(lap))
+                * smoothstep(0.002, 0.018, grad_len);
+            liquid += vec3(0.84, 0.94, 1.0)
+                * max(signed_curvature, 0.0) * (0.24 + interference * 0.20);
+            liquid *= 1.0 - max(-signed_curvature, 0.0)
+                * (0.30 + interference * 0.18);
+            vec2 ridge_light_dir = normalize(vec2(0.42, 0.91));
+            float ridge = clamp(
+                dot(grad_dir, ridge_light_dir) * grad_len * 155.0,
+                -1.0,
+                1.0
+            ) * activity;
+            float gradient_rim = smoothstep(0.0012, 0.014, grad_len) * activity;
+            liquid += vec3(0.86, 0.95, 1.0) * gradient_rim * 0.16;
+            liquid += vec3(0.92, 0.98, 1.0) * max(ridge, 0.0) * 0.48;
+            liquid *= 1.0 - max(-ridge, 0.0) * 0.58;
+            c.rgb = mix(c.rgb, liquid, activity);
+
+            // Keep the tracked hand as a quiet visual guide; fingertip ripples
+            // are the primary effect and continue after this mask has faded.
+            if (u_slime_opacity > 0.0) {
+                float hand_opacity = u_slime_opacity * 0.34;
+                float d = slime_surface_sdf(pixel);
+                float aa = 2.0;
+                float mask = (1.0 - smoothstep(-aa, aa, d)) * hand_opacity;
+                if (mask > 0.001) {
                 float epsilon = max(1.25, u_slime_scale * 0.018);
                 vec2 gradient = vec2(
                     slime_surface_sdf(pixel + vec2(epsilon, 0.0))
@@ -655,7 +849,9 @@ void main() {
                     : vec2(0.0, -1.0);
 
                 float depth = clamp(-d / max(u_slime_scale * 0.62, 1.0), 0.0, 1.0);
-                float edge_weight = 1.0 - depth;
+                float meniscus = 1.0 - smoothstep(
+                    0.0, max(u_slime_scale * 0.22, 2.0), max(-d, 0.0)
+                );
                 vec2 uv_normal = vec2(
                     normal.x / u_slime_screen_size.x,
                     -normal.y / u_slime_screen_size.y
@@ -670,31 +866,32 @@ void main() {
                     - pixel.y / max(u_slime_scale * 0.62, 1.0)
                 );
                 vec2 offset = uv_normal * u_slime_strength
-                    * (0.28 + edge_weight * 0.72) * mask
-                    + uv_tangent * u_slime_strength * 0.12 * flow * depth * mask;
+                    * (0.06 + meniscus * 0.94) * mask
+                    + uv_tangent * u_slime_strength * 0.08 * flow * depth * mask;
                 vec2 refracted_uv = clamp(sample_uv + offset, vec2(0.001), vec2(0.999));
                 vec2 dispersion = uv_normal * u_slime_strength
-                    * (0.12 + edge_weight * 0.06);
+                    * (0.02 + meniscus * 0.09);
 
                 vec3 glass;
                 glass.r = texture(u_texture, clamp(refracted_uv + dispersion, vec2(0.001), vec2(0.999))).r;
                 glass.g = texture(u_texture, refracted_uv).g;
                 glass.b = texture(u_texture, clamp(refracted_uv - dispersion, vec2(0.001), vec2(0.999))).b;
-                glass *= vec3(0.965, 1.025, 1.01);
-                c.rgb = mix(c.rgb, glass, mask * 0.94);
+                glass *= vec3(0.99, 1.008, 1.002);
+                c.rgb = mix(c.rgb, glass, mask * 0.82);
 
                 float rim = (1.0 - smoothstep(
-                    0.0, max(u_slime_scale * 0.12, 2.0), max(-d, 0.0)
+                    0.0, max(u_slime_scale * 0.038, 1.5), max(-d, 0.0)
                 ))
-                    * u_slime_opacity;
+                    * hand_opacity;
                 vec2 light_dir = normalize(vec2(-0.58, -0.82));
                 float specular = pow(max(dot(normal, light_dir), 0.0), 18.0);
-                float fresnel = pow(edge_weight, 1.55);
+                float fresnel = pow(meniscus, 2.2);
                 float caustic = pow(0.5 + 0.5 * flow, 8.0) * depth;
                 c.rgb += vec3(0.82, 0.93, 1.0)
-                    * (specular * 0.34 + fresnel * 0.10) * mask;
-                c.rgb += vec3(0.34, 0.78, 0.62) * caustic * 0.055 * mask;
-                c.rgb = mix(c.rgb, vec3(0.94, 0.98, 1.0), rim * 0.24);
+                    * (specular * 0.22 + fresnel * 0.055) * mask;
+                c.rgb += vec3(0.34, 0.78, 0.62) * caustic * 0.035 * mask;
+                c.rgb = mix(c.rgb, vec3(0.94, 0.98, 1.0), rim * 0.14);
+                }
             }
         }
     }
