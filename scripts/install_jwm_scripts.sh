@@ -135,7 +135,8 @@ usage() {
 说明:
   - CLONE_BARS（脚本顶部）只用于把哪些 bar 仓库 git clone/pull 到本地，不会构建。
   - 真正会被安装的 bar 只有 JWM_BAR_NAME（即 -b 的第一个参数，或脚本顶部默认值）。
-  - bar / jwm / jwm-tool 都使用 cargo install --path ... 安装到 cargo bin 目录（通常是 ~/.cargo/bin）。
+  - bar 使用 cargo install --path ... 安装到 cargo bin 目录（通常是 ~/.cargo/bin）。
+  - jwm / jwm-tool 会先通过 cargo install 构建，再额外安装到 /usr/local/bin，供 desktop 会话直接启动。
   - jwm 通过 config.toml 的 status_bar.name 在运行时选择 bar，切换 bar 不需要重编 jwm。
 
 示例:
@@ -308,6 +309,18 @@ ensure_cargo_bin_dir() {
     mkdir -p "$(cargo_bin_dir)"
 }
 
+install_system_binary() {
+    local src="$1"
+    local dest_dir="$2"
+
+    if [[ ! -x "$src" ]]; then
+        err "二进制不存在或不可执行: $src"
+        exit 1
+    fi
+
+    sudo install -m755 "$src" "$dest_dir/"
+}
+
 # ============================================================
 # 安装 bar 到 cargo bin
 # ============================================================
@@ -329,7 +342,7 @@ build_bar() {
 }
 
 # ============================================================
-# 安装 JWM 到 cargo bin
+# 安装 JWM，并将 desktop 依赖的二进制同步到 /usr/local/bin
 # ============================================================
 build_and_install_jwm() {
     info "安装 jwm（$BUILD_MODE 模式）..."
@@ -345,7 +358,11 @@ build_and_install_jwm() {
     # shellcheck disable=SC2086
     cargo install --path . --force $CARGO_INSTALL_MODE_FLAG $CARGO_JOBS --root "$(cargo_install_root)"
 
-    ok "jwm, jwm-tool 安装完成: $(cargo_bin_dir)"
+    info "同步 jwm, jwm-tool 到 /usr/local/bin ..."
+    install_system_binary "$(cargo_bin_dir)/jwm" /usr/local/bin
+    install_system_binary "$(cargo_bin_dir)/jwm-tool" /usr/local/bin
+
+    ok "jwm, jwm-tool 安装完成: $(cargo_bin_dir) 和 /usr/local/bin"
 
     info "安装 desktop 文件 ..."
     [[ -f jwm-x11rb.desktop ]]         && sudo install -m644 jwm-x11rb.desktop         /usr/share/xsessions/
@@ -362,7 +379,10 @@ build_and_install_jwm() {
 # ============================================================
 regenerate_config() {
     info "重新生成 JWM 配置文件..."
-    local jwm_bin="$(cargo_bin_dir)/jwm"
+    local jwm_bin="/usr/local/bin/jwm"
+    if [[ ! -x "$jwm_bin" ]]; then
+        jwm_bin="$(cargo_bin_dir)/jwm"
+    fi
     if "$jwm_bin" --gen-config; then
         ok "配置文件已重新生成"
     else
