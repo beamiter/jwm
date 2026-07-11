@@ -83,6 +83,8 @@ impl<C: CompositorConnection> Compositor<C> {
                     front: 0,
                     width,
                     height,
+                    last_tick: std::time::Instant::now(),
+                    accumulated_time: 1.0 / 120.0,
                 }),
                 (Ok((fbo, texture)), Err(err)) | (Err(err), Ok((fbo, texture))) => {
                     self.gl.delete_framebuffer(fbo);
@@ -139,14 +141,24 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.slime_wave_uniforms.aspect.as_ref(),
                 simulation.width as f32 / simulation.height as f32,
             );
-            self.gl.uniform_1_f32(
-                self.slime_wave_uniforms.noise_time.as_ref(),
-                self.compositor_start_time.elapsed().as_secs_f32(),
-            );
             self.gl.bind_vertex_array(Some(self.quad_vao));
             self.gl
                 .viewport(0, 0, simulation.width as i32, simulation.height as i32);
-            for step in 0..2 {
+            const FIXED_STEP: f32 = 1.0 / 120.0;
+            let now = std::time::Instant::now();
+            simulation.accumulated_time += now
+                .duration_since(simulation.last_tick)
+                .as_secs_f32()
+                .min(0.05);
+            simulation.last_tick = now;
+            if injection_count > 0 {
+                simulation.accumulated_time = simulation.accumulated_time.max(FIXED_STEP);
+            }
+            let steps = (simulation.accumulated_time / FIXED_STEP).floor().min(6.0) as usize;
+            simulation.accumulated_time -= steps as f32 * FIXED_STEP;
+            self.gl
+                .uniform_1_f32(self.slime_wave_uniforms.time_step.as_ref(), FIXED_STEP);
+            for step in 0..steps {
                 let back = 1 - simulation.front;
                 self.gl
                     .bind_framebuffer(glow::FRAMEBUFFER, Some(simulation.fbos[back]));

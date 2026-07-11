@@ -284,8 +284,8 @@ impl SlimeState {
                 f32::NEG_INFINITY,
             ]
         };
-        // The half-resolution Verlet field advances two cells per display frame,
-        // so its wake can travel well beyond the original fingertip capsule.
+        // The persistent field keeps propagating after the hand fades, so its
+        // wake can travel well beyond the original fingertip capsule.
         let expand = self.scale * 1.1 + self.strength * 2.0 + 320.0;
         for ripple in self.live_ripples() {
             bbox[0] = bbox[0].min(ripple.center[0] - expand);
@@ -349,7 +349,7 @@ impl SlimeState {
             segments[base + 2] = end[0] / screen_w;
             segments[base + 3] = end[1] / screen_h;
             params[index * 2] = self.scale * 0.055 / screen_h;
-            params[index * 2 + 1] = 0.070 * (0.7 + amplitude * 1.5);
+            params[index * 2 + 1] = 0.42 * (0.55 + amplitude * 1.45);
         }
         self.pending_wave_injections.clear();
         (segments, params, count as i32)
@@ -378,6 +378,9 @@ impl SlimeState {
 
         self.ripples
             .retain(|ripple| ripple.born.elapsed() < RIPPLE_LIFETIME);
+        let sample_dt = self.last_update.map_or(1.0 / 30.0, |last| {
+            last.elapsed().as_secs_f32().clamp(1.0 / 120.0, 0.10)
+        });
         let wave_spacing = (self.scale * 0.008).clamp(1.2, 3.5);
         if self.wave_tips_initialized {
             for (index, current) in tips.iter().copied().enumerate() {
@@ -386,7 +389,8 @@ impl SlimeState {
                 let dy = current[1] - previous[1];
                 let distance = (dx * dx + dy * dy).sqrt();
                 if distance >= wave_spacing && self.pending_wave_injections.len() < 10 {
-                    let amplitude = (distance / (self.scale * 0.08).max(1.0)).clamp(0.20, 1.0);
+                    let speed = distance / sample_dt;
+                    let amplitude = (speed / (self.scale * 5.0).max(1.0)).clamp(0.16, 1.0);
                     self.pending_wave_injections
                         .push((previous, current, amplitude));
                     self.wave_tips[index] = current;

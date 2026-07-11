@@ -494,13 +494,14 @@ void main() {
 
 pub const SLIME_WAVE_SIM_FRAGMENT_SHADER: &str = r#"#version 330 core
 
-uniform sampler2D u_state; // R=current height, G=previous height
+// Linearized viscous shallow-water state: R=surface height, G=vertical velocity.
+uniform sampler2D u_state;
 uniform vec2 u_texel;
 uniform float u_aspect;
+uniform float u_time_step;
 uniform int u_injection_count;
 uniform vec4 u_injections[10]; // previous.xy, current.xy in top-left UV space
-uniform vec2 u_injection_params[10]; // radius, force
-uniform float u_noise_time;
+uniform vec2 u_injection_params[10]; // radius, velocity impulse
 in vec2 v_uv;
 out vec4 frag_color;
 
@@ -515,27 +516,28 @@ void main() {
     vec2 uv = v_uv;
     vec2 axial = vec2(u_texel.x, 0.0);
     vec2 vertical = vec2(0.0, u_texel.y);
-    float current = texture(u_state, uv).r;
-    float previous = texture(u_state, uv).g;
-    float average = (
-        texture(u_state, uv - axial).r
-        + texture(u_state, uv + axial).r
-        + texture(u_state, uv - vertical).r
-        + texture(u_state, uv + vertical).r
-    ) * 0.20;
-    average += (
-        texture(u_state, uv - axial - vertical).r
-        + texture(u_state, uv + axial - vertical).r
-        + texture(u_state, uv - axial + vertical).r
-        + texture(u_state, uv + axial + vertical).r
-    ) * 0.05;
+    vec2 state = texture(u_state, uv).rg;
+    vec2 axial_sum = texture(u_state, uv - axial).rg
+        + texture(u_state, uv + axial).rg
+        + texture(u_state, uv - vertical).rg
+        + texture(u_state, uv + vertical).rg;
+    vec2 diagonal_sum = texture(u_state, uv - axial - vertical).rg
+        + texture(u_state, uv + axial - vertical).rg
+        + texture(u_state, uv - axial + vertical).rg
+        + texture(u_state, uv + axial + vertical).rg;
+    // Isotropic nine-point Laplacian. Coordinates are measured in grid cells,
+    // so X and Y have the same physical propagation speed on any aspect ratio.
+    vec2 laplacian = (4.0 * axial_sum + diagonal_sum - 20.0 * state) / 6.0;
 
-    float next = average * 2.0 - previous;
-    float amplitude_damping = mix(
-        0.982, 0.997, smoothstep(0.0, 0.10, abs(next))
-    );
-    next *= amplitude_damping;
-    next += sin(dot(uv, vec2(91.7, 57.3)) + u_noise_time * 0.7) * 0.000012;
+    const float wave_speed = 38.0; // grid cells / second
+    const float drag = 2.8;        // bulk viscous drag / second
+    const float viscosity = 1.35;  // kinematic viscosity in cells^2 / second
+    float acceleration = wave_speed * wave_speed * laplacian.r
+        + viscosity * laplacian.g;
+    // Semi-implicit integration keeps the damped system stable and makes
+    // energy loss depend on elapsed time rather than monitor refresh rate.
+    float velocity = (state.g + u_time_step * acceleration)
+        / (1.0 + drag * u_time_step);
 
     vec2 p = vec2(uv.x * u_aspect, uv.y);
     for (int index = 0; index < 10; ++index) {
@@ -549,19 +551,21 @@ void main() {
         float force = u_injection_params[index].y;
         float distance_to_finger = capsule_distance(p, a, b);
         float normalized_distance = distance_to_finger / max(radius, 0.00001);
-        float positive_core = 1.0 - smoothstep(0.18, 0.68, normalized_distance);
-        float negative_ring = smoothstep(0.48, 0.82, normalized_distance)
-            * (1.0 - smoothstep(0.82, 1.28, normalized_distance));
-        // A near-zero-mean bipolar impulse launches a crest and trough instead
-        // of adding a static positive mound. Opposite phases then cancel when
-        // waves meet, making interference visible.
-        next += (positive_core - negative_ring * 0.72) * force;
+        float r2 = normalized_distance * normalized_distance;
+        // A compact Mexican-hat momentum impulse has almost zero net volume:
+        // the displaced crest is supplied by the surrounding trough.
+        float impulse = (1.0 - 1.5 * r2) * exp(-1.5 * r2)
+            * (1.0 - smoothstep(1.15, 1.45, normalized_distance));
+        velocity += impulse * force;
     }
 
     float edge_distance = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
-    next *= mix(0.86, 1.0, smoothstep(0.0, 0.045, edge_distance));
-    next = clamp(next, -0.55, 0.55);
-    frag_color = vec4(next, current, 0.0, 1.0);
+    // The screen edge represents an open, lossy boundary. A viscosity sponge
+    // absorbs outgoing energy instead of reflecting it back into the domain.
+    float sponge = mix(0.72, 1.0, smoothstep(0.0, 0.055, edge_distance));
+    velocity *= sponge;
+    float height = state.r + u_time_step * velocity;
+    frag_color = vec4(clamp(height, -0.45, 0.45), velocity, 0.0, 1.0);
 }
 "#;
 

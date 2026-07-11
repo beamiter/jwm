@@ -268,7 +268,7 @@ pub(super) struct SlimeWaveUniforms {
     pub(super) injection_count: Option<glow::UniformLocation>,
     pub(super) injections: Option<glow::UniformLocation>,
     pub(super) injection_params: Option<glow::UniformLocation>,
-    pub(super) noise_time: Option<glow::UniformLocation>,
+    pub(super) time_step: Option<glow::UniformLocation>,
 }
 
 pub(super) struct SlimeWaveSimulation {
@@ -277,6 +277,8 @@ pub(super) struct SlimeWaveSimulation {
     pub(super) front: usize,
     pub(super) width: u32,
     pub(super) height: u32,
+    pub(super) last_tick: std::time::Instant,
+    pub(super) accumulated_time: f32,
 }
 
 pub(super) struct ParticleUniforms {

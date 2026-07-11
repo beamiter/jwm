@@ -742,7 +742,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 injections: gl.get_uniform_location(slime_wave_program, "u_injections[0]"),
                 injection_params: gl
                     .get_uniform_location(slime_wave_program, "u_injection_params[0]"),
-                noise_time: gl.get_uniform_location(slime_wave_program, "u_noise_time"),
+                time_step: gl.get_uniform_location(slime_wave_program, "u_time_step"),
             }
         };
 
