@@ -70,3 +70,38 @@ python3 video-demo/runner/run_demo.py \
   --assemble \
   --voice
 ```
+
+### GPT-SoVITS v4
+
+The repository includes an API-v2 adapter configured for the local `yinjian`
+v4 models. Start the persistent API once (the Gradio inference WebUI on port
+9872 is a separate service):
+
+```bash
+cd /home/yj/ai/GPT-SoVITS
+/home/yj/miniconda3/envs/GPTSoVits/bin/python3 api_v2.py \
+  -a 127.0.0.1 \
+  -p 9880 \
+  -c /home/yj/projects/jwm/video-demo/tts/gpt-sovits-yinjian-v4.yaml
+```
+
+Then generate all narration WAV files with the same reference audio and
+sampling values used in the WebUI screenshot:
+
+```bash
+cd /home/yj/projects/jwm
+python3 video-demo/runner/run_demo.py \
+  --profile production \
+  --generate-assets \
+  --tts-command '/home/yj/miniconda3/envs/GPTSoVits/bin/python3 video-demo/runner/gpt_sovits_tts.py --ref-audio /home/yj/ai/GPT-SoVITS/TEMP/gradio/2279d4c22dc220f6f532d24d7b3245f82846394d8878e0b30c2566bc29112bc2/audio.wav --prompt-text 注意力机制可以让模型关注不同位置的信息。 --text-file {text} --output {output}'
+
+python3 video-demo/runner/run_demo.py \
+  --profile production \
+  --assemble \
+  --voice
+```
+
+The adapter defaults match the UI values: Chinese, `cut1` (four-sentence
+split), top-k 15, top-p 1, temperature 1, speed 1, 0.3-second fragment pause,
+and 8 sampling steps. It validates every returned WAV and replaces the target
+atomically.
