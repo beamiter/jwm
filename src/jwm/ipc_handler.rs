@@ -962,6 +962,12 @@ impl Jwm {
                 "do_not_disturb": self.do_not_disturb,
                 "recording_fps": cfg.behavior().recording_fps,
                 "recording_encoder": cfg.behavior().recording_encoder,
+                "corner_radius": cfg.behavior().corner_radius,
+                "shadow_enabled": cfg.behavior().shadow_enabled,
+                "blur_enabled": cfg.behavior().blur_enabled,
+                "fading": cfg.behavior().fading,
+                "wobbly_windows": cfg.behavior().wobbly_windows,
+                "motion_trail": cfg.behavior().motion_trail,
             }))),
             "get_dnd" => IpcResponse::ok(Some(serde_json::json!({
                 "enabled": self.do_not_disturb,
@@ -989,6 +995,18 @@ impl Jwm {
                     "encoder": cfg.behavior().recording_encoder,
                 })))
             }
+            "get_effect_status" => IpcResponse::ok(Some(serde_json::json!({
+                "overview": self.features.overview.active,
+                "magnifier": self.features.magnifier.enabled,
+                "annotation": self.features.annotation_active,
+                "peek": self.features.peek_active,
+                "corner_radius": cfg.behavior().corner_radius,
+                "shadow_enabled": cfg.behavior().shadow_enabled,
+                "blur_enabled": cfg.behavior().blur_enabled,
+                "fading": cfg.behavior().fading,
+                "wobbly_windows": cfg.behavior().wobbly_windows,
+                "motion_trail": cfg.behavior().motion_trail,
+            }))),
             "get_hdr_status" => {
                 let outputs: Vec<serde_json::Value> = backend
                     .output_ops()
@@ -1120,6 +1138,7 @@ impl Jwm {
                 "version": env!("CARGO_PKG_VERSION"),
                 "name": "jwm",
                 "backend": std::env::var("JWM_BACKEND").unwrap_or_else(|_| "x11rb".to_string()),
+                "build_profile": if cfg!(debug_assertions) { "debug" } else { "release" },
             }))),
             "get_metrics" => {
                 if let Some(metrics) = backend.compositor_get_metrics() {
@@ -1659,6 +1678,7 @@ impl Jwm {
                     is_fullscreen: c.state.is_fullscreen,
                     is_urgent: c.state.is_urgent,
                     is_sticky: c.state.is_sticky,
+                    is_pip: c.state.is_pip,
                     is_focused: sel_client == Some(ck),
                 })
             })
@@ -2025,6 +2045,7 @@ impl Jwm {
                                     is_fullscreen: c.state.is_fullscreen,
                                     is_urgent: c.state.is_urgent,
                                     is_sticky: c.state.is_sticky,
+                                    is_pip: c.state.is_pip,
                                     is_focused: sel_client == Some(ck),
                                 })
                             })

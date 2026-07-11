@@ -87,6 +87,7 @@ pub struct WindowInfo {
     pub is_fullscreen: bool,
     pub is_urgent: bool,
     pub is_sticky: bool,
+    pub is_pip: bool,
     pub is_focused: bool,
 }
 
@@ -154,6 +155,11 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "scrolling_toggle_attach_mode" => {
             Ok((Jwm::scrolling_toggle_attach_mode, parse_int_arg(args, 0)))
         }
+        "scrolling_focus_column" => Ok((Jwm::scrolling_focus_column, parse_int_arg(args, 1))),
+        "scrolling_move_column" => Ok((Jwm::scrolling_move_column, parse_int_arg(args, 1))),
+        "scrolling_focus_window" => Ok((Jwm::scrolling_focus_window, parse_int_arg(args, 1))),
+        "scrolling_consume" => Ok((Jwm::scrolling_consume, parse_int_arg(args, 1))),
+        "scrolling_expel" => Ok((Jwm::scrolling_expel, parse_int_arg(args, 1))),
         "setlayout" => {
             let layout = parse_layout_arg(args)?;
             Ok((Jwm::setlayout, layout))
@@ -389,6 +395,21 @@ mod tests {
             panic!("expected layout arg");
         };
         assert_eq!(*layout, LayoutEnum::SCROLLING);
+    }
+
+    #[test]
+    fn dispatch_scrolling_navigation_commands() {
+        let args = serde_json::json!({"value": -1});
+        for command in [
+            "scrolling_focus_column",
+            "scrolling_move_column",
+            "scrolling_focus_window",
+            "scrolling_consume",
+            "scrolling_expel",
+        ] {
+            let (_, arg) = dispatch_command(command, &args).unwrap();
+            assert!(matches!(arg, WMArgEnum::Int(-1)));
+        }
     }
 
     #[test]

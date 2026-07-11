@@ -298,7 +298,23 @@ sync_bar_repo() {
 # cargo install 目标目录
 # ============================================================
 cargo_install_root() {
-    echo "${CARGO_HOME:-$HOME/.cargo}"
+    if [[ -n "${CARGO_HOME:-}" ]]; then
+        echo "$CARGO_HOME"
+        return
+    fi
+
+    local target_home="${HOME}"
+    if [[ "$(id -u)" -eq 0 && -n "${SUDO_USER:-}" ]]; then
+        local sudo_home
+        sudo_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+        if [[ -n "$sudo_home" ]]; then
+            target_home="$sudo_home"
+        else
+            target_home="/home/$SUDO_USER"
+        fi
+    fi
+
+    echo "$target_home/.cargo"
 }
 
 cargo_bin_dir() {

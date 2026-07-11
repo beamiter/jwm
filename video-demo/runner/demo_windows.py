@@ -21,14 +21,16 @@ class DemoWindows:
     def pids(self) -> list[int]:
         return [process.pid for process in self.processes if process.poll() is None]
 
-    def spawn(self, count: int, content: str = "grid") -> None:
-        names = ["MASTER"] + [f"STACK {index}" for index in range(1, count)]
-        for index, title in enumerate(names):
+    def spawn(self, count: int, content: str = "grid", opacity: float = 1.0) -> None:
+        offset = len(self.processes)
+        names = ["MASTER" if offset == 0 and index == 0 else f"STACK {offset + index}" for index in range(count)]
+        for local_index, title in enumerate(names):
+            index = offset + local_index
             socket = self.tmp / f"demo-{index}.sock"
             process = subprocess.Popen([
                 str(self.binary), "--title", title, "--instance", f"demo-{index}",
                 "--theme", THEMES[index % len(THEMES)], "--content", content,
-                "--animate", "--socket", str(socket),
+                "--opacity", str(opacity), "--animate", "--socket", str(socket),
             ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             ready, _, _ = select.select([process.stdout], [], [], 5.0) if process.stdout else ([], [], [])
             line = process.stdout.readline().strip() if ready else ""

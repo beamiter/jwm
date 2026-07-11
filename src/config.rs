@@ -2518,6 +2518,14 @@ impl Config {
             "behavior.blur_enabled" => self.inner.behavior.blur_enabled = as_bool()?,
             "behavior.shadow_enabled" => self.inner.behavior.shadow_enabled = as_bool()?,
             "behavior.compositor" => self.inner.behavior.compositor = as_bool()?,
+            "behavior.corner_radius" => {
+                let v = as_f32()?;
+                if !(0.0..=64.0).contains(&v) { return Err(format!("behavior.corner_radius={v} out of [0, 64]")); }
+                self.inner.behavior.corner_radius = v;
+            }
+            "behavior.fading" => self.inner.behavior.fading = as_bool()?,
+            "behavior.wobbly_windows" => self.inner.behavior.wobbly_windows = as_bool()?,
+            "behavior.motion_trail" => self.inner.behavior.motion_trail = as_bool()?,
             "behavior.recording_fps" => {
                 let v = as_u32()?;
                 if !(1..=240).contains(&v) {
@@ -2700,5 +2708,17 @@ mod tests {
                 .is_err()
         );
         assert_eq!(cfg.behavior().recording_fps, 30);
+    }
+
+    #[test]
+    fn compositor_effect_hot_overrides_are_applied() {
+        let mut cfg = Config::default();
+        cfg.set_value("behavior.corner_radius", &serde_json::json!(18.0)).unwrap();
+        cfg.set_value("behavior.fading", &serde_json::json!(true)).unwrap();
+        cfg.set_value("behavior.wobbly_windows", &serde_json::json!(true)).unwrap();
+        cfg.set_value("behavior.motion_trail", &serde_json::json!(true)).unwrap();
+        assert_eq!(cfg.behavior().corner_radius, 18.0);
+        assert!(cfg.behavior().fading && cfg.behavior().wobbly_windows && cfg.behavior().motion_trail);
+        assert!(cfg.set_value("behavior.corner_radius", &serde_json::json!(65.0)).is_err());
     }
 }

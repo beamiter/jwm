@@ -590,7 +590,10 @@ impl<C: CompositorConnection> Compositor<C> {
             select_recording_encoder, RecordingEncoder,
         };
         let encoder = select_recording_encoder(&self.recording_encoder);
-        let codec_name = encoder.codec_name("libopenh264");
+        // Ubuntu/Debian's ffmpeg builds expose the software H.264 encoder as
+        // libx264.  libopenh264 is not generally compiled in and made the
+        // recorder accept the IPC request while ffmpeg immediately exited.
+        let codec_name = encoder.codec_name("libx264");
         let bitrate = &self.recording_bitrate;
         let quality_str = self.recording_quality.to_string();
         log::info!(
@@ -670,14 +673,18 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     pub(crate) fn stop_recording(&mut self) {
-        if !self.recording_active {
+        // `capture_recording_frame` clears recording_active when the ffmpeg
+        // pipe breaks.  The child and PBOs still need cleanup in that case;
+        // returning solely on the flag leaks a zombie ffmpeg process.
+        if !self.recording_active && self.recording_process.is_none() {
             return;
         }
+        let was_active = self.recording_active;
         self.recording_active = false;
 
         // Drain the last asynchronous ReadPixels before closing ffmpeg. This
         // keeps the final frame instead of silently truncating every recording.
-        if self.recording_captured_frames > 0 {
+        if was_active && self.recording_captured_frames > 0 {
             let last_pbo = self.recording_current_pbo ^ 1;
             self.write_recording_pbo(last_pbo);
         }

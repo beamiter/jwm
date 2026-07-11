@@ -55,10 +55,15 @@ def preflight(ipc: JwmIpc) -> EnvironmentReport:
         errors.append(f"JWM IPC socket not found: {ipc.path}")
     else:
         try:
-            ipc.query("get_version")
+            version = ipc.query("get_version") or {}
         except Exception as exc:
             errors.append(f"JWM IPC is not responding: {exc}")
         else:
+            if version.get("build_profile") != "release":
+                errors.append(
+                    "running JWM is not the required release build "
+                    f"(reported {version.get('build_profile', 'unknown')!r}); rebuild and restart it"
+                )
             try:
                 ipc.query("get_recording_status")
             except Exception as exc:

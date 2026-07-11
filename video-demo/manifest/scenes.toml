@@ -1,42 +1,294 @@
 [profiles]
 smoke = ["layout-tile", "layout-grid", "layout-scrolling"]
-layouts = ["layout-tile", "layout-grid", "layout-scrolling"]
+layouts = ["layout-tile", "layout-float", "layout-monocle", "layout-fibonacci", "layout-centeredmaster", "layout-bstack", "layout-grid", "layout-deck", "layout-threecol", "layout-tatami", "layout-fullscreen", "layout-scrolling", "layout-vstack"]
+window-management = ["wm-focus-order", "wm-factors", "wm-floating", "wm-sticky", "wm-pip"]
+tags = ["tags-move-window"]
+stage2 = ["layout-tile", "layout-float", "layout-monocle", "layout-fibonacci", "layout-centeredmaster", "layout-bstack", "layout-grid", "layout-deck", "layout-threecol", "layout-tatami", "layout-fullscreen", "layout-scrolling", "layout-vstack", "wm-focus-order", "wm-factors", "wm-floating", "wm-sticky", "wm-pip", "tags-move-window"]
+compositor-basic = ["effect-rounded", "effect-shadow", "effect-blur", "effect-fade"]
+compositor-pointer = ["effect-wobbly", "effect-motion-trail"]
+compositor-interactive = ["effect-overview", "effect-magnifier", "effect-annotation"]
+stage3 = ["effect-rounded", "effect-shadow", "effect-blur", "effect-fade", "effect-wobbly", "effect-motion-trail", "effect-overview", "effect-magnifier", "effect-annotation"]
 
 [[scene]]
 id = "layout-tile"
 title = "Tile 主从布局"
 layout = "tile"
 windows = 6
+duration = 5.0
+status = "ready"
+narration = "Tile 使用清晰的主区和堆栈区组织窗口，并支持焦点、比例和顺序调整。"
+assertions = ["focus_changed", "m_fact_changed"]
+actions = [
+  { command = "focus_demo", args = { value = 1 }, hold = 0.6 },
+  { command = "setmfact", args = { value = 0.05 }, hold = 0.7 },
+  { command = "movestack", args = { value = 1 }, hold = 0.7 },
+]
+
+[[scene]]
+id = "layout-float"
+title = "Float 浮动布局"
+layout = "float"
+windows = 5
 duration = 4.0
 status = "ready"
-narration = "Tile 使用清晰的主区和堆栈区组织窗口，并支持焦点与顺序调整。"
+narration = "Float 保留应用窗口的自由位置，同时仍由 JWM 管理焦点和标签。"
+assertions = ["focus_changed"]
+actions = [{ command = "focus_demo", args = { value = 1 }, hold = 1.0 }]
+
+[[scene]]
+id = "layout-monocle"
+title = "Monocle 单窗口布局"
+layout = "monocle"
+windows = 5
+duration = 4.0
+status = "ready"
+narration = "Monocle 让每个平铺窗口占满工作区，通过焦点切换选择当前窗口。"
+assertions = ["focus_changed"]
+actions = [{ command = "focus_demo", args = { value = 1 }, hold = 1.0 }]
+
+[[scene]]
+id = "layout-fibonacci"
+title = "Fibonacci 递归布局"
+layout = "fibonacci"
+windows = 6
+duration = 5.0
+status = "ready"
+narration = "Fibonacci 使用递归分割形成逐级缩小的窗口区域。"
+assertions = ["focus_changed", "m_fact_changed"]
+actions = [
+  { command = "focus_demo", args = { value = 1 }, hold = 0.6 },
+  { command = "setmfact", args = { value = -0.05 }, hold = 0.8 },
+  { command = "movestack", args = { value = 1 }, hold = 0.7 },
+]
+
+[[scene]]
+id = "layout-centeredmaster"
+title = "Centered Master 中央主区"
+layout = "centeredmaster"
+windows = 7
+duration = 5.0
+status = "ready"
+narration = "Centered Master 将主窗口置于中央，两侧用于排列堆栈窗口。"
+assertions = ["focus_changed", "m_fact_changed"]
+actions = [
+  { command = "focus_demo", args = { value = 1 }, hold = 0.6 },
+  { command = "setmfact", args = { value = 0.05 }, hold = 0.8 },
+  { command = "movestack", args = { value = 1 }, hold = 0.7 },
+]
+
+[[scene]]
+id = "layout-bstack"
+title = "Bottom Stack 底部堆栈"
+layout = "bstack"
+windows = 6
+duration = 5.0
+status = "ready"
+narration = "Bottom Stack 将主区放在上方，并在下方横向排列其余窗口。"
+assertions = ["focus_changed", "m_fact_changed"]
+actions = [
+  { command = "focus_demo", args = { value = 1 }, hold = 0.6 },
+  { command = "setmfact", args = { value = 0.05 }, hold = 0.8 },
+  { command = "movestack", args = { value = 1 }, hold = 0.7 },
+]
 
 [[scene]]
 id = "layout-grid"
 title = "Grid 网格布局"
 layout = "grid"
 windows = 6
-duration = 4.0
+duration = 4.5
 status = "ready"
 narration = "Grid 根据窗口数量计算网格，让窗口均匀占用可用空间。"
+assertions = ["focus_changed"]
+actions = [
+  { command = "focus_demo", args = { value = 1 }, hold = 0.7 },
+  { command = "movestack", args = { value = 1 }, hold = 0.8 },
+]
+
+[[scene]]
+id = "layout-deck"
+title = "Deck 叠放布局"
+layout = "deck"
+windows = 6
+duration = 4.5
+status = "ready"
+narration = "Deck 保留主窗口，并将堆栈窗口以层叠预览方式放在另一侧。"
+assertions = ["focus_changed"]
+actions = [
+  { command = "focus_demo", args = { value = 1 }, hold = 0.7 },
+  { command = "movestack", args = { value = 1 }, hold = 0.8 },
+]
+
+[[scene]]
+id = "layout-threecol"
+title = "Three Column 三列布局"
+layout = "threecol"
+windows = 7
+duration = 5.0
+status = "ready"
+narration = "Three Column 使用中央主列和左右两个堆栈列组织宽屏空间。"
+assertions = ["focus_changed", "m_fact_changed"]
+actions = [
+  { command = "focus_demo", args = { value = 1 }, hold = 0.6 },
+  { command = "setmfact", args = { value = -0.05 }, hold = 0.8 },
+  { command = "movestack", args = { value = 1 }, hold = 0.7 },
+]
+
+[[scene]]
+id = "layout-tatami"
+title = "Tatami 组合布局"
+layout = "tatami"
+windows = 7
+duration = 4.5
+status = "ready"
+narration = "Tatami 使用组合式分区，在较多窗口时保持紧凑且有层次的排列。"
+assertions = ["focus_changed"]
+actions = [
+  { command = "focus_demo", args = { value = 1 }, hold = 0.7 },
+  { command = "movestack", args = { value = 1 }, hold = 0.8 },
+]
+
+[[scene]]
+id = "layout-fullscreen"
+title = "Fullscreen Layout 全屏布局"
+layout = "fullscreen"
+windows = 5
+duration = 4.0
+status = "ready"
+narration = "Fullscreen Layout 是工作区布局策略，与单个客户端的 fullscreen 状态不同。"
+assertions = ["focus_changed"]
+actions = [{ command = "focus_demo", args = { value = 1 }, hold = 1.0 }]
 
 [[scene]]
 id = "layout-scrolling"
 title = "Scrolling 滚动布局"
 layout = "scrolling"
 windows = 6
-duration = 4.0
+duration = 4.5
 status = "ready"
 narration = "Scrolling 使用列式视口管理窗口，并让焦点窗口保持可见。"
+assertions = ["focus_changed"]
+actions = [
+  { command = "focus_demo", args = { value = -1 }, hold = 0.8 },
+]
+
+[[scene]]
+id = "layout-vstack"
+title = "VStack 垂直堆栈"
+layout = "vstack"
+windows = 6
+duration = 4.5
+status = "ready"
+narration = "VStack 垂直排列窗口，并围绕当前焦点组织可视区域。"
+assertions = ["focus_changed"]
+actions = [
+  { command = "focus_demo", args = { value = 1 }, hold = 0.7 },
+  { command = "movestack", args = { value = 1 }, hold = 0.8 },
+]
+
+[[scene]]
+id = "wm-focus-order"
+title = "窗口焦点与顺序"
+layout = "tile"
+windows = 6
+duration = 5.0
+status = "ready"
+narration = "JWM 可以通过 IPC 精确切换焦点并调整窗口在布局中的顺序。"
+assertions = ["focus_changed"]
+actions = [
+  { command = "focus_demo", args = { value = 1 }, hold = 0.7 },
+  { command = "movestack", args = { value = 1 }, hold = 0.8 },
+  { command = "focus_demo", args = { value = 1 }, hold = 0.7 },
+]
+
+[[scene]]
+id = "wm-factors"
+title = "主区与客户端比例"
+layout = "tile"
+windows = 7
+duration = 6.0
+status = "ready"
+narration = "主区比例、主窗口数量和单个客户端权重都可以独立调整。"
+assertions = ["m_fact_changed", "n_master_changed"]
+actions = [
+  { command = "focus_demo", args = { value = 1 }, hold = 0.5 },
+  { command = "setmfact", args = { value = 0.08 }, hold = 0.8 },
+  { command = "incnmaster", args = { value = 1 }, hold = 0.8 },
+  { command = "setcfact", args = { value = 0.25 }, hold = 0.8 },
+]
+
+[[scene]]
+id = "wm-floating"
+title = "窗口浮动切换"
+layout = "tile"
+windows = 5
+duration = 4.5
+status = "ready"
+narration = "选中的平铺窗口可以即时切换为浮动窗口，并保留在当前标签。"
+assertions = ["focused_floating"]
+actions = [
+  { command = "focus_demo", args = { value = 1 }, hold = 0.6 },
+  { command = "togglefloating", args = {}, hold = 1.2 },
+]
+
+[[scene]]
+id = "wm-sticky"
+title = "Sticky 跨标签窗口"
+layout = "tile"
+windows = 5
+duration = 4.5
+status = "ready"
+narration = "Sticky 窗口可以在标签切换时持续保持可见。"
+assertions = ["focused_sticky"]
+actions = [
+  { command = "focus_demo", args = { value = 1 }, hold = 0.6 },
+  { command = "togglesticky", args = {}, hold = 1.2 },
+]
+
+[[scene]]
+id = "wm-pip"
+title = "Picture in Picture"
+layout = "tile"
+windows = 5
+duration = 4.5
+status = "ready"
+narration = "PiP 将选中窗口缩放到屏幕角落，并自动赋予浮动和 Sticky 行为。"
+assertions = ["focused_pip"]
+actions = [
+  { command = "focus_demo", args = { value = 1 }, hold = 0.6 },
+  { command = "togglepip", args = {}, hold = 1.2 },
+]
+
+[[scene]]
+id = "tags-move-window"
+title = "标签切换与窗口移动"
+layout = "tile"
+windows = 5
+duration = 6.0
+status = "ready"
+narration = "窗口可以移动到另一个空标签，随后通过 View 命令切换并继续操作。"
+assertions = ["window_on_alternate_tag"]
+actions = [
+  { command = "focus_demo", args = { value = 1 }, hold = 0.6 },
+  { command = "tag", args = { tag = "$alternate_tag" }, hold = 0.9 },
+  { command = "view", args = { tag = "$alternate_tag" }, hold = 1.2 },
+]
 
 [[scene]]
 id = "effect-wobbly"
 title = "Wobbly Windows"
 layout = "float"
-windows = 2
+windows = 4
 duration = 6.0
-status = "manual-review"
-narration = "Wobbly Windows 需要真实指针拖动和当前 compositor 配置，暂不进入无人值守 profile。"
+status = "ready"
+manual_review = true
+narration = "Wobbly Windows 使用弹性网格响应真实的指针拖动轨迹。"
+assertions = ["effect_changed"]
+actions = [
+  { command = "set_config", args = { key = "behavior.wobbly_windows", value = true }, hold = 0.8 },
+  { command = "focus_demo", args = {}, hold = 0.4 },
+  { command = "drag_demo", args = {}, duration = 2.5, hold = 1.0 },
+]
 
 [[scene]]
 id = "effect-overview"
@@ -44,5 +296,122 @@ title = "Overview"
 layout = "tile"
 windows = 6
 duration = 6.0
-status = "experimental"
-narration = "Overview 的视觉结果需要人工目视确认，基础 IPC 触发已由 JWM 提供。"
+status = "ready"
+manual_review = true
+narration = "Overview 将当前标签的窗口组织为可切换的三维概览。"
+assertions = ["effect_changed"]
+actions = [
+  { command = "toggle_overview", args = {}, hold = 2.0 },
+  { command = "toggle_overview", args = {}, hold = 0.8 },
+]
+
+[[scene]]
+id = "effect-rounded"
+title = "Rounded Corners 圆角"
+layout = "tile"
+windows = 5
+duration = 5.0
+status = "ready"
+manual_review = true
+narration = "圆角效果支持运行时 A/B 对比，并立即应用到 compositor 输出。"
+assertions = ["effect_changed"]
+actions = [
+  { command = "set_config", args = { key = "behavior.corner_radius", value = 0.0 }, hold = 1.0 },
+  { command = "set_config", args = { key = "behavior.corner_radius", value = 22.0 }, hold = 1.5 },
+]
+
+[[scene]]
+id = "effect-shadow"
+title = "Window Shadow 阴影"
+layout = "float"
+windows = 4
+duration = 5.0
+status = "ready"
+manual_review = true
+narration = "窗口阴影通过关闭和开启的 A/B 画面展示层次变化。"
+assertions = ["effect_changed"]
+actions = [
+  { command = "set_config", args = { key = "behavior.shadow_enabled", value = false }, hold = 1.0 },
+  { command = "set_config", args = { key = "behavior.shadow_enabled", value = true }, hold = 1.5 },
+]
+
+[[scene]]
+id = "effect-blur"
+title = "Background Blur 背景模糊"
+layout = "float"
+windows = 4
+opacity = 0.78
+duration = 5.0
+status = "ready"
+manual_review = true
+narration = "背景模糊对半透明窗口后的内容进行实时采样和模糊。"
+assertions = ["effect_changed"]
+actions = [
+  { command = "set_config", args = { key = "behavior.blur_enabled", value = false }, hold = 1.0 },
+  { command = "set_config", args = { key = "behavior.blur_enabled", value = true }, hold = 1.5 },
+]
+
+[[scene]]
+id = "effect-fade"
+title = "Window Fade 淡入淡出"
+layout = "tile"
+windows = 3
+duration = 5.0
+status = "ready"
+manual_review = true
+narration = "Fade 在窗口映射和关闭过程中平滑改变透明度。"
+assertions = ["effect_changed"]
+actions = [
+  { command = "set_config", args = { key = "behavior.fading", value = false }, hold = 1.0 },
+  { command = "spawn_demo", count = 1, content = "grid", hold = 0.8 },
+  { command = "set_config", args = { key = "behavior.fading", value = true }, hold = 1.5 },
+  { command = "spawn_demo", count = 1, content = "grid", hold = 1.0 },
+]
+
+[[scene]]
+id = "effect-motion-trail"
+title = "Motion Trail 运动拖影"
+layout = "float"
+windows = 4
+duration = 6.0
+status = "ready"
+manual_review = true
+narration = "Motion Trail 在真实窗口拖动过程中保留逐渐淡出的历史位置。"
+assertions = ["effect_changed"]
+actions = [
+  { command = "set_config", args = { key = "behavior.motion_trail", value = true }, hold = 0.8 },
+  { command = "focus_demo", args = {}, hold = 0.4 },
+  { command = "drag_demo", args = {}, duration = 2.5, hold = 1.0 },
+]
+
+[[scene]]
+id = "effect-magnifier"
+title = "Magnifier 放大镜"
+layout = "tile"
+windows = 5
+duration = 6.0
+status = "ready"
+manual_review = true
+narration = "Magnifier 跟随真实指针轨迹放大局部 compositor 输出。"
+assertions = ["effect_changed"]
+actions = [
+  { command = "toggle_magnifier", args = {}, hold = 0.8 },
+  { command = "pointer_path", args = {}, duration = 2.5, hold = 0.8 },
+  { command = "toggle_magnifier", args = {}, hold = 0.5 },
+]
+
+[[scene]]
+id = "effect-annotation"
+title = "Annotation 屏幕标注"
+layout = "tile"
+windows = 5
+duration = 6.0
+status = "ready"
+manual_review = true
+narration = "Annotation 抓取真实指针输入并直接在 compositor 输出上绘制线条。"
+assertions = ["effect_changed"]
+actions = [
+  { command = "toggle_annotation", args = {}, hold = 0.6 },
+  { command = "annotation_draw", args = {}, duration = 2.2, hold = 1.0 },
+  { command = "toggle_annotation", args = {}, hold = 0.5 },
+]
