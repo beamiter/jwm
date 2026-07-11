@@ -1545,10 +1545,17 @@ impl WaylandCompositor {
         // =================================================================
         if let Some(path) = self.pending_recording_start.take() {
             unsafe {
-                if let Err(e) = self
-                    .recording
-                    .start(gl, self.screen_w, self.screen_h, &path, 30)
-                {
+                if let Err(e) = self.recording.start(
+                    gl,
+                    self.screen_w,
+                    self.screen_h,
+                    &path,
+                    crate::config::CONFIG
+                        .load()
+                        .behavior()
+                        .recording_fps
+                        .clamp(1, 240),
+                ) {
                     log::error!("[compositor] Failed to start recording: {}", e);
                 }
             }

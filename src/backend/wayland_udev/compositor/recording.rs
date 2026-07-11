@@ -64,6 +64,12 @@ impl RecordingState {
             gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, 0);
         }
 
+        // Keep ffmpeg diagnostics available: discarding stderr makes a failed
+        // encoder look like a successfully-created but unplayable MP4.
+        let stderr = std::fs::File::create("/tmp/jwm-wayland-recording-ffmpeg.log")
+            .map_err(|e| format!("create ffmpeg log: {e}"))?;
+        let size = format!("{}x{}", width, height);
+        let fps = fps.to_string();
         let child = Command::new("ffmpeg")
             .args([
                 "-y",
@@ -72,9 +78,9 @@ impl RecordingState {
                 "-pix_fmt",
                 "rgba",
                 "-s",
-                &format!("{}x{}", width, height),
+                &size,
                 "-r",
-                &fps.to_string(),
+                &fps,
                 "-i",
                 "pipe:0",
                 "-c:v",
@@ -83,13 +89,18 @@ impl RecordingState {
                 "fast",
                 "-crf",
                 "23",
+                // OpenGL's origin is bottom-left, unlike normal video.
+                "-vf",
+                "vflip",
                 "-pix_fmt",
                 "yuv420p",
+                "-movflags",
+                "+faststart",
                 output_path,
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(stderr))
             .spawn()
             .map_err(|e| format!("Failed to spawn ffmpeg: {}", e))?;
 
@@ -117,7 +128,8 @@ impl RecordingState {
         unsafe {
             gl.BindFramebuffer(ffi::READ_FRAMEBUFFER, source_fbo);
 
-            gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, self.pbo[self.current_pbo]);
+            let written_pbo = self.current_pbo;
+            gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, self.pbo[written_pbo]);
             gl.ReadPixels(
                 0,
                 0,
@@ -131,7 +143,9 @@ impl RecordingState {
             self.current_pbo ^= 1;
 
             if self.frame_count > 0 {
-                let other_pbo = self.current_pbo;
+                // `written_pbo` is being filled by this ReadPixels; map the
+                // other PBO, which was filled by the preceding capture.
+                let other_pbo = written_pbo ^ 1;
                 gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, self.pbo[other_pbo]);
 
                 let buffer_size = (self.width * self.height * 4) as isize;
@@ -143,7 +157,9 @@ impl RecordingState {
 
                     if let Some(ref mut child) = self.child {
                         if let Some(ref mut stdin) = child.stdin {
-                            let _ = stdin.write_all(data);
+                            if let Err(e) = stdin.write_all(data) {
+                                log::warn!("[recording] ffmpeg input write failed: {e}");
+                            }
                         }
                     }
 
@@ -161,9 +177,39 @@ impl RecordingState {
             return;
         }
 
+        // The most recent ReadPixels has no subsequent capture to trigger its
+        // readback. Drain it before closing stdin so the file is complete.
+        if self.frame_count > 0 {
+            let last_pbo = self.current_pbo ^ 1;
+            unsafe {
+                gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, self.pbo[last_pbo]);
+                let buffer_size = (self.width * self.height * 4) as isize;
+                let ptr =
+                    gl.MapBufferRange(ffi::PIXEL_PACK_BUFFER, 0, buffer_size, ffi::MAP_READ_BIT);
+                if !ptr.is_null() {
+                    let data = std::slice::from_raw_parts(ptr as *const u8, buffer_size as usize);
+                    if let Some(child) = self.child.as_mut() {
+                        if let Some(stdin) = child.stdin.as_mut() {
+                            if let Err(e) = stdin.write_all(data) {
+                                log::warn!("[recording] final ffmpeg input write failed: {e}");
+                            }
+                        }
+                    }
+                    gl.UnmapBuffer(ffi::PIXEL_PACK_BUFFER);
+                }
+                gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, 0);
+            }
+        }
+
         if let Some(mut child) = self.child.take() {
             drop(child.stdin.take());
-            let _ = child.wait();
+            match child.wait() {
+                Ok(status) if !status.success() => log::warn!(
+                    "[recording] ffmpeg exited with {status}; see /tmp/jwm-wayland-recording-ffmpeg.log"
+                ),
+                Err(e) => log::warn!("[recording] failed waiting for ffmpeg: {e}"),
+                Ok(_) => {}
+            }
         }
 
         unsafe {

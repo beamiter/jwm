@@ -459,10 +459,41 @@ impl Jwm {
                 return;
             }
             if segments.len() == 1 {
-                // Single segment: just move it to the final path
-                if std::fs::rename(&segments[0], &output_path).is_err() {
-                    let _ = std::fs::copy(&segments[0], &output_path);
-                    let _ = std::fs::remove_file(&segments[0]);
+                // The Wayland compositor closes ffmpeg on its next GL frame.
+                // Do not move its MP4 before ffmpeg has written the moov atom,
+                // otherwise the final path can point at an unplayable file.
+                let segment = &segments[0];
+                let ready = (0..100).any(|_| {
+                    let status = std::process::Command::new("ffprobe")
+                        .args([
+                            "-v",
+                            "error",
+                            "-show_entries",
+                            "format=duration",
+                            "-of",
+                            "default=nw=1",
+                            segment,
+                        ])
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .is_ok_and(|status| status.success());
+                    if !status {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    status
+                });
+                if !ready {
+                    log::error!(
+                        "[recording] segment was not finalized within 5s; leaving it at {segment}"
+                    );
+                    return;
+                }
+                if std::fs::rename(segment, &output_path).is_err() {
+                    if std::fs::copy(segment, &output_path).is_ok() {
+                        let _ = std::fs::remove_file(segment);
+                    }
                 }
             } else {
                 // Multiple segments: concat with ffmpeg -c copy
