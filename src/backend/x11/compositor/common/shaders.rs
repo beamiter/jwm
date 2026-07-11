@@ -623,6 +623,29 @@ float slime_smooth_union(float a, float b, float radius) {
     return mix(b, a, h) - radius * h * (1.0 - h);
 }
 
+float slime_surface_mask_at(vec2 p) {
+    float feather = 7.0;
+    // A target touching a screen edge needs no transition there. This makes a
+    // desktop-wide surface cover every pixel while preserving soft window edges.
+    float left = u_slime_surface_rect.x <= 0.5
+        ? 1.0
+        : smoothstep(u_slime_surface_rect.x, u_slime_surface_rect.x + feather, p.x);
+    float top = u_slime_surface_rect.y <= 0.5
+        ? 1.0
+        : smoothstep(u_slime_surface_rect.y, u_slime_surface_rect.y + feather, p.y);
+    float right = u_slime_surface_rect.z >= u_slime_screen_size.x - 0.5
+        ? 1.0
+        : 1.0 - smoothstep(
+            u_slime_surface_rect.z - feather, u_slime_surface_rect.z, p.x
+        );
+    float bottom = u_slime_surface_rect.w >= u_slime_screen_size.y - 0.5
+        ? 1.0
+        : 1.0 - smoothstep(
+            u_slime_surface_rect.w - feather, u_slime_surface_rect.w, p.y
+        );
+    return left * top * right * bottom;
+}
+
 float slime_hand_sdf(vec2 p) {
     float radius = max(u_slime_scale * 0.115, 3.0);
     float d = 100000.0;
@@ -707,15 +730,12 @@ void main() {
         uv.x * u_slime_screen_size.x,
         (1.0 - uv.y) * u_slime_screen_size.y
     );
+    float slime_surface_mask = slime_surface_mask_at(slime_pixel);
 
     // A softly blurred window-wide film gives the undisturbed area a water
     // surface baseline, so propagated waves read as relief instead of isolated
     // transparent lines.
-    if (u_slime_enabled == 1
-        && slime_pixel.x >= u_slime_surface_rect.x
-        && slime_pixel.y >= u_slime_surface_rect.y
-        && slime_pixel.x <= u_slime_surface_rect.z
-        && slime_pixel.y <= u_slime_surface_rect.w) {
+    if (u_slime_enabled == 1 && slime_surface_mask > 0.001) {
         vec2 blur_step = vec2(
             2.6 / u_slime_screen_size.x,
             2.6 / u_slime_screen_size.y
@@ -730,25 +750,13 @@ void main() {
         water_skin += texture(u_texture, sample_uv + vec2( blur_step.x, -blur_step.y)).rgb * 0.08;
         water_skin += texture(u_texture, sample_uv + vec2(-blur_step.x, -blur_step.y)).rgb * 0.08;
         water_skin *= vec3(0.965, 1.005, 1.035);
-        float feather = 7.0;
-        float surface_mask = smoothstep(
-            u_slime_surface_rect.x, u_slime_surface_rect.x + feather, slime_pixel.x
-        ) * smoothstep(
-            u_slime_surface_rect.y, u_slime_surface_rect.y + feather, slime_pixel.y
-        ) * (1.0 - smoothstep(
-            u_slime_surface_rect.z - feather, u_slime_surface_rect.z, slime_pixel.x
-        )) * (1.0 - smoothstep(
-            u_slime_surface_rect.w - feather, u_slime_surface_rect.w, slime_pixel.y
-        ));
-        c.rgb = mix(c.rgb, water_skin, surface_mask * 0.64);
+        c.rgb = mix(c.rgb, water_skin, slime_surface_mask * 0.64);
     }
 
-    // Fingertip water ripples and the faint glass-hand guide share a CPU-supplied
-    // bounding box. Refraction is applied before color/HDR passes.
-    if (u_slime_enabled == 1) {
+    // Waves cover the complete target surface. The hand guide alone uses its
+    // tighter CPU bounding box below to avoid evaluating its SDF everywhere.
+    if (u_slime_enabled == 1 && slime_surface_mask > 0.001) {
         vec2 pixel = slime_pixel;
-        if (pixel.x >= u_slime_bbox.x && pixel.y >= u_slime_bbox.y
-            && pixel.x <= u_slime_bbox.z && pixel.y <= u_slime_bbox.w) {
             // Pose coordinates are top-left based while the wave texture is
             // sampled in GL's bottom-left convention.
             vec2 wave_uv = vec2(uv.x, 1.0 - uv.y);
@@ -790,7 +798,8 @@ void main() {
                 refracted_uv - total_offset * dispersion, vec2(0.001), vec2(0.999)
             )).b;
 
-            float activity = smoothstep(0.00035, 0.008, grad_len + abs(center) * 0.42);
+            float activity = smoothstep(0.00035, 0.008, grad_len + abs(center) * 0.42)
+                * slime_surface_mask;
             float wave_brightness = 1.0 + clamp(center * 4.2, -0.55, 0.68);
             liquid *= wave_brightness;
             liquid = mix(liquid, liquid * vec3(0.72, 0.88, 1.12), activity * 0.28);
@@ -834,7 +843,9 @@ void main() {
 
             // Keep the tracked hand as a quiet visual guide; fingertip ripples
             // are the primary effect and continue after this mask has faded.
-            if (u_slime_opacity > 0.0) {
+            if (u_slime_opacity > 0.0
+                && pixel.x >= u_slime_bbox.x && pixel.y >= u_slime_bbox.y
+                && pixel.x <= u_slime_bbox.z && pixel.y <= u_slime_bbox.w) {
                 float hand_opacity = u_slime_opacity * 0.34;
                 float d = slime_surface_sdf(pixel);
                 float aa = 2.0;
@@ -897,7 +908,6 @@ void main() {
                 c.rgb = mix(c.rgb, vec3(0.94, 0.98, 1.0), rim * 0.14);
                 }
             }
-        }
     }
 
     // Colorblind correction (Daltonization) — applied before other color adjustments

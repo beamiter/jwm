@@ -274,34 +274,11 @@ impl SlimeState {
     }
 
     pub(super) fn bbox(&self) -> [f32; 4] {
-        let mut bbox = if self.opacity() > 0.0 {
+        if self.opacity() > 0.0 {
             self.bbox
         } else {
-            [
-                f32::INFINITY,
-                f32::INFINITY,
-                f32::NEG_INFINITY,
-                f32::NEG_INFINITY,
-            ]
-        };
-        // The persistent field keeps propagating after the hand fades, so its
-        // wake can travel well beyond the original fingertip capsule.
-        let expand = self.scale * 1.1 + self.strength * 2.0 + 320.0;
-        for ripple in self.live_ripples() {
-            bbox[0] = bbox[0].min(ripple.center[0] - expand);
-            bbox[1] = bbox[1].min(ripple.center[1] - expand);
-            bbox[2] = bbox[2].max(ripple.center[0] + expand);
-            bbox[3] = bbox[3].max(ripple.center[1] + expand);
+            [0.0; 4]
         }
-        if !bbox[0].is_finite() {
-            return [0.0; 4];
-        }
-        [
-            bbox[0].clamp(0.0, self.screen_size.0),
-            bbox[1].clamp(0.0, self.screen_size.1),
-            bbox[2].clamp(0.0, self.screen_size.0),
-            bbox[3].clamp(0.0, self.screen_size.1),
-        ]
     }
 
     pub(super) fn scale(&self) -> f32 {
@@ -711,5 +688,22 @@ mod tests {
         assert!(state.is_visible());
         state.ripples[0].born = Instant::now() - RIPPLE_LIFETIME - Duration::from_millis(1);
         assert!(!state.is_visible());
+    }
+
+    #[test]
+    fn wave_surface_is_not_limited_by_the_hand_bbox() {
+        let mut state = SlimeState::default();
+        assert!(state.update(packet_with_tip_offset(0.0), None, (1000.0, 700.0)));
+        state.last_update = Some(Instant::now() - HOLD_TIME - FADE_TIME);
+        state.ripples.push(SlimeRipple {
+            center: [500.0, 350.0],
+            direction: [1.0, 0.0],
+            born: Instant::now(),
+            amplitude: 1.0,
+        });
+
+        assert!(state.is_visible());
+        assert_eq!(state.surface_rect(), [0.0, 0.0, 1000.0, 700.0]);
+        assert_eq!(state.bbox(), [0.0; 4]);
     }
 }
