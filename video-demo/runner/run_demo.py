@@ -154,7 +154,10 @@ def main() -> int:
     reports: list[dict] = []
     guard = SessionGuard(ipc, ROOT, run_dir, args.backend)
     with guard:
-        ipc.command("set_config", {"key": "behavior.recording_fps", "value": args.fps})
+        try:
+            ipc.command("set_config", {"key": "behavior.recording_fps", "value": args.fps})
+        except Exception as exc:
+            print(f"warning: cannot hot-set recording FPS; using the running JWM configuration: {exc}", file=sys.stderr)
         config = ipc.query("get_config") or {}
         demo_tag = 1 << max(0, int(config.get("tags_length", 9)) - 1)
         ipc.command("view", {"tag": demo_tag})

@@ -2,10 +2,11 @@
 
 This implementation records deterministic demo windows through JWM's own X11 compositor recorder. Formal runs deliberately require the real X11 login session; they do not fall back to Xephyr or Xvfb.
 
-Build and check the environment:
+Build, install/restart the modified JWM, and check the environment. Building only
+the demo client does not update the already-running window manager:
 
 ```bash
-cargo build --bin jwm --bin jwm-tool
+jwm-tool rebuild --jwm-dir "$PWD"
 python3 video-demo/runner/run_demo.py --preflight
 ```
 

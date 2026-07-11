@@ -58,4 +58,12 @@ def preflight(ipc: JwmIpc) -> EnvironmentReport:
             ipc.query("get_version")
         except Exception as exc:
             errors.append(f"JWM IPC is not responding: {exc}")
+        else:
+            try:
+                ipc.query("get_recording_status")
+            except Exception as exc:
+                errors.append(
+                    "running JWM lacks the explicit recording IPC required by video-demo "
+                    f"({exc}); rebuild and restart JWM, not only the demo client"
+                )
     return EnvironmentReport(not errors, session, display, str(ipc.path), _screen_dimensions(), commands, errors, warnings)
