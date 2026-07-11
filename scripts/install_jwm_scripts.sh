@@ -1,5 +1,5 @@
 #!/bin/bash
-# install_jwm_scripts.sh - 编译并安装 JWM，并按需构建 status bar
+# install_jwm_scripts.sh - 使用 cargo install 安装 JWM，并按需安装 status bar
 set -euo pipefail
 
 # ============================================================
@@ -128,24 +128,24 @@ usage() {
   -l, --list-bars             列出所有可用的 bar
   -j, --jobs <N>              并行编译任务数（传给 cargo）
   --gen-config                安装后重新生成默认配置（备份旧配置为 .toml.backup）
-  --skip-bar                  跳过 bar 构建（仍会按 CLONE_BARS 同步代码）
+  --skip-bar                  跳过 bar 安装（仍会按 CLONE_BARS 同步代码）
   --skip-jwm                  跳过 jwm 编译安装（仅处理 bar）
   -h, --help                  显示此帮助信息
 
 说明:
   - CLONE_BARS（脚本顶部）只用于把哪些 bar 仓库 git clone/pull 到本地，不会构建。
-  - 真正会被构建的 bar 只有 JWM_BAR_NAME（即 -b 的第一个参数，或脚本顶部默认值）。
-  - bar 不会安装到 /usr/local/bin；构建产物保留在 submodules/<bar>/target/<mode>/<bar>。
+  - 真正会被安装的 bar 只有 JWM_BAR_NAME（即 -b 的第一个参数，或脚本顶部默认值）。
+  - bar / jwm / jwm-tool 都使用 cargo install --path ... 安装到 cargo bin 目录（通常是 ~/.cargo/bin）。
   - jwm 通过 config.toml 的 status_bar.name 在运行时选择 bar，切换 bar 不需要重编 jwm。
 
 示例:
-  $(basename "$0")                           # 编译安装 jwm + 构建默认 bar，按 CLONE_BARS 同步其它仓库
+  $(basename "$0")                           # 安装 jwm + 默认 bar，按 CLONE_BARS 同步其它仓库
   $(basename "$0") --gen-config              # 同上，并重新生成默认配置
   $(basename "$0") -m debug                  # debug 模式编译安装
-  $(basename "$0") -b xcb_bar                # 构建 xcb_bar
-  $(basename "$0") -b xcb_bar,egui_bar       # 构建 xcb_bar；同时把 egui_bar 仓库拉到本地
-  $(basename "$0") -b xcb_bar --skip-jwm     # 仅构建 xcb_bar
-  $(basename "$0") --gen-config --skip-bar   # 仅重新生成配置，不编译 bar
+  $(basename "$0") -b xcb_bar                # 安装 xcb_bar
+  $(basename "$0") -b xcb_bar,egui_bar       # 安装 xcb_bar；同时把 egui_bar 仓库拉到本地
+  $(basename "$0") -b xcb_bar --skip-jwm     # 仅安装 xcb_bar
+  $(basename "$0") --gen-config --skip-bar   # 仅重新生成配置，不安装 bar
 EOF
     exit 0
 }
@@ -260,11 +260,9 @@ done
 # 构建参数
 # ============================================================
 if [[ "$BUILD_MODE" == "release" ]]; then
-    CARGO_BUILD_FLAG="--release"
-    TARGET_DIR="target/release"
+    CARGO_INSTALL_MODE_FLAG=""
 else
-    CARGO_BUILD_FLAG=""
-    TARGET_DIR="target/debug"
+    CARGO_INSTALL_MODE_FLAG="--debug"
 fi
 
 CARGO_JOBS=""
@@ -296,7 +294,22 @@ sync_bar_repo() {
 }
 
 # ============================================================
-# 编译 bar（不安装到系统路径）
+# cargo install 目标目录
+# ============================================================
+cargo_install_root() {
+    echo "${CARGO_HOME:-$HOME/.cargo}"
+}
+
+cargo_bin_dir() {
+    echo "$(cargo_install_root)/bin"
+}
+
+ensure_cargo_bin_dir() {
+    mkdir -p "$(cargo_bin_dir)"
+}
+
+# ============================================================
+# 安装 bar 到 cargo bin
 # ============================================================
 build_bar() {
     local bar="$1"
@@ -307,38 +320,32 @@ build_bar() {
         exit 1
     fi
 
-    info "编译 $bar（$BUILD_MODE 模式）..."
+    info "安装 $bar（$BUILD_MODE 模式）..."
+    ensure_cargo_bin_dir
     # shellcheck disable=SC2086
-    cargo build $CARGO_BUILD_FLAG $CARGO_JOBS --manifest-path "$bar_dir/Cargo.toml"
+    cargo install --path "$bar_dir" --force $CARGO_INSTALL_MODE_FLAG $CARGO_JOBS --root "$(cargo_install_root)"
 
-    local bin_path="$bar_dir/$TARGET_DIR/$bar"
-    if [[ ! -f "$bin_path" ]]; then
-        err "编译产物未找到: $bin_path"
-        exit 1
-    fi
-
-    ok "$bar 构建完成: $bin_path"
+    ok "$bar 安装完成: $(cargo_bin_dir)"
 }
 
 # ============================================================
-# 编译并安装 JWM
+# 安装 JWM 到 cargo bin
 # ============================================================
 build_and_install_jwm() {
-    info "编译 jwm（$BUILD_MODE 模式）..."
+    info "安装 jwm（$BUILD_MODE 模式）..."
 
     if [[ -n "$JWM_BAR_NAME" ]]; then
-        info "将构建 bar: $JWM_BAR_NAME（不安装到 /usr/local/bin；jwm 通过 config.toml 的 status_bar.name 选择 bar）"
+        info "当前 bar: $JWM_BAR_NAME（bar 已安装到 cargo bin；jwm 通过 config.toml 的 status_bar.name 选择 bar）"
     fi
 
     cd "$PROJECT_ROOT"
-    # shellcheck disable=SC2086
-    cargo build $CARGO_BUILD_FLAG $CARGO_JOBS
 
-    info "安装 jwm, jwm-tool -> /usr/local/bin/"
-    sudo rm -f /usr/local/bin/jwm /usr/local/bin/jwm-tool
-    sudo install "$TARGET_DIR/jwm" /usr/local/bin/
-    sudo install "$TARGET_DIR/jwm-tool" /usr/local/bin/
-    ok "jwm, jwm-tool 安装完成"
+    ensure_cargo_bin_dir
+
+    # shellcheck disable=SC2086
+    cargo install --path . --force $CARGO_INSTALL_MODE_FLAG $CARGO_JOBS --root "$(cargo_install_root)"
+
+    ok "jwm, jwm-tool 安装完成: $(cargo_bin_dir)"
 
     info "安装 desktop 文件 ..."
     [[ -f jwm-x11rb.desktop ]]         && sudo install -m644 jwm-x11rb.desktop         /usr/share/xsessions/
@@ -355,10 +362,11 @@ build_and_install_jwm() {
 # ============================================================
 regenerate_config() {
     info "重新生成 JWM 配置文件..."
-    if /usr/local/bin/jwm --gen-config; then
+    local jwm_bin="$(cargo_bin_dir)/jwm"
+    if "$jwm_bin" --gen-config; then
         ok "配置文件已重新生成"
     else
-        warn "配置文件生成失败，请手动运行: /usr/local/bin/jwm --gen-config"
+        warn "配置文件生成失败，请手动运行: $jwm_bin --gen-config"
     fi
 }
 
@@ -407,7 +415,7 @@ echo ""
 info "========================================="
 info " JWM 安装脚本"
 info " 构建模式: $BUILD_MODE"
-info " JWM Bar (built only): $JWM_BAR_NAME"
+info " JWM Bar (installed only): $JWM_BAR_NAME"
 if [[ ${#CLONE_BARS[@]} -gt 0 ]]; then
     info " 拉取仓库: ${CLONE_BARS[*]}"
 fi
@@ -422,7 +430,7 @@ if [[ ${#CLONE_BARS[@]} -gt 0 ]]; then
     done
 fi
 
-# 2. 仅构建 JWM_BAR_NAME 对应的 bar，不安装到系统路径
+# 2. 仅安装 JWM_BAR_NAME 对应的 bar 到 cargo bin
 if [[ "$SKIP_BAR" == false && -n "$JWM_BAR_NAME" ]]; then
     build_bar "$JWM_BAR_NAME"
 fi
