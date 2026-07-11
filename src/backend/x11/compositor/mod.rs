@@ -385,8 +385,7 @@ where
     frame_stats: FrameStats,
 
     // --- Feature 12: Screenshot ---
-    pending_screenshot: Option<std::path::PathBuf>,
-    pending_screenshot_region: Option<(std::path::PathBuf, i32, i32, u32, u32)>,
+    screenshot_requests: crate::backend::compositor_common::screenshot::ScreenshotQueue,
 
     // --- Feature 13: Blur mask / frame extents ---
     blur_use_frame_extents: bool,
@@ -595,6 +594,8 @@ where
     recording_process: Option<std::process::Child>,
     recording_last_frame: Option<std::time::Instant>,
     recording_pbo: [Option<glow::Buffer>; 2],
+    recording_current_pbo: usize,
+    recording_captured_frames: u64,
 
     // --- Phase 3.1: Motion trail (drag ghosting) ---
     motion_trail_enabled: bool,

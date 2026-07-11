@@ -851,8 +851,7 @@ pub(crate) struct WaylandCompositor {
     border_color_unfocused: [f32; 4],
 
     // --- Screenshot ---
-    pending_screenshot: Option<std::path::PathBuf>,
-    pending_screenshot_region: Option<(std::path::PathBuf, i32, i32, u32, u32)>,
+    screenshot_requests: crate::backend::compositor_common::screenshot::ScreenshotQueue,
 
     // --- Recording control ---
     pending_recording_start: Option<String>,
@@ -1661,8 +1660,7 @@ impl WaylandCompositor {
                 border_color_unfocused: [0.3, 0.3, 0.3, 0.5],
 
                 // Screenshot
-                pending_screenshot: None,
-                pending_screenshot_region: None,
+                screenshot_requests: Default::default(),
 
                 // Recording control
                 pending_recording_start: None,

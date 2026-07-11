@@ -39,6 +39,9 @@ impl RecordingState {
         height: u32,
         output_path: &str,
         fps: u32,
+        bitrate: &str,
+        quality: u32,
+        configured_encoder: &str,
     ) -> Result<(), String> {
         if self.active {
             return Err("Recording already active".to_string());
@@ -70,34 +73,67 @@ impl RecordingState {
             .map_err(|e| format!("create ffmpeg log: {e}"))?;
         let size = format!("{}x{}", width, height);
         let fps = fps.to_string();
-        let child = Command::new("ffmpeg")
-            .args([
-                "-y",
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "rgba",
-                "-s",
-                &size,
-                "-r",
-                &fps,
-                "-i",
-                "pipe:0",
+        use crate::backend::compositor_common::media::{
+            select_recording_encoder, RecordingEncoder,
+        };
+        let encoder = select_recording_encoder(configured_encoder);
+
+        let quality = quality.to_string();
+        let mut args = Vec::new();
+        if matches!(encoder, RecordingEncoder::Vaapi) {
+            args.extend_from_slice(&["-vaapi_device", "/dev/dri/renderD128"]);
+        }
+        args.extend_from_slice(&[
+            "-y",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "-s",
+            &size,
+            "-r",
+            &fps,
+            "-i",
+            "pipe:0",
+            // OpenGL's origin is bottom-left, unlike normal video.
+            "-vf",
+        ]);
+        match encoder {
+            RecordingEncoder::Nvenc => {
+                args.extend_from_slice(&["vflip", "-c:v", "h264_nvenc", "-b:v", bitrate])
+            }
+            RecordingEncoder::Vaapi => args.extend_from_slice(&[
+                "vflip,format=nv12,hwupload",
+                "-c:v",
+                "h264_vaapi",
+                "-rc_mode",
+                "CQP",
+                "-qp",
+                &quality,
+            ]),
+            RecordingEncoder::Software => args.extend_from_slice(&[
+                "vflip",
                 "-c:v",
                 "libx264",
                 "-preset",
                 "fast",
                 "-crf",
                 "23",
-                // OpenGL's origin is bottom-left, unlike normal video.
-                "-vf",
-                "vflip",
-                "-pix_fmt",
-                "yuv420p",
-                "-movflags",
-                "+faststart",
-                output_path,
-            ])
+                "-b:v",
+                bitrate,
+            ]),
+        }
+        args.extend_from_slice(&[
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            output_path,
+        ]);
+        let codec_name = encoder.codec_name("libx264");
+        log::info!("[recording] Wayland encoder={codec_name} size={size} fps={fps}");
+        let child = Command::new("ffmpeg")
+            .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr))

@@ -2,6 +2,8 @@
 #[allow(unused_imports)]
 use super::*;
 use smithay::backend::renderer::gles::ffi;
+use crate::backend::compositor_common::capture::{clip_region, flip_rgba_vertical};
+use crate::backend::compositor_common::screenshot::save_png_async;
 
 impl WaylandCompositor {
     // =========================================================================
@@ -492,10 +494,18 @@ impl WaylandCompositor {
             || motion_trail_active
             || !self.genie_active.is_empty();
 
+        // These operations need a frame even on an otherwise static desktop.
+        // Keep the demand calculation next to the other compositor work so
+        // KMS scheduling, screenshots, and recording all agree on liveness.
+        let screenshot_pending = self.screenshot_requests.has_pending();
+        let recording_active = self.recording.is_active();
+
         let force_render = any_animating
             || self.postprocess_active
             || self.debug_hud_enabled
-            || (self.edge_glow_enabled && self.edge_glow_active);
+            || (self.edge_glow_enabled && self.edge_glow_active)
+            || screenshot_pending
+            || recording_active;
 
         // Texture existence is stable after a window's first frame and must
         // not keep the render loop alive. Only content committed since the
@@ -509,7 +519,7 @@ impl WaylandCompositor {
         }
         // If animations are still running, keep the flag set so the next
         // tick_animations call re-invokes compositor_render_frame automatically.
-        self.needs_render = any_animating || self.has_active_animations();
+        self.needs_render = any_animating || self.has_active_animations() || recording_active;
 
         // Rate-limited diagnostic logging (once per second when scene is non-empty)
         static LAST_RF_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1506,7 +1516,7 @@ impl WaylandCompositor {
         // =================================================================
         // 19. Screenshot capture (region or full)
         // =================================================================
-        if self.pending_screenshot.is_some() || self.pending_screenshot_region.is_some() {
+        if self.screenshot_requests.has_pending() {
             unsafe {
                 gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
                 self.capture_pending_screenshots(gl);
@@ -1545,16 +1555,17 @@ impl WaylandCompositor {
         // =================================================================
         if let Some(path) = self.pending_recording_start.take() {
             unsafe {
+                let config = crate::config::CONFIG.load();
+                let recording = config.behavior();
                 if let Err(e) = self.recording.start(
                     gl,
                     self.screen_w,
                     self.screen_h,
                     &path,
-                    crate::config::CONFIG
-                        .load()
-                        .behavior()
-                        .recording_fps
-                        .clamp(1, 240),
+                    recording.recording_fps.clamp(1, 240),
+                    &recording.recording_bitrate,
+                    recording.recording_quality,
+                    &recording.recording_encoder,
                 ) {
                     log::error!("[compositor] Failed to start recording: {}", e);
                 }
@@ -1607,73 +1618,28 @@ impl WaylandCompositor {
 
     unsafe fn capture_pending_screenshots(&mut self, gl: &ffi::Gles2) {
         unsafe {
-            // Full screenshot
-            if let Some(path) = self.pending_screenshot.take() {
-                let w = self.screen_w;
-                let h = self.screen_h;
-                let mut pixels = vec![0u8; (w * h * 4) as usize];
-                gl.ReadPixels(
-                    0,
-                    0,
-                    w as i32,
-                    h as i32,
-                    ffi::RGBA,
-                    ffi::UNSIGNED_BYTE,
-                    pixels.as_mut_ptr() as *mut _,
-                );
-                // Flip vertically (OpenGL reads bottom-to-top)
-                let row_bytes = (w * 4) as usize;
-                let mut temp = vec![0u8; row_bytes];
-                for y in 0..(h as usize / 2) {
-                    let top = y * row_bytes;
-                    let bot = ((h as usize) - 1 - y) * row_bytes;
-                    temp.copy_from_slice(&pixels[top..top + row_bytes]);
-                    pixels.copy_within(bot..bot + row_bytes, top);
-                    pixels[bot..bot + row_bytes].copy_from_slice(&temp);
-                }
-                // Save in background thread
-                std::thread::spawn(move || {
-                    if let Err(e) =
-                        image::save_buffer(&path, &pixels, w, h, image::ColorType::Rgba8)
-                    {
-                        log::warn!("[compositor] screenshot failed: {}", e);
-                    } else {
-                        log::info!("[compositor] screenshot saved to {:?}", path);
+            for request in self.screenshot_requests.take_all() {
+                match request {
+                    crate::backend::compositor_common::screenshot::ScreenshotRequest::Full(path) => {
+                        let w = self.screen_w;
+                        let h = self.screen_h;
+                        let mut pixels = vec![0u8; (w * h * 4) as usize];
+                        gl.ReadPixels(0, 0, w as i32, h as i32, ffi::RGBA, ffi::UNSIGNED_BYTE, pixels.as_mut_ptr() as *mut _);
+                        flip_rgba_vertical(&mut pixels, w, h);
+                        save_png_async(path, pixels, w, h);
                     }
-                });
-            }
-
-            // Region screenshot
-            if let Some((path, rx, ry, rw, rh)) = self.pending_screenshot_region.take() {
-                let mut pixels = vec![0u8; (rw * rh * 4) as usize];
-                gl.ReadPixels(
-                    rx,
-                    (self.screen_h as i32) - ry - (rh as i32),
-                    rw as i32,
-                    rh as i32,
-                    ffi::RGBA,
-                    ffi::UNSIGNED_BYTE,
-                    pixels.as_mut_ptr() as *mut _,
-                );
-                // Flip vertically
-                let row_bytes = (rw * 4) as usize;
-                let mut temp = vec![0u8; row_bytes];
-                for y in 0..(rh as usize / 2) {
-                    let top = y * row_bytes;
-                    let bot = ((rh as usize) - 1 - y) * row_bytes;
-                    temp.copy_from_slice(&pixels[top..top + row_bytes]);
-                    pixels.copy_within(bot..bot + row_bytes, top);
-                    pixels[bot..bot + row_bytes].copy_from_slice(&temp);
-                }
-                std::thread::spawn(move || {
-                    if let Err(e) =
-                        image::save_buffer(&path, &pixels, rw, rh, image::ColorType::Rgba8)
-                    {
-                        log::warn!("[compositor] region screenshot failed: {}", e);
-                    } else {
-                        log::info!("[compositor] region screenshot saved to {:?}", path);
+                    crate::backend::compositor_common::screenshot::ScreenshotRequest::Region { path, x, y, width, height } => {
+                        let Some(region) = clip_region(self.screen_w, self.screen_h, x, y, width, height) else {
+                            log::warn!("[compositor] screenshot region is empty");
+                            continue;
+                        };
+                        let (x, y, w, h) = (region.x, region.y, region.width, region.height);
+                        let mut pixels = vec![0u8; (w * h * 4) as usize];
+                        gl.ReadPixels(x as i32, self.screen_h.saturating_sub(y + h) as i32, w as i32, h as i32, ffi::RGBA, ffi::UNSIGNED_BYTE, pixels.as_mut_ptr() as *mut _);
+                        flip_rgba_vertical(&mut pixels, w, h);
+                        save_png_async(path, pixels, w, h);
                     }
-                });
+                }
             }
         }
     }
@@ -1793,7 +1759,7 @@ impl WaylandCompositor {
 
     #[allow(dead_code)]
     pub(crate) fn request_screenshot(&mut self, path: PathBuf) {
-        self.pending_screenshot = Some(path);
+        self.screenshot_requests.request_full(path);
         self.needs_render = true;
     }
 
@@ -1806,7 +1772,7 @@ impl WaylandCompositor {
         w: u32,
         h: u32,
     ) {
-        self.pending_screenshot_region = Some((path, x, y, w, h));
+        self.screenshot_requests.request_region(path, x, y, w, h);
         self.needs_render = true;
     }
 

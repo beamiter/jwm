@@ -1312,8 +1312,7 @@ impl<C: CompositorConnection> Compositor<C> {
             sys_stats: crate::backend::sys_stats::SysStatsSampler::new(),
             frame_stats: FrameStats::new(),
             // Feature 12: screenshot
-            pending_screenshot: None,
-            pending_screenshot_region: None,
+            screenshot_requests: Default::default(),
             // Feature 13: blur mask
             blur_use_frame_extents: behavior.blur_use_frame_extents,
             // Feature 14: shadow shape
@@ -1484,6 +1483,8 @@ impl<C: CompositorConnection> Compositor<C> {
             recording_process: None,
             recording_last_frame: None,
             recording_pbo: [None, None],
+            recording_current_pbo: 0,
+            recording_captured_frames: 0,
             // Phase 3.1: Motion trail
             motion_trail_enabled: behavior.motion_trail,
             motion_trail_frames: behavior.motion_trail_frames,

@@ -345,7 +345,7 @@ impl<C: CompositorConnection> Compositor<C> {
     // Feature 12: Screenshot
     // =====================================================================
     pub(crate) fn request_screenshot(&mut self, path: std::path::PathBuf) {
-        self.pending_screenshot = Some(path);
+        self.screenshot_requests.request_full(path);
         self.needs_render = true;
     }
 
@@ -357,7 +357,7 @@ impl<C: CompositorConnection> Compositor<C> {
         w: u32,
         h: u32,
     ) {
-        self.pending_screenshot_region = Some((path, x, y, w, h));
+        self.screenshot_requests.request_region(path, x, y, w, h);
         self.needs_render = true;
     }
 
@@ -707,8 +707,7 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
         let explicit_render = std::mem::replace(&mut self.needs_render, false);
-        let force_render = self.pending_screenshot.is_some()
-            || self.pending_screenshot_region.is_some()
+        let force_render = self.screenshot_requests.has_pending()
             || self.debug_hud
             || self.transition_active()
             || self.overview_active
@@ -2505,13 +2504,22 @@ impl<C: CompositorConnection> Compositor<C> {
         // === Feature 12: Screenshot capture (after all rendering, before overlays) ===
         // Capture BEFORE rendering snap preview / annotations so the screenshot
         // doesn't include the selection overlay or annotation strokes.
-        let has_pending_screenshot =
-            self.pending_screenshot.is_some() || self.pending_screenshot_region.is_some();
-        if let Some(path) = self.pending_screenshot.take() {
-            self.capture_screenshot(&path);
-        }
-        if let Some((path, rx, ry, rw, rh)) = self.pending_screenshot_region.take() {
-            self.capture_screenshot_region(&path, rx, ry, rw, rh);
+        let has_pending_screenshot = self.screenshot_requests.has_pending();
+        for request in self.screenshot_requests.take_all() {
+            match request {
+                crate::backend::compositor_common::screenshot::ScreenshotRequest::Full(path) => {
+                    self.capture_screenshot(&path);
+                }
+                crate::backend::compositor_common::screenshot::ScreenshotRequest::Region {
+                    path,
+                    x,
+                    y,
+                    width,
+                    height,
+                } => {
+                    self.capture_screenshot_region(&path, x, y, width, height);
+                }
+            }
         }
 
         // === Pass 5g: Snap preview ===
@@ -2893,6 +2901,13 @@ impl<C: CompositorConnection> Compositor<C> {
             false
         };
 
+        // Capture before swapping: the GLX back buffer's contents are no
+        // longer defined after SwapBuffers, which caused intermittent black or
+        // corrupted frames in both X11RB and XCB backends.
+        if self.recording_active {
+            self.capture_recording_frame();
+        }
+
         // Swap buffers (double-buffered with vsync for tear-free output).
         // VRR (Variable Refresh Rate) is automatically handled by the driver when using Present.
         match self.vsync_method {
@@ -2936,11 +2951,6 @@ impl<C: CompositorConnection> Compositor<C> {
                     x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable);
                 }
             }
-        }
-
-        // === Phase 7.3: Recording frame capture ===
-        if self.recording_active {
-            self.capture_recording_frame();
         }
 
         // Schedule re-render if fades or transition are still in progress

@@ -3,6 +3,8 @@ use super::{Compositor, SlimeWaveSimulation};
 use glow::HasContext;
 
 use super::CompositorConnection;
+use crate::backend::compositor_common::capture::{clip_region, flip_rgba_vertical};
+use crate::backend::compositor_common::screenshot::save_png_async;
 
 impl<C: CompositorConnection> Compositor<C> {
     unsafe fn create_slime_wave_target(
@@ -216,40 +218,9 @@ impl<C: CompositorConnection> Compositor<C> {
                 glow::PixelPackData::Slice(Some(&mut pixels)),
             );
         }
-        // OpenGL reads bottom-to-top, flip vertically
-        let row_bytes = (w * 4) as usize;
-        let mut flipped = vec![0u8; pixels.len()];
-        for y in 0..h as usize {
-            let src_row = (h as usize - 1 - y) * row_bytes;
-            let dst_row = y * row_bytes;
-            flipped[dst_row..dst_row + row_bytes]
-                .copy_from_slice(&pixels[src_row..src_row + row_bytes]);
-        }
-        // Write PNG
-        let file = match std::fs::File::create(path) {
-            Ok(f) => f,
-            Err(e) => {
-                log::warn!("compositor: screenshot create failed: {e}");
-                return false;
-            }
-        };
-        let writer = std::io::BufWriter::new(file);
-        let mut encoder = png::Encoder::new(writer, w, h);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        match encoder
-            .write_header()
-            .and_then(|mut w| w.write_image_data(&flipped))
-        {
-            Ok(_) => {
-                log::info!("compositor: screenshot saved to {}", path.display());
-                true
-            }
-            Err(e) => {
-                log::warn!("compositor: screenshot encode failed: {e}");
-                false
-            }
-        }
+        flip_rgba_vertical(&mut pixels, w, h);
+        save_png_async(path.to_path_buf(), pixels, w, h);
+        true
     }
 
     /// Capture a region of the current framebuffer to a PNG file.
@@ -261,15 +232,11 @@ impl<C: CompositorConnection> Compositor<C> {
         rw: u32,
         rh: u32,
     ) -> bool {
-        // Clamp to screen bounds
-        let x = rx.max(0) as u32;
-        let y = ry.max(0) as u32;
-        let w = rw.min(self.screen_w.saturating_sub(x));
-        let h = rh.min(self.screen_h.saturating_sub(y));
-        if w == 0 || h == 0 {
+        let Some(region) = clip_region(self.screen_w, self.screen_h, rx, ry, rw, rh) else {
             log::warn!("compositor: screenshot region is empty");
             return false;
-        }
+        };
+        let (x, y, w, h) = (region.x, region.y, region.width, region.height);
         // OpenGL Y is flipped: GL origin is bottom-left
         let gl_y = self.screen_h.saturating_sub(y + h);
         let mut pixels = vec![0u8; (w * h * 4) as usize];
@@ -284,47 +251,17 @@ impl<C: CompositorConnection> Compositor<C> {
                 glow::PixelPackData::Slice(Some(&mut pixels)),
             );
         }
-        // Flip vertically
-        let row_bytes = (w * 4) as usize;
-        let mut flipped = vec![0u8; pixels.len()];
-        for row in 0..h as usize {
-            let src_row = (h as usize - 1 - row) * row_bytes;
-            let dst_row = row * row_bytes;
-            flipped[dst_row..dst_row + row_bytes]
-                .copy_from_slice(&pixels[src_row..src_row + row_bytes]);
-        }
-        // Write PNG
-        let file = match std::fs::File::create(path) {
-            Ok(f) => f,
-            Err(e) => {
-                log::warn!("compositor: screenshot region create failed: {e}");
-                return false;
-            }
-        };
-        let writer = std::io::BufWriter::new(file);
-        let mut encoder = png::Encoder::new(writer, w, h);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        match encoder
-            .write_header()
-            .and_then(|mut wr| wr.write_image_data(&flipped))
-        {
-            Ok(_) => {
-                log::info!(
-                    "compositor: region screenshot saved to {} ({}x{} at {},{})",
-                    path.display(),
-                    w,
-                    h,
-                    x,
-                    y
-                );
-                true
-            }
-            Err(e) => {
-                log::warn!("compositor: region screenshot encode failed: {e}");
-                false
-            }
-        }
+        flip_rgba_vertical(&mut pixels, w, h);
+        save_png_async(path.to_path_buf(), pixels, w, h);
+        log::info!(
+            "compositor: region screenshot queued to {} ({}x{} at {},{})",
+            path.display(),
+            w,
+            h,
+            x,
+            y
+        );
+        true
     }
 
     /// Render a specific window to an off-screen FBO and return RGBA pixel data.

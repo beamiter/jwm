@@ -581,75 +581,16 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         let w = self.screen_w;
         let h = self.screen_h;
-        let fps = self.recording_fps;
+        let fps = self.recording_fps.clamp(1, 240);
 
         let stderr_file = std::fs::File::create("/tmp/jwm-ffmpeg.log")
             .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
 
-        // Select encoder: respect config or auto-probe (NVENC > VAAPI > SW).
-        let probe = |args: &[&str]| -> bool {
-            std::process::Command::new("ffmpeg")
-                .args(args)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
+        use crate::backend::compositor_common::media::{
+            select_recording_encoder, RecordingEncoder,
         };
-
-        enum Encoder {
-            Nvenc,
-            Vaapi,
-            Sw,
-        }
-        let encoder = match self.recording_encoder.as_str() {
-            "nvenc" => Encoder::Nvenc,
-            "vaapi" => Encoder::Vaapi,
-            "software" => Encoder::Sw,
-            _ => {
-                // auto: probe NVENC > VAAPI > SW
-                if probe(&[
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "nullsrc=s=64x64",
-                    "-frames:v",
-                    "1",
-                    "-c:v",
-                    "h264_nvenc",
-                    "-f",
-                    "null",
-                    "-",
-                ]) {
-                    Encoder::Nvenc
-                } else if std::path::Path::new("/dev/dri/renderD128").exists()
-                    && probe(&[
-                        "-vaapi_device",
-                        "/dev/dri/renderD128",
-                        "-f",
-                        "lavfi",
-                        "-i",
-                        "nullsrc=s=64x64",
-                        "-frames:v",
-                        "1",
-                        "-f",
-                        "null",
-                        "-",
-                    ])
-                {
-                    Encoder::Vaapi
-                } else {
-                    Encoder::Sw
-                }
-            }
-        };
-
-        let codec_name = match encoder {
-            Encoder::Nvenc => "h264_nvenc",
-            Encoder::Vaapi => "h264_vaapi",
-            Encoder::Sw => "libopenh264",
-        };
+        let encoder = select_recording_encoder(&self.recording_encoder);
+        let codec_name = encoder.codec_name("libopenh264");
         let bitrate = &self.recording_bitrate;
         let quality_str = self.recording_quality.to_string();
         log::info!(
@@ -660,7 +601,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let fps_str = fps.to_string();
         let mut args: Vec<&str> = Vec::new();
 
-        if matches!(encoder, Encoder::Vaapi) {
+        if matches!(encoder, RecordingEncoder::Vaapi) {
             args.extend_from_slice(&["-vaapi_device", "/dev/dri/renderD128"]);
         }
         // Input: use wall clock timestamps so video duration matches real time.
@@ -679,17 +620,17 @@ impl<C: CompositorConnection> Compositor<C> {
             "pipe:0",
         ]);
         match encoder {
-            Encoder::Nvenc => args.extend_from_slice(&["-vf", "vflip"]),
-            Encoder::Vaapi => args.extend_from_slice(&["-vf", "vflip,format=nv12,hwupload"]),
-            Encoder::Sw => args.extend_from_slice(&["-vf", "vflip"]),
+            RecordingEncoder::Nvenc => args.extend_from_slice(&["-vf", "vflip"]),
+            RecordingEncoder::Vaapi => args.extend_from_slice(&["-vf", "vflip,format=nv12,hwupload"]),
+            RecordingEncoder::Software => args.extend_from_slice(&["-vf", "vflip"]),
         }
         args.push("-c:v");
         args.push(codec_name);
         match encoder {
-            Encoder::Vaapi => args.extend_from_slice(&["-rc_mode", "CQP", "-qp", &quality_str]),
+            RecordingEncoder::Vaapi => args.extend_from_slice(&["-rc_mode", "CQP", "-qp", &quality_str]),
             _ => args.extend_from_slice(&["-b:v", bitrate]),
         }
-        args.extend_from_slice(&["-r", &fps_str, "-y", output_path]);
+        args.extend_from_slice(&["-r", &fps_str, "-movflags", "+faststart", "-y", output_path]);
 
         let child = match std::process::Command::new("ffmpeg")
             .args(&args)
@@ -723,6 +664,8 @@ impl<C: CompositorConnection> Compositor<C> {
         self.recording_process = Some(child);
         self.recording_active = true;
         self.recording_last_frame = None;
+        self.recording_current_pbo = 0;
+        self.recording_captured_frames = 0;
         log::info!("compositor: recording started to {output_path}");
     }
 
@@ -731,6 +674,13 @@ impl<C: CompositorConnection> Compositor<C> {
             return;
         }
         self.recording_active = false;
+
+        // Drain the last asynchronous ReadPixels before closing ffmpeg. This
+        // keeps the final frame instead of silently truncating every recording.
+        if self.recording_captured_frames > 0 {
+            let last_pbo = self.recording_current_pbo ^ 1;
+            self.write_recording_pbo(last_pbo);
+        }
 
         unsafe {
             for pbo in &mut self.recording_pbo {
@@ -742,7 +692,11 @@ impl<C: CompositorConnection> Compositor<C> {
 
         if let Some(mut child) = self.recording_process.take() {
             drop(child.stdin.take());
-            let _ = child.wait();
+            if let Ok(status) = child.wait() {
+                if !status.success() {
+                    log::warn!("compositor: ffmpeg exited with {status}; see /tmp/jwm-ffmpeg.log");
+                }
+            }
         }
         log::info!("compositor: recording stopped");
     }
@@ -753,7 +707,8 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         let now = std::time::Instant::now();
-        let min_interval = std::time::Duration::from_secs_f32(1.0 / self.recording_fps as f32);
+        let min_interval =
+            std::time::Duration::from_secs_f32(1.0 / self.recording_fps.clamp(1, 240) as f32);
         if let Some(last) = self.recording_last_frame {
             if now.duration_since(last) < min_interval {
                 return;
@@ -763,10 +718,10 @@ impl<C: CompositorConnection> Compositor<C> {
 
         let w = self.screen_w;
         let h = self.screen_h;
-        let buf_size = (w * h * 4) as usize;
-
-        // Simple single-buffer approach: read_pixels into PBO, map, write to ffmpeg.
-        if let Some(pbo) = self.recording_pbo[0] {
+        // Overlap the current GPU readback with sending the preceding PBO to
+        // ffmpeg. This avoids a GPU/CPU round-trip on every frame.
+        let written_pbo = self.recording_current_pbo;
+        if let Some(pbo) = self.recording_pbo[written_pbo] {
             unsafe {
                 self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
                 self.gl.read_pixels(
@@ -779,32 +734,45 @@ impl<C: CompositorConnection> Compositor<C> {
                     glow::PixelPackData::BufferOffset(0),
                 );
 
-                let ptr = self.gl.map_buffer_range(
-                    glow::PIXEL_PACK_BUFFER,
-                    0,
-                    buf_size as i32,
-                    glow::MAP_READ_BIT,
-                );
-                if !ptr.is_null() {
-                    let pixels = std::slice::from_raw_parts(ptr as *const u8, buf_size);
-                    if let Some(ref mut child) = self.recording_process {
-                        if let Some(ref mut stdin) = child.stdin {
-                            use std::io::Write;
-                            if let Err(e) = stdin.write_all(pixels) {
-                                log::warn!("compositor: recording write failed: {e}, stopping");
-                                self.gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
-                                self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-                                self.recording_active = false;
-                                return;
-                            }
-                        }
-                    }
-                    self.gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
-                } else {
-                    log::warn!("compositor: recording PBO map returned null");
-                }
                 self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
             }
+            self.recording_current_pbo ^= 1;
+            if self.recording_captured_frames > 0 {
+                self.write_recording_pbo(written_pbo ^ 1);
+            }
+            self.recording_captured_frames += 1;
+        }
+    }
+
+    fn write_recording_pbo(&mut self, pbo_index: usize) {
+        let Some(pbo) = self.recording_pbo[pbo_index] else {
+            return;
+        };
+        let buf_size = (self.screen_w * self.screen_h * 4) as usize;
+        unsafe {
+            self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
+            let ptr = self.gl.map_buffer_range(
+                glow::PIXEL_PACK_BUFFER,
+                0,
+                buf_size as i32,
+                glow::MAP_READ_BIT,
+            );
+            if ptr.is_null() {
+                log::warn!("compositor: recording PBO map returned null");
+            } else {
+                let pixels = std::slice::from_raw_parts(ptr as *const u8, buf_size);
+                if let Some(child) = self.recording_process.as_mut() {
+                    if let Some(stdin) = child.stdin.as_mut() {
+                        use std::io::Write;
+                        if let Err(e) = stdin.write_all(pixels) {
+                            log::warn!("compositor: recording write failed: {e}, stopping");
+                            self.recording_active = false;
+                        }
+                    }
+                }
+                self.gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
+            }
+            self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
         }
     }
 
