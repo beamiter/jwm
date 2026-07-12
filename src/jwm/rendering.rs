@@ -5,9 +5,56 @@ use crate::core::models::ClientKey;
 use crate::core::types::Rect;
 use log::info;
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use super::Jwm;
+
+type SceneEntry = (u64, i32, i32, u32, u32);
+
+fn compositor_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+
+    *ENABLED.get_or_init(|| {
+        std::env::var("JWM_DEBUG_COMPOSITOR")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+fn push_scene_window(
+    jwm: &Jwm,
+    scene: &mut Vec<SceneEntry>,
+    secondary_bar_wins: &HashSet<WindowId>,
+    visual_overrides: &HashMap<ClientKey, Rect>,
+    win_id: WindowId,
+) {
+    if secondary_bar_wins.contains(&win_id) {
+        return;
+    }
+
+    let Some(&client_key) = jwm.state.win_to_client.get(&win_id) else {
+        return;
+    };
+    let Some(client) = jwm.state.clients.get(client_key) else {
+        return;
+    };
+
+    let (x, y, w, h) = if let Some(rect) = visual_overrides.get(&client_key) {
+        (rect.x, rect.y, rect.w as u32, rect.h as u32)
+    } else {
+        (
+            client.geometry.x,
+            client.geometry.y,
+            client.geometry.w as u32,
+            client.geometry.h as u32,
+        )
+    };
+
+    if w > 0 && h > 0 {
+        scene.push((win_id.raw(), x, y, w, h));
+    }
+}
 
 impl Jwm {
     #[allow(dead_code)]
@@ -95,8 +142,10 @@ impl Jwm {
         }
 
         let now = Instant::now();
-        let mut completed = Vec::new();
-        let mut visual_overrides: HashMap<ClientKey, Rect> = HashMap::new();
+        let active_animation_count = self.animations.active.len();
+        let mut completed = Vec::with_capacity(active_animation_count);
+        let mut visual_overrides: HashMap<ClientKey, Rect> =
+            HashMap::with_capacity(active_animation_count);
 
         let keys: Vec<ClientKey> = self.animations.active.keys().copied().collect();
         for key in keys {
@@ -152,11 +201,12 @@ impl Jwm {
     /// The focused window is marked as active tab.
     #[allow(dead_code)]
     pub(super) fn build_window_groups(&self) -> Vec<(u32, Vec<(u32, String, bool)>)> {
-        let mut groups = Vec::new();
+        let mut groups = Vec::with_capacity(self.state.monitor_order.len());
         let focused_ck = self.get_selected_client_key();
         for (i, &mon_key) in self.state.monitor_order.iter().enumerate() {
-            let mut tabs = Vec::new();
-            for &ck in self.get_monitor_clients(mon_key) {
+            let monitor_clients = self.get_monitor_clients(mon_key);
+            let mut tabs = Vec::with_capacity(monitor_clients.len());
+            for &ck in monitor_clients {
                 if !self.is_client_visible_on_monitor(ck, mon_key) {
                     continue;
                 }
@@ -184,12 +234,23 @@ impl Jwm {
         &self,
         backend: &dyn Backend,
         visual_overrides: &HashMap<ClientKey, Rect>,
-    ) -> Vec<(u64, i32, i32, u32, u32)> {
-        let mut scene = Vec::new();
+    ) -> Vec<SceneEntry> {
+        let estimated_window_count = self.state.client_order.len()
+            + self.secondary_bars.len()
+            + self.override_redirect_windows.len();
+        let mut scene = Vec::with_capacity(estimated_window_count);
+        let debug_compositor = compositor_debug_enabled();
 
-        let debug_compositor = std::env::var("JWM_DEBUG_COMPOSITOR")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        // Secondary bars are appended explicitly after managed windows. Build this
+        // lookup once per frame rather than once for every monitor.
+        let secondary_bar_wins: HashSet<WindowId> = self
+            .secondary_bars
+            .values()
+            .filter_map(|bar_instance| {
+                let bar_key = bar_instance.client_key?;
+                Some(self.state.clients.get(bar_key)?.win)
+            })
+            .collect();
 
         // Iterate all monitors, using last_stacking order (bottom to top)
         for &mon_key in &self.state.monitor_order {
@@ -211,63 +272,37 @@ impl Jwm {
                     mon_key, has_stacking, stack_len, client_count
                 );
             }
+
             // Use last_stacking if available, otherwise fall back to
             // monitor_stack so the compositor still has something to render
-            // when restack() hasn't run yet for this monitor.
-            let stacking_source: Vec<WindowId> =
-                if let Some(stacking) = self.last_stacking.get(mon_key) {
-                    stacking.clone()
-                } else if let Some(stack) = self.state.monitor_stack.get(mon_key) {
-                    // Fallback: build bottom-to-top from monitor_stack (which is top-to-bottom)
-                    stack
-                        .iter()
-                        .rev()
-                        .filter_map(|&ck| {
-                            let c = self.state.clients.get(ck)?;
-                            if self.is_client_visible_on_monitor(ck, mon_key) {
-                                Some(c.win)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-
-            // Collect secondary bar window IDs so we can skip them in the stacking loop —
-            // they are added explicitly at the end (on top), so including them here would
-            // render each bar twice per frame.
-            let secondary_bar_wins: HashSet<WindowId> = self
-                .secondary_bars
-                .values()
-                .filter_map(|bar_instance| {
-                    let bar_key = bar_instance.client_key?;
-                    Some(self.state.clients.get(bar_key)?.win)
-                })
-                .collect();
-
-            for &win_id in &stacking_source {
-                if secondary_bar_wins.contains(&win_id) {
-                    continue;
+            // when restack() hasn't run yet for this monitor. Iterate borrowed
+            // storage directly to avoid cloning/collecting a temporary Vec every frame.
+            if let Some(stacking) = self.last_stacking.get(mon_key) {
+                for &win_id in stacking {
+                    push_scene_window(
+                        self,
+                        &mut scene,
+                        &secondary_bar_wins,
+                        visual_overrides,
+                        win_id,
+                    );
                 }
-                // Find the client key for this window
-                if let Some(&ck) = self.state.win_to_client.get(&win_id) {
-                    if let Some(client) = self.state.clients.get(ck) {
-                        let (x, y, w, h) = if let Some(rect) = visual_overrides.get(&ck) {
-                            (rect.x, rect.y, rect.w as u32, rect.h as u32)
-                        } else {
-                            (
-                                client.geometry.x,
-                                client.geometry.y,
-                                client.geometry.w as u32,
-                                client.geometry.h as u32,
-                            )
-                        };
-                        if w > 0 && h > 0 {
-                            scene.push((win_id.raw(), x, y, w, h));
-                        }
+            } else if let Some(stack) = self.state.monitor_stack.get(mon_key) {
+                // monitor_stack is top-to-bottom, so traverse it in reverse.
+                for &client_key in stack.iter().rev() {
+                    let Some(client) = self.state.clients.get(client_key) else {
+                        continue;
+                    };
+                    if !self.is_client_visible_on_monitor(client_key, mon_key) {
+                        continue;
                     }
+                    push_scene_window(
+                        self,
+                        &mut scene,
+                        &secondary_bar_wins,
+                        visual_overrides,
+                        client.win,
+                    );
                 }
             }
         }
