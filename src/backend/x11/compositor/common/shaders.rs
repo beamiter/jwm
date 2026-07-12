@@ -515,6 +515,13 @@ vec4 fluid_sample(vec2 uv) {
     );
 }
 
+vec4 fluid_sample_screen(vec2 screen_uv) {
+    // The simulation quad is rasterized with a top-left projection, while an
+    // FBO texture still has OpenGL's bottom-left origin. Keep all solver math
+    // in top-left screen coordinates and flip only at this texture boundary.
+    return fluid_sample(vec2(screen_uv.x, 1.0 - screen_uv.y));
+}
+
 vec2 closest_on_segment(vec2 p, vec2 a, vec2 b) {
     vec2 ba = b - a;
     float h = clamp(dot(p - a, ba) / max(dot(ba, ba), 0.000001), 0.0, 1.0);
@@ -528,13 +535,17 @@ void main() {
 
     // Velocity is stored in grid cells/second, so multiplying by texel size turns
     // it into UV displacement for the semi-Lagrangian backtrace.
-    vec4 current = fluid_sample(uv);
+    vec4 current = fluid_sample_screen(uv);
     vec2 backtrace = uv - current.gb * u_texel * u_time_step;
-    vec4 state = fluid_sample(backtrace);
-    vec4 left = fluid_sample(backtrace - axial);
-    vec4 right = fluid_sample(backtrace + axial);
-    vec4 top = fluid_sample(backtrace - vertical);
-    vec4 bottom = fluid_sample(backtrace + vertical);
+    vec4 state = fluid_sample_screen(backtrace);
+    vec4 left = fluid_sample_screen(backtrace - axial);
+    vec4 right = fluid_sample_screen(backtrace + axial);
+    vec4 top = fluid_sample_screen(backtrace - vertical);
+    vec4 bottom = fluid_sample_screen(backtrace + vertical);
+    vec4 top_left = fluid_sample_screen(backtrace - axial - vertical);
+    vec4 top_right = fluid_sample_screen(backtrace + axial - vertical);
+    vec4 bottom_left = fluid_sample_screen(backtrace - axial + vertical);
+    vec4 bottom_right = fluid_sample_screen(backtrace + axial + vertical);
 
     float height = state.r;
     vec2 velocity = state.gb;
@@ -552,31 +563,52 @@ void main() {
     vec2 laplacian_velocity =
         left.gb + right.gb + top.gb + bottom.gb - 4.0 * velocity;
 
+    float turbulent_flow = smoothstep(0.12, 0.82, u_turbulence);
+    float wave_flow = 1.0 - turbulent_flow;
     const float wave_speed = 27.0; // grid cells / second; CFL ~= 0.23 at 120 Hz
-    const float drag = 2.20;
-    const float viscosity = 0.95;
+    float drag = mix(2.20, 1.15, turbulent_flow);
+    float viscosity = mix(0.95, 0.34, turbulent_flow);
     velocity += u_time_step * (
-        -wave_speed * wave_speed * gradient_height
+        -wave_speed * wave_speed * gradient_height * wave_flow
         + viscosity * laplacian_velocity
     );
-    velocity /= 1.0 + drag * u_time_step;
-    height += u_time_step * (-divergence + 0.85 * laplacian_height);
-    height /= 1.0 + 0.28 * u_time_step;
 
-    // Vorticity confinement restores small rotating structures that ordinary
-    // semi-Lagrangian advection would otherwise dissipate.
+    // A local Helmholtz-style bulk correction damps the compressible component
+    // of the velocity. It is deliberately active only on the turbulence path:
+    // the ocean path needs divergence to propagate gravity waves.
+    vec2 mixed_second = 0.25 * vec2(
+        bottom_right.b - bottom_left.b - top_right.b + top_left.b,
+        bottom_right.g - top_right.g - bottom_left.g + top_left.g
+    );
+    vec2 grad_divergence = vec2(
+        right.g + left.g - 2.0 * velocity.x + mixed_second.x,
+        bottom.b + top.b - 2.0 * velocity.y + mixed_second.y
+    );
+    velocity += grad_divergence * (0.22 * turbulent_flow);
+    velocity /= 1.0 + drag * u_time_step;
+    height += u_time_step * (
+        -divergence * wave_flow
+        + mix(0.85, 0.32, turbulent_flow) * laplacian_height
+    );
+    height /= 1.0 + mix(0.28, 1.85, turbulent_flow) * u_time_step;
+
+    // Curl is used for foam diagnostics below. Coherent vortices are injected
+    // locally with the gesture instead of applying global confinement, which
+    // tended to turn a horizontal hand motion into repeated shear bands.
     float curl = 0.5 * (
         right.b - left.b - bottom.g + top.g
     );
-    vec2 curl_gradient = vec2(
-        abs(right.b) - abs(left.b),
-        abs(bottom.g) - abs(top.g)
-    );
-    float curl_gradient_length = length(curl_gradient);
-    if (curl_gradient_length > 0.00001) {
-        vec2 normal = curl_gradient / curl_gradient_length;
-        velocity += vec2(normal.y, -normal.x)
-            * curl * (5.5 * u_turbulence) * u_time_step;
+    float dxx_v = right.b + left.b - 2.0 * velocity.y;
+    float dyy_u = bottom.g + top.g - 2.0 * velocity.x;
+    float dxy_u = mixed_second.y;
+    float dxy_v = mixed_second.x;
+    vec2 gradient_curl = vec2(dxx_v - dxy_u, dxy_v - dyy_u);
+    float gradient_curl_length = length(gradient_curl);
+    if (gradient_curl_length > 0.00001) {
+        // Standard vorticity confinement: N = grad(|curl|), force = N x curl.
+        vec2 curl_normal = gradient_curl * sign(curl) / gradient_curl_length;
+        velocity += vec2(curl_normal.y, -curl_normal.x)
+            * curl * (2.8 * turbulent_flow) * u_time_step;
     }
 
     vec2 p = vec2(uv.x * u_aspect, uv.y);
@@ -592,6 +624,7 @@ void main() {
         float force = u_injection_params[index].y;
         vec2 closest = closest_on_segment(p, a, b);
         vec2 radial = p - closest;
+        float radial_length = length(radial);
         float normalized_distance = length(radial) / max(radius, 0.00001);
         float r2 = normalized_distance * normalized_distance;
         float cutoff = 1.0 - smoothstep(1.10, 1.48, normalized_distance);
@@ -603,17 +636,28 @@ void main() {
         vec2 gesture_direction = gesture_length > 0.00001
             ? gesture_cells / gesture_length
             : vec2(1.0, 0.0);
-        vec2 swirl_direction = vec2(-gesture_direction.y, gesture_direction.x);
-        vec2 aspect_direction = normalize(b - a + vec2(0.000001, 0.0));
-        float side = sign(
-            aspect_direction.x * radial.y - aspect_direction.y * radial.x
-        );
-        side = side == 0.0 ? 1.0 : side;
+        vec2 radial_direction = radial_length > 0.00001
+            ? radial / radial_length
+            : vec2(-gesture_direction.y, gesture_direction.x);
+        vec2 vortex_tangent = vec2(-radial_direction.y, radial_direction.x);
+        vec2 aspect_segment = b - a;
+        float aspect_length = max(length(aspect_segment), 0.00001);
+        float along = dot(closest - a, aspect_segment / aspect_length)
+            / max(radius, 0.00001);
+        // Alternating vortex cells break a long gesture capsule into compact
+        // eddies rather than one screen-wide counter-flowing shear strip.
+        float vortex_cell = sin(along * 1.85 + float(index) * 2.37);
+        float vortex_envelope = 0.35 + 0.65 * abs(vortex_cell);
 
-        velocity += gesture_direction * wake * force * 38.0;
-        velocity += swirl_direction * side * wake * force
-            * (14.0 * u_turbulence);
-        height += displacement * force * 0.024;
+        velocity += gesture_direction * wake * force * 25.0;
+        velocity += vortex_tangent * vortex_cell * vortex_envelope
+            * wake * force * (12.0 * u_turbulence);
+        velocity += radial_direction * sin(along * 2.73 + float(index) * 1.41)
+            * wake * force * (3.2 * u_turbulence);
+        // Gravity waves receive a signed Mexican-hat displacement. Turbulence
+        // receives a smooth passive tracer blob which is stretched and folded
+        // by the advected velocity field instead of radiating parallel rings.
+        height += mix(displacement * 0.024, wake * 0.050, turbulent_flow) * force;
         foam = max(foam, wake * force * 0.35 * u_foam);
     }
 
@@ -637,7 +681,7 @@ void main() {
 
     frag_color = vec4(
         clamp(height, -0.45, 0.45),
-        clamp(velocity, vec2(-72.0), vec2(72.0)),
+        clamp(velocity, vec2(-32.0), vec2(32.0)),
         clamp(foam, 0.0, 1.0)
     );
 }
@@ -900,9 +944,9 @@ void main() {
     // tighter CPU bounding box below to avoid evaluating its SDF everywhere.
     if (u_slime_enabled == 1 && slime_surface_mask > 0.001) {
         vec2 pixel = slime_pixel;
-        // Pose coordinates are top-left based while the fluid texture is sampled
-        // in GL's bottom-left convention.
-        vec2 wave_uv = vec2(uv.x, 1.0 - uv.y);
+        // Both pixel and solver coordinates are top-left based. Convert once to
+        // the FBO texture's bottom-left convention at the sampling boundary.
+        vec2 wave_uv = uv;
         vec2 tx = vec2(u_slime_wave_texel.x, 0.0);
         vec2 ty = vec2(0.0, u_slime_wave_texel.y);
         vec4 center_state = texture(u_slime_wave, wave_uv);
@@ -913,14 +957,18 @@ void main() {
             0.0,
             1.0
         );
-        float left = texture(u_slime_wave, wave_uv - tx).r;
-        float right = texture(u_slime_wave, wave_uv + tx).r;
-        float top = texture(u_slime_wave, wave_uv - ty).r;
-        float bottom = texture(u_slime_wave, wave_uv + ty).r;
-        float top_left = texture(u_slime_wave, wave_uv - tx - ty).r;
-        float top_right = texture(u_slime_wave, wave_uv + tx - ty).r;
-        float bottom_left = texture(u_slime_wave, wave_uv - tx + ty).r;
-        float bottom_right = texture(u_slime_wave, wave_uv + tx + ty).r;
+        vec4 left_state = texture(u_slime_wave, wave_uv - tx);
+        vec4 right_state = texture(u_slime_wave, wave_uv + tx);
+        vec4 top_state = texture(u_slime_wave, wave_uv + ty);
+        vec4 bottom_state = texture(u_slime_wave, wave_uv - ty);
+        float left = left_state.r;
+        float right = right_state.r;
+        float top = top_state.r;
+        float bottom = bottom_state.r;
+        float top_left = texture(u_slime_wave, wave_uv - tx + ty).r;
+        float top_right = texture(u_slime_wave, wave_uv + tx + ty).r;
+        float bottom_left = texture(u_slime_wave, wave_uv - tx - ty).r;
+        float bottom_right = texture(u_slime_wave, wave_uv + tx - ty).r;
         vec2 grad = vec2(
             (top_right + 2.0 * right + bottom_right)
                 - (top_left + 2.0 * left + bottom_left),
@@ -939,15 +987,17 @@ void main() {
         float flow_speed = length(flow_velocity);
         float turbulence_gate = smoothstep(1.5, 20.0, flow_speed)
             * u_slime_turbulence_strength;
-        float micro_phase = dot(
-            pixel / max(u_slime_scale, 1.0),
-            vec2(1.73, -1.11)
-        ) + u_slime_time * 3.2 + center * 9.0;
-        vec2 micro_normal = vec2(
-            sin(micro_phase),
-            cos(micro_phase * 1.27 + 0.8)
-        ) * (0.0014 + min(flow_speed * 0.000035, 0.0028));
-        grad += micro_normal * turbulence_gate;
+        float du_dx = 0.5 * (right_state.g - left_state.g);
+        float du_dy = 0.5 * (bottom_state.g - top_state.g);
+        float dv_dx = 0.5 * (right_state.b - left_state.b);
+        float dv_dy = 0.5 * (bottom_state.b - top_state.b);
+        float flow_curl = dv_dx - du_dy;
+        vec2 strain_normal = vec2(du_dx - dv_dy, du_dy + dv_dx);
+        // Velocity strain and curl reveal the simulated eddies directly. Unlike
+        // the old procedural sine normals this cannot create stationary stripes.
+        grad += strain_normal * (0.0011 * turbulence_gate);
+        lap += clamp(flow_curl * 0.00055, -0.018, 0.018)
+            * turbulence_gate;
 
         float grad_len = length(grad);
         vec2 grad_dir = grad_len > 0.00001 ? grad / grad_len : vec2(0.0);

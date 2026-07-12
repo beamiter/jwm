@@ -21,8 +21,9 @@ therefore consumes the newest pose rather than replaying stale inference frames.
 Motion-filtered fingertip and palm landmarks inject directional momentum capsules
 into a persistent, half-resolution `RGBA16F` fluid field. The channels retain
 surface height, horizontal velocity, and foam. A fixed 120 Hz semi-Lagrangian
-shallow-water solver adds gravity, divergence coupling, viscosity, vorticity
-enhancement, crest foam, gesture swirl, and an absorbing boundary. Persistent
+hybrid solver adds gravity-wave coupling for the ocean path and switches toward
+semi-Lagrangian tracer/velocity transport, divergence damping, vorticity
+confinement, viscosity, gesture swirl, and an absorbing boundary for turbulence. Persistent
 ocean waves are analytic and therefore do not consume simulation bandwidth when
 the tracker is idle. The interactive field remains alive for roughly one second
 independently of the current pose; after that the GPU field is cleared once and
@@ -143,8 +144,9 @@ being mapped to the screen accidentally. Unknown fields such as `seq` and
    feathered 9-tap cool blur covers the selected window as the calm liquid
    baseline; packets without a window apply the skin to the whole screen.
 5. The GPU catches up in fixed 120 Hz fluid substeps, independent of display
-   refresh. Height and horizontal velocity are semi-Lagrangian advected, coupled
-   through a shallow-water pressure term, diffused, and augmented with vorticity.
+   refresh. Height/tracer and horizontal velocity are semi-Lagrangian advected.
+   Ocean strength retains shallow-water pressure waves; turbulence progressively
+   suppresses those waves and applies divergence damping plus vorticity confinement.
 6. Multi-direction analytic ocean waves are added to the simulated height. A
    Sobel gradient, transported micro-normal, and foam field drive refraction,
    chromatic dispersion, Schlick Fresnel, specular highlights, and caustics.
@@ -178,8 +180,8 @@ or palm wakes. This is useful when tuning directional waves independently.
 
 ## Current limitations and production path
 
-The field is a nonlinear 2.5D shallow-water approximation, not a volumetric
-three-dimensional Navier-Stokes solver. It produces directional flow, vortices,
+The field is a hybrid 2.5D shallow-water and incompressible-flow approximation,
+not a volumetric three-dimensional Navier-Stokes solver. It produces directional flow, vortices,
 foam, depth-shaped capsules, and convincing screen-space lighting, but cannot
 overturn into breaking geometry or collide with unknown objects inside client
 windows. Screen capture also sees any window covering the selected video region.
