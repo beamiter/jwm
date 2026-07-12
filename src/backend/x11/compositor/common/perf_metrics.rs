@@ -4,64 +4,147 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+const MAX_HISTORY: usize = 120;
+const RECENT_HISTORY: usize = 30;
+const NANOS_PER_SECOND: u128 = 1_000_000_000;
+
+#[derive(Debug)]
+struct TimingHistory {
+    samples: VecDeque<Duration>,
+    total_nanos: u128,
+    recent_total_nanos: u128,
+    max_history: usize,
+}
+
+impl TimingHistory {
+    fn new(max_history: usize) -> Self {
+        assert!(max_history > 0, "timing history must retain at least one sample");
+        Self {
+            samples: VecDeque::with_capacity(max_history),
+            total_nanos: 0,
+            recent_total_nanos: 0,
+            max_history,
+        }
+    }
+
+    fn push(&mut self, duration: Duration) {
+        let len_before_eviction = self.samples.len();
+        if len_before_eviction >= self.max_history {
+            let evicted_was_recent = len_before_eviction <= RECENT_HISTORY;
+            if let Some(evicted) = self.samples.pop_front() {
+                let evicted_nanos = evicted.as_nanos();
+                self.total_nanos = self.total_nanos.saturating_sub(evicted_nanos);
+                if evicted_was_recent {
+                    self.recent_total_nanos =
+                        self.recent_total_nanos.saturating_sub(evicted_nanos);
+                }
+            }
+        }
+
+        let duration_nanos = duration.as_nanos();
+        self.samples.push_back(duration);
+        self.total_nanos = self.total_nanos.saturating_add(duration_nanos);
+        self.recent_total_nanos = self.recent_total_nanos.saturating_add(duration_nanos);
+
+        if self.samples.len() > RECENT_HISTORY {
+            let expired_index = self.samples.len() - RECENT_HISTORY - 1;
+            if let Some(expired) = self.samples.get(expired_index) {
+                self.recent_total_nanos = self
+                    .recent_total_nanos
+                    .saturating_sub(expired.as_nanos());
+            }
+        }
+    }
+
+    fn average(&self) -> Duration {
+        average_duration(self.total_nanos, self.samples.len())
+    }
+
+    fn recent_sample_count(&self) -> usize {
+        self.samples.len().min(RECENT_HISTORY)
+    }
+
+    fn recent_fps(&self) -> f32 {
+        let count = self.recent_sample_count();
+        if count < 2 || self.recent_total_nanos == 0 {
+            return 0.0;
+        }
+
+        let elapsed_seconds = self.recent_total_nanos as f64 / NANOS_PER_SECOND as f64;
+        (count as f64 / elapsed_seconds) as f32
+    }
+
+    fn clear(&mut self) {
+        self.samples.clear();
+        self.total_nanos = 0;
+        self.recent_total_nanos = 0;
+    }
+}
+
+fn average_duration(total_nanos: u128, sample_count: usize) -> Duration {
+    if sample_count == 0 {
+        return Duration::ZERO;
+    }
+    duration_from_nanos(total_nanos / sample_count as u128)
+}
+
+fn duration_from_nanos(nanos: u128) -> Duration {
+    let seconds = nanos / NANOS_PER_SECOND;
+    if seconds > u64::MAX as u128 {
+        return Duration::MAX;
+    }
+
+    Duration::new(
+        seconds as u64,
+        (nanos % NANOS_PER_SECOND) as u32,
+    )
+}
+
 /// Frame timing statistics
 #[derive(Clone)]
 pub struct PerfMetrics {
-    frame_times: Arc<Mutex<VecDeque<Duration>>>,
-    compositor_times: Arc<Mutex<VecDeque<Duration>>>,
+    frame_times: Arc<Mutex<TimingHistory>>,
+    compositor_times: Arc<Mutex<TimingHistory>>,
     gpu_load: Arc<AtomicU32>, // 0-100
     cpu_load: Arc<AtomicU32>, // 0-100
     frame_count: Arc<AtomicU64>,
-    max_history: usize,
 }
 
 impl PerfMetrics {
     pub fn new() -> Self {
         Self {
-            frame_times: Arc::new(Mutex::new(VecDeque::with_capacity(120))),
-            compositor_times: Arc::new(Mutex::new(VecDeque::with_capacity(120))),
+            frame_times: Arc::new(Mutex::new(TimingHistory::new(MAX_HISTORY))),
+            compositor_times: Arc::new(Mutex::new(TimingHistory::new(MAX_HISTORY))),
             gpu_load: Arc::new(AtomicU32::new(0)),
             cpu_load: Arc::new(AtomicU32::new(0)),
             frame_count: Arc::new(AtomicU64::new(0)),
-            max_history: 120,
         }
     }
 
-    /// Record a frame time
+    /// Record a frame time.
     pub fn record_frame(&self, duration: Duration) {
         if let Ok(mut times) = self.frame_times.lock() {
-            times.push_back(duration);
-            if times.len() > self.max_history {
-                times.pop_front();
-            }
+            times.push(duration);
         }
         self.frame_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Record compositor processing time
+    /// Record compositor processing time.
     pub fn record_compositor(&self, duration: Duration) {
         if let Ok(mut times) = self.compositor_times.lock() {
-            times.push_back(duration);
-            if times.len() > self.max_history {
-                times.pop_front();
-            }
+            times.push(duration);
         }
     }
 
-    /// Get average frame time
+    /// Get average frame time in O(1).
     pub fn avg_frame_time(&self) -> Duration {
-        if let Ok(times) = self.frame_times.lock() {
-            if times.is_empty() {
-                return Duration::ZERO;
-            }
-            let sum: Duration = times.iter().sum();
-            sum / times.len() as u32
-        } else {
-            Duration::ZERO
-        }
+        self.frame_times
+            .lock()
+            .map(|times| times.average())
+            .unwrap_or(Duration::ZERO)
     }
 
-    /// Get average FPS
+    /// Get average FPS.
     pub fn avg_fps(&self) -> f32 {
         let avg = self.avg_frame_time();
         if avg.is_zero() {
@@ -70,75 +153,70 @@ impl PerfMetrics {
         1.0 / avg.as_secs_f32()
     }
 
-    /// Get recent FPS (last 30 frames)
+    /// Get recent FPS from the last 30 frames without allocating.
     pub fn recent_fps(&self) -> f32 {
-        if let Ok(times) = self.frame_times.lock() {
-            if times.len() < 2 {
-                return 0.0;
-            }
-            let recent: Vec<_> = times.iter().rev().take(30).copied().collect();
-            if recent.is_empty() {
-                return 0.0;
-            }
-            let sum: Duration = recent.iter().sum();
-            1.0 / (sum / recent.len() as u32).as_secs_f32()
-        } else {
-            0.0
-        }
+        self.frame_times
+            .lock()
+            .map(|times| times.recent_fps())
+            .unwrap_or(0.0)
     }
 
-    /// Set estimated GPU load (0-100)
+    /// Set estimated GPU load (0-100).
     pub fn set_gpu_load(&self, load: u32) {
         self.gpu_load.store(load.min(100), Ordering::Relaxed);
     }
 
-    /// Get GPU load
+    /// Get GPU load.
     pub fn gpu_load(&self) -> u32 {
         self.gpu_load.load(Ordering::Relaxed)
     }
 
-    /// Set estimated CPU load (0-100)
+    /// Set estimated CPU load (0-100).
     pub fn set_cpu_load(&self, load: u32) {
         self.cpu_load.store(load.min(100), Ordering::Relaxed);
     }
 
-    /// Get CPU load
+    /// Get CPU load.
     pub fn cpu_load(&self) -> u32 {
         self.cpu_load.load(Ordering::Relaxed)
     }
 
-    /// Get total frame count
+    /// Get total frame count.
     pub fn frame_count(&self) -> u64 {
         self.frame_count.load(Ordering::Relaxed)
     }
 
-    /// Get max frame time (worst case)
+    /// Get max frame time (worst case).
     pub fn max_frame_time(&self) -> Duration {
         self.frame_times
             .lock()
             .ok()
-            .and_then(|t| t.iter().copied().max())
+            .and_then(|times| times.samples.iter().copied().max())
             .unwrap_or_default()
     }
 
-    /// Get min frame time (best case)
+    /// Get min frame time (best case).
     pub fn min_frame_time(&self) -> Duration {
         self.frame_times
             .lock()
             .ok()
-            .and_then(|t| t.iter().copied().min())
+            .and_then(|times| times.samples.iter().copied().min())
             .unwrap_or_default()
     }
 
-    /// Estimate GPU load based on frame times and target FPS
+    /// Estimate GPU load based on frame times and target FPS.
     pub fn estimate_gpu_load(&self, target_fps: f32) -> u32 {
+        if target_fps <= 0.0 {
+            return 0;
+        }
+
         let target_frame_time = 1.0 / target_fps;
         let actual_frame_time = self.avg_frame_time().as_secs_f32();
         let load = (actual_frame_time / target_frame_time * 100.0) as u32;
         load.min(100)
     }
 
-    /// Clear all metrics
+    /// Clear all metrics.
     pub fn clear(&self) {
         if let Ok(mut times) = self.frame_times.lock() {
             times.clear();
@@ -193,14 +271,12 @@ mod tests {
         let m = PerfMetrics::new();
         m.record_frame(Duration::from_millis(10));
         m.record_frame(Duration::from_millis(30));
-        // avg = 20ms
         assert_eq!(m.avg_frame_time(), Duration::from_millis(20));
     }
 
     #[test]
     fn test_avg_fps_from_frame_times() {
         let m = PerfMetrics::new();
-        // 16.666ms ≈ 60fps
         m.record_frame(Duration::from_micros(16_667));
         let fps = m.avg_fps();
         assert!((fps - 60.0).abs() < 1.0, "expected ~60fps, got {fps}");
@@ -209,12 +285,9 @@ mod tests {
     #[test]
     fn test_recent_fps_requires_at_least_two_samples() {
         let m = PerfMetrics::new();
-        // 0 samples
         assert_eq!(m.recent_fps(), 0.0);
-        // 1 sample still returns 0
         m.record_frame(Duration::from_millis(16));
         assert_eq!(m.recent_fps(), 0.0);
-        // 2 samples → valid fps
         m.record_frame(Duration::from_millis(16));
         assert!(m.recent_fps() > 0.0);
     }
@@ -222,12 +295,25 @@ mod tests {
     #[test]
     fn test_recent_fps_uses_last_30_frames() {
         let m = PerfMetrics::new();
-        // 50 frames at 100ms → 10fps
         for _ in 0..50 {
             m.record_frame(Duration::from_millis(100));
         }
         let fps = m.recent_fps();
         assert!((fps - 10.0).abs() < 1.0, "expected ~10fps, got {fps}");
+    }
+
+    #[test]
+    fn recent_fps_excludes_older_slow_frames() {
+        let m = PerfMetrics::new();
+        for _ in 0..90 {
+            m.record_frame(Duration::from_millis(100));
+        }
+        for _ in 0..30 {
+            m.record_frame(Duration::from_millis(10));
+        }
+
+        let fps = m.recent_fps();
+        assert!((fps - 100.0).abs() < 1.0, "expected ~100fps, got {fps}");
     }
 
     #[test]
@@ -279,7 +365,6 @@ mod tests {
     #[test]
     fn test_record_compositor_time() {
         let m = PerfMetrics::new();
-        // should not panic
         m.record_compositor(Duration::from_millis(5));
         m.record_compositor(Duration::from_millis(8));
     }
@@ -287,7 +372,6 @@ mod tests {
     #[test]
     fn test_estimate_gpu_load_at_60fps() {
         let m = PerfMetrics::new();
-        // At 60fps target, a 16.67ms frame → 100% load
         m.record_frame(Duration::from_micros(16_667));
         let load = m.estimate_gpu_load(60.0);
         assert!((load as i32 - 100).abs() <= 5, "expected ~100%, got {load}");
@@ -296,7 +380,6 @@ mod tests {
     #[test]
     fn test_estimate_gpu_load_half_target() {
         let m = PerfMetrics::new();
-        // At 120fps target, a 16.67ms frame → 200%, clamped to 100%
         m.record_frame(Duration::from_micros(16_667));
         let load = m.estimate_gpu_load(120.0);
         assert!(load <= 100);
@@ -306,6 +389,7 @@ mod tests {
     fn test_estimate_gpu_load_empty_returns_zero() {
         let m = PerfMetrics::new();
         assert_eq!(m.estimate_gpu_load(60.0), 0);
+        assert_eq!(m.estimate_gpu_load(0.0), 0);
     }
 
     #[test]
@@ -316,11 +400,11 @@ mod tests {
         m.clear();
         assert_eq!(m.avg_frame_time(), Duration::ZERO);
         assert_eq!(m.avg_fps(), 0.0);
+        assert_eq!(m.recent_fps(), 0.0);
     }
 
     #[test]
     fn test_clear_does_not_reset_frame_count() {
-        // frame_count uses an atomic that is not cleared by clear()
         let m = PerfMetrics::new();
         m.record_frame(Duration::from_millis(16));
         m.clear();
@@ -332,7 +416,6 @@ mod tests {
         let m = PerfMetrics::new();
         let m2 = m.clone();
         m.record_frame(Duration::from_millis(16));
-        // clone shares Arc, so both see the update
         assert_eq!(m2.frame_count(), 1);
         assert_eq!(m2.avg_frame_time(), Duration::from_millis(16));
     }
@@ -340,14 +423,22 @@ mod tests {
     #[test]
     fn test_history_capped_at_max() {
         let m = PerfMetrics::new();
-        // max_history = 120; insert 200 frames
         for _ in 0..200 {
             m.record_frame(Duration::from_millis(16));
         }
         assert_eq!(m.frame_count(), 200);
-        // avg should still be ~16ms (all equal)
         let avg = m.avg_frame_time();
         assert!((avg.as_millis() as i64 - 16).abs() <= 1);
+    }
+
+    #[test]
+    fn rolling_average_evicts_the_oldest_sample() {
+        let m = PerfMetrics::new();
+        for _ in 0..MAX_HISTORY {
+            m.record_frame(Duration::from_millis(10));
+        }
+        m.record_frame(Duration::from_millis(130));
+        assert_eq!(m.avg_frame_time(), Duration::from_millis(11));
     }
 
     #[test]
