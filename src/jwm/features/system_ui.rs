@@ -25,6 +25,8 @@ pub enum SystemUiState {
     Info {
         title: String,
         lines: Vec<String>,
+        query: String,
+        matches: Vec<usize>,
         offset: usize,
     },
     Locked {
@@ -51,10 +53,14 @@ impl Clone for SystemUiState {
             Self::Info {
                 title,
                 lines,
+                query,
+                matches,
                 offset,
             } => Self::Info {
                 title: title.clone(),
                 lines: lines.clone(),
+                query: query.clone(),
+                matches: matches.clone(),
                 offset: *offset,
             },
             // Never duplicate credentials into another allocation.
@@ -107,9 +113,12 @@ impl SystemUiState {
     }
 
     pub fn info(title: impl Into<String>, lines: Vec<String>) -> Self {
+        let matches = (0..lines.len()).collect();
         Self::Info {
             title: title.into(),
             lines,
+            query: String::new(),
+            matches,
             offset: 0,
         }
     }
@@ -122,7 +131,7 @@ impl SystemUiState {
                 message.clear();
             }
             Self::Inactive => return,
-            Self::Info { .. } => return,
+            Self::Info { query, .. } => query.push(ch),
         }
         self.refresh_matches();
     }
@@ -137,7 +146,9 @@ impl SystemUiState {
                 message.clear();
             }
             Self::Inactive => return,
-            Self::Info { .. } => return,
+            Self::Info { query, .. } => {
+                query.pop();
+            }
         }
         self.refresh_matches();
     }
@@ -152,8 +163,11 @@ impl SystemUiState {
                 return;
             }
             *selected = (*selected as isize + delta).rem_euclid(matches.len() as isize) as usize;
-        } else if let Self::Info { lines, offset, .. } = self {
-            let max = lines.len().saturating_sub(1);
+        } else if let Self::Info {
+            matches, offset, ..
+        } = self
+        {
+            let max = matches.len().saturating_sub(28);
             *offset = (*offset as isize + delta).clamp(0, max as isize) as usize;
         }
     }
@@ -224,38 +238,68 @@ impl SystemUiState {
             Self::Info {
                 title,
                 lines,
+                query,
+                matches,
                 offset,
             } => {
-                let mut out = format!("{title}\n\n");
-                for line in lines.iter().skip(*offset).take(28) {
-                    out.push_str(line);
-                    out.push('\n');
+                let mut out = format!("{title}\n\n\u{f002}  {query}_\n\n");
+                if matches.is_empty() {
+                    out.push_str("  No matching shortcuts\n");
+                } else {
+                    for &index in matches.iter().skip(*offset).take(28) {
+                        out.push_str(&lines[index]);
+                        out.push('\n');
+                    }
                 }
-                out.push_str("\nEsc  close    \u{f062}/\u{f063}  scroll");
+                out.push_str(
+                    "\nType  search    Backspace  erase    Esc  close    \u{f062}/\u{f063}  scroll",
+                );
                 out
             }
         }
     }
 
     fn refresh_matches(&mut self) {
-        let Self::Launcher {
-            query,
-            entries,
-            matches,
-            selected,
-        } = self
-        else {
-            return;
-        };
-        let needle = query.to_lowercase();
-        let mut scored: Vec<(usize, usize)> = entries
-            .iter()
-            .enumerate()
-            .filter_map(|(i, entry)| fuzzy_score(&entry.search, &needle).map(|score| (i, score)))
-            .collect();
-        scored.sort_by_key(|&(i, score)| (Reverse(score), entries[i].name.to_lowercase()));
-        *matches = scored.into_iter().map(|(i, _)| i).collect();
-        *selected = 0;
+        match self {
+            Self::Launcher {
+                query,
+                entries,
+                matches,
+                selected,
+            } => {
+                let needle = query.to_lowercase();
+                let mut scored: Vec<(usize, usize)> = entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, entry)| {
+                        fuzzy_score(&entry.search, &needle).map(|score| (i, score))
+                    })
+                    .collect();
+                scored.sort_by_key(|&(i, score)| (Reverse(score), entries[i].name.to_lowercase()));
+                *matches = scored.into_iter().map(|(i, _)| i).collect();
+                *selected = 0;
+            }
+            Self::Info {
+                query,
+                lines,
+                matches,
+                offset,
+                ..
+            } => {
+                let needle = query.to_lowercase();
+                let mut scored: Vec<(usize, usize)> = lines
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, line)| {
+                        fuzzy_score(&line.to_lowercase(), &needle).map(|score| (i, score))
+                    })
+                    .collect();
+                scored.sort_by_key(|&(i, score)| (Reverse(score), i));
+                *matches = scored.into_iter().map(|(i, _)| i).collect();
+                *offset = 0;
+            }
+            Self::Inactive | Self::Locked { .. } => {}
+        }
     }
 }
 
@@ -555,5 +599,25 @@ mod tests {
     fn fuzzy_matching() {
         assert!(fuzzy_score("visual studio code", "vsc").is_some());
         assert!(fuzzy_score("firefox", "zzz").is_none());
+    }
+
+    #[test]
+    fn info_search_filters_shortcut_and_description() {
+        let mut state = SystemUiState::info(
+            "KEYS",
+            vec![
+                "Mod1+j  focus next".into(),
+                "Mod1+Return  terminal".into(),
+                "Mod1+b  toggle bar".into(),
+            ],
+        );
+        for ch in "term".chars() {
+            state.push_char(ch);
+        }
+        let text = state.overlay_text();
+        assert!(text.contains("Mod1+Return  terminal"));
+        assert!(!text.contains("focus next"));
+        state.backspace();
+        assert!(state.overlay_text().contains("ter_"));
     }
 }
