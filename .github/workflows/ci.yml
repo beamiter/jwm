@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  check-and-test:
+    name: Check, Clippy, and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libglib2.0-dev \
+            libcairo2-dev \
+            libpango1.0-dev \
+            libasound2-dev \
+            libdbus-1-dev \
+            libudev-dev \
+            libinput-dev \
+            libseat-dev \
+            libdrm-dev \
+            libgbm-dev \
+            libegl1-mesa-dev \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxext-dev \
+            libxxf86vm-dev \
+            libxcb1-dev \
+            libxcb-composite0-dev \
+            libxcb-damage0-dev \
+            libxcb-present-dev \
+            libxcb-randr0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcursor-dev \
+            libxfixes-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libxrender-dev
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo build data
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check production targets and tests
+        run: cargo check --lib --bins --tests
+
+      - name: Run Clippy
+        run: cargo clippy --lib --bins --tests --no-deps
+
+      - name: Run tests
+        run: cargo test --lib --tests
