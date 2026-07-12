@@ -3,7 +3,7 @@
 
 Optional runtime dependencies:
 
-    python -m pip install opencv-python mediapipe mss numpy
+    python -m pip install -r tools/requirements-slime.txt
 
 The compositor consumes compact JSON datagrams from
 ``$XDG_RUNTIME_DIR/jwm-slime.sock``. Delivery is intentionally lossy: JWM keeps

@@ -60,7 +60,7 @@ Install the optional Python dependencies and X11 utility:
 
 ```bash
 sudo apt install x11-utils
-python -m pip install opencv-python mediapipe mss numpy
+python -m pip install -r tools/requirements-slime.txt
 ```
 
 Run the tracker without `--window` and click the video player when prompted:
