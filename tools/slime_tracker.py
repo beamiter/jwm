@@ -165,12 +165,18 @@ def main() -> int:
     )
     parser.add_argument("--socket", type=Path, default=default_socket_path())
     parser.add_argument("--fps", type=float, default=30.0)
-    parser.add_argument("--refract-px", type=float, default=12.0)
+    parser.add_argument("--refract-px", type=float, default=8.0)
     parser.add_argument(
         "--ocean-strength",
         type=float,
         default=0.32,
         help="continuous directional-ocean contribution in [0,1]",
+    )
+    parser.add_argument(
+        "--interaction-strength",
+        type=float,
+        default=0.55,
+        help="fingertip/palm wake strength in [0,1]",
     )
     parser.add_argument(
         "--turbulence-strength",
@@ -213,6 +219,7 @@ def main() -> int:
         parser.error("--refract-px must be positive")
     for name, value in (
         ("--ocean-strength", args.ocean_strength),
+        ("--interaction-strength", args.interaction_strength),
         ("--turbulence-strength", args.turbulence_strength),
         ("--foam-strength", args.foam_strength),
     ):
@@ -264,7 +271,8 @@ def main() -> int:
     print(
         f"tracking {hex(window_id)} at {geometry.width}x{geometry.height}; "
         f"content={tuple(args.content_rect)}; socket={args.socket}; "
-        f"ocean={args.ocean_strength:.2f} turbulence={args.turbulence_strength:.2f} "
+        f"ocean={args.ocean_strength:.2f} interaction={args.interaction_strength:.2f} "
+        f"turbulence={args.turbulence_strength:.2f} "
         f"foam={args.foam_strength:.2f}",
         file=sys.stderr,
     )
@@ -311,6 +319,7 @@ def main() -> int:
                         "content_rect": list(args.content_rect),
                         "refract_px": args.refract_px,
                         "ocean_strength": args.ocean_strength,
+                        "interaction_strength": args.interaction_strength,
                         "turbulence_strength": args.turbulence_strength,
                         "foam_strength": args.foam_strength,
                         "hands": [{"score": 1.0, "landmarks": landmarks}],

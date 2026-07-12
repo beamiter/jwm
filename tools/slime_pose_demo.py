@@ -81,8 +81,14 @@ def main() -> int:
     parser.add_argument("--center-x", type=float, default=0.50)
     parser.add_argument("--center-y", type=float, default=0.50)
     parser.add_argument("--scale", type=float, default=0.72)
-    parser.add_argument("--refract-px", type=float, default=14.0)
+    parser.add_argument("--refract-px", type=float, default=8.0)
     parser.add_argument("--ocean-strength", type=float, default=0.42)
+    parser.add_argument(
+        "--interaction-strength",
+        type=float,
+        default=0.42,
+        help="fingertip/palm wake strength in [0,1]; 0 isolates the ocean",
+    )
     parser.add_argument("--turbulence-strength", type=float, default=0.72)
     parser.add_argument("--foam-strength", type=float, default=0.82)
     args = parser.parse_args()
@@ -91,6 +97,7 @@ def main() -> int:
         parser.error("fps, scale, and refract-px must be positive")
     for name, value in (
         ("--ocean-strength", args.ocean_strength),
+        ("--interaction-strength", args.interaction_strength),
         ("--turbulence-strength", args.turbulence_strength),
         ("--foam-strength", args.foam_strength),
     ):
@@ -118,6 +125,7 @@ def main() -> int:
                 "active": True,
                 "refract_px": args.refract_px,
                 "ocean_strength": args.ocean_strength,
+                "interaction_strength": args.interaction_strength,
                 "turbulence_strength": args.turbulence_strength,
                 "foam_strength": args.foam_strength,
                 "hands": [

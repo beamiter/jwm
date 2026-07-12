@@ -24,7 +24,7 @@ surface height, horizontal velocity, and foam. A fixed 120 Hz semi-Lagrangian
 shallow-water solver adds gravity, divergence coupling, viscosity, vorticity
 enhancement, crest foam, gesture swirl, and an absorbing boundary. Persistent
 ocean waves are analytic and therefore do not consume simulation bandwidth when
-the tracker is idle. The interactive field remains alive for roughly 1.5 seconds
+the tracker is idle. The interactive field remains alive for roughly one second
 independently of the current pose; after that the GPU field is cleared once and
 the numerical solver sleeps until the next gesture.
 
@@ -44,7 +44,7 @@ This draws an animated glass hand in screen coordinates. To constrain it to a
 video window, click the window with `xwininfo`, copy its ID, and run:
 
 ```bash
-python tools/slime_pose_demo.py --window 0x04600007 --refract-px 14
+python tools/slime_pose_demo.py --window 0x04600007 --refract-px 8
 ```
 
 This test isolates the compositor shader and IPC path from MediaPipe, capture
@@ -73,7 +73,7 @@ python tools/slime_tracker.py \
   --fps 30 \
   --max-width 640 \
   --max-height 640 \
-  --refract-px 12
+  --refract-px 8
 ```
 
 The capture is downscaled only for inference; landmarks stay normalized and are
@@ -105,8 +105,9 @@ Each Unix datagram contains one compact JSON object:
   "active": true,
   "window": 73400327,
   "content_rect": [0.0, 0.0625, 1.0, 0.875],
-  "refract_px": 12.0,
+  "refract_px": 8.0,
   "ocean_strength": 0.32,
+  "interaction_strength": 0.55,
   "turbulence_strength": 0.68,
   "foam_strength": 0.78,
   "seq": 1204,
@@ -123,7 +124,7 @@ Each Unix datagram contains one compact JSON object:
 `landmarks` must contain the standard 21 MediaPipe hand points. Both legacy
 `[x,y]` points and depth-aware `[x,y,z]` points are accepted in version 1. A
 negative MediaPipe Z value brings the corresponding liquid capsule toward the
-viewer and increases its apparent thickness. The three fluid controls are
+viewer and increases its apparent thickness. The four fluid controls are
 optional and are clamped to `[0,1]`.
 
 `window` is an X11 window ID. Omit `window` only when points are normalized to
@@ -167,9 +168,13 @@ Values are clamped to `0.25..1.0`. Tracker controls can be changed independently
 ```bash
 python tools/slime_tracker.py \
   --ocean-strength 0.32 \
+  --interaction-strength 0.55 \
   --turbulence-strength 0.68 \
   --foam-strength 0.78
 ```
+
+Set `--interaction-strength 0` to inspect the analytic ocean without fingertip
+or palm wakes. This is useful when tuning directional waves independently.
 
 ## Current limitations and production path
 

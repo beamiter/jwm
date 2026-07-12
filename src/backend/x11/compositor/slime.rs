@@ -15,10 +15,11 @@ const PACKET_LIMIT: usize = 64 * 1024;
 const HOLD_TIME: Duration = Duration::from_millis(120);
 const FADE_TIME: Duration = Duration::from_millis(160);
 const RECEIVE_TIMEOUT: Duration = Duration::from_millis(100);
-const WAVE_LIFETIME: Duration = Duration::from_millis(1550);
+const WAVE_LIFETIME: Duration = Duration::from_millis(1050);
 const FINGERTIP_INDICES: [usize; 5] = [4, 8, 12, 16, 20];
 const PALM_INDICES: [usize; 5] = [0, 5, 9, 13, 17];
 const DEFAULT_OCEAN_STRENGTH: f32 = 0.28;
+const DEFAULT_INTERACTION_STRENGTH: f32 = 0.55;
 const DEFAULT_TURBULENCE_STRENGTH: f32 = 0.62;
 const DEFAULT_FOAM_STRENGTH: f32 = 0.72;
 
@@ -36,6 +37,8 @@ struct SlimePacket {
     refract_px: Option<f32>,
     #[serde(default)]
     ocean_strength: Option<f32>,
+    #[serde(default)]
+    interaction_strength: Option<f32>,
     #[serde(default)]
     turbulence_strength: Option<f32>,
     #[serde(default)]
@@ -234,6 +237,7 @@ pub(super) struct SlimeState {
     scale: f32,
     strength: f32,
     ocean_strength: f32,
+    interaction_strength: f32,
     turbulence_strength: f32,
     foam_strength: f32,
     last_update: Option<Instant>,
@@ -258,6 +262,7 @@ impl Default for SlimeState {
             scale: 48.0,
             strength: 10.0,
             ocean_strength: DEFAULT_OCEAN_STRENGTH,
+            interaction_strength: DEFAULT_INTERACTION_STRENGTH,
             turbulence_strength: DEFAULT_TURBULENCE_STRENGTH,
             foam_strength: DEFAULT_FOAM_STRENGTH,
             last_update: None,
@@ -363,7 +368,7 @@ impl SlimeState {
             params[index * 2] =
                 self.scale * 0.055 * injection.radius_scale / screen_h;
             params[index * 2 + 1] =
-                0.42 * (0.55 + injection.amplitude * 1.45);
+                (0.30 + injection.amplitude * 0.70) * self.interaction_strength;
         }
         self.pending_wave_injections.clear();
         (segments, params, count as i32)
@@ -397,6 +402,14 @@ impl SlimeState {
             return;
         }
 
+        // Keep the reference pose current while gesture wakes are disabled, so
+        // enabling them later cannot inject one long catch-up segment.
+        if self.interaction_strength <= f32::EPSILON {
+            self.wave_tips = tips;
+            self.wave_palm = palm;
+            return;
+        }
+
         let sample_dt = self.last_update.map_or(1.0 / 30.0, |last| {
             last.elapsed().as_secs_f32().clamp(1.0 / 120.0, 0.10)
         });
@@ -410,7 +423,8 @@ impl SlimeState {
             let distance = (dx * dx + dy * dy).sqrt();
             if distance >= wave_spacing && self.pending_wave_injections.len() < 10 {
                 let speed = distance / sample_dt;
-                let amplitude = (speed / (self.scale * 5.0).max(1.0)).clamp(0.16, 1.0);
+                let amplitude =
+                    (speed / (self.scale * 6.5).max(1.0)).clamp(0.10, 0.72);
                 self.pending_wave_injections.push(SlimeWaveInjection {
                     start: previous,
                     end: current,
@@ -430,7 +444,8 @@ impl SlimeState {
             let palm_spacing = (self.scale * 0.015).clamp(2.0, 6.0);
             if distance >= palm_spacing {
                 let speed = distance / sample_dt;
-                let amplitude = (speed / (self.scale * 3.5).max(1.0)).clamp(0.12, 0.85);
+                let amplitude =
+                    (speed / (self.scale * 5.0).max(1.0)).clamp(0.08, 0.58);
                 self.pending_wave_injections.push(SlimeWaveInjection {
                     start: previous,
                     end: palm,
@@ -574,6 +589,7 @@ impl SlimeState {
             }
         };
         smooth_control(&mut self.ocean_strength, packet.ocean_strength);
+        smooth_control(&mut self.interaction_strength, packet.interaction_strength);
         smooth_control(
             &mut self.turbulence_strength,
             packet.turbulence_strength,
@@ -690,6 +706,7 @@ mod tests {
             content_rect: None,
             refract_px: Some(14.0),
             ocean_strength: None,
+            interaction_strength: None,
             turbulence_strength: None,
             foam_strength: None,
             hands: vec![SlimeHand {
@@ -771,6 +788,18 @@ mod tests {
     }
 
     #[test]
+    fn zero_interaction_tracks_motion_without_emitting_wakes() {
+        let mut state = SlimeState::default();
+        let mut initial = packet_with_tip_offset(0.0);
+        initial.interaction_strength = Some(0.0);
+        assert!(state.update(initial, None, (1000.0, 1000.0)));
+
+        assert!(state.update(packet_with_tip_offset(0.08), None, (1000.0, 1000.0)));
+        assert!(state.pending_wave_injections.is_empty());
+        assert!(!state.has_live_waves());
+    }
+
+    #[test]
     fn palm_motion_emits_a_broader_wake_than_fingertips() {
         let mut state = SlimeState::default();
         assert!(state.update(packet_with_tip_offset(0.0), None, (1000.0, 1000.0)));
@@ -800,6 +829,7 @@ mod tests {
         let mut packet = packet_with_tip_offset(0.0);
         packet.hands[0].landmarks[8] = SlimeLandmark::Xyz([0.39, 0.14, -0.5]);
         packet.ocean_strength = Some(2.0);
+        packet.interaction_strength = Some(-1.0);
         packet.turbulence_strength = Some(-1.0);
         packet.foam_strength = Some(0.8);
 
@@ -807,6 +837,7 @@ mod tests {
         assert!(state.update(packet, None, (1000.0, 1000.0)));
         assert_eq!(state.depths()[8], -0.5);
         assert_eq!(state.ocean_strength(), 1.0);
+        assert_eq!(state.interaction_strength, 0.0);
         assert_eq!(state.turbulence_strength(), 0.0);
         assert_eq!(state.foam_strength(), 0.8);
     }

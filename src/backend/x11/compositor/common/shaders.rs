@@ -553,15 +553,15 @@ void main() {
         left.gb + right.gb + top.gb + bottom.gb - 4.0 * velocity;
 
     const float wave_speed = 27.0; // grid cells / second; CFL ~= 0.23 at 120 Hz
-    const float drag = 1.65;
-    const float viscosity = 0.72;
+    const float drag = 2.20;
+    const float viscosity = 0.95;
     velocity += u_time_step * (
         -wave_speed * wave_speed * gradient_height
         + viscosity * laplacian_velocity
     );
     velocity /= 1.0 + drag * u_time_step;
     height += u_time_step * (-divergence + 0.85 * laplacian_height);
-    height /= 1.0 + 0.12 * u_time_step;
+    height /= 1.0 + 0.28 * u_time_step;
 
     // Vorticity confinement restores small rotating structures that ordinary
     // semi-Lagrangian advection would otherwise dissipate.
@@ -610,10 +610,10 @@ void main() {
         );
         side = side == 0.0 ? 1.0 : side;
 
-        velocity += gesture_direction * wake * force * 52.0;
+        velocity += gesture_direction * wake * force * 38.0;
         velocity += swirl_direction * side * wake * force
             * (14.0 * u_turbulence);
-        height += displacement * force * 0.035;
+        height += displacement * force * 0.024;
         foam = max(foam, wake * force * 0.35 * u_foam);
     }
 
@@ -815,6 +815,21 @@ float slime_surface_sdf(vec2 p) {
     return d + wave * scale * 0.009 * near_edge;
 }
 
+float slime_ocean_height(vec2 p) {
+    // A small cross-warp keeps crests from becoming ruler-straight while the
+    // broader set of directions avoids an obvious repeating stripe pattern.
+    vec2 q = p + vec2(
+        sin(p.y * 3.1 + u_slime_time * 0.17),
+        sin(p.x * 2.7 - u_slime_time * 0.14)
+    ) * 0.045;
+    return 0.070 * sin(dot(q, normalize(vec2( 1.00,  0.18))) *  7.6 - u_slime_time * 1.05)
+        + 0.043 * sin(dot(q, normalize(vec2( 0.62,  0.78))) * 11.8 - u_slime_time * 1.52 + 1.7)
+        + 0.029 * sin(dot(q, normalize(vec2(-0.48,  0.88))) * 16.7 - u_slime_time * 2.02 + 4.1)
+        + 0.020 * sin(dot(q, normalize(vec2( 0.91, -0.42))) * 22.9 - u_slime_time * 2.55 + 0.8)
+        + 0.014 * sin(dot(q, normalize(vec2(-0.83, -0.56))) * 30.5 - u_slime_time * 3.12 + 2.9)
+        + 0.010 * sin(dot(q, normalize(vec2( 0.24, -0.97))) * 39.0 - u_slime_time * 3.75 + 5.2);
+}
+
 // Returns height, Sobel-compatible gradient X/Y, and axial curvature.
 vec4 slime_ocean_profile(vec2 pixel) {
     vec2 surface_size = max(
@@ -825,34 +840,15 @@ vec4 slime_ocean_profile(vec2 pixel) {
     float surface_aspect = surface_size.x / surface_size.y;
     vec2 p = vec2(local.x * surface_aspect, local.y);
 
-    vec2 d0 = normalize(vec2(1.0, 0.18));
-    vec2 d1 = normalize(vec2(0.57, 0.82));
-    vec2 d2 = normalize(vec2(-0.31, 0.95));
-    float f0 = 8.5;
-    float f1 = 14.5;
-    float f2 = 25.0;
-    float phase0 = dot(p, d0) * f0 - u_slime_time * 1.20;
-    float phase1 = dot(p, d1) * f1 - u_slime_time * 1.86 + 1.7;
-    float phase2 = dot(p, d2) * f2 - u_slime_time * 2.75 + 4.1;
-    float a0 = 0.105;
-    float a1 = 0.052;
-    float a2 = 0.024;
-
-    float height = a0 * sin(phase0)
-        + a1 * sin(phase1)
-        + a2 * sin(phase2);
-    vec2 derivative = d0 * (a0 * f0 * cos(phase0))
-        + d1 * (a1 * f1 * cos(phase1))
-        + d2 * (a2 * f2 * cos(phase2));
-    float second_derivative = -a0 * f0 * f0 * sin(phase0)
-        - a1 * f1 * f1 * sin(phase1)
-        - a2 * f2 * f2 * sin(phase2);
-
     vec2 grid_pixels = u_slime_screen_size * u_slime_wave_texel;
-    vec2 pixel_gradient = derivative / surface_size.y;
-    vec2 sobel_gradient = pixel_gradient * grid_pixels * 8.0;
-    float cell_scale = grid_pixels.y / surface_size.y;
-    float curvature = second_derivative * cell_scale * cell_scale * 0.25;
+    vec2 step_p = grid_pixels / surface_size.y;
+    float height = slime_ocean_height(p);
+    float left = slime_ocean_height(p - vec2(step_p.x, 0.0));
+    float right = slime_ocean_height(p + vec2(step_p.x, 0.0));
+    float top = slime_ocean_height(p - vec2(0.0, step_p.y));
+    float bottom = slime_ocean_height(p + vec2(0.0, step_p.y));
+    vec2 sobel_gradient = vec2(right - left, bottom - top) * 4.0;
+    float curvature = (left + right + top + bottom) * 0.25 - height;
     return vec4(height, sobel_gradient, curvature);
 }
 
@@ -897,7 +893,7 @@ void main() {
         water_skin += texture(u_texture, sample_uv + vec2( blur_step.x, -blur_step.y)).rgb * 0.08;
         water_skin += texture(u_texture, sample_uv + vec2(-blur_step.x, -blur_step.y)).rgb * 0.08;
         water_skin *= vec3(0.965, 1.005, 1.035);
-        c.rgb = mix(c.rgb, water_skin, slime_surface_mask * 0.64);
+        c.rgb = mix(c.rgb, water_skin, slime_surface_mask * 0.32);
     }
 
     // Waves cover the complete target surface. The hand guide alone uses its
@@ -955,8 +951,8 @@ void main() {
 
         float grad_len = length(grad);
         vec2 grad_dir = grad_len > 0.00001 ? grad / grad_len : vec2(0.0);
-        vec2 refraction_px = grad * (0.72 * u_slime_strength * 92.0);
-        vec2 lens_px = grad_dir * lap * (0.26 * u_slime_strength * 230.0);
+        vec2 refraction_px = grad * (0.72 * u_slime_strength * 58.0);
+        vec2 lens_px = grad_dir * lap * (0.26 * u_slime_strength * 125.0);
         vec2 transport_px = clamp(
             flow_velocity,
             vec2(-24.0),
@@ -987,8 +983,8 @@ void main() {
         )).b;
 
         float activity = smoothstep(
-            0.00035,
-            0.008,
+            0.0007,
+            0.014,
             grad_len + abs(center) * 0.42 + min(flow_speed * 0.00045, 0.02)
         ) * slime_surface_mask;
         float foam_variation = 0.80 + 0.20 * sin(
@@ -1001,7 +997,7 @@ void main() {
         ) * slime_surface_mask;
         activity = max(activity, foam_visible * 0.92);
 
-        float wave_brightness = 1.0 + clamp(center * 4.2, -0.55, 0.68);
+        float wave_brightness = 1.0 + clamp(center * 2.4, -0.30, 0.38);
         liquid *= wave_brightness;
         liquid = mix(
             liquid,
@@ -1023,7 +1019,7 @@ void main() {
         );
         vec3 reflection = texture(u_texture, reflection_uv).rgb
             * vec3(0.80, 0.90, 1.08);
-        liquid = mix(liquid, reflection, fresnel * activity * 0.62);
+        liquid = mix(liquid, reflection, fresnel * activity * 0.36);
 
         vec3 light_dir = normalize(vec3(0.4, 0.7, 1.0));
         float ndoth = max(dot(normal, light_dir), 0.0);
@@ -1032,8 +1028,8 @@ void main() {
         float caustic_mask = smoothstep(0.04, 0.10, abs(center))
             * smoothstep(0.01, 0.06, abs(lap));
         liquid += vec3(0.86, 0.95, 1.0)
-            * (specular * activity * 1.35 + caustic_mask * 0.58);
-        float signed_curvature = clamp(lap * 26.0, -1.0, 1.0) * activity;
+            * (specular * activity * 0.72 + caustic_mask * 0.24);
+        float signed_curvature = clamp(lap * 17.0, -1.0, 1.0) * activity;
         float interference = smoothstep(0.008, 0.045, abs(lap))
             * smoothstep(0.002, 0.018, grad_len);
         liquid += vec3(0.84, 0.94, 1.0)
@@ -1042,14 +1038,14 @@ void main() {
             * (0.30 + interference * 0.18);
         vec2 ridge_light_dir = normalize(vec2(0.42, 0.91));
         float ridge = clamp(
-            dot(grad_dir, ridge_light_dir) * grad_len * 155.0,
+            dot(grad_dir, ridge_light_dir) * grad_len * 86.0,
             -1.0,
             1.0
         ) * activity;
         float gradient_rim = smoothstep(0.0012, 0.014, grad_len) * activity;
         liquid += vec3(0.86, 0.95, 1.0) * gradient_rim * 0.16;
-        liquid += vec3(0.92, 0.98, 1.0) * max(ridge, 0.0) * 0.48;
-        liquid *= 1.0 - max(-ridge, 0.0) * 0.58;
+        liquid += vec3(0.92, 0.98, 1.0) * max(ridge, 0.0) * 0.25;
+        liquid *= 1.0 - max(-ridge, 0.0) * 0.30;
 
         vec3 foam_color = vec3(0.90, 0.97, 1.0);
         liquid = mix(liquid, foam_color, foam_visible * 0.78);
