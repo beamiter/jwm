@@ -326,7 +326,7 @@ impl Jwm {
             }
         }
 
-        // Include override-redirect windows (menus, dmenu, tooltips) on top.
+        // Include override-redirect windows (menus, launchers, tooltips) on top.
         // These are not managed by the WM but must be composited.
         // Filter out the compositor's overlay window to avoid feedback loops.
         // Use cached geometries to avoid synchronous GetGeometry round-trips

@@ -65,7 +65,10 @@ pub struct AppearanceConfig {
     pub border_px: u32,
     pub gap_px: u32,
     pub snap: u32,
-    pub dmenu_font: String,
+    /// Fontconfig/Xft-style font used by JWM-owned overlays such as the lock
+    /// screen, application launcher and keybinding viewer.
+    #[serde(alias = "dmenu_font")]
+    pub system_ui_font: String,
     pub status_bar_padding: i32,
     pub status_bar_height: i32,
 }
@@ -1044,7 +1047,7 @@ impl Default for Config {
                     border_px: 3,
                     gap_px: 5,
                     snap: 32,
-                    dmenu_font: "SauceCodePro Nerd Font Regular 11".to_string(),
+                    system_ui_font: "SauceCodePro Nerd Font Regular 11".to_string(),
                     status_bar_padding: 5,
                     status_bar_height: 42,
                 },
@@ -1875,8 +1878,8 @@ impl Config {
         self.inner.appearance.status_bar_height
     }
 
-    pub fn dmenu_font(&self) -> &str {
-        &self.inner.appearance.dmenu_font
+    pub fn system_ui_font(&self) -> &str {
+        &self.inner.appearance.system_ui_font
     }
 
     pub fn show_bar(&self) -> bool {
@@ -2633,7 +2636,7 @@ pub fn reload_global() -> Result<(), ConfigError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, key_function_is_repeatable};
+    use super::{Config, TomlConfig, key_function_is_repeatable};
 
     #[test]
     fn key_repeat_policy_only_allows_incremental_actions() {
@@ -2706,6 +2709,18 @@ mod tests {
         assert!(
             cfg.set_value("behavior.corner_radius", &serde_json::json!(65.0))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_dmenu_font_deserializes_as_system_ui_font() {
+        let cfg = Config::default();
+        let modern = toml::to_string(&cfg.inner).unwrap();
+        let legacy = modern.replacen("system_ui_font", "dmenu_font", 1);
+        let parsed: TomlConfig = toml::from_str(&legacy).unwrap();
+        assert_eq!(
+            parsed.appearance.system_ui_font,
+            "SauceCodePro Nerd Font Regular 11"
         );
     }
 }

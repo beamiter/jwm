@@ -345,7 +345,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
     fn update_system_ui_text_texture(&mut self, text: &str) {
         let config = crate::config::CONFIG.load();
-        let description = config.dmenu_font();
+        let description = config.system_ui_font();
         let size = crate::backend::compositor_font::ui_font_pixel_size(description);
         let cache_key = format!("{description}\0{size}\0{text}");
         if cache_key == self.hud_text_cache && self.hud_text_texture.is_some() {

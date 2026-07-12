@@ -146,7 +146,7 @@ pub struct Jwm {
     pub config_reload_last_success: Option<bool>,
     pub config_reload_last_error: Option<String>,
 
-    /// Override-redirect windows (menus, tooltips, dmenu, etc.) that are
+    /// Override-redirect windows (menus, tooltips, launchers, etc.) that are
     /// currently mapped.  These are not managed by the WM but must be rendered
     /// by the compositor when COMPOSITE_REDIRECT_MANUAL is active.
     pub override_redirect_windows: HashSet<WindowId>,

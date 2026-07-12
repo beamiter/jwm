@@ -1833,7 +1833,7 @@ impl WaylandCompositor {
             return;
         };
         let config = crate::config::CONFIG.load();
-        let description = config.dmenu_font();
+        let description = config.system_ui_font();
         let size = crate::backend::compositor_font::ui_font_pixel_size(description);
         let cache_key = format!("{description}\0{size}\0{}", overlay.text);
         if cache_key != self.hud_text_cache {
