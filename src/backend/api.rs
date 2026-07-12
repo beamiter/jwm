@@ -207,6 +207,15 @@ pub struct ScreenInfo {
     pub height: i32,
 }
 
+/// Backend-neutral compositor UI drawn above every client.  Input and policy
+/// live in JWM; backends only present this snapshot.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SystemUiOverlay {
+    pub text: String,
+    /// A lock overlay is opaque; other system UI dims the current desktop.
+    pub locked: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Capabilities {
     pub can_warp_pointer: bool,
@@ -1195,10 +1204,7 @@ pub trait CompositorControl: Send {
 
 /// Capture, thumbnail, recording and media-timing operations.
 pub trait CompositorMedia: Send {
-    fn take_screenshot_to_file(
-        &mut self,
-        _path: &std::path::Path,
-    ) -> Result<bool, BackendError> {
+    fn take_screenshot_to_file(&mut self, _path: &std::path::Path) -> Result<bool, BackendError> {
         Ok(false)
     }
 
@@ -1243,6 +1249,7 @@ pub trait CompositorMedia: Send {
 
 /// Workspace transition and interactive preview effects.
 pub trait CompositorWorkspaceEffects: Send {
+    fn compositor_set_system_ui(&mut self, _overlay: Option<SystemUiOverlay>) {}
     fn compositor_notify_tag_switch(
         &mut self,
         _duration: std::time::Duration,
@@ -1319,20 +1326,34 @@ pub trait CompositorAnnotation: Send {
 
 /// Output hardware capabilities and runtime display controls.
 pub trait DisplayControl: Send {
-    fn query_vrr_capabilities(&self, _output: OutputId) -> Option<VrrCapabilities> { None }
-    fn query_kms_color_pipeline_caps(&self, _output: OutputId) -> Option<KmsColorPipelineCaps> { None }
-    fn set_vrr_enabled(&mut self, _output: OutputId, _enabled: bool) -> Result<(), BackendError> { Ok(()) }
+    fn query_vrr_capabilities(&self, _output: OutputId) -> Option<VrrCapabilities> {
+        None
+    }
+    fn query_kms_color_pipeline_caps(&self, _output: OutputId) -> Option<KmsColorPipelineCaps> {
+        None
+    }
+    fn set_vrr_enabled(&mut self, _output: OutputId, _enabled: bool) -> Result<(), BackendError> {
+        Ok(())
+    }
     fn set_hdr_metadata(&mut self, _output: OutputId, _enabled: bool) -> Result<(), BackendError> {
-        Err(BackendError::Unsupported("HDR metadata push not implemented"))
+        Err(BackendError::Unsupported(
+            "HDR metadata push not implemented",
+        ))
     }
 }
 
 /// Lightweight compositor scheduling and state queries.
 pub trait RenderScheduler: Send {
     fn request_render(&mut self) {}
-    fn has_compositor(&self) -> bool { false }
-    fn compositor_needs_render(&self) -> bool { false }
-    fn compositor_overlay_window(&self) -> Option<WindowId> { None }
+    fn has_compositor(&self) -> bool {
+        false
+    }
+    fn compositor_needs_render(&self) -> bool {
+        false
+    }
+    fn compositor_overlay_window(&self) -> Option<WindowId> {
+        None
+    }
 }
 
 pub trait EventHandler {
@@ -1450,10 +1471,15 @@ pub trait Backend:
         Ok(false)
     }
 
-    fn set_compositor_enabled(&mut self, _enabled: bool) -> Result<bool, BackendError> { Ok(false) }
-    fn has_partial_damage(&self) -> bool { false }
-    fn set_partial_damage(&mut self, _enabled: bool) -> Result<bool, BackendError> { Ok(false) }
-
+    fn set_compositor_enabled(&mut self, _enabled: bool) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+    fn has_partial_damage(&self) -> bool {
+        false
+    }
+    fn set_partial_damage(&mut self, _enabled: bool) -> Result<bool, BackendError> {
+        Ok(false)
+    }
 }
 
 // 兼容性定义

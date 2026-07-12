@@ -8,17 +8,6 @@ use std::process::Command;
 use super::Jwm;
 
 impl Jwm {
-    fn resolve_fuzzel_path_launcher() -> Vec<String> {
-        // fuzzel's default mode only searches desktop entries, which misses
-        // command-only tools like jterm1/2/3/4. Feed it PATH executables via
-        // dmenu mode so it behaves like a real command launcher.
-        vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "compgen -c | sort -u | fuzzel --dmenu --prompt 'run> ' | { IFS= read -r cmd || exit 0; [ -n \"$cmd\" ] && exec ${SHELL:-/bin/bash} -lc \"$cmd\"; }".to_string(),
-        ]
-    }
-
     fn is_smithay_backend(backend: &dyn Backend) -> bool {
         backend
             .as_any()
@@ -126,30 +115,6 @@ impl Jwm {
         }
     }
 
-    fn resolve_launcher(cmd: &str, backend: &dyn Backend) -> Vec<String> {
-        if cmd != "jwm-launcher" {
-            return vec![cmd.to_string()];
-        }
-        if Self::is_smithay_backend(backend) {
-            for (bin, args) in [("fuzzel", vec![]), ("wofi", vec!["--show", "run"])] {
-                if std::process::Command::new("which")
-                    .arg(bin)
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false)
-                {
-                    if bin == "fuzzel" {
-                        return Self::resolve_fuzzel_path_launcher();
-                    }
-                    let mut v = vec![bin.to_string()];
-                    v.extend(args.iter().map(|s| s.to_string()));
-                    return v;
-                }
-            }
-        }
-        vec!["dmenu_run".to_string()]
-    }
-
     pub(crate) fn spawn(
         &mut self,
         _backend: &mut dyn Backend,
@@ -157,11 +122,13 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         info!("[spawn]");
 
+        if matches!(arg, WMArgEnum::StringVec(v) if v.first().is_some_and(|s| s == "jwm-launcher"))
+        {
+            return self.app_launcher(_backend, &WMArgEnum::Int(0));
+        }
+
         let mut mut_arg: WMArgEnum = arg.clone();
         if let WMArgEnum::StringVec(ref mut v) = mut_arg {
-            if v.first().map(|s| s.as_str()) == Some("jwm-launcher") {
-                *v = Self::resolve_launcher("jwm-launcher", _backend);
-            }
             info!("[spawn] spawning command: {:?}", v);
 
             let mut command = Command::new(&v[0]);

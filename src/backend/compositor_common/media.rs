@@ -39,7 +39,10 @@ pub fn select_recording_encoder(configured: &str) -> RecordingEncoder {
             "-f",
             "null",
             "-",
-        ]) => RecordingEncoder::Nvenc,
+        ]) =>
+        {
+            RecordingEncoder::Nvenc
+        }
         _ if std::path::Path::new("/dev/dri/renderD128").exists()
             && probe(&[
                 "-vaapi_device",
@@ -55,7 +58,10 @@ pub fn select_recording_encoder(configured: &str) -> RecordingEncoder {
                 "-f",
                 "null",
                 "-",
-            ]) => RecordingEncoder::Vaapi,
+            ]) =>
+        {
+            RecordingEncoder::Vaapi
+        }
         _ => RecordingEncoder::Software,
     }
 }
@@ -69,4 +75,3 @@ fn probe(args: &[&str]) -> bool {
         .status()
         .is_ok_and(|status| status.success())
 }
-

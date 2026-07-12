@@ -3006,8 +3006,11 @@ impl KmsState {
                 .load()
                 .behavior()
                 .fullscreen_unredirect;
+            let system_ui_active = compositor.as_ref().is_some_and(|c| c.has_system_ui());
             let (direct_scanout_eligible, direct_scanout_reason) = if compositor.is_none() {
                 (false, "compositor disabled".to_string())
+            } else if system_ui_active {
+                (false, "JWM system UI requires composition".to_string())
             } else if !fullscreen_unredirect {
                 (false, "fullscreen_unredirect disabled".to_string())
             } else if !elements.is_empty() {

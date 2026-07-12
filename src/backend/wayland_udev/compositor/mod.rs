@@ -43,12 +43,12 @@ mod profiler;
 #[allow(dead_code, unreachable_pub)]
 mod recording;
 mod render;
-mod screenshot_readback;
 #[allow(dead_code, unreachable_pub)]
 mod render_batcher;
 #[allow(dead_code, unreachable_pub)]
 mod render_stats;
 mod rules;
+mod screenshot_readback;
 #[allow(dead_code, unreachable_pub)]
 mod shader_cache;
 #[allow(dead_code, unreachable_pub)]
@@ -865,6 +865,7 @@ pub(crate) struct WaylandCompositor {
     hud_text_width: u32,
     hud_text_height: u32,
     hud_text_cache: String,
+    system_ui: Option<crate::backend::api::SystemUiOverlay>,
     compositor_start_time: Instant,
 
     // --- Animation parameters ---
@@ -1675,6 +1676,7 @@ impl WaylandCompositor {
                 hud_text_width: 0,
                 hud_text_height: 0,
                 hud_text_cache: String::new(),
+                system_ui: None,
                 compositor_start_time: now,
 
                 // Animation parameters
@@ -1972,16 +1974,8 @@ impl WaylandCompositor {
         let avg = self.perf_metrics.avg_frame_time().as_secs_f32() * 1000.0;
         let max = self.perf_metrics.max_frame_time().as_secs_f32() * 1000.0;
         let min = self.perf_metrics.min_frame_time().as_secs_f32() * 1000.0;
-        let p95 = self
-            .perf_metrics
-            .frame_time_percentile(0.95)
-            .as_secs_f32()
-            * 1000.0;
-        let p99 = self
-            .perf_metrics
-            .frame_time_percentile(0.99)
-            .as_secs_f32()
-            * 1000.0;
+        let p95 = self.perf_metrics.frame_time_percentile(0.95).as_secs_f32() * 1000.0;
+        let p99 = self.perf_metrics.frame_time_percentile(0.99).as_secs_f32() * 1000.0;
         let temporal_rate = if self.temporal_blur_total_count > 0 {
             100.0 * self.temporal_blur_reuse_count as f32 / self.temporal_blur_total_count as f32
         } else {

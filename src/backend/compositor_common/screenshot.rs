@@ -58,7 +58,9 @@ pub fn save_png_async(path: std::path::PathBuf, pixels: Vec<u8>, width: u32, hei
     std::thread::spawn(move || {
         let tmp_path = path.with_extension(format!(
             "{}.tmp",
-            path.extension().and_then(|ext| ext.to_str()).unwrap_or("png")
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("png")
         ));
         let result = image::save_buffer_with_format(
             &tmp_path,
@@ -90,7 +92,11 @@ mod tests {
 
         let mut requests = queue.take_all();
         assert!(!queue.has_pending());
-        assert!(matches!(requests.pop_front(), Some(ScreenshotRequest::Full(path)) if path == std::path::Path::new("first.png")));
-        assert!(matches!(requests.pop_front(), Some(ScreenshotRequest::Region { path, x: 1, y: 2, width: 3, height: 4 }) if path == std::path::Path::new("second.png")));
+        assert!(
+            matches!(requests.pop_front(), Some(ScreenshotRequest::Full(path)) if path == std::path::Path::new("first.png"))
+        );
+        assert!(
+            matches!(requests.pop_front(), Some(ScreenshotRequest::Region { path, x: 1, y: 2, width: 3, height: 4 }) if path == std::path::Path::new("second.png"))
+        );
     }
 }

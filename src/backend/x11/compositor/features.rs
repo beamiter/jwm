@@ -15,6 +15,10 @@ use std::sync::Arc;
 use std::sync::mpsc;
 
 impl<C: CompositorConnection> Compositor<C> {
+    pub(crate) fn set_system_ui(&mut self, overlay: Option<crate::backend::api::SystemUiOverlay>) {
+        self.system_ui = overlay;
+        self.needs_render = true;
+    }
     pub(crate) fn has_partial_damage(&self) -> bool {
         self.partial_damage_enabled
     }
@@ -587,7 +591,7 @@ impl<C: CompositorConnection> Compositor<C> {
             .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
 
         use crate::backend::compositor_common::media::{
-            select_recording_encoder, RecordingEncoder,
+            RecordingEncoder, select_recording_encoder,
         };
         let encoder = select_recording_encoder(&self.recording_encoder);
         // Ubuntu/Debian's ffmpeg builds expose the software H.264 encoder as
@@ -624,13 +628,17 @@ impl<C: CompositorConnection> Compositor<C> {
         ]);
         match encoder {
             RecordingEncoder::Nvenc => args.extend_from_slice(&["-vf", "vflip"]),
-            RecordingEncoder::Vaapi => args.extend_from_slice(&["-vf", "vflip,format=nv12,hwupload"]),
+            RecordingEncoder::Vaapi => {
+                args.extend_from_slice(&["-vf", "vflip,format=nv12,hwupload"])
+            }
             RecordingEncoder::Software => args.extend_from_slice(&["-vf", "vflip"]),
         }
         args.push("-c:v");
         args.push(codec_name);
         match encoder {
-            RecordingEncoder::Vaapi => args.extend_from_slice(&["-rc_mode", "CQP", "-qp", &quality_str]),
+            RecordingEncoder::Vaapi => {
+                args.extend_from_slice(&["-rc_mode", "CQP", "-qp", &quality_str])
+            }
             _ => args.extend_from_slice(&["-b:v", bitrate]),
         }
         args.extend_from_slice(&["-r", &fps_str, "-movflags", "+faststart", "-y", output_path]);

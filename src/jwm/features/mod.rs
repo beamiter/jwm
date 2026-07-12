@@ -11,12 +11,14 @@ pub mod magnifier;
 pub mod overview;
 pub mod recording;
 pub mod screenshot;
+pub mod system_ui;
 pub mod toggles;
 
 pub use magnifier::MagnifierState;
 pub use overview::OverviewState;
 pub use recording::RecordingState;
 pub use screenshot::ScreenshotState;
+pub use system_ui::SystemUiState;
 
 /// 所有特性的组合状态
 #[derive(Debug, Default, Clone)]
@@ -25,6 +27,8 @@ pub struct FeatureStates {
     pub overview: OverviewState,
     pub recording: RecordingState,
     pub magnifier: MagnifierState,
+    /// Built-in lock screen / application launcher.
+    pub system_ui: SystemUiState,
     /// Peek 模式 (Boss Key) - 所有窗口淡出
     pub peek_active: bool,
     /// Expose / Mission Control 模式
@@ -43,6 +47,7 @@ impl FeatureStates {
     /// 检查是否有任何特殊模式激活
     pub fn has_active_feature(&self) -> bool {
         self.screenshot.active
+            || self.system_ui.is_active()
             || self.overview.active
             || self.recording.active
             || self.magnifier.enabled
@@ -54,6 +59,7 @@ impl FeatureStates {
     /// 禁用所有特性（紧急退出）
     pub fn disable_all(&mut self) {
         self.screenshot.cancel();
+        self.system_ui.cancel();
         self.overview.deactivate();
         self.recording.cancel();
         self.magnifier.disable();

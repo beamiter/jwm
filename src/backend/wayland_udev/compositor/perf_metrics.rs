@@ -28,8 +28,7 @@ impl TimingHistory {
                 let evicted_nanos = evicted.as_nanos();
                 self.total_nanos = self.total_nanos.saturating_sub(evicted_nanos);
                 if evicted_was_recent {
-                    self.recent_total_nanos =
-                        self.recent_total_nanos.saturating_sub(evicted_nanos);
+                    self.recent_total_nanos = self.recent_total_nanos.saturating_sub(evicted_nanos);
                 }
             }
         }
@@ -42,9 +41,8 @@ impl TimingHistory {
         if self.samples.len() > RECENT_SAMPLES {
             let expired_index = self.samples.len() - RECENT_SAMPLES - 1;
             if let Some(expired) = self.samples.get(expired_index) {
-                self.recent_total_nanos = self
-                    .recent_total_nanos
-                    .saturating_sub(expired.as_nanos());
+                self.recent_total_nanos =
+                    self.recent_total_nanos.saturating_sub(expired.as_nanos());
             }
         }
     }
@@ -83,10 +81,7 @@ fn duration_from_nanos(nanos: u128) -> Duration {
         return Duration::MAX;
     }
 
-    Duration::new(
-        seconds as u64,
-        (nanos % NANOS_PER_SECOND) as u32,
-    )
+    Duration::new(seconds as u64, (nanos % NANOS_PER_SECOND) as u32)
 }
 
 pub struct PerfMetrics {

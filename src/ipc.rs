@@ -129,6 +129,8 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
     match name {
         // --- Window management ---
         "focusstack" => Ok((Jwm::focusstack as WMFuncType, parse_int_arg(args, 1))),
+        "app_launcher" => Ok((Jwm::app_launcher as WMFuncType, WMArgEnum::Int(0))),
+        "lock_screen" => Ok((Jwm::lock_screen as WMFuncType, WMArgEnum::Int(0))),
         "killclient" => Ok((Jwm::killclient, parse_int_arg(args, 0))),
         "zoom" => Ok((Jwm::zoom, parse_int_arg(args, 0))),
         "togglefloating" => Ok((Jwm::togglefloating, parse_int_arg(args, 0))),

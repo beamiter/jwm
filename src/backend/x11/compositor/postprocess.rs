@@ -152,26 +152,25 @@ impl<C: CompositorConnection> Compositor<C> {
             let second = Self::create_slime_wave_target(&self.gl, width, height);
             match (first, second) {
                 (Ok((fbo_a, tex_a)), Ok((fbo_b, tex_b))) => {
-                    let pressure_a =
-                        Self::create_slime_pressure_target(&self.gl, width, height);
-                    let pressure_b =
-                        Self::create_slime_pressure_target(&self.gl, width, height);
+                    let pressure_a = Self::create_slime_pressure_target(&self.gl, width, height);
+                    let pressure_b = Self::create_slime_pressure_target(&self.gl, width, height);
                     match (pressure_a, pressure_b) {
-                        (Ok((pressure_fbo_a, pressure_tex_a)), Ok((pressure_fbo_b, pressure_tex_b))) => {
-                            Some(SlimeWaveSimulation {
-                                fbos: [fbo_a, fbo_b],
-                                textures: [tex_a, tex_b],
-                                pressure_fbos: [pressure_fbo_a, pressure_fbo_b],
-                                pressure_textures: [pressure_tex_a, pressure_tex_b],
-                                front: 0,
-                                pressure_iterations,
-                                width,
-                                height,
-                                last_tick: std::time::Instant::now(),
-                                accumulated_time: 1.0 / 120.0,
-                                active: false,
-                            })
-                        }
+                        (
+                            Ok((pressure_fbo_a, pressure_tex_a)),
+                            Ok((pressure_fbo_b, pressure_tex_b)),
+                        ) => Some(SlimeWaveSimulation {
+                            fbos: [fbo_a, fbo_b],
+                            textures: [tex_a, tex_b],
+                            pressure_fbos: [pressure_fbo_a, pressure_fbo_b],
+                            pressure_textures: [pressure_tex_a, pressure_tex_b],
+                            front: 0,
+                            pressure_iterations,
+                            width,
+                            height,
+                            last_tick: std::time::Instant::now(),
+                            accumulated_time: 1.0 / 120.0,
+                            active: false,
+                        }),
                         (pressure_a, pressure_b) => {
                             self.gl.delete_framebuffer(fbo_a);
                             self.gl.delete_texture(tex_a);
@@ -216,13 +215,11 @@ impl<C: CompositorConnection> Compositor<C> {
                 if simulation.active {
                     self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
                     for fbo in &simulation.fbos {
-                        self.gl
-                            .bind_framebuffer(glow::FRAMEBUFFER, Some(*fbo));
+                        self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(*fbo));
                         self.gl.clear(glow::COLOR_BUFFER_BIT);
                     }
                     for fbo in &simulation.pressure_fbos {
-                        self.gl
-                            .bind_framebuffer(glow::FRAMEBUFFER, Some(*fbo));
+                        self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(*fbo));
                         self.gl.clear(glow::COLOR_BUFFER_BIT);
                     }
                     self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
@@ -279,8 +276,7 @@ impl<C: CompositorConnection> Compositor<C> {
             );
             let turbulence = self.slime_state.turbulence_strength();
             let projection_t = ((turbulence - 0.12) / 0.70).clamp(0.0, 1.0);
-            let projection_amount =
-                projection_t * projection_t * (3.0 - 2.0 * projection_t);
+            let projection_amount = projection_t * projection_t * (3.0 - 2.0 * projection_t);
             if projection_amount > 0.001 {
                 self.gl.use_program(Some(self.slime_pressure_program));
                 self.gl.uniform_matrix_4_f32_slice(
@@ -358,10 +354,8 @@ impl<C: CompositorConnection> Compositor<C> {
 
                     // Seed pressure=0 and retain the predicted velocity
                     // divergence in G for every Jacobi iteration.
-                    self.gl.bind_framebuffer(
-                        glow::FRAMEBUFFER,
-                        Some(simulation.pressure_fbos[0]),
-                    );
+                    self.gl
+                        .bind_framebuffer(glow::FRAMEBUFFER, Some(simulation.pressure_fbos[0]));
                     self.gl.active_texture(glow::TEXTURE1);
                     self.gl.bind_texture(glow::TEXTURE_2D, None);
                     self.gl.active_texture(glow::TEXTURE0);
@@ -393,10 +387,8 @@ impl<C: CompositorConnection> Compositor<C> {
 
                     // Project the provisional state into the other state target.
                     let projected = 1 - simulation.front;
-                    self.gl.bind_framebuffer(
-                        glow::FRAMEBUFFER,
-                        Some(simulation.fbos[projected]),
-                    );
+                    self.gl
+                        .bind_framebuffer(glow::FRAMEBUFFER, Some(simulation.fbos[projected]));
                     self.gl.active_texture(glow::TEXTURE0);
                     self.gl.bind_texture(
                         glow::TEXTURE_2D,

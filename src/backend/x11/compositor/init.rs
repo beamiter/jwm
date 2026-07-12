@@ -739,8 +739,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 aspect: gl.get_uniform_location(slime_wave_program, "u_aspect"),
                 turbulence: gl.get_uniform_location(slime_wave_program, "u_turbulence"),
                 foam: gl.get_uniform_location(slime_wave_program, "u_foam"),
-                injection_count: gl
-                    .get_uniform_location(slime_wave_program, "u_injection_count"),
+                injection_count: gl.get_uniform_location(slime_wave_program, "u_injection_count"),
                 injections: gl.get_uniform_location(slime_wave_program, "u_injections[0]"),
                 injection_params: gl
                     .get_uniform_location(slime_wave_program, "u_injection_params[0]"),
@@ -1332,6 +1331,7 @@ impl<C: CompositorConnection> Compositor<C> {
             hud_text_width: 0,
             hud_text_height: 0,
             hud_text_cache: String::new(),
+            system_ui: None,
             debug_hud: behavior.debug_hud,
             sys_stats: crate::backend::sys_stats::SysStatsSampler::new(),
             frame_stats: FrameStats::new(),

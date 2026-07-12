@@ -74,7 +74,7 @@ impl RecordingState {
         let size = format!("{}x{}", width, height);
         let fps = fps.to_string();
         use crate::backend::compositor_common::media::{
-            select_recording_encoder, RecordingEncoder,
+            RecordingEncoder, select_recording_encoder,
         };
         let encoder = select_recording_encoder(configured_encoder);
 
@@ -84,17 +84,7 @@ impl RecordingState {
             args.extend_from_slice(&["-vaapi_device", "/dev/dri/renderD128"]);
         }
         args.extend_from_slice(&[
-            "-y",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgba",
-            "-s",
-            &size,
-            "-r",
-            &fps,
-            "-i",
-            "pipe:0",
+            "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", &size, "-r", &fps, "-i", "pipe:0",
             // OpenGL's origin is bottom-left, unlike normal video.
             "-vf",
         ]);
@@ -112,15 +102,7 @@ impl RecordingState {
                 &quality,
             ]),
             RecordingEncoder::Software => args.extend_from_slice(&[
-                "vflip",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "fast",
-                "-crf",
-                "23",
-                "-b:v",
-                bitrate,
+                "vflip", "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-b:v", bitrate,
             ]),
         }
         args.extend_from_slice(&[

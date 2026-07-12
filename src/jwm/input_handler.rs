@@ -1,7 +1,9 @@
 // Input event handling: keyboard, mouse, and configure request processing
 
 use crate::Jwm;
-use crate::backend::api::{AllowMode, Backend, HitTarget, WindowChanges, WindowType};
+use crate::backend::api::{
+    AllowMode, Backend, HitTarget, SystemUiOverlay, WindowChanges, WindowType,
+};
 use crate::backend::common_define::{ConfigWindowBits, Mods, MouseButton, WindowId, keys};
 use crate::config::CONFIG;
 use crate::core::models::ClientKey;
@@ -11,6 +13,58 @@ use crate::jwm::types::{WMArgEnum, WMClickType};
 use log::{error, info};
 
 impl Jwm {
+    pub(crate) fn sync_system_ui(&self, backend: &mut dyn Backend) {
+        let active = self.features.system_ui.is_active();
+        backend.compositor_set_system_ui(active.then(|| SystemUiOverlay {
+            text: self.features.system_ui.overlay_text(),
+            locked: self.features.system_ui.is_locked(),
+        }));
+        backend.compositor_force_full_redraw();
+    }
+
+    fn system_ui_char(keysym: u32, mods: Mods) -> Option<char> {
+        let mut ch = char::from_u32(xkbcommon::xkb::keysym_to_utf32(
+            xkbcommon::xkb::Keysym::new(keysym),
+        ))?;
+        let shifted = mods.contains(Mods::SHIFT);
+        let caps = mods.contains(Mods::CAPS);
+        if ch.is_ascii_alphabetic() {
+            ch = if shifted ^ caps {
+                ch.to_ascii_uppercase()
+            } else {
+                ch.to_ascii_lowercase()
+            };
+            return Some(ch);
+        }
+        if shifted {
+            ch = match ch {
+                '1' => '!',
+                '2' => '@',
+                '3' => '#',
+                '4' => '$',
+                '5' => '%',
+                '6' => '^',
+                '7' => '&',
+                '8' => '*',
+                '9' => '(',
+                '0' => ')',
+                '-' => '_',
+                '=' => '+',
+                '[' => '{',
+                ']' => '}',
+                '\\' => '|',
+                ';' => ':',
+                '\'' => '"',
+                ',' => '<',
+                '.' => '>',
+                '/' => '?',
+                '`' => '~',
+                other => other,
+            };
+        }
+        (!ch.is_control() && ch.is_ascii()).then_some(ch)
+    }
+
     pub(crate) fn sync_screenshot_annotation_style(&self, backend: &mut dyn Backend) {
         let color = self.features.screenshot.color;
         backend.compositor_set_annotation_color([
@@ -147,6 +201,55 @@ impl Jwm {
 
         let keysym = backend.key_ops_mut().keysym_from_keycode(keycode)?;
         let clean_state = self.clean_mask(backend, state_bits);
+
+        // Built-in system UI is modal and consumes every key. This branch is
+        // shared by X11rb, XCB and Wayland-udev, keeping behavior identical.
+        if self.features.system_ui.is_active() {
+            let locked = self.features.system_ui.is_locked();
+            if keysym == keys::KEY_Escape && !locked {
+                self.features.system_ui.cancel();
+                backend.compositor_set_system_ui(None);
+                let _ = backend.key_ops().ungrab_keyboard();
+                let _ = backend.input_ops().ungrab_pointer();
+                backend.compositor_force_full_redraw();
+                return Ok(());
+            }
+            if keysym == keys::KEY_BackSpace || keysym == keys::KEY_Delete {
+                self.features.system_ui.backspace();
+            } else if keysym == keys::KEY_Up {
+                self.features.system_ui.move_selection(-1);
+            } else if keysym == keys::KEY_Down || keysym == keys::KEY_Tab {
+                self.features.system_ui.move_selection(1);
+            } else if keysym == keys::KEY_Return {
+                if locked {
+                    if let Some(mut password) = self.features.system_ui.take_password() {
+                        let authenticated =
+                            crate::jwm::features::system_ui::authenticate_current_user(&password);
+                        unsafe { password.as_bytes_mut().fill(0) };
+                        if authenticated {
+                            self.features.system_ui.cancel();
+                            backend.compositor_set_system_ui(None);
+                            let _ = backend.key_ops().ungrab_keyboard();
+                            let _ = backend.input_ops().ungrab_pointer();
+                            backend.compositor_force_full_redraw();
+                            return Ok(());
+                        }
+                        self.features.system_ui.authentication_failed();
+                    }
+                } else if let Some(command) = self.features.system_ui.selected_command() {
+                    self.features.system_ui.cancel();
+                    backend.compositor_set_system_ui(None);
+                    let _ = backend.key_ops().ungrab_keyboard();
+                    let _ = backend.input_ops().ungrab_pointer();
+                    backend.compositor_force_full_redraw();
+                    return self.spawn(backend, &WMArgEnum::StringVec(command));
+                }
+            } else if let Some(ch) = Self::system_ui_char(keysym, clean_state) {
+                self.features.system_ui.push_char(ch);
+            }
+            self.sync_system_ui(backend);
+            return Ok(());
+        }
 
         // Screenshot region selection mode
         if self.features.screenshot.active {

@@ -4,13 +4,13 @@ use self::ids::X11IdRegistry;
 use crate::backend::api::EventHandler;
 use crate::backend::api::Geometry;
 use crate::backend::api::HitTarget;
+use crate::backend::api::InteractionAction;
 use crate::backend::api::PropertyKind;
 use crate::backend::api::ResizeEdge;
 use crate::backend::common_define::EventMaskBits;
 use crate::backend::common_define::StdCursorKind;
 use crate::backend::common_define::WindowId;
 use crate::backend::error::BackendError;
-use crate::backend::api::InteractionAction;
 use calloop::signals::{Signal, Signals};
 use std::any::Any;
 use std::env;
@@ -31,8 +31,8 @@ use calloop::{
 use crate::backend::api::{
     Backend, BackendDiagnostics, Capabilities, ColorAllocator, CompositorAnnotation,
     CompositorBenchmark, CompositorControl, CompositorMedia, CompositorWindowEffects,
-    CompositorWorkspaceEffects, CursorProvider, EwmhFacade, InputOps, KeyOps, OutputOps,
-    DisplayControl, PropertyOps, RenderScheduler, VrrCapabilities, WindowOps,
+    CompositorWorkspaceEffects, CursorProvider, DisplayControl, EwmhFacade, InputOps, KeyOps,
+    OutputOps, PropertyOps, RenderScheduler, SystemUiOverlay, VrrCapabilities, WindowOps,
 };
 use crate::backend::x11::wm::SUPPORTED_EWMH_FEATURES;
 
@@ -838,10 +838,7 @@ impl CompositorControl for X11rbBackend {
 }
 
 impl CompositorMedia for X11rbBackend {
-    fn take_screenshot_to_file(
-        &mut self,
-        path: &std::path::Path,
-    ) -> Result<bool, BackendError> {
+    fn take_screenshot_to_file(&mut self, path: &std::path::Path) -> Result<bool, BackendError> {
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.request_screenshot(path.to_path_buf());
             Ok(true)
@@ -914,6 +911,11 @@ impl CompositorMedia for X11rbBackend {
 }
 
 impl CompositorWorkspaceEffects for X11rbBackend {
+    fn compositor_set_system_ui(&mut self, overlay: Option<SystemUiOverlay>) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_system_ui(overlay);
+        }
+    }
     fn compositor_notify_tag_switch(
         &mut self,
         duration: std::time::Duration,
@@ -954,7 +956,15 @@ impl CompositorWorkspaceEffects for X11rbBackend {
                 .iter()
                 .filter_map(|(window, x, y, width, height, selected, title)| {
                     self.ids.x11(*window).ok().map(|x11_window| {
-                        (x11_window, *x, *y, *width, *height, *selected, title.clone())
+                        (
+                            x11_window,
+                            *x,
+                            *y,
+                            *width,
+                            *height,
+                            *selected,
+                            title.clone(),
+                        )
                     })
                 })
                 .collect();
@@ -1016,32 +1026,28 @@ impl CompositorWindowEffects for X11rbBackend {
         top: u32,
         bottom: u32,
     ) {
-        if let (Some(compositor), Ok(x11_window)) =
-            (self.compositor.as_mut(), self.ids.x11(window))
+        if let (Some(compositor), Ok(x11_window)) = (self.compositor.as_mut(), self.ids.x11(window))
         {
             compositor.set_frame_extents(x11_window, left, right, top, bottom);
         }
     }
 
     fn compositor_set_window_shaped(&mut self, window: WindowId, shaped: bool) {
-        if let (Some(compositor), Ok(x11_window)) =
-            (self.compositor.as_mut(), self.ids.x11(window))
+        if let (Some(compositor), Ok(x11_window)) = (self.compositor.as_mut(), self.ids.x11(window))
         {
             compositor.set_window_shaped(x11_window, shaped);
         }
     }
 
     fn compositor_set_window_urgent(&mut self, window: WindowId, urgent: bool) {
-        if let (Some(compositor), Ok(x11_window)) =
-            (self.compositor.as_mut(), self.ids.x11(window))
+        if let (Some(compositor), Ok(x11_window)) = (self.compositor.as_mut(), self.ids.x11(window))
         {
             compositor.set_window_urgent(x11_window, urgent);
         }
     }
 
     fn compositor_set_window_pip(&mut self, window: WindowId, pip: bool) {
-        if let (Some(compositor), Ok(x11_window)) =
-            (self.compositor.as_mut(), self.ids.x11(window))
+        if let (Some(compositor), Ok(x11_window)) = (self.compositor.as_mut(), self.ids.x11(window))
         {
             compositor.set_window_pip(x11_window, pip);
         }
@@ -1072,24 +1078,21 @@ impl CompositorWindowEffects for X11rbBackend {
     }
 
     fn compositor_notify_window_move_start(&mut self, window: WindowId) {
-        if let (Some(compositor), Ok(x11_window)) =
-            (self.compositor.as_mut(), self.ids.x11(window))
+        if let (Some(compositor), Ok(x11_window)) = (self.compositor.as_mut(), self.ids.x11(window))
         {
             compositor.notify_window_move_start(x11_window);
         }
     }
 
     fn compositor_notify_window_move_delta(&mut self, window: WindowId, dx: f32, dy: f32) {
-        if let (Some(compositor), Ok(x11_window)) =
-            (self.compositor.as_mut(), self.ids.x11(window))
+        if let (Some(compositor), Ok(x11_window)) = (self.compositor.as_mut(), self.ids.x11(window))
         {
             compositor.notify_window_move_delta(x11_window, dx, dy);
         }
     }
 
     fn compositor_notify_window_move_end(&mut self, window: WindowId) {
-        if let (Some(compositor), Ok(x11_window)) =
-            (self.compositor.as_mut(), self.ids.x11(window))
+        if let (Some(compositor), Ok(x11_window)) = (self.compositor.as_mut(), self.ids.x11(window))
         {
             compositor.notify_window_move_end(x11_window);
         }
@@ -1121,40 +1124,92 @@ impl CompositorWindowEffects for X11rbBackend {
 }
 
 impl CompositorAnnotation for X11rbBackend {
-    fn compositor_set_colorblind_mode(&mut self, mode: &str) { if let Some(c) = self.compositor.as_mut() { c.set_colorblind_mode(mode); } }
-    fn compositor_set_annotation_mode(&mut self, active: bool) { if let Some(c) = self.compositor.as_mut() { c.set_annotation_mode(active); } }
-    fn compositor_set_annotation_color(&mut self, rgba: [f32; 4]) { if let Some(c) = self.compositor.as_mut() { c.set_annotation_color(rgba); } }
-    fn compositor_set_annotation_line_width(&mut self, width: f32) { if let Some(c) = self.compositor.as_mut() { c.set_annotation_line_width(width); } }
-    fn compositor_annotation_add_point(&mut self, x: f32, y: f32) { if let Some(c) = self.compositor.as_mut() { c.annotation_add_point(x, y); } }
-    fn compositor_annotation_begin_stroke(&mut self) { if let Some(c) = self.compositor.as_mut() { c.annotation_new_stroke(); } }
+    fn compositor_set_colorblind_mode(&mut self, mode: &str) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_colorblind_mode(mode);
+        }
+    }
+    fn compositor_set_annotation_mode(&mut self, active: bool) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_annotation_mode(active);
+        }
+    }
+    fn compositor_set_annotation_color(&mut self, rgba: [f32; 4]) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_annotation_color(rgba);
+        }
+    }
+    fn compositor_set_annotation_line_width(&mut self, width: f32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_annotation_line_width(width);
+        }
+    }
+    fn compositor_annotation_add_point(&mut self, x: f32, y: f32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.annotation_add_point(x, y);
+        }
+    }
+    fn compositor_annotation_begin_stroke(&mut self) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.annotation_new_stroke();
+        }
+    }
 }
 
 impl DisplayControl for X11rbBackend {
-    fn query_vrr_capabilities(&self, output: crate::backend::common_define::OutputId) -> Option<VrrCapabilities> {
+    fn query_vrr_capabilities(
+        &self,
+        output: crate::backend::common_define::OutputId,
+    ) -> Option<VrrCapabilities> {
         let config = crate::config::CONFIG.load();
-        if !config.behavior().vrr_enabled { return None; }
+        if !config.behavior().vrr_enabled {
+            return None;
+        }
         let outputs = OutputOps::enumerate_outputs(self.output_ops.as_ref());
-        outputs.iter().any(|candidate| candidate.id == output).then(|| VrrCapabilities {
-            supported: self.query_output_vrr_capable(output.0 as u32),
-            current_enabled: false,
-            min_refresh_hz: config.behavior().vrr_min_fps,
-            max_refresh_hz: config.behavior().vrr_max_fps,
-        })
+        outputs
+            .iter()
+            .any(|candidate| candidate.id == output)
+            .then(|| VrrCapabilities {
+                supported: self.query_output_vrr_capable(output.0 as u32),
+                current_enabled: false,
+                min_refresh_hz: config.behavior().vrr_min_fps,
+                max_refresh_hz: config.behavior().vrr_max_fps,
+            })
     }
-    fn set_vrr_enabled(&mut self, _output: crate::backend::common_define::OutputId, _enabled: bool) -> Result<(), BackendError> {
-        Err(BackendError::Unsupported("X11 set_vrr_enabled not implemented"))
+    fn set_vrr_enabled(
+        &mut self,
+        _output: crate::backend::common_define::OutputId,
+        _enabled: bool,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "X11 set_vrr_enabled not implemented",
+        ))
     }
-    fn set_hdr_metadata(&mut self, output: crate::backend::common_define::OutputId, enabled: bool) -> Result<(), BackendError> {
+    fn set_hdr_metadata(
+        &mut self,
+        output: crate::backend::common_define::OutputId,
+        enabled: bool,
+    ) -> Result<(), BackendError> {
         self.set_output_hdr_properties(output.0 as u32, enabled);
         Ok(())
     }
 }
 
 impl RenderScheduler for X11rbBackend {
-    fn request_render(&mut self) { let _ = self.conn.flush(); }
-    fn has_compositor(&self) -> bool { self.compositor.is_some() }
-    fn compositor_needs_render(&self) -> bool { self.compositor.as_ref().is_some_and(|c| c.needs_render()) }
-    fn compositor_overlay_window(&self) -> Option<WindowId> { self.compositor.as_ref().map(|c| self.ids.intern(c.overlay_window())) }
+    fn request_render(&mut self) {
+        let _ = self.conn.flush();
+    }
+    fn has_compositor(&self) -> bool {
+        self.compositor.is_some()
+    }
+    fn compositor_needs_render(&self) -> bool {
+        self.compositor.as_ref().is_some_and(|c| c.needs_render())
+    }
+    fn compositor_overlay_window(&self) -> Option<WindowId> {
+        self.compositor
+            .as_ref()
+            .map(|c| self.ids.intern(c.overlay_window()))
+    }
 }
 
 impl Backend for X11rbBackend {

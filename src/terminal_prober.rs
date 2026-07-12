@@ -4,30 +4,6 @@ use std::env;
 use std::process::Command;
 use std::sync::{LazyLock, RwLock};
 
-type CommandCandidate = (&'static str, &'static [&'static str]);
-
-const WAYLAND_LAUNCHERS: &[CommandCandidate] = &[
-    ("fuzzel", &[]),
-    ("wofi", &["--show", "run"]),
-    ("tofi-run", &[]),
-    ("tofi", &["--prompt", "run: "]),
-    ("bemenu-run", &[]),
-    // rofi with wayland backend works via -display-backend wayland
-    ("rofi", &["-show", "run"]),
-    // last resort: dmenu_run via XWayland
-    ("dmenu_run", &[]),
-];
-
-const X11_LAUNCHERS: &[CommandCandidate] = &[
-    ("dmenu_run", &[]),
-    ("rofi", &["-show", "run"]),
-    ("gmrun", &[]),
-    ("xfce4-appfinder", &["--collapsed"]),
-    // Wayland-native launchers still work on X11 if installed
-    ("fuzzel", &[]),
-    ("wofi", &["--show", "run"]),
-];
-
 fn command_exists(cmd: &str) -> bool {
     Command::new("which")
         .arg(cmd)
@@ -40,7 +16,7 @@ fn command_exists(cmd: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Returns true if running in a Wayland session (no X11 display available).
-/// Used by both terminal and launcher probers to pick the right tool set.
+/// Used by the terminal prober to pick the right tool set.
 #[must_use]
 pub fn is_wayland_session() -> bool {
     let has_wayland = env::var("WAYLAND_DISPLAY").is_ok()
@@ -50,66 +26,6 @@ pub fn is_wayland_session() -> bool {
     has_wayland && !has_display
         || env::var("XDG_SESSION_TYPE").is_ok_and(|v| v.eq_ignore_ascii_case("wayland"))
 }
-
-// ---------------------------------------------------------------------------
-// Launcher prober (for Alt+r / dmenu-like spawn)
-// ---------------------------------------------------------------------------
-
-pub struct LauncherProber {
-    /// Ordered list of (`binary`, `extra_args`) to try in Wayland sessions.
-    wayland_candidates: &'static [CommandCandidate],
-    /// Ordered list of (`binary`, `extra_args`) to try in X11 sessions.
-    x11_candidates: &'static [CommandCandidate],
-    cache: RwLock<HashMap<String, bool>>,
-}
-
-impl LauncherProber {
-    fn new() -> Self {
-        Self {
-            wayland_candidates: WAYLAND_LAUNCHERS,
-            x11_candidates: X11_LAUNCHERS,
-            cache: RwLock::new(HashMap::new()),
-        }
-    }
-
-    fn is_command_available(&self, cmd: &str) -> bool {
-        {
-            let r = self.cache.read_safe();
-            if let Some(&v) = r.get(cmd) {
-                return v;
-            }
-        }
-        let result = command_exists(cmd);
-        self.cache.write_safe().insert(cmd.to_string(), result);
-        result
-    }
-
-    /// Probe for an available launcher and return it as a ready-to-spawn argv.
-    /// Falls back to `["dmenu_run"]` if nothing is found.
-    pub fn probe_launcher(&self) -> Vec<String> {
-        let candidates = if is_wayland_session() {
-            self.wayland_candidates
-        } else {
-            self.x11_candidates
-        };
-        for (bin, args) in candidates {
-            if self.is_command_available(bin) {
-                log::debug!("[LauncherProber] selected launcher: {bin}");
-                let mut cmd = vec![bin.to_string()];
-                cmd.extend(args.iter().map(std::string::ToString::to_string));
-                return cmd;
-            }
-        }
-        log::warn!("[LauncherProber] no launcher found, falling back to dmenu_run");
-        vec!["dmenu_run".to_string()]
-    }
-
-    pub fn clear_cache(&self) {
-        self.cache.write_safe().clear();
-    }
-}
-
-pub static LAUNCHER_PROBER: LazyLock<LauncherProber> = LazyLock::new(LauncherProber::new);
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]

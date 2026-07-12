@@ -10,9 +10,9 @@ use super::compositor::WaylandCompositor;
 use crate::backend::api::{
     Backend, BackendDiagnostics, BackendEvent, Capabilities, ColorAllocator, CompositorAnnotation,
     CompositorBenchmark, CompositorControl, CompositorMedia, CompositorWindowEffects,
-    CompositorWorkspaceEffects, CursorProvider, EventHandler, HitTarget, InputOps, KeyOps,
-    DisplayControl, OutputInfo, OutputOps, PropertyOps, ResizeEdge, ScreenInfo, WindowOps,
-    RenderScheduler, WindowType,
+    CompositorWorkspaceEffects, CursorProvider, DisplayControl, EventHandler, HitTarget, InputOps,
+    KeyOps, OutputInfo, OutputOps, PropertyOps, RenderScheduler, ResizeEdge, ScreenInfo,
+    SystemUiOverlay, WindowOps, WindowType,
 };
 use crate::backend::common_define::{KeySym, Mods, OutputId, StdCursorKind, WindowId};
 use crate::backend::error::BackendError;
@@ -187,6 +187,8 @@ struct SharedState {
     /// True while the WM screenshot region-select grab is active.
     /// Suppresses pointer/keyboard events from reaching Wayland clients.
     screenshot_grab_active: bool,
+    /// True while JWM's built-in launcher or lock screen owns all input.
+    system_ui_grab_active: bool,
 }
 
 impl Default for SharedState {
@@ -211,6 +213,7 @@ impl Default for SharedState {
             kms_needs_reinit: false,
             session_active: true,
             screenshot_grab_active: false,
+            system_ui_grab_active: false,
         }
     }
 }
@@ -1634,7 +1637,7 @@ impl UdevBackend {
                                     .iter()
                                     .find(|o| (x as i32) >= o.x && (y as i32) >= o.y && (x as i32) < (o.x + o.width) && (y as i32) < (o.y + o.height))
                                     .map(|o| o.id);
-                                (x, y, output, s.screenshot_grab_active)
+                                (x, y, output, s.screenshot_grab_active || s.system_ui_grab_active)
                             };
 
                             let mut location: Point<f64, Logical> = (x, y).into();
@@ -1717,7 +1720,7 @@ impl UdevBackend {
                                 s.pointer_x = origin_x as f64 + pos.x;
                                 s.pointer_y = origin_y as f64 + pos.y;
                                 let output = output_at(&s.outputs, s.pointer_x, s.pointer_y);
-                                (s.pointer_x, s.pointer_y, output, s.screenshot_grab_active)
+                                (s.pointer_x, s.pointer_y, output, s.screenshot_grab_active || s.system_ui_grab_active)
                             };
 
                             let mut location: Point<f64, Logical> = (x, y).into();
@@ -1810,7 +1813,7 @@ impl UdevBackend {
                                     .iter()
                                     .find(|o| (x as i32) >= o.x && (y as i32) >= o.y && (x as i32) < (o.x + o.width) && (y as i32) < (o.y + o.height))
                                     .map(|o| o.id);
-                                (x, y, output, s.screenshot_grab_active)
+                                (x, y, output, s.screenshot_grab_active || s.system_ui_grab_active)
                             };
 
                             let location: Point<f64, Logical> = (x, y).into();
@@ -1998,10 +2001,12 @@ impl UdevBackend {
                                 let cfg = crate::config::CONFIG.load();
                                 let bar_name = cfg.status_bar_name();
 
-                                let screenshot_grab_active =
-                                    shared.lock_safe().screenshot_grab_active;
+                                let modal_grab_active = {
+                                    let s = shared.lock_safe();
+                                    s.screenshot_grab_active || s.system_ui_grab_active
+                                };
 
-                                let exclusive_surface = if session_locked || screenshot_grab_active
+                                let exclusive_surface = if session_locked || modal_grab_active
                                 {
                                     None
                                 } else {
@@ -2203,7 +2208,8 @@ impl UdevBackend {
                                                         | crate::backend::common_define::keys::KEY_7
                                                         | crate::backend::common_define::keys::KEY_8
                                             );
-                                            let should_suppress = is_screenshot_control
+                                            let should_suppress = s.system_ui_grab_active
+                                                || is_screenshot_control
                                                 || (!session_locked
                                                     && !shortcuts_inhibited
                                                     && is_wm_shortcut);
@@ -2231,16 +2237,19 @@ impl UdevBackend {
                             // JWM only uses press for shortcuts for now. When an active client
                             // inhibits compositor shortcuts, let that client receive the combo
                             // and keep the WM repeat state quiet.
-                            let screenshot_grab_active = shared.lock_safe().screenshot_grab_active;
+                            let (screenshot_grab_active, system_ui_grab_active) = {
+                                let s = shared.lock_safe();
+                                (s.screenshot_grab_active, s.system_ui_grab_active)
+                            };
                             if session_locked
-                                || (!screenshot_grab_active
+                                || (!(screenshot_grab_active || system_ui_grab_active)
                                     && (shortcuts_inhibited || handled_by_exclusive_layer))
                             {
                                 shared.lock_safe().repeat = None;
                             }
                             if matches!(state_key, smithay::backend::input::KeyState::Pressed)
                                 && !session_locked
-                                && (screenshot_grab_active
+                                && (screenshot_grab_active || system_ui_grab_active
                                     || (!shortcuts_inhibited && !handled_by_exclusive_layer))
                             {
                                 // Smithay provides XKB/Wayland keycodes already (evdev + 8).
@@ -3083,10 +3092,7 @@ impl CompositorControl for UdevBackend {
 }
 
 impl CompositorMedia for UdevBackend {
-    fn take_screenshot_to_file(
-        &mut self,
-        path: &std::path::Path,
-    ) -> Result<bool, BackendError> {
+    fn take_screenshot_to_file(&mut self, path: &std::path::Path) -> Result<bool, BackendError> {
         if let Some(kms) = &self.kms {
             kms.borrow_mut().request_screenshot(path.to_path_buf());
             self.state.needs_redraw = true;
@@ -3167,6 +3173,13 @@ impl CompositorMedia for UdevBackend {
 }
 
 impl CompositorWorkspaceEffects for UdevBackend {
+    fn compositor_set_system_ui(&mut self, overlay: Option<SystemUiOverlay>) {
+        self.shared.lock_safe().system_ui_grab_active = overlay.is_some();
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_system_ui(overlay);
+        }
+        self.request_render();
+    }
     fn compositor_notify_tag_switch(
         &mut self,
         duration: Duration,
@@ -3206,7 +3219,15 @@ impl CompositorWorkspaceEffects for UdevBackend {
             let entries = windows
                 .iter()
                 .map(|(window, x, y, width, height, selected, title)| {
-                    (window.raw(), *x, *y, *width, *height, *selected, title.clone())
+                    (
+                        window.raw(),
+                        *x,
+                        *y,
+                        *width,
+                        *height,
+                        *selected,
+                        title.clone(),
+                    )
                 })
                 .collect::<Vec<_>>();
             compositor.set_overview_mode(active, &entries);
@@ -3258,9 +3279,7 @@ impl CompositorWorkspaceEffects for UdevBackend {
         if let Some(compositor) = self.compositor.as_mut() {
             let entries = windows
                 .iter()
-                .map(|(window, x, y, width, height)| {
-                    (window.raw(), *x, *y, *width, *height)
-                })
+                .map(|(window, x, y, width, height)| (window.raw(), *x, *y, *width, *height))
                 .collect();
             compositor.set_expose_mode(active, entries);
         }
@@ -3306,64 +3325,175 @@ impl CompositorWindowEffects for UdevBackend {
         }
     }
 
-    fn compositor_force_full_redraw(&mut self) { if let Some(c) = self.compositor.as_mut() { c.force_full_redraw(); } }
-    fn compositor_set_mouse_position(&mut self, x: f32, y: f32) { if let Some(c) = self.compositor.as_mut() { c.set_mouse_position(x, y); } }
-    fn compositor_deactivate_edge_glow(&mut self) { if let Some(c) = self.compositor.as_mut() { c.deactivate_edge_glow(); } }
-    fn compositor_unsuppress_edge_glow(&mut self) { if let Some(c) = self.compositor.as_mut() { c.unsuppress_edge_glow(); } }
-    fn compositor_notify_window_move_start(&mut self, window: WindowId) { if let Some(c) = self.compositor.as_mut() { c.notify_window_move_start(window.raw()); } }
-    fn compositor_notify_window_move_delta(&mut self, window: WindowId, dx: f32, dy: f32) { if let Some(c) = self.compositor.as_mut() { c.notify_window_move_delta(window.raw(), dx, dy); } }
-    fn compositor_notify_window_move_end(&mut self, window: WindowId) { if let Some(c) = self.compositor.as_mut() { c.notify_window_move_end(window.raw()); } }
-    fn compositor_set_dock_position(&mut self, x: f32, y: f32) { if let Some(c) = self.compositor.as_mut() { c.set_dock_position(x, y); } }
-    fn compositor_set_peek_mode(&mut self, active: bool) { if let Some(c) = self.compositor.as_mut() { c.set_peek_mode(active); } }
-    fn compositor_set_window_groups(&mut self, groups: Vec<(u32, Vec<(u32, String, bool)>)>) { if let Some(c) = self.compositor.as_mut() { c.set_window_groups(groups); } }
-    fn compositor_zoom_to_fit(&mut self, window: Option<u32>) { if let Some(c) = self.compositor.as_mut() { c.zoom_to_fit(window); } }
+    fn compositor_force_full_redraw(&mut self) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.force_full_redraw();
+        }
+    }
+    fn compositor_set_mouse_position(&mut self, x: f32, y: f32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_mouse_position(x, y);
+        }
+    }
+    fn compositor_deactivate_edge_glow(&mut self) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.deactivate_edge_glow();
+        }
+    }
+    fn compositor_unsuppress_edge_glow(&mut self) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.unsuppress_edge_glow();
+        }
+    }
+    fn compositor_notify_window_move_start(&mut self, window: WindowId) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.notify_window_move_start(window.raw());
+        }
+    }
+    fn compositor_notify_window_move_delta(&mut self, window: WindowId, dx: f32, dy: f32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.notify_window_move_delta(window.raw(), dx, dy);
+        }
+    }
+    fn compositor_notify_window_move_end(&mut self, window: WindowId) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.notify_window_move_end(window.raw());
+        }
+    }
+    fn compositor_set_dock_position(&mut self, x: f32, y: f32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_dock_position(x, y);
+        }
+    }
+    fn compositor_set_peek_mode(&mut self, active: bool) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_peek_mode(active);
+        }
+    }
+    fn compositor_set_window_groups(&mut self, groups: Vec<(u32, Vec<(u32, String, bool)>)>) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_window_groups(groups);
+        }
+    }
+    fn compositor_zoom_to_fit(&mut self, window: Option<u32>) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.zoom_to_fit(window);
+        }
+    }
 }
 
 impl CompositorAnnotation for UdevBackend {
-    fn compositor_set_colorblind_mode(&mut self, mode: &str) { if let Some(c) = self.compositor.as_mut() { c.set_colorblind_mode(mode); } }
-    fn compositor_set_annotation_mode(&mut self, active: bool) { if let Some(c) = self.compositor.as_mut() { c.set_annotation_mode(active); } }
-    fn compositor_set_annotation_color(&mut self, rgba: [f32; 4]) { if let Some(c) = self.compositor.as_mut() { c.set_annotation_color(rgba[0], rgba[1], rgba[2], rgba[3]); } }
-    fn compositor_set_annotation_line_width(&mut self, width: f32) { if let Some(c) = self.compositor.as_mut() { c.set_annotation_line_width(width); } }
-    fn compositor_annotation_add_point(&mut self, x: f32, y: f32) { if let Some(c) = self.compositor.as_mut() { c.annotation_add_point(x, y); } }
-    fn compositor_annotation_begin_stroke(&mut self) { if let Some(c) = self.compositor.as_mut() { c.annotation_new_stroke(); } }
+    fn compositor_set_colorblind_mode(&mut self, mode: &str) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_colorblind_mode(mode);
+        }
+    }
+    fn compositor_set_annotation_mode(&mut self, active: bool) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_annotation_mode(active);
+        }
+    }
+    fn compositor_set_annotation_color(&mut self, rgba: [f32; 4]) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_annotation_color(rgba[0], rgba[1], rgba[2], rgba[3]);
+        }
+    }
+    fn compositor_set_annotation_line_width(&mut self, width: f32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_annotation_line_width(width);
+        }
+    }
+    fn compositor_annotation_add_point(&mut self, x: f32, y: f32) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.annotation_add_point(x, y);
+        }
+    }
+    fn compositor_annotation_begin_stroke(&mut self) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.annotation_new_stroke();
+        }
+    }
 }
 
 impl DisplayControl for UdevBackend {
-    fn query_vrr_capabilities(&self, output: OutputId) -> Option<crate::backend::api::VrrCapabilities> {
+    fn query_vrr_capabilities(
+        &self,
+        output: OutputId,
+    ) -> Option<crate::backend::api::VrrCapabilities> {
         let kms = self.kms.as_ref()?;
         let shared = self.shared.lock_safe();
-        let index = shared.outputs.iter().position(|candidate| candidate.id == output)?;
+        let index = shared
+            .outputs
+            .iter()
+            .position(|candidate| candidate.id == output)?;
         drop(shared);
         kms.borrow_mut().query_vrr_for_output(index)
     }
-    fn query_kms_color_pipeline_caps(&self, output: OutputId) -> Option<crate::backend::api::KmsColorPipelineCaps> {
+    fn query_kms_color_pipeline_caps(
+        &self,
+        output: OutputId,
+    ) -> Option<crate::backend::api::KmsColorPipelineCaps> {
         let kms = self.kms.as_ref()?;
         let shared = self.shared.lock_safe();
-        let index = shared.outputs.iter().position(|candidate| candidate.id == output)?;
+        let index = shared
+            .outputs
+            .iter()
+            .position(|candidate| candidate.id == output)?;
         drop(shared);
         kms.borrow_mut().query_color_pipeline_caps_for_output(index)
     }
     fn set_vrr_enabled(&mut self, output: OutputId, enabled: bool) -> Result<(), BackendError> {
-        let kms = self.kms.as_ref().ok_or(BackendError::Unsupported("no KMS"))?;
+        let kms = self
+            .kms
+            .as_ref()
+            .ok_or(BackendError::Unsupported("no KMS"))?;
         let shared = self.shared.lock_safe();
-        let index = shared.outputs.iter().position(|candidate| candidate.id == output).ok_or(BackendError::NotFound("output not found"))?;
+        let index = shared
+            .outputs
+            .iter()
+            .position(|candidate| candidate.id == output)
+            .ok_or(BackendError::NotFound("output not found"))?;
         drop(shared);
-        kms.borrow_mut().set_vrr_for_output(index, enabled).map_err(BackendError::Message)
+        kms.borrow_mut()
+            .set_vrr_for_output(index, enabled)
+            .map_err(BackendError::Message)
     }
     fn set_hdr_metadata(&mut self, output: OutputId, enabled: bool) -> Result<(), BackendError> {
-        let kms = self.kms.as_ref().ok_or(BackendError::Unsupported("no KMS"))?;
+        let kms = self
+            .kms
+            .as_ref()
+            .ok_or(BackendError::Unsupported("no KMS"))?;
         let shared = self.shared.lock_safe();
-        let info = shared.outputs.iter().find(|candidate| candidate.id == output).ok_or(BackendError::NotFound("output not found"))?;
-        let index = shared.outputs.iter().position(|candidate| candidate.id == output).ok_or(BackendError::NotFound("output not found"))?;
+        let info = shared
+            .outputs
+            .iter()
+            .find(|candidate| candidate.id == output)
+            .ok_or(BackendError::NotFound("output not found"))?;
+        let index = shared
+            .outputs
+            .iter()
+            .position(|candidate| candidate.id == output)
+            .ok_or(BackendError::NotFound("output not found"))?;
         let caps = info.hdr_metadata.clone();
         drop(shared);
         if enabled {
-            let caps = caps.ok_or(BackendError::Unsupported("output does not advertise HDR in EDID"))?;
-            let peak = crate::config::CONFIG.load().behavior().hdr_peak_nits.round().clamp(0.0, u16::MAX as f32) as u16;
+            let caps = caps.ok_or(BackendError::Unsupported(
+                "output does not advertise HDR in EDID",
+            ))?;
+            let peak = crate::config::CONFIG
+                .load()
+                .behavior()
+                .hdr_peak_nits
+                .round()
+                .clamp(0.0, u16::MAX as f32) as u16;
             let blob = crate::backend::hdr_metadata::build_from_edid(&caps, peak);
-            kms.borrow_mut().set_hdr_metadata_for_output(index, Some(&blob)).map_err(BackendError::Message)
+            kms.borrow_mut()
+                .set_hdr_metadata_for_output(index, Some(&blob))
+                .map_err(BackendError::Message)
         } else {
-            kms.borrow_mut().set_hdr_metadata_for_output(index, None).map_err(BackendError::Message)
+            kms.borrow_mut()
+                .set_hdr_metadata_for_output(index, None)
+                .map_err(BackendError::Message)
         }
     }
 }
@@ -3371,10 +3501,14 @@ impl DisplayControl for UdevBackend {
 impl RenderScheduler for UdevBackend {
     fn request_render(&mut self) {
         self.state.needs_redraw = true;
-        if let Some(kms) = &self.kms { kms.borrow_mut().request_render(); }
+        if let Some(kms) = &self.kms {
+            kms.borrow_mut().request_render();
+        }
         self.request_flush();
     }
-    fn has_compositor(&self) -> bool { self.compositor.is_some() }
+    fn has_compositor(&self) -> bool {
+        self.compositor.is_some()
+    }
     fn compositor_needs_render(&self) -> bool {
         self.state.needs_redraw || self.compositor.as_ref().is_some_and(|c| c.needs_render())
     }

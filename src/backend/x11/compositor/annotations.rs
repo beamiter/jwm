@@ -57,12 +57,11 @@ impl<C: CompositorConnection> Compositor<C> {
 
         unsafe {
             self.gl.use_program(Some(self.annotation_line_program));
-            self.gl
-                .uniform_matrix_4_f32_slice(
-                    self.annotation_line_uniforms.projection.as_ref(),
-                    false,
-                    proj,
-                );
+            self.gl.uniform_matrix_4_f32_slice(
+                self.annotation_line_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
             self.gl.enable(glow::BLEND);
             self.gl
                 .blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
@@ -121,8 +120,7 @@ impl<C: CompositorConnection> Compositor<C> {
             }
 
             self.gl.line_width(1.0);
-            self.gl
-                .blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+            self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
             self.gl.use_program(None);
         }
     }

@@ -5,6 +5,14 @@ use crate::backend::compositor_common::wallpaper::{
 use crate::config::CONFIG;
 
 impl WaylandCompositor {
+    pub(crate) fn set_system_ui(&mut self, overlay: Option<crate::backend::api::SystemUiOverlay>) {
+        self.system_ui = overlay;
+        self.needs_render = true;
+    }
+
+    pub(crate) fn has_system_ui(&self) -> bool {
+        self.system_ui.is_some()
+    }
     pub(crate) fn apply_config(&mut self) {
         let cfg = CONFIG.load();
         let b = cfg.behavior();

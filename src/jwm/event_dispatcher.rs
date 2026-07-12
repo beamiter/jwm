@@ -241,6 +241,9 @@ impl WMController for Jwm {
         detail: u8,
         time: u32,
     ) {
+        if self.features.system_ui.is_active() {
+            return;
+        }
         // Annotation mode: a button press starts a new stroke at the cursor.
         if self.features.annotation_active {
             self.features.annotation_drawing = true;
@@ -259,6 +262,9 @@ impl WMController for Jwm {
     }
 
     fn on_button_release(&mut self, backend: &mut dyn Backend, _target: HitTarget, _time: u32) {
+        if self.features.system_ui.is_active() {
+            return;
+        }
         // Annotation mode: a button release lifts the pen (ends the current stroke).
         if self.features.annotation_active && self.features.annotation_drawing {
             self.features.annotation_drawing = false;
@@ -383,6 +389,10 @@ impl WMController for Jwm {
         root_y: f64,
         time: u32,
     ) {
+        if self.features.system_ui.is_active() {
+            self.last_mouse_root = (root_x, root_y);
+            return;
+        }
         // Screenshot region selection: update overlay rectangle while dragging
         if self.features.screenshot.active && self.features.screenshot.dragging {
             self.last_mouse_root = (root_x, root_y);

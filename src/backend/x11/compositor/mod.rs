@@ -382,6 +382,7 @@ where
     hud_text_width: u32,
     hud_text_height: u32,
     hud_text_cache: String,
+    system_ui: Option<crate::backend::api::SystemUiOverlay>,
     debug_hud: bool,
     sys_stats: crate::backend::sys_stats::SysStatsSampler,
     frame_stats: FrameStats,

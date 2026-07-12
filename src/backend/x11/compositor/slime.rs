@@ -365,10 +365,8 @@ impl SlimeState {
             segments[base + 1] = injection.start[1] / screen_h;
             segments[base + 2] = injection.end[0] / screen_w;
             segments[base + 3] = injection.end[1] / screen_h;
-            params[index * 2] =
-                self.scale * 0.055 * injection.radius_scale / screen_h;
-            params[index * 2 + 1] =
-                (0.30 + injection.amplitude * 0.70) * self.interaction_strength;
+            params[index * 2] = self.scale * 0.055 * injection.radius_scale / screen_h;
+            params[index * 2 + 1] = (0.30 + injection.amplitude * 0.70) * self.interaction_strength;
         }
         self.pending_wave_injections.clear();
         (segments, params, count as i32)
@@ -423,8 +421,7 @@ impl SlimeState {
             let distance = (dx * dx + dy * dy).sqrt();
             if distance >= wave_spacing && self.pending_wave_injections.len() < 10 {
                 let speed = distance / sample_dt;
-                let amplitude =
-                    (speed / (self.scale * 6.5).max(1.0)).clamp(0.10, 0.72);
+                let amplitude = (speed / (self.scale * 6.5).max(1.0)).clamp(0.10, 0.72);
                 self.pending_wave_injections.push(SlimeWaveInjection {
                     start: previous,
                     end: current,
@@ -444,8 +441,7 @@ impl SlimeState {
             let palm_spacing = (self.scale * 0.015).clamp(2.0, 6.0);
             if distance >= palm_spacing {
                 let speed = distance / sample_dt;
-                let amplitude =
-                    (speed / (self.scale * 5.0).max(1.0)).clamp(0.08, 0.58);
+                let amplitude = (speed / (self.scale * 5.0).max(1.0)).clamp(0.08, 0.58);
                 self.pending_wave_injections.push(SlimeWaveInjection {
                     start: previous,
                     end: palm,
@@ -590,10 +586,7 @@ impl SlimeState {
         };
         smooth_control(&mut self.ocean_strength, packet.ocean_strength);
         smooth_control(&mut self.interaction_strength, packet.interaction_strength);
-        smooth_control(
-            &mut self.turbulence_strength,
-            packet.turbulence_strength,
-        );
+        smooth_control(&mut self.turbulence_strength, packet.turbulence_strength);
         smooth_control(&mut self.foam_strength, packet.foam_strength);
         self.sample_fingertips(pose_is_continuous);
 
@@ -611,8 +604,8 @@ impl SlimeState {
             .depths
             .iter()
             .fold(0.0f32, |boost, depth| boost.max((-*depth).max(0.0)));
-        let expand = (self.scale * 0.62 + self.strength * 2.0)
-            * (1.0 + depth_boost.clamp(0.0, 1.0) * 0.30);
+        let expand =
+            (self.scale * 0.62 + self.strength * 2.0) * (1.0 + depth_boost.clamp(0.0, 1.0) * 0.30);
         self.bbox = [
             (min_x - expand).clamp(0.0, screen_size.0),
             (min_y - expand).clamp(0.0, screen_size.1),
@@ -728,14 +721,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            packet.hands[0].landmarks[0].components(),
-            [0.1, 0.2, 0.0]
-        );
-        assert_eq!(
-            packet.hands[0].landmarks[1].components(),
-            [0.3, 0.4, -0.5]
-        );
+        assert_eq!(packet.hands[0].landmarks[0].components(), [0.1, 0.2, 0.0]);
+        assert_eq!(packet.hands[0].landmarks[1].components(), [0.3, 0.4, -0.5]);
     }
 
     #[test]
@@ -847,8 +834,7 @@ mod tests {
         let mut state = SlimeState::default();
         state.last_wave_activity = Some(Instant::now());
         assert!(state.is_visible());
-        state.last_wave_activity =
-            Some(Instant::now() - WAVE_LIFETIME - Duration::from_millis(1));
+        state.last_wave_activity = Some(Instant::now() - WAVE_LIFETIME - Duration::from_millis(1));
         assert!(!state.is_visible());
     }
 

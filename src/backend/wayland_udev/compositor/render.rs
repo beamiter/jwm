@@ -1,8 +1,8 @@
 // render_frame and rendering helpers for the Wayland udev compositor
 #[allow(unused_imports)]
 use super::*;
-use smithay::backend::renderer::gles::ffi;
 use crate::backend::compositor_common::capture::clip_region;
+use smithay::backend::renderer::gles::ffi;
 
 impl WaylandCompositor {
     // =========================================================================
@@ -289,8 +289,8 @@ impl WaylandCompositor {
         // those are useful only when a frame can actually be produced.  The
         // animation check keeps time-based effects live without relying on a
         // separate caller to keep `needs_render` armed.
-        let recording_transition_pending = self.pending_recording_start.is_some()
-            || self.pending_recording_stop;
+        let recording_transition_pending =
+            self.pending_recording_start.is_some() || self.pending_recording_stop;
         if !self.needs_render
             && !self.screenshot_requests.has_pending()
             && !self.screenshot_readback.has_pending()
@@ -1533,6 +1533,19 @@ impl WaylandCompositor {
 
         self.frame_profiler.zone_end();
 
+        // A locked compositor must never expose the client scene through an
+        // IPC or protocol screenshot. Draw the opaque shield before readback.
+        if self
+            .system_ui
+            .as_ref()
+            .is_some_and(|overlay| overlay.locked)
+        {
+            unsafe {
+                gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
+                self.render_system_ui(gl, &projection);
+            }
+        }
+
         // =================================================================
         // 19. Screenshot capture (region or full)
         // =================================================================
@@ -1563,6 +1576,13 @@ impl WaylandCompositor {
             unsafe {
                 gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
                 self.render_annotations(gl, &projection);
+            }
+        }
+
+        if self.system_ui.is_some() {
+            unsafe {
+                gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
+                self.render_system_ui(gl, &projection);
             }
         }
 
@@ -1653,13 +1673,23 @@ impl WaylandCompositor {
         unsafe {
             for request in self.screenshot_requests.take_all() {
                 match request {
-                    crate::backend::compositor_common::screenshot::ScreenshotRequest::Full(path) => {
+                    crate::backend::compositor_common::screenshot::ScreenshotRequest::Full(
+                        path,
+                    ) => {
                         let w = self.screen_w;
                         let h = self.screen_h;
                         self.screenshot_readback.enqueue(gl, path, 0, 0, w, h);
                     }
-                    crate::backend::compositor_common::screenshot::ScreenshotRequest::Region { path, x, y, width, height } => {
-                        let Some(region) = clip_region(self.screen_w, self.screen_h, x, y, width, height) else {
+                    crate::backend::compositor_common::screenshot::ScreenshotRequest::Region {
+                        path,
+                        x,
+                        y,
+                        width,
+                        height,
+                    } => {
+                        let Some(region) =
+                            clip_region(self.screen_w, self.screen_h, x, y, width, height)
+                        else {
                             log::warn!("[compositor] screenshot region is empty");
                             continue;
                         };
@@ -1714,16 +1744,8 @@ impl WaylandCompositor {
 
         if self.debug_hud_extended {
             use std::fmt::Write;
-            let p95_ms = self
-                .perf_metrics
-                .frame_time_percentile(0.95)
-                .as_secs_f32()
-                * 1000.0;
-            let p99_ms = self
-                .perf_metrics
-                .frame_time_percentile(0.99)
-                .as_secs_f32()
-                * 1000.0;
+            let p95_ms = self.perf_metrics.frame_time_percentile(0.95).as_secs_f32() * 1000.0;
+            let p99_ms = self.perf_metrics.frame_time_percentile(0.99).as_secs_f32() * 1000.0;
             let _ = write!(
                 hud_text,
                 "\nFrame tail: p95={p95_ms:.2}ms p99={p99_ms:.2}ms\n--- Profiler (ms avg/min/max, last 120 frames) ---",
@@ -1803,6 +1825,92 @@ impl WaylandCompositor {
                 gl.UseProgram(0);
             }
         }
+    }
+
+    #[allow(unsafe_op_in_unsafe_fn)]
+    unsafe fn render_system_ui(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+        let Some(overlay) = self.system_ui.clone() else {
+            return;
+        };
+        if overlay.text != self.hud_text_cache {
+            let (pixels, w, h) = font::render_text_to_rgba(&overlay.text, 2, [235, 240, 255, 255]);
+            if let Some(old) = self.hud_text_texture.take() {
+                gl.DeleteTextures(1, &old);
+            }
+            let mut tex = 0;
+            gl.GenTextures(1, &mut tex);
+            gl.BindTexture(ffi::TEXTURE_2D, tex);
+            gl.TexImage2D(
+                ffi::TEXTURE_2D,
+                0,
+                ffi::RGBA as i32,
+                w as i32,
+                h as i32,
+                0,
+                ffi::RGBA,
+                ffi::UNSIGNED_BYTE,
+                pixels.as_ptr().cast(),
+            );
+            gl.TexParameteri(
+                ffi::TEXTURE_2D,
+                ffi::TEXTURE_MIN_FILTER,
+                ffi::NEAREST as i32,
+            );
+            gl.TexParameteri(
+                ffi::TEXTURE_2D,
+                ffi::TEXTURE_MAG_FILTER,
+                ffi::NEAREST as i32,
+            );
+            self.hud_text_texture = Some(tex);
+            self.hud_text_width = w;
+            self.hud_text_height = h;
+            self.hud_text_cache = overlay.text;
+        }
+        let pad = 24.0;
+        let tw = self.hud_text_width as f32;
+        let th = self.hud_text_height as f32;
+        let pw = (tw + pad * 2.0).min(self.screen_w as f32 - 32.0);
+        let ph = th + pad * 2.0;
+        let x = (self.screen_w as f32 - pw) * 0.5;
+        let y = (self.screen_h as f32 - ph) * 0.5;
+        let rect = super::get_uniform_loc(gl, self.hud_program, "u_rect");
+        let proj = super::get_uniform_loc(gl, self.hud_program, "u_projection");
+        let bg = super::get_uniform_loc(gl, self.hud_program, "u_bg_color");
+        let size = super::get_uniform_loc(gl, self.hud_program, "u_size");
+        gl.UseProgram(self.hud_program);
+        gl.UniformMatrix4fv(proj, 1, ffi::FALSE as u8, projection.as_ptr());
+        gl.Uniform4f(
+            bg,
+            0.025,
+            0.03,
+            0.045,
+            if overlay.locked { 1.0 } else { 0.94 },
+        );
+        gl.Uniform2f(size, self.screen_w as f32, self.screen_h as f32);
+        gl.Uniform4f(rect, 0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
+        gl.BindVertexArray(self.quad_vao);
+        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+        gl.Uniform4f(bg, 0.08, 0.10, 0.15, 0.98);
+        gl.Uniform2f(size, pw, ph);
+        gl.Uniform4f(rect, x, y, pw, ph);
+        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+        if let Some(tex) = self.hud_text_texture {
+            gl.UseProgram(self.program);
+            self.set_projection_uniform(gl, self.win_uniforms.projection, projection);
+            gl.Uniform1i(self.win_uniforms.texture, 0);
+            gl.Uniform1f(self.win_uniforms.opacity, 1.0);
+            gl.Uniform1f(self.win_uniforms.dim, 1.0);
+            gl.Uniform1f(self.win_uniforms.radius, 0.0);
+            gl.Uniform2f(self.win_uniforms.size, tw, th);
+            self.set_rect_uniform(gl, self.win_uniforms.rect, x + pad, y + pad, tw, th);
+            gl.Uniform4f(self.win_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
+            gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
+            gl.ActiveTexture(ffi::TEXTURE0);
+            gl.BindTexture(ffi::TEXTURE_2D, tex);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+        }
+        gl.BindVertexArray(0);
+        gl.UseProgram(0);
     }
 
     #[allow(dead_code)]

@@ -1,8 +1,8 @@
 use crate::backend::api::{
     Backend, BackendDiagnostics, BackendEvent, Capabilities, ColorAllocator, CompositorAnnotation,
     CompositorBenchmark, CompositorControl, CompositorMedia, CompositorWindowEffects,
-    CompositorWorkspaceEffects, CursorProvider, EventHandler, HitTarget, InputOps, KeyOps,
-    DisplayControl, OutputInfo, OutputOps, PropertyOps, RenderScheduler, ScreenInfo, WindowOps,
+    CompositorWorkspaceEffects, CursorProvider, DisplayControl, EventHandler, HitTarget, InputOps,
+    KeyOps, OutputInfo, OutputOps, PropertyOps, RenderScheduler, ScreenInfo, WindowOps,
 };
 use crate::backend::common_define::{KeySym, Mods, OutputId, WindowId};
 use crate::backend::error::BackendError;
@@ -1822,7 +1822,10 @@ impl CompositorWindowEffects for WaylandWinitBackend {}
 impl CompositorAnnotation for WaylandWinitBackend {}
 impl DisplayControl for WaylandWinitBackend {}
 impl RenderScheduler for WaylandWinitBackend {
-    fn request_render(&mut self) { self.needs_render = true; self.request_flush(); }
+    fn request_render(&mut self) {
+        self.needs_render = true;
+        self.request_flush();
+    }
 }
 
 impl Backend for WaylandWinitBackend {

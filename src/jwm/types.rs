@@ -1,5 +1,5 @@
-use crate::backend::api::{Backend, Geometry};
 pub use crate::backend::api::InteractionAction;
+use crate::backend::api::{Backend, Geometry};
 use crate::backend::common_define::WindowId;
 use crate::backend::common_define::{KeySym, Mods, MouseButton};
 use crate::core::layout::LayoutEnum;

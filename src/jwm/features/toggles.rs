@@ -14,6 +14,59 @@ use log::{error, info, warn};
 use std::process::Command;
 
 impl Jwm {
+    pub(crate) fn app_launcher(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.features.system_ui.is_active() {
+            return Ok(());
+        }
+        if !backend.has_compositor() {
+            return Err("built-in launcher requires the JWM compositor".into());
+        }
+        if let Some(root) = backend.root_window() {
+            backend.key_ops().grab_keyboard(root)?;
+            if !backend.input_ops().grab_pointer(
+                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
+                None,
+            )? {
+                let _ = backend.key_ops().ungrab_keyboard();
+                return Err("could not grab pointer for application launcher".into());
+            }
+        }
+        self.features.system_ui = crate::jwm::features::SystemUiState::open_launcher();
+        self.sync_system_ui(backend);
+        Ok(())
+    }
+
+    pub(crate) fn lock_screen(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.features.system_ui.is_active() {
+            return Ok(());
+        }
+        if !backend.has_compositor() {
+            return Err("built-in lock screen requires the JWM compositor".into());
+        }
+        // On X11, never display a pretend lock if the exclusive keyboard grab
+        // failed. Wayland-udev performs interception in its input pipeline.
+        if let Some(root) = backend.root_window() {
+            backend.key_ops().grab_keyboard(root)?;
+            if !backend.input_ops().grab_pointer(
+                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
+                None,
+            )? {
+                let _ = backend.key_ops().ungrab_keyboard();
+                return Err("could not grab pointer for lock screen".into());
+            }
+        }
+        self.features.system_ui = crate::jwm::features::SystemUiState::lock();
+        self.sync_system_ui(backend);
+        Ok(())
+    }
     /// 切换当前选中窗口的浮动状态
     pub fn togglefloating(
         &mut self,

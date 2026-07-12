@@ -343,6 +343,77 @@ impl<C: CompositorConnection> Compositor<C> {
         self.hud_text_cache = text.to_string();
     }
 
+    fn render_system_ui(&mut self, proj: &[f32; 16]) {
+        let Some(overlay) = self.system_ui.clone() else {
+            return;
+        };
+        self.update_hud_text_texture(&overlay.text);
+        let pad = 24.0;
+        let text_w = self.hud_text_width as f32;
+        let text_h = self.hud_text_height as f32;
+        let panel_w = (text_w + pad * 2.0).min(self.screen_w as f32 - 32.0);
+        let panel_h = text_h + pad * 2.0;
+        let x = (self.screen_w as f32 - panel_w) * 0.5;
+        let y = (self.screen_h as f32 - panel_h) * 0.5;
+        unsafe {
+            self.gl.use_program(Some(self.hud_program));
+            self.gl
+                .uniform_matrix_4_f32_slice(self.hud_uniforms.projection.as_ref(), false, proj);
+            self.gl.uniform_4_f32(
+                self.hud_uniforms.bg_color.as_ref(),
+                0.025,
+                0.03,
+                0.045,
+                if overlay.locked { 1.0 } else { 0.94 },
+            );
+            self.gl
+                .uniform_4_f32(self.hud_uniforms.fg_color.as_ref(), 0.4, 0.7, 1.0, 1.0);
+            self.gl.uniform_2_f32(
+                self.hud_uniforms.size.as_ref(),
+                self.screen_w as f32,
+                self.screen_h as f32,
+            );
+            self.gl.uniform_4_f32(
+                self.hud_uniforms.rect.as_ref(),
+                0.0,
+                0.0,
+                self.screen_w as f32,
+                self.screen_h as f32,
+            );
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.gl
+                .uniform_4_f32(self.hud_uniforms.bg_color.as_ref(), 0.08, 0.10, 0.15, 0.98);
+            self.gl
+                .uniform_2_f32(self.hud_uniforms.size.as_ref(), panel_w, panel_h);
+            self.gl
+                .uniform_4_f32(self.hud_uniforms.rect.as_ref(), x, y, panel_w, panel_h);
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            if let Some(tex) = self.hud_text_texture {
+                self.gl.use_program(Some(self.hud_text_program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.hud_text_uniforms.projection.as_ref(),
+                    false,
+                    proj,
+                );
+                self.gl.uniform_4_f32(
+                    self.hud_text_uniforms.rect.as_ref(),
+                    x + pad,
+                    y + pad,
+                    text_w,
+                    text_h,
+                );
+                self.gl
+                    .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
+                self.gl.active_texture(glow::TEXTURE0);
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+        }
+    }
+
     // =====================================================================
     // Feature 12: Screenshot
     // =====================================================================
@@ -373,7 +444,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // Realtime post-processing cannot run while the X server presents a
         // fullscreen client directly. Restore redirection as soon as a pose is
         // visible, including the first packet received during unredirect.
-        if self.slime_state.is_visible() {
+        if self.slime_state.is_visible() || self.system_ui.is_some() {
             if let Some(previous) = self.unredirected_window.take() {
                 let _ = self.conn.redirect_window_manual(previous);
                 let _ = self.conn.flush_x11();
@@ -382,7 +453,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
                 self.needs_render = true;
                 log::info!(
-                    "compositor: re-redirected fullscreen window 0x{:x} for slime effect",
+                    "compositor: re-redirected fullscreen window 0x{:x} for overlay",
                     previous
                 );
             }
@@ -2185,9 +2256,7 @@ impl<C: CompositorConnection> Compositor<C> {
                         self.slime_state.ocean_strength(),
                     );
                     self.gl.uniform_1_f32(
-                        self.magnifier_uniforms
-                            .slime_turbulence_strength
-                            .as_ref(),
+                        self.magnifier_uniforms.slime_turbulence_strength.as_ref(),
                         self.slime_state.turbulence_strength(),
                     );
                     self.gl.uniform_1_f32(
@@ -2199,18 +2268,15 @@ impl<C: CompositorConnection> Compositor<C> {
                         self.compositor_start_time.elapsed().as_secs_f32(),
                     );
                     let (wave_texture, wave_width, wave_height) = slime_wave.unwrap();
-                    self.gl.uniform_1_i32(
-                        self.magnifier_uniforms.slime_wave.as_ref(),
-                        1,
-                    );
+                    self.gl
+                        .uniform_1_i32(self.magnifier_uniforms.slime_wave.as_ref(), 1);
                     self.gl.uniform_2_f32(
                         self.magnifier_uniforms.slime_wave_texel.as_ref(),
                         1.0 / wave_width as f32,
                         1.0 / wave_height as f32,
                     );
                     self.gl.active_texture(glow::TEXTURE1);
-                    self.gl
-                        .bind_texture(glow::TEXTURE_2D, Some(wave_texture));
+                    self.gl.bind_texture(glow::TEXTURE_2D, Some(wave_texture));
                     self.gl.active_texture(glow::TEXTURE0);
                 }
 
@@ -2505,6 +2571,16 @@ impl<C: CompositorConnection> Compositor<C> {
         // === Pass 5f: Expose/Mission Control overlay ===
         if !self.expose_entries.is_empty() {
             self.render_expose(&proj);
+        }
+
+        // A lock screen is sensitive content: remote/IPC captures must see the
+        // opaque lock UI, never the client scene underneath it.
+        if self
+            .system_ui
+            .as_ref()
+            .is_some_and(|overlay| overlay.locked)
+        {
+            self.render_system_ui(&proj);
         }
 
         // === Feature 12: Screenshot capture (after all rendering, before overlays) ===
@@ -2906,6 +2982,11 @@ impl<C: CompositorConnection> Compositor<C> {
             }
             false
         };
+
+        // System UI is always the final visual layer, above transitions and clients.
+        if self.system_ui.is_some() {
+            self.render_system_ui(&proj);
+        }
 
         // Capture before swapping: the GLX back buffer's contents are no
         // longer defined after SwapBuffers, which caused intermittent black or

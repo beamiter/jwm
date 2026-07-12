@@ -60,7 +60,12 @@ mod tests {
     fn clips_negative_origin_without_shifting_extent() {
         assert_eq!(
             clip_region(100, 100, -10, -5, 30, 20),
-            Some(CaptureRegion { x: 0, y: 0, width: 20, height: 15 })
+            Some(CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 15
+            })
         );
     }
 

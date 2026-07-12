@@ -11,7 +11,7 @@ use crate::core::animation::{AnimationSpeed, Easing};
 use crate::core::layout::LayoutEnum;
 use crate::jwm::WMFuncType;
 use crate::jwm::{self, Jwm, WMButton, WMClickType, WMKey, WMRule};
-use crate::terminal_prober::{ADVANCED_TERMINAL_PROBER, LAUNCHER_PROBER};
+use crate::terminal_prober::ADVANCED_TERMINAL_PROBER;
 use std::time::Duration;
 
 use crate::backend::common_define::keys as k;
@@ -1250,8 +1250,6 @@ impl Default for Config {
 #[allow(dead_code)]
 impl Config {
     fn get_default_keys() -> Vec<KeyConfig> {
-        let dmenu_cmd = LAUNCHER_PROBER.probe_launcher();
-
         vec![
             KeyConfig {
                 modifier: vec!["Mod1".to_string()],
@@ -1274,8 +1272,14 @@ impl Config {
             KeyConfig {
                 modifier: vec!["Mod1".to_string()],
                 key: "r".to_string(),
-                function: "spawn".to_string(),
-                argument: ArgumentConfig::StringVec(dmenu_cmd),
+                function: "app_launcher".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
+                key: "Escape".to_string(),
+                function: "lock_screen".to_string(),
+                argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
@@ -1700,24 +1704,7 @@ impl Config {
     }
 
     fn get_default_rules() -> Vec<RuleConfig> {
-        vec![
-            RuleConfig {
-                class: "wofi".to_string(),
-                instance: "".to_string(),
-                name: "".to_string(),
-                tags: 0,
-                is_floating: true,
-                monitor: -1,
-            },
-            RuleConfig {
-                class: "fuzzel".to_string(),
-                instance: "".to_string(),
-                name: "".to_string(),
-                tags: 0,
-                is_floating: true,
-                monitor: -1,
-            },
-        ]
+        vec![]
     }
 
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
@@ -2016,7 +2003,7 @@ impl Config {
                 ArgumentConfig::StringVec(cmd) => Some(cmd.clone()),
                 _ => None,
             })
-            .unwrap_or_else(|| LAUNCHER_PROBER.probe_launcher())
+            .unwrap_or_else(|| vec!["jwm-launcher".to_string()])
     }
 
     pub fn get_termcmd() -> Vec<String> {
@@ -2083,6 +2070,8 @@ impl Config {
     fn parse_function(&self, func_name: &str) -> Option<WMFuncType> {
         match func_name {
             "spawn" => Some(Jwm::spawn),
+            "app_launcher" => Some(Jwm::app_launcher),
+            "lock_screen" => Some(Jwm::lock_screen),
             "focusstack" => Some(Jwm::focusstack),
             "focusmon" => Some(Jwm::focusmon),
             "take_screenshot" => Some(Jwm::take_screenshot),
@@ -2520,7 +2509,9 @@ impl Config {
             "behavior.compositor" => self.inner.behavior.compositor = as_bool()?,
             "behavior.corner_radius" => {
                 let v = as_f32()?;
-                if !(0.0..=64.0).contains(&v) { return Err(format!("behavior.corner_radius={v} out of [0, 64]")); }
+                if !(0.0..=64.0).contains(&v) {
+                    return Err(format!("behavior.corner_radius={v} out of [0, 64]"));
+                }
                 self.inner.behavior.corner_radius = v;
             }
             "behavior.fading" => self.inner.behavior.fading = as_bool()?,
@@ -2713,12 +2704,21 @@ mod tests {
     #[test]
     fn compositor_effect_hot_overrides_are_applied() {
         let mut cfg = Config::default();
-        cfg.set_value("behavior.corner_radius", &serde_json::json!(18.0)).unwrap();
-        cfg.set_value("behavior.fading", &serde_json::json!(true)).unwrap();
-        cfg.set_value("behavior.wobbly_windows", &serde_json::json!(true)).unwrap();
-        cfg.set_value("behavior.motion_trail", &serde_json::json!(true)).unwrap();
+        cfg.set_value("behavior.corner_radius", &serde_json::json!(18.0))
+            .unwrap();
+        cfg.set_value("behavior.fading", &serde_json::json!(true))
+            .unwrap();
+        cfg.set_value("behavior.wobbly_windows", &serde_json::json!(true))
+            .unwrap();
+        cfg.set_value("behavior.motion_trail", &serde_json::json!(true))
+            .unwrap();
         assert_eq!(cfg.behavior().corner_radius, 18.0);
-        assert!(cfg.behavior().fading && cfg.behavior().wobbly_windows && cfg.behavior().motion_trail);
-        assert!(cfg.set_value("behavior.corner_radius", &serde_json::json!(65.0)).is_err());
+        assert!(
+            cfg.behavior().fading && cfg.behavior().wobbly_windows && cfg.behavior().motion_trail
+        );
+        assert!(
+            cfg.set_value("behavior.corner_radius", &serde_json::json!(65.0))
+                .is_err()
+        );
     }
 }
