@@ -68,6 +68,68 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
+    unsafe fn create_slime_pressure_target(
+        gl: &glow::Context,
+        width: u32,
+        height: u32,
+    ) -> Result<(glow::Framebuffer, glow::Texture), String> {
+        unsafe {
+            let texture = gl.create_texture().map_err(|err| err.to_string())?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            // R=pressure, G=divergence. Half precision is sufficient for the
+            // iterative projection and halves pressure-bandwidth versus RGBA.
+            const GL_RG16F: u32 = 0x822f;
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                GL_RG16F as i32,
+                width as i32,
+                height as i32,
+                0,
+                glow::RG,
+                glow::HALF_FLOAT,
+                glow::PixelUnpackData::Slice(None),
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            let fbo = gl.create_framebuffer().map_err(|err| err.to_string())?;
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(texture),
+                0,
+            );
+            if gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
+                gl.delete_framebuffer(fbo);
+                gl.delete_texture(texture);
+                return Err("slime pressure RG16F framebuffer is incomplete".to_string());
+            }
+            gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+            Ok((fbo, texture))
+        }
+    }
+
     fn ensure_slime_wave_simulation(&mut self) -> bool {
         if self.slime_wave_simulation.is_some() {
             return true;
@@ -80,20 +142,52 @@ impl<C: CompositorConnection> Compositor<C> {
             .clamp(0.25, 1.0);
         let width = ((self.screen_w as f32 * scale).round() as u32).max(1);
         let height = ((self.screen_h as f32 * scale).round() as u32).max(1);
+        let pressure_iterations = std::env::var("JWM_SLIME_PRESSURE_ITERS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(10)
+            .clamp(2, 24);
         let created = unsafe {
             let first = Self::create_slime_wave_target(&self.gl, width, height);
             let second = Self::create_slime_wave_target(&self.gl, width, height);
             match (first, second) {
-                (Ok((fbo_a, tex_a)), Ok((fbo_b, tex_b))) => Some(SlimeWaveSimulation {
-                    fbos: [fbo_a, fbo_b],
-                    textures: [tex_a, tex_b],
-                    front: 0,
-                    width,
-                    height,
-                    last_tick: std::time::Instant::now(),
-                    accumulated_time: 1.0 / 120.0,
-                    active: false,
-                }),
+                (Ok((fbo_a, tex_a)), Ok((fbo_b, tex_b))) => {
+                    let pressure_a =
+                        Self::create_slime_pressure_target(&self.gl, width, height);
+                    let pressure_b =
+                        Self::create_slime_pressure_target(&self.gl, width, height);
+                    match (pressure_a, pressure_b) {
+                        (Ok((pressure_fbo_a, pressure_tex_a)), Ok((pressure_fbo_b, pressure_tex_b))) => {
+                            Some(SlimeWaveSimulation {
+                                fbos: [fbo_a, fbo_b],
+                                textures: [tex_a, tex_b],
+                                pressure_fbos: [pressure_fbo_a, pressure_fbo_b],
+                                pressure_textures: [pressure_tex_a, pressure_tex_b],
+                                front: 0,
+                                pressure_iterations,
+                                width,
+                                height,
+                                last_tick: std::time::Instant::now(),
+                                accumulated_time: 1.0 / 120.0,
+                                active: false,
+                            })
+                        }
+                        (pressure_a, pressure_b) => {
+                            self.gl.delete_framebuffer(fbo_a);
+                            self.gl.delete_texture(tex_a);
+                            self.gl.delete_framebuffer(fbo_b);
+                            self.gl.delete_texture(tex_b);
+                            for target in [pressure_a, pressure_b] {
+                                if let Ok((fbo, texture)) = target {
+                                    self.gl.delete_framebuffer(fbo);
+                                    self.gl.delete_texture(texture);
+                                }
+                            }
+                            log::warn!("compositor: slime pressure targets unavailable");
+                            None
+                        }
+                    }
+                }
                 (Ok((fbo, texture)), Err(err)) | (Err(err), Ok((fbo, texture))) => {
                     self.gl.delete_framebuffer(fbo);
                     self.gl.delete_texture(texture);
@@ -122,6 +216,11 @@ impl<C: CompositorConnection> Compositor<C> {
                 if simulation.active {
                     self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
                     for fbo in &simulation.fbos {
+                        self.gl
+                            .bind_framebuffer(glow::FRAMEBUFFER, Some(*fbo));
+                        self.gl.clear(glow::COLOR_BUFFER_BIT);
+                    }
+                    for fbo in &simulation.pressure_fbos {
                         self.gl
                             .bind_framebuffer(glow::FRAMEBUFFER, Some(*fbo));
                         self.gl.clear(glow::COLOR_BUFFER_BIT);
@@ -178,6 +277,39 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.slime_wave_uniforms.foam.as_ref(),
                 self.slime_state.foam_strength(),
             );
+            let turbulence = self.slime_state.turbulence_strength();
+            let projection_t = ((turbulence - 0.12) / 0.70).clamp(0.0, 1.0);
+            let projection_amount =
+                projection_t * projection_t * (3.0 - 2.0 * projection_t);
+            if projection_amount > 0.001 {
+                self.gl.use_program(Some(self.slime_pressure_program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.slime_pressure_uniforms.projection.as_ref(),
+                    false,
+                    &projection,
+                );
+                self.gl.uniform_4_f32(
+                    self.slime_pressure_uniforms.rect.as_ref(),
+                    0.0,
+                    0.0,
+                    simulation.width as f32,
+                    simulation.height as f32,
+                );
+                self.gl
+                    .uniform_1_i32(self.slime_pressure_uniforms.state.as_ref(), 0);
+                self.gl
+                    .uniform_1_i32(self.slime_pressure_uniforms.pressure.as_ref(), 1);
+                self.gl.uniform_2_f32(
+                    self.slime_pressure_uniforms.texel.as_ref(),
+                    1.0 / simulation.width as f32,
+                    1.0 / simulation.height as f32,
+                );
+                self.gl.uniform_1_f32(
+                    self.slime_pressure_uniforms.projection_amount.as_ref(),
+                    projection_amount,
+                );
+                self.gl.use_program(Some(self.slime_wave_program));
+            }
             self.gl.bind_vertex_array(Some(self.quad_vao));
             self.gl
                 .viewport(0, 0, simulation.width as i32, simulation.height as i32);
@@ -196,6 +328,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl
                 .uniform_1_f32(self.slime_wave_uniforms.time_step.as_ref(), FIXED_STEP);
             for step in 0..steps {
+                self.gl.use_program(Some(self.slime_wave_program));
                 let back = 1 - simulation.front;
                 self.gl
                     .bind_framebuffer(glow::FRAMEBUFFER, Some(simulation.fbos[back]));
@@ -219,10 +352,71 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 simulation.front = back;
+
+                if projection_amount > 0.001 {
+                    self.gl.use_program(Some(self.slime_pressure_program));
+
+                    // Seed pressure=0 and retain the predicted velocity
+                    // divergence in G for every Jacobi iteration.
+                    self.gl.bind_framebuffer(
+                        glow::FRAMEBUFFER,
+                        Some(simulation.pressure_fbos[0]),
+                    );
+                    self.gl.active_texture(glow::TEXTURE1);
+                    self.gl.bind_texture(glow::TEXTURE_2D, None);
+                    self.gl.active_texture(glow::TEXTURE0);
+                    self.gl.bind_texture(
+                        glow::TEXTURE_2D,
+                        Some(simulation.textures[simulation.front]),
+                    );
+                    self.gl
+                        .uniform_1_i32(self.slime_pressure_uniforms.mode.as_ref(), 0);
+                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+                    let mut pressure_front = 0usize;
+                    self.gl
+                        .uniform_1_i32(self.slime_pressure_uniforms.mode.as_ref(), 1);
+                    for _ in 0..simulation.pressure_iterations {
+                        let pressure_back = 1 - pressure_front;
+                        self.gl.bind_framebuffer(
+                            glow::FRAMEBUFFER,
+                            Some(simulation.pressure_fbos[pressure_back]),
+                        );
+                        self.gl.active_texture(glow::TEXTURE1);
+                        self.gl.bind_texture(
+                            glow::TEXTURE_2D,
+                            Some(simulation.pressure_textures[pressure_front]),
+                        );
+                        self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                        pressure_front = pressure_back;
+                    }
+
+                    // Project the provisional state into the other state target.
+                    let projected = 1 - simulation.front;
+                    self.gl.bind_framebuffer(
+                        glow::FRAMEBUFFER,
+                        Some(simulation.fbos[projected]),
+                    );
+                    self.gl.active_texture(glow::TEXTURE0);
+                    self.gl.bind_texture(
+                        glow::TEXTURE_2D,
+                        Some(simulation.textures[simulation.front]),
+                    );
+                    self.gl.active_texture(glow::TEXTURE1);
+                    self.gl.bind_texture(
+                        glow::TEXTURE_2D,
+                        Some(simulation.pressure_textures[pressure_front]),
+                    );
+                    self.gl
+                        .uniform_1_i32(self.slime_pressure_uniforms.mode.as_ref(), 2);
+                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    simulation.front = projected;
+                }
             }
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.gl.active_texture(glow::TEXTURE0);
             self.gl.enable(glow::BLEND);
             self.gl
                 .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);

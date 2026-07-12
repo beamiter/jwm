@@ -371,6 +371,12 @@ impl<C: CompositorConnection> Compositor<C> {
                 for texture in simulation.textures {
                     self.gl.delete_texture(texture);
                 }
+                for fbo in simulation.pressure_fbos {
+                    self.gl.delete_framebuffer(fbo);
+                }
+                for texture in simulation.pressure_textures {
+                    self.gl.delete_texture(texture);
+                }
             }
         }
         // Cancel in-progress transition on resize (screen geometry changed)

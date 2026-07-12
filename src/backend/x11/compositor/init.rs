@@ -748,6 +748,25 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         };
 
+        let slime_pressure_program = shader_cache.get_or_compile(
+            &gl,
+            "slime_pressure",
+            shaders::BLUR_DOWN_VERTEX,
+            shaders::SLIME_PRESSURE_FRAGMENT_SHADER,
+        )?;
+        let slime_pressure_uniforms = unsafe {
+            SlimePressureUniforms {
+                projection: gl.get_uniform_location(slime_pressure_program, "u_projection"),
+                rect: gl.get_uniform_location(slime_pressure_program, "u_rect"),
+                state: gl.get_uniform_location(slime_pressure_program, "u_state"),
+                pressure: gl.get_uniform_location(slime_pressure_program, "u_pressure"),
+                texel: gl.get_uniform_location(slime_pressure_program, "u_texel"),
+                mode: gl.get_uniform_location(slime_pressure_program, "u_mode"),
+                projection_amount: gl
+                    .get_uniform_location(slime_pressure_program, "u_projection_amount"),
+            }
+        };
+
         let magnifier_uniforms = unsafe {
             MagnifierUniforms {
                 magnifier_enabled: gl
@@ -1283,6 +1302,8 @@ impl<C: CompositorConnection> Compositor<C> {
             postprocess_uniforms,
             slime_wave_program,
             slime_wave_uniforms,
+            slime_pressure_program,
+            slime_pressure_uniforms,
             slime_wave_simulation: None,
             postprocess_fbo,
             color_temperature: behavior.color_temperature,

@@ -352,6 +352,8 @@ where
     postprocess_uniforms: PostprocessUniforms,
     slime_wave_program: glow::Program,
     slime_wave_uniforms: SlimeWaveUniforms,
+    slime_pressure_program: glow::Program,
+    slime_pressure_uniforms: SlimePressureUniforms,
     slime_wave_simulation: Option<SlimeWaveSimulation>,
     /// FBO for post-process pass (captures the composited scene)
     postprocess_fbo: Option<(glow::Framebuffer, glow::Texture)>,
@@ -751,6 +753,7 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
             self.gl.delete_program(self.border_program);
             self.gl.delete_program(self.postprocess_program);
             self.gl.delete_program(self.slime_wave_program);
+            self.gl.delete_program(self.slime_pressure_program);
             self.gl.delete_program(self.hud_program);
             self.gl.delete_program(self.hud_text_program);
             self.gl.delete_program(self.annotation_line_program);
@@ -787,6 +790,12 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                     self.gl.delete_framebuffer(fbo);
                 }
                 for texture in simulation.textures {
+                    self.gl.delete_texture(texture);
+                }
+                for fbo in simulation.pressure_fbos {
+                    self.gl.delete_framebuffer(fbo);
+                }
+                for texture in simulation.pressure_textures {
                     self.gl.delete_texture(texture);
                 }
             }

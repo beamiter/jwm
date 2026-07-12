@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE = ROOT / "src/backend/x11/compositor/common/shaders.rs"
 SHADER_NAMES = (
     "SLIME_WAVE_SIM_FRAGMENT_SHADER",
+    "SLIME_PRESSURE_FRAGMENT_SHADER",
     "MAGNIFIER_POSTPROCESS_FRAGMENT_SHADER",
 )
 

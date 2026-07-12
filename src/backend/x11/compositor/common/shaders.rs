@@ -573,18 +573,12 @@ void main() {
         + viscosity * laplacian_velocity
     );
 
-    // A local Helmholtz-style bulk correction damps the compressible component
-    // of the velocity. It is deliberately active only on the turbulence path:
-    // the ocean path needs divergence to propagate gravity waves.
+    // Mixed derivatives feed vorticity confinement below. Incompressibility is
+    // enforced by the multi-pass pressure projection after this predictor pass.
     vec2 mixed_second = 0.25 * vec2(
         bottom_right.b - bottom_left.b - top_right.b + top_left.b,
         bottom_right.g - top_right.g - bottom_left.g + top_left.g
     );
-    vec2 grad_divergence = vec2(
-        right.g + left.g - 2.0 * velocity.x + mixed_second.x,
-        bottom.b + top.b - 2.0 * velocity.y + mixed_second.y
-    );
-    velocity += grad_divergence * (0.22 * turbulent_flow);
     velocity /= 1.0 + drag * u_time_step;
     height += u_time_step * (
         -divergence * wave_flow
@@ -684,6 +678,83 @@ void main() {
         clamp(velocity, vec2(-32.0), vec2(32.0)),
         clamp(foam, 0.0, 1.0)
     );
+}
+"#;
+
+pub const SLIME_PRESSURE_FRAGMENT_SHADER: &str = r#"#version 330 core
+
+// mode 0: seed divergence in G with zero pressure in R
+// mode 1: one Jacobi pressure iteration, preserving divergence in G
+// mode 2: subtract the converged pressure gradient from state velocity
+uniform sampler2D u_state;
+uniform sampler2D u_pressure;
+uniform vec2 u_texel;
+uniform int u_mode;
+uniform float u_projection_amount;
+in vec2 v_uv;
+out vec4 frag_color;
+
+vec2 texture_uv(vec2 screen_uv) {
+    return vec2(screen_uv.x, 1.0 - screen_uv.y);
+}
+
+vec4 state_sample(vec2 screen_uv) {
+    return texture(
+        u_state,
+        clamp(texture_uv(screen_uv), u_texel * 1.5, vec2(1.0) - u_texel * 1.5)
+    );
+}
+
+vec2 pressure_sample(vec2 screen_uv) {
+    return texture(
+        u_pressure,
+        clamp(texture_uv(screen_uv), u_texel * 1.5, vec2(1.0) - u_texel * 1.5)
+    ).rg;
+}
+
+void main() {
+    vec2 axial = vec2(u_texel.x, 0.0);
+    vec2 vertical = vec2(0.0, u_texel.y);
+
+    if (u_mode == 0) {
+        vec2 left = state_sample(v_uv - axial).gb;
+        vec2 right = state_sample(v_uv + axial).gb;
+        vec2 top = state_sample(v_uv - vertical).gb;
+        vec2 bottom = state_sample(v_uv + vertical).gb;
+        float divergence = 0.5 * (
+            right.x - left.x + bottom.y - top.y
+        );
+        frag_color = vec4(0.0, divergence, 0.0, 1.0);
+        return;
+    }
+
+    if (u_mode == 1) {
+        vec2 center = pressure_sample(v_uv);
+        float left = pressure_sample(v_uv - axial).r;
+        float right = pressure_sample(v_uv + axial).r;
+        float top = pressure_sample(v_uv - vertical).r;
+        float bottom = pressure_sample(v_uv + vertical).r;
+        float pressure = (left + right + top + bottom - center.g) * 0.25;
+
+        float edge_distance = min(
+            min(v_uv.x, 1.0 - v_uv.x),
+            min(v_uv.y, 1.0 - v_uv.y)
+        );
+        // Atmospheric/open boundary: pressure falls to zero rather than
+        // reflecting a wake back into the domain.
+        pressure *= smoothstep(0.0, 0.025, edge_distance);
+        frag_color = vec4(pressure, center.g, 0.0, 1.0);
+        return;
+    }
+
+    vec4 state = state_sample(v_uv);
+    float left = pressure_sample(v_uv - axial).r;
+    float right = pressure_sample(v_uv + axial).r;
+    float top = pressure_sample(v_uv - vertical).r;
+    float bottom = pressure_sample(v_uv + vertical).r;
+    vec2 pressure_gradient = 0.5 * vec2(right - left, bottom - top);
+    state.gb -= pressure_gradient * u_projection_amount;
+    frag_color = state;
 }
 "#;
 

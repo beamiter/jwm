@@ -274,10 +274,23 @@ pub(super) struct SlimeWaveUniforms {
     pub(super) time_step: Option<glow::UniformLocation>,
 }
 
+pub(super) struct SlimePressureUniforms {
+    pub(super) projection: Option<glow::UniformLocation>,
+    pub(super) rect: Option<glow::UniformLocation>,
+    pub(super) state: Option<glow::UniformLocation>,
+    pub(super) pressure: Option<glow::UniformLocation>,
+    pub(super) texel: Option<glow::UniformLocation>,
+    pub(super) mode: Option<glow::UniformLocation>,
+    pub(super) projection_amount: Option<glow::UniformLocation>,
+}
+
 pub(super) struct SlimeWaveSimulation {
     pub(super) fbos: [glow::Framebuffer; 2],
     pub(super) textures: [glow::Texture; 2],
+    pub(super) pressure_fbos: [glow::Framebuffer; 2],
+    pub(super) pressure_textures: [glow::Texture; 2],
     pub(super) front: usize,
+    pub(super) pressure_iterations: usize,
     pub(super) width: u32,
     pub(super) height: u32,
     pub(super) last_tick: std::time::Instant,

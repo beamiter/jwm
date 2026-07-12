@@ -23,7 +23,10 @@ into a persistent, half-resolution `RGBA16F` fluid field. The channels retain
 surface height, horizontal velocity, and foam. A fixed 120 Hz semi-Lagrangian
 hybrid solver adds gravity-wave coupling for the ocean path and switches toward
 semi-Lagrangian tracer/velocity transport, divergence damping, vorticity
-confinement, viscosity, gesture swirl, and an absorbing boundary for turbulence. Persistent
+confinement, viscosity, gesture swirl, and an absorbing boundary for turbulence.
+The turbulence path computes velocity divergence, solves a pressure Poisson
+equation with ping-pong RG16F Jacobi iterations, and subtracts the converged
+pressure gradient to enforce approximate incompressibility. Persistent
 ocean waves are analytic and therefore do not consume simulation bandwidth when
 the tracker is idle. The interactive field remains alive for roughly one second
 independently of the current pose; after that the GPU field is cleared once and
@@ -178,13 +181,31 @@ python tools/slime_tracker.py \
 Set `--interaction-strength 0` to inspect the analytic ocean without fingertip
 or palm wakes. This is useful when tuning directional waves independently.
 
+Pressure projection defaults to 10 Jacobi iterations per 120 Hz simulation
+substep. The value is read when the simulation textures are first created and is
+clamped to `2..24`:
+
+```bash
+JWM_SLIME_PRESSURE_ITERS=6  jwm  # lower GPU cost
+JWM_SLIME_PRESSURE_ITERS=10 jwm  # default
+JWM_SLIME_PRESSURE_ITERS=16 jwm  # stronger incompressibility
+JWM_SLIME_PRESSURE_ITERS=24 jwm  # quality/stress testing
+```
+
+Iteration count and `JWM_SLIME_SIM_SCALE` multiply GPU cost. A practical high
+quality configuration is scale `0.75` with 16 iterations; full resolution with
+24 iterations should be treated as a benchmark rather than a desktop default.
+
 ## Current limitations and production path
 
 The field is a hybrid 2.5D shallow-water and incompressible-flow approximation,
 not a volumetric three-dimensional Navier-Stokes solver. It produces directional flow, vortices,
 foam, depth-shaped capsules, and convincing screen-space lighting, but cannot
 overturn into breaking geometry or collide with unknown objects inside client
-windows. Screen capture also sees any window covering the selected video region.
+windows. It also has no wall-resolved boundary layer, 3D vortex stretching, LES
+or RANS closure, mesh convergence study, or validated force coefficients, so it
+must not be interpreted as engineering CFD. Screen capture also sees any window
+covering the selected video region.
 
 For production-quality silhouettes, add an optional 64x64 or 128x128 R8 hand
 segmentation mask transported through shared memory (or dma-buf where practical).
