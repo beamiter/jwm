@@ -1993,19 +1993,6 @@ impl Config {
             .collect()
     }
 
-    pub fn get_dmenucmd(&self) -> Vec<String> {
-        self.inner
-            .keybindings
-            .keys
-            .iter()
-            .find(|k| k.function == "spawn" && (k.key == "e" || k.key == "r"))
-            .and_then(|k| match &k.argument {
-                ArgumentConfig::StringVec(cmd) => Some(cmd.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| vec!["jwm-launcher".to_string()])
-    }
-
     pub fn get_termcmd() -> Vec<String> {
         if let Ok(cmd) = std::env::var("JWM_TERMINAL") {
             let cmd = cmd.trim();
