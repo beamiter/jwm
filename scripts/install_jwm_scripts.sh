@@ -1,5 +1,5 @@
 #!/bin/bash
-# install_jwm_scripts.sh - 使用 cargo install 安装 JWM，并按需安装 status bar
+# install_jwm_scripts.sh - 安装 JWM，并按需安装 status bar
 set -euo pipefail
 
 # ============================================================
@@ -136,7 +136,7 @@ usage() {
   - CLONE_BARS（脚本顶部）只用于把哪些 bar 仓库 git clone/pull 到本地，不会构建。
   - 真正会被安装的 bar 只有 JWM_BAR_NAME（即 -b 的第一个参数，或脚本顶部默认值）。
   - bar 使用 cargo install --path ... 安装到 cargo bin 目录（通常是 ~/.cargo/bin）。
-  - jwm / jwm-tool 会先通过 cargo install 构建，再额外安装到 /usr/local/bin，供 desktop 会话直接启动。
+  - jwm / jwm-tool 只通过 cargo build 构建，并安装到 /usr/local/bin，不会安装到 cargo bin。
   - jwm 通过 config.toml 的 status_bar.name 在运行时选择 bar，切换 bar 不需要重编 jwm。
 
 示例:
@@ -262,8 +262,10 @@ done
 # ============================================================
 if [[ "$BUILD_MODE" == "release" ]]; then
     CARGO_INSTALL_MODE_FLAG=""
+    CARGO_BUILD_MODE_FLAG="--release"
 else
     CARGO_INSTALL_MODE_FLAG="--debug"
+    CARGO_BUILD_MODE_FLAG=""
 fi
 
 CARGO_JOBS=""
@@ -325,6 +327,19 @@ ensure_cargo_bin_dir() {
     mkdir -p "$(cargo_bin_dir)"
 }
 
+remove_jwm_cargo_bins() {
+    local bin_dir="$(cargo_bin_dir)"
+    local binary
+
+    # JWM 不再安装到 cargo bin；清理历史版本遗留的 JWM 二进制。
+    for binary in jwm jwm-tool; do
+        if [[ -e "$bin_dir/$binary" ]]; then
+            info "清理旧的 cargo bin/$binary ..."
+            rm -f -- "$bin_dir/$binary"
+        fi
+    done
+}
+
 install_system_binary() {
     local src="$1"
     local dest_dir="$2"
@@ -358,7 +373,7 @@ build_bar() {
 }
 
 # ============================================================
-# 安装 JWM，并将 desktop 依赖的二进制同步到 /usr/local/bin
+# 构建 JWM，并将 desktop 依赖的二进制安装到 /usr/local/bin
 # ============================================================
 build_and_install_jwm() {
     info "安装 jwm（$BUILD_MODE 模式）..."
@@ -369,16 +384,22 @@ build_and_install_jwm() {
 
     cd "$PROJECT_ROOT"
 
-    ensure_cargo_bin_dir
-
+    # JWM 不使用 cargo install，避免把 jwm/jwm-tool 写入 cargo bin。
     # shellcheck disable=SC2086
-    cargo install --path . --force $CARGO_INSTALL_MODE_FLAG $CARGO_JOBS --root "$(cargo_install_root)"
+    cargo build $CARGO_BUILD_MODE_FLAG $CARGO_JOBS
+
+    local target_dir="$PROJECT_ROOT/target"
+    if [[ "$BUILD_MODE" == "release" ]]; then
+        target_dir="$target_dir/release"
+    else
+        target_dir="$target_dir/debug"
+    fi
 
     info "同步 jwm, jwm-tool 到 /usr/local/bin ..."
-    install_system_binary "$(cargo_bin_dir)/jwm" /usr/local/bin
-    install_system_binary "$(cargo_bin_dir)/jwm-tool" /usr/local/bin
+    install_system_binary "$target_dir/jwm" /usr/local/bin
+    install_system_binary "$target_dir/jwm-tool" /usr/local/bin
 
-    ok "jwm, jwm-tool 安装完成: $(cargo_bin_dir) 和 /usr/local/bin"
+    ok "jwm, jwm-tool 安装完成: /usr/local/bin（未安装到 cargo bin）"
 
     info "安装 desktop 文件 ..."
     [[ -f jwm-x11rb.desktop ]]         && sudo install -m644 jwm-x11rb.desktop         /usr/share/xsessions/
@@ -397,7 +418,7 @@ regenerate_config() {
     info "重新生成 JWM 配置文件..."
     local jwm_bin="/usr/local/bin/jwm"
     if [[ ! -x "$jwm_bin" ]]; then
-        jwm_bin="$(cargo_bin_dir)/jwm"
+        jwm_bin="$PROJECT_ROOT/target/$BUILD_MODE/jwm"
     fi
     if "$jwm_bin" --gen-config; then
         ok "配置文件已重新生成"
@@ -458,6 +479,9 @@ fi
 info " 重新生成配置: $REGEN_CONFIG"
 info "========================================="
 echo ""
+
+# JWM 只安装到 /usr/local/bin；无论本次是否跳过编译，都先清理旧遗留文件。
+remove_jwm_cargo_bins
 
 # 1. 拉取所有 CLONE_BARS 仓库到本地（不编译）
 if [[ ${#CLONE_BARS[@]} -gt 0 ]]; then
