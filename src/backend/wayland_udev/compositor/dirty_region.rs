@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 
+const INITIAL_REGION_CAPACITY: usize = 16;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DirtyRect {
     pub x: f32,
@@ -67,7 +69,10 @@ pub struct DirtyRegionTracker {
 impl DirtyRegionTracker {
     pub fn new(w: u32, h: u32) -> Self {
         Self {
-            regions: VecDeque::new(),
+            // A compositor frame commonly accumulates several window, border, and
+            // focus-damage rectangles. Reserve the normal working set up front so
+            // the first active frame does not grow the deque repeatedly.
+            regions: VecDeque::with_capacity(INITIAL_REGION_CAPACITY),
             screen_w: w,
             screen_h: h,
             merge_distance: 50.0,
@@ -150,10 +155,20 @@ impl DirtyRegionTracker {
         if screen_area == 0.0 || self.regions.is_empty() {
             return 0.0;
         }
-        let mut merged = self.regions[0];
-        for rect in self.regions.iter().skip(1) {
-            merged = merged.union(rect);
-        }
+
+        // Metrics are often read immediately after the render path has already
+        // requested the merged rectangle. Reuse that result instead of folding
+        // all regions a second time, while keeping this method read-only.
+        let merged = if let Some(cached) = self.cached_merged {
+            cached
+        } else {
+            let mut merged = self.regions[0];
+            for rect in self.regions.iter().skip(1) {
+                merged = merged.union(rect);
+            }
+            merged
+        };
+
         (merged.area() / screen_area).min(1.0)
     }
 
@@ -186,11 +201,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tracker_preallocates_common_region_working_set() {
+        let tracker = DirtyRegionTracker::new(100, 100);
+        assert!(tracker.regions.capacity() >= INITIAL_REGION_CAPACITY);
+    }
+
+    #[test]
     fn current_dirty_fraction_is_read_only() {
         let mut tracker = DirtyRegionTracker::new(100, 100);
         tracker.mark_dirty(DirtyRect::new(0.0, 0.0, 20.0, 20.0));
 
         assert_eq!(tracker.current_dirty_fraction(), 0.04);
         assert_eq!(tracker.region_count(), 1);
+    }
+
+    #[test]
+    fn current_dirty_fraction_matches_cached_merge() {
+        let mut tracker = DirtyRegionTracker::new(100, 100);
+        tracker.mark_dirty(DirtyRect::new(0.0, 0.0, 20.0, 20.0));
+        tracker.mark_dirty(DirtyRect::new(70.0, 70.0, 20.0, 20.0));
+
+        let merged = tracker.merged().expect("dirty region should exist");
+        let expected = merged.area() / 10_000.0;
+
+        assert_eq!(tracker.current_dirty_fraction(), expected);
+        assert_eq!(tracker.region_count(), 2);
     }
 }
