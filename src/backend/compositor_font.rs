@@ -6,6 +6,148 @@
 //! once; each backend uploads the returned RGBA buffer to a texture in its own
 //! API-specific way.
 
+use ab_glyph::{Font, FontArc, ScaleFont, point};
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+
+static UI_FONTS: LazyLock<Mutex<HashMap<String, Option<FontArc>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Extract the conventional trailing point size from a fontconfig pattern.
+/// `SauceCodePro Nerd Font Regular 11` becomes 11pt (about 18 physical px for
+/// the system UI); patterns without a size use the modern 18px default.
+pub(crate) fn ui_font_pixel_size(description: &str) -> f32 {
+    description
+        .split_whitespace()
+        .next_back()
+        .and_then(|s| s.parse::<f32>().ok())
+        .map(|pt| (pt * 1.6).clamp(14.0, 32.0))
+        .unwrap_or(18.0)
+}
+
+fn ui_font_family(description: &str) -> String {
+    let mut parts: Vec<&str> = description.split_whitespace().collect();
+    if parts.last().is_some_and(|part| part.parse::<f32>().is_ok()) {
+        parts.pop();
+    }
+    while parts.last().is_some_and(|part| {
+        matches!(
+            part.to_ascii_lowercase().as_str(),
+            "regular" | "book" | "medium" | "semibold" | "bold" | "italic" | "oblique"
+        )
+    }) {
+        parts.pop();
+    }
+    if parts.is_empty() {
+        "monospace".to_owned()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn load_ui_font(description: &str) -> Option<FontArc> {
+    if let Some(cached) = UI_FONTS.lock().ok()?.get(description).cloned() {
+        return cached;
+    }
+    let family = ui_font_family(description);
+    let path = std::process::Command::new("fc-match")
+        .args(["-f", "%{file}\n", "--", &family])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|output| output.lines().next().map(str::trim).map(str::to_owned))
+        .filter(|path| !path.is_empty());
+    let font = path
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| FontArc::try_from_vec(bytes).ok());
+    if let Ok(mut fonts) = UI_FONTS.lock() {
+        fonts.insert(description.to_owned(), font.clone());
+    }
+    font
+}
+
+/// Render UTF-8 UI text with the configured TrueType/OpenType font. This path
+/// supports Nerd Font private-use glyphs and produces smooth alpha coverage.
+/// The embedded bitmap font remains the dependency-free fallback.
+pub(crate) fn render_ui_text_to_rgba(
+    text: &str,
+    font_description: &str,
+    pixel_size: f32,
+    fg: [u8; 4],
+) -> (Vec<u8>, u32, u32) {
+    let Some(font) = load_ui_font(font_description) else {
+        return render_text_to_rgba(text, 2, fg);
+    };
+    if text.is_empty() {
+        return (Vec::new(), 0, 0);
+    }
+
+    let scaled = font.as_scaled(pixel_size);
+    let ascent = scaled.ascent();
+    let line_height = (ascent - scaled.descent() + scaled.line_gap())
+        .ceil()
+        .max(1.0);
+    let lines: Vec<&str> = text.lines().collect();
+    let mut line_widths = Vec::with_capacity(lines.len());
+    for line in &lines {
+        let mut width = 0.0;
+        let mut previous = None;
+        for ch in line.chars() {
+            let mut id = scaled.glyph_id(ch);
+            if id.0 == 0 && ch != '\0' {
+                id = scaled.glyph_id('?');
+            }
+            if let Some(prev) = previous {
+                width += scaled.kern(prev, id);
+            }
+            width += scaled.h_advance(id);
+            previous = Some(id);
+        }
+        line_widths.push(width.ceil() as u32);
+    }
+    let width = line_widths.into_iter().max().unwrap_or(0).saturating_add(4);
+    let height = (line_height * lines.len().max(1) as f32).ceil() as u32 + 4;
+    if width == 0 || height == 0 {
+        return (Vec::new(), 0, 0);
+    }
+    let mut pixels = vec![0u8; width as usize * height as usize * 4];
+    for (line_index, line) in lines.iter().enumerate() {
+        let baseline = 2.0 + ascent + line_index as f32 * line_height;
+        let mut x = 2.0;
+        let mut previous = None;
+        for ch in line.chars() {
+            let mut id = scaled.glyph_id(ch);
+            if id.0 == 0 && ch != '\0' {
+                id = scaled.glyph_id('?');
+            }
+            if let Some(prev) = previous {
+                x += scaled.kern(prev, id);
+            }
+            let glyph = id.with_scale_and_position(pixel_size, point(x, baseline));
+            if let Some(outlined) = font.outline_glyph(glyph) {
+                let bounds = outlined.px_bounds();
+                outlined.draw(|gx, gy, coverage| {
+                    let px = bounds.min.x as i32 + gx as i32;
+                    let py = bounds.min.y as i32 + gy as i32;
+                    if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
+                        return;
+                    }
+                    let offset = (py as usize * width as usize + px as usize) * 4;
+                    let alpha = (coverage * fg[3] as f32).round().clamp(0.0, 255.0) as u8;
+                    if alpha > pixels[offset + 3] {
+                        pixels[offset..offset + 3].copy_from_slice(&fg[..3]);
+                        pixels[offset + 3] = alpha;
+                    }
+                });
+            }
+            x += scaled.h_advance(id);
+            previous = Some(id);
+        }
+    }
+    (pixels, width, height)
+}
+
 /// Glyph width in pixels (before scaling).
 pub(crate) const GLYPH_W: u32 = 6;
 /// Glyph height in pixels (before scaling).
@@ -284,6 +426,18 @@ mod tests {
         assert_eq!(w, 2 * GLYPH_W * 3);
         assert_eq!(h, GLYPH_H * 3);
         assert_eq!(px.len() as u32, w * h * 4);
+    }
+
+    #[test]
+    fn xft_style_font_description_splits_family_and_size() {
+        assert_eq!(
+            ui_font_family("SauceCodePro Nerd Font Regular 11"),
+            "SauceCodePro Nerd Font"
+        );
+        assert_eq!(
+            ui_font_pixel_size("SauceCodePro Nerd Font Regular 11"),
+            17.6
+        );
     }
 
     #[test]

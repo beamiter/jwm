@@ -199,7 +199,7 @@ impl SystemUiState {
                     message
                 };
                 format!(
-                    "JWM LOCKED\n\n{status}\n\nPassword: {}",
+                    "\u{f023}  JWM LOCKED\n\n{status}\n\n\u{f084}  Password  {}",
                     "*".repeat(password.chars().count())
                 )
             }
@@ -209,16 +209,16 @@ impl SystemUiState {
                 matches,
                 selected,
             } => {
-                let mut out = format!("JWM APP LAUNCHER\n\nRun: {query}_\n\n");
+                let mut out = format!("\u{f135}  APPLICATIONS\n\n\u{f002}  {query}_\n\n");
                 if matches.is_empty() {
                     out.push_str("  No matching applications");
                 }
                 let start = selected.saturating_sub(11);
                 for (row, &index) in matches.iter().enumerate().skip(start).take(12) {
-                    let marker = if row == *selected { ">" } else { " " };
+                    let marker = if row == *selected { "\u{f054}" } else { " " };
                     out.push_str(&format!("{marker} {}\n", entries[index].name));
                 }
-                out.push_str("\nEnter launch   Esc close   Up/Down select");
+                out.push_str("\n\u{f2f6} Enter  launch    Esc  close    \u{f062}/\u{f063}  select");
                 out
             }
             Self::Info {
@@ -231,7 +231,7 @@ impl SystemUiState {
                     out.push_str(line);
                     out.push('\n');
                 }
-                out.push_str("\nEsc close   Up/Down scroll");
+                out.push_str("\nEsc  close    \u{f062}/\u{f063}  scroll");
                 out
             }
         }

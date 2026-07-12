@@ -1832,8 +1832,17 @@ impl WaylandCompositor {
         let Some(overlay) = self.system_ui.clone() else {
             return;
         };
-        if overlay.text != self.hud_text_cache {
-            let (pixels, w, h) = font::render_text_to_rgba(&overlay.text, 2, [235, 240, 255, 255]);
+        let config = crate::config::CONFIG.load();
+        let description = config.dmenu_font();
+        let size = crate::backend::compositor_font::ui_font_pixel_size(description);
+        let cache_key = format!("{description}\0{size}\0{}", overlay.text);
+        if cache_key != self.hud_text_cache {
+            let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
+                &overlay.text,
+                description,
+                size,
+                [235, 240, 255, 255],
+            );
             if let Some(old) = self.hud_text_texture.take() {
                 gl.DeleteTextures(1, &old);
             }
@@ -1851,28 +1860,24 @@ impl WaylandCompositor {
                 ffi::UNSIGNED_BYTE,
                 pixels.as_ptr().cast(),
             );
-            gl.TexParameteri(
-                ffi::TEXTURE_2D,
-                ffi::TEXTURE_MIN_FILTER,
-                ffi::NEAREST as i32,
-            );
-            gl.TexParameteri(
-                ffi::TEXTURE_2D,
-                ffi::TEXTURE_MAG_FILTER,
-                ffi::NEAREST as i32,
-            );
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
             self.hud_text_texture = Some(tex);
             self.hud_text_width = w;
             self.hud_text_height = h;
-            self.hud_text_cache = overlay.text;
+            self.hud_text_cache = cache_key;
         }
-        let pad = 24.0;
+        let pad = 30.0;
         let tw = self.hud_text_width as f32;
         let th = self.hud_text_height as f32;
         let pw = (tw + pad * 2.0).min(self.screen_w as f32 - 32.0);
         let ph = th + pad * 2.0;
         let x = (self.screen_w as f32 - pw) * 0.5;
         let y = (self.screen_h as f32 - ph) * 0.5;
+        if overlay.locked {
+            gl.ClearColor(0.018, 0.022, 0.035, 1.0);
+            gl.Clear(ffi::COLOR_BUFFER_BIT);
+        }
         let rect = super::get_uniform_loc(gl, self.hud_program, "u_rect");
         let proj = super::get_uniform_loc(gl, self.hud_program, "u_projection");
         let bg = super::get_uniform_loc(gl, self.hud_program, "u_bg_color");

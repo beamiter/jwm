@@ -343,12 +343,59 @@ impl<C: CompositorConnection> Compositor<C> {
         self.hud_text_cache = text.to_string();
     }
 
+    fn update_system_ui_text_texture(&mut self, text: &str) {
+        let config = crate::config::CONFIG.load();
+        let description = config.dmenu_font();
+        let size = crate::backend::compositor_font::ui_font_pixel_size(description);
+        let cache_key = format!("{description}\0{size}\0{text}");
+        if cache_key == self.hud_text_cache && self.hud_text_texture.is_some() {
+            return;
+        }
+        let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
+            text,
+            description,
+            size,
+            [235, 240, 255, 255],
+        );
+        if w == 0 || h == 0 {
+            return;
+        }
+        unsafe {
+            if let Some(old) = self.hud_text_texture.take() {
+                self.gl.delete_texture(old);
+            }
+            if let Ok(tex) = self.gl.create_texture() {
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                self.gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA8 as i32,
+                    w as i32,
+                    h as i32,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&pixels)),
+                );
+                for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+                    self.gl
+                        .tex_parameter_i32(glow::TEXTURE_2D, filter, glow::LINEAR as i32);
+                }
+                self.gl.bind_texture(glow::TEXTURE_2D, None);
+                self.hud_text_texture = Some(tex);
+                self.hud_text_width = w;
+                self.hud_text_height = h;
+            }
+        }
+        self.hud_text_cache = cache_key;
+    }
+
     fn render_system_ui(&mut self, proj: &[f32; 16]) {
         let Some(overlay) = self.system_ui.clone() else {
             return;
         };
-        self.update_hud_text_texture(&overlay.text);
-        let pad = 24.0;
+        self.update_system_ui_text_texture(&overlay.text);
+        let pad = 30.0;
         let text_w = self.hud_text_width as f32;
         let text_h = self.hud_text_height as f32;
         let panel_w = (text_w + pad * 2.0).min(self.screen_w as f32 - 32.0);
@@ -356,6 +403,10 @@ impl<C: CompositorConnection> Compositor<C> {
         let x = (self.screen_w as f32 - panel_w) * 0.5;
         let y = (self.screen_h as f32 - panel_h) * 0.5;
         unsafe {
+            if overlay.locked {
+                self.gl.clear_color(0.018, 0.022, 0.035, 1.0);
+                self.gl.clear(glow::COLOR_BUFFER_BIT);
+            }
             self.gl.use_program(Some(self.hud_program));
             self.gl
                 .uniform_matrix_4_f32_slice(self.hud_uniforms.projection.as_ref(), false, proj);

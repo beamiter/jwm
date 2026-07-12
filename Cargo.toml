@@ -33,6 +33,7 @@ xbar_core = { git = "https://github.com/beamiter/xbar_core.git" }
 nix = { version = "0.30.1", features = ["signal", "inotify", "fs", "poll"] }
 lazy_static = "1.5.0"
 arc-swap = "1"
+ab_glyph = "0.2.32"
 rand = "0.9.4"
 xkbcommon = "0.9.0"
 bitflags = "2.11.1"
