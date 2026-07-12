@@ -567,7 +567,21 @@ void main() {
     float wave_flow = 1.0 - turbulent_flow;
     const float wave_speed = 27.0; // grid cells / second; CFL ~= 0.23 at 120 Hz
     float drag = mix(2.20, 1.15, turbulent_flow);
-    float viscosity = mix(0.95, 0.34, turbulent_flow);
+    float du_dx = 0.5 * (right.g - left.g);
+    float du_dy = 0.5 * (bottom.g - top.g);
+    float dv_dx = 0.5 * (right.b - left.b);
+    float dv_dy = 0.5 * (bottom.b - top.b);
+    float strain_rate = sqrt(
+        2.0 * du_dx * du_dx
+        + 2.0 * dv_dy * dv_dy
+        + (du_dy + dv_dx) * (du_dy + dv_dx)
+    );
+    // Smagorinsky-style subgrid viscosity: unresolved cell-scale motion is
+    // dissipated while broad, resolved vortices retain a much higher Reynolds
+    // number. This prevents vorticity confinement from feeding grid noise.
+    float eddy_viscosity = turbulent_flow
+        * clamp(strain_rate * 0.055, 0.0, 1.35);
+    float viscosity = mix(0.95, 0.52, turbulent_flow) + eddy_viscosity;
     velocity += u_time_step * (
         -wave_speed * wave_speed * gradient_height * wave_flow
         + viscosity * laplacian_velocity
@@ -717,13 +731,14 @@ void main() {
     vec2 vertical = vec2(0.0, u_texel.y);
 
     if (u_mode == 0) {
+        vec2 center = state_sample(v_uv).gb;
         vec2 left = state_sample(v_uv - axial).gb;
-        vec2 right = state_sample(v_uv + axial).gb;
         vec2 top = state_sample(v_uv - vertical).gb;
-        vec2 bottom = state_sample(v_uv + vertical).gb;
-        float divergence = 0.5 * (
-            right.x - left.x + bottom.y - top.y
-        );
+        // Backward divergence pairs with the forward pressure gradient in mode
+        // 2. Their composition is the ordinary one-cell Laplacian, avoiding the
+        // odd/even pressure null-space of two centered differences.
+        float divergence =
+            center.x - left.x + center.y - top.y;
         frag_color = vec4(0.0, divergence, 0.0, 1.0);
         return;
     }
@@ -734,7 +749,10 @@ void main() {
         float right = pressure_sample(v_uv + axial).r;
         float top = pressure_sample(v_uv - vertical).r;
         float bottom = pressure_sample(v_uv + vertical).r;
-        float pressure = (left + right + top + bottom - center.g) * 0.25;
+        float jacobi = (left + right + top + bottom - center.g) * 0.25;
+        // Weighted Jacobi damps the +/-1 checkerboard eigenmode that ordinary
+        // Jacobi merely flips between odd and even cells.
+        float pressure = mix(center.r, jacobi, 0.72);
 
         float edge_distance = min(
             min(v_uv.x, 1.0 - v_uv.x),
@@ -748,11 +766,10 @@ void main() {
     }
 
     vec4 state = state_sample(v_uv);
-    float left = pressure_sample(v_uv - axial).r;
+    float center = pressure_sample(v_uv).r;
     float right = pressure_sample(v_uv + axial).r;
-    float top = pressure_sample(v_uv - vertical).r;
     float bottom = pressure_sample(v_uv + vertical).r;
-    vec2 pressure_gradient = 0.5 * vec2(right - left, bottom - top);
+    vec2 pressure_gradient = vec2(right - center, bottom - center);
     state.gb -= pressure_gradient * u_projection_amount;
     frag_color = state;
 }
