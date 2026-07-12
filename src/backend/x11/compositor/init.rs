@@ -737,6 +737,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 state: gl.get_uniform_location(slime_wave_program, "u_state"),
                 texel: gl.get_uniform_location(slime_wave_program, "u_texel"),
                 aspect: gl.get_uniform_location(slime_wave_program, "u_aspect"),
+                turbulence: gl.get_uniform_location(slime_wave_program, "u_turbulence"),
+                foam: gl.get_uniform_location(slime_wave_program, "u_foam"),
                 injection_count: gl
                     .get_uniform_location(slime_wave_program, "u_injection_count"),
                 injections: gl.get_uniform_location(slime_wave_program, "u_injections[0]"),
@@ -757,6 +759,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 magnifier_zoom: gl.get_uniform_location(postprocess_program, "u_magnifier_zoom"),
                 slime_enabled: gl.get_uniform_location(postprocess_program, "u_slime_enabled"),
                 slime_points: gl.get_uniform_location(postprocess_program, "u_slime_points[0]"),
+                slime_depths: gl.get_uniform_location(postprocess_program, "u_slime_depths[0]"),
                 slime_bbox: gl.get_uniform_location(postprocess_program, "u_slime_bbox"),
                 slime_surface_rect: gl
                     .get_uniform_location(postprocess_program, "u_slime_surface_rect"),
@@ -764,14 +767,14 @@ impl<C: CompositorConnection> Compositor<C> {
                     .get_uniform_location(postprocess_program, "u_slime_screen_size"),
                 slime_scale: gl.get_uniform_location(postprocess_program, "u_slime_scale"),
                 slime_strength: gl.get_uniform_location(postprocess_program, "u_slime_strength"),
+                slime_ocean_strength: gl
+                    .get_uniform_location(postprocess_program, "u_slime_ocean_strength"),
+                slime_turbulence_strength: gl
+                    .get_uniform_location(postprocess_program, "u_slime_turbulence_strength"),
+                slime_foam_strength: gl
+                    .get_uniform_location(postprocess_program, "u_slime_foam_strength"),
                 slime_opacity: gl.get_uniform_location(postprocess_program, "u_slime_opacity"),
                 slime_time: gl.get_uniform_location(postprocess_program, "u_slime_time"),
-                slime_ripple_count: gl
-                    .get_uniform_location(postprocess_program, "u_slime_ripple_count"),
-                slime_ripples: gl
-                    .get_uniform_location(postprocess_program, "u_slime_ripples[0]"),
-                slime_ripple_directions: gl
-                    .get_uniform_location(postprocess_program, "u_slime_ripple_directions[0]"),
                 slime_wave: gl.get_uniform_location(postprocess_program, "u_slime_wave"),
                 slime_wave_texel: gl
                     .get_uniform_location(postprocess_program, "u_slime_wave_texel"),

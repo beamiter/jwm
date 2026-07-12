@@ -18,13 +18,15 @@ Override the location with `JWM_SLIME_SOCKET=/path/to/socket`.
 
 A receiver thread continuously replaces a single pending packet. The compositor
 therefore consumes the newest pose rather than replaying stale inference frames.
-Motion-filtered fingertip landmarks inject speed-scaled momentum capsules into a
-half-resolution, persistent `RG16F` wave field. Two ping-pong textures retain
-surface height and vertical velocity. A fixed 120 Hz, nine-point isotropic solver
-integrates the linearized viscous shallow-water equation with bulk drag, kinematic
-viscosity, volume-balanced impulses, and an absorbing boundary. Its CFL number is
-about 0.32, below the two-dimensional stability limit. The field remains alive
-for roughly 1.5 seconds independently of the current pose.
+Motion-filtered fingertip and palm landmarks inject directional momentum capsules
+into a persistent, half-resolution `RGBA16F` fluid field. The channels retain
+surface height, horizontal velocity, and foam. A fixed 120 Hz semi-Lagrangian
+shallow-water solver adds gravity, divergence coupling, viscosity, vorticity
+enhancement, crest foam, gesture swirl, and an absorbing boundary. Persistent
+ocean waves are analytic and therefore do not consume simulation bandwidth when
+the tracker is idle. The interactive field remains alive for roughly 1.5 seconds
+independently of the current pose; after that the GPU field is cleared once and
+the numerical solver sleeps until the next gesture.
 
 While the effect is visible, direct scanout and fullscreen unredirect are
 suppressed because both paths bypass compositor post-processing.
@@ -104,52 +106,80 @@ Each Unix datagram contains one compact JSON object:
   "window": 73400327,
   "content_rect": [0.0, 0.0625, 1.0, 0.875],
   "refract_px": 12.0,
+  "ocean_strength": 0.32,
+  "turbulence_strength": 0.68,
+  "foam_strength": 0.78,
   "seq": 1204,
   "timestamp_ns": 998877665544,
   "hands": [
     {
       "score": 0.97,
-      "landmarks": [[0.51, 0.82], [0.46, 0.71]]
+      "landmarks": [[0.51, 0.82, -0.04], [0.46, 0.71, -0.06]]
     }
   ]
 }
 ```
 
-`landmarks` must contain the standard 21 MediaPipe hand points. `window` is an
-X11 window ID. Omit `window` only when points are normalized to the entire
-screen. Packets naming an unknown/stale XID are ignored instead of being mapped
-to the screen accidentally. Unknown fields such as `seq` and `timestamp_ns` are
-forward-compatible diagnostics.
+`landmarks` must contain the standard 21 MediaPipe hand points. Both legacy
+`[x,y]` points and depth-aware `[x,y,z]` points are accepted in version 1. A
+negative MediaPipe Z value brings the corresponding liquid capsule toward the
+viewer and increases its apparent thickness. The three fluid controls are
+optional and are clamped to `[0,1]`.
+
+`window` is an X11 window ID. Omit `window` only when points are normalized to
+the entire screen. Packets naming an unknown/stale XID are ignored instead of
+being mapped to the screen accidentally. Unknown fields such as `seq` and
+`timestamp_ns` remain forward-compatible diagnostics.
 
 ## Render path
 
 1. The tracker captures and runs inference outside JWM.
 2. JWM retains only the newest datagram.
-3. Window-relative landmarks are mapped and adaptively smoothed in screen pixels.
-   Five fingertip tracks emit distance-spaced ripple events while rejecting
-   stationary landmark jitter.
-4. The existing post-process FBO supplies the composited scene texture.
-   A feathered 9-tap cool blur covers the selected window as the calm water
-   surface; packets without a window apply the skin to the whole screen.
-5. The GPU catches up in fixed 120 Hz shallow-water substeps, independent of the
-   display refresh rate. Old disturbances keep propagating after the hand
-   disappears and then lose energy through viscosity and boundary absorption.
-6. A 9-sample Sobel gradient and Laplacian drive refraction, lens curvature,
-   chromatic dispersion, Schlick Fresnel, dual-lobe specular, and caustics. A
-   low-opacity hand SDF provides secondary tracking feedback.
-7. Existing accessibility, color correction, and HDR passes run afterwards.
-8. The pose is held briefly and faded when inference disappears or stops.
+3. Window-relative XY and optional Z landmarks are adaptively smoothed. Fingertips
+   inject narrow wakes while the palm injects a broader momentum wake; stationary
+   tracking jitter is rejected by distance thresholds.
+4. The existing post-process FBO supplies the composited scene texture. A
+   feathered 9-tap cool blur covers the selected window as the calm liquid
+   baseline; packets without a window apply the skin to the whole screen.
+5. The GPU catches up in fixed 120 Hz fluid substeps, independent of display
+   refresh. Height and horizontal velocity are semi-Lagrangian advected, coupled
+   through a shallow-water pressure term, diffused, and augmented with vorticity.
+6. Multi-direction analytic ocean waves are added to the simulated height. A
+   Sobel gradient, transported micro-normal, and foam field drive refraction,
+   chromatic dispersion, Schlick Fresnel, specular highlights, and caustics.
+7. The depth-aware hand SDF supplies a quiet three-dimensional tracking guide.
+8. Existing accessibility, color correction, and HDR passes run afterwards.
+9. The pose is held briefly and faded when inference disappears or stops.
+
+## Runtime tuning
+
+The simulation defaults to half resolution. Set `JWM_SLIME_SIM_SCALE` before
+starting JWM to trade GPU cost for detail:
+
+```bash
+JWM_SLIME_SIM_SCALE=0.35 jwm   # low-power
+JWM_SLIME_SIM_SCALE=0.50 jwm   # default
+JWM_SLIME_SIM_SCALE=0.75 jwm   # high quality
+```
+
+Values are clamped to `0.25..1.0`. Tracker controls can be changed independently:
+
+```bash
+python tools/slime_tracker.py \
+  --ocean-strength 0.32 \
+  --turbulence-strength 0.68 \
+  --foam-strength 0.78
+```
 
 ## Current limitations and production path
 
-The wave field is a linearized, two-dimensional free-surface approximation, not
-a full three-dimensional Navier-Stokes simulation; overturning, turbulence, and
-object coupling are outside its realtime screen-space model. The landmark SDF is
-a low-latency MVP. It approximates the wrist boundary and
-cannot express hand/object occlusion precisely. Screen capture also sees any
-window covering the selected video region.
+The field is a nonlinear 2.5D shallow-water approximation, not a volumetric
+three-dimensional Navier-Stokes solver. It produces directional flow, vortices,
+foam, depth-shaped capsules, and convincing screen-space lighting, but cannot
+overturn into breaking geometry or collide with unknown objects inside client
+windows. Screen capture also sees any window covering the selected video region.
 
-For production quality, add an optional 64x64 or 128x128 R8 hand-segmentation
-mask transported through shared memory (or dma-buf where practical). Keep the
-landmarks for temporal stabilization, analytic highlights, and fallback when
-the segmentation model drops a frame.
+For production-quality silhouettes, add an optional 64x64 or 128x128 R8 hand
+segmentation mask transported through shared memory (or dma-buf where practical).
+Keep landmarks for depth, temporal stabilization, analytic highlights, momentum
+injection, and fallback when the segmentation model drops a frame.

@@ -48,13 +48,20 @@ def transform_hand(t: float, center_x: float, center_y: float, scale: float):
     sin_a = math.sin(angle)
 
     points = []
-    for x, y in BASE_HAND:
+    for index, (x, y) in enumerate(BASE_HAND):
         local_x = (x - 0.50) * scale * pulse
         local_y = (y - 0.50) * scale * pulse
+        # Negative MediaPipe-style Z moves the surface toward the viewer.
+        depth = (
+            -0.055
+            - max(0.0, 0.50 - y) * 0.11
+            + math.sin(t * 1.15 + index * 0.37) * 0.018
+        )
         points.append(
             [
                 cx + local_x * cos_a - local_y * sin_a,
                 cy + local_x * sin_a + local_y * cos_a,
+                depth,
             ]
         )
     return points
@@ -75,10 +82,20 @@ def main() -> int:
     parser.add_argument("--center-y", type=float, default=0.50)
     parser.add_argument("--scale", type=float, default=0.72)
     parser.add_argument("--refract-px", type=float, default=14.0)
+    parser.add_argument("--ocean-strength", type=float, default=0.42)
+    parser.add_argument("--turbulence-strength", type=float, default=0.72)
+    parser.add_argument("--foam-strength", type=float, default=0.82)
     args = parser.parse_args()
 
     if args.fps <= 0.0 or args.scale <= 0.0 or args.refract_px <= 0.0:
         parser.error("fps, scale, and refract-px must be positive")
+    for name, value in (
+        ("--ocean-strength", args.ocean_strength),
+        ("--turbulence-strength", args.turbulence_strength),
+        ("--foam-strength", args.foam_strength),
+    ):
+        if not 0.0 <= value <= 1.0:
+            parser.error(f"{name} must be in [0,1]")
     if not args.socket.exists():
         print(f"JWM slime socket does not exist: {args.socket}", file=sys.stderr)
         return 2
@@ -100,6 +117,9 @@ def main() -> int:
                 "version": 1,
                 "active": True,
                 "refract_px": args.refract_px,
+                "ocean_strength": args.ocean_strength,
+                "turbulence_strength": args.turbulence_strength,
+                "foam_strength": args.foam_strength,
                 "hands": [
                     {
                         "score": 1.0,

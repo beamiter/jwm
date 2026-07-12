@@ -15,15 +15,16 @@ impl<C: CompositorConnection> Compositor<C> {
         unsafe {
             let texture = gl.create_texture().map_err(|err| err.to_string())?;
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-            const GL_RG16F: u32 = 0x822f;
+            // R=surface height, G/B=horizontal velocity, A=foam density.
+            const GL_RGBA16F: u32 = 0x881a;
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
                 0,
-                GL_RG16F as i32,
+                GL_RGBA16F as i32,
                 width as i32,
                 height as i32,
                 0,
-                glow::RG,
+                glow::RGBA,
                 glow::HALF_FLOAT,
                 glow::PixelUnpackData::Slice(None),
             );
@@ -59,7 +60,7 @@ impl<C: CompositorConnection> Compositor<C> {
             if gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE {
                 gl.delete_framebuffer(fbo);
                 gl.delete_texture(texture);
-                return Err("slime wave RG16F framebuffer is incomplete".to_string());
+                return Err("slime fluid RGBA16F framebuffer is incomplete".to_string());
             }
             gl.clear_color(0.0, 0.0, 0.0, 0.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
@@ -71,8 +72,14 @@ impl<C: CompositorConnection> Compositor<C> {
         if self.slime_wave_simulation.is_some() {
             return true;
         }
-        let width = (self.screen_w / 2).max(1);
-        let height = (self.screen_h / 2).max(1);
+        let scale = std::env::var("JWM_SLIME_SIM_SCALE")
+            .ok()
+            .and_then(|value| value.parse::<f32>().ok())
+            .filter(|value| value.is_finite())
+            .unwrap_or(0.5)
+            .clamp(0.25, 1.0);
+        let width = ((self.screen_w as f32 * scale).round() as u32).max(1);
+        let height = ((self.screen_h as f32 * scale).round() as u32).max(1);
         let created = unsafe {
             let first = Self::create_slime_wave_target(&self.gl, width, height);
             let second = Self::create_slime_wave_target(&self.gl, width, height);
@@ -85,6 +92,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     height,
                     last_tick: std::time::Instant::now(),
                     accumulated_time: 1.0 / 120.0,
+                    active: false,
                 }),
                 (Ok((fbo, texture)), Err(err)) | (Err(err), Ok((fbo, texture))) => {
                     self.gl.delete_framebuffer(fbo);
@@ -107,8 +115,29 @@ impl<C: CompositorConnection> Compositor<C> {
             return;
         }
         let (segments, injection_params, injection_count) = self.slime_state.take_wave_injections();
+        let fluid_active = injection_count > 0 || self.slime_state.has_live_waves();
         let mut simulation = self.slime_wave_simulation.take().unwrap();
         unsafe {
+            if !fluid_active {
+                if simulation.active {
+                    self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
+                    for fbo in &simulation.fbos {
+                        self.gl
+                            .bind_framebuffer(glow::FRAMEBUFFER, Some(*fbo));
+                        self.gl.clear(glow::COLOR_BUFFER_BIT);
+                    }
+                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                    simulation.active = false;
+                }
+                simulation.accumulated_time = 0.0;
+                simulation.last_tick = std::time::Instant::now();
+                self.gl
+                    .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+                self.slime_wave_simulation = Some(simulation);
+                return;
+            }
+            simulation.active = true;
+            self.gl.disable(glow::BLEND);
             self.gl.use_program(Some(self.slime_wave_program));
             let projection = ortho(
                 0.0,
@@ -140,6 +169,14 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.uniform_1_f32(
                 self.slime_wave_uniforms.aspect.as_ref(),
                 simulation.width as f32 / simulation.height as f32,
+            );
+            self.gl.uniform_1_f32(
+                self.slime_wave_uniforms.turbulence.as_ref(),
+                self.slime_state.turbulence_strength(),
+            );
+            self.gl.uniform_1_f32(
+                self.slime_wave_uniforms.foam.as_ref(),
+                self.slime_state.foam_strength(),
             );
             self.gl.bind_vertex_array(Some(self.quad_vao));
             self.gl
@@ -186,6 +223,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.gl.enable(glow::BLEND);
             self.gl
                 .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
         }

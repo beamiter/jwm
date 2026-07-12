@@ -166,6 +166,24 @@ def main() -> int:
     parser.add_argument("--socket", type=Path, default=default_socket_path())
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--refract-px", type=float, default=12.0)
+    parser.add_argument(
+        "--ocean-strength",
+        type=float,
+        default=0.32,
+        help="continuous directional-ocean contribution in [0,1]",
+    )
+    parser.add_argument(
+        "--turbulence-strength",
+        type=float,
+        default=0.68,
+        help="horizontal-flow vorticity and micro-normal strength in [0,1]",
+    )
+    parser.add_argument(
+        "--foam-strength",
+        type=float,
+        default=0.78,
+        help="crest/vorticity foam generation in [0,1]",
+    )
     parser.add_argument("--min-score", type=float, default=0.55)
     parser.add_argument(
         "--content-rect",
@@ -193,6 +211,13 @@ def main() -> int:
         parser.error("--min-score must be in [0,1]")
     if args.refract_px <= 0.0:
         parser.error("--refract-px must be positive")
+    for name, value in (
+        ("--ocean-strength", args.ocean_strength),
+        ("--turbulence-strength", args.turbulence_strength),
+        ("--foam-strength", args.foam_strength),
+    ):
+        if not 0.0 <= value <= 1.0:
+            parser.error(f"{name} must be in [0,1]")
 
     try:
         import cv2  # type: ignore
@@ -238,7 +263,9 @@ def main() -> int:
 
     print(
         f"tracking {hex(window_id)} at {geometry.width}x{geometry.height}; "
-        f"content={tuple(args.content_rect)}; socket={args.socket}",
+        f"content={tuple(args.content_rect)}; socket={args.socket}; "
+        f"ocean={args.ocean_strength:.2f} turbulence={args.turbulence_strength:.2f} "
+        f"foam={args.foam_strength:.2f}",
         file=sys.stderr,
     )
 
@@ -273,13 +300,19 @@ def main() -> int:
 
                 if result.multi_hand_landmarks:
                     hand = result.multi_hand_landmarks[0]
-                    landmarks = [[float(point.x), float(point.y)] for point in hand.landmark]
+                    landmarks = [
+                        [float(point.x), float(point.y), float(point.z)]
+                        for point in hand.landmark
+                    ]
                     packet = {
                         "version": 1,
                         "active": True,
                         "window": window_id,
                         "content_rect": list(args.content_rect),
                         "refract_px": args.refract_px,
+                        "ocean_strength": args.ocean_strength,
+                        "turbulence_strength": args.turbulence_strength,
+                        "foam_strength": args.foam_strength,
                         "hands": [{"score": 1.0, "landmarks": landmarks}],
                         "seq": seq,
                         "timestamp_ns": time.monotonic_ns(),

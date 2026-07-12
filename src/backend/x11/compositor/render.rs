@@ -2146,6 +2146,10 @@ impl<C: CompositorConnection> Compositor<C> {
                         self.magnifier_uniforms.slime_points.as_ref(),
                         self.slime_state.points(),
                     );
+                    self.gl.uniform_1_f32_slice(
+                        self.magnifier_uniforms.slime_depths.as_ref(),
+                        self.slime_state.depths(),
+                    );
                     let [min_x, min_y, max_x, max_y] = self.slime_state.bbox();
                     self.gl.uniform_4_f32(
                         self.magnifier_uniforms.slime_bbox.as_ref(),
@@ -2177,6 +2181,20 @@ impl<C: CompositorConnection> Compositor<C> {
                         self.slime_state.strength(),
                     );
                     self.gl.uniform_1_f32(
+                        self.magnifier_uniforms.slime_ocean_strength.as_ref(),
+                        self.slime_state.ocean_strength(),
+                    );
+                    self.gl.uniform_1_f32(
+                        self.magnifier_uniforms
+                            .slime_turbulence_strength
+                            .as_ref(),
+                        self.slime_state.turbulence_strength(),
+                    );
+                    self.gl.uniform_1_f32(
+                        self.magnifier_uniforms.slime_foam_strength.as_ref(),
+                        self.slime_state.foam_strength(),
+                    );
+                    self.gl.uniform_1_f32(
                         self.magnifier_uniforms.slime_time.as_ref(),
                         self.compositor_start_time.elapsed().as_secs_f32(),
                     );
@@ -2194,20 +2212,6 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.gl
                         .bind_texture(glow::TEXTURE_2D, Some(wave_texture));
                     self.gl.active_texture(glow::TEXTURE0);
-                    let (ripples, ripple_directions, ripple_count) =
-                        self.slime_state.ripple_uniforms();
-                    self.gl.uniform_1_i32(
-                        self.magnifier_uniforms.slime_ripple_count.as_ref(),
-                        ripple_count,
-                    );
-                    self.gl.uniform_4_f32_slice(
-                        self.magnifier_uniforms.slime_ripples.as_ref(),
-                        &ripples[..ripple_count as usize * 4],
-                    );
-                    self.gl.uniform_2_f32_slice(
-                        self.magnifier_uniforms.slime_ripple_directions.as_ref(),
-                        &ripple_directions[..ripple_count as usize * 2],
-                    );
                 }
 
                 // Colorblind correction uniform

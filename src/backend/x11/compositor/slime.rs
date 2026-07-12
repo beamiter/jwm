@@ -15,9 +15,12 @@ const PACKET_LIMIT: usize = 64 * 1024;
 const HOLD_TIME: Duration = Duration::from_millis(120);
 const FADE_TIME: Duration = Duration::from_millis(160);
 const RECEIVE_TIMEOUT: Duration = Duration::from_millis(100);
-const RIPPLE_LIFETIME: Duration = Duration::from_millis(1550);
-const MAX_RIPPLES: usize = 48;
+const WAVE_LIFETIME: Duration = Duration::from_millis(1550);
 const FINGERTIP_INDICES: [usize; 5] = [4, 8, 12, 16, 20];
+const PALM_INDICES: [usize; 5] = [0, 5, 9, 13, 17];
+const DEFAULT_OCEAN_STRENGTH: f32 = 0.28;
+const DEFAULT_TURBULENCE_STRENGTH: f32 = 0.62;
+const DEFAULT_FOAM_STRENGTH: f32 = 0.72;
 
 #[derive(Debug, Deserialize)]
 struct SlimePacket {
@@ -32,6 +35,12 @@ struct SlimePacket {
     #[serde(default)]
     refract_px: Option<f32>,
     #[serde(default)]
+    ocean_strength: Option<f32>,
+    #[serde(default)]
+    turbulence_strength: Option<f32>,
+    #[serde(default)]
+    foam_strength: Option<f32>,
+    #[serde(default)]
     hands: Vec<SlimeHand>,
 }
 
@@ -39,7 +48,29 @@ struct SlimePacket {
 struct SlimeHand {
     #[serde(default = "default_score")]
     score: f32,
-    landmarks: Vec<[f32; 2]>,
+    landmarks: Vec<SlimeLandmark>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(untagged)]
+enum SlimeLandmark {
+    Xy([f32; 2]),
+    Xyz([f32; 3]),
+}
+
+impl SlimeLandmark {
+    fn components(self) -> [f32; 3] {
+        match self {
+            Self::Xy([x, y]) => [x, y, 0.0],
+            Self::Xyz(point) => point,
+        }
+    }
+}
+
+impl From<[f32; 2]> for SlimeLandmark {
+    fn from(point: [f32; 2]) -> Self {
+        Self::Xy(point)
+    }
 }
 
 const fn default_version() -> u32 {
@@ -188,28 +219,32 @@ impl Drop for SlimeIpc {
     }
 }
 
-struct SlimeRipple {
-    center: [f32; 2],
-    direction: [f32; 2],
-    born: Instant,
+struct SlimeWaveInjection {
+    start: [f32; 2],
+    end: [f32; 2],
     amplitude: f32,
+    radius_scale: f32,
 }
 
 pub(super) struct SlimeState {
     points: [f32; LANDMARK_COUNT * 2],
+    depths: [f32; LANDMARK_COUNT],
     bbox: [f32; 4],
     surface_rect: [f32; 4],
     scale: f32,
     strength: f32,
+    ocean_strength: f32,
+    turbulence_strength: f32,
+    foam_strength: f32,
     last_update: Option<Instant>,
+    last_wave_activity: Option<Instant>,
     was_visible: bool,
     initialized: bool,
-    ripple_tips: [[f32; 2]; 5],
-    ripple_tips_initialized: bool,
     wave_tips: [[f32; 2]; 5],
     wave_tips_initialized: bool,
-    ripples: Vec<SlimeRipple>,
-    pending_wave_injections: Vec<([f32; 2], [f32; 2], f32)>,
+    wave_palm: [f32; 2],
+    wave_palm_initialized: bool,
+    pending_wave_injections: Vec<SlimeWaveInjection>,
     screen_size: (f32, f32),
 }
 
@@ -217,18 +252,22 @@ impl Default for SlimeState {
     fn default() -> Self {
         Self {
             points: [0.0; LANDMARK_COUNT * 2],
+            depths: [0.0; LANDMARK_COUNT],
             bbox: [0.0; 4],
             surface_rect: [0.0, 0.0, 1.0, 1.0],
             scale: 48.0,
             strength: 10.0,
+            ocean_strength: DEFAULT_OCEAN_STRENGTH,
+            turbulence_strength: DEFAULT_TURBULENCE_STRENGTH,
+            foam_strength: DEFAULT_FOAM_STRENGTH,
             last_update: None,
+            last_wave_activity: None,
             was_visible: false,
             initialized: false,
-            ripple_tips: [[0.0; 2]; 5],
-            ripple_tips_initialized: false,
             wave_tips: [[0.0; 2]; 5],
             wave_tips_initialized: false,
-            ripples: Vec::with_capacity(MAX_RIPPLES),
+            wave_palm: [0.0; 2],
+            wave_palm_initialized: false,
             pending_wave_injections: Vec::with_capacity(10),
             screen_size: (1.0, 1.0),
         }
@@ -238,11 +277,11 @@ impl Default for SlimeState {
 impl SlimeState {
     fn clear(&mut self) {
         self.last_update = None;
+        self.last_wave_activity = None;
         self.was_visible = false;
         self.initialized = false;
-        self.ripple_tips_initialized = false;
         self.wave_tips_initialized = false;
-        self.ripples.clear();
+        self.wave_palm_initialized = false;
         self.pending_wave_injections.clear();
     }
 
@@ -261,7 +300,7 @@ impl SlimeState {
     }
 
     pub(super) fn is_visible(&self) -> bool {
-        self.opacity() > 0.0 || self.has_live_ripples()
+        self.opacity() > 0.0 || self.has_live_waves()
     }
 
     /// Includes the final cleanup frame after opacity reaches zero.
@@ -271,6 +310,10 @@ impl SlimeState {
 
     pub(super) fn points(&self) -> &[f32] {
         &self.points
+    }
+
+    pub(super) fn depths(&self) -> &[f32] {
+        &self.depths
     }
 
     pub(super) fn bbox(&self) -> [f32; 4] {
@@ -293,22 +336,16 @@ impl SlimeState {
         self.strength
     }
 
-    pub(super) fn ripple_uniforms(&self) -> ([f32; MAX_RIPPLES * 4], [f32; MAX_RIPPLES * 2], i32) {
-        let mut data = [0.0; MAX_RIPPLES * 4];
-        let mut directions = [0.0; MAX_RIPPLES * 2];
-        let mut count = 0usize;
-        for ripple in self.live_ripples().take(MAX_RIPPLES) {
-            let base = count * 4;
-            data[base] = ripple.center[0];
-            data[base + 1] = ripple.center[1];
-            data[base + 2] = (ripple.born.elapsed().as_secs_f32() / RIPPLE_LIFETIME.as_secs_f32())
-                .clamp(0.0, 1.0);
-            data[base + 3] = ripple.amplitude;
-            directions[count * 2] = ripple.direction[0];
-            directions[count * 2 + 1] = ripple.direction[1];
-            count += 1;
-        }
-        (data, directions, count as i32)
+    pub(super) fn ocean_strength(&self) -> f32 {
+        self.ocean_strength
+    }
+
+    pub(super) fn turbulence_strength(&self) -> f32 {
+        self.turbulence_strength
+    }
+
+    pub(super) fn foam_strength(&self) -> f32 {
+        self.foam_strength
     }
 
     pub(super) fn take_wave_injections(&mut self) -> ([f32; 40], [f32; 20], i32) {
@@ -317,92 +354,96 @@ impl SlimeState {
         let count = self.pending_wave_injections.len().min(10);
         let screen_w = self.screen_size.0.max(1.0);
         let screen_h = self.screen_size.1.max(1.0);
-        for (index, (start, end, amplitude)) in
-            self.pending_wave_injections.drain(..count).enumerate()
-        {
+        for (index, injection) in self.pending_wave_injections.drain(..count).enumerate() {
             let base = index * 4;
-            segments[base] = start[0] / screen_w;
-            segments[base + 1] = start[1] / screen_h;
-            segments[base + 2] = end[0] / screen_w;
-            segments[base + 3] = end[1] / screen_h;
-            params[index * 2] = self.scale * 0.055 / screen_h;
-            params[index * 2 + 1] = 0.42 * (0.55 + amplitude * 1.45);
+            segments[base] = injection.start[0] / screen_w;
+            segments[base + 1] = injection.start[1] / screen_h;
+            segments[base + 2] = injection.end[0] / screen_w;
+            segments[base + 3] = injection.end[1] / screen_h;
+            params[index * 2] =
+                self.scale * 0.055 * injection.radius_scale / screen_h;
+            params[index * 2 + 1] =
+                0.42 * (0.55 + injection.amplitude * 1.45);
         }
         self.pending_wave_injections.clear();
         (segments, params, count as i32)
     }
 
-    fn live_ripples(&self) -> impl Iterator<Item = &SlimeRipple> {
-        self.ripples
-            .iter()
-            .filter(|ripple| ripple.born.elapsed() < RIPPLE_LIFETIME)
+    pub(super) fn has_live_waves(&self) -> bool {
+        self.last_wave_activity
+            .is_some_and(|started| started.elapsed() < WAVE_LIFETIME)
     }
 
-    fn has_live_ripples(&self) -> bool {
-        self.live_ripples().next().is_some()
+    fn palm_center(&self) -> [f32; 2] {
+        let mut center = [0.0f32; 2];
+        for index in PALM_INDICES {
+            center[0] += self.points[index * 2];
+            center[1] += self.points[index * 2 + 1];
+        }
+        center[0] /= PALM_INDICES.len() as f32;
+        center[1] /= PALM_INDICES.len() as f32;
+        center
     }
 
     fn sample_fingertips(&mut self, pose_is_continuous: bool) {
         let tips =
             FINGERTIP_INDICES.map(|index| [self.points[index * 2], self.points[index * 2 + 1]]);
-        if !pose_is_continuous || !self.ripple_tips_initialized {
-            self.ripple_tips = tips;
-            self.ripple_tips_initialized = true;
+        let palm = self.palm_center();
+        if !pose_is_continuous || !self.wave_tips_initialized {
             self.wave_tips = tips;
             self.wave_tips_initialized = true;
+            self.wave_palm = palm;
+            self.wave_palm_initialized = true;
             return;
         }
 
-        self.ripples
-            .retain(|ripple| ripple.born.elapsed() < RIPPLE_LIFETIME);
         let sample_dt = self.last_update.map_or(1.0 / 30.0, |last| {
             last.elapsed().as_secs_f32().clamp(1.0 / 120.0, 0.10)
         });
         let wave_spacing = (self.scale * 0.008).clamp(1.2, 3.5);
-        if self.wave_tips_initialized {
-            for (index, current) in tips.iter().copied().enumerate() {
-                let previous = self.wave_tips[index];
-                let dx = current[0] - previous[0];
-                let dy = current[1] - previous[1];
-                let distance = (dx * dx + dy * dy).sqrt();
-                if distance >= wave_spacing && self.pending_wave_injections.len() < 10 {
-                    let speed = distance / sample_dt;
-                    let amplitude = (speed / (self.scale * 5.0).max(1.0)).clamp(0.16, 1.0);
-                    self.pending_wave_injections
-                        .push((previous, current, amplitude));
-                    self.wave_tips[index] = current;
-                }
-            }
-        }
-        let spacing = (self.scale * 0.13).clamp(7.0, 22.0);
-        let mut emitted = Vec::with_capacity(15);
-        for (index, current) in tips.into_iter().enumerate() {
-            let previous = self.ripple_tips[index];
+        let mut injected = false;
+
+        for (index, current) in tips.iter().copied().enumerate() {
+            let previous = self.wave_tips[index];
             let dx = current[0] - previous[0];
             let dy = current[1] - previous[1];
             let distance = (dx * dx + dy * dy).sqrt();
-            if distance < spacing {
-                continue;
-            }
-            let samples = ((distance / spacing).ceil() as usize).clamp(1, 3);
-            let amplitude = (distance / (self.scale * 0.50).max(1.0)).clamp(0.44, 1.0);
-            let direction = [dx / distance, dy / distance];
-            for sample in 1..=samples {
-                let t = sample as f32 / samples as f32;
-                emitted.push(SlimeRipple {
-                    center: [previous[0] + dx * t, previous[1] + dy * t],
-                    direction,
-                    born: Instant::now(),
+            if distance >= wave_spacing && self.pending_wave_injections.len() < 10 {
+                let speed = distance / sample_dt;
+                let amplitude = (speed / (self.scale * 5.0).max(1.0)).clamp(0.16, 1.0);
+                self.pending_wave_injections.push(SlimeWaveInjection {
+                    start: previous,
+                    end: current,
                     amplitude,
+                    radius_scale: 1.0,
                 });
+                self.wave_tips[index] = current;
+                injected = true;
             }
-            self.ripple_tips[index] = current;
         }
-        for ripple in emitted {
-            if self.ripples.len() == MAX_RIPPLES {
-                self.ripples.remove(0);
+
+        if self.wave_palm_initialized && self.pending_wave_injections.len() < 10 {
+            let previous = self.wave_palm;
+            let dx = palm[0] - previous[0];
+            let dy = palm[1] - previous[1];
+            let distance = (dx * dx + dy * dy).sqrt();
+            let palm_spacing = (self.scale * 0.015).clamp(2.0, 6.0);
+            if distance >= palm_spacing {
+                let speed = distance / sample_dt;
+                let amplitude = (speed / (self.scale * 3.5).max(1.0)).clamp(0.12, 0.85);
+                self.pending_wave_injections.push(SlimeWaveInjection {
+                    start: previous,
+                    end: palm,
+                    amplitude,
+                    radius_scale: 2.8,
+                });
+                self.wave_palm = palm;
+                injected = true;
             }
-            self.ripples.push(ripple);
+        }
+
+        if injected {
+            self.last_wave_activity = Some(Instant::now());
         }
     }
 
@@ -414,8 +455,8 @@ impl SlimeState {
     }
 
     fn begin_fade(&mut self) {
-        self.ripple_tips_initialized = false;
         self.wave_tips_initialized = false;
+        self.wave_palm_initialized = false;
         let Some(last) = self.last_update else {
             return;
         };
@@ -462,14 +503,17 @@ impl SlimeState {
         }
 
         let mut target = [0.0f32; LANDMARK_COUNT * 2];
-        for (index, landmark) in hand.landmarks.iter().enumerate() {
-            if !landmark[0].is_finite() || !landmark[1].is_finite() {
+        let mut target_depths = [0.0f32; LANDMARK_COUNT];
+        for (index, landmark) in hand.landmarks.iter().copied().enumerate() {
+            let [x, y, z] = landmark.components();
+            if !x.is_finite() || !y.is_finite() || !z.is_finite() {
                 return false;
             }
-            let nx = content[0] + landmark[0].clamp(-0.25, 1.25) * content[2];
-            let ny = content[1] + landmark[1].clamp(-0.25, 1.25) * content[3];
+            let nx = content[0] + x.clamp(-0.25, 1.25) * content[2];
+            let ny = content[1] + y.clamp(-0.25, 1.25) * content[3];
             target[index * 2] = base_x + nx * base_w;
             target[index * 2 + 1] = base_y + ny * base_h;
+            target_depths[index] = z.clamp(-1.5, 1.5);
         }
 
         let raw_point = |idx: usize| (target[idx * 2], target[idx * 2 + 1]);
@@ -502,6 +546,14 @@ impl SlimeState {
         for (current, next) in self.points.iter_mut().zip(target) {
             *current += (next - *current) * alpha;
         }
+        let depth_alpha = if pose_is_continuous {
+            (alpha * 0.72).clamp(0.24, 0.68)
+        } else {
+            1.0
+        };
+        for (current, next) in self.depths.iter_mut().zip(target_depths) {
+            *current += (next - *current) * depth_alpha;
+        }
         self.scale += (raw_scale - self.scale) * alpha;
 
         let raw_strength = packet
@@ -510,6 +562,23 @@ impl SlimeState {
             .unwrap_or(raw_scale * 0.13)
             .clamp(1.0, 32.0);
         self.strength += (raw_strength - self.strength) * alpha;
+
+        let control_alpha = if pose_is_continuous {
+            alpha.min(0.45)
+        } else {
+            1.0
+        };
+        let smooth_control = |current: &mut f32, requested: Option<f32>| {
+            if let Some(target) = requested.filter(|value| value.is_finite()) {
+                *current += (target.clamp(0.0, 1.0) - *current) * control_alpha;
+            }
+        };
+        smooth_control(&mut self.ocean_strength, packet.ocean_strength);
+        smooth_control(
+            &mut self.turbulence_strength,
+            packet.turbulence_strength,
+        );
+        smooth_control(&mut self.foam_strength, packet.foam_strength);
         self.sample_fingertips(pose_is_continuous);
 
         let mut min_x = f32::INFINITY;
@@ -522,7 +591,12 @@ impl SlimeState {
             max_x = max_x.max(point[0]);
             max_y = max_y.max(point[1]);
         }
-        let expand = self.scale * 0.62 + self.strength * 2.0;
+        let depth_boost = self
+            .depths
+            .iter()
+            .fold(0.0f32, |boost, depth| boost.max((-*depth).max(0.0)));
+        let expand = (self.scale * 0.62 + self.strength * 2.0)
+            * (1.0 + depth_boost.clamp(0.0, 1.0) * 0.30);
         self.bbox = [
             (min_x - expand).clamp(0.0, screen_size.0),
             (min_y - expand).clamp(0.0, screen_size.1),
@@ -597,17 +671,17 @@ mod tests {
     use super::*;
 
     fn packet_with_tip_offset(offset: f32) -> SlimePacket {
-        let mut landmarks = vec![[0.5, 0.5]; LANDMARK_COUNT];
-        landmarks[0] = [0.5, 0.72];
-        landmarks[5] = [0.38, 0.50];
-        landmarks[9] = [0.50, 0.42];
-        landmarks[13] = [0.60, 0.48];
-        landmarks[17] = [0.68, 0.54];
+        let mut landmarks = vec![SlimeLandmark::Xy([0.5, 0.5]); LANDMARK_COUNT];
+        landmarks[0] = SlimeLandmark::Xy([0.5, 0.72]);
+        landmarks[5] = SlimeLandmark::Xy([0.38, 0.50]);
+        landmarks[9] = SlimeLandmark::Xy([0.50, 0.42]);
+        landmarks[13] = SlimeLandmark::Xy([0.60, 0.48]);
+        landmarks[17] = SlimeLandmark::Xy([0.68, 0.54]);
         for (tip, x) in FINGERTIP_INDICES
             .into_iter()
             .zip([0.30, 0.42, 0.52, 0.62, 0.72])
         {
-            landmarks[tip] = [x + offset, 0.24];
+            landmarks[tip] = SlimeLandmark::Xy([x + offset, 0.24]);
         }
         SlimePacket {
             version: 1,
@@ -615,11 +689,36 @@ mod tests {
             window: None,
             content_rect: None,
             refract_px: Some(14.0),
+            ocean_strength: None,
+            turbulence_strength: None,
+            foam_strength: None,
             hands: vec![SlimeHand {
                 score: 1.0,
                 landmarks,
             }],
         }
+    }
+
+    #[test]
+    fn packet_v1_accepts_xy_and_xyz_landmarks() {
+        let packet: SlimePacket = serde_json::from_str(
+            r#"{
+                "version": 1,
+                "hands": [{
+                    "landmarks": [[0.1, 0.2], [0.3, 0.4, -0.5]]
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            packet.hands[0].landmarks[0].components(),
+            [0.1, 0.2, 0.0]
+        );
+        assert_eq!(
+            packet.hands[0].landmarks[1].components(),
+            [0.3, 0.4, -0.5]
+        );
     }
 
     #[test]
@@ -657,19 +756,14 @@ mod tests {
     }
 
     #[test]
-    fn moving_fingertips_emit_ripples_but_initial_pose_does_not() {
+    fn moving_fingertips_emit_fluid_injections_but_initial_pose_does_not() {
         let mut state = SlimeState::default();
         assert!(state.update(packet_with_tip_offset(0.0), None, (1000.0, 1000.0)));
-        assert_eq!(state.ripple_uniforms().2, 0);
+        assert!(state.pending_wave_injections.is_empty());
+        assert!(!state.has_live_waves());
 
         assert!(state.update(packet_with_tip_offset(0.08), None, (1000.0, 1000.0)));
-        let (ripples, directions, count) = state.ripple_uniforms();
-        assert!(count >= 5);
-        assert!(ripples[0].is_finite());
-        assert!(ripples[1].is_finite());
-        assert!((0.0..=1.0).contains(&ripples[2]));
-        assert!((0.44..=1.0).contains(&ripples[3]));
-        assert!(directions[0].abs() > 0.9);
+        assert!(state.has_live_waves());
         let (segments, params, injection_count) = state.take_wave_injections();
         assert_eq!(injection_count, 5);
         assert!(segments[..20].iter().all(|value| value.is_finite()));
@@ -677,16 +771,53 @@ mod tests {
     }
 
     #[test]
-    fn ripple_outlives_hand_then_expires() {
+    fn palm_motion_emits_a_broader_wake_than_fingertips() {
         let mut state = SlimeState::default();
-        state.ripples.push(SlimeRipple {
-            center: [120.0, 80.0],
-            direction: [1.0, 0.0],
-            born: Instant::now(),
-            amplitude: 1.0,
-        });
+        assert!(state.update(packet_with_tip_offset(0.0), None, (1000.0, 1000.0)));
+
+        let mut moved = packet_with_tip_offset(0.0);
+        for landmark in &mut moved.hands[0].landmarks {
+            match landmark {
+                SlimeLandmark::Xy(point) => point[0] += 0.05,
+                SlimeLandmark::Xyz(point) => point[0] += 0.05,
+            }
+        }
+        assert!(state.update(moved, None, (1000.0, 1000.0)));
+
+        let (_, params, count) = state.take_wave_injections();
+        assert_eq!(count, 6);
+        let radii = params[..count as usize * 2]
+            .chunks_exact(2)
+            .map(|pair| pair[0])
+            .collect::<Vec<_>>();
+        let smallest = radii.iter().copied().fold(f32::INFINITY, f32::min);
+        let largest = radii.iter().copied().fold(0.0f32, f32::max);
+        assert!(largest > smallest * 2.0);
+    }
+
+    #[test]
+    fn xyz_depth_and_fluid_controls_are_clamped() {
+        let mut packet = packet_with_tip_offset(0.0);
+        packet.hands[0].landmarks[8] = SlimeLandmark::Xyz([0.39, 0.14, -0.5]);
+        packet.ocean_strength = Some(2.0);
+        packet.turbulence_strength = Some(-1.0);
+        packet.foam_strength = Some(0.8);
+
+        let mut state = SlimeState::default();
+        assert!(state.update(packet, None, (1000.0, 1000.0)));
+        assert_eq!(state.depths()[8], -0.5);
+        assert_eq!(state.ocean_strength(), 1.0);
+        assert_eq!(state.turbulence_strength(), 0.0);
+        assert_eq!(state.foam_strength(), 0.8);
+    }
+
+    #[test]
+    fn wave_activity_outlives_hand_then_expires() {
+        let mut state = SlimeState::default();
+        state.last_wave_activity = Some(Instant::now());
         assert!(state.is_visible());
-        state.ripples[0].born = Instant::now() - RIPPLE_LIFETIME - Duration::from_millis(1);
+        state.last_wave_activity =
+            Some(Instant::now() - WAVE_LIFETIME - Duration::from_millis(1));
         assert!(!state.is_visible());
     }
 
@@ -695,12 +826,7 @@ mod tests {
         let mut state = SlimeState::default();
         assert!(state.update(packet_with_tip_offset(0.0), None, (1000.0, 700.0)));
         state.last_update = Some(Instant::now() - HOLD_TIME - FADE_TIME);
-        state.ripples.push(SlimeRipple {
-            center: [500.0, 350.0],
-            direction: [1.0, 0.0],
-            born: Instant::now(),
-            amplitude: 1.0,
-        });
+        state.last_wave_activity = Some(Instant::now());
 
         assert!(state.is_visible());
         assert_eq!(state.surface_rect(), [0.0, 0.0, 1000.0, 700.0]);
