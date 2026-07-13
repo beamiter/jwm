@@ -40,6 +40,47 @@ jobs:
       - name: Apply focused source transform
         shell: bash
         run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/agent/apply_jwm_tool_reliability.py')
+          text = path.read_text()
+          old_helper = '''def sub_once(pattern: str, replacement: str) -> None:
+              global text
+              text, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
+              if count != 1:
+                  raise SystemExit(f"expected exactly one regex match, found {count}: {pattern}")
+          '''
+          new_helper = '''def sub_once(pattern: str, replacement) -> None:
+              global text
+              matches = list(re.finditer(pattern, text, flags=re.S))
+              if len(matches) != 1:
+                  raise SystemExit(
+                      f"expected exactly one regex match, found {len(matches)}: {pattern}"
+                  )
+              match = matches[0]
+              replacement_text = replacement(match) if callable(replacement) else replacement
+              text = text[: match.start()] + replacement_text + text[match.end() :]
+          '''
+          if old_helper not in text:
+              raise SystemExit('sub_once helper context not found')
+          text = text.replace(old_helper, new_helper, 1)
+
+          old_group = '''sub_once(
+              r'(fn response_path\\(control_pipe: &Path\\) -> PathBuf \\{.*?\\n\\})\\n',
+              r'\\1' + response_lock_code + "\\n",
+          )
+          '''
+          new_group = '''sub_once(
+              r'(fn response_path\\(control_pipe: &Path\\) -> PathBuf \\{.*?\\n\\})\\n',
+              lambda match: match.group(1) + response_lock_code + "\\n",
+          )
+          '''
+          if old_group not in text:
+              raise SystemExit('response_path replacement context not found')
+          path.write_text(text.replace(old_group, new_group, 1))
+          PY
+
           set +e
           : > agent-transform.log
           python3 .github/agent/apply_jwm_tool_reliability.py >> agent-transform.log 2>&1
