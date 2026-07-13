@@ -1,21 +1,64 @@
 // benches/ring_buffer_bench.rs
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
+use std::io::ErrorKind;
+use std::ops::Deref;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-// 根据你的工程路径
 use shared_structures::{SharedCommand, SharedMessage, SharedRingBuffer};
 
-// 统一工具
-fn mk_path(name: &str) -> String {
-    format!("/tmp/{}_{}", name, std::process::id())
+static PATH_NONCE: AtomicU64 = AtomicU64::new(0);
+
+/// A process-unique shared-memory link that is also cleaned up during unwinding.
+struct BenchPath(String);
+
+impl AsRef<Path> for BenchPath {
+    fn as_ref(&self) -> &Path {
+        Path::new(&self.0)
+    }
+}
+
+impl Deref for BenchPath {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for BenchPath {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.0) {
+            if error.kind() != ErrorKind::NotFound {
+                eprintln!("failed to clean up benchmark link {}: {error}", self.0);
+            }
+        }
+    }
+}
+
+fn mk_path(name: &str) -> BenchPath {
+    let nonce = PATH_NONCE.fetch_add(1, Ordering::Relaxed);
+    let epoch_millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    BenchPath(format!(
+        "/tmp/shared_structures_{name}_{}_{}_{}",
+        std::process::id(),
+        epoch_millis,
+        nonce
+    ))
 }
 
 fn drain_all(buffer: &SharedRingBuffer) {
-    while let Ok(Some(_)) = buffer.try_read_next_message() {}
+    while buffer
+        .try_read_next_message()
+        .expect("message drain failed")
+        .is_some()
+    {}
 }
 
 fn create_test_message(id: i32) -> SharedMessage {
@@ -45,14 +88,26 @@ fn bench_single_threaded_write(c: &mut Criterion) {
     let messages = prebuild_messages(100, 0);
 
     c.bench_function("single_threaded_write", |b| {
-        b.iter(|| {
-            drain_all(&buffer);
-            for m in &messages {
-                while !buffer.try_write_message(black_box(m)).unwrap_or(false) {
-                    let _ = buffer.try_read_next_message();
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
+                drain_all(&buffer);
+
+                let started = Instant::now();
+                for m in &messages {
+                    assert!(
+                        buffer
+                            .try_write_message(black_box(m))
+                            .expect("message write failed"),
+                        "sized benchmark queue unexpectedly filled"
+                    );
                 }
+                elapsed += started.elapsed();
+
+                assert_eq!(buffer.available_messages(), messages.len());
+                black_box(buffer.available_messages());
             }
-            black_box(buffer.available_messages());
+            elapsed
         })
     });
 
@@ -69,20 +124,30 @@ fn bench_single_threaded_read(c: &mut Criterion) {
     let messages = prebuild_messages(100, 10_000);
 
     c.bench_function("single_threaded_read", |b| {
-        b.iter_batched(
-            || {
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
                 drain_all(&buffer);
                 for m in &messages {
-                    while !buffer.try_write_message(m).unwrap_or(false) {
-                        let _ = buffer.try_read_next_message();
-                    }
+                    assert!(buffer.try_write_message(m).expect("prefill failed"));
                 }
-            },
-            |_| {
-                while let Ok(Some(_)) = buffer.try_read_next_message() {}
-            },
-            BatchSize::SmallInput,
-        )
+
+                let started = Instant::now();
+                let mut read = 0usize;
+                while buffer
+                    .try_read_next_message()
+                    .expect("message read failed")
+                    .is_some()
+                {
+                    read += 1;
+                }
+                elapsed += started.elapsed();
+
+                assert_eq!(read, messages.len(), "read benchmark lost messages");
+                black_box(read);
+            }
+            elapsed
+        })
     });
 
     drop(buffer);
@@ -106,13 +171,25 @@ fn bench_throughput_varying_sizes(c: &mut Criterion) {
                     SharedRingBuffer::create_aux(&test_path, Some(16_384), Some(0)).unwrap();
                 let messages = prebuild_messages(count, 20_000);
 
-                b.iter(|| {
-                    drain_all(&buffer);
-                    for m in &messages {
-                        while !buffer.try_write_message(black_box(m)).unwrap_or(false) {
-                            let _ = buffer.try_read_next_message();
+                b.iter_custom(|iters| {
+                    let mut elapsed = Duration::ZERO;
+                    for _ in 0..iters {
+                        drain_all(&buffer);
+
+                        let started = Instant::now();
+                        for m in &messages {
+                            assert!(
+                                buffer
+                                    .try_write_message(black_box(m))
+                                    .expect("message write failed"),
+                                "sized benchmark queue unexpectedly filled"
+                            );
                         }
+                        elapsed += started.elapsed();
+
+                        assert_eq!(buffer.available_messages(), messages.len());
                     }
+                    elapsed
                 });
 
                 drop(buffer);
@@ -145,7 +222,6 @@ fn bench_producer_consumer(c: &mut Criterion) {
                     let producer = Arc::new(
                         SharedRingBuffer::create_aux(&test_path, Some(2048), Some(spins)).unwrap(),
                     );
-                    thread::sleep(Duration::from_millis(5));
                     let consumer =
                         Arc::new(SharedRingBuffer::open_aux(&test_path, Some(spins)).unwrap());
 
@@ -157,7 +233,8 @@ fn bench_producer_consumer(c: &mut Criterion) {
                     let messages = Arc::new(prebuild_messages(message_count_per_round, 30_000));
 
                     // 计数与启动同步
-                    let start_barrier = Arc::new(Barrier::new(2));
+                    // The driver participates so workers cannot run before timing starts.
+                    let start_barrier = Arc::new(Barrier::new(3));
                     let sent = Arc::new(AtomicU64::new(0));
                     let received = Arc::new(AtomicU64::new(0));
 
@@ -170,9 +247,14 @@ fn bench_producer_consumer(c: &mut Criterion) {
                         start_c.wait();
                         while recv_cnt.load(Ordering::Acquire) < total_target {
                             // 避免空转，等待最多1ms
-                            let _ = cns.wait_for_message(Some(Duration::from_millis(1)));
+                            cns.wait_for_message(Some(Duration::from_millis(1)))
+                                .expect("message wait failed");
                             // 尽可能多地读取
-                            while let Ok(Some(_)) = cns.try_read_next_message() {
+                            while cns
+                                .try_read_next_message()
+                                .expect("message read failed")
+                                .is_some()
+                            {
                                 recv_cnt.fetch_add(1, Ordering::Release);
                                 if recv_cnt.load(Ordering::Acquire) >= total_target {
                                     break;
@@ -192,7 +274,7 @@ fn bench_producer_consumer(c: &mut Criterion) {
                         while sent_cnt.load(Ordering::Acquire) < total_target {
                             let m = &msgs[idx];
                             // 若满则忙等等待消费者清空（不可读！）
-                            while !p.try_write_message(m).unwrap_or(false) {
+                            while !p.try_write_message(m).expect("message write failed") {
                                 std::hint::spin_loop();
                             }
                             sent_cnt.fetch_add(1, Ordering::Release);
@@ -203,15 +285,16 @@ fn bench_producer_consumer(c: &mut Criterion) {
                         }
                     });
 
-                    // 启动后才计时
+                    // Thread creation and fixture setup are outside the timed interval.
                     let t0 = Instant::now();
-                    let _ = h_prod.join();
-                    let _ = h_cons.join();
+                    start_barrier.wait();
+                    h_prod.join().expect("producer thread panicked");
+                    h_cons.join().expect("consumer thread panicked");
                     let elapsed = t0.elapsed();
 
-                    // 基本校验（不打印）
-                    debug_assert_eq!(sent.load(Ordering::Acquire), total_to_send as u64);
-                    debug_assert_eq!(received.load(Ordering::Acquire), total_to_send as u64);
+                    // Bench profiles disable debug assertions, so correctness checks must be hard.
+                    assert_eq!(sent.load(Ordering::Acquire), total_to_send as u64);
+                    assert_eq!(received.load(Ordering::Acquire), total_to_send as u64);
 
                     // 清理
                     drop(producer);
@@ -232,16 +315,24 @@ fn bench_command_latency(c: &mut Criterion) {
     let _ = std::fs::remove_file(&test_path);
 
     let sender = SharedRingBuffer::create_aux(&test_path, Some(1024), Some(1000)).unwrap();
-    thread::sleep(Duration::from_millis(5));
     let receiver = SharedRingBuffer::open_aux(&test_path, Some(1000)).unwrap();
 
     c.bench_function("command_round_trip", |b| {
         b.iter(|| {
             let command = black_box(SharedCommand::view_tag(1 << 3, 0));
-            if sender.send_command(command).unwrap_or(false) {
-                let _ = receiver.wait_for_command(Some(Duration::from_millis(5)));
-                let _ = receiver.receive_command();
-            }
+            assert!(sender.send_command(command).expect("command send failed"));
+            assert!(
+                receiver
+                    .wait_for_command(Some(Duration::from_millis(5)))
+                    .expect("command wait failed"),
+                "command wait timed out"
+            );
+            black_box(
+                receiver
+                    .try_receive_command()
+                    .expect("command receive failed")
+                    .expect("notification without a command"),
+            );
         })
     });
 
@@ -272,17 +363,24 @@ fn bench_memory_layout_efficiency(c: &mut Criterion) {
                         drain_all(&buffer);
                         // 预填充至 75%
                         for m in &prefill_msgs {
-                            if !buffer.try_write_message(black_box(m)).unwrap_or(false) {
-                                break;
-                            }
+                            assert!(buffer
+                                .try_write_message(black_box(m))
+                                .expect("message prefill failed"));
                         }
 
                         // 交替读写
                         for m in &alternation_msgs {
-                            let _ = buffer.try_read_next_message();
-                            if !buffer.try_write_message(black_box(m)).unwrap_or(false) {
-                                let _ = buffer.try_read_next_message();
-                                let _ = buffer.try_write_message(black_box(m));
+                            buffer.try_read_next_message().expect("message read failed");
+                            if !buffer
+                                .try_write_message(black_box(m))
+                                .expect("message write failed")
+                            {
+                                buffer
+                                    .try_read_next_message()
+                                    .expect("backpressure read failed");
+                                assert!(buffer
+                                    .try_write_message(black_box(m))
+                                    .expect("message retry failed"));
                             }
                         }
                     });
@@ -312,21 +410,25 @@ fn bench_burst_performance(c: &mut Criterion) {
                 let burst_msgs = prebuild_messages(size, 50_000);
 
                 b.iter(|| {
-                    drain_all(&buffer);
                     // 突发写入
                     for m in &burst_msgs {
-                        while !buffer.try_write_message(black_box(m)).unwrap_or(false) {
-                            let _ = buffer.try_read_next_message();
-                        }
+                        assert!(buffer
+                            .try_write_message(black_box(m))
+                            .expect("burst write failed"));
                     }
                     // 突发读取
                     let mut read_count = 0usize;
-                    while let Ok(Some(_)) = buffer.try_read_next_message() {
+                    while buffer
+                        .try_read_next_message()
+                        .expect("burst read failed")
+                        .is_some()
+                    {
                         read_count += 1;
                         if read_count >= size {
                             break;
                         }
                     }
+                    assert_eq!(read_count, size, "burst benchmark lost messages");
                     black_box(read_count);
                 });
 
@@ -348,9 +450,15 @@ fn bench_write_read_latency(c: &mut Criterion) {
 
     c.bench_function("single_message_write_read_latency", |b| {
         b.iter(|| {
-            drain_all(&buffer);
-            let _ = buffer.try_write_message(black_box(&msg));
-            black_box(buffer.try_read_next_message().unwrap());
+            assert!(buffer
+                .try_write_message(black_box(&msg))
+                .expect("message write failed"));
+            black_box(
+                buffer
+                    .try_read_next_message()
+                    .expect("message read failed")
+                    .expect("round-trip message was unavailable"),
+            );
         })
     });
 
@@ -369,20 +477,30 @@ fn bench_read_latest_vs_next(c: &mut Criterion) {
         let buffer = SharedRingBuffer::create_aux(&test_path, Some(128), Some(0)).unwrap();
 
         group.bench_function("read_next_message", |b| {
-            b.iter_batched(
-                || {
+            b.iter_custom(|iters| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iters {
                     drain_all(&buffer);
                     for m in &msgs {
-                        while !buffer.try_write_message(m).unwrap_or(false) {
-                            let _ = buffer.try_read_next_message();
-                        }
+                        assert!(buffer.try_write_message(m).expect("prefill failed"));
                     }
-                },
-                |_| {
-                    while let Ok(Some(_)) = buffer.try_read_next_message() {}
-                },
-                BatchSize::SmallInput,
-            )
+
+                    let started = Instant::now();
+                    let mut read = 0usize;
+                    while buffer
+                        .try_read_next_message()
+                        .expect("message read failed")
+                        .is_some()
+                    {
+                        read += 1;
+                    }
+                    elapsed += started.elapsed();
+
+                    assert_eq!(read, msgs.len(), "read-next benchmark lost messages");
+                    black_box(read);
+                }
+                elapsed
+            })
         });
 
         drop(buffer);
@@ -395,21 +513,33 @@ fn bench_read_latest_vs_next(c: &mut Criterion) {
         let buffer = SharedRingBuffer::create_aux(&test_path, Some(128), Some(0)).unwrap();
 
         group.bench_function("read_latest_message", |b| {
-            b.iter_batched(
-                || {
+            b.iter_custom(|iters| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iters {
                     drain_all(&buffer);
                     for m in &msgs {
-                        while !buffer.try_write_message(m).unwrap_or(false) {
-                            let _ = buffer.try_read_next_message();
-                        }
+                        assert!(buffer.try_write_message(m).expect("prefill failed"));
                     }
-                },
-                |_| {
-                    // try_read_latest 一次性将 read_idx 推进到 write_idx
-                    black_box(buffer.try_read_latest_message().unwrap());
-                },
-                BatchSize::SmallInput,
-            )
+
+                    let started = Instant::now();
+                    let latest = buffer
+                        .try_read_latest_message()
+                        .expect("latest-message read failed");
+                    elapsed += started.elapsed();
+
+                    assert!(
+                        latest.is_some(),
+                        "prefilled queue returned no latest message"
+                    );
+                    assert_eq!(
+                        buffer.available_messages(),
+                        0,
+                        "latest read did not advance to the writer"
+                    );
+                    black_box(latest);
+                }
+                elapsed
+            })
         });
 
         drop(buffer);
@@ -434,14 +564,35 @@ fn bench_command_throughput(c: &mut Criterion) {
                 let buffer = SharedRingBuffer::create_aux(&test_path, Some(2048), Some(0)).unwrap();
 
                 b.iter(|| {
-                    while buffer.receive_command().is_some() {}
+                    while buffer
+                        .try_receive_command()
+                        .expect("command drain failed")
+                        .is_some()
+                    {}
+                    let mut received = 0usize;
                     for i in 0..count {
                         let cmd = SharedCommand::view_tag(1 << (i % 9), (i % 4) as i32);
-                        while !buffer.send_command(black_box(cmd)).unwrap_or(false) {
-                            let _ = buffer.receive_command();
+                        while !buffer
+                            .send_command(black_box(cmd))
+                            .expect("command send failed")
+                        {
+                            if buffer
+                                .try_receive_command()
+                                .expect("command receive failed")
+                                .is_some()
+                            {
+                                received += 1;
+                            }
                         }
                     }
-                    while buffer.receive_command().is_some() {}
+                    while buffer
+                        .try_receive_command()
+                        .expect("command receive failed")
+                        .is_some()
+                    {
+                        received += 1;
+                    }
+                    assert_eq!(received, count, "command benchmark lost commands");
                 });
 
                 drop(buffer);
@@ -454,16 +605,12 @@ fn bench_command_throughput(c: &mut Criterion) {
 
 // 11) SharedRingBuffer 创建与销毁开销
 fn bench_create_destroy_cost(c: &mut Criterion) {
-    let mut counter = 0u64;
     c.bench_function("create_destroy_ring_buffer", |b| {
         b.iter(|| {
-            let path = format!("/tmp/bench_cd_{}_{}", std::process::id(), counter);
-            counter += 1;
-            let _ = std::fs::remove_file(&path);
+            let path = mk_path("bench_create_destroy");
             let buf = SharedRingBuffer::create_aux(&path, Some(64), Some(0)).unwrap();
             black_box(buf.available_messages());
             drop(buf);
-            let _ = std::fs::remove_file(&path);
         });
     });
 }
@@ -481,10 +628,15 @@ fn bench_small_buffer_wraparound(c: &mut Criterion) {
 
             b.iter(|| {
                 for _ in 0..50 {
-                    while !buffer.try_write_message(black_box(&msg)).unwrap_or(false) {
-                        let _ = buffer.try_read_next_message();
-                    }
-                    black_box(buffer.try_read_next_message().unwrap());
+                    assert!(buffer
+                        .try_write_message(black_box(&msg))
+                        .expect("message write failed"));
+                    black_box(
+                        buffer
+                            .try_read_next_message()
+                            .expect("message read failed")
+                            .expect("just-written message was unavailable"),
+                    );
                 }
             });
 
@@ -505,7 +657,7 @@ fn bench_availability_query(c: &mut Criterion) {
     // 半满状态下查询
     let msg = create_test_message(0);
     for _ in 0..128 {
-        let _ = buffer.try_write_message(&msg);
+        assert!(buffer.try_write_message(&msg).expect("prefill failed"));
     }
 
     group.bench_function("available_messages_half_full", |b| {
@@ -529,20 +681,18 @@ fn bench_availability_query(c: &mut Criterion) {
 
 use shared_structures::SyncStrategy;
 
-#[cfg(any(feature = "futex", feature = "semaphore", feature = "eventfd"))]
 fn enabled_strategies() -> Vec<(&'static str, SyncStrategy)> {
-    let mut v: Vec<(&'static str, SyncStrategy)> = Vec::new();
-    #[cfg(feature = "futex")]
-    v.push(("futex", SyncStrategy::Futex));
-    #[cfg(feature = "semaphore")]
-    v.push(("semaphore", SyncStrategy::Semaphore));
-    #[cfg(feature = "eventfd")]
-    v.push(("eventfd", SyncStrategy::EventFd));
-    v
+    vec![
+        #[cfg(feature = "futex")]
+        ("futex", SyncStrategy::Futex),
+        #[cfg(feature = "semaphore")]
+        ("semaphore", SyncStrategy::Semaphore),
+        #[cfg(feature = "eventfd")]
+        ("eventfd", SyncStrategy::EventFd),
+    ]
 }
 
 // 1) 各策略单线程写吞吐
-#[cfg(any(feature = "futex", feature = "semaphore", feature = "eventfd"))]
 fn bench_strategy_write_throughput(c: &mut Criterion) {
     let mut group = c.benchmark_group("strategy_write_throughput");
     let msgs = prebuild_messages(1000, 70_000);
@@ -557,13 +707,22 @@ fn bench_strategy_write_throughput(c: &mut Criterion) {
                 let _ = std::fs::remove_file(&path);
                 let buf = SharedRingBuffer::create(&path, strategy, Some(4096), Some(0)).unwrap();
 
-                b.iter(|| {
-                    drain_all(&buf);
-                    for m in &msgs {
-                        while !buf.try_write_message(black_box(m)).unwrap_or(false) {
-                            let _ = buf.try_read_next_message();
+                b.iter_custom(|iters| {
+                    let mut elapsed = Duration::ZERO;
+                    for _ in 0..iters {
+                        drain_all(&buf);
+
+                        let started = Instant::now();
+                        for m in &msgs {
+                            assert!(buf
+                                .try_write_message(black_box(m))
+                                .expect("message write failed"));
                         }
+                        elapsed += started.elapsed();
+
+                        assert_eq!(buf.available_messages(), msgs.len());
                     }
+                    elapsed
                 });
 
                 drop(buf);
@@ -575,7 +734,6 @@ fn bench_strategy_write_throughput(c: &mut Criterion) {
 }
 
 // 2) 各策略单条往返延迟
-#[cfg(any(feature = "futex", feature = "semaphore", feature = "eventfd"))]
 fn bench_strategy_round_trip_latency(c: &mut Criterion) {
     let mut group = c.benchmark_group("strategy_round_trip_latency");
     let msg = create_test_message(0);
@@ -590,9 +748,14 @@ fn bench_strategy_round_trip_latency(c: &mut Criterion) {
                 let buf = SharedRingBuffer::create(&path, strategy, Some(64), Some(0)).unwrap();
 
                 b.iter(|| {
-                    drain_all(&buf);
-                    let _ = buf.try_write_message(black_box(&msg));
-                    black_box(buf.try_read_next_message().unwrap());
+                    assert!(buf
+                        .try_write_message(black_box(&msg))
+                        .expect("message write failed"));
+                    black_box(
+                        buf.try_read_next_message()
+                            .expect("message read failed")
+                            .expect("round-trip message was unavailable"),
+                    );
                 });
 
                 drop(buf);
@@ -604,7 +767,6 @@ fn bench_strategy_round_trip_latency(c: &mut Criterion) {
 }
 
 // 3) 各策略命令通道往返
-#[cfg(any(feature = "futex", feature = "semaphore", feature = "eventfd"))]
 fn bench_strategy_command_latency(c: &mut Criterion) {
     let mut group = c.benchmark_group("strategy_command_latency");
     let cmd = SharedCommand::view_tag(1 << 3, 0);
@@ -620,9 +782,19 @@ fn bench_strategy_command_latency(c: &mut Criterion) {
                     SharedRingBuffer::create(&path, strategy, Some(1024), Some(1000)).unwrap();
 
                 b.iter(|| {
-                    while buf.receive_command().is_some() {}
-                    let _ = buf.send_command(black_box(cmd));
-                    black_box(buf.receive_command());
+                    while buf
+                        .try_receive_command()
+                        .expect("command drain failed")
+                        .is_some()
+                    {}
+                    assert!(buf
+                        .send_command(black_box(cmd))
+                        .expect("command send failed"));
+                    black_box(
+                        buf.try_receive_command()
+                            .expect("command receive failed")
+                            .expect("sent command was not available"),
+                    );
                 });
 
                 drop(buf);
@@ -634,7 +806,6 @@ fn bench_strategy_command_latency(c: &mut Criterion) {
 }
 
 // 4) 各策略 SPSC 生产者-消费者（跨线程）
-#[cfg(any(feature = "futex", feature = "semaphore", feature = "eventfd"))]
 fn bench_strategy_spsc_throughput(c: &mut Criterion) {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Barrier};
@@ -656,7 +827,6 @@ fn bench_strategy_spsc_throughput(c: &mut Criterion) {
                     let producer = Arc::new(
                         SharedRingBuffer::create(&path, strategy, Some(2048), Some(400)).unwrap(),
                     );
-                    thread::sleep(Duration::from_millis(5));
                     let consumer =
                         Arc::new(SharedRingBuffer::open(&path, strategy, Some(400)).unwrap());
 
@@ -666,7 +836,7 @@ fn bench_strategy_spsc_throughput(c: &mut Criterion) {
 
                     let sent = Arc::new(AtomicU64::new(0));
                     let received = Arc::new(AtomicU64::new(0));
-                    let barrier = Arc::new(Barrier::new(2));
+                    let barrier = Arc::new(Barrier::new(3));
 
                     let c2 = consumer.clone();
                     let recv = received.clone();
@@ -675,8 +845,13 @@ fn bench_strategy_spsc_throughput(c: &mut Criterion) {
                     let h_cons = thread::spawn(move || {
                         bar_c.wait();
                         while recv.load(Ordering::Acquire) < target {
-                            let _ = c2.wait_for_message(Some(Duration::from_millis(1)));
-                            while let Ok(Some(_)) = c2.try_read_next_message() {
+                            c2.wait_for_message(Some(Duration::from_millis(1)))
+                                .expect("message wait failed");
+                            while c2
+                                .try_read_next_message()
+                                .expect("message read failed")
+                                .is_some()
+                            {
                                 recv.fetch_add(1, Ordering::Release);
                                 if recv.load(Ordering::Acquire) >= target {
                                     break;
@@ -693,7 +868,10 @@ fn bench_strategy_spsc_throughput(c: &mut Criterion) {
                         bar_p.wait();
                         let mut idx = 0usize;
                         while sent2.load(Ordering::Acquire) < target {
-                            while !p2.try_write_message(&msgs2[idx]).unwrap_or(false) {
+                            while !p2
+                                .try_write_message(&msgs2[idx])
+                                .expect("message write failed")
+                            {
                                 std::hint::spin_loop();
                             }
                             sent2.fetch_add(1, Ordering::Release);
@@ -702,9 +880,13 @@ fn bench_strategy_spsc_throughput(c: &mut Criterion) {
                     });
 
                     let t0 = Instant::now();
-                    let _ = h_prod.join();
-                    let _ = h_cons.join();
+                    barrier.wait();
+                    h_prod.join().expect("producer thread panicked");
+                    h_cons.join().expect("consumer thread panicked");
                     let elapsed = t0.elapsed();
+
+                    assert_eq!(sent.load(Ordering::Acquire), target);
+                    assert_eq!(received.load(Ordering::Acquire), target);
 
                     drop(producer);
                     drop(consumer);

@@ -2,20 +2,78 @@
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use shared_structures::{SharedCommand, SharedMessage, SharedRingBuffer};
 use std::hint::black_box;
+use std::io::ErrorKind;
+use std::ops::Deref;
+use std::path::Path;
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     mpsc, Arc, Barrier,
 };
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-fn mk_path(name: &str) -> String {
-    format!("/tmp/{}_{}", name, std::process::id())
+static PATH_NONCE: AtomicU64 = AtomicU64::new(0);
+
+/// A process-unique shared-memory link that is also cleaned up during unwinding.
+struct BenchPath(String);
+
+impl AsRef<Path> for BenchPath {
+    fn as_ref(&self) -> &Path {
+        Path::new(&self.0)
+    }
+}
+
+impl Deref for BenchPath {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for BenchPath {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.0) {
+            if error.kind() != ErrorKind::NotFound {
+                eprintln!("failed to clean up benchmark link {}: {error}", self.0);
+            }
+        }
+    }
+}
+
+fn mk_path(name: &str) -> BenchPath {
+    let nonce = PATH_NONCE.fetch_add(1, Ordering::Relaxed);
+    let epoch_millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    BenchPath(format!(
+        "/tmp/shared_structures_{name}_{}_{}_{}",
+        std::process::id(),
+        epoch_millis,
+        nonce
+    ))
 }
 
 fn drain_all(buffer: &SharedRingBuffer) {
     // 顺序读取清空，避免 latest 跳跃带来的歧义
-    while let Ok(Some(_)) = buffer.try_read_next_message() {}
+    while buffer
+        .try_read_next_message()
+        .expect("message drain failed")
+        .is_some()
+    {}
+}
+
+fn drain_commands(buffer: &SharedRingBuffer) -> usize {
+    let mut drained = 0usize;
+    while buffer
+        .try_receive_command()
+        .expect("command drain failed")
+        .is_some()
+    {
+        drained += 1;
+    }
+    drained
 }
 
 fn create_base_message(id: i32) -> SharedMessage {
@@ -59,17 +117,25 @@ fn bench_high_frequency_updates(c: &mut Criterion) {
                     );
                     // 常驻消费者线程：不断拉取，避免写端顶满
                     let stop = Arc::new(AtomicBool::new(false));
+                    let ready = Arc::new(Barrier::new(2));
                     let b_cons = buffer.clone();
                     let stop_cons = stop.clone();
+                    let ready_cons = ready.clone();
                     let consumer = thread::spawn(move || {
+                        ready_cons.wait();
                         while !stop_cons.load(Ordering::Relaxed) {
                             // 优先等待，避免忙等占用 CPU
-                            let _ = b_cons.wait_for_message(Some(Duration::from_millis(1)));
-                            while let Ok(Some(_)) = b_cons.try_read_next_message() {}
+                            b_cons
+                                .wait_for_message(Some(Duration::from_millis(1)))
+                                .expect("message wait failed");
+                            drain_all(&b_cons);
                         }
                         // 退出前清空残留
-                        while let Ok(Some(_)) = b_cons.try_read_next_message() {}
+                        drain_all(&b_cons);
                     });
+
+                    // Do not let scheduler startup become part of an arbitrary first round.
+                    ready.wait();
 
                     // 预构建目标写入数据；每次“迭代”写固定 batch 的消息
                     let batch_writes: usize = 2000;
@@ -81,7 +147,10 @@ fn bench_high_frequency_updates(c: &mut Criterion) {
                         // 开始计时
                         let t0 = Instant::now();
                         for m in &messages {
-                            while !buffer.try_write_message(black_box(m)).unwrap_or(false) {
+                            while !buffer
+                                .try_write_message(black_box(m))
+                                .expect("message write failed")
+                            {
                                 // 只写不读（严格 SPSC），等待消费者清空
                                 std::hint::spin_loop();
                             }
@@ -94,7 +163,7 @@ fn bench_high_frequency_updates(c: &mut Criterion) {
 
                     // 停止消费者
                     stop.store(true, Ordering::Relaxed);
-                    let _ = consumer.join();
+                    consumer.join().expect("consumer thread panicked");
 
                     drop(buffer);
                     let _ = std::fs::remove_file(&test_path);
@@ -126,36 +195,24 @@ fn bench_concurrent_stress(c: &mut Criterion) {
                     let writer_rb = Arc::new(
                         SharedRingBuffer::create_aux(&test_path, Some(4096), Some(5000)).unwrap(),
                     );
-                    thread::sleep(Duration::from_millis(5));
                     let reader_rb =
                         Arc::new(SharedRingBuffer::open_aux(&test_path, Some(5000)).unwrap());
 
                     // MPSC 管道：多生产者 -> 单聚合写者
                     let (tx, rx) = mpsc::channel::<u32>();
+                    let workers_ready = Arc::new(Barrier::new(3));
 
                     // 常驻聚合写者线程：从 rx 取 -> 写入环
                     let wr = writer_rb.clone();
-                    let aggregator_running = Arc::new(AtomicBool::new(true));
-                    let aggregator_running_c = aggregator_running.clone();
+                    let writer_ready = workers_ready.clone();
                     let writer = thread::spawn(move || {
                         let mut msg = create_base_message(0);
-                        while aggregator_running_c.load(Ordering::Acquire) {
-                            match rx.recv_timeout(Duration::from_millis(1)) {
-                                Ok(v) => {
-                                    msg.get_monitor_info_mut().monitor_num = v as i32;
-                                    // 满则忙等等待消费者清空
-                                    while !wr.try_write_message(&msg).unwrap_or(false) {
-                                        std::hint::spin_loop();
-                                    }
-                                }
-                                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                            }
-                        }
-                        // 排空可能残留
-                        while let Ok(v) = rx.try_recv() {
+                        writer_ready.wait();
+                        // Channel disconnection is the shutdown protocol. This guarantees every
+                        // accepted item reaches the ring before the writer exits.
+                        for v in rx {
                             msg.get_monitor_info_mut().monitor_num = v as i32;
-                            while !wr.try_write_message(&msg).unwrap_or(false) {
+                            while !wr.try_write_message(&msg).expect("aggregator write failed") {
                                 std::hint::spin_loop();
                             }
                         }
@@ -167,25 +224,40 @@ fn bench_concurrent_stress(c: &mut Criterion) {
                     let consumer_running_c = consumer_running.clone();
                     let consumed_total = Arc::new(AtomicUsize::new(0));
                     let consumed_total_c = consumed_total.clone();
+                    let consumer_ready = workers_ready.clone();
                     let consumer = thread::spawn(move || {
+                        consumer_ready.wait();
                         while consumer_running_c.load(Ordering::Acquire) {
-                            let _ = rd.wait_for_message(Some(Duration::from_millis(1)));
-                            while let Ok(Some(_)) = rd.try_read_next_message() {
+                            rd.wait_for_message(Some(Duration::from_millis(1)))
+                                .expect("message wait failed");
+                            while rd
+                                .try_read_next_message()
+                                .expect("message read failed")
+                                .is_some()
+                            {
                                 consumed_total_c.fetch_add(1, Ordering::Relaxed);
                             }
                         }
                         // 兜底排空
-                        while let Ok(Some(_)) = rd.try_read_next_message() {
+                        while rd
+                            .try_read_next_message()
+                            .expect("final message drain failed")
+                            .is_some()
+                        {
                             consumed_total_c.fetch_add(1, Ordering::Relaxed);
                         }
                     });
+
+                    workers_ready.wait();
 
                     // 每轮样本执行：创建临时生产者们，固定发送条目数
                     let per_producer: usize = 2000;
                     let mut total = Duration::ZERO;
 
                     for _ in 0..iters {
-                        let barrier = Arc::new(Barrier::new(producer_count));
+                        // The benchmark driver is an explicit participant. Without it, producers
+                        // may finish before `Instant::now()` is reached.
+                        let barrier = Arc::new(Barrier::new(producer_count + 1));
                         let mut handles = Vec::with_capacity(producer_count);
 
                         // 计数目标：用于等待 round 完成
@@ -201,9 +273,7 @@ fn bench_concurrent_stress(c: &mut Criterion) {
                                 for i in 0..per_producer {
                                     let id = ((p as u32) << 24) | (i as u32);
                                     // mpsc send 是阻塞内存队列，失败仅在断开
-                                    if tx_i.send(id).is_err() {
-                                        break;
-                                    }
+                                    tx_i.send(id).expect("aggregator disconnected early");
                                 }
                             });
                             handles.push(h);
@@ -211,10 +281,11 @@ fn bench_concurrent_stress(c: &mut Criterion) {
 
                         // 计时开始：从全部生产者同步起跑
                         let t0 = Instant::now();
+                        barrier.wait();
 
                         // 等待所有生产者发送完成
                         for h in handles {
-                            let _ = h.join();
+                            h.join().expect("producer thread panicked");
                         }
 
                         // 等待消费者完成本轮消费
@@ -225,11 +296,18 @@ fn bench_concurrent_stress(c: &mut Criterion) {
                         total += t0.elapsed();
                     }
 
-                    // 关闭常驻线程
-                    aggregator_running.store(false, Ordering::Release);
+                    // Close and join the writer while the consumer is still active. Stopping the
+                    // consumer first can deadlock the writer on a full ring.
+                    drop(tx);
+                    writer.join().expect("aggregator thread panicked");
                     consumer_running.store(false, Ordering::Release);
-                    let _ = writer.join();
-                    let _ = consumer.join();
+                    consumer.join().expect("consumer thread panicked");
+
+                    assert_eq!(
+                        consumed_total.load(Ordering::Acquire),
+                        iters as usize * producer_count * per_producer,
+                        "concurrent benchmark lost messages"
+                    );
 
                     drop(writer_rb);
                     drop(reader_rb);
@@ -269,18 +347,33 @@ fn bench_memory_pressure(c: &mut Criterion) {
                         let running_c = running.clone();
                         let read_counter = Arc::new(AtomicUsize::new(0));
                         let read_counter_c = read_counter.clone();
+                        let ready = Arc::new(Barrier::new(2));
+                        let ready_c = ready.clone();
 
                         let consumer = thread::spawn(move || {
+                            ready_c.wait();
                             while running_c.load(Ordering::Acquire) {
-                                let _ = reader.wait_for_message(Some(Duration::from_millis(1)));
-                                while let Ok(Some(_)) = reader.try_read_next_message() {
+                                reader
+                                    .wait_for_message(Some(Duration::from_millis(1)))
+                                    .expect("message wait failed");
+                                while reader
+                                    .try_read_next_message()
+                                    .expect("message read failed")
+                                    .is_some()
+                                {
                                     read_counter_c.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
-                            while let Ok(Some(_)) = reader.try_read_next_message() {
+                            while reader
+                                .try_read_next_message()
+                                .expect("final message drain failed")
+                                .is_some()
+                            {
                                 read_counter_c.fetch_add(1, Ordering::Relaxed);
                             }
                         });
+
+                        ready.wait();
 
                         let mut total = Duration::ZERO;
                         let writes_per_round = size * 10;
@@ -294,7 +387,10 @@ fn bench_memory_pressure(c: &mut Criterion) {
                             for i in 0..writes_per_round {
                                 msg.get_monitor_info_mut().monitor_num =
                                     (round as usize * writes_per_round + i) as i32;
-                                while !buffer.try_write_message(&msg).unwrap_or(false) {
+                                while !buffer
+                                    .try_write_message(&msg)
+                                    .expect("message write failed")
+                                {
                                     std::hint::spin_loop();
                                 }
                             }
@@ -306,7 +402,13 @@ fn bench_memory_pressure(c: &mut Criterion) {
                         }
 
                         running.store(false, Ordering::Release);
-                        let _ = consumer.join();
+                        consumer.join().expect("consumer thread panicked");
+
+                        assert_eq!(
+                            read_counter.load(Ordering::Acquire),
+                            iters as usize * writes_per_round,
+                            "memory-pressure benchmark lost messages"
+                        );
 
                         drop(buffer);
                         let _ = std::fs::remove_file(&test_path);
@@ -329,34 +431,28 @@ fn bench_command_stress(c: &mut Criterion) {
 
             let sender =
                 Arc::new(SharedRingBuffer::create_aux(&test_path, Some(1024), Some(3000)).unwrap());
-            thread::sleep(Duration::from_millis(5));
             let receiver = Arc::new(SharedRingBuffer::open_aux(&test_path, Some(3000)).unwrap());
 
             let recv_counter = Arc::new(AtomicUsize::new(0));
             let running = Arc::new(AtomicBool::new(true));
+            let ready = Arc::new(Barrier::new(2));
 
             // 常驻接收线程：持续 wait + drain
             let r = receiver.clone();
             let recv_c = recv_counter.clone();
             let running_c = running.clone();
+            let ready_c = ready.clone();
             let consumer = thread::spawn(move || {
+                ready_c.wait();
                 while running_c.load(Ordering::Acquire) {
-                    if r.wait_for_command(Some(Duration::from_millis(1)))
-                        .unwrap_or(false)
-                    {
-                        while let Some(_) = r.receive_command() {
-                            recv_c.fetch_add(1, Ordering::Relaxed);
-                        }
-                    } else {
-                        while let Some(_) = r.receive_command() {
-                            recv_c.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
+                    r.wait_for_command(Some(Duration::from_millis(1)))
+                        .expect("command wait failed");
+                    recv_c.fetch_add(drain_commands(&r), Ordering::Relaxed);
                 }
-                while let Some(_) = r.receive_command() {
-                    recv_c.fetch_add(1, Ordering::Relaxed);
-                }
+                recv_c.fetch_add(drain_commands(&r), Ordering::Relaxed);
             });
+
+            ready.wait();
 
             let mut total = Duration::ZERO;
             let cmds_per_round = 2000;
@@ -368,7 +464,10 @@ fn bench_command_stress(c: &mut Criterion) {
                 let t0 = Instant::now();
                 for i in 0..cmds_per_round {
                     let cmd = SharedCommand::view_tag(1 << (i % 9), (i % 2) as i32);
-                    while !sender.send_command(black_box(cmd)).unwrap_or(false) {
+                    while !sender
+                        .send_command(black_box(cmd))
+                        .expect("command send failed")
+                    {
                         std::hint::spin_loop();
                     }
                 }
@@ -380,7 +479,13 @@ fn bench_command_stress(c: &mut Criterion) {
             }
 
             running.store(false, Ordering::Release);
-            let _ = consumer.join();
+            consumer.join().expect("consumer thread panicked");
+
+            assert_eq!(
+                recv_counter.load(Ordering::Acquire),
+                iters as usize * cmds_per_round,
+                "command benchmark lost commands"
+            );
 
             drop(sender);
             drop(receiver);
@@ -394,7 +499,8 @@ fn bench_command_stress(c: &mut Criterion) {
 // 五、长时间稳定性：固定工作量，测量多轮执行总时间（主要用于回归与稳定性观察）
 fn bench_long_running_stability(c: &mut Criterion) {
     c.bench_function("long_running_stability", |b| {
-        b.iter_batched(
+        // `iter_batched_ref` keeps fixture destruction and link cleanup out of the timed routine.
+        b.iter_batched_ref(
             || {
                 let test_path = mk_path("stress_long_running");
                 let _ = std::fs::remove_file(&test_path);
@@ -403,7 +509,7 @@ fn bench_long_running_stability(c: &mut Criterion) {
                 );
                 (test_path, buffer)
             },
-            |(test_path, buffer)| {
+            |(_, buffer)| {
                 let total_cycles = 10usize;
                 let messages_per_cycle = 100usize;
                 let mut msg = create_base_message(0);
@@ -414,26 +520,30 @@ fn bench_long_running_stability(c: &mut Criterion) {
                     for i in 0..messages_per_cycle {
                         msg.get_monitor_info_mut().monitor_num =
                             (cycle * messages_per_cycle + i) as i32;
-                        while !buffer.try_write_message(&msg).unwrap_or(false) {
-                            std::hint::spin_loop();
-                        }
+                        assert!(buffer
+                            .try_write_message(&msg)
+                            .expect("message write failed"));
                     }
 
                     // 读取固定条数
                     let mut read_in_cycle = 0;
-                    while let Ok(Some(_)) = buffer.try_read_next_message() {
+                    while buffer
+                        .try_read_next_message()
+                        .expect("message read failed")
+                        .is_some()
+                    {
                         read_in_cycle += 1;
                         if read_in_cycle >= messages_per_cycle {
                             break;
                         }
                     }
+                    assert_eq!(
+                        read_in_cycle, messages_per_cycle,
+                        "stability benchmark lost messages"
+                    );
                 }
 
-                // 最终清理
-                drain_all(&buffer);
-
-                drop(buffer);
-                let _ = std::fs::remove_file(&test_path);
+                assert_eq!(buffer.available_messages(), 0);
             },
             BatchSize::SmallInput,
         );
@@ -453,13 +563,11 @@ fn bench_ping_pong_latency(c: &mut Criterion) {
             // 通道 A：main 写，pong 读
             let ping_writer =
                 Arc::new(SharedRingBuffer::create_aux(&path_a, Some(4), Some(0)).unwrap());
-            thread::sleep(Duration::from_millis(2));
             let ping_reader = Arc::new(SharedRingBuffer::open_aux(&path_a, Some(0)).unwrap());
 
             // 通道 B：pong 写，main 读
             let pong_writer =
                 Arc::new(SharedRingBuffer::create_aux(&path_b, Some(4), Some(0)).unwrap());
-            thread::sleep(Duration::from_millis(2));
             let pong_reader = Arc::new(SharedRingBuffer::open_aux(&path_b, Some(0)).unwrap());
 
             let stop = Arc::new(AtomicBool::new(false));
@@ -467,31 +575,46 @@ fn bench_ping_pong_latency(c: &mut Criterion) {
             let ping_r = ping_reader.clone();
             let pong_w = pong_writer.clone();
             let reply_msg = create_base_message(1);
+            let ready = Arc::new(Barrier::new(2));
+            let ready_c = ready.clone();
 
             // pong 线程：收到消息后立即回一条
             let pong_thread = thread::spawn(move || {
+                ready_c.wait();
                 while !stop_c.load(Ordering::Relaxed) {
-                    match ping_r.try_read_next_message() {
-                        Ok(Some(_)) => {
-                            while !pong_w.try_write_message(&reply_msg).unwrap_or(false) {
+                    match ping_r.try_read_next_message().expect("ping read failed") {
+                        Some(_) => {
+                            while !pong_w
+                                .try_write_message(&reply_msg)
+                                .expect("pong write failed")
+                            {
                                 std::hint::spin_loop();
                             }
                         }
-                        _ => std::hint::spin_loop(),
+                        None => std::hint::spin_loop(),
                     }
                 }
             });
+
+            ready.wait();
 
             let send_msg = create_base_message(0);
             let mut total = Duration::ZERO;
 
             for _ in 0..iters {
                 let t0 = Instant::now();
-                while !ping_writer.try_write_message(&send_msg).unwrap_or(false) {
+                while !ping_writer
+                    .try_write_message(&send_msg)
+                    .expect("ping write failed")
+                {
                     std::hint::spin_loop();
                 }
                 loop {
-                    if let Ok(Some(_)) = pong_reader.try_read_next_message() {
+                    if pong_reader
+                        .try_read_next_message()
+                        .expect("pong read failed")
+                        .is_some()
+                    {
                         break;
                     }
                     std::hint::spin_loop();
@@ -500,7 +623,7 @@ fn bench_ping_pong_latency(c: &mut Criterion) {
             }
 
             stop.store(true, Ordering::Relaxed);
-            let _ = pong_thread.join();
+            pong_thread.join().expect("pong thread panicked");
 
             drop(ping_writer);
             drop(ping_reader);
@@ -524,7 +647,6 @@ fn bench_mixed_message_command(c: &mut Criterion) {
 
             let writer =
                 Arc::new(SharedRingBuffer::create_aux(&test_path, Some(1024), Some(2000)).unwrap());
-            thread::sleep(Duration::from_millis(5));
             let reader = Arc::new(SharedRingBuffer::open_aux(&test_path, Some(2000)).unwrap());
 
             let stop = Arc::new(AtomicBool::new(false));
@@ -535,25 +657,35 @@ fn bench_mixed_message_command(c: &mut Criterion) {
             let stop_c = stop.clone();
             let msg_recv_c = msg_recv.clone();
             let cmd_recv_c = cmd_recv.clone();
+            let ready = Arc::new(Barrier::new(2));
+            let ready_c = ready.clone();
 
             // 消费者：同时消费消息和命令
             let consumer = thread::spawn(move || {
+                ready_c.wait();
                 while !stop_c.load(Ordering::Acquire) {
-                    let _ = r.wait_for_message(Some(Duration::from_millis(1)));
-                    while let Ok(Some(_)) = r.try_read_next_message() {
+                    r.wait_for_message(Some(Duration::from_millis(1)))
+                        .expect("message wait failed");
+                    while r
+                        .try_read_next_message()
+                        .expect("message read failed")
+                        .is_some()
+                    {
                         msg_recv_c.fetch_add(1, Ordering::Relaxed);
                     }
-                    while r.receive_command().is_some() {
-                        cmd_recv_c.fetch_add(1, Ordering::Relaxed);
-                    }
+                    cmd_recv_c.fetch_add(drain_commands(&r), Ordering::Relaxed);
                 }
-                while let Ok(Some(_)) = r.try_read_next_message() {
+                while r
+                    .try_read_next_message()
+                    .expect("final message drain failed")
+                    .is_some()
+                {
                     msg_recv_c.fetch_add(1, Ordering::Relaxed);
                 }
-                while r.receive_command().is_some() {
-                    cmd_recv_c.fetch_add(1, Ordering::Relaxed);
-                }
+                cmd_recv_c.fetch_add(drain_commands(&r), Ordering::Relaxed);
             });
+
+            ready.wait();
 
             let per_round = 500usize;
             let mut total = Duration::ZERO;
@@ -569,11 +701,14 @@ fn bench_mixed_message_command(c: &mut Criterion) {
                 for i in 0..per_round {
                     msg.get_monitor_info_mut().monitor_num =
                         (round as usize * per_round + i) as i32;
-                    while !writer.try_write_message(&msg).unwrap_or(false) {
+                    while !writer
+                        .try_write_message(&msg)
+                        .expect("message write failed")
+                    {
                         std::hint::spin_loop();
                     }
                     let cmd = SharedCommand::view_tag(1 << (i % 9), 0);
-                    while !writer.send_command(cmd).unwrap_or(false) {
+                    while !writer.send_command(cmd).expect("command send failed") {
                         std::hint::spin_loop();
                     }
                 }
@@ -587,7 +722,11 @@ fn bench_mixed_message_command(c: &mut Criterion) {
             }
 
             stop.store(true, Ordering::Release);
-            let _ = consumer.join();
+            consumer.join().expect("consumer thread panicked");
+
+            let expected = iters as usize * per_round;
+            assert_eq!(msg_recv.load(Ordering::Acquire), expected);
+            assert_eq!(cmd_recv.load(Ordering::Acquire), expected);
 
             drop(writer);
             drop(reader);
@@ -617,21 +756,37 @@ fn bench_backpressure_handling(c: &mut Criterion) {
                 let fill_count = cap * ratio / 100;
                 let msg = create_base_message(0);
 
-                b.iter(|| {
-                    drain_all(&buffer);
-                    for _ in 0..fill_count {
-                        if !buffer.try_write_message(&msg).unwrap_or(false) {
-                            break;
+                b.iter_custom(|iters| {
+                    let mut elapsed = Duration::ZERO;
+                    for _ in 0..iters {
+                        drain_all(&buffer);
+                        for _ in 0..fill_count {
+                            assert!(buffer
+                                .try_write_message(&msg)
+                                .expect("message prefill failed"));
                         }
-                    }
-                    // 缓冲区接近满：模拟写端遭遇背压
-                    for _ in 0..100usize {
-                        if !buffer.try_write_message(black_box(&msg)).unwrap_or(false) {
-                            let _ = buffer.try_read_next_message();
-                            let _ = buffer.try_write_message(&msg);
+
+                        let started = Instant::now();
+                        // 缓冲区接近满：模拟写端遭遇背压
+                        for _ in 0..100usize {
+                            if !buffer
+                                .try_write_message(black_box(&msg))
+                                .expect("backpressure write failed")
+                            {
+                                assert!(buffer
+                                    .try_read_next_message()
+                                    .expect("backpressure read failed")
+                                    .is_some());
+                                assert!(buffer
+                                    .try_write_message(&msg)
+                                    .expect("backpressure retry failed"));
+                            }
                         }
+                        elapsed += started.elapsed();
+
+                        drain_all(&buffer);
                     }
-                    drain_all(&buffer);
+                    elapsed
                 });
 
                 drop(buffer);
@@ -657,15 +812,18 @@ fn bench_read_latest_under_load(c: &mut Criterion) {
             let stop = Arc::new(AtomicBool::new(false));
             let stop_c = stop.clone();
             let w = writer.clone();
+            let ready = Arc::new(Barrier::new(2));
+            let ready_c = ready.clone();
 
             // 常驻写者线程：持续写入
             let producer = thread::spawn(move || {
                 let mut msg = create_base_message(0);
                 let mut i = 0i32;
+                ready_c.wait();
                 while !stop_c.load(Ordering::Relaxed) {
                     msg.get_monitor_info_mut().monitor_num = i;
                     i = i.wrapping_add(1);
-                    let _ = w.try_write_message(&msg);
+                    w.try_write_message(&msg).expect("message write failed");
                     // 防止极端填满导致写者也阻塞
                     if i % 64 == 0 {
                         std::hint::spin_loop();
@@ -673,18 +831,29 @@ fn bench_read_latest_under_load(c: &mut Criterion) {
                 }
             });
 
-            // 预热
-            thread::sleep(Duration::from_millis(2));
+            ready.wait();
+            while !reader.has_message() {
+                std::hint::spin_loop();
+            }
 
             let mut total = Duration::ZERO;
             for _ in 0..iters {
                 let t0 = Instant::now();
-                black_box(reader.try_read_latest_message().unwrap());
+                loop {
+                    if let Some(message) = reader
+                        .try_read_latest_message()
+                        .expect("latest-message read failed")
+                    {
+                        black_box(message);
+                        break;
+                    }
+                    std::hint::spin_loop();
+                }
                 total += t0.elapsed();
             }
 
             stop.store(true, Ordering::Relaxed);
-            let _ = producer.join();
+            producer.join().expect("producer thread panicked");
 
             drop(writer);
             let _ = std::fs::remove_file(&test_path);

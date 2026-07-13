@@ -1,6 +1,7 @@
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
+use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // 常量定义
@@ -18,7 +19,19 @@ fn now_millis() -> u64 {
 
 // 使用合理对齐
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct TagStatus {
     pub is_selected: bool,
     pub is_urg: bool,
@@ -26,18 +39,8 @@ pub struct TagStatus {
     pub is_occ: bool,
 }
 
-impl Default for TagStatus {
-    fn default() -> Self {
-        Self {
-            is_selected: false,
-            is_urg: false,
-            is_filled: false,
-            is_occ: false,
-        }
-    }
-}
-
 impl TagStatus {
+    #[must_use]
     pub fn new(is_selected: bool, is_urg: bool, is_filled: bool, is_occ: bool) -> Self {
         Self {
             is_selected,
@@ -50,7 +53,18 @@ impl TagStatus {
 
 // 使用更合理的对齐策略
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct MonitorInfo {
     pub monitor_num: i32,
     pub monitor_width: i32,
@@ -79,55 +93,88 @@ impl Default for MonitorInfo {
 }
 
 impl MonitorInfo {
-    pub fn set_client_name(&mut self, name: &str) {
-        let bytes = name.as_bytes();
-        let len = bytes.len().min(MAX_CLIENT_NAME_LEN - 1);
-        self.client_name.fill(0);
-        self.client_name[..len].copy_from_slice(&bytes[..len]);
+    fn copy_utf8_truncated(destination: &mut [u8], value: &str) {
+        let mut len = value.len().min(destination.len().saturating_sub(1));
+        while !value.is_char_boundary(len) {
+            len -= 1;
+        }
+        destination.fill(0);
+        destination[..len].copy_from_slice(&value.as_bytes()[..len]);
     }
 
+    pub fn set_client_name(&mut self, name: &str) {
+        Self::copy_utf8_truncated(&mut self.client_name, name);
+    }
+
+    #[must_use]
     pub fn get_client_name(&self) -> String {
+        self.client_name_lossy().into_owned()
+    }
+
+    /// 以零拷贝形式返回 client name；外部直接写入了非 UTF-8 字节时
+    /// 才会分配并做损坏替换。
+    #[must_use]
+    pub fn client_name_lossy(&self) -> Cow<'_, str> {
         let null_pos = self
             .client_name
             .iter()
             .position(|&x| x == 0)
             .unwrap_or(MAX_CLIENT_NAME_LEN);
-        String::from_utf8_lossy(&self.client_name[..null_pos]).to_string()
+        String::from_utf8_lossy(&self.client_name[..null_pos])
     }
 
     pub fn set_ltsymbol(&mut self, symbol: &str) {
-        let bytes = symbol.as_bytes();
-        let len = bytes.len().min(MAX_LT_SYMBOL_LEN - 1);
-        self.ltsymbol.fill(0);
-        self.ltsymbol[..len].copy_from_slice(&bytes[..len]);
+        Self::copy_utf8_truncated(&mut self.ltsymbol, symbol);
     }
 
+    #[must_use]
     pub fn get_ltsymbol(&self) -> String {
+        self.ltsymbol_lossy().into_owned()
+    }
+
+    /// 以零拷贝形式返回 layout symbol，非 UTF-8 时做损坏替换。
+    #[must_use]
+    pub fn ltsymbol_lossy(&self) -> Cow<'_, str> {
         let null_pos = self
             .ltsymbol
             .iter()
             .position(|&x| x == 0)
             .unwrap_or(MAX_LT_SYMBOL_LEN);
-        String::from_utf8_lossy(&self.ltsymbol[..null_pos]).to_string()
+        String::from_utf8_lossy(&self.ltsymbol[..null_pos])
     }
 
     pub fn set_tag_status(&mut self, index: usize, status: TagStatus) {
-        if index < MAX_TAGS {
-            self.tag_status_vec[index] = status;
-        }
+        let _ = self.try_set_tag_status(index, status);
     }
 
+    /// 设置 tag 状态，越界时返回 `false`。
+    pub fn try_set_tag_status(&mut self, index: usize, status: TagStatus) -> bool {
+        let Some(slot) = self.tag_status_vec.get_mut(index) else {
+            return false;
+        };
+        *slot = status;
+        true
+    }
+
+    #[must_use]
     pub fn get_tag_status(&self, index: usize) -> Option<TagStatus> {
-        if index < MAX_TAGS {
-            Some(self.tag_status_vec[index])
-        } else {
-            None
-        }
+        self.tag_status_vec.get(index).copied()
     }
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct SharedMessage {
     pub timestamp: u64,
     pub monitor_info: MonitorInfo,
@@ -143,10 +190,12 @@ impl Default for SharedMessage {
 }
 
 impl SharedMessage {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    #[must_use]
     pub fn with_monitor_info(monitor_info: MonitorInfo) -> Self {
         Self {
             timestamp: now_millis(),
@@ -158,10 +207,12 @@ impl SharedMessage {
         self.timestamp = now_millis();
     }
 
+    #[must_use]
     pub fn get_timestamp(&self) -> u64 {
         self.timestamp
     }
 
+    #[must_use]
     pub fn get_monitor_info(&self) -> &MonitorInfo {
         &self.monitor_info
     }
@@ -172,18 +223,26 @@ impl SharedMessage {
 }
 
 // 命令相关定义
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub enum CommandType {
+    #[default]
     None = 0,
     ViewTag = 1,
     ToggleTag = 2,
     SetLayout = 3,
-}
-
-impl Default for CommandType {
-    fn default() -> Self {
-        CommandType::None
-    }
 }
 
 impl From<u32> for CommandType {
@@ -197,6 +256,20 @@ impl From<u32> for CommandType {
     }
 }
 
+impl CommandType {
+    /// 严格解析原始命令值，未知值不会与 `None` 混淆。
+    #[must_use]
+    pub const fn from_raw(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::None),
+            1 => Some(Self::ViewTag),
+            2 => Some(Self::ToggleTag),
+            3 => Some(Self::SetLayout),
+            _ => None,
+        }
+    }
+}
+
 impl From<CommandType> for u32 {
     fn from(cmd_type: CommandType) -> Self {
         cmd_type as u32
@@ -204,7 +277,19 @@ impl From<CommandType> for u32 {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct SharedCommand {
     pub cmd_type: u32,
     pub parameter: u32,
@@ -213,6 +298,7 @@ pub struct SharedCommand {
 }
 
 impl SharedCommand {
+    #[must_use]
     pub fn new(cmd_type: CommandType, parameter: u32, monitor_id: i32) -> Self {
         Self {
             cmd_type: cmd_type.into(),
@@ -222,30 +308,43 @@ impl SharedCommand {
         }
     }
 
+    #[must_use]
     pub fn get_command_type(&self) -> CommandType {
         self.cmd_type.into()
     }
 
+    /// 严格返回命令类型；原始值未知时返回 `None`。
+    #[must_use]
+    pub const fn command_type_checked(&self) -> Option<CommandType> {
+        CommandType::from_raw(self.cmd_type)
+    }
+
+    #[must_use]
     pub fn view_tag(tag_bit: u32, monitor_id: i32) -> Self {
         Self::new(CommandType::ViewTag, tag_bit, monitor_id)
     }
 
+    #[must_use]
     pub fn toggle_tag(tag_bit: u32, monitor_id: i32) -> Self {
         Self::new(CommandType::ToggleTag, tag_bit, monitor_id)
     }
 
+    #[must_use]
     pub fn set_layout(layout_idx: u32, monitor_id: i32) -> Self {
         Self::new(CommandType::SetLayout, layout_idx, monitor_id)
     }
 
+    #[must_use]
     pub fn get_parameter(&self) -> u32 {
         self.parameter
     }
 
+    #[must_use]
     pub fn get_monitor_id(&self) -> i32 {
         self.monitor_id
     }
 
+    #[must_use]
     pub fn get_timestamp(&self) -> u64 {
         self.timestamp
     }
@@ -369,6 +468,18 @@ mod tests {
     }
 
     #[test]
+    fn test_client_name_truncation_preserves_utf8_boundary() {
+        let mut mi = MonitorInfo::default();
+        let name = "界".repeat(MAX_CLIENT_NAME_LEN);
+        mi.set_client_name(&name);
+        let got = mi.get_client_name();
+        assert!(got.len() < MAX_CLIENT_NAME_LEN);
+        assert!(!got.contains('\u{fffd}'));
+        assert!(got.chars().all(|character| character == '界'));
+        assert!(matches!(mi.client_name_lossy(), Cow::Borrowed(_)));
+    }
+
+    #[test]
     fn test_client_name_overwrite_clears_previous() {
         let mut mi = MonitorInfo::default();
         mi.set_client_name("long_name_here");
@@ -404,6 +515,16 @@ mod tests {
     }
 
     #[test]
+    fn test_ltsymbol_truncation_preserves_utf8_boundary() {
+        let mut mi = MonitorInfo::default();
+        mi.set_ltsymbol(&"🖥".repeat(MAX_LT_SYMBOL_LEN));
+        let got = mi.get_ltsymbol();
+        assert!(got.len() < MAX_LT_SYMBOL_LEN);
+        assert!(!got.contains('\u{fffd}'));
+        assert!(got.chars().all(|character| character == '🖥'));
+    }
+
+    #[test]
     fn test_all_tag_indices_valid() {
         let mut mi = MonitorInfo::default();
         for i in 0..MAX_TAGS {
@@ -425,12 +546,14 @@ mod tests {
 
     #[test]
     fn test_monitor_info_numeric_fields() {
-        let mut mi = MonitorInfo::default();
-        mi.monitor_num = -1;
-        mi.monitor_width = 1920;
-        mi.monitor_height = 1080;
-        mi.monitor_x = -320;
-        mi.monitor_y = 0;
+        let mi = MonitorInfo {
+            monitor_num: -1,
+            monitor_width: 1920,
+            monitor_height: 1080,
+            monitor_x: -320,
+            monitor_y: 0,
+            ..MonitorInfo::default()
+        };
         assert_eq!(mi.monitor_num, -1);
         assert_eq!(mi.monitor_width, 1920);
         assert_eq!(mi.monitor_height, 1080);
@@ -449,6 +572,8 @@ mod tests {
         // 修改 b 不影响 a
         assert_eq!(a.get_client_name(), "original");
         assert_eq!(a.monitor_num, 7);
+        assert_eq!(b.get_client_name(), "copy");
+        assert_eq!(b.monitor_num, 99);
     }
 
     // ── SharedMessage ────────────────────────────────────────────────────────
@@ -466,8 +591,10 @@ mod tests {
 
     #[test]
     fn test_shared_message_with_monitor_info() {
-        let mut mi = MonitorInfo::default();
-        mi.monitor_num = 3;
+        let mut mi = MonitorInfo {
+            monitor_num: 3,
+            ..MonitorInfo::default()
+        };
         mi.set_client_name("wm");
         let msg = SharedMessage::with_monitor_info(mi);
         assert!(msg.get_timestamp() > 0);
@@ -516,6 +643,8 @@ mod tests {
         assert_eq!(CommandType::from(4u32), CommandType::None);
         assert_eq!(CommandType::from(u32::MAX), CommandType::None);
         assert_eq!(CommandType::from(100u32), CommandType::None);
+        assert_eq!(CommandType::from_raw(4), None);
+        assert_eq!(CommandType::from_raw(u32::MAX), None);
     }
 
     #[test]
@@ -898,11 +1027,13 @@ mod tests {
 
     #[test]
     fn test_monitor_info_negative_coordinates() {
-        let mut mi = MonitorInfo::default();
-        mi.monitor_x = i32::MIN;
-        mi.monitor_y = i32::MIN;
-        mi.monitor_width = -1920;
-        mi.monitor_height = -1080;
+        let mi = MonitorInfo {
+            monitor_x: i32::MIN,
+            monitor_y: i32::MIN,
+            monitor_width: -1920,
+            monitor_height: -1080,
+            ..MonitorInfo::default()
+        };
         assert_eq!(mi.monitor_x, i32::MIN);
         assert_eq!(mi.monitor_y, i32::MIN);
         assert_eq!(mi.monitor_width, -1920);
@@ -957,12 +1088,14 @@ mod tests {
 
     #[test]
     fn test_with_monitor_info_preserves_all_fields() {
-        let mut mi = MonitorInfo::default();
-        mi.monitor_num = 3;
-        mi.monitor_width = 2560;
-        mi.monitor_height = 1440;
-        mi.monitor_x = -100;
-        mi.monitor_y = 50;
+        let mut mi = MonitorInfo {
+            monitor_num: 3,
+            monitor_width: 2560,
+            monitor_height: 1440,
+            monitor_x: -100,
+            monitor_y: 50,
+            ..MonitorInfo::default()
+        };
         mi.set_client_name("wm_client");
         mi.set_ltsymbol("[M]");
         for i in 0..MAX_TAGS {

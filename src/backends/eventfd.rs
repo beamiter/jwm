@@ -2,12 +2,11 @@
 #![cfg(feature = "eventfd")]
 
 use super::common::SyncBackend;
-use log::info;
 use nix::errno::Errno;
-use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
+use nix::fcntl::{fcntl, FcntlArg};
 use nix::poll::{poll, PollFd, PollFlags};
 use nix::sys::socket::{
-    accept, bind, connect, listen, recvmsg, sendmsg, socket, AddressFamily, Backlog,
+    accept4, bind, connect, listen, recvmsg, sendmsg, socket, AddressFamily, Backlog,
     ControlMessage, ControlMessageOwned, MsgFlags, SockFlag, SockType, UnixAddr,
 };
 use nix::unistd;
@@ -16,31 +15,32 @@ use std::hint;
 use std::io::{Error, ErrorKind, Result};
 use std::io::{IoSlice, IoSliceMut};
 use std::os::fd::FromRawFd;
-use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 /// UNIX sockaddr_un 路径上限为 108 字节
 const UNIX_SOCK_MAX: usize = 108;
+static SOCKET_NONCE: AtomicU64 = AtomicU64::new(0);
 
 // ── EventFdHeader ─────────────────────────────────────────────────────────────
 //
-// 核心优化：新增 message_waiters / command_waiters 计数器（位于共享内存中），
-// signal 路径在 waiters == 0 时跳过 write(eventfd) syscall。
-// 改动前：每次 try_write_message 都触发一次 write() 内核调用（≈200–500 ns）。
-// 改动后：只有对端真正在 poll() 等待时才发出 write()。
+// sequence + waiters 组成 SeqCst 注册握手：无人等待时 signal 不必进入内核，
+// 同时不会因读到旧 waiter 计数而丢失正在注册的唤醒。
 #[repr(C, align(8))]
 pub struct EventFdHeader {
     // 创建者写入路径后，把 ready 置为 true，打开者据此读取路径
-    is_ready: AtomicBool,
-    _pad0: [u8; 3],
+    is_ready: AtomicU32,
     /// 正在 poll() 等待消息 fd 的线程数（含本进程）
     pub message_waiters: AtomicI32,
     /// 正在 poll() 等待命令 fd 的线程数
     pub command_waiters: AtomicI32,
-    _pad1: [u8; 4],
+    message_sequence: AtomicU32,
+    command_sequence: AtomicU32,
     // 以 0 结尾的 C 字节串，未用完则补 0
     sock_path: [u8; UNIX_SOCK_MAX],
 }
@@ -53,8 +53,8 @@ pub struct EventFdBackend {
     local_command_fd: Option<OwnedFd>,
 
     // 仅创建者持有：用于关闭监听线程
-    is_creator: bool,
     listener_stop: Option<Arc<AtomicBool>>,
+    listener_thread: Option<JoinHandle<()>>,
     sock_path: Option<PathBuf>,
 }
 
@@ -67,8 +67,8 @@ impl EventFdBackend {
             header: std::ptr::null_mut(),
             local_message_fd: None,
             local_command_fd: None,
-            is_creator: false,
             listener_stop: None,
+            listener_thread: None,
             sock_path: None,
         }
     }
@@ -76,29 +76,49 @@ impl EventFdBackend {
     fn write_u64(fd: BorrowedFd<'_>, v: u64) -> Result<()> {
         let bytes = v.to_ne_bytes();
         match unistd::write(fd, &bytes) {
-            Ok(_) => Ok(()),
+            Ok(8) => Ok(()),
+            Ok(written) => Err(Error::new(
+                ErrorKind::WriteZero,
+                format!("short eventfd write: {written} bytes"),
+            )),
             Err(Errno::EAGAIN) => Ok(()),
-            Err(e) => Err(Error::new(ErrorKind::Other, e)),
+            Err(e) => Err(Error::other(e)),
         }
     }
 
-    fn drain_eventfd(fd: BorrowedFd<'_>) {
-        // fd 是 EFD_NONBLOCK，读不到数据时返回 EAGAIN，此处忽略即可
+    fn signal_if_waiting(
+        fd: Option<&OwnedFd>,
+        waiters: &AtomicI32,
+        sequence: &AtomicU32,
+    ) -> Result<()> {
+        sequence.fetch_add(1, Ordering::SeqCst);
+        if waiters.load(Ordering::SeqCst) > 0 {
+            if let Some(fd) = fd {
+                Self::write_u64(fd.as_fd(), 1)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn consume_one_eventfd(fd: BorrowedFd<'_>) {
+        // EFD_SEMAPHORE 保证每次 read 只消费一个通知，不会把其他
+        // consumer 对应的累计计数一次清空。
         let mut buf = [0u8; 8];
         let _ = unistd::read(fd, &mut buf);
     }
 
-    fn poll_fd(fd: RawFd, timeout: Option<Duration>) -> Result<bool> {
+    fn poll_fd(fd: BorrowedFd<'_>, timeout: Option<Duration>) -> Result<bool> {
         use nix::poll::PollTimeout;
-        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
-        let pfd = PollFd::new(borrowed_fd, PollFlags::POLLIN);
+        let pfd = PollFd::new(fd, PollFlags::POLLIN);
         let to = timeout.map_or(PollTimeout::NONE, |d| {
-            nix::poll::PollTimeout::try_from(d.as_millis()).unwrap_or(PollTimeout::NONE)
+            // 有限 Duration 绝不能因整数转换溢出而变成无限等待。
+            PollTimeout::try_from(d.as_millis()).unwrap_or(PollTimeout::MAX)
         });
         match poll(&mut [pfd], to) {
             Ok(0) => Ok(false),
             Ok(_) => Ok(true),
-            Err(e) => Err(Error::new(ErrorKind::Other, e)),
+            Err(Errno::EINTR) => Err(ErrorKind::Interrupted.into()),
+            Err(e) => Err(Error::other(e)),
         }
     }
 
@@ -117,20 +137,30 @@ impl EventFdBackend {
             ));
         }
         unsafe {
-            (*header).sock_path.fill(0);
-            (&mut (*header).sock_path)[..bytes.len()].copy_from_slice(bytes);
-            (*header).is_ready.store(true, Ordering::Release);
+            let path_ptr = std::ptr::addr_of_mut!((*header).sock_path).cast::<u8>();
+            std::ptr::write_bytes(path_ptr, 0, UNIX_SOCK_MAX);
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), path_ptr, bytes.len());
+            (*header).is_ready.store(1, Ordering::Release);
         }
         Ok(())
     }
 
     fn get_header_sock_path(header: *mut EventFdHeader) -> Result<PathBuf> {
         unsafe {
-            if !(*header).is_ready.load(Ordering::Acquire) {
-                return Err(Error::new(
-                    ErrorKind::WouldBlock,
-                    "Backend not ready (socket path not published)",
-                ));
+            match (*header).is_ready.load(Ordering::Acquire) {
+                0 => {
+                    return Err(Error::new(
+                        ErrorKind::WouldBlock,
+                        "Backend not ready (socket path not published)",
+                    ));
+                }
+                1 => {}
+                value => {
+                    return Err(Error::new(
+                        ErrorKind::InvalidData,
+                        format!("Invalid eventfd ready state: {value}"),
+                    ));
+                }
             }
             let buf = &(*header).sock_path;
             let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
@@ -145,12 +175,13 @@ impl EventFdBackend {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_millis();
-        PathBuf::from(format!("/tmp/srb-{}-{}.sock", pid, ts))
+            .as_nanos();
+        let nonce = SOCKET_NONCE.fetch_add(1, Ordering::Relaxed);
+        PathBuf::from(format!("/tmp/srb-{pid}-{ts}-{nonce}.sock"))
     }
 
     fn create_eventfd_owned() -> Result<OwnedFd> {
-        let flags = libc::EFD_NONBLOCK | libc::EFD_CLOEXEC;
+        let flags = libc::EFD_NONBLOCK | libc::EFD_CLOEXEC | libc::EFD_SEMAPHORE;
         let fd = unsafe { libc::eventfd(0, flags) };
         if fd < 0 {
             return Err(Error::last_os_error());
@@ -158,46 +189,56 @@ impl EventFdBackend {
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 
+    fn dup_cloexec(fd: &OwnedFd) -> Result<OwnedFd> {
+        let duplicated = fcntl(fd, FcntlArg::F_DUPFD_CLOEXEC(0)).map_err(Error::other)?;
+        Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
+    }
+
     fn spawn_listener_thread(
         sock_path: PathBuf,
         msg_fd: OwnedFd,
         cmd_fd: OwnedFd,
         stop: Arc<AtomicBool>,
-    ) -> Result<()> {
-        if sock_path.exists() {
-            let _ = std::fs::remove_file(&sock_path);
-        }
-
+    ) -> Result<JoinHandle<()>> {
+        let backlog = Backlog::new(8).map_err(Error::other)?;
         let srv = socket(
             AddressFamily::Unix,
             SockType::Stream,
-            SockFlag::SOCK_CLOEXEC,
+            SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK,
             None,
         )
-        .map_err(|e| Error::new(ErrorKind::Other, e))?;
+        .map_err(Error::other)?;
 
-        let addr = UnixAddr::new(&sock_path).map_err(|e| Error::new(ErrorKind::Other, e))?;
-        bind(srv.as_raw_fd(), &addr).map_err(|e| Error::new(ErrorKind::Other, e))?;
-        listen(&srv, Backlog::new(8)?).map_err(|e| Error::new(ErrorKind::Other, e))?;
+        let addr = UnixAddr::new(&sock_path).map_err(Error::other)?;
+        bind(srv.as_raw_fd(), &addr).map_err(Error::other)?;
+        if let Err(error) =
+            std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600))
+        {
+            let _ = std::fs::remove_file(&sock_path);
+            return Err(error);
+        }
+        if let Err(error) = listen(&srv, backlog).map_err(Error::other) {
+            let _ = std::fs::remove_file(&sock_path);
+            return Err(error);
+        }
 
-        let _ = fcntl(&srv, FcntlArg::F_SETFL(OFlag::O_NONBLOCK));
-        let _ = fcntl(&srv, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC));
-
-        std::thread::Builder::new()
+        let listener_path = sock_path.clone();
+        let listener = std::thread::Builder::new()
             .name("srb_eventfd_fdpass".to_string())
             .spawn(move || {
                 let msg_fd_raw = msg_fd.as_raw_fd();
                 let cmd_fd_raw = cmd_fd.as_raw_fd();
 
-                while !stop.load(Ordering::Relaxed) {
-                    match accept(srv.as_raw_fd()) {
+                while !stop.load(Ordering::Acquire) {
+                    match accept4(srv.as_raw_fd(), SockFlag::SOCK_CLOEXEC) {
                         Ok(cli_fd) => {
+                            let cli_fd = unsafe { OwnedFd::from_raw_fd(cli_fd) };
                             let iov = [IoSlice::new(&[0xE5])];
                             let fds = [msg_fd_raw, cmd_fd_raw];
                             let cmsg = [ControlMessage::ScmRights(&fds)];
 
                             if let Err(e) = sendmsg::<nix::sys::socket::UnixAddr>(
-                                cli_fd,
+                                cli_fd.as_raw_fd(),
                                 &iov,
                                 &cmsg,
                                 MsgFlags::empty(),
@@ -205,7 +246,6 @@ impl EventFdBackend {
                             ) {
                                 log::warn!("sendmsg(SCM_RIGHTS) failed: {e}");
                             }
-                            let _ = unistd::close(cli_fd);
                         }
                         Err(Errno::EAGAIN) => {
                             // ── 优化：用 poll(1ms) 代替 sleep(10ms) ──────────────
@@ -225,11 +265,31 @@ impl EventFdBackend {
                     }
                 }
 
-                let _ = std::fs::remove_file(&sock_path);
-            })
-            .map_err(|e| Error::new(ErrorKind::Other, e))?;
+                let _ = std::fs::remove_file(&listener_path);
+            });
 
-        Ok(())
+        match listener {
+            Ok(listener) => Ok(listener),
+            Err(error) => {
+                let _ = std::fs::remove_file(&sock_path);
+                Err(Error::other(error))
+            }
+        }
+    }
+
+    fn poke_listener(sock_path: &Path) {
+        let Ok(addr) = UnixAddr::new(sock_path) else {
+            return;
+        };
+        let Ok(client) = socket(
+            AddressFamily::Unix,
+            SockType::Stream,
+            SockFlag::SOCK_CLOEXEC,
+            None,
+        ) else {
+            return;
+        };
+        let _ = connect(client.as_raw_fd(), &addr);
     }
 
     fn receive_fds_from_server(sock_path: &Path) -> Result<(OwnedFd, OwnedFd)> {
@@ -242,20 +302,19 @@ impl EventFdBackend {
                 None,
             ) {
                 Ok(cli) => {
-                    let addr =
-                        UnixAddr::new(sock_path).map_err(|e| Error::new(ErrorKind::Other, e))?;
+                    let addr = UnixAddr::new(sock_path).map_err(Error::other)?;
                     match connect(cli.as_raw_fd(), &addr) {
                         Ok(()) => break cli,
                         Err(e) => {
                             if std::time::Instant::now() >= deadline {
-                                return Err(Error::new(ErrorKind::Other, e));
+                                return Err(Error::other(e));
                             }
                             std::thread::sleep(Duration::from_millis(10));
                             continue;
                         }
                     }
                 }
-                Err(e) => return Err(Error::new(ErrorKind::Other, e)),
+                Err(e) => return Err(Error::other(e)),
             }
         };
 
@@ -267,9 +326,24 @@ impl EventFdBackend {
             cli.as_raw_fd(),
             &mut iov,
             Some(&mut cmsgspace),
-            MsgFlags::empty(),
+            MsgFlags::MSG_CMSG_CLOEXEC,
         )
-        .map_err(|e| Error::new(ErrorKind::Other, e))?;
+        .map_err(Error::other)?;
+
+        // 内核在 recvmsg 返回时已为 SCM_RIGHTS 安装了新描述符。立即转为
+        // OwnedFd，使后续的任何校验错误（包括 MSG_CTRUNC 和额外 fd）都能
+        // 自动关闭已收到的所有 fd。
+        let mut received_fds: Vec<OwnedFd> = Vec::new();
+        let cmsgs = msg.cmsgs().map_err(Error::other)?;
+        for cmsg in cmsgs {
+            if let ControlMessageOwned::ScmRights(raw_fds) = cmsg {
+                received_fds.extend(
+                    raw_fds
+                        .into_iter()
+                        .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) }),
+                );
+            }
+        }
 
         if msg.bytes == 0 {
             return Err(Error::new(
@@ -284,23 +358,19 @@ impl EventFdBackend {
             ));
         }
 
-        let mut fds: Vec<RawFd> = Vec::new();
-        if let Ok(mut cmsg) = msg.cmsgs() {
-            while let Some(ControlMessageOwned::ScmRights(recv_fds)) = cmsg.next() {
-                fds.extend(recv_fds);
-            }
-        }
-        info!("fds: {:?}", fds);
-
-        if fds.len() < 2 {
+        if received_fds.len() != 2 {
             return Err(Error::new(
                 ErrorKind::InvalidData,
-                "Did not receive 2 fds from server",
+                format!(
+                    "Expected exactly 2 fds from server, received {}",
+                    received_fds.len()
+                ),
             ));
         }
 
-        let owned_msg = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-        let owned_cmd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        let mut received_fds = received_fds.into_iter();
+        let owned_msg = received_fds.next().expect("length checked above");
+        let owned_cmd = received_fds.next().expect("length checked above");
         Ok((owned_msg, owned_cmd))
     }
 
@@ -311,6 +381,7 @@ impl EventFdBackend {
         adaptive_poll_spins: u32,
         timeout: Option<Duration>,
     ) -> Result<bool> {
+        let started = std::time::Instant::now();
         for _ in 0..adaptive_poll_spins {
             if has_data() {
                 return Ok(true);
@@ -331,91 +402,135 @@ impl EventFdBackend {
             return Ok(has_data());
         };
 
-        // ── 核心优化：发布等待意图，signal 侧据此决定是否触发 write(fd) ────────
-        let waiters = unsafe {
+        let (waiters, sequence) = unsafe {
             if is_message {
-                &(*self.header).message_waiters
+                (
+                    &(*self.header).message_waiters,
+                    &(*self.header).message_sequence,
+                )
             } else {
-                &(*self.header).command_waiters
+                (
+                    &(*self.header).command_waiters,
+                    &(*self.header).command_sequence,
+                )
             }
         };
-        // Release：让 signal 侧读到最新的 waiters
-        waiters.fetch_add(1, Ordering::Release);
 
-        // 进内核前再检查一次（避免 signal 在 waiters++ 前就完成，导致漏唤醒）
-        if has_data() {
-            waiters.fetch_sub(1, Ordering::Relaxed);
-            // 可能有一个已经写入 fd 的事件，drain 掉避免下次 poll 误触发
-            let borrowed = unsafe { BorrowedFd::borrow_raw(ofd.as_raw_fd()) };
-            Self::drain_eventfd(borrowed);
-            return Ok(true);
+        loop {
+            if has_data() {
+                return Ok(true);
+            }
+            if timeout.is_some_and(|limit| started.elapsed() >= limit) {
+                return Ok(false);
+            }
+
+            // A signal before registration changes the sequence; one after the second sequence
+            // load must observe this waiter. This permits the no-waiter syscall fast path without
+            // reopening the lost-wakeup window.
+            let snapshot = sequence.load(Ordering::SeqCst);
+            waiters.fetch_add(1, Ordering::SeqCst);
+            if has_data() {
+                waiters.fetch_sub(1, Ordering::SeqCst);
+                return Ok(true);
+            }
+            if sequence.load(Ordering::SeqCst) != snapshot {
+                waiters.fetch_sub(1, Ordering::SeqCst);
+                continue;
+            }
+
+            let remaining = timeout.map(|limit| limit.saturating_sub(started.elapsed()));
+            let poll_result = Self::poll_fd(ofd.as_fd(), remaining);
+            waiters.fetch_sub(1, Ordering::SeqCst);
+            match poll_result {
+                Ok(true) => {
+                    // EFD_SEMAPHORE 保证每次只消费一个 token。若该
+                    // token 已过时，沿用原 deadline 重新注册并继续等待。
+                    Self::consume_one_eventfd(ofd.as_fd());
+                    if has_data() {
+                        return Ok(true);
+                    }
+                    if timeout.is_some_and(|limit| started.elapsed() >= limit) {
+                        return Ok(false);
+                    }
+                }
+                Ok(false) => {
+                    if has_data() {
+                        return Ok(true);
+                    }
+                    // PollTimeout::MAX 是有限超长 timeout 的分段，不能
+                    // 把这个分段到期误当作整个 Duration 已经到期。
+                    if timeout.is_some_and(|limit| started.elapsed() < limit) {
+                        continue;
+                    }
+                    return Ok(false);
+                }
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    log::warn!("poll(eventfd) error: {error}. Fallback to check state.");
+                    return Ok(has_data());
+                }
+            }
         }
-
-        let result = match Self::poll_fd(ofd.as_raw_fd(), timeout) {
-            Ok(true) => {
-                let borrowed = unsafe { BorrowedFd::borrow_raw(ofd.as_raw_fd()) };
-                Self::drain_eventfd(borrowed);
-                Ok(true)
-            }
-            Ok(false) => Ok(has_data()),
-            Err(e) => {
-                log::warn!("poll(eventfd) error: {e}. Fallback to check state.");
-                Ok(has_data())
-            }
-        };
-
-        // Release：确保 signal 侧下次读到 waiters 已减少
-        waiters.fetch_sub(1, Ordering::Release);
-        result
     }
 }
 
 impl SyncBackend for EventFdBackend {
     fn init(&mut self, is_creator: bool, backend_ptr: *mut u8) -> Result<()> {
         self.header = backend_ptr as *mut EventFdHeader;
-        self.is_creator = is_creator;
 
         if is_creator {
-            info!("is creator");
-            // 初始化共享内存中的 waiters 计数器
+            // 共享映射中的原子对象尚未构造；在发布映射前用
+            // ptr::write + Atomic*::new 正式开始它们的生命期。
             unsafe {
-                (*self.header).message_waiters.store(0, Ordering::Relaxed);
-                (*self.header).command_waiters.store(0, Ordering::Relaxed);
+                self.header.write(EventFdHeader {
+                    is_ready: AtomicU32::new(0),
+                    message_waiters: AtomicI32::new(0),
+                    command_waiters: AtomicI32::new(0),
+                    message_sequence: AtomicU32::new(0),
+                    command_sequence: AtomicU32::new(0),
+                    sock_path: [0; UNIX_SOCK_MAX],
+                });
             }
 
             let msg_fd = Self::create_eventfd_owned()?;
             let cmd_fd = Self::create_eventfd_owned()?;
 
-            let msg_fd_for_send =
-                nix::unistd::dup(&msg_fd).map_err(|e| Error::new(ErrorKind::Other, e))?;
-            let cmd_fd_for_send =
-                nix::unistd::dup(&cmd_fd).map_err(|e| Error::new(ErrorKind::Other, e))?;
+            let msg_fd_for_send = Self::dup_cloexec(&msg_fd)?;
+            let cmd_fd_for_send = Self::dup_cloexec(&cmd_fd)?;
 
             let sock_path = Self::generate_socket_path();
-            Self::set_header_sock_path(self.header, &sock_path)?;
             let stop = Arc::new(AtomicBool::new(false));
-            Self::spawn_listener_thread(
+            let listener = Self::spawn_listener_thread(
                 sock_path.clone(),
                 msg_fd_for_send,
                 cmd_fd_for_send,
                 stop.clone(),
             )?;
 
+            // 只有 bind/chmod/listen/thread spawn 全部成功后才发布路径。
+            if let Err(error) = Self::set_header_sock_path(self.header, &sock_path) {
+                stop.store(true, Ordering::Release);
+                Self::poke_listener(&sock_path);
+                let _ = listener.join();
+                let _ = std::fs::remove_file(&sock_path);
+                return Err(error);
+            }
+
             self.local_message_fd = Some(msg_fd);
             self.local_command_fd = Some(cmd_fd);
             self.listener_stop = Some(stop);
+            self.listener_thread = Some(listener);
             self.sock_path = Some(sock_path);
         } else {
-            info!("is not creator");
             for _ in 0..10_000 {
                 unsafe {
-                    if (*self.header).is_ready.load(Ordering::Acquire) {
+                    if (*self.header).is_ready.load(Ordering::Acquire) == 1 {
                         break;
                     }
                 }
                 hint::spin_loop();
             }
-            if unsafe { !(*self.header).is_ready.load(Ordering::Acquire) } {
+            if unsafe { (*self.header).is_ready.load(Ordering::Acquire) != 1 } {
                 std::thread::sleep(Duration::from_millis(5));
             }
 
@@ -448,58 +563,102 @@ impl SyncBackend for EventFdBackend {
 
     fn signal_message(&self) -> Result<()> {
         unsafe {
-            // ── 核心优化：无等待者时跳过 write() syscall ────────────────────────
-            // Acquire：与 wait 侧的 Release fetch_add 配对，确保看到最新 waiters
-            if (*self.header).message_waiters.load(Ordering::Acquire) > 0 {
-                if let Some(fd) = &self.local_message_fd {
-                    let borrowed = BorrowedFd::borrow_raw(fd.as_raw_fd());
-                    Self::write_u64(borrowed, 1)?;
-                }
-            }
+            Self::signal_if_waiting(
+                self.local_message_fd.as_ref(),
+                &(*self.header).message_waiters,
+                &(*self.header).message_sequence,
+            )
         }
-        Ok(())
     }
 
     fn signal_command(&self) -> Result<()> {
         unsafe {
-            if (*self.header).command_waiters.load(Ordering::Acquire) > 0 {
-                if let Some(fd) = &self.local_command_fd {
-                    let borrowed = BorrowedFd::borrow_raw(fd.as_raw_fd());
-                    Self::write_u64(borrowed, 1)?;
-                }
-            }
+            Self::signal_if_waiting(
+                self.local_command_fd.as_ref(),
+                &(*self.header).command_waiters,
+                &(*self.header).command_sequence,
+            )
         }
-        Ok(())
+    }
+
+    fn wake_all(&self) -> Result<()> {
+        let (message_count, command_count) = unsafe {
+            (*self.header)
+                .message_sequence
+                .fetch_add(1, Ordering::SeqCst);
+            (*self.header)
+                .command_sequence
+                .fetch_add(1, Ordering::SeqCst);
+            (
+                (*self.header).message_waiters.load(Ordering::SeqCst).max(0) as u64,
+                (*self.header).command_waiters.load(Ordering::SeqCst).max(0) as u64,
+            )
+        };
+        let message_result = if message_count == 0 {
+            Ok(())
+        } else {
+            self.local_message_fd
+                .as_ref()
+                .map_or(Ok(()), |fd| Self::write_u64(fd.as_fd(), message_count))
+        };
+        let command_result = if command_count == 0 {
+            Ok(())
+        } else {
+            self.local_command_fd
+                .as_ref()
+                .map_or(Ok(()), |fd| Self::write_u64(fd.as_fd(), command_count))
+        };
+        message_result.and(command_result)
     }
 
     fn cleanup(&mut self, is_creator: bool) {
         if is_creator {
             if let Some(stop) = &self.listener_stop {
-                stop.store(true, Ordering::Relaxed);
+                stop.store(true, Ordering::Release);
 
                 // ── 优化：主动连接 socket 唤醒监听线程，避免等满 poll 超时 ─────
                 // 监听线程 poll(1ms)，正常情况下 3ms 内必定退出。
                 // 改动前：sleep(20ms) 硬等。
                 if let Some(path) = &self.sock_path {
-                    if let Ok(addr) = UnixAddr::new(path.as_path()) {
-                        if let Ok(cli) = socket(
-                            AddressFamily::Unix,
-                            SockType::Stream,
-                            SockFlag::SOCK_CLOEXEC,
-                            None,
-                        ) {
-                            // 忽略结果：仅为唤醒，失败也无妨
-                            let _ = connect(cli.as_raw_fd(), &addr);
-                        }
-                    }
+                    Self::poke_listener(path);
                 }
-                // 等待线程完成本轮 poll(1ms) 并退出（留 3ms 余量）
-                std::thread::sleep(Duration::from_millis(3));
+            }
+            if let Some(listener) = self.listener_thread.take() {
+                if listener.join().is_err() {
+                    log::warn!("eventfd listener thread panicked during cleanup");
+                }
             }
             if let Some(path) = &self.sock_path {
                 let _ = std::fs::remove_file(path);
             }
         }
         // OwnedFd 在 drop 时自动关闭
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::MaybeUninit;
+
+    #[test]
+    fn signal_without_waiters_does_not_accumulate_tokens() {
+        let mut storage = MaybeUninit::<EventFdHeader>::uninit();
+        let header = storage.as_mut_ptr();
+        let mut backend = EventFdBackend::new();
+        backend.init(true, header.cast()).unwrap();
+
+        backend.signal_message().unwrap();
+        backend.signal_message().unwrap();
+        let sequence = unsafe { (*header).message_sequence.load(Ordering::SeqCst) };
+        let mut bytes = [0u8; 8];
+        let read_result = unistd::read(
+            backend.local_message_fd.as_ref().unwrap().as_fd(),
+            &mut bytes,
+        );
+        backend.cleanup(true);
+
+        assert_eq!(read_result, Err(Errno::EAGAIN));
+        assert_eq!(sequence, 2);
     }
 }

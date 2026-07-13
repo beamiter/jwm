@@ -1,7 +1,14 @@
 [package]
 name = "shared_structures"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+rust-version = "1.86"
+description = "Linux shared-memory IPC with fixed-size message and command ring buffers"
+readme = "README.md"
+repository = "https://github.com/beamiter/shared_structures"
+documentation = "https://docs.rs/shared_structures"
+keywords = ["shared-memory", "ipc", "ring-buffer", "linux", "concurrency"]
+categories = ["concurrency", "data-structures", "os::linux-apis"]
 
 [dependencies]
 libc = { version = "0.2.186", optional = true }
@@ -10,18 +17,25 @@ serde = { version = "1.0.228", features = ["derive"] }
 rkyv = "0.8"
 serde-big-array = "0.5.1"
 shared_memory = "0.12.4"
+nix = { version = "0.31.3", features = ["fs", "poll", "socket", "uio"], optional = true }
+
+[dev-dependencies]
 criterion = "0.8.2"
-nix = { version = "0.31.3", features = ["fs", "poll", "socket", "uio"] }
 
 [features]
 futex = ["dep:libc"]
 semaphore = ["dep:libc"]
-eventfd = []
+eventfd = ["dep:libc", "dep:nix"]
 default = ["futex", "semaphore", "eventfd"]
 
-use-eventfd = []
-use-futex = []
-use-semaphore = []
+# Legacy default-backend selectors. Prefer choosing `SyncStrategy` at runtime.
+use-eventfd = ["eventfd"]
+use-futex = ["futex"]
+use-semaphore = ["semaphore"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
 
 [[bench]]
 name = "ring_buffer_bench"

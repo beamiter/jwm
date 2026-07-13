@@ -6,7 +6,7 @@ use libc::timespec;
 use std::hint;
 use std::io::{Error, Result};
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // ── 核心优化：将 seq 和 waiters 放在不同 cache line 上 ──────────────────────
 //
@@ -53,6 +53,7 @@ impl FutexBackend {
         adaptive_poll_spins: u32,
         timeout: Option<Duration>,
     ) -> Result<bool> {
+        let started = Instant::now();
         for _ in 0..adaptive_poll_spins {
             if has_data() {
                 return Ok(true);
@@ -63,32 +64,47 @@ impl FutexBackend {
             return Ok(true);
         }
 
-        unsafe {
-            let ch = if is_message {
-                &(*self.header).message
-            } else {
-                &(*self.header).command
-            };
-
-            // 发布等待意图（Release：让 signal 侧看到最新 waiters 值）
-            ch.waiters.fetch_add(1, Ordering::Release);
-
-            // 进内核前再检查一次，避免 signal 先于 waiters++ 发生而被漏掉
+        loop {
             if has_data() {
-                ch.waiters.fetch_sub(1, Ordering::Relaxed);
                 return Ok(true);
             }
+            if timeout.is_some_and(|limit| started.elapsed() >= limit) {
+                return Ok(false);
+            }
 
-            let snapshot = ch.seq.load(Ordering::Acquire);
-            let res = futex_wait(&ch.seq, snapshot as u32, timeout);
+            // Sequence + waiter count form the same SeqCst registration handshake used by the
+            // other backends. A signal before registration changes the sequence; one after the
+            // second sequence load must observe the registered waiter and issue FUTEX_WAKE.
+            let (ch, snapshot) = unsafe {
+                let ch = if is_message {
+                    &(*self.header).message
+                } else {
+                    &(*self.header).command
+                };
+                (ch, ch.seq.load(Ordering::SeqCst))
+            };
 
-            // Release：确保 signal 侧下次读到 waiters 已减少
-            ch.waiters.fetch_sub(1, Ordering::Release);
+            ch.waiters.fetch_add(1, Ordering::SeqCst);
+            if has_data() {
+                ch.waiters.fetch_sub(1, Ordering::SeqCst);
+                return Ok(true);
+            }
+            if ch.seq.load(Ordering::SeqCst) != snapshot {
+                ch.waiters.fetch_sub(1, Ordering::SeqCst);
+                continue;
+            }
 
-            res.map(|_| has_data()).or_else(|e| {
-                log::warn!("futex_wait error: {}. Fallback to check state", e);
-                Ok(has_data())
-            })
+            let remaining = timeout.map(|limit| limit.saturating_sub(started.elapsed()));
+            let wait_result = futex_wait(&ch.seq, snapshot, remaining);
+            ch.waiters.fetch_sub(1, Ordering::SeqCst);
+            match wait_result {
+                Ok(_) if has_data() => return Ok(true),
+                Ok(_) => continue,
+                Err(error) => {
+                    log::warn!("futex_wait error: {error}. Fallback to check state");
+                    return Ok(has_data());
+                }
+            }
         }
     }
 }
@@ -98,12 +114,22 @@ impl SyncBackend for FutexBackend {
         self.header = backend_ptr as *mut FutexHeader;
         if is_creator {
             unsafe {
-                // 逐字段初始化，避免 write() 踩 padding 字节（UB）
-                let h = &mut *self.header;
-                h.message.seq.store(0, Ordering::Relaxed);
-                h.message.waiters.store(0, Ordering::Relaxed);
-                h.command.seq.store(0, Ordering::Relaxed);
-                h.command.waiters.store(0, Ordering::Relaxed);
+                // 共享映射只是原始存储；用 ptr::write + Atomic*::new
+                // 正式构造原子对象，不对未初始化的 Atomic 调用 store。
+                self.header.write(FutexHeader {
+                    message: FutexChannel {
+                        seq: AtomicU32::new(0),
+                        _pad_seq: [0; 60],
+                        waiters: AtomicI32::new(0),
+                        _pad_waiters: [0; 60],
+                    },
+                    command: FutexChannel {
+                        seq: AtomicU32::new(0),
+                        _pad_seq: [0; 60],
+                        waiters: AtomicI32::new(0),
+                        _pad_waiters: [0; 60],
+                    },
+                });
             }
         }
         Ok(())
@@ -130,9 +156,8 @@ impl SyncBackend for FutexBackend {
     fn signal_message(&self) -> Result<()> {
         unsafe {
             let ch = &(*self.header).message;
-            // Acquire：读到最新的 waiters（与 waiter 的 Release fetch_add 配对）
-            if ch.waiters.load(Ordering::Acquire) > 0 {
-                ch.seq.fetch_add(1, Ordering::Release);
+            ch.seq.fetch_add(1, Ordering::SeqCst);
+            if ch.waiters.load(Ordering::SeqCst) > 0 {
                 let _ = futex_wake(&ch.seq, 1);
             }
         }
@@ -142,29 +167,26 @@ impl SyncBackend for FutexBackend {
     fn signal_command(&self) -> Result<()> {
         unsafe {
             let ch = &(*self.header).command;
-            if ch.waiters.load(Ordering::Acquire) > 0 {
-                ch.seq.fetch_add(1, Ordering::Release);
+            ch.seq.fetch_add(1, Ordering::SeqCst);
+            if ch.waiters.load(Ordering::SeqCst) > 0 {
                 let _ = futex_wake(&ch.seq, 1);
             }
         }
         Ok(())
     }
 
-    fn cleanup(&mut self, _is_creator: bool) {
-        // 修复：只在真正有等待者时才发出 FUTEX_WAKE syscall。
-        // 改动前：无论有没有等待者都调用 futex_wake（两次不必要的 syscall）。
+    fn wake_all(&self) -> Result<()> {
         unsafe {
             let h = &*self.header;
-            if h.message.waiters.load(Ordering::Acquire) > 0 {
-                h.message.seq.fetch_add(1, Ordering::Release);
-                let _ = futex_wake(&h.message.seq, i32::MAX);
-            }
-            if h.command.waiters.load(Ordering::Acquire) > 0 {
-                h.command.seq.fetch_add(1, Ordering::Release);
-                let _ = futex_wake(&h.command.seq, i32::MAX);
-            }
+            h.message.seq.fetch_add(1, Ordering::SeqCst);
+            let _ = futex_wake(&h.message.seq, i32::MAX);
+            h.command.seq.fetch_add(1, Ordering::SeqCst);
+            let _ = futex_wake(&h.command.seq, i32::MAX);
         }
+        Ok(())
     }
+
+    fn cleanup(&mut self, _is_creator: bool) {}
 }
 
 #[inline]

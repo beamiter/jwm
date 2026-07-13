@@ -1,22 +1,62 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+IFS=$'\n\t'
 
-# 可选：清空上次结果（不清也可，Criterion 会在 data 目录内叠加 baselines）
-rm -rf target/criterion
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+readonly BACKENDS=(futex semaphore eventfd)
 
-echo "Running benches with use-futex as baseline..."
-cargo bench --features use-futex --bench ring_buffer_bench -- --save-baseline futex
+usage() {
+    echo "Usage: $0 [--clean]"
+    echo ""
+    echo "Environment:"
+    echo "  RUN_STRESS=1  also run the long-running stress benchmark for every backend"
+}
 
-echo "Running benches with use-eventfd, comparing to futex baseline..."
-# cargo bench --features use-eventfd --bench ring_buffer_bench -- --baseline futex
-cargo bench --features use-eventfd --bench ring_buffer_bench -- --save-baseline eventfd
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    usage
+    exit 0
+fi
 
-echo "Running benches with use-semaphore, comparing to futex baseline..."
-# cargo bench --features use-semaphore --bench ring_buffer_bench -- --baseline futex
-cargo bench --features use-semaphore --bench ring_buffer_bench -- --save-baseline semaphore
+if [[ "${1:-}" == "--clean" ]]; then
+    rm -rf -- "${REPO_ROOT}/target/criterion"
+    shift
+fi
 
-echo "Done. Open target/criterion/report/index.html to view comparisons."
+if (($# != 0)); then
+    usage >&2
+    exit 2
+fi
 
-critcmp futex eventfd
-critcmp futex semaphore
-critcmp eventfd semaphore
+cd -- "${REPO_ROOT}"
+
+for backend in "${BACKENDS[@]}"; do
+    echo "Running ring-buffer benchmarks with only the ${backend} backend enabled..."
+    cargo bench \
+        --no-default-features \
+        --features "${backend}" \
+        --bench ring_buffer_bench \
+        -- \
+        --save-baseline "${backend}"
+done
+
+echo "Running direct, same-process comparison of all synchronization backends..."
+cargo bench --all-features --bench ring_buffer_bench -- strategy_
+
+if [[ "${RUN_STRESS:-0}" == "1" ]]; then
+    for backend in "${BACKENDS[@]}"; do
+        echo "Running stress benchmarks with only the ${backend} backend enabled..."
+        cargo bench \
+            --no-default-features \
+            --features "${backend}" \
+            --bench stress_test
+    done
+fi
+
+if command -v critcmp >/dev/null 2>&1; then
+    critcmp futex semaphore
+    critcmp futex eventfd
+    critcmp semaphore eventfd
+else
+    echo "critcmp is not installed; Criterion HTML reports are under target/criterion/."
+fi
