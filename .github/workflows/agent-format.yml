@@ -1,9 +1,9 @@
 name: Agent format snapshot
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/startup-architecture-performance-ux
+      - master
 
 permissions:
   contents: read
