@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -21,49 +21,6 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  apply-letter-shortcuts:
-    name: Apply letter-only alignment shortcuts
-    if: github.event_name == 'pull_request' && github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out source branch
-        uses: actions/checkout@v4
-        with:
-          ref: agent/display-layout-fine-tuning
-
-      - name: Replace alignment shortcuts
-        run: |
-          python3 <<'PY'
-          from pathlib import Path
-
-          replacements = {
-              Path("src/jwm/input_handler.rs"): [
-                  ("keysym == keys::KEY_Home", "keysym == keys::KEY_s"),
-                  ("keysym == keys::KEY_End", "keysym == keys::KEY_e"),
-              ],
-              Path("src/jwm/features/system_ui.rs"): [
-                  ("Home / C / End  align start / center / end", "S / C / E  align start / center / end"),
-              ],
-          }
-          for path, changes in replacements.items():
-              text = path.read_text()
-              for old, new in changes:
-                  count = text.count(old)
-                  if count != 1:
-                      raise SystemExit(f"{path}: expected one {old!r}, found {count}")
-                  text = text.replace(old, new, 1)
-              path.write_text(text)
-          PY
-          cargo fmt --all
-
-      - name: Commit shortcut update
-        run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add src/jwm/features/system_ui.rs src/jwm/input_handler.rs
-          git commit -m "use letter-only display alignment shortcuts"
-          git push
-
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
