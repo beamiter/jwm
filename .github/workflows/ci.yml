@@ -41,16 +41,8 @@ jobs:
 
       - name: Apply prepared patch
         run: |
-          python3 <<'PY'
-          from pathlib import Path
-          import textwrap
-
-          workflow = Path('.github/workflows/agent-display-layout-patch.yml').read_text()
-          start = "          python3 <<'PY'\n"
-          end = "\n          PY\n"
-          script = workflow.split(start, 1)[1].split(end, 1)[0]
-          exec(compile(textwrap.dedent(script), '<display-layout-patch>', 'exec'))
-          PY
+          git apply --check .github/display-layout.patch
+          git apply .github/display-layout.patch
           cargo fmt --all
 
       - name: Commit patch
