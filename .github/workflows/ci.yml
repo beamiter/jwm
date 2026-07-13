@@ -41,7 +41,18 @@ jobs:
 
       - name: Apply prepared transform
         run: |
-          python3 .github/apply_display_layout.py
+          python3 <<'PY'
+          from pathlib import Path
+
+          source = Path('.github/apply_display_layout.py').read_text()
+          parts = source.split('"""')
+          if len(parts) % 2 == 0:
+              raise SystemExit('unbalanced triple-quoted templates')
+          transformed = parts[0]
+          for index, part in enumerate(parts[1:], start=1):
+              transformed += ('r"""' if index % 2 else '"""') + part
+          exec(compile(transformed, '<display-layout-transform>', 'exec'))
+          PY
           cargo fmt --all
 
       - name: Commit patch
