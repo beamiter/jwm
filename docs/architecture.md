@@ -4,7 +4,7 @@ JWM is split into a process shell, an application composition root, window
 management policy, platform backends, and reusable state/layout code.
 
 ```text
-src/main.rs                 process setup (logging, locale, D-Bus)
+src/main.rs                 process setup (CLI, logging, locale, D-Bus)
     |
     v
 src/application.rs          backend selection and application lifecycle
@@ -23,7 +23,9 @@ src/backend/api.rs          platform boundary
 
 ## Dependency rules
 
-1. `main` may depend on `application` and OS process services only.
+1. `main` may depend on `application` and OS process services only. It parses
+   process inputs into an immutable `ApplicationOptions` snapshot before the
+   display server or worker threads start.
 2. `application` is the composition root. Concrete backend constructors belong
    here; policy code must not select a concrete backend.
 3. `jwm` implements window-management behavior against `backend::api::Backend`.
@@ -60,6 +62,17 @@ src/backend/api.rs          platform boundary
 ## Migration status
 
 - Application composition root extracted from the process bootstrap.
+- Startup backend and benchmark settings are represented by typed
+  `ApplicationOptions` instead of being rediscovered from environment variables
+  inside the lifecycle loop. Environment variables remain a compatibility
+  adapter at the process edge.
+- Configuration generation, path discovery and validation are exposed through
+  application-level maintenance operations, so the binary does not reach into
+  configuration implementation details.
+- Restarts preserve the original OS-native argument vector and resolve the
+  current executable once, avoiding repeated UTF-8 conversions and allocations.
+- The production release profile now enables thin LTO, one codegen unit and
+  symbol stripping; the separate profiling profile retains debug symbols.
 - Interactive move/resize transport state moved into the backend contract.
 - Key-repeat policy is now binding metadata produced by configuration; the
   Wayland input backend no longer inspects or imports concrete `Jwm` methods.
