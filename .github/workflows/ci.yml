@@ -95,4 +95,4 @@ jobs:
         run: cargo clippy --lib --bins --tests --no-deps
 
       - name: Run tests
-        run: cargo test --lib --tests
+        run: cargo test --lib --bins --tests
