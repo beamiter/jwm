@@ -36,7 +36,8 @@ pub use types::{
 };
 
 pub use features::{
-    FeatureStates, MagnifierState, OverviewState, RecordingState, ScreenshotState, SystemUiState,
+    AudioRecordingState, FeatureStates, MagnifierState, OverviewState, RecordingState,
+    ScreenshotState, SystemUiState,
 };
 
 pub use geometry::GeometryConstraints;
@@ -338,6 +339,8 @@ impl Jwm {
             "toggle_expose"
         } else if eq!(Jwm::toggle_recording) {
             "toggle_recording"
+        } else if eq!(Jwm::toggle_audio_recording) {
+            "toggle_audio_recording"
         } else {
             "<unknown>"
         }

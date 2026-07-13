@@ -67,6 +67,18 @@ impl Jwm {
             self.features.recording.active = false;
         }
 
+        if self.features.audio_recording.active {
+            let path = self.features.audio_recording.output_path.clone();
+            if let Err(error) = self.features.audio_recording.stop() {
+                warn!("[cleanup_x11_resources] Failed to stop audio recording: {error}");
+            } else {
+                info!(
+                    "[cleanup_x11_resources] Audio recording finalized: {}",
+                    path.as_deref().unwrap_or("(unset)")
+                );
+            }
+        }
+
         self.cleanup_all_clients_x11_state(backend)?;
 
         self.cleanup_key_grabs(backend)?;

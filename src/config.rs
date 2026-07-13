@@ -555,6 +555,18 @@ pub struct BehaviorConfig {
     /// Recording output directory (empty = $XDG_VIDEOS_DIR or ~/Videos).
     #[serde(default)]
     pub recording_output_dir: String,
+    /// ALSA capture device used by the built-in audio recorder.
+    #[serde(default = "default_audio_recording_device")]
+    pub audio_recording_device: String,
+    /// Audio recording output directory (empty = $XDG_MUSIC_DIR or ~/Music).
+    #[serde(default)]
+    pub audio_recording_output_dir: String,
+    /// Requested WAV sample rate. ALSA may negotiate the nearest supported rate.
+    #[serde(default = "default_audio_recording_sample_rate")]
+    pub audio_recording_sample_rate: u32,
+    /// Requested capture channels (1 or 2).
+    #[serde(default = "default_audio_recording_channels")]
+    pub audio_recording_channels: u16,
 
     // --- Wallpaper ---
     /// Path to wallpaper image file (empty = solid black background).
@@ -831,6 +843,15 @@ fn default_recording_encoder() -> String {
 }
 fn default_recording_quality() -> u32 {
     23
+}
+fn default_audio_recording_device() -> String {
+    "default".to_string()
+}
+fn default_audio_recording_sample_rate() -> u32 {
+    48_000
+}
+fn default_audio_recording_channels() -> u16 {
+    1
 }
 fn default_motion_trail_frames() -> u32 {
     5
@@ -1213,6 +1234,10 @@ impl Default for Config {
                     recording_quality: default_recording_quality(),
                     recording_encoder: default_recording_encoder(),
                     recording_output_dir: String::new(),
+                    audio_recording_device: default_audio_recording_device(),
+                    audio_recording_output_dir: String::new(),
+                    audio_recording_sample_rate: default_audio_recording_sample_rate(),
+                    audio_recording_channels: default_audio_recording_channels(),
                 },
                 status_bar: StatusBarConfig {
                     name: STATUS_BAR_NAME.to_string(),
@@ -1270,6 +1295,12 @@ impl Config {
                 modifier: vec!["Mod1".to_string(), "Control".to_string()],
                 key: "r".to_string(),
                 function: "toggle_recording".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
+                key: "m".to_string(),
+                function: "toggle_audio_recording".to_string(),
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
@@ -1973,6 +2004,40 @@ impl Config {
                 keys.push(key);
             }
         }
+
+        // Existing config files contain a full snapshot of the key list, so
+        // newly introduced defaults are not picked up automatically. Add the
+        // recorder binding only when the user has neither configured the
+        // action nor occupied its fallback chord.
+        if !self
+            .inner
+            .keybindings
+            .keys
+            .iter()
+            .any(|key| key.function == "toggle_audio_recording")
+        {
+            let fallback = KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
+                key: "m".to_string(),
+                function: "toggle_audio_recording".to_string(),
+                argument: ArgumentConfig::Int(0),
+            };
+            if let Some(binding) = self.convert_key_config(&fallback) {
+                let occupied = keys
+                    .iter()
+                    .any(|key| key.mask == binding.mask && key.key_sym == binding.key_sym);
+                if occupied {
+                    log::warn!(
+                        "[config] built-in audio recorder has no shortcut: Alt+Ctrl+M is already occupied"
+                    );
+                } else {
+                    log::info!(
+                        "[config] legacy key list detected; enabling audio recorder on Alt+Ctrl+M"
+                    );
+                    keys.push(binding);
+                }
+            }
+        }
         for i in 0..self.tags_length() {
             keys.extend(self.generate_tag_keys(i));
         }
@@ -2107,6 +2172,7 @@ impl Config {
             "restore_session" => Some(Jwm::restore_session),
             "toggle_expose" => Some(Jwm::toggle_expose),
             "toggle_recording" => Some(Jwm::toggle_recording),
+            "toggle_audio_recording" => Some(Jwm::toggle_audio_recording),
 
             "scrolling_focus_column" => Some(Jwm::scrolling_focus_column),
             "scrolling_move_column" => Some(Jwm::scrolling_move_column),
@@ -2636,7 +2702,7 @@ pub fn reload_global() -> Result<(), ConfigError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, TomlConfig, key_function_is_repeatable};
+    use super::{ArgumentConfig, Config, KeyConfig, Mods, TomlConfig, key_function_is_repeatable};
 
     #[test]
     fn key_repeat_policy_only_allows_incremental_actions() {
@@ -2647,6 +2713,45 @@ mod tests {
         assert!(!key_function_is_repeatable("spawn"));
         assert!(!key_function_is_repeatable("killclient"));
         assert!(!key_function_is_repeatable("take_screenshot"));
+    }
+
+    #[test]
+    fn legacy_key_list_gets_non_conflicting_audio_recording_fallback() {
+        let mut cfg = Config::default();
+        cfg.inner
+            .keybindings
+            .keys
+            .retain(|key| key.function != "toggle_audio_recording");
+
+        let key_sym = cfg.parse_keysym("m").unwrap();
+        let keys = cfg.get_keys();
+        assert!(
+            keys.iter()
+                .any(|key| { key.key_sym == key_sym && key.mask == (Mods::ALT | Mods::CONTROL) })
+        );
+    }
+
+    #[test]
+    fn legacy_audio_fallback_does_not_override_occupied_chord() {
+        let mut cfg = Config::default();
+        cfg.inner
+            .keybindings
+            .keys
+            .retain(|key| key.function != "toggle_audio_recording");
+        cfg.inner.keybindings.keys.push(KeyConfig {
+            modifier: vec!["Mod1".into(), "Control".into()],
+            key: "m".into(),
+            function: "spawn".into(),
+            argument: ArgumentConfig::StringVec(vec!["true".into()]),
+        });
+
+        let key_sym = cfg.parse_keysym("m").unwrap();
+        let matches = cfg
+            .get_keys()
+            .into_iter()
+            .filter(|key| key.key_sym == key_sym && key.mask == (Mods::ALT | Mods::CONTROL))
+            .count();
+        assert_eq!(matches, 1);
     }
 
     #[test]

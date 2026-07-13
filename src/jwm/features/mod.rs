@@ -4,9 +4,11 @@
 //! - screenshot: 交互式截图选择
 //! - overview: 3D 窗口切换器
 //! - recording: 屏幕录制
+//! - audio_recording: 内置麦克风录音
 //! - magnifier: 放大镜
 //! - toggles: 所有特性的切换函数
 
+pub mod audio_recording;
 pub mod magnifier;
 pub mod overview;
 pub mod recording;
@@ -14,6 +16,7 @@ pub mod screenshot;
 pub mod system_ui;
 pub mod toggles;
 
+pub use audio_recording::AudioRecordingState;
 pub use magnifier::MagnifierState;
 pub use overview::OverviewState;
 pub use recording::RecordingState;
@@ -21,8 +24,9 @@ pub use screenshot::ScreenshotState;
 pub use system_ui::SystemUiState;
 
 /// 所有特性的组合状态
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct FeatureStates {
+    pub audio_recording: AudioRecordingState,
     pub screenshot: ScreenshotState,
     pub overview: OverviewState,
     pub recording: RecordingState,
@@ -50,6 +54,7 @@ impl FeatureStates {
             || self.system_ui.is_active()
             || self.overview.active
             || self.recording.active
+            || self.audio_recording.active
             || self.magnifier.enabled
             || self.peek_active
             || self.expose_active
@@ -62,6 +67,7 @@ impl FeatureStates {
         self.system_ui.cancel();
         self.overview.deactivate();
         self.recording.cancel();
+        let _ = self.audio_recording.stop();
         self.magnifier.disable();
         self.peek_active = false;
         self.expose_active = false;

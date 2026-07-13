@@ -477,6 +477,77 @@ impl Jwm {
         Ok(())
     }
 
+    /// Toggle the built-in microphone recorder (Alt+Ctrl+M by default).
+    pub fn toggle_audio_recording(
+        &mut self,
+        _backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.features.audio_recording.refresh();
+        if self.features.audio_recording.active {
+            self.stop_audio_recording()?;
+        } else {
+            let behavior = CONFIG.load().behavior().clone();
+            let output_dir = if !behavior.audio_recording_output_dir.is_empty() {
+                std::path::PathBuf::from(&behavior.audio_recording_output_dir)
+            } else {
+                std::env::var("XDG_MUSIC_DIR")
+                    .map(std::path::PathBuf::from)
+                    .or_else(|_| {
+                        std::env::var("HOME")
+                            .map(|home| std::path::PathBuf::from(home).join("Music"))
+                    })
+                    .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+            };
+            let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+            let path = output_dir.join(format!("jwm-recording-{timestamp}.wav"));
+            self.start_audio_recording(&path)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn start_audio_recording(
+        &mut self,
+        output_path: &std::path::Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let behavior = CONFIG.load().behavior().clone();
+        self.features.audio_recording.start(
+            output_path,
+            &behavior.audio_recording_device,
+            behavior.audio_recording_sample_rate,
+            behavior.audio_recording_channels,
+        )?;
+        info!(
+            "[audio-recording] start → {} (device={}, {} Hz, {} channel(s))",
+            output_path.display(),
+            self.features.audio_recording.device,
+            self.features.audio_recording.sample_rate,
+            self.features.audio_recording.channels
+        );
+        self.broadcast_ipc_event(
+            "audio_recording/started",
+            serde_json::json!({"output_path": output_path}),
+        );
+        Ok(())
+    }
+
+    pub(crate) fn stop_audio_recording(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let was_active = self.features.audio_recording.active;
+        let path = self.features.audio_recording.output_path.clone();
+        self.features.audio_recording.stop()?;
+        if was_active {
+            info!(
+                "[audio-recording] stop → {}",
+                path.as_deref().unwrap_or("(unset)")
+            );
+            self.broadcast_ipc_event(
+                "audio_recording/stopped",
+                serde_json::json!({"output_path": path}),
+            );
+        }
+        Ok(())
+    }
+
     /// Start a recording with an explicit final output path.
     pub(crate) fn start_recording(
         &mut self,

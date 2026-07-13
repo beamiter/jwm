@@ -914,6 +914,40 @@ impl Jwm {
             };
         }
 
+        if name == "start_audio_recording" {
+            let Some(path) = args.get("path").and_then(|value| value.as_str()) else {
+                return IpcResponse::err(
+                    "start_audio_recording: expected absolute .wav path in string field 'path'",
+                );
+            };
+            return match self.start_audio_recording(std::path::Path::new(path)) {
+                Ok(()) => IpcResponse::ok(Some(serde_json::json!({
+                    "active": true,
+                    "output_path": path,
+                }))),
+                Err(error) => {
+                    self.broadcast_ipc_event(
+                        "audio_recording/error",
+                        serde_json::json!({"operation": "start", "error": error.to_string()}),
+                    );
+                    IpcResponse::err(error.to_string())
+                }
+            };
+        }
+
+        if name == "stop_audio_recording" {
+            let was_active = self.features.audio_recording.active;
+            let output_path = self.features.audio_recording.output_path.clone();
+            return match self.stop_audio_recording() {
+                Ok(()) => IpcResponse::ok(Some(serde_json::json!({
+                    "active": false,
+                    "was_active": was_active,
+                    "output_path": output_path,
+                }))),
+                Err(error) => IpcResponse::err(error.to_string()),
+            };
+        }
+
         match ipc::dispatch_command(name, args) {
             Ok((func, arg)) => match func(self, backend, &arg) {
                 Ok(()) => IpcResponse::ok(None),
@@ -962,6 +996,9 @@ impl Jwm {
                 "do_not_disturb": self.do_not_disturb,
                 "recording_fps": cfg.behavior().recording_fps,
                 "recording_encoder": cfg.behavior().recording_encoder,
+                "audio_recording_device": cfg.behavior().audio_recording_device,
+                "audio_recording_sample_rate": cfg.behavior().audio_recording_sample_rate,
+                "audio_recording_channels": cfg.behavior().audio_recording_channels,
                 "corner_radius": cfg.behavior().corner_radius,
                 "shadow_enabled": cfg.behavior().shadow_enabled,
                 "blur_enabled": cfg.behavior().blur_enabled,
@@ -995,8 +1032,26 @@ impl Jwm {
                     "encoder": cfg.behavior().recording_encoder,
                 })))
             }
+            "get_audio_recording_status" => {
+                self.features.audio_recording.refresh();
+                let recording = &self.features.audio_recording;
+                let output_exists = recording.output_path.as_deref().is_some_and(|path| {
+                    std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 44)
+                });
+                IpcResponse::ok(Some(serde_json::json!({
+                    "active": recording.active,
+                    "output_path": recording.output_path,
+                    "output_exists": output_exists,
+                    "elapsed_ms": recording.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                    "device": recording.device,
+                    "sample_rate": recording.sample_rate,
+                    "channels": recording.channels,
+                    "last_error": recording.last_error,
+                })))
+            }
             "get_effect_status" => IpcResponse::ok(Some(serde_json::json!({
                 "overview": self.features.overview.active,
+                "audio_recording": self.features.audio_recording.active,
                 "magnifier": self.features.magnifier.enabled,
                 "annotation": self.features.annotation_active,
                 "peek": self.features.peek_active,
