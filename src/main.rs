@@ -196,11 +196,7 @@ fn setup_locale() {
     if env::var("LC_CTYPE").is_err()
         || env::var_os("LC_CTYPE").is_some_and(|value| value.is_empty())
     {
-        let ctype = if is_utf8 {
-            locale.as_str()
-        } else {
-            "C.UTF-8"
-        };
+        let ctype = if is_utf8 { locale.as_str() } else { "C.UTF-8" };
         // Environment mutation happens during single-threaded process bootstrap.
         unsafe { env::set_var("LC_CTYPE", ctype) };
     }
