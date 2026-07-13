@@ -2140,11 +2140,13 @@ impl Config {
         }
         ADVANCED_TERMINAL_PROBER
             .get_available_terminal()
-            .map(|config| vec![config.command.clone()])
-            .unwrap_or_else(|| {
-                log::warn!("terminal fallback to x-terminal-emulator");
-                vec!["x-terminal-emulator".to_string()]
-            })
+            .map_or_else(
+                || {
+                    log::warn!("no supported terminal found; falling back to jterm4");
+                    vec!["jterm4".to_string()]
+                },
+                |config| vec![config.command.clone()],
+            )
     }
 
     pub fn get_scratchpad_termcmd() -> Vec<String> {
@@ -2158,11 +2160,13 @@ impl Config {
         // Prefer jterm4 for scratchpad
         ADVANCED_TERMINAL_PROBER
             .get_available_terminal_with_priority(Some("jterm4"))
-            .map(|config| vec![config.command.clone()])
-            .unwrap_or_else(|| {
-                log::warn!("scratchpad terminal fallback to x-terminal-emulator");
-                vec!["x-terminal-emulator".to_string()]
-            })
+            .map_or_else(
+                || {
+                    log::warn!("no supported scratchpad terminal found; falling back to jterm4");
+                    vec!["jterm4".to_string()]
+                },
+                |config| vec![config.command.clone()],
+            )
     }
 
     fn convert_button_config(&self, btn_config: &ButtonConfig) -> Option<WMButton> {

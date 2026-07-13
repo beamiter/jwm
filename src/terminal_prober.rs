@@ -1,14 +1,29 @@
 use crate::sync_ext::RwLockExt;
 use std::collections::HashMap;
 use std::env;
-use std::process::Command;
+use std::ffi::OsStr;
+use std::path::Path;
 use std::sync::{LazyLock, RwLock};
 
 fn command_exists(cmd: &str) -> bool {
-    Command::new("which")
-        .arg(cmd)
-        .output()
-        .is_ok_and(|output| output.status.success())
+    command_exists_in_path(cmd, env::var_os("PATH").as_deref())
+}
+
+fn command_exists_in_path(cmd: &str, path: Option<&OsStr>) -> bool {
+    let command_path = Path::new(cmd);
+    if command_path.components().count() > 1 {
+        return is_executable(command_path);
+    }
+    path.is_some_and(|path| {
+        env::split_paths(path).any(|directory| is_executable(&directory.join(command_path)))
+    })
+}
+
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    path.metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -66,28 +81,36 @@ impl TerminalDefinition {
 
 const TERMINAL_DEFINITIONS: &[TerminalDefinition] = &[
     TerminalDefinition {
-        name: "terminal_emulator",
-        command: "terminal_emulator",
+        name: "jterm1",
+        command: "jterm1",
         execute_flag: "-e",
-        title_flag: None,
+        title_flag: Some("--title"),
         geometry_flag: None,
-        working_dir_flag: None,
+        working_dir_flag: Some("--workdir"),
     },
     TerminalDefinition {
-        name: "foot",
-        command: "foot",
+        name: "jterm2",
+        command: "jterm2",
         execute_flag: "-e",
-        title_flag: Some("-T"),
+        title_flag: Some("--title"),
         geometry_flag: None,
-        working_dir_flag: Some("-D"),
+        working_dir_flag: Some("--workdir"),
     },
     TerminalDefinition {
-        name: "wezterm",
-        command: "wezterm",
-        execute_flag: "start",
-        title_flag: Some("--class"),
+        name: "jterm3",
+        command: "jterm3",
+        execute_flag: "-e",
+        title_flag: Some("--title"),
         geometry_flag: None,
-        working_dir_flag: Some("--cwd"),
+        working_dir_flag: Some("--workdir"),
+    },
+    TerminalDefinition {
+        name: "jterm4",
+        command: "jterm4",
+        execute_flag: "-e",
+        title_flag: Some("--title"),
+        geometry_flag: None,
+        working_dir_flag: Some("--workdir"),
     },
     TerminalDefinition {
         name: "alacritty",
@@ -96,22 +119,6 @@ const TERMINAL_DEFINITIONS: &[TerminalDefinition] = &[
         title_flag: Some("--title"),
         geometry_flag: None,
         working_dir_flag: Some("--working-directory"),
-    },
-    TerminalDefinition {
-        name: "kitty",
-        command: "kitty",
-        execute_flag: "--",
-        title_flag: Some("--title"),
-        geometry_flag: Some("--geometry"),
-        working_dir_flag: Some("--directory"),
-    },
-    TerminalDefinition {
-        name: "weston-terminal",
-        command: "weston-terminal",
-        execute_flag: "--",
-        title_flag: None,
-        geometry_flag: None,
-        working_dir_flag: None,
     },
     TerminalDefinition {
         name: "warp-terminal",
@@ -137,41 +144,29 @@ const TERMINAL_DEFINITIONS: &[TerminalDefinition] = &[
         geometry_flag: Some("--geometry"),
         working_dir_flag: Some("--working-directory"),
     },
-    TerminalDefinition {
-        name: "jterm4",
-        command: "jterm4",
-        execute_flag: "-e",
-        title_flag: Some("--title"),
-        geometry_flag: None,
-        working_dir_flag: Some("--workdir"),
-    },
 ];
 
 const WAYLAND_TERMINAL_PRIORITY: &[&str] = &[
-    "terminal_emulator",
     "jterm4",
-    "foot",
-    "wezterm",
+    "jterm3",
+    "jterm2",
+    "jterm1",
     "alacritty",
-    "kitty",
-    "weston-terminal",
-    // Keep Warp last: it may depend on X11/desktop services.
-    "warp-terminal",
     "terminator",
     "gnome-terminal",
+    // Keep Warp last on Wayland: it may depend on X11/desktop services.
+    "warp-terminal",
 ];
 
 const X11_TERMINAL_PRIORITY: &[&str] = &[
-    "terminal_emulator",
     "jterm4",
+    "jterm3",
+    "jterm2",
+    "jterm1",
     "warp-terminal",
     "terminator",
     "gnome-terminal",
     "alacritty",
-    "kitty",
-    "wezterm",
-    "foot",
-    "weston-terminal",
 ];
 
 impl AdvancedTerminalProber {
@@ -274,3 +269,63 @@ impl AdvancedTerminalProber {
 
 pub static ADVANCED_TERMINAL_PROBER: LazyLock<AdvancedTerminalProber> =
     LazyLock::new(AdvancedTerminalProber::new);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    const SUPPORTED: &[&str] = &[
+        "jterm1",
+        "jterm2",
+        "jterm3",
+        "jterm4",
+        "alacritty",
+        "terminator",
+        "gnome-terminal",
+        "warp-terminal",
+    ];
+
+    #[test]
+    fn definitions_only_contain_supported_terminals() {
+        let definitions: HashSet<_> = TERMINAL_DEFINITIONS
+            .iter()
+            .map(|definition| definition.name)
+            .collect();
+        let supported: HashSet<_> = SUPPORTED.iter().copied().collect();
+
+        assert_eq!(definitions, supported);
+        assert_eq!(TERMINAL_DEFINITIONS.len(), SUPPORTED.len());
+        assert!(
+            TERMINAL_DEFINITIONS
+                .iter()
+                .all(|definition| definition.name == definition.command)
+        );
+    }
+
+    #[test]
+    fn priorities_cover_each_supported_terminal_once() {
+        let supported: HashSet<_> = SUPPORTED.iter().copied().collect();
+        for priority in [WAYLAND_TERMINAL_PRIORITY, X11_TERMINAL_PRIORITY] {
+            let names: HashSet<_> = priority.iter().copied().collect();
+            assert_eq!(names, supported);
+            assert_eq!(priority.len(), SUPPORTED.len());
+        }
+    }
+
+    #[test]
+    fn path_probe_finds_executable_without_which() {
+        let executable = std::env::current_exe().unwrap();
+        assert!(command_exists_in_path(executable.to_str().unwrap(), None));
+
+        let search_path = std::env::join_paths([executable.parent().unwrap()]).unwrap();
+        assert!(command_exists_in_path(
+            executable.file_name().unwrap().to_str().unwrap(),
+            Some(&search_path)
+        ));
+        assert!(!command_exists_in_path(
+            "definitely-not-a-jwm-terminal",
+            Some(&search_path)
+        ));
+    }
+}
