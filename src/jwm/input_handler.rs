@@ -216,6 +216,20 @@ impl Jwm {
                 return Ok(());
             }
             if self.features.system_ui.is_monitor_layout() {
+                let adjustment_step = if clean_state.contains(Mods::CONTROL) {
+                    Some(1)
+                } else if clean_state.contains(Mods::SHIFT) {
+                    Some(10)
+                } else {
+                    None
+                };
+                let arrow_direction = match keysym {
+                    keys::KEY_Left => Some(MonitorDirection::Left),
+                    keys::KEY_Right => Some(MonitorDirection::Right),
+                    keys::KEY_Up => Some(MonitorDirection::Above),
+                    keys::KEY_Down => Some(MonitorDirection::Below),
+                    _ => None,
+                };
                 if keysym == keys::KEY_Tab || keysym == keys::KEY_ISO_Left_Tab {
                     let backwards =
                         clean_state.contains(Mods::SHIFT) || keysym == keys::KEY_ISO_Left_Tab;
@@ -226,22 +240,16 @@ impl Jwm {
                     self.features.system_ui.cycle_monitor_reference(-1);
                 } else if keysym == keys::KEY_bracketright {
                     self.features.system_ui.cycle_monitor_reference(1);
-                } else if keysym == keys::KEY_Left {
-                    self.features
-                        .system_ui
-                        .place_monitor(MonitorDirection::Left);
-                } else if keysym == keys::KEY_Right {
-                    self.features
-                        .system_ui
-                        .place_monitor(MonitorDirection::Right);
-                } else if keysym == keys::KEY_Up {
-                    self.features
-                        .system_ui
-                        .place_monitor(MonitorDirection::Above);
-                } else if keysym == keys::KEY_Down {
-                    self.features
-                        .system_ui
-                        .place_monitor(MonitorDirection::Below);
+                } else if let (Some(step), Some(direction)) = (adjustment_step, arrow_direction) {
+                    self.features.system_ui.fine_tune_monitor(direction, step);
+                } else if let Some(direction) = arrow_direction {
+                    self.features.system_ui.place_monitor(direction);
+                } else if keysym == keys::KEY_Home {
+                    self.features.system_ui.align_monitor_start();
+                } else if keysym == keys::KEY_c {
+                    self.features.system_ui.align_monitor_center();
+                } else if keysym == keys::KEY_End {
+                    self.features.system_ui.align_monitor_end();
                 } else if keysym == keys::KEY_Return {
                     let args = self
                         .features
