@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -21,48 +21,6 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  apply-display-layout-patch:
-    name: Apply display layout patch
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.head_ref == 'agent/display-layout-fine-tuning' &&
-      github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out source branch
-        uses: actions/checkout@v4
-        with:
-          ref: agent/display-layout-fine-tuning
-
-      - name: Install Rustfmt
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-
-      - name: Apply prepared transform
-        run: |
-          python3 <<'PY'
-          from pathlib import Path
-
-          source = Path('.github/apply_display_layout.py').read_text()
-          parts = source.split('"""')
-          if len(parts) % 2 == 0:
-              raise SystemExit('unbalanced triple-quoted templates')
-          transformed = parts[0]
-          for index, part in enumerate(parts[1:], start=1):
-              transformed += ('r"""' if index % 2 else '"""') + part
-          exec(compile(transformed, '<display-layout-transform>', 'exec'))
-          PY
-          cargo fmt --all
-
-      - name: Commit patch
-        run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add src/jwm/features/system_ui.rs src/jwm/input_handler.rs
-          git commit -m "Improve display layout fine tuning"
-          git push origin HEAD:agent/display-layout-fine-tuning
-
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
