@@ -21,7 +21,7 @@ pub use magnifier::MagnifierState;
 pub use overview::OverviewState;
 pub use recording::RecordingState;
 pub use screenshot::ScreenshotState;
-pub use system_ui::SystemUiState;
+pub use system_ui::{MonitorDirection, MonitorLayoutEntry, SystemUiState};
 
 /// 所有特性的组合状态
 #[derive(Debug, Default)]
@@ -31,7 +31,7 @@ pub struct FeatureStates {
     pub overview: OverviewState,
     pub recording: RecordingState,
     pub magnifier: MagnifierState,
-    /// Built-in lock screen / application launcher.
+    /// Built-in lock screen, application launcher, and display layout UI.
     pub system_ui: SystemUiState,
     /// Peek 模式 (Boss Key) - 所有窗口淡出
     pub peek_active: bool,

@@ -130,6 +130,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         // --- Window management ---
         "focusstack" => Ok((Jwm::focusstack as WMFuncType, parse_int_arg(args, 1))),
         "app_launcher" => Ok((Jwm::app_launcher as WMFuncType, WMArgEnum::Int(0))),
+        "monitor_layout" => Ok((Jwm::monitor_layout as WMFuncType, WMArgEnum::Int(0))),
         "lock_screen" => Ok((Jwm::lock_screen as WMFuncType, WMArgEnum::Int(0))),
         "killclient" => Ok((Jwm::killclient, parse_int_arg(args, 0))),
         "zoom" => Ok((Jwm::zoom, parse_int_arg(args, 0))),
@@ -360,6 +361,10 @@ mod tests {
         // killclient (no args)
         let args = serde_json::json!(null);
         let (_, arg) = dispatch_command("killclient", &args).unwrap();
+        assert_eq!(arg, WMArgEnum::Int(0));
+
+        // display layout modal
+        let (_, arg) = dispatch_command("monitor_layout", &args).unwrap();
         assert_eq!(arg, WMArgEnum::Int(0));
     }
 

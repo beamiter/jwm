@@ -265,6 +265,8 @@ impl Jwm {
             "spawn"
         } else if eq!(Jwm::app_launcher) {
             "app_launcher"
+        } else if eq!(Jwm::monitor_layout) {
+            "monitor_layout"
         } else if eq!(Jwm::lock_screen) {
             "lock_screen"
         } else if eq!(Jwm::focusstack) {

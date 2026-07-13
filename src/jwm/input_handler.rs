@@ -8,6 +8,7 @@ use crate::backend::common_define::{ConfigWindowBits, Mods, MouseButton, WindowI
 use crate::config::CONFIG;
 use crate::core::models::ClientKey;
 use crate::core::types::Rect;
+use crate::jwm::features::MonitorDirection;
 use crate::jwm::features::screenshot::{ScreenshotAnnotation, ScreenshotTool};
 use crate::jwm::types::{WMArgEnum, WMClickType};
 use log::{error, info};
@@ -212,6 +213,77 @@ impl Jwm {
                 let _ = backend.key_ops().ungrab_keyboard();
                 let _ = backend.input_ops().ungrab_pointer();
                 backend.compositor_force_full_redraw();
+                return Ok(());
+            }
+            if self.features.system_ui.is_monitor_layout() {
+                if keysym == keys::KEY_Tab || keysym == keys::KEY_ISO_Left_Tab {
+                    let backwards =
+                        clean_state.contains(Mods::SHIFT) || keysym == keys::KEY_ISO_Left_Tab;
+                    self.features
+                        .system_ui
+                        .cycle_monitor(if backwards { -1 } else { 1 });
+                } else if keysym == keys::KEY_bracketleft {
+                    self.features.system_ui.cycle_monitor_reference(-1);
+                } else if keysym == keys::KEY_bracketright {
+                    self.features.system_ui.cycle_monitor_reference(1);
+                } else if keysym == keys::KEY_Left {
+                    self.features
+                        .system_ui
+                        .place_monitor(MonitorDirection::Left);
+                } else if keysym == keys::KEY_Right {
+                    self.features
+                        .system_ui
+                        .place_monitor(MonitorDirection::Right);
+                } else if keysym == keys::KEY_Up {
+                    self.features
+                        .system_ui
+                        .place_monitor(MonitorDirection::Above);
+                } else if keysym == keys::KEY_Down {
+                    self.features
+                        .system_ui
+                        .place_monitor(MonitorDirection::Below);
+                } else if keysym == keys::KEY_Return {
+                    let args = self
+                        .features
+                        .system_ui
+                        .monitor_layout_xrandr_args()
+                        .unwrap_or_default();
+                    match std::process::Command::new("xrandr").args(&args).output() {
+                        Ok(output) if output.status.success() => {
+                            info!("Applied display layout with xrandr {args:?}");
+                            self.features.system_ui.cancel();
+                            backend.compositor_set_system_ui(None);
+                            let _ = backend.key_ops().ungrab_keyboard();
+                            let _ = backend.input_ops().ungrab_pointer();
+                            backend.output_ops().invalidate_output_cache();
+                            self.updategeom(backend);
+                            backend.compositor_force_full_redraw();
+                            return Ok(());
+                        }
+                        Ok(output) => {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            let detail = stderr.trim();
+                            let message = if detail.is_empty() {
+                                format!("xrandr exited with {}", output.status)
+                            } else {
+                                let first_line = detail.lines().next().unwrap_or(detail);
+                                format!(
+                                    "xrandr: {}",
+                                    first_line.chars().take(120).collect::<String>()
+                                )
+                            };
+                            error!("Could not apply display layout: {message}");
+                            self.features.system_ui.monitor_layout_error(message);
+                        }
+                        Err(err) => {
+                            error!("Could not run xrandr: {err}");
+                            self.features
+                                .system_ui
+                                .monitor_layout_error(format!("could not run xrandr: {err}"));
+                        }
+                    }
+                }
+                self.sync_system_ui(backend);
                 return Ok(());
             }
             if keysym == keys::KEY_BackSpace || keysym == keys::KEY_Delete {

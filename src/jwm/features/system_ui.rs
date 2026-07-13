@@ -1,8 +1,9 @@
-//! Backend-independent lock screen and application launcher state.
+//! Backend-independent modal system UI state.
 
 use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -13,8 +14,26 @@ pub struct LaunchEntry {
     search: String,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MonitorLayoutEntry {
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MonitorDirection {
+    Left,
+    Right,
+    Above,
+    Below,
+}
+
+#[derive(Debug, Default)]
 pub enum SystemUiState {
+    #[default]
     Inactive,
     Launcher {
         query: String,
@@ -28,6 +47,12 @@ pub enum SystemUiState {
         query: String,
         matches: Vec<usize>,
         offset: usize,
+    },
+    MonitorLayout {
+        entries: Vec<MonitorLayoutEntry>,
+        selected: usize,
+        reference: usize,
+        message: String,
     },
     Locked {
         password: String,
@@ -63,6 +88,17 @@ impl Clone for SystemUiState {
                 matches: matches.clone(),
                 offset: *offset,
             },
+            Self::MonitorLayout {
+                entries,
+                selected,
+                reference,
+                message,
+            } => Self::MonitorLayout {
+                entries: entries.clone(),
+                selected: *selected,
+                reference: *reference,
+                message: message.clone(),
+            },
             // Never duplicate credentials into another allocation.
             Self::Locked { message, .. } => Self::Locked {
                 password: String::new(),
@@ -72,18 +108,16 @@ impl Clone for SystemUiState {
     }
 }
 
-impl Default for SystemUiState {
-    fn default() -> Self {
-        Self::Inactive
-    }
-}
-
 impl SystemUiState {
     pub fn is_active(&self) -> bool {
         !matches!(self, Self::Inactive)
     }
     pub fn is_locked(&self) -> bool {
         matches!(self, Self::Locked { .. })
+    }
+
+    pub fn is_monitor_layout(&self) -> bool {
+        matches!(self, Self::MonitorLayout { .. })
     }
 
     pub fn cancel(&mut self) {
@@ -123,32 +157,141 @@ impl SystemUiState {
         }
     }
 
+    #[must_use]
+    pub fn monitor_layout(mut entries: Vec<MonitorLayoutEntry>) -> Self {
+        normalize_monitor_positions(&mut entries);
+        Self::MonitorLayout {
+            entries,
+            selected: 0,
+            reference: 1,
+            message: String::new(),
+        }
+    }
+
+    pub fn cycle_monitor(&mut self, delta: isize) {
+        let Self::MonitorLayout {
+            entries,
+            selected,
+            reference,
+            message,
+        } = self
+        else {
+            return;
+        };
+        if entries.len() < 2 {
+            return;
+        }
+        let previous = *selected;
+        *selected = cycle_index(*selected, entries.len(), delta);
+        if *reference == *selected {
+            *reference = previous;
+        }
+        message.clear();
+    }
+
+    pub fn cycle_monitor_reference(&mut self, delta: isize) {
+        let Self::MonitorLayout {
+            entries,
+            selected,
+            reference,
+            message,
+        } = self
+        else {
+            return;
+        };
+        if entries.len() < 2 {
+            return;
+        }
+        loop {
+            *reference = cycle_index(*reference, entries.len(), delta);
+            if *reference != *selected {
+                break;
+            }
+        }
+        message.clear();
+    }
+
+    pub fn place_monitor(&mut self, direction: MonitorDirection) {
+        let Self::MonitorLayout {
+            entries,
+            selected,
+            reference,
+            message,
+        } = self
+        else {
+            return;
+        };
+        let Some(anchor) = entries.get(*reference).cloned() else {
+            return;
+        };
+        let Some(target) = entries.get_mut(*selected) else {
+            return;
+        };
+        match direction {
+            MonitorDirection::Left => {
+                target.x = anchor.x - target.width;
+                target.y = anchor.y;
+            }
+            MonitorDirection::Right => {
+                target.x = anchor.x + anchor.width;
+                target.y = anchor.y;
+            }
+            MonitorDirection::Above => {
+                target.x = anchor.x;
+                target.y = anchor.y - target.height;
+            }
+            MonitorDirection::Below => {
+                target.x = anchor.x;
+                target.y = anchor.y + anchor.height;
+            }
+        }
+        normalize_monitor_positions(entries);
+        message.clear();
+    }
+
+    #[must_use]
+    pub fn monitor_layout_xrandr_args(&self) -> Option<Vec<String>> {
+        let Self::MonitorLayout { entries, .. } = self else {
+            return None;
+        };
+        let mut args = Vec::with_capacity(entries.len() * 4);
+        for entry in entries {
+            args.push("--output".into());
+            args.push(entry.name.clone());
+            args.push("--pos".into());
+            args.push(format!("{}x{}", entry.x, entry.y));
+        }
+        Some(args)
+    }
+
+    pub fn monitor_layout_error(&mut self, error: impl Into<String>) {
+        if let Self::MonitorLayout { message, .. } = self {
+            *message = error.into();
+        }
+    }
+
     pub fn push_char(&mut self, ch: char) {
         match self {
-            Self::Launcher { query, .. } => query.push(ch),
+            Self::Launcher { query, .. } | Self::Info { query, .. } => query.push(ch),
             Self::Locked { password, message } => {
                 password.push(ch);
                 message.clear();
             }
-            Self::Inactive => return,
-            Self::Info { query, .. } => query.push(ch),
+            Self::Inactive | Self::MonitorLayout { .. } => return,
         }
         self.refresh_matches();
     }
 
     pub fn backspace(&mut self) {
         match self {
-            Self::Launcher { query, .. } => {
+            Self::Launcher { query, .. } | Self::Info { query, .. } => {
                 query.pop();
             }
             Self::Locked { password, message } => {
                 password.pop();
                 message.clear();
             }
-            Self::Inactive => return,
-            Self::Info { query, .. } => {
-                query.pop();
-            }
+            Self::Inactive | Self::MonitorLayout { .. } => return,
         }
         self.refresh_matches();
     }
@@ -256,6 +399,12 @@ impl SystemUiState {
                 );
                 out
             }
+            Self::MonitorLayout {
+                entries,
+                selected,
+                reference,
+                message,
+            } => monitor_layout_overlay(entries, *selected, *reference, message),
         }
     }
 
@@ -298,9 +447,132 @@ impl SystemUiState {
                 *matches = scored.into_iter().map(|(i, _)| i).collect();
                 *offset = 0;
             }
-            Self::Inactive | Self::Locked { .. } => {}
+            Self::Inactive | Self::Locked { .. } | Self::MonitorLayout { .. } => {}
         }
     }
+}
+
+fn cycle_index(index: usize, len: usize, delta: isize) -> usize {
+    debug_assert!(len > 0);
+    let distance = delta.unsigned_abs() % len;
+    if delta.is_negative() {
+        (index + len - distance) % len
+    } else {
+        (index + distance) % len
+    }
+}
+
+fn normalize_monitor_positions(entries: &mut [MonitorLayoutEntry]) {
+    let min_x = entries.iter().map(|entry| entry.x).min().unwrap_or(0);
+    let min_y = entries.iter().map(|entry| entry.y).min().unwrap_or(0);
+    if min_x == 0 && min_y == 0 {
+        return;
+    }
+    for entry in entries {
+        entry.x -= min_x;
+        entry.y -= min_y;
+    }
+}
+
+fn monitor_layout_overlay(
+    entries: &[MonitorLayoutEntry],
+    selected: usize,
+    reference: usize,
+    message: &str,
+) -> String {
+    let mut out = String::from("\u{f108}  DISPLAY LAYOUT\n\n");
+    out.push_str(&monitor_layout_preview(entries, selected, reference));
+    out.push('\n');
+    for (index, entry) in entries.iter().enumerate() {
+        let target = if index == selected { '>' } else { ' ' };
+        let anchor = if index == reference { '*' } else { ' ' };
+        writeln!(
+            out,
+            "{target}{anchor} {}  {}x{}  @ {},{}",
+            entry.name, entry.width, entry.height, entry.x, entry.y
+        )
+        .expect("writing to a String cannot fail");
+    }
+    if !message.is_empty() {
+        writeln!(out, "\n! {message}").expect("writing to a String cannot fail");
+    }
+    out.push_str(
+        "\nTab  target    [ / ]  reference    Arrow keys  place\nEnter  apply with xrandr    Esc  cancel",
+    );
+    out
+}
+
+fn monitor_layout_preview(
+    entries: &[MonitorLayoutEntry],
+    selected: usize,
+    reference: usize,
+) -> String {
+    const WIDTH: usize = 52;
+    const HEIGHT: usize = 10;
+    let max_x = entries
+        .iter()
+        .map(|entry| entry.x.saturating_add(entry.width.max(1)))
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let max_y = entries
+        .iter()
+        .map(|entry| entry.y.saturating_add(entry.height.max(1)))
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let mut canvas = vec![vec![' '; WIDTH]; HEIGHT];
+
+    // Draw the selected output last so its outline remains visible when the
+    // current layout contains mirrored/overlapping outputs.
+    let order = (0..entries.len())
+        .filter(|&i| i != selected)
+        .chain((selected < entries.len()).then_some(selected));
+    for index in order {
+        let entry = &entries[index];
+        let x0 = scale_preview(entry.x, max_x, WIDTH);
+        let y0 = scale_preview(entry.y, max_y, HEIGHT);
+        let mut x1 = scale_preview(entry.x.saturating_add(entry.width), max_x, WIDTH);
+        let mut y1 = scale_preview(entry.y.saturating_add(entry.height), max_y, HEIGHT);
+        x1 = x1.max((x0 + 5).min(WIDTH - 1)).min(WIDTH - 1);
+        y1 = y1.max((y0 + 2).min(HEIGHT - 1)).min(HEIGHT - 1);
+        let horizontal = if index == selected { '=' } else { '-' };
+        let vertical = if index == selected { '#' } else { '|' };
+        canvas[y0][x0..=x1].fill(horizontal);
+        canvas[y1][x0..=x1].fill(horizontal);
+        for row in canvas.iter_mut().take(y1 + 1).skip(y0) {
+            row[x0] = vertical;
+            row[x1] = vertical;
+        }
+        for &(x, y) in &[(x0, y0), (x1, y0), (x0, y1), (x1, y1)] {
+            canvas[y][x] = '+';
+        }
+        let marker = if index == selected {
+            '>'
+        } else if index == reference {
+            '*'
+        } else {
+            char::from_digit(u32::try_from((index + 1).min(9)).unwrap_or(9), 10).unwrap_or('?')
+        };
+        let label = format!("{marker}{}", entry.name);
+        for (offset, ch) in label.chars().take(x1.saturating_sub(x0 + 1)).enumerate() {
+            canvas[(y0 + 1).min(y1)][x0 + 1 + offset] = ch;
+        }
+    }
+
+    canvas
+        .into_iter()
+        .map(|row| row.into_iter().collect::<String>().trim_end().to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn scale_preview(value: i32, max: i32, extent: usize) -> usize {
+    let extent_max = extent.saturating_sub(1);
+    let value = u64::try_from(value.max(0)).unwrap_or(0);
+    let max = u64::try_from(max.max(1)).unwrap_or(1);
+    let extent_max_u64 = u64::try_from(extent_max).unwrap_or(u64::MAX);
+    usize::try_from(value.saturating_mul(extent_max_u64) / max).unwrap_or(extent_max)
 }
 
 fn fuzzy_score(haystack: &str, needle: &str) -> Option<usize> {
@@ -619,5 +891,62 @@ mod tests {
         assert!(!text.contains("focus next"));
         state.backspace();
         assert!(state.overlay_text().contains("ter_"));
+    }
+
+    fn monitor(name: &str, x: i32, y: i32, width: i32, height: i32) -> MonitorLayoutEntry {
+        MonitorLayoutEntry {
+            name: name.into(),
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn monitor_layout_places_target_relative_to_reference() {
+        let mut state = SystemUiState::monitor_layout(vec![
+            monitor("eDP-1", 0, 0, 1920, 1080),
+            monitor("HDMI-1", 0, 0, 2560, 1440),
+        ]);
+
+        state.place_monitor(MonitorDirection::Left);
+
+        assert_eq!(
+            state.monitor_layout_xrandr_args().unwrap(),
+            [
+                "--output", "eDP-1", "--pos", "0x0", "--output", "HDMI-1", "--pos", "1920x0",
+            ]
+        );
+    }
+
+    #[test]
+    fn monitor_layout_cycles_target_without_using_it_as_reference() {
+        let mut state = SystemUiState::monitor_layout(vec![
+            monitor("one", 0, 0, 100, 100),
+            monitor("two", 100, 0, 100, 100),
+            monitor("three", 200, 0, 100, 100),
+        ]);
+
+        state.cycle_monitor(1);
+        state.place_monitor(MonitorDirection::Below);
+
+        let text = state.overlay_text();
+        assert!(text.contains(" * one  100x100  @ 0,0"));
+        assert!(text.contains(">  two  100x100  @ 0,100"));
+    }
+
+    #[test]
+    fn monitor_layout_preview_marks_target_and_reference() {
+        let state = SystemUiState::monitor_layout(vec![
+            monitor("eDP-1", 0, 0, 1920, 1080),
+            monitor("HDMI-1", 1920, 0, 2560, 1440),
+        ]);
+        let text = state.overlay_text();
+
+        assert!(text.contains("DISPLAY LAYOUT"));
+        assert!(text.contains(">  eDP-1"));
+        assert!(text.contains(" * HDMI-1"));
+        assert!(text.contains("apply with xrandr"));
     }
 }

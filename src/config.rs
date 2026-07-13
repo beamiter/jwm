@@ -44,7 +44,7 @@ pub fn get_backend_family() -> BackendFamily {
     *ACTIVE_BACKEND.get().unwrap_or(&BackendFamily::X11)
 }
 
-pub const STATUS_BAR_NAME: &str = "tao_softbuffer_bar";
+pub const STATUS_BAR_NAME: &str = "gtk_bar";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TomlConfig {
@@ -1337,6 +1337,12 @@ impl Config {
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
+                key: "o".to_string(),
+                function: "monitor_layout".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
                 modifier: vec!["Mod1".to_string()],
                 key: "r".to_string(),
                 function: "app_launcher".to_string(),
@@ -2071,6 +2077,37 @@ impl Config {
                 }
             }
         }
+        // Keep the built-in display configurator reachable for configurations
+        // generated before the action was introduced.
+        if !self
+            .inner
+            .keybindings
+            .keys
+            .iter()
+            .any(|key| key.function == "monitor_layout")
+        {
+            let fallback = KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
+                key: "o".to_string(),
+                function: "monitor_layout".to_string(),
+                argument: ArgumentConfig::Int(0),
+            };
+            if let Some(binding) = self.convert_key_config(&fallback) {
+                let occupied = keys
+                    .iter()
+                    .any(|key| key.mask == binding.mask && key.key_sym == binding.key_sym);
+                if occupied {
+                    log::warn!(
+                        "[config] display layout has no shortcut: Alt+Ctrl+O is already occupied"
+                    );
+                } else {
+                    log::info!(
+                        "[config] legacy key list detected; enabling display layout on Alt+Ctrl+O"
+                    );
+                    keys.push(binding);
+                }
+            }
+        }
         for i in 0..self.tags_length() {
             keys.extend(self.generate_tag_keys(i));
         }
@@ -2159,6 +2196,7 @@ impl Config {
         match func_name {
             "spawn" => Some(Jwm::spawn),
             "app_launcher" => Some(Jwm::app_launcher),
+            "monitor_layout" => Some(Jwm::monitor_layout),
             "lock_screen" => Some(Jwm::lock_screen),
             "focusstack" => Some(Jwm::focusstack),
             "focusmon" => Some(Jwm::focusmon),
@@ -2827,6 +2865,45 @@ mod tests {
         });
 
         let key_sym = cfg.parse_keysym("m").unwrap();
+        let matches = cfg
+            .get_keys()
+            .into_iter()
+            .filter(|key| key.key_sym == key_sym && key.mask == (Mods::ALT | Mods::CONTROL))
+            .count();
+        assert_eq!(matches, 1);
+    }
+
+    #[test]
+    fn legacy_key_list_gets_non_conflicting_monitor_layout_fallback() {
+        let mut cfg = Config::default();
+        cfg.inner
+            .keybindings
+            .keys
+            .retain(|key| key.function != "monitor_layout");
+
+        let key_sym = cfg.parse_keysym("o").unwrap();
+        let keys = cfg.get_keys();
+        assert!(
+            keys.iter()
+                .any(|key| { key.key_sym == key_sym && key.mask == (Mods::ALT | Mods::CONTROL) })
+        );
+    }
+
+    #[test]
+    fn legacy_monitor_layout_fallback_does_not_override_occupied_chord() {
+        let mut cfg = Config::default();
+        cfg.inner
+            .keybindings
+            .keys
+            .retain(|key| key.function != "monitor_layout");
+        cfg.inner.keybindings.keys.push(KeyConfig {
+            modifier: vec!["Mod1".into(), "Control".into()],
+            key: "o".into(),
+            function: "spawn".into(),
+            argument: ArgumentConfig::StringVec(vec!["true".into()]),
+        });
+
+        let key_sym = cfg.parse_keysym("o").unwrap();
         let matches = cfg
             .get_keys()
             .into_iter()

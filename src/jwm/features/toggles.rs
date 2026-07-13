@@ -40,6 +40,59 @@ impl Jwm {
         Ok(())
     }
 
+    pub(crate) fn monitor_layout(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.features.system_ui.is_active() {
+            return Ok(());
+        }
+        if !backend.has_compositor() {
+            return Err("display layout requires the JWM compositor".into());
+        }
+        let is_x11 = backend
+            .as_any()
+            .is::<crate::backend::x11rb::backend::X11rbBackend>()
+            || backend
+                .as_any()
+                .is::<crate::backend::xcb::backend::XcbBackend>();
+        if !is_x11 {
+            return Err("display layout via xrandr is only available on an X11 backend".into());
+        }
+
+        let entries: Vec<_> = backend
+            .output_ops()
+            .enumerate_outputs()
+            .into_iter()
+            .filter(|output| !output.name.is_empty() && output.width > 0 && output.height > 0)
+            .map(|output| crate::jwm::features::MonitorLayoutEntry {
+                name: output.name,
+                x: output.x,
+                y: output.y,
+                width: output.width,
+                height: output.height,
+            })
+            .collect();
+        if entries.len() < 2 {
+            return Err("display layout requires at least two active outputs".into());
+        }
+
+        if let Some(root) = backend.root_window() {
+            backend.key_ops().grab_keyboard(root)?;
+            if !backend.input_ops().grab_pointer(
+                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
+                None,
+            )? {
+                let _ = backend.key_ops().ungrab_keyboard();
+                return Err("could not grab pointer for display layout".into());
+            }
+        }
+        self.features.system_ui = crate::jwm::features::SystemUiState::monitor_layout(entries);
+        self.sync_system_ui(backend);
+        Ok(())
+    }
+
     pub(crate) fn lock_screen(
         &mut self,
         backend: &mut dyn Backend,
