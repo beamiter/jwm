@@ -38,23 +38,29 @@ jobs:
           components: rustfmt
 
       - name: Apply focused source transform
+        shell: bash
         run: |
           set +e
-          python3 .github/agent/apply_jwm_tool_reliability.py > .agent-transform.log 2>&1
+          : > .agent-transform.log
+          python3 .github/agent/apply_jwm_tool_reliability.py >> .agent-transform.log 2>&1
           status=$?
-          cat .agent-transform.log
-          if [ "$status" -ne 0 ]; then
-            exit "$status"
+          if [ "$status" -eq 0 ]; then
+            cp tools/jwm_tool.rs .agent-transformed-jwm_tool.rs
+            cargo fmt --all >> .agent-transform.log 2>&1
+            status=$?
           fi
-          rm -f .agent-transform.log
-          cargo fmt --all
+          cat .agent-transform.log
+          exit "$status"
 
       - name: Upload transform diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: jwm-tool-transform-log
-          path: .agent-transform.log
+          name: jwm-tool-transform-diagnostics
+          if-no-files-found: error
+          path: |
+            .agent-transform.log
+            .agent-transformed-jwm_tool.rs
 
       - name: Commit source changes and remove automation
         run: |
@@ -62,6 +68,7 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git checkout origin/master -- .github/workflows/ci.yml
           rm -f .github/agent/apply_jwm_tool_reliability.py
+          rm -f .agent-transform.log .agent-transformed-jwm_tool.rs
           git add -A
           git commit -m "fix jwm-tool reliability and install UX"
           git push
