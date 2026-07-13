@@ -591,9 +591,26 @@ impl<C: CompositorConnection> Compositor<C> {
             .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
 
         use crate::backend::compositor_common::media::{
-            RecordingEncoder, select_recording_encoder,
+            RecordingEncoder, append_recording_audio_input, append_recording_audio_output,
+            recording_audio_available, select_recording_encoder,
         };
         let encoder = select_recording_encoder(&self.recording_encoder);
+        let (audio_enabled, audio_device, audio_bitrate) = {
+            let cfg = crate::config::CONFIG.load();
+            let behavior = cfg.behavior();
+            (
+                behavior.recording_audio_enabled,
+                behavior.recording_audio_device.clone(),
+                behavior.recording_audio_bitrate.clone(),
+            )
+        };
+        let with_audio = audio_enabled && recording_audio_available(&audio_device);
+        if audio_enabled && !with_audio {
+            log::warn!(
+                "compositor: recording microphone '{}' unavailable; continuing video-only",
+                audio_device
+            );
+        }
         // Ubuntu/Debian's ffmpeg builds expose the software H.264 encoder as
         // libx264.  libopenh264 is not generally compiled in and made the
         // recorder accept the IPC request while ffmpeg immediately exited.
@@ -606,42 +623,61 @@ impl<C: CompositorConnection> Compositor<C> {
 
         let size_str = format!("{w}x{h}");
         let fps_str = fps.to_string();
-        let mut args: Vec<&str> = Vec::new();
+        let mut args: Vec<String> = Vec::new();
 
         if matches!(encoder, RecordingEncoder::Vaapi) {
-            args.extend_from_slice(&["-vaapi_device", "/dev/dri/renderD128"]);
+            args.extend(["-vaapi_device", "/dev/dri/renderD128"].map(str::to_string));
         }
         // Input: use wall clock timestamps so video duration matches real time.
         // The nominal `-r` is moved to the output side; ffmpeg duplicates/drops
         // frames automatically to produce a constant-frame-rate file.
-        args.extend_from_slice(&[
-            "-use_wallclock_as_timestamps",
-            "1",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgba",
-            "-s",
-            &size_str,
-            "-i",
-            "pipe:0",
-        ]);
-        match encoder {
-            RecordingEncoder::Nvenc => args.extend_from_slice(&["-vf", "vflip"]),
-            RecordingEncoder::Vaapi => {
-                args.extend_from_slice(&["-vf", "vflip,format=nv12,hwupload"])
-            }
-            RecordingEncoder::Software => args.extend_from_slice(&["-vf", "vflip"]),
+        args.extend(
+            [
+                "-use_wallclock_as_timestamps",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgba",
+                "-s",
+                size_str.as_str(),
+                "-i",
+                "pipe:0",
+            ]
+            .map(str::to_string),
+        );
+        if with_audio {
+            append_recording_audio_input(&mut args, &audio_device);
         }
-        args.push("-c:v");
-        args.push(codec_name);
+        match encoder {
+            RecordingEncoder::Nvenc => args.extend(["-vf", "vflip"].map(str::to_string)),
+            RecordingEncoder::Vaapi => {
+                args.extend(["-vf", "vflip,format=nv12,hwupload"].map(str::to_string))
+            }
+            RecordingEncoder::Software => args.extend(["-vf", "vflip"].map(str::to_string)),
+        }
+        args.push("-c:v".into());
+        args.push(codec_name.into());
         match encoder {
             RecordingEncoder::Vaapi => {
-                args.extend_from_slice(&["-rc_mode", "CQP", "-qp", &quality_str])
+                args.extend(["-rc_mode", "CQP", "-qp", quality_str.as_str()].map(str::to_string))
             }
-            _ => args.extend_from_slice(&["-b:v", bitrate]),
+            _ => args.extend(["-b:v", bitrate.as_str()].map(str::to_string)),
         }
-        args.extend_from_slice(&["-r", &fps_str, "-movflags", "+faststart", "-y", output_path]);
+        if with_audio {
+            append_recording_audio_output(&mut args, &audio_bitrate);
+        }
+        args.extend(
+            [
+                "-r",
+                fps_str.as_str(),
+                "-movflags",
+                "+faststart",
+                "-y",
+                output_path,
+            ]
+            .map(str::to_string),
+        );
 
         let child = match std::process::Command::new("ffmpeg")
             .args(&args)
@@ -677,7 +713,14 @@ impl<C: CompositorConnection> Compositor<C> {
         self.recording_last_frame = None;
         self.recording_current_pbo = 0;
         self.recording_captured_frames = 0;
-        log::info!("compositor: recording started to {output_path}");
+        log::info!(
+            "compositor: recording started to {output_path} (microphone={})",
+            if with_audio {
+                audio_device.as_str()
+            } else {
+                "off"
+            }
+        );
     }
 
     pub(crate) fn stop_recording(&mut self) {

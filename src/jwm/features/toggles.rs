@@ -511,6 +511,11 @@ impl Jwm {
         output_path: &std::path::Path,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let behavior = CONFIG.load().behavior().clone();
+        if self.features.recording.active && behavior.recording_audio_enabled {
+            return Err(
+                "screen recording is already using the configured microphone; stop it first".into(),
+            );
+        }
         self.features.audio_recording.start(
             output_path,
             &behavior.audio_recording_device,
@@ -572,6 +577,15 @@ impl Jwm {
         }
         if output.exists() {
             return Err(format!("recording output already exists: {output_path}").into());
+        }
+
+        // A standalone WAV recording and the synchronized screen audio track
+        // must not race for the same capture device. Finalize the standalone
+        // file before handing the microphone to the screen recorder.
+        if CONFIG.load().behavior().recording_audio_enabled && self.features.audio_recording.active
+        {
+            info!("[recording] stopping standalone audio before synchronized capture");
+            self.stop_audio_recording()?;
         }
 
         let nonce = chrono::Local::now().format("%Y%m%d-%H%M%S-%3f");

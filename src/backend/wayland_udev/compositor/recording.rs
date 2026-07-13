@@ -74,46 +74,100 @@ impl RecordingState {
         let size = format!("{}x{}", width, height);
         let fps = fps.to_string();
         use crate::backend::compositor_common::media::{
-            RecordingEncoder, select_recording_encoder,
+            RecordingEncoder, append_recording_audio_input, append_recording_audio_output,
+            recording_audio_available, select_recording_encoder,
         };
         let encoder = select_recording_encoder(configured_encoder);
+        let (audio_enabled, audio_device, audio_bitrate) = {
+            let cfg = crate::config::CONFIG.load();
+            let behavior = cfg.behavior();
+            (
+                behavior.recording_audio_enabled,
+                behavior.recording_audio_device.clone(),
+                behavior.recording_audio_bitrate.clone(),
+            )
+        };
+        let with_audio = audio_enabled && recording_audio_available(&audio_device);
+        if audio_enabled && !with_audio {
+            log::warn!(
+                "[recording] microphone '{}' unavailable; continuing video-only",
+                audio_device
+            );
+        }
 
         let quality = quality.to_string();
-        let mut args = Vec::new();
+        let mut args: Vec<String> = Vec::new();
         if matches!(encoder, RecordingEncoder::Vaapi) {
-            args.extend_from_slice(&["-vaapi_device", "/dev/dri/renderD128"]);
+            args.extend(["-vaapi_device", "/dev/dri/renderD128"].map(str::to_string));
         }
-        args.extend_from_slice(&[
-            "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", &size, "-r", &fps, "-i", "pipe:0",
-            // OpenGL's origin is bottom-left, unlike normal video.
-            "-vf",
-        ]);
+        args.extend(
+            [
+                "-y",
+                "-use_wallclock_as_timestamps",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgba",
+                "-s",
+                size.as_str(),
+                "-i",
+                "pipe:0",
+            ]
+            .map(str::to_string),
+        );
+        if with_audio {
+            append_recording_audio_input(&mut args, &audio_device);
+        }
+        // OpenGL's origin is bottom-left, unlike normal video.
+        args.push("-vf".into());
         match encoder {
             RecordingEncoder::Nvenc => {
-                args.extend_from_slice(&["vflip", "-c:v", "h264_nvenc", "-b:v", bitrate])
+                args.extend(["vflip", "-c:v", "h264_nvenc", "-b:v", bitrate].map(str::to_string))
             }
-            RecordingEncoder::Vaapi => args.extend_from_slice(&[
-                "vflip,format=nv12,hwupload",
-                "-c:v",
-                "h264_vaapi",
-                "-rc_mode",
-                "CQP",
-                "-qp",
-                &quality,
-            ]),
-            RecordingEncoder::Software => args.extend_from_slice(&[
-                "vflip", "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-b:v", bitrate,
-            ]),
+            RecordingEncoder::Vaapi => args.extend(
+                [
+                    "vflip,format=nv12,hwupload",
+                    "-c:v",
+                    "h264_vaapi",
+                    "-rc_mode",
+                    "CQP",
+                    "-qp",
+                    quality.as_str(),
+                ]
+                .map(str::to_string),
+            ),
+            RecordingEncoder::Software => args.extend(
+                [
+                    "vflip", "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-b:v", bitrate,
+                ]
+                .map(str::to_string),
+            ),
         }
-        args.extend_from_slice(&[
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            output_path,
-        ]);
+        if with_audio {
+            append_recording_audio_output(&mut args, &audio_bitrate);
+        }
+        args.extend(
+            [
+                "-r",
+                fps.as_str(),
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                output_path,
+            ]
+            .map(str::to_string),
+        );
         let codec_name = encoder.codec_name("libx264");
-        log::info!("[recording] Wayland encoder={codec_name} size={size} fps={fps}");
+        log::info!(
+            "[recording] Wayland encoder={codec_name} size={size} fps={fps} microphone={}",
+            if with_audio {
+                audio_device.as_str()
+            } else {
+                "off"
+            }
+        );
         let child = Command::new("ffmpeg")
             .args(&args)
             .stdin(Stdio::piped())

@@ -996,6 +996,9 @@ impl Jwm {
                 "do_not_disturb": self.do_not_disturb,
                 "recording_fps": cfg.behavior().recording_fps,
                 "recording_encoder": cfg.behavior().recording_encoder,
+                "recording_audio_enabled": cfg.behavior().recording_audio_enabled,
+                "recording_audio_device": cfg.behavior().recording_audio_device,
+                "recording_audio_bitrate": cfg.behavior().recording_audio_bitrate,
                 "audio_recording_device": cfg.behavior().audio_recording_device,
                 "audio_recording_sample_rate": cfg.behavior().audio_recording_sample_rate,
                 "audio_recording_channels": cfg.behavior().audio_recording_channels,
@@ -1030,6 +1033,9 @@ impl Jwm {
                     "segment_path": self.features.recording.current_segment.clone(),
                     "fps": cfg.behavior().recording_fps,
                     "encoder": cfg.behavior().recording_encoder,
+                    "audio_enabled": cfg.behavior().recording_audio_enabled,
+                    "audio_device": cfg.behavior().recording_audio_device,
+                    "audio_bitrate": cfg.behavior().recording_audio_bitrate,
                 })))
             }
             "get_audio_recording_status" => {

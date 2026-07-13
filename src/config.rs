@@ -555,6 +555,15 @@ pub struct BehaviorConfig {
     /// Recording output directory (empty = $XDG_VIDEOS_DIR or ~/Videos).
     #[serde(default)]
     pub recording_output_dir: String,
+    /// Capture microphone audio alongside screen recordings.
+    #[serde(default = "default_true")]
+    pub recording_audio_enabled: bool,
+    /// ALSA capture device used for the screen recording audio track.
+    #[serde(default = "default_audio_recording_device")]
+    pub recording_audio_device: String,
+    /// AAC bitrate for the screen recording audio track.
+    #[serde(default = "default_recording_audio_bitrate")]
+    pub recording_audio_bitrate: String,
     /// ALSA capture device used by the built-in audio recorder.
     #[serde(default = "default_audio_recording_device")]
     pub audio_recording_device: String,
@@ -852,6 +861,9 @@ fn default_audio_recording_sample_rate() -> u32 {
 }
 fn default_audio_recording_channels() -> u16 {
     1
+}
+fn default_recording_audio_bitrate() -> String {
+    "128k".to_string()
 }
 fn default_motion_trail_frames() -> u32 {
     5
@@ -1234,6 +1246,9 @@ impl Default for Config {
                     recording_quality: default_recording_quality(),
                     recording_encoder: default_recording_encoder(),
                     recording_output_dir: String::new(),
+                    recording_audio_enabled: true,
+                    recording_audio_device: default_audio_recording_device(),
+                    recording_audio_bitrate: default_recording_audio_bitrate(),
                     audio_recording_device: default_audio_recording_device(),
                     audio_recording_output_dir: String::new(),
                     audio_recording_sample_rate: default_audio_recording_sample_rate(),
@@ -2526,6 +2541,12 @@ impl Config {
                 .as_bool()
                 .ok_or_else(|| format!("expected bool for '{key}'"))
         };
+        let as_string = || {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| format!("expected string for '{key}'"))
+        };
         match key {
             "appearance.border_px" => self.inner.appearance.border_px = as_u32()?,
             "appearance.gap_px" => self.inner.appearance.gap_px = as_u32()?,
@@ -2579,6 +2600,23 @@ impl Config {
                     return Err(format!("behavior.recording_fps={v} out of [1, 240]"));
                 }
                 self.inner.behavior.recording_fps = v;
+            }
+            "behavior.recording_audio_enabled" => {
+                self.inner.behavior.recording_audio_enabled = as_bool()?
+            }
+            "behavior.recording_audio_device" => {
+                let device = as_string()?;
+                if device.trim().is_empty() {
+                    return Err("behavior.recording_audio_device must not be empty".into());
+                }
+                self.inner.behavior.recording_audio_device = device;
+            }
+            "behavior.recording_audio_bitrate" => {
+                let bitrate = as_string()?;
+                if bitrate.trim().is_empty() {
+                    return Err("behavior.recording_audio_bitrate must not be empty".into());
+                }
+                self.inner.behavior.recording_audio_bitrate = bitrate;
             }
             _ => {
                 return Err(format!(
@@ -2794,6 +2832,33 @@ mod tests {
                 .is_err()
         );
         assert_eq!(cfg.behavior().recording_fps, 30);
+    }
+
+    #[test]
+    fn recording_audio_hot_overrides_are_validated() {
+        let mut cfg = Config::default();
+        cfg.set_value(
+            "behavior.recording_audio_enabled",
+            &serde_json::json!(false),
+        )
+        .unwrap();
+        cfg.set_value(
+            "behavior.recording_audio_device",
+            &serde_json::json!("hw:1,0"),
+        )
+        .unwrap();
+        cfg.set_value(
+            "behavior.recording_audio_bitrate",
+            &serde_json::json!("160k"),
+        )
+        .unwrap();
+        assert!(!cfg.behavior().recording_audio_enabled);
+        assert_eq!(cfg.behavior().recording_audio_device, "hw:1,0");
+        assert_eq!(cfg.behavior().recording_audio_bitrate, "160k");
+        assert!(
+            cfg.set_value("behavior.recording_audio_device", &serde_json::json!(""))
+                .is_err()
+        );
     }
 
     #[test]
