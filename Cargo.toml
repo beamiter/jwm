@@ -76,18 +76,18 @@ name = "wm_benchmark"
 harness = false
 
 # Maximize runtime performance for the shipped compositor.
-# panic="unwind" kept intentionally: jwm spawns worker threads (async blur,
+# panic="unwind" is intentional: jwm spawns worker threads (async blur,
 # wallpaper loaders); unwind isolates a thread panic instead of aborting the
 # whole compositor.
-# lto="thin": ~90% of fat's size win at a fraction of the build time, chosen to
-# keep iteration fast. Switch back to "fat" if shaving the last few % matters.
-# [profile.release]
-# opt-level = 3
-# lto = "thin"
-# codegen-units = 1
-# panic = "unwind"
-# strip = "symbols"
-# incremental = false
+# lto="thin" captures most cross-crate optimization gains without the much
+# slower link times of fat LTO.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+strip = "symbols"
+incremental = false
 
 # Profiling build: release-grade codegen but keeps symbols and skips strip so
 # samply/perf can resolve frames. Use: cargo build --profile profiling
