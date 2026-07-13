@@ -39,10 +39,9 @@ jobs:
         with:
           components: rustfmt
 
-      - name: Apply prepared patch
+      - name: Apply prepared transform
         run: |
-          git apply --check .github/display-layout.patch
-          git apply .github/display-layout.patch
+          python3 .github/apply_display_layout.py
           cargo fmt --all
 
       - name: Commit patch
