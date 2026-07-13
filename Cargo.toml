@@ -75,19 +75,20 @@ criterion = "0.8.2"
 name = "wm_benchmark"
 harness = false
 
-# Maximize runtime performance for the shipped compositor.
-# panic="unwind" is intentional: jwm spawns worker threads (async blur,
-# wallpaper loaders); unwind isolates a thread panic instead of aborting the
-# whole compositor.
-# lto="thin" captures most cross-crate optimization gains without the much
-# slower link times of fat LTO.
-[profile.release]
-opt-level = 3
-lto = "thin"
-codegen-units = 1
-panic = "unwind"
-strip = "symbols"
-incremental = false
+# Reference-only release tuning (INTENTIONALLY DISABLED).
+#
+# IMPORTANT: Keep this entire [profile.release] block commented out. The project
+# maintainer deliberately does not enable these settings by default. Do not turn
+# them on as part of routine cleanup or generic performance work. Any activation
+# must be a dedicated change with explicit maintainer approval, benchmark data,
+# build-time impact, and crash/diagnostics review.
+# [profile.release]
+# opt-level = 3
+# lto = "thin"
+# codegen-units = 1
+# panic = "unwind"
+# strip = "symbols"
+# incremental = false
 
 # Profiling build: release-grade codegen but keeps symbols and skips strip so
 # samply/perf can resolve frames. Use: cargo build --profile profiling
