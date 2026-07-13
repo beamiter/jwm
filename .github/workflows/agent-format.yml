@@ -1,0 +1,27 @@
+name: Agent format snapshot
+
+on:
+  push:
+    branches:
+      - agent/startup-architecture-performance-ux
+
+permissions:
+  contents: read
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format Rust sources
+        run: cargo fmt --all
+      - name: Upload formatted sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: formatted-rust-sources
+          path: |
+            src/main.rs
+            src/application.rs
