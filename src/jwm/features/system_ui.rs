@@ -666,7 +666,7 @@ fn monitor_layout_overlay(
         writeln!(out, "\n! {message}").expect("writing to a String cannot fail");
     }
     out.push_str(
-        "\nTab  target    [ / ]  reference    Arrow  attach side\nShift+Arrow  10px adjust    Ctrl+Arrow  1px adjust\nHome / C / End  align start / center / end\nEnter  apply with xrandr    Esc  cancel",
+        "\nTab  target    [ / ]  reference    Arrow  attach side\nShift+Arrow  10px adjust    Ctrl+Arrow  1px adjust\nS / C / E  align start / center / end\nEnter  apply with xrandr    Esc  cancel",
     );
     out
 }

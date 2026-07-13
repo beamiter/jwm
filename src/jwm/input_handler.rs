@@ -244,11 +244,11 @@ impl Jwm {
                     self.features.system_ui.fine_tune_monitor(direction, step);
                 } else if let Some(direction) = arrow_direction {
                     self.features.system_ui.place_monitor(direction);
-                } else if keysym == keys::KEY_Home {
+                } else if keysym == keys::KEY_s {
                     self.features.system_ui.align_monitor_start();
                 } else if keysym == keys::KEY_c {
                     self.features.system_ui.align_monitor_center();
-                } else if keysym == keys::KEY_End {
+                } else if keysym == keys::KEY_e {
                     self.features.system_ui.align_monitor_end();
                 } else if keysym == keys::KEY_Return {
                     let args = self
