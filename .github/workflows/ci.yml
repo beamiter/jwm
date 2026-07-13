@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -21,99 +21,6 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  apply-jwm-tool-fixes:
-    name: Apply jwm-tool reliability fixes
-    if: github.event_name == 'pull_request' && github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out source branch
-        uses: actions/checkout@v4
-        with:
-          ref: agent/jwm-tool-reliability-ux
-          fetch-depth: 0
-
-      - name: Install Rustfmt
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-
-      - name: Apply focused source transform
-        shell: bash
-        run: |
-          python3 <<'PY'
-          from pathlib import Path
-
-          path = Path('.github/agent/apply_jwm_tool_reliability.py')
-          text = path.read_text()
-          old_helper = '''def sub_once(pattern: str, replacement: str) -> None:
-              global text
-              text, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
-              if count != 1:
-                  raise SystemExit(f"expected exactly one regex match, found {count}: {pattern}")
-          '''
-          new_helper = '''def sub_once(pattern: str, replacement) -> None:
-              global text
-              matches = list(re.finditer(pattern, text, flags=re.S))
-              if len(matches) != 1:
-                  raise SystemExit(
-                      f"expected exactly one regex match, found {len(matches)}: {pattern}"
-                  )
-              match = matches[0]
-              replacement_text = replacement(match) if callable(replacement) else replacement
-              text = text[: match.start()] + replacement_text + text[match.end() :]
-          '''
-          if old_helper not in text:
-              raise SystemExit('sub_once helper context not found')
-          text = text.replace(old_helper, new_helper, 1)
-
-          old_group = '''sub_once(
-              r'(fn response_path\\(control_pipe: &Path\\) -> PathBuf \\{.*?\\n\\})\\n',
-              r'\\1' + response_lock_code + "\\n",
-          )
-          '''
-          new_group = '''sub_once(
-              r'(fn response_path\\(control_pipe: &Path\\) -> PathBuf \\{.*?\\n\\})\\n',
-              lambda match: match.group(1) + response_lock_code + "\\n",
-          )
-          '''
-          if old_group not in text:
-              raise SystemExit('response_path replacement context not found')
-          path.write_text(text.replace(old_group, new_group, 1))
-          PY
-
-          set +e
-          : > agent-transform.log
-          python3 .github/agent/apply_jwm_tool_reliability.py >> agent-transform.log 2>&1
-          status=$?
-          if [ "$status" -eq 0 ]; then
-            cp tools/jwm_tool.rs agent-transformed-jwm_tool.rs
-            cargo fmt --all >> agent-transform.log 2>&1
-            status=$?
-          fi
-          cat agent-transform.log
-          exit "$status"
-
-      - name: Upload transform diagnostics
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: jwm-tool-transform-diagnostics
-          if-no-files-found: error
-          path: |
-            agent-transform.log
-            agent-transformed-jwm_tool.rs
-
-      - name: Commit source changes and remove automation
-        run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git checkout origin/master -- .github/workflows/ci.yml
-          rm -f .github/agent/apply_jwm_tool_reliability.py
-          rm -f agent-transform.log agent-transformed-jwm_tool.rs
-          git add -A
-          git commit -m "fix jwm-tool reliability and install UX"
-          git push
-
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
