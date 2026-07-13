@@ -170,4 +170,16 @@ mod tests {
         assert!(!state.finalized);
         assert!(!state.finalization_reported);
     }
+
+    #[test]
+    fn direct_output_can_be_the_active_segment() {
+        let mut state = RecordingState::new();
+        let output = "/home/test/Videos/recording.mp4";
+        state.start(output.to_string());
+        state.start_segment(output.to_string());
+
+        assert_eq!(state.current_segment.as_deref(), Some(output));
+        state.stop();
+        assert_eq!(state.segments, vec![output.to_string()]);
+    }
 }

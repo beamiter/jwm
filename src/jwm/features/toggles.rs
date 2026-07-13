@@ -10,7 +10,7 @@ use crate::core::models::ClientKey;
 use crate::core::types::Rect;
 use crate::jwm::Jwm;
 use crate::jwm::types::WMArgEnum;
-use log::{error, info, warn};
+use log::{error, info};
 use std::process::Command;
 
 impl Jwm {
@@ -450,22 +450,36 @@ impl Jwm {
         if !self.features.recording.active {
             let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
             let cfg_dir = CONFIG.load().behavior().recording_output_dir.clone();
-            let videos_dir = if !cfg_dir.is_empty() {
-                cfg_dir
+            let output_dir = if !cfg_dir.is_empty() {
+                std::path::PathBuf::from(cfg_dir)
             } else {
                 std::env::var("XDG_VIDEOS_DIR")
-                    .or_else(|_| std::env::var("HOME").map(|h| format!("{}/Videos", h)))
-                    .unwrap_or_else(|_| "/tmp".to_string())
+                    .ok()
+                    .filter(|path| !path.is_empty())
+                    .map(std::path::PathBuf::from)
+                    .or_else(dirs::video_dir)
+                    .or_else(|| {
+                        std::env::var_os("HOME")
+                            .filter(|home| !home.is_empty())
+                            .map(std::path::PathBuf::from)
+                            .map(|home| home.join("Videos"))
+                    })
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "cannot resolve the Videos directory; set behavior.recording_output_dir",
+                        )
+                    })?
             };
-            let mut output_dir = std::path::PathBuf::from(&videos_dir);
-            if let Err(e) = std::fs::create_dir_all(&output_dir) {
-                warn!(
-                    "[toggle_recording] cannot create output dir '{}': {}, fallback to /tmp",
-                    output_dir.display(),
-                    e
-                );
-                output_dir = std::path::PathBuf::from("/tmp");
-            }
+            std::fs::create_dir_all(&output_dir).map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "cannot create recording output directory '{}': {error}",
+                        output_dir.display()
+                    ),
+                )
+            })?;
             let output_path = output_dir
                 .join(format!("recording-{}.mp4", timestamp))
                 .to_string_lossy()
@@ -596,12 +610,12 @@ impl Jwm {
             self.stop_audio_recording()?;
         }
 
-        let nonce = chrono::Local::now().format("%Y%m%d-%H%M%S-%3f");
-        let seg_path = format!("/tmp/jwm-rec-{}-{nonce}-seg0.mp4", std::process::id());
         self.features.recording.start(output_path.to_string());
-        self.features.recording.start_segment(seg_path.clone());
-        info!("[recording] start → {output_path} (segment: {seg_path})");
-        backend.compositor_start_recording(&seg_path);
+        self.features
+            .recording
+            .start_segment(output_path.to_string());
+        info!("[recording] start → {output_path} (direct output)");
+        backend.compositor_start_recording(output_path);
         Ok(())
     }
 
@@ -630,7 +644,7 @@ impl Jwm {
         Ok(())
     }
 
-    /// Concatenate segments into final output, or rename if single segment.
+    /// Validate direct output, or concatenate legacy multi-segment recordings.
     fn finalize_recording(segments: Vec<String>, output_path: String) {
         std::thread::spawn(move || {
             if segments.is_empty() {
@@ -664,42 +678,35 @@ impl Jwm {
                 });
                 if !ready {
                     log::error!(
-                        "[recording] segment was not finalized within 5s; leaving it at {segment}"
+                        "[recording] output was not finalized within 5s; leaving it at {segment}"
                     );
                     return;
                 }
-                if std::fs::rename(segment, &output_path).is_err() {
+                // New recordings are encoded directly at output_path. Keep the
+                // move for old callers that may still pass a separate segment.
+                if segment != &output_path && std::fs::rename(segment, &output_path).is_err() {
                     if std::fs::copy(segment, &output_path).is_ok() {
                         let _ = std::fs::remove_file(segment);
                     }
                 }
             } else {
                 // Multiple segments: concat with ffmpeg -c copy
-                let list_path = "/tmp/jwm-recording-concat.txt";
+                let list_path = std::path::Path::new(&output_path).with_extension("concat.txt");
                 let list_content: String = segments
                     .iter()
                     .map(|s| format!("file '{}'", s))
                     .collect::<Vec<_>>()
                     .join("\n");
-                if std::fs::write(list_path, &list_content).is_ok() {
+                if std::fs::write(&list_path, &list_content).is_ok() {
                     let _ = std::process::Command::new("ffmpeg")
-                        .args([
-                            "-f",
-                            "concat",
-                            "-safe",
-                            "0",
-                            "-i",
-                            list_path,
-                            "-c",
-                            "copy",
-                            "-y",
-                            &output_path,
-                        ])
+                        .args(["-f", "concat", "-safe", "0", "-i"])
+                        .arg(&list_path)
+                        .args(["-c", "copy", "-y", &output_path])
                         .stdin(std::process::Stdio::null())
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
                         .status();
-                    let _ = std::fs::remove_file(list_path);
+                    let _ = std::fs::remove_file(&list_path);
                 }
                 for seg in &segments {
                     let _ = std::fs::remove_file(seg);

@@ -45,6 +45,10 @@ audio_recording_channels = 1              # 1 或 2
 各自的系统时钟时间戳，ffmpeg 的异步重采样会校正长期录制中的轻微时钟漂移。停止
 录屏时两个轨道同步结束，分段录制和最终拼接也会保留音轨。
 
+录制开始后，编码器会直接写入 `Videos/recording-YYYYMMDD-HHMMSS.mp4`（或
+`recording_output_dir` 指定的目录），不会先在 `/tmp` 创建中间 MP4。目标目录无法
+解析或创建时会明确报错，也不会静默退回临时目录。
+
 ```toml
 # 位于 [behavior]
 recording_audio_enabled = true

@@ -45,26 +45,19 @@ impl Jwm {
         info!("[cleanup_x11_resources] Cleaning X11 resources");
 
         // Stop recording on shutdown. We do NOT cross-restart resume: previously
-        // that caused silent runaway recordings spanning many restarts (segment
-        // count grew by 1 per restart, output never finalized). Segments are
-        // left on /tmp; concat manually if needed — finalize_recording's thread
-        // would not survive the exec() restart path anyway.
+        // that caused silent runaway recordings spanning many restarts. The
+        // compositor now writes directly to the final Videos path, so no
+        // temporary segment has to be recovered or moved after shutdown.
         if self.features.recording.active {
             backend.compositor_stop_recording();
-            if let Some(seg) = self.features.recording.current_segment.take() {
-                self.features.recording.segments.push(seg);
-            }
-            let n = self.features.recording.segments.len();
+            self.features.recording.stop();
             let target = self
                 .features
                 .recording
                 .output_path
                 .as_deref()
                 .unwrap_or("(unset)");
-            info!(
-                "[cleanup_x11_resources] Recording stopped on shutdown: {n} segment(s) on /tmp/jwm-rec-*, target was {target}"
-            );
-            self.features.recording.active = false;
+            info!("[cleanup_x11_resources] Recording stopped on shutdown; output is at {target}");
         }
 
         if self.features.audio_recording.active {
