@@ -193,10 +193,16 @@ fn setup_locale() {
         warn!("Consider setting: export LANG=C.UTF-8");
     }
 
-    if env::var("LC_CTYPE").is_err() || env::var_os("LC_CTYPE").is_some_and(|value| value.is_empty())
+    if env::var("LC_CTYPE").is_err()
+        || env::var_os("LC_CTYPE").is_some_and(|value| value.is_empty())
     {
+        let ctype = if is_utf8 {
+            locale.as_str()
+        } else {
+            "C.UTF-8"
+        };
         // Environment mutation happens during single-threaded process bootstrap.
-        unsafe { env::set_var("LC_CTYPE", if is_utf8 { &locale } else { "C.UTF-8" }) };
+        unsafe { env::set_var("LC_CTYPE", ctype) };
     }
 }
 
@@ -247,8 +253,12 @@ fn parse_dbus_launch_output(output: &str) -> Vec<(String, String)> {
             }
             let raw_value = raw_value.trim();
             let value = match (
-                raw_value.strip_prefix('\'').and_then(|value| value.strip_suffix('\'')),
-                raw_value.strip_prefix('"').and_then(|value| value.strip_suffix('"')),
+                raw_value
+                    .strip_prefix('\'')
+                    .and_then(|value| value.strip_suffix('\'')),
+                raw_value
+                    .strip_prefix('"')
+                    .and_then(|value| value.strip_suffix('"')),
             ) {
                 (Some(value), _) | (_, Some(value)) => value,
                 _ => raw_value,
@@ -336,9 +346,7 @@ mod tests {
 
     #[test]
     fn cli_rejects_conflicting_config_actions() {
-        assert!(
-            Cli::try_parse_from(["jwm", "--gen-config", "--check-config"]).is_err()
-        );
+        assert!(Cli::try_parse_from(["jwm", "--gen-config", "--check-config"]).is_err());
     }
 
     #[test]
