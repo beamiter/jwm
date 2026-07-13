@@ -71,8 +71,9 @@ src/backend/api.rs          platform boundary
   configuration implementation details.
 - Restarts preserve the original OS-native argument vector and resolve the
   current executable once, avoiding repeated UTF-8 conversions and allocations.
-- The production release profile now enables thin LTO, one codegen unit and
-  symbol stripping; the separate profiling profile retains debug symbols.
+- The experimental `[profile.release]` tuning block remains deliberately
+  commented and reference-only. It must not be enabled without explicit
+  maintainer approval and a dedicated benchmark/build/diagnostics review.
 - Interactive move/resize transport state moved into the backend contract.
 - Key-repeat policy is now binding metadata produced by configuration; the
   Wayland input backend no longer inspects or imports concrete `Jwm` methods.
