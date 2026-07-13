@@ -1,8 +1,8 @@
 //! Application composition root.
 //!
-//! This module owns backend construction and the top-level JWM lifecycle.  The
-//! binary is intentionally kept as a thin process bootstrap layer so backend
-//! selection can be parsed and tested without starting an X11/Wayland server.
+//! This module owns backend construction and the top-level JWM lifecycle. The
+//! binary is intentionally kept as a thin process bootstrap layer so startup
+//! options can be parsed and tested without starting an X11/Wayland server.
 
 use crate::Jwm;
 use crate::backend::api::{Backend, CompositorBenchmark};
@@ -11,15 +11,19 @@ use crate::backend::wayland_winit::backend::WaylandWinitBackend;
 use crate::backend::wayland_x11::backend::WaylandX11Backend;
 use crate::backend::x11rb::backend::X11rbBackend;
 use crate::backend::xcb::backend::XcbBackend;
-use crate::config::{BackendFamily, set_backend_family};
+use crate::config::{BackendFamily, Config, ConfigError, set_backend_family};
 use log::{error, info};
 use std::env;
+use std::ffi::OsString;
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
 
-const BACKEND_ENV: &str = "JWM_BACKEND";
+pub const BACKEND_ENV: &str = "JWM_BACKEND";
+pub const BENCHMARK_ENV: &str = "JWM_BENCHMARK";
+pub const BENCHMARK_WARMUP_ENV: &str = "JWM_BENCHMARK_WARMUP";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BackendChoice {
@@ -47,6 +51,17 @@ impl BackendChoice {
             BackendFamily::Wayland => "config_wayland.toml",
         }
     }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::X11rb => "x11rb",
+            Self::Xcb => "xcb",
+            Self::WaylandUdev => "wayland-udev",
+            Self::WaylandX11 => "wayland-x11",
+            Self::WaylandWinit => "wayland-winit",
+        }
+    }
 }
 
 impl FromStr for BackendChoice {
@@ -66,10 +81,46 @@ impl FromStr for BackendChoice {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BenchmarkRequest {
+    pub frames: u32,
+    pub warmup: u32,
+}
+
+impl BenchmarkRequest {
+    pub fn new(frames: u32, warmup: u32) -> Result<Self, String> {
+        if frames == 0 {
+            return Err("benchmark frame count must be greater than zero".to_string());
+        }
+        Ok(Self { frames, warmup })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ApplicationOptions {
+    pub backend: BackendChoice,
+    pub benchmark: Option<BenchmarkRequest>,
+}
+
+impl ApplicationOptions {
+    pub fn from_env() -> Result<Self, String> {
+        Ok(Self {
+            backend: configured_backend()?,
+            benchmark: configured_benchmark()?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GeneratedConfig {
+    pub path: PathBuf,
+    pub backup: Option<PathBuf>,
+}
+
 /// Resolve the configured backend without constructing it.
 ///
-/// Keeping environment access at this boundary makes the selection policy
-/// independent from the concrete backend implementations.
+/// Environment access is kept at this boundary for compatibility. New callers
+/// should prefer constructing `ApplicationOptions` explicitly.
 pub fn configured_backend() -> Result<BackendChoice, String> {
     env::var(BACKEND_ENV).map_or_else(
         |error| match error {
@@ -80,12 +131,39 @@ pub fn configured_backend() -> Result<BackendChoice, String> {
     )
 }
 
+#[must_use]
+pub fn config_path(choice: BackendChoice) -> PathBuf {
+    Config::get_config_path_for(choice.family())
+}
+
+pub fn generate_config_templates() -> Result<Vec<GeneratedConfig>, ConfigError> {
+    let mut generated = Vec::with_capacity(2);
+    for family in [BackendFamily::X11, BackendFamily::Wayland] {
+        let path = Config::get_config_path_for(family);
+        let backup = if path.exists() {
+            Some(Config::backup_config(&path)?)
+        } else {
+            None
+        };
+        Config::generate_template(&path)?;
+        generated.push(GeneratedConfig { path, backup });
+    }
+    Ok(generated)
+}
+
+pub fn validate_config(choice: BackendChoice) -> Result<PathBuf, ConfigError> {
+    let path = config_path(choice);
+    Config::validate_config_file(&path)?;
+    Ok(path)
+}
+
 fn create_backend(choice: BackendChoice) -> Result<Box<dyn Backend>, Box<dyn std::error::Error>> {
     // Config is a process-wide singleton, so its family must be established
     // before any backend constructor can access CONFIG.
     set_backend_family(choice.family());
     info!(
-        "Initializing {choice:?} backend (config: {})",
+        "Initializing {} backend (config: {})",
+        choice.as_str(),
         choice.config_name()
     );
 
@@ -98,18 +176,55 @@ fn create_backend(choice: BackendChoice) -> Result<Box<dyn Backend>, Box<dyn std
     }
 }
 
-/// Run JWM until it exits or replaces itself during a restart.
+#[derive(Debug)]
+struct RestartCommand {
+    executable: OsString,
+    arguments: Vec<OsString>,
+}
+
+impl RestartCommand {
+    fn current() -> Self {
+        let mut arguments = env::args_os();
+        let invoked_as = arguments
+            .next()
+            .unwrap_or_else(|| OsString::from("jwm"));
+        let executable = env::current_exe().map_or(invoked_as, |path| path.into_os_string());
+        Self {
+            executable,
+            arguments: arguments.collect(),
+        }
+    }
+
+    fn exec(&self) -> std::io::Error {
+        Command::new(&self.executable)
+            .args(&self.arguments)
+            .env("JWM_RESTARTING", "1")
+            .exec()
+    }
+}
+
+/// Run JWM using environment-based compatibility options.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    run_with_options(ApplicationOptions::from_env()?)
+}
+
+/// Run JWM until it exits or replaces itself during a restart.
+pub fn run_with_options(options: ApplicationOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let restart_command = RestartCommand::current();
+
     loop {
-        info!("[application] starting JWM instance");
-        let mut backend = create_backend(configured_backend()?)?;
+        info!(
+            "[application] starting JWM instance with backend {}",
+            options.backend.as_str()
+        );
+        let mut backend = create_backend(options.backend)?;
 
         backend.check_existing_wm()?;
 
         let mut jwm = Jwm::new(&mut *backend)?;
         jwm.setup(&mut *backend)?;
         jwm.setup_initial_windows(&mut *backend)?;
-        configure_benchmark(&mut *backend, configured_benchmark());
+        configure_benchmark(&mut *backend, options.benchmark);
         jwm.run(&mut *backend)?;
         jwm.cleanup(&mut *backend)?;
 
@@ -118,11 +233,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             drop(jwm);
             drop(backend);
 
-            let args: Vec<String> = env::args().collect();
-            let error = Command::new(&args[0])
-                .args(&args[1..])
-                .env("JWM_RESTARTING", "1")
-                .exec();
+            let error = restart_command.exec();
             error!("[application] exec failed: {error}; falling back to in-process restart");
             continue;
         }
@@ -134,22 +245,32 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct BenchmarkRequest {
-    frames: u32,
-    warmup: u32,
+fn parse_benchmark(
+    frames: Option<&str>,
+    warmup: Option<&str>,
+) -> Result<Option<BenchmarkRequest>, String> {
+    let Some(frames) = frames else {
+        if warmup.is_some() {
+            return Err(format!("{BENCHMARK_WARMUP_ENV} requires {BENCHMARK_ENV}"));
+        }
+        return Ok(None);
+    };
+
+    let frames = frames
+        .parse::<u32>()
+        .map_err(|error| format!("invalid {BENCHMARK_ENV} value {frames:?}: {error}"))?;
+    let warmup = warmup.map_or(Ok(60), |value| {
+        value
+            .parse::<u32>()
+            .map_err(|error| format!("invalid {BENCHMARK_WARMUP_ENV} value {value:?}: {error}"))
+    })?;
+
+    BenchmarkRequest::new(frames, warmup).map(Some)
 }
 
-fn parse_benchmark(frames: Option<&str>, warmup: Option<&str>) -> Option<BenchmarkRequest> {
-    Some(BenchmarkRequest {
-        frames: frames?.parse().ok()?,
-        warmup: warmup.and_then(|value| value.parse().ok()).unwrap_or(60),
-    })
-}
-
-fn configured_benchmark() -> Option<BenchmarkRequest> {
-    let frames = env::var("JWM_BENCHMARK").ok();
-    let warmup = env::var("JWM_BENCHMARK_WARMUP").ok();
+fn configured_benchmark() -> Result<Option<BenchmarkRequest>, String> {
+    let frames = env::var(BENCHMARK_ENV).ok();
+    let warmup = env::var(BENCHMARK_WARMUP_ENV).ok();
     parse_benchmark(frames.as_deref(), warmup.as_deref())
 }
 
@@ -170,7 +291,10 @@ fn configure_benchmark<B: CompositorBenchmark + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    use super::{BackendChoice, BenchmarkRequest, configure_benchmark, parse_benchmark};
+    use super::{
+        ApplicationOptions, BackendChoice, BenchmarkRequest, configure_benchmark, config_path,
+        parse_benchmark,
+    };
     use crate::backend::api::CompositorBenchmark;
     use crate::config::BackendFamily;
 
@@ -216,6 +340,23 @@ mod tests {
             BackendChoice::WaylandWinit.config_name(),
             "config_wayland.toml"
         );
+        assert_eq!(
+            config_path(BackendChoice::X11rb)
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("config_x11.toml")
+        );
+    }
+
+    #[test]
+    fn explicit_application_options_have_stable_defaults() {
+        assert_eq!(
+            ApplicationOptions::default(),
+            ApplicationOptions {
+                backend: BackendChoice::X11rb,
+                benchmark: None,
+            }
+        );
     }
 
     #[test]
@@ -237,12 +378,14 @@ mod tests {
     fn benchmark_values_are_validated_without_environment_access() {
         assert_eq!(
             parse_benchmark(Some("120"), None),
-            Some(BenchmarkRequest {
+            Ok(Some(BenchmarkRequest {
                 frames: 120,
                 warmup: 60,
-            })
+            }))
         );
-        assert_eq!(parse_benchmark(Some("invalid"), Some("10")), None);
-        assert_eq!(parse_benchmark(None, Some("10")), None);
+        assert!(parse_benchmark(Some("invalid"), Some("10")).is_err());
+        assert!(parse_benchmark(Some("0"), Some("10")).is_err());
+        assert!(parse_benchmark(None, Some("10")).is_err());
+        assert_eq!(parse_benchmark(None, None), Ok(None));
     }
 }
