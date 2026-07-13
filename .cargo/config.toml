@@ -1,17 +1,4 @@
-# Workspace-wide build environment.
-#
-# These three env vars exist so the `jwm-portal` member crate (which links to
-# the privately-installed PipeWire 1.2.8 in /opt/pipewire-1.2 via libspa-sys'
-# bindgen step) can be built from the workspace root. They are additive and
-# harmless to the root `jwm` crate (no pkg-config conflicts at /opt; jwm does
-# not use bindgen against pipewire/spa headers).
-
-[env]
-# Make the private PipeWire prefix's pkg-config files findable first; pkg-config
-# prepends entries from PKG_CONFIG_PATH ahead of the system defaults.
-PKG_CONFIG_PATH = "/opt/pipewire-1.2/lib/pkgconfig"
-# bindgen (used by libspa-sys) needs libclang and gcc-builtin headers.
-# The system `clang` metapackage is uninstallable on this host, but the
-# libclang-14 .so and gcc-11 headers are already present.
-LIBCLANG_PATH = "/usr/lib/x86_64-linux-gnu"
-BINDGEN_EXTRA_CLANG_ARGS = "-isystem /usr/lib/gcc/x86_64-linux-gnu/11/include"
+# Keep the repository build environment host-independent. The portal discovers
+# PipeWire and libclang through their normal pkg-config/bindgen mechanisms.
+# Developers with a private PipeWire prefix can set JWM_PIPEWIRE_PREFIX; the
+# portal installer derives PKG_CONFIG_PATH and an rpath from that value.

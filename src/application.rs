@@ -11,7 +11,7 @@ use crate::backend::wayland_winit::backend::WaylandWinitBackend;
 use crate::backend::wayland_x11::backend::WaylandX11Backend;
 use crate::backend::x11rb::backend::X11rbBackend;
 use crate::backend::xcb::backend::XcbBackend;
-use crate::config::{BackendFamily, Config, ConfigError, set_backend_family};
+use crate::config::{BackendFamily, Config, ConfigDiagnostics, ConfigError, set_backend_family};
 use log::{error, info};
 use std::env;
 use std::ffi::OsString;
@@ -117,6 +117,12 @@ pub struct GeneratedConfig {
     pub backup: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigCheck {
+    pub path: PathBuf,
+    pub diagnostics: ConfigDiagnostics,
+}
+
 /// Resolve the configured backend without constructing it.
 ///
 /// Environment access is kept at this boundary for compatibility. New callers
@@ -151,13 +157,27 @@ pub fn generate_config_templates() -> Result<Vec<GeneratedConfig>, ConfigError> 
     Ok(generated)
 }
 
-pub fn validate_config(choice: BackendChoice) -> Result<PathBuf, ConfigError> {
+pub fn validate_config(choice: BackendChoice) -> Result<ConfigCheck, ConfigError> {
     let path = config_path(choice);
-    Config::validate_config_file(&path)?;
-    Ok(path)
+    let diagnostics = Config::validate_config_file(&path)?;
+    Ok(ConfigCheck { path, diagnostics })
+}
+
+fn preflight_config(choice: BackendChoice) -> Result<(), ConfigError> {
+    let path = config_path(choice);
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let diagnostics = Config::validate_config_file(&path)?;
+    if diagnostics.has_errors() {
+        return Err(ConfigError::Validation(diagnostics));
+    }
+    Ok(())
 }
 
 fn create_backend(choice: BackendChoice) -> Result<Box<dyn Backend>, Box<dyn std::error::Error>> {
+    preflight_config(choice)?;
     // Config is a process-wide singleton, so its family must be established
     // before any backend constructor can access CONFIG.
     set_backend_family(choice.family());

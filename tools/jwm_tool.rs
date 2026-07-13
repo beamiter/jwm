@@ -894,10 +894,12 @@ fn rebuild_and_restart(jwm_dir: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Run `sudo install <src> <dest_dir>` and return an error on failure.
-fn sudo_install(src: &Path, dest_dir: &str) -> io::Result<()> {
+/// Run `sudo install -m <mode> <src> <dest_dir>` and return an error on failure.
+fn sudo_install(src: &Path, dest_dir: &str, mode: &str) -> io::Result<()> {
     let status = Command::new("sudo")
         .arg("install")
+        .arg("-m")
+        .arg(mode)
         .arg(src)
         .arg(dest_dir)
         .status()?;
@@ -910,6 +912,55 @@ fn sudo_install(src: &Path, dest_dir: &str) -> io::Result<()> {
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct InstallPlanEntry {
+    name: &'static str,
+    source: PathBuf,
+    destination_dir: &'static str,
+    mode: &'static str,
+}
+
+/// Build the complete install plan before touching system paths.
+///
+/// Keeping the source and destination together prevents a newly inserted file
+/// from silently changing another entry's destination through positional
+/// indexing.
+fn jwm_install_plan(jwm_dir: &Path) -> Vec<InstallPlanEntry> {
+    vec![
+        InstallPlanEntry {
+            name: "jwm",
+            source: jwm_dir.join("target/release/jwm"),
+            destination_dir: "/usr/local/bin/",
+            mode: "0755",
+        },
+        InstallPlanEntry {
+            name: "jwm-tool",
+            source: jwm_dir.join("target/release/jwm-tool"),
+            destination_dir: "/usr/local/bin/",
+            mode: "0755",
+        },
+        InstallPlanEntry {
+            name: "jwm-x11rb.desktop",
+            source: jwm_dir.join("jwm-x11rb.desktop"),
+            destination_dir: "/usr/share/xsessions/",
+            mode: "0644",
+        },
+        InstallPlanEntry {
+            name: "jwm-xcb.desktop",
+            source: jwm_dir.join("jwm-xcb.desktop"),
+            destination_dir: "/usr/share/xsessions/",
+            mode: "0644",
+        },
+        InstallPlanEntry {
+            name: "jwm-wayland.desktop",
+            source: jwm_dir.join("jwm-wayland.desktop"),
+            destination_dir: "/usr/share/wayland-sessions/",
+            mode: "0644",
+        },
+    ]
+}
+
+#[cfg(test)]
 fn session_install_targets(jwm_dir: &Path) -> [(PathBuf, &'static str); 3] {
     [
         (jwm_dir.join("jwm-x11rb.desktop"), "/usr/share/xsessions/"),
@@ -923,20 +974,13 @@ fn session_install_targets(jwm_dir: &Path) -> [(PathBuf, &'static str); 3] {
 
 fn install_jwm(jwm_dir: &str) -> io::Result<()> {
     let jwm_dir = Path::new(jwm_dir);
+    let install_plan = jwm_install_plan(jwm_dir);
 
-    let files_to_check: &[(&str, PathBuf)] = &[
-        ("jwm", jwm_dir.join("target/release/jwm")),
-        ("jwm-tool", jwm_dir.join("target/release/jwm-tool")),
-        ("jwm-x11rb.desktop", jwm_dir.join("jwm-x11rb.desktop")),
-        ("jwm-xcb.desktop", jwm_dir.join("jwm-xcb.desktop")),
-        ("jwm-wayland.desktop", jwm_dir.join("jwm-wayland.desktop")),
-    ];
-
-    for (name, path) in files_to_check {
-        if !path.is_file() {
+    for entry in &install_plan {
+        if !entry.source.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("{} 未找到: {}", name, path.display()),
+                format!("{} 未找到: {}", entry.name, entry.source.display()),
             ));
         }
     }
@@ -951,10 +995,8 @@ fn install_jwm(jwm_dir: &str) -> io::Result<()> {
         return Err(io::Error::new(io::ErrorKind::Other, "sudo rm failed"));
     }
 
-    sudo_install(&files_to_check[0].1, "/usr/local/bin/")?;
-    sudo_install(&files_to_check[1].1, "/usr/local/bin/")?;
-    for (source, destination) in session_install_targets(jwm_dir) {
-        sudo_install(&source, destination)?;
+    for entry in &install_plan {
+        sudo_install(&entry.source, entry.destination_dir, entry.mode)?;
     }
 
     println!("安装完成");
@@ -1971,11 +2013,11 @@ fn ipc_socket_path() -> PathBuf {
     Path::new(&runtime).join("jwm-ipc.sock")
 }
 
-fn parse_msg_args(args_str: &str) -> io::Result<serde_json::Value> {
-    serde_json::from_str(args_str).map_err(|error| {
+fn parse_msg_args(args: &str) -> io::Result<serde_json::Value> {
+    serde_json::from_str(args).map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("--args 不是有效 JSON: {error}"),
+            format!("invalid JSON passed to --args: {error}"),
         )
     })
 }
@@ -2018,7 +2060,33 @@ fn validate_ipc_response(line: &str) -> io::Result<()> {
     Ok(())
 }
 
+fn ipc_request(name: &str, args: serde_json::Value) -> serde_json::Value {
+    if name.starts_with("get_") {
+        serde_json::json!({ "query": name, "args": args })
+    } else {
+        serde_json::json!({ "command": name, "args": args })
+    }
+}
+
+fn ensure_ipc_response_succeeded(response: &str) -> io::Result<()> {
+    if serde_json::from_str::<serde_json::Value>(response.trim()).is_err() {
+        // Preserve compatibility with legacy/plain-text server responses.
+        return Ok(());
+    }
+    validate_ipc_response(response)
+}
+
 fn run_ipc_msg(name: &str, args_str: &str, subscribe: Option<&str>, raw: bool) -> io::Result<()> {
+    // Validate --args before touching the socket. Subscription requests do not
+    // consume the value, but malformed input is still a CLI usage error.
+    let args = parse_msg_args(args_str)?;
+    let request = if let Some(topics) = subscribe {
+        let topic_list = parse_subscription_topics(topics)?;
+        serde_json::json!({ "subscribe": topic_list })
+    } else {
+        ipc_request(name, args)
+    };
+
     let sock_path = ipc_socket_path();
     if !sock_path.exists() {
         return Err(io::Error::new(
@@ -2033,16 +2101,16 @@ fn run_ipc_msg(name: &str, args_str: &str, subscribe: Option<&str>, raw: bool) -
     let mut stream = UnixStream::connect(&sock_path)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
 
-    if let Some(topics) = subscribe {
-        let topic_list = parse_subscription_topics(topics)?;
-        let msg = serde_json::json!({ "subscribe": topic_list });
-        let mut line = serde_json::to_string(&msg)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        line.push('\n');
-        stream.write_all(line.as_bytes())?;
+    let mut line = serde_json::to_string(&request)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    line.push('\n');
+    stream.write_all(line.as_bytes())?;
 
+    // Handle subscribe mode
+    if subscribe.is_some() {
+        // Read subscription confirmation
         let resp = read_ipc_line(&mut stream)?;
-        validate_ipc_response(resp.trim())?;
+        ensure_ipc_response_succeeded(&resp)?;
         if !raw {
             eprintln!("Subscribed: {}", resp.trim());
         }
@@ -2071,40 +2139,118 @@ fn run_ipc_msg(name: &str, args_str: &str, subscribe: Option<&str>, raw: bool) -
         return Ok(());
     }
 
-    let args = parse_msg_args(args_str)?;
-    let msg = if name.starts_with("get_") {
-        serde_json::json!({ "query": name, "args": args })
-    } else {
-        serde_json::json!({ "command": name, "args": args })
-    };
-
-    let mut line = serde_json::to_string(&msg)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    line.push('\n');
-    stream.write_all(line.as_bytes())?;
-
+    // Read response
     let resp = read_ipc_line(&mut stream)?;
-    let validation = validate_ipc_response(resp.trim());
     if raw {
         print!("{resp}");
     } else {
         match serde_json::from_str::<serde_json::Value>(resp.trim()) {
-            Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap_or(resp)),
+            Ok(value) => match serde_json::to_string_pretty(&value) {
+                Ok(pretty) => println!("{pretty}"),
+                Err(_) => print!("{resp}"),
+            },
             Err(_) => print!("{resp}"),
         }
     }
-    validation
+
+    ensure_ipc_response_succeeded(&resp)
 }
 
 #[cfg(test)]
+// The CLI keeps protocol parsing tests beside the message implementation;
+// later functions belong to independent smoke/reporting commands.
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        SmokeTarget, acquire_response_lock, daemon_command_response, parse_msg_args,
+        InstallPlanEntry, SmokeTarget, acquire_response_lock, daemon_command_response,
+        ensure_ipc_response_succeeded, ipc_request, jwm_install_plan, parse_msg_args,
         parse_subscription_topics, response_lock_path, session_install_targets,
         smoke_artifacts_json, smoke_ci_profile_json, smoke_manual_kms_checklist_json,
         smoke_target_json, split_path_list, validate_daemon_response, validate_ipc_response,
     };
     use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn install_plan_routes_desktops_to_their_session_types() {
+        let root = Path::new("/src/jwm");
+
+        assert_eq!(
+            jwm_install_plan(root),
+            vec![
+                InstallPlanEntry {
+                    name: "jwm",
+                    source: PathBuf::from("/src/jwm/target/release/jwm"),
+                    destination_dir: "/usr/local/bin/",
+                    mode: "0755",
+                },
+                InstallPlanEntry {
+                    name: "jwm-tool",
+                    source: PathBuf::from("/src/jwm/target/release/jwm-tool"),
+                    destination_dir: "/usr/local/bin/",
+                    mode: "0755",
+                },
+                InstallPlanEntry {
+                    name: "jwm-x11rb.desktop",
+                    source: PathBuf::from("/src/jwm/jwm-x11rb.desktop"),
+                    destination_dir: "/usr/share/xsessions/",
+                    mode: "0644",
+                },
+                InstallPlanEntry {
+                    name: "jwm-xcb.desktop",
+                    source: PathBuf::from("/src/jwm/jwm-xcb.desktop"),
+                    destination_dir: "/usr/share/xsessions/",
+                    mode: "0644",
+                },
+                InstallPlanEntry {
+                    name: "jwm-wayland.desktop",
+                    source: PathBuf::from("/src/jwm/jwm-wayland.desktop"),
+                    destination_dir: "/usr/share/wayland-sessions/",
+                    mode: "0644",
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn msg_args_reject_invalid_json_as_invalid_input() {
+        let error = parse_msg_args("{not-json").unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("invalid JSON passed to --args"));
+    }
+
+    #[test]
+    fn msg_request_preserves_command_and_query_shapes() {
+        assert_eq!(
+            ipc_request("view", serde_json::json!({ "tag": 2 })),
+            serde_json::json!({ "command": "view", "args": { "tag": 2 } })
+        );
+        assert_eq!(
+            ipc_request("get_windows", serde_json::Value::Null),
+            serde_json::json!({ "query": "get_windows", "args": null })
+        );
+    }
+
+    #[test]
+    fn msg_response_reports_server_failure() {
+        let error = ensure_ipc_response_succeeded(r#"{"success":false,"error":"unknown command"}"#)
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert!(error.to_string().contains("unknown command"));
+    }
+
+    #[test]
+    fn msg_response_keeps_success_and_legacy_responses_compatible() {
+        for response in [
+            r#"{"success":true,"data":null}"#,
+            r#"{"data":{"windows":[]}}"#,
+            "legacy_ok",
+        ] {
+            ensure_ipc_response_succeeded(response).unwrap();
+        }
+    }
 
     #[test]
     fn split_path_list_ignores_empty_entries() {

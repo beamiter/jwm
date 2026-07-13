@@ -5,6 +5,7 @@ pub mod application;
 pub mod backend;
 pub mod config;
 pub mod core;
+pub mod doctor;
 pub mod ipc;
 pub mod ipc_server;
 pub mod jwm;

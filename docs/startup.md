@@ -35,8 +35,39 @@ jwm --gen-config
 ```
 
 `--gen-config` writes both templates. An existing file is copied to the matching
-`*.toml.backup` path before replacement. `--check-config` validates TOML syntax
-and the deserialized configuration structure without constructing a backend.
+`*.toml.backup` path before replacement. Writes use a same-directory atomic
+replace, preserve an existing configuration symlink, and sync the new file
+before returning.
+
+`--check-config` validates both TOML structure and runtime semantics without
+constructing a backend. It reports unreachable shortcut collisions, unknown
+keys/functions/modifiers, unsafe tag and geometry ranges, invalid enum-like
+values, and media/display invariants. Warnings keep a usable configuration
+valid; errors return a non-zero status. Normal startup performs the same
+preflight and stops before opening a display when the selected configuration is
+syntactically invalid or has a blocking semantic error. It no longer silently
+starts with unrelated built-in defaults.
+
+Legacy templates that assigned Alt+Shift+C/S twice are recognized at runtime:
+the calculator scratchpad and sticky-window actions move to Alt+Control+C/S when
+those target chords are free. The diagnostic remains visible until the file is
+updated, so the compatibility migration never hides on-disk ambiguity.
+
+## Run the startup doctor
+
+The doctor is read-only: it does not generate configuration, open a display,
+or probe DRM devices by taking control of them.
+
+```bash
+jwm --backend x11rb --doctor
+jwm --backend wayland-udev --doctor --json
+```
+
+It checks the selected configuration, status-bar and `jwm-tool` executables,
+runtime-directory ownership and permissions, display/DRM prerequisites, and
+the D-Bus session environment. JSON output has a versioned schema and is useful
+for installers and support bundles. Warnings return success; a blocking error
+returns a non-zero status.
 
 ## Benchmark a compositor backend
 

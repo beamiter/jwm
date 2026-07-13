@@ -6,6 +6,9 @@
 name = "jwm"
 version = "0.2.0"
 edition = "2024"
+description = "A multi-backend X11 and Wayland window manager and compositor"
+repository = "https://github.com/beamiter/jwm"
+readme = "README.md"
 
 [[bin]]
 name = "jwm-tool"

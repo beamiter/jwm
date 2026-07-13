@@ -128,85 +128,102 @@ pub struct TreeNode {
 pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEnum), String> {
     match name {
         // --- Window management ---
-        "focusstack" => Ok((Jwm::focusstack as WMFuncType, parse_int_arg(args, 1))),
+        "focusstack" => Ok((Jwm::focusstack as WMFuncType, parse_int_arg(args, 1)?)),
         "app_launcher" => Ok((Jwm::app_launcher as WMFuncType, WMArgEnum::Int(0))),
         "monitor_layout" => Ok((Jwm::monitor_layout as WMFuncType, WMArgEnum::Int(0))),
         "lock_screen" => Ok((Jwm::lock_screen as WMFuncType, WMArgEnum::Int(0))),
-        "killclient" => Ok((Jwm::killclient, parse_int_arg(args, 0))),
-        "zoom" => Ok((Jwm::zoom, parse_int_arg(args, 0))),
-        "togglefloating" => Ok((Jwm::togglefloating, parse_int_arg(args, 0))),
-        "togglesticky" => Ok((Jwm::togglesticky, parse_int_arg(args, 0))),
-        "togglepip" => Ok((Jwm::togglepip, parse_int_arg(args, 0))),
+        "killclient" => Ok((Jwm::killclient, parse_int_arg(args, 0)?)),
+        "zoom" => Ok((Jwm::zoom, parse_int_arg(args, 0)?)),
+        "togglefloating" => Ok((Jwm::togglefloating, parse_int_arg(args, 0)?)),
+        "togglesticky" => Ok((Jwm::togglesticky, parse_int_arg(args, 0)?)),
+        "togglepip" => Ok((Jwm::togglepip, parse_int_arg(args, 0)?)),
         "togglescratchpad" => {
-            let cmd = parse_string_vec_arg(args).unwrap_or_else(|_| vec!["term".to_string()]);
+            let cmd = if argument_is_omitted(args) {
+                vec!["term".to_string()]
+            } else {
+                parse_string_vec_arg(args).map_err(|e| format!("togglescratchpad: {e}"))?
+            };
             Ok((Jwm::togglescratchpad, WMArgEnum::StringVec(cmd)))
         }
-        "movestack" => Ok((Jwm::movestack, parse_int_arg(args, 1))),
-        "focus_none" => Ok((Jwm::focus_none, parse_int_arg(args, 0))),
+        "movestack" => Ok((Jwm::movestack, parse_int_arg(args, 1)?)),
+        "focus_none" => Ok((Jwm::focus_none, parse_int_arg(args, 0)?)),
         "focus_window" => Ok((Jwm::focus_window, parse_window_id_arg(args)?)),
         "focus_tab" => {
-            let cmd = parse_string_vec_arg(args)
-                .unwrap_or_else(|_| vec!["0".to_string(), "0".to_string()]);
+            let cmd = if argument_is_omitted(args) {
+                vec!["0".to_string(), "0".to_string()]
+            } else {
+                parse_string_vec_arg(args).map_err(|e| format!("focus_tab: {e}"))?
+            };
             Ok((Jwm::focus_tab, WMArgEnum::StringVec(cmd)))
         }
-        "refocus" => Ok((Jwm::refocus, parse_int_arg(args, 0))),
+        "refocus" => Ok((Jwm::refocus, parse_int_arg(args, 0)?)),
 
         // --- Layout ---
-        "setmfact" => Ok((Jwm::setmfact, parse_float_arg(args, 0.0))),
-        "setcfact" => Ok((Jwm::setcfact, parse_float_arg(args, 0.0))),
-        "incnmaster" => Ok((Jwm::incnmaster, parse_int_arg(args, 1))),
+        "setmfact" => Ok((Jwm::setmfact, parse_float_arg(args, 0.0)?)),
+        "setcfact" => Ok((Jwm::setcfact, parse_float_arg(args, 0.0)?)),
+        "incnmaster" => Ok((Jwm::incnmaster, parse_int_arg(args, 1)?)),
         "scrolling_toggle_attach_mode" => {
-            Ok((Jwm::scrolling_toggle_attach_mode, parse_int_arg(args, 0)))
+            Ok((Jwm::scrolling_toggle_attach_mode, parse_int_arg(args, 0)?))
         }
-        "scrolling_focus_column" => Ok((Jwm::scrolling_focus_column, parse_int_arg(args, 1))),
-        "scrolling_move_column" => Ok((Jwm::scrolling_move_column, parse_int_arg(args, 1))),
-        "scrolling_focus_window" => Ok((Jwm::scrolling_focus_window, parse_int_arg(args, 1))),
-        "scrolling_consume" => Ok((Jwm::scrolling_consume, parse_int_arg(args, 1))),
-        "scrolling_expel" => Ok((Jwm::scrolling_expel, parse_int_arg(args, 1))),
+        "scrolling_focus_column" => Ok((Jwm::scrolling_focus_column, parse_int_arg(args, 1)?)),
+        "scrolling_move_column" => Ok((Jwm::scrolling_move_column, parse_int_arg(args, 1)?)),
+        "scrolling_focus_window" => Ok((Jwm::scrolling_focus_window, parse_int_arg(args, 1)?)),
+        "scrolling_consume" => Ok((Jwm::scrolling_consume, parse_int_arg(args, 1)?)),
+        "scrolling_expel" => Ok((Jwm::scrolling_expel, parse_int_arg(args, 1)?)),
         "setlayout" => {
             let layout = parse_layout_arg(args)?;
             Ok((Jwm::setlayout, layout))
         }
-        "cyclelayout" => Ok((Jwm::cyclelayout, parse_int_arg(args, 1))),
-        "togglebar" => Ok((Jwm::togglebar, parse_int_arg(args, 0))),
+        "cyclelayout" => Ok((Jwm::cyclelayout, parse_int_arg(args, 1)?)),
+        "togglebar" => Ok((Jwm::togglebar, parse_int_arg(args, 0)?)),
 
         // --- Tags ---
-        "view" => Ok((Jwm::view, parse_uint_arg(args))),
-        "tag" => Ok((Jwm::tag, parse_uint_arg(args))),
-        "toggleview" => Ok((Jwm::toggleview, parse_uint_arg(args))),
-        "toggletag" => Ok((Jwm::toggletag, parse_uint_arg(args))),
-        "loopview" => Ok((Jwm::loopview, parse_int_arg(args, 1))),
+        "view" => Ok((Jwm::view, parse_uint_arg(args)?)),
+        "tag" => Ok((Jwm::tag, parse_uint_arg(args)?)),
+        "toggleview" => Ok((Jwm::toggleview, parse_uint_arg(args)?)),
+        "toggletag" => Ok((Jwm::toggletag, parse_uint_arg(args)?)),
+        "loopview" => Ok((Jwm::loopview, parse_int_arg(args, 1)?)),
 
         // --- Monitor ---
-        "focusmon" => Ok((Jwm::focusmon, parse_int_arg(args, 1))),
-        "tagmon" => Ok((Jwm::tagmon, parse_int_arg(args, 1))),
+        "focusmon" => Ok((Jwm::focusmon, parse_int_arg(args, 1)?)),
+        "tagmon" => Ok((Jwm::tagmon, parse_int_arg(args, 1)?)),
 
         // --- Spawn ---
         "spawn" => {
-            let cmd = parse_string_vec_arg(args)?;
+            let cmd = parse_string_vec_arg(args).map_err(|e| format!("spawn: {e}"))?;
             Ok((Jwm::spawn, WMArgEnum::StringVec(cmd)))
         }
 
         // --- Misc ---
-        "quit" => Ok((Jwm::quit, parse_int_arg(args, 0))),
-        "restart" => Ok((Jwm::restart, parse_int_arg(args, 0))),
-        "togglecompositor" => Ok((Jwm::togglecompositor, parse_int_arg(args, 0))),
-        "togglepartialdamage" => Ok((Jwm::togglepartialdamage, parse_int_arg(args, 0))),
-        "toggle_slime" => Ok((Jwm::toggle_slime, parse_int_arg(args, 0))),
-        "toggle_overview" => Ok((Jwm::toggle_overview, parse_int_arg(args, 0))),
-        "cycle_overview" => Ok((Jwm::cycle_overview, parse_int_arg(args, 1))),
-        "toggle_magnifier" => Ok((Jwm::toggle_magnifier, parse_int_arg(args, 0))),
-        "toggle_peek" => Ok((Jwm::toggle_peek, parse_int_arg(args, 0))),
-        "toggle_annotation" => Ok((Jwm::toggle_annotation, parse_int_arg(args, 0))),
-        "toggle_recording" => Ok((Jwm::toggle_recording, parse_int_arg(args, 0))),
-        "toggle_audio_recording" => Ok((Jwm::toggle_audio_recording, parse_int_arg(args, 0))),
-        "toggle_dnd" => Ok((Jwm::toggle_dnd, parse_int_arg(args, 0))),
+        "quit" => Ok((Jwm::quit, parse_int_arg(args, 0)?)),
+        "restart" => Ok((Jwm::restart, parse_int_arg(args, 0)?)),
+        "togglecompositor" => Ok((Jwm::togglecompositor, parse_int_arg(args, 0)?)),
+        "togglepartialdamage" => Ok((Jwm::togglepartialdamage, parse_int_arg(args, 0)?)),
+        "toggle_slime" => Ok((Jwm::toggle_slime, parse_int_arg(args, 0)?)),
+        "toggle_overview" => Ok((Jwm::toggle_overview, parse_int_arg(args, 0)?)),
+        "cycle_overview" => Ok((Jwm::cycle_overview, parse_int_arg(args, 1)?)),
+        "toggle_magnifier" => Ok((Jwm::toggle_magnifier, parse_int_arg(args, 0)?)),
+        "toggle_peek" => Ok((Jwm::toggle_peek, parse_int_arg(args, 0)?)),
+        "toggle_annotation" => Ok((Jwm::toggle_annotation, parse_int_arg(args, 0)?)),
+        "toggle_recording" => Ok((Jwm::toggle_recording, parse_int_arg(args, 0)?)),
+        "toggle_audio_recording" => Ok((Jwm::toggle_audio_recording, parse_int_arg(args, 0)?)),
+        "toggle_dnd" => Ok((Jwm::toggle_dnd, parse_int_arg(args, 0)?)),
 
         // --- Session ---
-        "save_session" => Ok((Jwm::save_session, parse_int_arg(args, 0))),
-        "restore_session" => Ok((Jwm::restore_session, parse_int_arg(args, 0))),
+        "save_session" => Ok((Jwm::save_session, parse_int_arg(args, 0)?)),
+        "restore_session" => Ok((Jwm::restore_session, parse_int_arg(args, 0)?)),
 
         _ => Err(format!("unknown command: {name}")),
+    }
+}
+
+/// Returns whether `name` identifies an IPC command, independent of whether a
+/// particular argument value is valid for that command.
+#[must_use]
+pub fn is_known_command(name: &str) -> bool {
+    match dispatch_command(name, &Value::Null) {
+        Ok(_) => true,
+        Err(error) => !error.starts_with("unknown command:"),
     }
 }
 
@@ -214,56 +231,127 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
 // Argument parsers
 // ---------------------------------------------------------------------------
 
-fn parse_int_arg(args: &Value, default: i32) -> WMArgEnum {
-    let v = args
-        .get("value")
-        .or_else(|| args.get("v"))
-        .and_then(|v| v.as_i64())
-        .map(|v| v as i32)
-        .or_else(|| args.as_i64().map(|v| v as i32))
-        .unwrap_or(default);
-    WMArgEnum::Int(v)
+fn argument_is_omitted(args: &Value) -> bool {
+    args.is_null() || args.as_object().is_some_and(serde_json::Map::is_empty)
 }
 
-fn parse_float_arg(args: &Value, default: f32) -> WMArgEnum {
-    let v = args
-        .get("value")
-        .or_else(|| args.get("v"))
-        .and_then(|v| v.as_f64())
-        .map(|v| v as f32)
-        .or_else(|| args.as_f64().map(|v| v as f32))
-        .unwrap_or(default);
-    WMArgEnum::Float(v)
+/// Extract an optional scalar argument. `null` and `{}` preserve the historical
+/// command defaults, while a non-empty object without a supported key is a
+/// caller error rather than silently behaving as if no argument was supplied.
+fn scalar_arg_value<'a>(
+    args: &'a Value,
+    keys: &[&str],
+    expected: &str,
+) -> Result<Option<&'a Value>, String> {
+    match args {
+        Value::Null => Ok(None),
+        Value::Object(values) => {
+            if let Some(value) = keys.iter().find_map(|key| values.get(*key)) {
+                if value.is_null() {
+                    Ok(None)
+                } else {
+                    Ok(Some(value))
+                }
+            } else if values.is_empty() {
+                Ok(None)
+            } else {
+                Err(format!(
+                    "expected {expected} directly or in field {}",
+                    keys.iter()
+                        .map(|key| format!("'{key}'"))
+                        .collect::<Vec<_>>()
+                        .join("/")
+                ))
+            }
+        }
+        value => Ok(Some(value)),
+    }
 }
 
-fn parse_uint_arg(args: &Value) -> WMArgEnum {
-    let v = args
-        .get("tag")
-        .or_else(|| args.get("value"))
-        .or_else(|| args.get("v"))
-        .and_then(|v| v.as_u64())
-        .map(|v| v as u32)
-        .or_else(|| args.as_u64().map(|v| v as u32))
-        .unwrap_or(0);
-    WMArgEnum::UInt(v)
+fn parse_int_arg(args: &Value, default: i32) -> Result<WMArgEnum, String> {
+    let Some(value) = scalar_arg_value(args, &["value", "v"], "an i32 integer")? else {
+        return Ok(WMArgEnum::Int(default));
+    };
+    let Value::Number(number) = value else {
+        return Err(format!("expected an i32 integer, got {value}"));
+    };
+    let parsed = if let Some(value) = number.as_i64() {
+        i32::try_from(value)
+    } else if let Some(value) = number.as_u64() {
+        i32::try_from(value)
+    } else {
+        return Err(format!("expected an i32 integer, got {value}"));
+    }
+    .map_err(|_| format!("integer argument {value} is outside the i32 range"))?;
+    Ok(WMArgEnum::Int(parsed))
+}
+
+fn parse_float_arg(args: &Value, default: f32) -> Result<WMArgEnum, String> {
+    let Some(value) = scalar_arg_value(args, &["value", "v"], "a finite number")? else {
+        return Ok(WMArgEnum::Float(default));
+    };
+    let Some(parsed) = value.as_f64() else {
+        return Err(format!("expected a finite number, got {value}"));
+    };
+    if !parsed.is_finite() || parsed < -(f32::MAX as f64) || parsed > f32::MAX as f64 {
+        return Err(format!(
+            "floating-point argument {value} is outside the finite f32 range"
+        ));
+    }
+    Ok(WMArgEnum::Float(parsed as f32))
+}
+
+fn parse_uint_arg(args: &Value) -> Result<WMArgEnum, String> {
+    let Some(value) = scalar_arg_value(args, &["tag", "value", "v"], "a u32 tag mask")? else {
+        return Ok(WMArgEnum::UInt(0));
+    };
+    let Value::Number(number) = value else {
+        return Err(format!("expected a u32 tag mask, got {value}"));
+    };
+    let Some(parsed) = number.as_u64() else {
+        return Err(format!(
+            "expected a non-negative integer tag mask, got {value}"
+        ));
+    };
+    let parsed =
+        u32::try_from(parsed).map_err(|_| format!("tag mask {value} is outside the u32 range"))?;
+    Ok(WMArgEnum::UInt(parsed))
 }
 
 fn parse_string_vec_arg(args: &Value) -> Result<Vec<String>, String> {
-    if let Some(arr) = args.get("cmd").and_then(|v| v.as_array()) {
-        Ok(arr
+    let value = match args {
+        Value::Object(values) => values.get("cmd").ok_or_else(|| {
+            "expected a command string or string array in field 'cmd'".to_string()
+        })?,
+        value => value,
+    };
+
+    let command = match value {
+        Value::String(value) => vec![value.clone()],
+        Value::Array(values) => values
             .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect())
-    } else if let Some(arr) = args.as_array() {
-        Ok(arr
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect())
-    } else if let Some(s) = args.as_str() {
-        Ok(vec![s.to_string()])
-    } else {
-        Err("spawn requires a command array or string".into())
+            .enumerate()
+            .map(|(index, value)| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("command element {index} must be a string, got {value}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => {
+            return Err(format!(
+                "expected a command string or string array, got {value}"
+            ));
+        }
+    };
+
+    let Some(program) = command.first() else {
+        return Err("command array must not be empty".to_string());
+    };
+    if program.trim().is_empty() {
+        return Err("command program must not be empty".to_string());
     }
+    Ok(command)
 }
 
 fn parse_window_id_arg(args: &Value) -> Result<WMArgEnum, String> {
@@ -280,12 +368,11 @@ fn parse_window_id_arg(args: &Value) -> Result<WMArgEnum, String> {
 }
 
 fn parse_layout_arg(args: &Value) -> Result<WMArgEnum, String> {
-    let name = args
-        .get("layout")
-        .or_else(|| args.get("value"))
-        .and_then(|v| v.as_str())
-        .or_else(|| args.as_str())
-        .unwrap_or("tile");
+    let name = match scalar_arg_value(args, &["layout", "value"], "a layout name")? {
+        None => "tile",
+        Some(Value::String(name)) if !name.trim().is_empty() => name,
+        Some(value) => return Err(format!("expected a non-empty layout name, got {value}")),
+    };
     let layout = match name.to_lowercase().as_str() {
         "tile" => LayoutEnum::TILE,
         "float" => LayoutEnum::FLOAT,
@@ -372,6 +459,12 @@ mod tests {
     fn dispatch_unknown_command_errors() {
         let args = serde_json::json!(null);
         assert!(dispatch_command("nonexistent", &args).is_err());
+        assert!(!is_known_command("nonexistent"));
+        assert!(is_known_command("focusstack"));
+        assert!(
+            is_known_command("spawn"),
+            "argument validation must not make a known command look unknown"
+        );
     }
 
     #[test]
@@ -382,6 +475,112 @@ mod tests {
             arg,
             WMArgEnum::StringVec(vec!["alacritty".into(), "--title".into(), "test".into()])
         );
+
+        let (_, arg) = dispatch_command("spawn", &serde_json::json!("alacritty")).unwrap();
+        assert_eq!(arg, WMArgEnum::StringVec(vec!["alacritty".into()]));
+    }
+
+    #[test]
+    fn dispatch_spawn_rejects_empty_or_non_string_commands() {
+        for args in [
+            serde_json::json!([]),
+            serde_json::json!({"cmd": []}),
+            serde_json::json!([1]),
+            serde_json::json!(["alacritty", 1]),
+            serde_json::json!({"cmd": [false]}),
+            serde_json::json!(""),
+            serde_json::json!({"cmd": ["   "]}),
+        ] {
+            let error = dispatch_command("spawn", &args).unwrap_err();
+            assert!(error.starts_with("spawn:"), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn optional_string_vector_commands_default_only_when_omitted() {
+        let (_, arg) = dispatch_command("togglescratchpad", &serde_json::Value::Null).unwrap();
+        assert_eq!(arg, WMArgEnum::StringVec(vec!["term".into()]));
+
+        let (_, arg) = dispatch_command("focus_tab", &serde_json::json!({})).unwrap();
+        assert_eq!(arg, WMArgEnum::StringVec(vec!["0".into(), "0".into()]));
+
+        assert!(dispatch_command("togglescratchpad", &serde_json::json!({"bad": 1})).is_err());
+        assert!(dispatch_command("focus_tab", &serde_json::json!(["0", 1])).is_err());
+    }
+
+    #[test]
+    fn integer_arguments_reject_wrong_types_and_overflow() {
+        for args in [
+            serde_json::json!("1"),
+            serde_json::json!(1.5),
+            serde_json::json!({"value": false}),
+            serde_json::json!({"unexpected": 1}),
+            serde_json::json!(i64::from(i32::MAX) + 1),
+            serde_json::json!(i64::from(i32::MIN) - 1),
+        ] {
+            assert!(
+                dispatch_command("focusstack", &args).is_err(),
+                "accepted invalid integer argument: {args}"
+            );
+        }
+
+        let (_, arg) = dispatch_command("focusstack", &serde_json::json!(i32::MAX)).unwrap();
+        assert_eq!(arg, WMArgEnum::Int(i32::MAX));
+        let (_, arg) = dispatch_command("focusstack", &serde_json::json!({"v": i32::MIN})).unwrap();
+        assert_eq!(arg, WMArgEnum::Int(i32::MIN));
+    }
+
+    #[test]
+    fn omitted_integer_arguments_keep_existing_defaults() {
+        let (_, arg) = dispatch_command("focusstack", &serde_json::Value::Null).unwrap();
+        assert_eq!(arg, WMArgEnum::Int(1));
+        let (_, arg) = dispatch_command("killclient", &serde_json::json!({})).unwrap();
+        assert_eq!(arg, WMArgEnum::Int(0));
+        let (_, arg) = dispatch_command("focusstack", &serde_json::json!({"value": null})).unwrap();
+        assert_eq!(arg, WMArgEnum::Int(1));
+    }
+
+    #[test]
+    fn float_arguments_reject_wrong_types_and_non_f32_values() {
+        for args in [
+            serde_json::json!("0.1"),
+            serde_json::json!({"value": true}),
+            serde_json::json!({"unexpected": 0.1}),
+            serde_json::json!(1.0e100),
+            serde_json::json!(-1.0e100),
+        ] {
+            assert!(
+                dispatch_command("setmfact", &args).is_err(),
+                "accepted invalid float argument: {args}"
+            );
+        }
+
+        let (_, arg) = dispatch_command("setmfact", &serde_json::json!({"value": 1})).unwrap();
+        assert_eq!(arg, WMArgEnum::Float(1.0));
+        let (_, arg) = dispatch_command("setmfact", &serde_json::Value::Null).unwrap();
+        assert_eq!(arg, WMArgEnum::Float(0.0));
+    }
+
+    #[test]
+    fn tag_arguments_reject_wrong_types_negative_values_and_overflow() {
+        for args in [
+            serde_json::json!("2"),
+            serde_json::json!(-1),
+            serde_json::json!(2.5),
+            serde_json::json!({"tag": false}),
+            serde_json::json!({"unexpected": 2}),
+            serde_json::json!(u64::from(u32::MAX) + 1),
+        ] {
+            assert!(
+                dispatch_command("view", &args).is_err(),
+                "accepted invalid tag argument: {args}"
+            );
+        }
+
+        let (_, arg) = dispatch_command("view", &serde_json::json!({"tag": u32::MAX})).unwrap();
+        assert_eq!(arg, WMArgEnum::UInt(u32::MAX));
+        let (_, arg) = dispatch_command("view", &serde_json::Value::Null).unwrap();
+        assert_eq!(arg, WMArgEnum::UInt(0));
     }
 
     #[test]
@@ -391,6 +590,30 @@ mod tests {
         assert!(result.is_ok());
         let (_, arg) = result.unwrap();
         assert!(matches!(arg, WMArgEnum::Layout(_)));
+    }
+
+    #[test]
+    fn layout_arguments_default_only_when_omitted_and_reject_invalid_shapes() {
+        for args in [serde_json::Value::Null, serde_json::json!({})] {
+            let (_, arg) = dispatch_command("setlayout", &args).unwrap();
+            let WMArgEnum::Layout(layout) = arg else {
+                panic!("expected layout argument");
+            };
+            assert_eq!(*layout, LayoutEnum::TILE);
+        }
+
+        for args in [
+            serde_json::json!({"layuot": "monocle"}),
+            serde_json::json!(7),
+            serde_json::json!([]),
+            serde_json::json!({"layout": ""}),
+            serde_json::json!({"layout": false}),
+        ] {
+            assert!(
+                dispatch_command("setlayout", &args).is_err(),
+                "accepted invalid layout argument: {args}"
+            );
+        }
     }
 
     #[test]

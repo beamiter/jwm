@@ -131,14 +131,17 @@ impl Jwm {
         if let WMArgEnum::StringVec(ref mut v) = mut_arg {
             info!("[spawn] spawning command: {:?}", v);
 
-            let mut command = Command::new(&v[0]);
+            let Some(program) = v.first().filter(|program| !program.trim().is_empty()) else {
+                return Err("spawn requires a non-empty command program".into());
+            };
+            let mut command = Command::new(program);
             command.args(&v[1..]);
 
             Self::setup_smithay_child_env(&mut command, _backend);
 
             // Redirect child stderr to /tmp/jwm-{name}-stderr.log so Python
             // exceptions and other error output survive when JWM runs as daemon.
-            let cmd_name = std::path::Path::new(&v[0])
+            let cmd_name = std::path::Path::new(program)
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("child");

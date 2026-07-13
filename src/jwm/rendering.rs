@@ -57,8 +57,7 @@ fn push_scene_window(
 }
 
 impl Jwm {
-    #[allow(dead_code)]
-    pub(super) fn render_compositor_immediate(&mut self, backend: &mut dyn Backend) {
+    pub(super) fn render_pending_frame(&mut self, backend: &mut dyn Backend) {
         if !backend.has_compositor() {
             return;
         }

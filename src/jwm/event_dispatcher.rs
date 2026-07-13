@@ -938,6 +938,198 @@ impl Jwm {
     }
 }
 
+#[cfg(test)]
+// Kept next to the event-handler implementation it protects; this file also
+// contains later inherent helpers used by unrelated event families.
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+    use crate::backend::api::{
+        BackendDiagnostics, Capabilities, ColorAllocator, CompositorAnnotation,
+        CompositorBenchmark, CompositorControl, CompositorMedia, CompositorWindowEffects,
+        CompositorWorkspaceEffects, CursorProvider, DisplayControl, InputOps, KeyOps, OutputOps,
+        PropertyOps, RenderScheduler, WindowOps,
+    };
+    use crate::backend::wayland_dummy_ops::{
+        DummyColorAllocator, DummyCursorProvider, DummyInputOps, DummyKeyOps, DummyOutputOps,
+        DummyPropertyOps, DummyWindowOps,
+    };
+    use crate::core::animation::AnimationManager;
+    use crate::core::state::WMState;
+    use crate::jwm::features::FeatureStates;
+    use shared_structures::SharedMessage;
+    use slotmap::SecondaryMap;
+    use std::any::Any;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::AtomicBool;
+
+    struct RenderSpyBackend {
+        window_ops: DummyWindowOps,
+        input_ops: DummyInputOps,
+        property_ops: DummyPropertyOps,
+        output_ops: DummyOutputOps,
+        key_ops: DummyKeyOps,
+        cursor_provider: DummyCursorProvider,
+        color_allocator: DummyColorAllocator,
+        rendered_frames: usize,
+    }
+
+    impl RenderSpyBackend {
+        fn new() -> Self {
+            Self {
+                window_ops: DummyWindowOps,
+                input_ops: DummyInputOps,
+                property_ops: DummyPropertyOps,
+                output_ops: DummyOutputOps,
+                key_ops: DummyKeyOps,
+                cursor_provider: DummyCursorProvider,
+                color_allocator: DummyColorAllocator,
+                rendered_frames: 0,
+            }
+        }
+    }
+
+    impl CompositorBenchmark for RenderSpyBackend {}
+    impl BackendDiagnostics for RenderSpyBackend {}
+    impl CompositorControl for RenderSpyBackend {}
+    impl CompositorMedia for RenderSpyBackend {}
+    impl CompositorWorkspaceEffects for RenderSpyBackend {}
+    impl CompositorWindowEffects for RenderSpyBackend {}
+    impl CompositorAnnotation for RenderSpyBackend {}
+    impl DisplayControl for RenderSpyBackend {}
+
+    impl RenderScheduler for RenderSpyBackend {
+        fn has_compositor(&self) -> bool {
+            true
+        }
+
+        fn compositor_needs_render(&self) -> bool {
+            true
+        }
+    }
+
+    impl Backend for RenderSpyBackend {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::default()
+        }
+
+        fn root_window(&self) -> Option<WindowId> {
+            Some(WindowId::from_raw(0))
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn check_existing_wm(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn window_ops(&self) -> &dyn WindowOps {
+            &self.window_ops
+        }
+
+        fn input_ops(&self) -> &dyn InputOps {
+            &self.input_ops
+        }
+
+        fn property_ops(&self) -> &dyn PropertyOps {
+            &self.property_ops
+        }
+
+        fn output_ops(&self) -> &dyn OutputOps {
+            &self.output_ops
+        }
+
+        fn key_ops(&self) -> &dyn KeyOps {
+            &self.key_ops
+        }
+
+        fn key_ops_mut(&mut self) -> &mut dyn KeyOps {
+            &mut self.key_ops
+        }
+
+        fn cursor_provider(&mut self) -> &mut dyn CursorProvider {
+            &mut self.cursor_provider
+        }
+
+        fn color_allocator(&mut self) -> &mut dyn ColorAllocator {
+            &mut self.color_allocator
+        }
+
+        fn run(&mut self, _handler: &mut dyn EventHandler) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn compositor_render_frame(
+            &mut self,
+            _scene: &[(u64, i32, i32, u32, u32)],
+            _focused_window: Option<u64>,
+        ) -> Result<bool, BackendError> {
+            self.rendered_frames += 1;
+            Ok(true)
+        }
+    }
+
+    fn empty_jwm() -> Jwm {
+        Jwm {
+            state: WMState::new(),
+            s_w: 0,
+            s_h: 0,
+            running: AtomicBool::new(true),
+            is_restarting: AtomicBool::new(false),
+            last_mouse_root: (0.0, 0.0),
+            message: SharedMessage::default(),
+            secondary_bars: HashMap::new(),
+            secondary_bar_failures: HashMap::new(),
+            secondary_bar_retry_after: HashMap::new(),
+            last_key_grab_refresh_at: None,
+            pending_bar_updates: HashSet::new(),
+            suppress_mouse_focus_until: None,
+            suppress_layout_animation: false,
+            last_stacking: SecondaryMap::new(),
+            scratchpads: HashMap::new(),
+            scratchpad_pending_name: None,
+            animations: AnimationManager::new(),
+            key_bindings: Vec::new(),
+            chord_compiled: None,
+            chord_armed_until: None,
+            do_not_disturb: false,
+            debug_hud_on: false,
+            external_struts: HashMap::new(),
+            ipc_server: None,
+            config_last_modified: None,
+            config_reload_debounce: None,
+            config_reload_count: 0,
+            config_reload_last_unix_ms: None,
+            config_reload_last_success: None,
+            config_reload_last_error: None,
+            override_redirect_windows: HashSet::new(),
+            or_window_geometries: HashMap::new(),
+            scrolling_states: HashMap::new(),
+            last_night_light_update: None,
+            features: FeatureStates::new(),
+            event_coalescer:
+                crate::backend::x11::compositor_common::event_coalescer::EventCoalescer::new(),
+            pending_pings: HashMap::new(),
+            unresponsive_windows: HashSet::new(),
+            last_ping_time: None,
+            last_user_activity_time: 0,
+        }
+    }
+
+    #[test]
+    fn event_handler_trait_object_delegates_immediate_render_to_jwm() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+
+        let handler: &mut dyn EventHandler = &mut jwm;
+        handler.render_compositor_immediate(&mut backend);
+
+        assert_eq!(backend.rendered_frames, 1);
+    }
+}
+
 // =================================================================================
 // EventHandler trait 实现 - 事件循环主处理器
 // =================================================================================
@@ -1184,6 +1376,10 @@ impl EventHandler for Jwm {
 
     fn needs_tick(&self) -> bool {
         self.animations.has_active() || self.features.overview.active || self.features.expose_active
+    }
+
+    fn render_compositor_immediate(&mut self, backend: &mut dyn Backend) {
+        self.render_pending_frame(backend);
     }
 }
 

@@ -5,9 +5,12 @@ use jwm::application::{
 };
 use log::{error, info, warn};
 use std::env;
+use std::fmt;
 use std::os::unix::fs::FileTypeExt;
 use std::process::Command;
 use xbar_core::initialize_logging;
+
+use jwm::doctor::{DoctorReport, DoctorStatus, diagnose};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -30,23 +33,40 @@ struct Cli {
     /// Generate fresh X11 and Wayland configuration templates, backing up existing files.
     #[arg(
         long,
-        conflicts_with_all = ["check_config", "print_config_path"]
+        conflicts_with_all = ["check_config", "print_config_path", "doctor"]
     )]
     gen_config: bool,
 
     /// Validate the selected backend's configuration and exit.
     #[arg(
         long,
-        conflicts_with_all = ["gen_config", "print_config_path"]
+        conflicts_with_all = ["gen_config", "print_config_path", "doctor"]
     )]
     check_config: bool,
 
     /// Print the selected backend's configuration path and exit.
     #[arg(
         long,
-        conflicts_with_all = ["gen_config", "check_config"]
+        conflicts_with_all = ["gen_config", "check_config", "doctor"]
     )]
     print_config_path: bool,
+
+    /// Run read-only startup health checks without constructing a display backend.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "gen_config",
+            "check_config",
+            "print_config_path",
+            "benchmark",
+            "benchmark_warmup"
+        ]
+    )]
+    doctor: bool,
+
+    /// Emit the doctor report as machine-readable JSON.
+    #[arg(long, requires = "doctor")]
+    json: bool,
 
     /// Collect a compositor benchmark for this many frames, then exit.
     #[arg(
@@ -85,8 +105,58 @@ fn parse_positive_u32(value: &str) -> Result<u32, String> {
     Ok(parsed)
 }
 
+#[derive(Debug)]
+struct DoctorFailed {
+    errors: usize,
+}
+
+impl fmt::Display for DoctorFailed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "JWM doctor found {} blocking error(s)", self.errors)
+    }
+}
+
+impl std::error::Error for DoctorFailed {}
+
+fn print_doctor_report(report: &DoctorReport) {
+    println!("JWM startup doctor (backend: {})", report.backend);
+    for check in &report.checks {
+        let label = match check.status {
+            DoctorStatus::Pass => "PASS",
+            DoctorStatus::Warning => "WARN",
+            DoctorStatus::Error => "FAIL",
+        };
+        println!("[{label}] {}: {}", check.id, check.summary);
+        if let Some(detail) = &check.detail {
+            println!("       {detail}");
+        }
+        if let Some(hint) = &check.hint {
+            println!("       hint: {hint}");
+        }
+    }
+    println!(
+        "Summary: {} passed, {} warning(s), {} error(s)",
+        report.summary.passed, report.summary.warnings, report.summary.errors
+    );
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+
+    if cli.doctor {
+        let report = diagnose(cli.backend);
+        if cli.json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            print_doctor_report(&report);
+        }
+        if report.status == DoctorStatus::Error {
+            return Err(Box::new(DoctorFailed {
+                errors: report.summary.errors,
+            }));
+        }
+        return Ok(());
+    }
 
     if cli.print_config_path {
         println!("{}", config_path(cli.backend).display());
@@ -94,10 +164,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if cli.check_config {
-        let path = validate_config(cli.backend)?;
+        let check = validate_config(cli.backend)?;
+        if check.diagnostics.has_errors() {
+            return Err(Box::new(jwm::config::ConfigError::Validation(
+                check.diagnostics,
+            )));
+        }
+        for issue in check.diagnostics.issues() {
+            eprintln!("{issue}");
+        }
         println!(
-            "Configuration syntax and structure are valid: {}",
-            path.display()
+            "Configuration syntax and semantics are valid: {} ({} warning(s))",
+            check.path.display(),
+            check.diagnostics.warning_count()
         );
         return Ok(());
     }
@@ -343,6 +422,18 @@ mod tests {
     #[test]
     fn cli_rejects_conflicting_config_actions() {
         assert!(Cli::try_parse_from(["jwm", "--gen-config", "--check-config"]).is_err());
+    }
+
+    #[test]
+    fn cli_accepts_doctor_json_and_rejects_invalid_combinations() {
+        let cli = Cli::try_parse_from(["jwm", "--backend", "winit", "--doctor", "--json"]).unwrap();
+        assert!(cli.doctor);
+        assert!(cli.json);
+        assert_eq!(cli.backend.as_str(), "wayland-winit");
+
+        assert!(Cli::try_parse_from(["jwm", "--json"]).is_err());
+        assert!(Cli::try_parse_from(["jwm", "--doctor", "--check-config"]).is_err());
+        assert!(Cli::try_parse_from(["jwm", "--doctor", "--benchmark", "10"]).is_err());
     }
 
     #[test]

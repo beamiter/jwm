@@ -1,3 +1,4 @@
 [D-BUS Service]
 Name=org.freedesktop.impl.portal.desktop.jwm
-Exec=/home/mm/.local/libexec/jwm-portal
+# Replaced with the user's absolute libexec path by scripts/install-portal.sh.
+Exec=@JWM_PORTAL_EXEC@

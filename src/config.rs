@@ -1,7 +1,11 @@
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock};
 
 use std::fmt;
@@ -17,7 +21,89 @@ use std::time::Duration;
 use crate::backend::common_define::keys as k;
 use crate::backend::common_define::{KeySym, Mods, MouseButton};
 
+mod validation;
+
+pub use validation::{ConfigDiagnostic, ConfigDiagnosticLevel, ConfigDiagnostics};
+
 pub const LOAD_LOCAL_CONFIG: bool = true;
+
+static CONFIG_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn resolve_write_destination(path: &Path) -> std::io::Result<std::path::PathBuf> {
+    const MAX_SYMLINK_DEPTH: usize = 40;
+
+    let mut destination = path.to_path_buf();
+    for _ in 0..MAX_SYMLINK_DEPTH {
+        match fs::symlink_metadata(&destination) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let target = fs::read_link(&destination)?;
+                destination = if target.is_absolute() {
+                    target
+                } else {
+                    destination
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(target)
+                };
+            }
+            Ok(_) => return Ok(destination),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(destination);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "configuration symlink chain exceeds {MAX_SYMLINK_DEPTH} entries: {}",
+            path.display()
+        ),
+    ))
+}
+
+fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    // Preserve symlink-based dotfile setups. Renaming over `path` itself would
+    // replace the link; resolving the complete chain lets us atomically
+    // replace its target while leaving every user-managed link intact. The
+    // lexical walk also supports a final target that does not exist yet.
+    let destination = resolve_write_destination(path)?;
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+
+    let file_name = destination
+        .file_name()
+        .map_or_else(|| "config".into(), |name| name.to_string_lossy());
+    let sequence = CONFIG_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(
+        ".{file_name}.tmp-{}-{sequence}",
+        std::process::id()
+    ));
+
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        if let Ok(metadata) = fs::metadata(&destination) {
+            file.set_permissions(metadata.permissions())?;
+        }
+        file.write_all(contents)?;
+        file.sync_all()?;
+        fs::rename(&temporary, &destination)?;
+        // Persist the directory entry as well as the file contents so a
+        // successful return survives a sudden power loss on local filesystems.
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
 
 // ---------------------------------------------------------------------------
 // Backend family — set once by main() before CONFIG is first accessed.
@@ -44,7 +130,9 @@ pub fn get_backend_family() -> BackendFamily {
     *ACTIVE_BACKEND.get().unwrap_or(&BackendFamily::X11)
 }
 
-pub const STATUS_BAR_NAME: &str = "gtk_bar";
+/// Matches the bar installed by `scripts/install_jwm_scripts.sh` when the user
+/// does not select another implementation explicitly.
+pub const STATUS_BAR_NAME: &str = "egui_bar";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TomlConfig {
@@ -1664,7 +1752,7 @@ impl Config {
                 ]),
             },
             KeyConfig {
-                modifier: vec!["Mod1".to_string(), "Shift".to_string()],
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
                 key: "c".to_string(),
                 function: "togglescratchpad".to_string(),
                 argument: ArgumentConfig::StringVec(vec![
@@ -1673,7 +1761,7 @@ impl Config {
                 ]),
             },
             KeyConfig {
-                modifier: vec!["Mod1".to_string(), "Shift".to_string()],
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
                 key: "s".to_string(),
                 function: "togglesticky".to_string(),
                 argument: ArgumentConfig::Int(0),
@@ -1784,144 +1872,31 @@ impl Config {
         let content = fs::read_to_string(path)?;
         let config: TomlConfig = toml::from_str(&content)?;
         let cfg = Self { inner: config };
-        cfg.warn_about_invalid_values();
+        let diagnostics = cfg.diagnostics();
+        if diagnostics.has_errors() {
+            return Err(ConfigError::Validation(diagnostics));
+        }
+        if !diagnostics.is_empty() {
+            log::warn!("[config] {diagnostics}");
+        }
         Ok(cfg)
     }
 
-    /// Walk the loaded config and emit a single warning summarising any
-    /// values that are syntactically valid TOML but semantically suspect:
-    /// out-of-range numbers, unknown keybinding function names, unknown
-    /// easings, rules pointing at impossible monitor indices. Does not
-    /// reject the config — keeps the previous load_from_file contract.
-    fn warn_about_invalid_values(&self) {
-        let mut problems: Vec<String> = Vec::new();
-        let b = &self.inner.behavior;
-
-        let in_range = |label: &str, v: f32, lo: f32, hi: f32, problems: &mut Vec<String>| {
-            if !(lo..=hi).contains(&v) {
-                problems.push(format!("{label}={v} out of [{lo}, {hi}]"));
-            }
-        };
-        in_range(
-            "behavior.active_opacity",
-            b.active_opacity,
-            0.0,
-            1.0,
-            &mut problems,
-        );
-        in_range(
-            "behavior.inactive_opacity",
-            b.inactive_opacity,
-            0.0,
-            1.0,
-            &mut problems,
-        );
-        in_range(
-            "behavior.blur_temporal_mix_ratio",
-            b.blur_temporal_mix_ratio,
-            0.0,
-            1.0,
-            &mut problems,
-        );
-        if b.blur_strength > 5 {
-            problems.push(format!(
-                "behavior.blur_strength={} out of [0, 5]",
-                b.blur_strength
-            ));
-        }
-        if b.corner_radius < 0.0 || b.corner_radius > 64.0 {
-            problems.push(format!(
-                "behavior.corner_radius={} out of [0, 64]",
-                b.corner_radius
-            ));
-        }
-
-        const KNOWN_EASINGS: &[&str] = &[
-            "linear",
-            "ease-in",
-            "ease-out",
-            "ease-in-out",
-            "bounce",
-            "elastic",
-        ];
-        if !KNOWN_EASINGS.contains(&self.inner.animation.easing.as_str()) {
-            problems.push(format!(
-                "animation.easing='{}' is not one of {:?} (falling back to ease-out)",
-                self.inner.animation.easing, KNOWN_EASINGS
-            ));
-        }
-
-        for (i, k) in self.inner.keybindings.keys.iter().enumerate() {
-            if self.parse_function(&k.function).is_none() {
-                problems.push(format!(
-                    "keybindings.keys[{i}]: unknown function '{}'",
-                    k.function
-                ));
-            }
-        }
-
-        let tag_count = self.inner.layout.tags_length;
-        for (i, r) in self.inner.rules.iter().enumerate() {
-            if tag_count > 0 && r.tags >= (1usize << tag_count) {
-                problems.push(format!(
-                    "rules[{i}] (class='{}'): tags=0x{:x} references bits beyond tag_count={}",
-                    r.class, r.tags, tag_count
-                ));
-            }
-            if r.monitor < -1 {
-                problems.push(format!(
-                    "rules[{i}] (class='{}'): monitor={} (must be >=-1)",
-                    r.class, r.monitor
-                ));
-            }
-        }
-
-        for (i, wt) in b.wallpaper_tags.iter().enumerate() {
-            if tag_count > 0 && wt.tag as usize >= tag_count {
-                problems.push(format!(
-                    "behavior.wallpaper_tags[{i}]: tag={} >= tag_count={}",
-                    wt.tag, tag_count
-                ));
-            }
-            if wt.monitor < -1 {
-                problems.push(format!(
-                    "behavior.wallpaper_tags[{i}]: monitor={} (must be >=-1)",
-                    wt.monitor
-                ));
-            }
-        }
-
-        for (i, rule) in b.scrolling_column_width_rules.iter().enumerate() {
-            let Some((factor, pattern)) = rule.split_once(':') else {
-                problems.push(format!(
-                    "behavior.scrolling_column_width_rules[{i}]='{rule}' must use 'factor:pattern'"
-                ));
-                continue;
-            };
-            match factor.trim().parse::<f32>() {
-                Ok(value) if value.is_finite() && value > 0.0 => {}
-                _ => problems.push(format!(
-                    "behavior.scrolling_column_width_rules[{i}]='{rule}' has invalid factor"
-                )),
-            }
-            if pattern.trim().is_empty() {
-                problems.push(format!(
-                    "behavior.scrolling_column_width_rules[{i}]='{rule}' has empty pattern"
-                ));
-            }
-        }
-
-        if !problems.is_empty() {
-            log::warn!(
-                "[config] {} suspect value(s) detected:\n  - {}",
-                problems.len(),
-                problems.join("\n  - ")
-            );
-        }
-    }
-
     pub fn load_default() -> Self {
-        Self::load_from_file(Self::resolve_load_path()).unwrap_or_else(|_| Self::default())
+        let path = Self::resolve_load_path();
+        match Self::load_from_file(&path) {
+            Ok(config) => {
+                println!("Configuration loaded from: {}", path.display());
+                config
+            }
+            Err(error) => {
+                eprintln!(
+                    "Failed to load configuration from {}: {error}; using built-in defaults",
+                    path.display()
+                );
+                Self::default()
+            }
+        }
     }
 
     pub fn key_configs(&self) -> &[KeyConfig] {
@@ -2038,8 +2013,56 @@ impl Config {
     pub fn get_keys(&self) -> Vec<WMKey> {
         let mut keys = Vec::new();
 
+        let chord_is_occupied = |modifiers: Mods, key: &str| {
+            self.inner.keybindings.keys.iter().any(|binding| {
+                binding.key == key && self.parse_modifiers(&binding.modifier) == modifiers
+            })
+        };
+        let calc_migration_available = !chord_is_occupied(Mods::ALT | Mods::CONTROL, "c");
+        let sticky_migration_available = !chord_is_occupied(Mods::ALT | Mods::CONTROL, "s");
+
         for key_config in &self.inner.keybindings.keys {
-            if let Some(key) = self.convert_key_config(key_config) {
+            // Templates generated before the safe-control-plane upgrade used
+            // Alt+Shift+C/S twice. Keep those existing files functional in
+            // memory while `--check-config` points users at the explicit new
+            // chords written by current templates.
+            let migrated = if calc_migration_available
+                && key_config.function == "togglescratchpad"
+                && key_config.key == "c"
+                && self.parse_modifiers(&key_config.modifier) == (Mods::ALT | Mods::SHIFT)
+                && matches!(
+                    &key_config.argument,
+                    ArgumentConfig::StringVec(command)
+                        if command.first().is_some_and(|name| name == "calc")
+                ) {
+                log::info!(
+                    "[config] remapping legacy calculator shortcut from Alt+Shift+C to Alt+Ctrl+C"
+                );
+                Some(KeyConfig {
+                    modifier: vec!["Mod1".into(), "Control".into()],
+                    key: key_config.key.clone(),
+                    function: key_config.function.clone(),
+                    argument: key_config.argument.clone(),
+                })
+            } else if sticky_migration_available
+                && key_config.function == "togglesticky"
+                && key_config.key == "s"
+                && self.parse_modifiers(&key_config.modifier) == (Mods::ALT | Mods::SHIFT)
+            {
+                log::info!(
+                    "[config] remapping legacy sticky shortcut from Alt+Shift+S to Alt+Ctrl+S"
+                );
+                Some(KeyConfig {
+                    modifier: vec!["Mod1".into(), "Control".into()],
+                    key: key_config.key.clone(),
+                    function: key_config.function.clone(),
+                    argument: key_config.argument.clone(),
+                })
+            } else {
+                None
+            };
+            let effective = migrated.as_ref().unwrap_or(key_config);
+            if let Some(key) = self.convert_key_config(effective) {
                 keys.push(key);
             }
         }
@@ -2256,10 +2279,7 @@ impl Config {
             "scrolling_focus_window" => Some(Jwm::scrolling_focus_window),
             "scrolling_toggle_attach_mode" => Some(Jwm::scrolling_toggle_attach_mode),
 
-            _ => {
-                eprintln!("Unknown function: {}", func_name);
-                None
-            }
+            _ => None,
         }
     }
 
@@ -2338,10 +2358,7 @@ impl Config {
             "Delete" => k::KEY_Delete,
             "Home" => k::KEY_Home,
             "End" => k::KEY_End,
-            _ => {
-                eprintln!("Unknown key: {}", key);
-                return None;
-            }
+            _ => return None,
         };
         Some(ks)
     }
@@ -2458,10 +2475,7 @@ impl Config {
         let toml_string =
             toml::to_string_pretty(&self.inner).map_err(|e| ConfigError::Serialize(e))?;
         let toml_string = Self::add_option_comments(&toml_string);
-        if let Some(parent) = path.as_ref().parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(path, toml_string)?;
+        atomic_write(path.as_ref(), toml_string.as_bytes())?;
         Ok(())
     }
 
@@ -2569,10 +2583,10 @@ impl Config {
         Ok(())
     }
 
-    pub fn validate_config_file<P: AsRef<Path>>(path: P) -> Result<(), ConfigError> {
+    pub fn validate_config_file<P: AsRef<Path>>(path: P) -> Result<ConfigDiagnostics, ConfigError> {
         let content = fs::read_to_string(path)?;
-        let _config: TomlConfig = toml::from_str(&content)?;
-        Ok(())
+        let config: TomlConfig = toml::from_str(&content)?;
+        Ok(Self { inner: config }.diagnostics())
     }
 
     pub fn merge_config(&mut self, other: TomlConfig) {
@@ -2727,7 +2741,7 @@ impl Config {
         let config_path = Self::resolve_load_path();
         if config_path.exists() {
             let new_config = Self::load_from_file(&config_path)?;
-            // load_from_file already ran warn_about_invalid_values.
+            // load_from_file already ran semantic diagnostics.
             self.inner = new_config.inner;
         }
         Ok(())
@@ -2749,6 +2763,7 @@ pub enum ConfigError {
     Io(std::io::Error),
     Parse(toml::de::Error),
     Serialize(toml::ser::Error),
+    Validation(ConfigDiagnostics),
 }
 
 impl fmt::Display for ConfigError {
@@ -2757,6 +2772,7 @@ impl fmt::Display for ConfigError {
             ConfigError::Io(err) => write!(f, "IO error: {}", err),
             ConfigError::Parse(err) => write!(f, "Parse error: {}", err),
             ConfigError::Serialize(err) => write!(f, "Serialize error: {}", err),
+            ConfigError::Validation(diagnostics) => write!(f, "{diagnostics}"),
         }
     }
 }
@@ -2767,6 +2783,7 @@ impl std::error::Error for ConfigError {
             ConfigError::Io(err) => Some(err),
             ConfigError::Parse(err) => Some(err),
             ConfigError::Serialize(err) => Some(err),
+            ConfigError::Validation(_) => None,
         }
     }
 }
@@ -2806,12 +2823,7 @@ pub static CONFIG: LazyLock<ArcSwap<Config>> = LazyLock::new(|| {
                 ),
             }
         }
-        let config = Config::load_default();
-        println!(
-            "Configuration loaded from: {}",
-            Config::resolve_load_path().display()
-        );
-        config
+        Config::load_default()
     };
     ArcSwap::from_pointee(config)
 });
@@ -2825,7 +2837,265 @@ pub fn reload_global() -> Result<(), ConfigError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArgumentConfig, Config, KeyConfig, Mods, TomlConfig, key_function_is_repeatable};
+    use super::{
+        ArgumentConfig, CONFIG_WRITE_COUNTER, Config, ConfigDiagnosticLevel, ConfigError,
+        GestureSwipeConfig, KeyConfig, Mods, Ordering, STATUS_BAR_NAME, TomlConfig,
+        WallpaperMonitorConfig, WallpaperTagConfig, key_function_is_repeatable,
+    };
+
+    fn temporary_config_path(label: &str) -> std::path::PathBuf {
+        let sequence = CONFIG_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "jwm-{label}-{}-{sequence}.toml",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn built_in_configuration_has_no_semantic_diagnostics() {
+        let diagnostics = Config::default().diagnostics();
+        assert!(diagnostics.is_empty(), "{diagnostics}");
+    }
+
+    #[test]
+    fn built_in_status_bar_matches_installer_default() {
+        let expected = format!("JWM_BAR_NAME=\"{STATUS_BAR_NAME}\"");
+        assert!(
+            include_str!("../scripts/install_jwm_scripts.sh").contains(&expected),
+            "installer default must match {STATUS_BAR_NAME}"
+        );
+    }
+
+    #[test]
+    fn duplicate_shortcut_is_reported_as_unreachable() {
+        let mut config = Config::default();
+        config
+            .inner
+            .keybindings
+            .keys
+            .push(config.inner.keybindings.keys[0].clone());
+
+        let diagnostics = config.diagnostics();
+        assert!(diagnostics.issues().iter().any(|issue| {
+            issue.level == ConfigDiagnosticLevel::Warning
+                && issue.path.contains("keybindings.keys")
+                && issue.message.contains("unreachable")
+        }));
+    }
+
+    #[test]
+    fn semantic_validation_preserves_supported_compact_spawn_syntax() {
+        let mut config = Config::default();
+        let spawn = config
+            .inner
+            .keybindings
+            .keys
+            .iter_mut()
+            .find(|binding| binding.function == "spawn")
+            .unwrap();
+        spawn.argument = ArgumentConfig::String("alacritty".into());
+        config.inner.behavior.shadow_enabled = false;
+        config.inner.behavior.shadow_radius = 0.0;
+        config.inner.behavior.magnifier_enabled = false;
+        config.inner.behavior.magnifier_radius = 0.0;
+        config.inner.behavior.magnifier_zoom = 0.0;
+
+        let diagnostics = config.diagnostics();
+        assert!(!diagnostics.has_errors(), "{diagnostics}");
+    }
+
+    #[test]
+    fn semantic_validation_keeps_degradable_features_non_blocking() {
+        let mut config = Config::default();
+        config.inner.status_bar.show_bar = false;
+        config.inner.appearance.status_bar_height = 0;
+        config.inner.behavior.vrr_enabled = false;
+        config.inner.behavior.vrr_min_fps = 0;
+        config.inner.behavior.vrr_max_fps = 0;
+        config.inner.behavior.recording_fps = 0;
+        config.inner.behavior.audio_recording_sample_rate = 0;
+        config.inner.behavior.audio_recording_channels = 0;
+
+        let diagnostics = config.diagnostics();
+        assert!(!diagnostics.has_errors(), "{diagnostics}");
+        assert!(diagnostics.warning_count() >= 3, "{diagnostics}");
+    }
+
+    #[test]
+    fn semantic_validation_matches_case_insensitive_runtime_choices() {
+        let mut config = Config::default();
+        config.inner.behavior.wallpaper_mode = "Fill".into();
+        config
+            .inner
+            .behavior
+            .wallpaper_monitors
+            .push(WallpaperMonitorConfig {
+                monitor: 0,
+                path: String::new(),
+                mode: "FIT".into(),
+            });
+        config
+            .inner
+            .behavior
+            .wallpaper_tags
+            .push(WallpaperTagConfig {
+                tag: 0,
+                monitor: -1,
+                path: String::new(),
+                mode: "Center".into(),
+            });
+        config
+            .inner
+            .behavior
+            .gesture_swipe
+            .push(GestureSwipeConfig {
+                fingers: 3,
+                direction: "Left".into(),
+                function: "loopview".into(),
+                argument: ArgumentConfig::Int(1),
+            });
+
+        let diagnostics = config.diagnostics();
+        assert!(diagnostics.is_empty(), "{diagnostics}");
+    }
+
+    #[test]
+    fn unknown_gesture_command_is_a_non_blocking_warning() {
+        let mut config = Config::default();
+        config
+            .inner
+            .behavior
+            .gesture_swipe
+            .push(GestureSwipeConfig {
+                fingers: 3,
+                direction: "left".into(),
+                function: "typo_command".into(),
+                argument: ArgumentConfig::Int(0),
+            });
+
+        let diagnostics = config.diagnostics();
+        assert!(!diagnostics.has_errors(), "{diagnostics}");
+        assert!(diagnostics.issues().iter().any(|issue| {
+            issue.path.ends_with(".function") && issue.message.contains("unknown IPC command")
+        }));
+    }
+
+    #[test]
+    fn unsafe_tag_count_is_a_validation_error() {
+        let mut config = Config::default();
+        config.inner.layout.tags_length = 32;
+
+        let diagnostics = config.diagnostics();
+        assert!(diagnostics.has_errors());
+        assert!(
+            diagnostics
+                .issues()
+                .iter()
+                .any(|issue| issue.path == "layout.tags_length")
+        );
+    }
+
+    #[test]
+    fn saved_configuration_roundtrips_through_atomic_writer() {
+        let path = temporary_config_path("atomic-config");
+        std::fs::write(&path, "incomplete = ").unwrap();
+
+        let config = Config::default();
+        config.save_to_file(&path).unwrap();
+        let loaded = Config::load_from_file(&path).unwrap();
+
+        assert_eq!(loaded.gap_px(), config.gap_px());
+        assert!(loaded.diagnostics().is_empty());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn atomic_writer_preserves_existing_configuration_symlink() {
+        let directory = temporary_config_path("symlink-config");
+        std::fs::create_dir(&directory).unwrap();
+        let target = directory.join("real.toml");
+        let link = directory.join("config.toml");
+        Config::default().save_to_file(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let mut updated = Config::default();
+        updated.inner.appearance.gap_px = 17;
+        updated.save_to_file(&link).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(Config::load_from_file(&target).unwrap().gap_px(), 17);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn atomic_writer_supports_dangling_relative_configuration_symlink() {
+        let directory = temporary_config_path("dangling-symlink-config");
+        let target_directory = directory.join("targets");
+        std::fs::create_dir_all(&target_directory).unwrap();
+        let target = target_directory.join("created.toml");
+        let link = directory.join("config.toml");
+        std::os::unix::fs::symlink("targets/created.toml", &link).unwrap();
+
+        let mut config = Config::default();
+        config.inner.appearance.gap_px = 23;
+        config.save_to_file(&link).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(Config::load_from_file(&target).unwrap().gap_px(), 23);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn atomic_writer_preserves_chained_dangling_configuration_symlinks() {
+        let directory = temporary_config_path("chained-dangling-symlink-config");
+        let target_directory = directory.join("targets");
+        std::fs::create_dir_all(&target_directory).unwrap();
+        let target = target_directory.join("created.toml");
+        let intermediate = directory.join("intermediate.toml");
+        let link = directory.join("config.toml");
+        std::os::unix::fs::symlink("targets/created.toml", &intermediate).unwrap();
+        std::os::unix::fs::symlink("intermediate.toml", &link).unwrap();
+
+        let mut config = Config::default();
+        config.inner.appearance.gap_px = 29;
+        config.save_to_file(&link).unwrap();
+
+        for symlink in [&link, &intermediate] {
+            assert!(
+                std::fs::symlink_metadata(symlink)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+        assert_eq!(Config::load_from_file(&target).unwrap().gap_px(), 29);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn loading_rejects_semantically_unsafe_configuration() {
+        let path = temporary_config_path("invalid-config");
+        let mut config = Config::default();
+        config.inner.layout.tags_length = 32;
+        config.save_to_file(&path).unwrap();
+
+        let error = match Config::load_from_file(&path) {
+            Ok(_) => panic!("unsafe configuration unexpectedly loaded"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, ConfigError::Validation(_)));
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn key_repeat_policy_only_allows_incremental_actions() {
@@ -2914,6 +3184,43 @@ mod tests {
             .filter(|key| key.key_sym == key_sym && key.mask == (Mods::ALT | Mods::CONTROL))
             .count();
         assert_eq!(matches, 1);
+    }
+
+    #[test]
+    fn legacy_duplicate_shortcuts_are_migrated_in_memory_when_targets_are_free() {
+        let mut config = Config::default();
+        config
+            .inner
+            .keybindings
+            .keys
+            .iter_mut()
+            .find(|binding| binding.function == "togglescratchpad" && binding.key == "c")
+            .unwrap()
+            .modifier = vec!["Mod1".into(), "Shift".into()];
+        config
+            .inner
+            .keybindings
+            .keys
+            .iter_mut()
+            .find(|binding| binding.function == "togglesticky" && binding.key == "s")
+            .unwrap()
+            .modifier = vec!["Mod1".into(), "Shift".into()];
+
+        let c = config.parse_keysym("c").unwrap();
+        let s = config.parse_keysym("s").unwrap();
+        let keys = config.get_keys();
+        assert!(keys.iter().any(|binding| {
+            binding.mask == (Mods::ALT | Mods::CONTROL)
+                && binding.key_sym == c
+                && matches!(
+                    &binding.arg,
+                    crate::jwm::WMArgEnum::StringVec(command)
+                        if command.first().is_some_and(|name| name == "calc")
+                )
+        }));
+        assert!(keys.iter().any(|binding| {
+            binding.mask == (Mods::ALT | Mods::CONTROL) && binding.key_sym == s
+        }));
     }
 
     #[test]

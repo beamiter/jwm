@@ -2064,6 +2064,7 @@ impl Jwm {
 
     pub(crate) fn query_config_status(&self) -> serde_json::Value {
         let path = crate::config::Config::resolve_load_path();
+        let diagnostics = crate::config::CONFIG.load().diagnostics();
         let modified_unix_ms = crate::config::Config::get_config_modified_time()
             .ok()
             .and_then(system_time_unix_ms);
@@ -2071,6 +2072,11 @@ impl Jwm {
             "path": path.display().to_string(),
             "exists": path.exists(),
             "modified_unix_ms": modified_unix_ms,
+            "diagnostics": {
+                "error_count": diagnostics.error_count(),
+                "warning_count": diagnostics.warning_count(),
+                "issues": diagnostics.issues(),
+            },
             "reload": {
                 "attempt_count": self.config_reload_count,
                 "last_attempt_unix_ms": self.config_reload_last_unix_ms,

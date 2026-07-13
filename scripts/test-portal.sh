@@ -73,14 +73,16 @@ else
   bad "$portal_file missing or DBusName mismatch"
 fi
 
-step "4. rpath sanity (no LD_LIBRARY_PATH at runtime)"
+step "4. PipeWire runtime linkage"
 bin=~/.local/libexec/jwm-portal
 if [[ -x "$bin" ]]; then
   pw_dep=$(ldd "$bin" | awk '/libpipewire-0.3/{print $3}')
-  if [[ "$pw_dep" == /opt/pipewire-1.2/* ]]; then
-    ok "libpipewire resolved via rpath to $pw_dep"
+  if [[ -z "$pw_dep" || "$pw_dep" == "not" ]]; then
+    bad "libpipewire-0.3 is not resolvable"
+  elif [[ -n "${JWM_PIPEWIRE_PREFIX:-}" && "$pw_dep" != "$JWM_PIPEWIRE_PREFIX"/* ]]; then
+    bad "libpipewire resolves to $pw_dep (expected prefix $JWM_PIPEWIRE_PREFIX)"
   else
-    bad "libpipewire resolves to $pw_dep (expected /opt/pipewire-1.2/...)"
+    ok "libpipewire resolves to $pw_dep"
   fi
 else
   bad "$bin not installed"

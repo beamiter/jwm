@@ -24,8 +24,8 @@ wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "unstable", "staging"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 
-# PipeWire bindings (freedesktop pipewire-rs); v1_2_0 feature targets the
-# privately-installed PipeWire 1.2.8 in /opt/pipewire-1.2.
+# PipeWire bindings (freedesktop pipewire-rs). The portal requires PipeWire 1.2
+# development metadata discoverable through pkg-config.
 pipewire = { version = "0.10", features = ["v1_2_0"] }
 libspa = { version = "0.10", features = ["v1_2_0"] }
 libspa-sys = "0.10"

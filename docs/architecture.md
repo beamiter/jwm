@@ -6,6 +6,8 @@ management policy, platform backends, and reusable state/layout code.
 ```text
 src/main.rs                 process setup (CLI, logging, locale, D-Bus)
     |
+    +-------> src/doctor.rs read-only startup diagnostics
+    |
     v
 src/application.rs          backend selection and application lifecycle
     |
@@ -69,6 +71,19 @@ src/backend/api.rs          platform boundary
 - Configuration generation, path discovery and validation are exposed through
   application-level maintenance operations, so the binary does not reach into
   configuration implementation details.
+- Configuration semantics now live in `config/validation.rs` as structured,
+  serializable diagnostics shared by startup preflight, `--check-config`, the
+  doctor, live reload, and IPC status. Blocking errors never replace the active
+  runtime snapshot; generated files are atomically written and symlink-safe.
+- IPC command arguments use checked conversions and reject malformed shapes,
+  empty spawn commands and numeric overflow instead of silently defaulting or
+  narrowing. The CLI propagates server failures through its exit status.
+- `EventHandler` explicitly delegates immediate compositor rendering to JWM's
+  render pump. X11 Damage events no longer fall through the trait's no-op
+  default and wait for the periodic update tick.
+- Startup health checks are represented as a versioned `DoctorReport`, keeping
+  environment and filesystem inspection independent of display construction
+  and machine-readable for support tooling.
 - Restarts preserve the original OS-native argument vector and resolve the
   current executable once, avoiding repeated UTF-8 conversions and allocations.
 - The experimental `[profile.release]` tuning block remains deliberately
