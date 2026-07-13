@@ -567,6 +567,15 @@ pub struct BehaviorConfig {
     /// ALSA capture device used by the built-in audio recorder.
     #[serde(default = "default_audio_recording_device")]
     pub audio_recording_device: String,
+    /// Standalone recorder backend: "auto", "direct", or "ffmpeg".
+    #[serde(default = "default_audio_recording_backend")]
+    pub audio_recording_backend: String,
+    /// Default standalone recording format: "wav", "flac", "opus", or "mp3".
+    #[serde(default = "default_audio_recording_format")]
+    pub audio_recording_format: String,
+    /// Bitrate used for standalone Opus and MP3 recording.
+    #[serde(default = "default_recording_audio_bitrate")]
+    pub audio_recording_bitrate: String,
     /// Audio recording output directory (empty = $XDG_MUSIC_DIR or ~/Music).
     #[serde(default)]
     pub audio_recording_output_dir: String,
@@ -855,6 +864,12 @@ fn default_recording_quality() -> u32 {
 }
 fn default_audio_recording_device() -> String {
     "default".to_string()
+}
+fn default_audio_recording_backend() -> String {
+    "auto".to_string()
+}
+fn default_audio_recording_format() -> String {
+    "wav".to_string()
 }
 fn default_audio_recording_sample_rate() -> u32 {
     48_000
@@ -1250,6 +1265,9 @@ impl Default for Config {
                     recording_audio_device: default_audio_recording_device(),
                     recording_audio_bitrate: default_recording_audio_bitrate(),
                     audio_recording_device: default_audio_recording_device(),
+                    audio_recording_backend: default_audio_recording_backend(),
+                    audio_recording_format: default_audio_recording_format(),
+                    audio_recording_bitrate: default_recording_audio_bitrate(),
                     audio_recording_output_dir: String::new(),
                     audio_recording_sample_rate: default_audio_recording_sample_rate(),
                     audio_recording_channels: default_audio_recording_channels(),
@@ -2618,6 +2636,31 @@ impl Config {
                 }
                 self.inner.behavior.recording_audio_bitrate = bitrate;
             }
+            "behavior.audio_recording_backend" => {
+                let backend = as_string()?;
+                if !matches!(backend.as_str(), "auto" | "direct" | "ffmpeg") {
+                    return Err(
+                        "behavior.audio_recording_backend must be auto, direct, or ffmpeg".into(),
+                    );
+                }
+                self.inner.behavior.audio_recording_backend = backend;
+            }
+            "behavior.audio_recording_format" => {
+                let format = as_string()?;
+                if !matches!(format.as_str(), "wav" | "flac" | "opus" | "mp3") {
+                    return Err(
+                        "behavior.audio_recording_format must be wav, flac, opus, or mp3".into(),
+                    );
+                }
+                self.inner.behavior.audio_recording_format = format;
+            }
+            "behavior.audio_recording_bitrate" => {
+                let bitrate = as_string()?;
+                if bitrate.trim().is_empty() {
+                    return Err("behavior.audio_recording_bitrate must not be empty".into());
+                }
+                self.inner.behavior.audio_recording_bitrate = bitrate;
+            }
             _ => {
                 return Err(format!(
                     "set_config: unknown or non-hot-tunable key '{key}'"
@@ -2857,6 +2900,34 @@ mod tests {
         assert_eq!(cfg.behavior().recording_audio_bitrate, "160k");
         assert!(
             cfg.set_value("behavior.recording_audio_device", &serde_json::json!(""))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn standalone_audio_backend_and_format_are_validated() {
+        let mut cfg = Config::default();
+        cfg.set_value(
+            "behavior.audio_recording_backend",
+            &serde_json::json!("ffmpeg"),
+        )
+        .unwrap();
+        cfg.set_value(
+            "behavior.audio_recording_format",
+            &serde_json::json!("opus"),
+        )
+        .unwrap();
+        assert_eq!(cfg.behavior().audio_recording_backend, "ffmpeg");
+        assert_eq!(cfg.behavior().audio_recording_format, "opus");
+        assert!(
+            cfg.set_value(
+                "behavior.audio_recording_backend",
+                &serde_json::json!("unknown")
+            )
+            .is_err()
+        );
+        assert!(
+            cfg.set_value("behavior.audio_recording_format", &serde_json::json!("aac"))
                 .is_err()
         );
     }

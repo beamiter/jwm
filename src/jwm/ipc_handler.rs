@@ -917,7 +917,7 @@ impl Jwm {
         if name == "start_audio_recording" {
             let Some(path) = args.get("path").and_then(|value| value.as_str()) else {
                 return IpcResponse::err(
-                    "start_audio_recording: expected absolute .wav path in string field 'path'",
+                    "start_audio_recording: expected absolute .wav/.flac/.opus/.mp3 path in string field 'path'",
                 );
             };
             return match self.start_audio_recording(std::path::Path::new(path)) {
@@ -1000,6 +1000,9 @@ impl Jwm {
                 "recording_audio_device": cfg.behavior().recording_audio_device,
                 "recording_audio_bitrate": cfg.behavior().recording_audio_bitrate,
                 "audio_recording_device": cfg.behavior().audio_recording_device,
+                "audio_recording_backend": cfg.behavior().audio_recording_backend,
+                "audio_recording_format": cfg.behavior().audio_recording_format,
+                "audio_recording_bitrate": cfg.behavior().audio_recording_bitrate,
                 "audio_recording_sample_rate": cfg.behavior().audio_recording_sample_rate,
                 "audio_recording_channels": cfg.behavior().audio_recording_channels,
                 "corner_radius": cfg.behavior().corner_radius,
@@ -1042,7 +1045,7 @@ impl Jwm {
                 self.features.audio_recording.refresh();
                 let recording = &self.features.audio_recording;
                 let output_exists = recording.output_path.as_deref().is_some_and(|path| {
-                    std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 44)
+                    std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0)
                 });
                 IpcResponse::ok(Some(serde_json::json!({
                     "active": recording.active,
@@ -1050,6 +1053,8 @@ impl Jwm {
                     "output_exists": output_exists,
                     "elapsed_ms": recording.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
                     "device": recording.device,
+                    "backend": recording.backend,
+                    "format": recording.format,
                     "sample_rate": recording.sample_rate,
                     "channels": recording.channels,
                     "last_error": recording.last_error,

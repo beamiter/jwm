@@ -1,13 +1,14 @@
 //! Built-in microphone recorder.
 //!
-//! Audio is captured directly through ALSA and written as PCM WAV.  No
-//! `arecord`, ffmpeg, or desktop recording application is spawned.
+//! PCM WAV can be captured directly through ALSA. Compressed formats use an
+//! ffmpeg worker while retaining ALSA as the Linux capture source.
 
 use alsa::pcm::{Access, Format, HwParams, PCM};
 use alsa::{Direction, ValueOr};
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
@@ -16,6 +17,47 @@ use std::time::{Duration, Instant};
 struct AudioWorker {
     stop: Arc<AtomicBool>,
     handle: JoinHandle<Result<(), String>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AudioBackend {
+    Direct,
+    Ffmpeg,
+}
+
+impl AudioBackend {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Ffmpeg => "ffmpeg",
+        }
+    }
+}
+
+fn select_backend(configured: &str, format: &str) -> Result<AudioBackend, String> {
+    match configured {
+        "direct" if format == "wav" => Ok(AudioBackend::Direct),
+        "direct" => Err(format!(
+            "direct audio backend only supports wav, not {format}"
+        )),
+        "ffmpeg" => Ok(AudioBackend::Ffmpeg),
+        "auto" | "" if format == "wav" => Ok(AudioBackend::Direct),
+        "auto" | "" => Ok(AudioBackend::Ffmpeg),
+        value => Err(format!(
+            "unknown audio recording backend '{value}' (expected auto, direct, or ffmpeg)"
+        )),
+    }
+}
+
+fn output_format(path: &Path) -> Result<&str, String> {
+    let format = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    match format {
+        "wav" | "flac" | "opus" | "mp3" => Ok(format),
+        _ => Err("audio recording path must end in .wav, .flac, .opus, or .mp3".into()),
+    }
 }
 
 /// Runtime state for the built-in audio recorder.
@@ -27,6 +69,8 @@ pub struct AudioRecordingState {
     pub sample_rate: u32,
     pub channels: u16,
     pub device: String,
+    pub backend: String,
+    pub format: String,
     pub last_error: Option<String>,
     worker: Option<AudioWorker>,
 }
@@ -39,6 +83,8 @@ impl std::fmt::Debug for AudioRecordingState {
             .field("sample_rate", &self.sample_rate)
             .field("channels", &self.channels)
             .field("device", &self.device)
+            .field("backend", &self.backend)
+            .field("format", &self.format)
             .field("last_error", &self.last_error)
             .finish()
     }
@@ -51,6 +97,8 @@ impl AudioRecordingState {
         device: &str,
         sample_rate: u32,
         channels: u16,
+        configured_backend: &str,
+        bitrate: &str,
     ) -> Result<(), String> {
         self.refresh();
         if self.active {
@@ -59,9 +107,8 @@ impl AudioRecordingState {
         if !output_path.is_absolute() {
             return Err("audio recording output path must be absolute".into());
         }
-        if output_path.extension().and_then(|value| value.to_str()) != Some("wav") {
-            return Err("audio recording output path must end in .wav".into());
-        }
+        let format = output_format(output_path)?;
+        let backend = select_backend(configured_backend, format)?;
         if output_path.exists() {
             return Err(format!(
                 "audio recording output already exists: {}",
@@ -81,18 +128,30 @@ impl AudioRecordingState {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let thread_device = device_name.clone();
+        let thread_format = format.to_string();
+        let thread_bitrate = bitrate.to_string();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let handle = thread::Builder::new()
             .name("jwm-audio-recorder".into())
-            .spawn(move || {
-                capture_to_wav(
+            .spawn(move || match backend {
+                AudioBackend::Direct => capture_to_wav(
                     &path,
                     &thread_device,
                     sample_rate,
                     channels,
                     thread_stop,
                     ready_tx,
-                )
+                ),
+                AudioBackend::Ffmpeg => capture_with_ffmpeg(
+                    &path,
+                    &thread_device,
+                    sample_rate,
+                    channels,
+                    &thread_format,
+                    &thread_bitrate,
+                    thread_stop,
+                    ready_tx,
+                ),
             })
             .map_err(|error| error.to_string())?;
 
@@ -115,12 +174,14 @@ impl AudioRecordingState {
         self.sample_rate = actual_rate;
         self.channels = actual_channels;
         self.device = device_name;
+        self.backend = backend.as_str().to_string();
+        self.format = format.to_string();
         self.last_error = None;
         self.worker = Some(AudioWorker { stop, handle });
         Ok(())
     }
 
-    /// Stop and finalize the WAV header. Safe to call more than once.
+    /// Stop and finalize the active container. Safe to call more than once.
     pub fn stop(&mut self) -> Result<(), String> {
         let Some(worker) = self.worker.take() else {
             self.active = false;
@@ -159,6 +220,119 @@ impl AudioRecordingState {
     pub fn elapsed(&self) -> Duration {
         self.started_at
             .map_or(Duration::ZERO, |start| start.elapsed())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_with_ffmpeg(
+    path: &Path,
+    device: &str,
+    requested_rate: u32,
+    requested_channels: u16,
+    format: &str,
+    bitrate: &str,
+    stop: Arc<AtomicBool>,
+    ready: mpsc::SyncSender<Result<(u32, u16), String>>,
+) -> Result<(), String> {
+    let rate = requested_rate.clamp(8_000, 192_000);
+    let channels = requested_channels.clamp(1, 2);
+    let mut args = vec![
+        "-hide_banner".to_string(),
+        "-nostats".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-n".to_string(),
+        "-f".to_string(),
+        "alsa".to_string(),
+        "-i".to_string(),
+        device.to_string(),
+        "-ar".to_string(),
+        rate.to_string(),
+        "-ac".to_string(),
+        channels.to_string(),
+    ];
+    match format {
+        "wav" => args.extend(["-c:a".into(), "pcm_s16le".into()]),
+        "flac" => args.extend(["-c:a".into(), "flac".into()]),
+        "opus" => args.extend([
+            "-c:a".into(),
+            "libopus".into(),
+            "-b:a".into(),
+            bitrate.into(),
+        ]),
+        "mp3" => args.extend([
+            "-c:a".into(),
+            "libmp3lame".into(),
+            "-b:a".into(),
+            bitrate.into(),
+        ]),
+        _ => return Err(format!("unsupported ffmpeg audio format: {format}")),
+    }
+    args.push(path.to_string_lossy().into_owned());
+
+    let log_path = format!("/tmp/jwm-audio-recording-ffmpeg-{}.log", std::process::id());
+    let stderr = match File::create(&log_path) {
+        Ok(file) => file,
+        Err(error) => {
+            let error = error.to_string();
+            let _ = ready.send(Err(error.clone()));
+            return Err(error);
+        }
+    };
+    let mut child = match Command::new("ffmpeg")
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr))
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            let error = format!("cannot start ffmpeg audio recorder: {error}");
+            let _ = ready.send(Err(error.clone()));
+            return Err(error);
+        }
+    };
+
+    thread::sleep(Duration::from_millis(150));
+    if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+        let detail = std::fs::read_to_string(&log_path).unwrap_or_default();
+        let _ = std::fs::remove_file(path);
+        let error = format!(
+            "ffmpeg audio recorder exited during startup ({status}): {}",
+            detail.trim()
+        );
+        let _ = ready.send(Err(error.clone()));
+        return Err(error);
+    }
+    let _ = ready.send(Ok((rate, channels)));
+
+    loop {
+        if stop.load(Ordering::Acquire) {
+            if let Some(stdin) = child.stdin.as_mut() {
+                let _ = stdin.write_all(b"q\n");
+                let _ = stdin.flush();
+            }
+            let status = child.wait().map_err(|error| error.to_string())?;
+            return if status.success() {
+                let _ = std::fs::remove_file(&log_path);
+                Ok(())
+            } else {
+                let detail = std::fs::read_to_string(&log_path).unwrap_or_default();
+                Err(format!(
+                    "ffmpeg audio recorder exited with {status}: {}",
+                    detail.trim()
+                ))
+            };
+        }
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            let detail = std::fs::read_to_string(&log_path).unwrap_or_default();
+            return Err(format!(
+                "ffmpeg audio recorder stopped unexpectedly ({status}): {}",
+                detail.trim()
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -308,5 +482,28 @@ mod tests {
         );
         assert_eq!(u16::from_le_bytes(bytes[22..24].try_into().unwrap()), 1);
         assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 960);
+    }
+
+    #[test]
+    fn auto_backend_keeps_wav_direct_and_compresses_other_formats() {
+        assert_eq!(select_backend("auto", "wav").unwrap(), AudioBackend::Direct);
+        assert_eq!(
+            select_backend("auto", "flac").unwrap(),
+            AudioBackend::Ffmpeg
+        );
+        assert_eq!(
+            select_backend("auto", "opus").unwrap(),
+            AudioBackend::Ffmpeg
+        );
+        assert!(select_backend("direct", "mp3").is_err());
+    }
+
+    #[test]
+    fn supported_output_formats_are_explicit() {
+        for extension in ["wav", "flac", "opus", "mp3"] {
+            let path = std::path::PathBuf::from(format!("/tmp/note.{extension}"));
+            assert_eq!(output_format(&path).unwrap(), extension);
+        }
+        assert!(output_format(Path::new("/tmp/note.aac")).is_err());
     }
 }

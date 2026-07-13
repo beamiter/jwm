@@ -500,7 +500,11 @@ impl Jwm {
                     .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
             };
             let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-            let path = output_dir.join(format!("jwm-recording-{timestamp}.wav"));
+            let format = behavior.audio_recording_format.as_str();
+            if !matches!(format, "wav" | "flac" | "opus" | "mp3") {
+                return Err(format!("unsupported audio recording format: {format}").into());
+            }
+            let path = output_dir.join(format!("jwm-recording-{timestamp}.{format}"));
             self.start_audio_recording(&path)?;
         }
         Ok(())
@@ -521,10 +525,14 @@ impl Jwm {
             &behavior.audio_recording_device,
             behavior.audio_recording_sample_rate,
             behavior.audio_recording_channels,
+            &behavior.audio_recording_backend,
+            &behavior.audio_recording_bitrate,
         )?;
         info!(
-            "[audio-recording] start → {} (device={}, {} Hz, {} channel(s))",
+            "[audio-recording] start → {} (backend={}, format={}, device={}, {} Hz, {} channel(s))",
             output_path.display(),
+            self.features.audio_recording.backend,
+            self.features.audio_recording.format,
             self.features.audio_recording.device,
             self.features.audio_recording.sample_rate,
             self.features.audio_recording.channels
