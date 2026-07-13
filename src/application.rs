@@ -185,9 +185,7 @@ struct RestartCommand {
 impl RestartCommand {
     fn current() -> Self {
         let mut arguments = env::args_os();
-        let invoked_as = arguments
-            .next()
-            .unwrap_or_else(|| OsString::from("jwm"));
+        let invoked_as = arguments.next().unwrap_or_else(|| OsString::from("jwm"));
         let executable = env::current_exe().map_or(invoked_as, |path| path.into_os_string());
         Self {
             executable,
@@ -292,7 +290,7 @@ fn configure_benchmark<B: CompositorBenchmark + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::{
-        ApplicationOptions, BackendChoice, BenchmarkRequest, configure_benchmark, config_path,
+        ApplicationOptions, BackendChoice, BenchmarkRequest, config_path, configure_benchmark,
         parse_benchmark,
     };
     use crate::backend::api::CompositorBenchmark;
