@@ -45,7 +45,7 @@ impl<C: CompositorConnection> Compositor<C> {
         if self.windows.contains_key(&x11_win) || w == 0 || h == 0 {
             return;
         }
-        log::info!(
+        log::debug!(
             "compositor: add_window START 0x{:x} {}x{} at ({},{})",
             x11_win,
             w,
@@ -53,6 +53,29 @@ impl<C: CompositorConnection> Compositor<C> {
             x,
             y
         );
+
+        let visual = match self.conn.get_window_visual(x11_win) {
+            Ok(visual) => visual,
+            Err(error) => {
+                log::debug!(
+                    "compositor: skipping stale window 0x{x11_win:x}; attributes unavailable: {error}"
+                );
+                return;
+            }
+        };
+        let depth = match self.conn.get_window_depth(x11_win) {
+            Ok(depth) => depth,
+            Err(error) => {
+                log::debug!(
+                    "compositor: skipping stale window 0x{x11_win:x}; geometry unavailable: {error}"
+                );
+                return;
+            }
+        };
+        if depth == 0 {
+            log::debug!("compositor: skipping input-only window 0x{x11_win:x}");
+            return;
+        }
 
         let damage_id = match self.conn.generate_xid() {
             Ok(id) => id,
@@ -75,14 +98,18 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         };
         if let Err(error) = self.conn.name_window_pixmap(x11_win, pixmap) {
-            log::warn!("compositor: name_window_pixmap failed for 0x{x11_win:x}: {error}");
+            if error.contains("Match") || error.contains("BadMatch") {
+                log::debug!(
+                    "compositor: window 0x{x11_win:x} is not redirectable yet; skipping pixmap: {error}"
+                );
+            } else {
+                log::warn!("compositor: name_window_pixmap failed for 0x{x11_win:x}: {error}");
+            }
             let _ = self.conn.destroy_window_damage(damage_id);
             return;
         }
         let _ = self.conn.flush_x11();
 
-        let visual = self.conn.get_window_visual(x11_win).unwrap_or(0);
-        let depth = self.conn.get_window_depth(x11_win).unwrap_or(24);
         let gl_texture = unsafe {
             match self.gl.create_texture() {
                 Ok(texture) => texture,

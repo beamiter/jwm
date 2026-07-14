@@ -492,6 +492,29 @@ pub fn protocol_supported<A: Copy + Eq>(protocols: &[A], protocol: A) -> bool {
 
 pub const DEFAULT_OUTPUT_REFRESH_MHZ: u32 = 60_000;
 
+/// Convert the backend-facing millihertz representation to the nearest whole Hz.
+///
+/// X11 output enumeration preserves fractional rates such as 120.081 Hz as
+/// 120_081 mHz. Compositor policy (blur tiers, frame pacing) intentionally uses
+/// whole Hz and must never consume the raw millihertz value directly.
+pub fn refresh_millihz_to_hz(refresh_millihz: u32) -> u32 {
+    if refresh_millihz == 0 {
+        return 0;
+    }
+    ((refresh_millihz as u64 + 500) / 1000).clamp(1, u32::MAX as u64) as u32
+}
+
+/// Calculate a rounded whole-Hz refresh rate from a RandR mode.
+pub fn mode_refresh_hz(dot_clock: u32, htotal: u16, vtotal: u16) -> u32 {
+    if dot_clock == 0 || htotal == 0 || vtotal == 0 {
+        return 60;
+    }
+    let denominator = htotal as u64 * vtotal as u64;
+    let refresh_millihz =
+        ((dot_clock as u64 * 1000 + denominator / 2) / denominator).min(u32::MAX as u64) as u32;
+    refresh_millihz_to_hz(refresh_millihz).max(1)
+}
+
 pub fn output_at(outputs: &[OutputInfo], x: i32, y: i32) -> Option<OutputId> {
     outputs.iter().find_map(|output| {
         if x >= output.x
@@ -791,8 +814,18 @@ fn decode_latin1(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_text_property, parse_icon_data, parse_normal_hints, parse_strut, parse_wm_class,
+        decode_text_property, mode_refresh_hz, parse_icon_data, parse_normal_hints, parse_strut,
+        parse_wm_class, refresh_millihz_to_hz,
     };
+
+    #[test]
+    fn refresh_units_are_rounded_for_compositor_policy() {
+        assert_eq!(refresh_millihz_to_hz(0), 0);
+        assert_eq!(refresh_millihz_to_hz(59_940), 60);
+        assert_eq!(refresh_millihz_to_hz(120_081), 120);
+        assert_eq!(mode_refresh_hz(497_500_000, 2720, 1525), 120);
+        assert_eq!(mode_refresh_hz(0, 0, 0), 60);
+    }
 
     #[test]
     fn parses_wm_class_to_lowercase_parts() {

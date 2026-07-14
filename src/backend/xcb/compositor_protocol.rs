@@ -4,6 +4,7 @@ use crate::backend::x11::compositor_common::{
     X11BootstrapOps, X11CompositeRedirectOps, X11ConnectionOps, X11PresentOps, X11RandrOps,
     X11TextureSourceOps, X11WindowResourceOps,
 };
+use crate::backend::x11::wm::mode_refresh_hz;
 use std::sync::Arc;
 use xcb::{Xid, XidNew, composite, shape, x, xfixes};
 
@@ -453,13 +454,6 @@ impl X11RandrOps for XcbCompositorProtocol<'_> {
         let root = x::Window::new(root);
         let mut rates = std::collections::HashMap::new();
 
-        fn calc_refresh_hz(dot_clock: u32, htotal: u16, vtotal: u16) -> u32 {
-            if htotal == 0 || vtotal == 0 {
-                return 60;
-            }
-            ((dot_clock as u64 * 1000) / (htotal as u64 * vtotal as u64) / 1000) as u32
-        }
-
         let ver_cookie = self.conn.send_request(&xcb::randr::QueryVersion {
             major_version: 1,
             minor_version: 5,
@@ -496,7 +490,7 @@ impl X11RandrOps for XcbCompositorProtocol<'_> {
                                                 .iter()
                                                 .find(|m| m.id == crtc_info.mode().resource_id())
                                                 .map(|m| {
-                                                    calc_refresh_hz(m.dot_clock, m.htotal, m.vtotal)
+                                                    mode_refresh_hz(m.dot_clock, m.htotal, m.vtotal)
                                                 })
                                                 .unwrap_or(60);
                                             rates.insert(idx as u32, refresh);
@@ -528,7 +522,7 @@ impl X11RandrOps for XcbCompositorProtocol<'_> {
                         let refresh = modes
                             .iter()
                             .find(|m| m.id == info.mode().resource_id())
-                            .map(|m| calc_refresh_hz(m.dot_clock, m.htotal, m.vtotal))
+                            .map(|m| mode_refresh_hz(m.dot_clock, m.htotal, m.vtotal))
                             .unwrap_or(60);
                         rates.insert(idx as u32, refresh);
                     }

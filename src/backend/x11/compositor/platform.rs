@@ -146,6 +146,15 @@ impl GraphicsPlatform {
         matches!(self.backend, PlatformBackend::Egl(_))
     }
 
+    /// Partial redraw is safe only when the post-swap back buffer is retained.
+    pub(super) fn supports_partial_redraw(&self) -> bool {
+        match &self.backend {
+            // Preserve the established GLX behavior. EGL explicitly verifies it.
+            PlatformBackend::Glx(_) => true,
+            PlatformBackend::Egl(egl) => egl.buffer_preserved,
+        }
+    }
+
     pub(super) fn make_current(&self) -> Result<(), String> {
         match &self.backend {
             PlatformBackend::Glx(glx) => glx.make_current(self.xlib_display),
@@ -153,10 +162,10 @@ impl GraphicsPlatform {
         }
     }
 
-    pub(super) fn swap_buffers(&self) -> Result<(), String> {
+    pub(super) fn swap_buffers(&self, damage: Option<(i32, i32, i32, i32)>) -> Result<(), String> {
         match &self.backend {
             PlatformBackend::Glx(glx) => glx.swap_buffers(self.xlib_display),
-            PlatformBackend::Egl(egl) => egl.swap_buffers(),
+            PlatformBackend::Egl(egl) => egl.swap_buffers(damage),
         }
     }
 
@@ -751,6 +760,8 @@ type EglCreateImage = unsafe extern "C" fn(
     *const EglInt,
 ) -> EglImage;
 type EglDestroyImage = unsafe extern "C" fn(EglDisplay, EglImage) -> EglBoolean;
+type EglSwapBuffersWithDamage =
+    unsafe extern "C" fn(EglDisplay, EglSurface, *const EglInt, EglInt) -> EglBoolean;
 type GlEglImageTargetTexture2dOes = unsafe extern "system" fn(u32, *const c_void);
 
 const EGL_FALSE: EglBoolean = 0;
@@ -771,6 +782,9 @@ const EGL_OPENGL_ES_API: EglEnum = 0x30A0;
 const EGL_NATIVE_PIXMAP_KHR: EglEnum = 0x30B0;
 const EGL_IMAGE_PRESERVED_KHR: EglInt = 0x30D2;
 const EGL_CORE_NATIVE_ENGINE: EglInt = 0x305B;
+const EGL_SWAP_BEHAVIOR: EglInt = 0x3093;
+const EGL_BUFFER_PRESERVED: EglInt = 0x3094;
+const EGL_SWAP_BEHAVIOR_PRESERVED_BIT: EglInt = 0x0400;
 
 #[link(name = "EGL")]
 unsafe extern "C" {
@@ -813,6 +827,12 @@ unsafe extern "C" {
     ) -> EglBoolean;
     fn eglSwapBuffers(display: EglDisplay, surface: EglSurface) -> EglBoolean;
     fn eglSwapInterval(display: EglDisplay, interval: EglInt) -> EglBoolean;
+    fn eglSurfaceAttrib(
+        display: EglDisplay,
+        surface: EglSurface,
+        attribute: EglInt,
+        value: EglInt,
+    ) -> EglBoolean;
     fn eglWaitNative(engine: EglInt) -> EglBoolean;
     fn eglQueryString(display: EglDisplay, name: EglInt) -> *const libc::c_char;
     fn eglGetError() -> EglInt;
@@ -826,6 +846,8 @@ struct EglPlatform {
     create_image: EglCreateImage,
     destroy_image: EglDestroyImage,
     image_target_texture: GlEglImageTargetTexture2dOes,
+    swap_buffers_with_damage: Option<EglSwapBuffersWithDamage>,
+    buffer_preserved: bool,
     gles_library: *mut c_void,
     output_is_10bit: bool,
 }
@@ -868,6 +890,20 @@ impl EglPlatform {
                     "EGL image-pixmap import unavailable (extensions: {extensions})"
                 ));
             }
+            let swap_buffers_with_damage: Option<EglSwapBuffersWithDamage> =
+                if extensions.contains("EGL_KHR_swap_buffers_with_damage") {
+                    let proc = egl_proc_any(&["eglSwapBuffersWithDamageKHR"]);
+                    (!proc.is_null()).then(|| unsafe {
+                        std::mem::transmute::<*const c_void, EglSwapBuffersWithDamage>(proc)
+                    })
+                } else if extensions.contains("EGL_EXT_swap_buffers_with_damage") {
+                    let proc = egl_proc_any(&["eglSwapBuffersWithDamageEXT"]);
+                    (!proc.is_null()).then(|| unsafe {
+                        std::mem::transmute::<*const c_void, EglSwapBuffersWithDamage>(proc)
+                    })
+                } else {
+                    None
+                };
 
             let (config, output_is_10bit) =
                 choose_egl_config(display, overlay_visual_id, hdr_enabled)?;
@@ -900,6 +936,31 @@ impl EglPlatform {
                 }
                 return Err(egl_error("eglMakeCurrent"));
             }
+
+            let mut surface_type = 0;
+            let supports_preserved_swap =
+                unsafe { eglGetConfigAttrib(display, config, EGL_SURFACE_TYPE, &mut surface_type) }
+                    != EGL_FALSE
+                    && surface_type & EGL_SWAP_BEHAVIOR_PRESERVED_BIT != 0;
+            let buffer_preserved = if supports_preserved_swap {
+                let preserved = unsafe {
+                    eglSurfaceAttrib(display, surface, EGL_SWAP_BEHAVIOR, EGL_BUFFER_PRESERVED)
+                } != EGL_FALSE;
+                if !preserved {
+                    log::debug!(
+                        "compositor: EGL preserved swap request failed: {}",
+                        egl_error("eglSurfaceAttrib(EGL_SWAP_BEHAVIOR)")
+                    );
+                }
+                preserved
+            } else {
+                false
+            };
+            log::info!(
+                "compositor: EGL partial redraw preserved_back_buffer={} swap_with_damage={}",
+                buffer_preserved,
+                swap_buffers_with_damage.is_some()
+            );
 
             if unsafe { eglSwapInterval(display, 1) } == EGL_FALSE {
                 log::warn!(
@@ -962,6 +1023,8 @@ impl EglPlatform {
                 create_image: unsafe { std::mem::transmute(create_image_ptr) },
                 destroy_image: unsafe { std::mem::transmute(destroy_image_ptr) },
                 image_target_texture: unsafe { std::mem::transmute(image_target_ptr) },
+                swap_buffers_with_damage,
+                buffer_preserved,
                 gles_library,
                 output_is_10bit,
             })
@@ -985,7 +1048,25 @@ impl EglPlatform {
         }
     }
 
-    fn swap_buffers(&self) -> Result<(), String> {
+    fn swap_buffers(&self, damage: Option<(i32, i32, i32, i32)>) -> Result<(), String> {
+        if let (Some(swap_with_damage), Some((x, y, width, height))) =
+            (self.swap_buffers_with_damage, damage)
+        {
+            if width > 0 && height > 0 {
+                let rect = [x, y, width, height];
+                if unsafe { swap_with_damage(self.display, self.surface, rect.as_ptr(), 1) }
+                    != EGL_FALSE
+                {
+                    return Ok(());
+                }
+                // A driver may advertise the extension but reject a particular
+                // surface. Fall back to the core swap for correctness.
+                log::debug!(
+                    "compositor: EGL swap-with-damage failed; using full swap: {}",
+                    egl_error("eglSwapBuffersWithDamage")
+                );
+            }
+        }
         if unsafe { eglSwapBuffers(self.display, self.surface) } == EGL_FALSE {
             Err(egl_error("eglSwapBuffers"))
         } else {
@@ -1162,14 +1243,29 @@ fn find_egl_config(display: EglDisplay, visual_id: u32, bits: EglInt) -> Option<
     {
         return None;
     }
-    configs.into_iter().take(count as usize).find(|&config| {
+    let mut fallback = None;
+    for config in configs.into_iter().take(count as usize) {
         let mut native_visual = 0;
-        unsafe {
+        let visual_matches = unsafe {
             eglGetConfigAttrib(display, config, EGL_NATIVE_VISUAL_ID, &mut native_visual)
-                != EGL_FALSE
-                && native_visual as u32 == visual_id
+        } != EGL_FALSE
+            && native_visual as u32 == visual_id;
+        if !visual_matches {
+            continue;
         }
-    })
+        if fallback.is_none() {
+            fallback = Some(config);
+        }
+        let mut surface_type = 0;
+        let preserves_back_buffer =
+            unsafe { eglGetConfigAttrib(display, config, EGL_SURFACE_TYPE, &mut surface_type) }
+                != EGL_FALSE
+                && surface_type & EGL_SWAP_BEHAVIOR_PRESERVED_BIT != 0;
+        if preserves_back_buffer {
+            return Some(config);
+        }
+    }
+    fallback
 }
 
 fn egl_proc_any(names: &[&str]) -> *const c_void {
