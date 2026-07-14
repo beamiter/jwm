@@ -9,6 +9,6 @@ libc = "0.2.186"
 log = "0.4.33"
 xbar_core = { git = "https://github.com/beamiter/xbar_core.git" }
 shared_structures = { git = "https://github.com/beamiter/shared_structures.git", features = ["use-futex"] }
-pixels = "0.15.0"
+pixels = "0.17.1"
 raw-window-handle = "0.6.2"
-tao = "0.34.8"
+tao = "0.35.3"
