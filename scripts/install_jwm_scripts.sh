@@ -77,7 +77,7 @@ ALL_BARS=(
 # 默认值
 # ============================================================
 BUILD_MODE="release"
-JWM_BAR_NAME="tao_pixels_bar"
+JWM_BAR_NAME="winit_pixels_bar"
 JWM_BAR_SET_BY_ARGS=false
 
 # CLONE_BARS：仅用于把这些 bar 仓库拉到本地（git clone / pull），
