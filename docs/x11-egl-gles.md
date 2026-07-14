@@ -39,10 +39,24 @@ sources are translated to GLSL ES 300 at compile time and use separate shader
 cache keys. `GLX_OML_sync_control` remains GLX-only; selecting it with EGL
 falls back to global platform vsync.
 
+## Partial redraw
+
+When the matching EGLConfig advertises `EGL_SWAP_BEHAVIOR_PRESERVED_BIT`, JWM
+requests `EGL_BUFFER_PRESERVED` and safely limits redraws to the merged X Damage
+region. If the driver also exposes `EGL_KHR_swap_buffers_with_damage` or
+`EGL_EXT_swap_buffers_with_damage`, the same bottom-left-origin rectangle is
+passed to the surface swap so the window-system compositor can avoid processing
+unchanged pixels. Drivers that cannot preserve the back buffer automatically use
+full-frame rendering and ordinary `eglSwapBuffers`.
+
+Output enumeration reports refresh rates in millihertz, while compositor policy
+uses rounded whole Hz. Startup logs therefore show both the precise rate (for
+example `120.081Hz`) and the policy value (`120Hz`).
+
 ## Diagnostics
 
-Startup logs include the selected API (`glx/opengl` or `egl/gles3`). To compare
-paths without changing config:
+Startup logs include the selected API (`glx/opengl` or `egl/gles3`) and EGL
+partial-redraw capability state. To compare paths without changing config:
 
 ```sh
 JWM_COMPOSITOR_API=egl JWM_COMPOSITOR=1 jwm --backend x11rb

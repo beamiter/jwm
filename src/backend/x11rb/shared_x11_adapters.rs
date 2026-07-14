@@ -2,6 +2,7 @@ use crate::backend::x11::compositor_common::{
     X11BootstrapOps, X11CompositeRedirectOps, X11ConnectionOps, X11PresentOps, X11RandrOps,
     X11TextureSourceOps, X11WindowResourceOps,
 };
+use crate::backend::x11::wm::mode_refresh_hz;
 use std::collections::HashMap;
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::composite::ConnectionExt as CompositeExt;
@@ -383,16 +384,6 @@ where
 {
     let mut rates = HashMap::new();
 
-    fn calc_refresh_mhz(mode: &x11rb::protocol::randr::ModeInfo) -> u32 {
-        if mode.htotal == 0 || mode.vtotal == 0 {
-            return 60000;
-        }
-        let dot_clock = mode.dot_clock as u64;
-        let htotal = mode.htotal as u64;
-        let vtotal = mode.vtotal as u64;
-        ((dot_clock * 1000) / (htotal * vtotal)) as u32
-    }
-
     if let Ok(ver_cookie) = conn.randr_query_version(1, 5) {
         if let Ok(ver) = ver_cookie.reply() {
             if ver.major_version > 1 || (ver.major_version == 1 && ver.minor_version >= 5) {
@@ -416,10 +407,15 @@ where
                                                             let refresh = modes
                                                                 .iter()
                                                                 .find(|m| m.id == crtc_info.mode)
-                                                                .map(calc_refresh_mhz)
-                                                                .unwrap_or(60000);
-                                                            rates
-                                                                .insert(idx as u32, refresh / 1000);
+                                                                .map(|mode| {
+                                                                    mode_refresh_hz(
+                                                                        mode.dot_clock,
+                                                                        mode.htotal,
+                                                                        mode.vtotal,
+                                                                    )
+                                                                })
+                                                                .unwrap_or(60);
+                                                            rates.insert(idx as u32, refresh);
                                                         }
                                                     }
                                                 }
@@ -448,9 +444,11 @@ where
                             let refresh = modes
                                 .iter()
                                 .find(|m| m.id == info.mode)
-                                .map(calc_refresh_mhz)
-                                .unwrap_or(60000);
-                            rates.insert(idx as u32, refresh / 1000);
+                                .map(|mode| {
+                                    mode_refresh_hz(mode.dot_clock, mode.htotal, mode.vtotal)
+                                })
+                                .unwrap_or(60);
+                            rates.insert(idx as u32, refresh);
                         }
                     }
                 }

@@ -1043,7 +1043,10 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // P5C Phase 3: Apply scissor test using rectangle-based dirty tracker
         let dirty_rect = self.dirty_region_tracker.merged();
-        let use_scissor = self.partial_damage_enabled && dirty_rect.is_some() && !force_render;
+        let use_scissor = self.partial_damage_enabled
+            && self.graphics.supports_partial_redraw()
+            && dirty_rect.is_some()
+            && !force_render;
         let mut damage_scissor = (0i32, 0i32, self.screen_w as i32, self.screen_h as i32);
         if let (true, Some(rect)) = (use_scissor, dirty_rect) {
             unsafe {
@@ -3053,8 +3056,12 @@ impl<C: CompositorConnection> Compositor<C> {
             self.capture_recording_frame();
         }
 
-        // Swap the selected platform surface. OML remains a GLX-only pacing
-        // optimization; EGL/GLES uses eglSwapInterval(1) or X Present pacing.
+        // Swap the selected platform surface. The scissor rectangle already
+        // uses EGL's bottom-left coordinate convention, so it can be forwarded
+        // directly to KHR/EXT_swap_buffers_with_damage.
+        let swap_damage = use_scissor.then_some(damage_scissor);
+        // OML remains a GLX-only pacing optimization; EGL/GLES uses
+        // eglSwapInterval(1) or X Present pacing.
         let swap_result = match self.vsync_method {
             VsyncMethod::OmlSyncControl => {
                 if self
@@ -3065,10 +3072,10 @@ impl<C: CompositorConnection> Compositor<C> {
                 {
                     Ok(())
                 } else {
-                    self.graphics.swap_buffers()
+                    self.graphics.swap_buffers(swap_damage)
                 }
             }
-            VsyncMethod::Present | VsyncMethod::Global => self.graphics.swap_buffers(),
+            VsyncMethod::Present | VsyncMethod::Global => self.graphics.swap_buffers(swap_damage),
         };
         if let Err(error) = swap_result {
             log::error!(

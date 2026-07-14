@@ -707,8 +707,20 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // P5B Phase 1: Build monitor rectangles from RandR (must do before consuming conn)
         let monitor_rects = Self::build_monitor_rects(&conn, root);
-        // P5B Phase 2: Build monitor refresh rates from RandR
-        let monitor_refresh_rates = Self::build_monitor_refresh_rates(&conn, root);
+        // P5B Phase 2: Build monitor refresh rates from RandR.
+        let mut monitor_refresh_rates = Self::build_monitor_refresh_rates(&conn, root);
+        if let [single_monitor] = monitor_rects.as_slice() {
+            let monitor_id = single_monitor.0;
+            let queried_hz = monitor_refresh_rates.get(&monitor_id).copied();
+            if queried_hz != Some(primary_refresh_hz) {
+                log::debug!(
+                    "compositor: replacing single-monitor RandR refresh {:?}Hz with primary {}Hz",
+                    queried_hz,
+                    primary_refresh_hz
+                );
+                monitor_refresh_rates.insert(monitor_id, primary_refresh_hz);
+            }
+        }
 
         // P5B: Log detected monitor configuration
         log::info!("compositor: P5B detected {} monitors", monitor_rects.len());
