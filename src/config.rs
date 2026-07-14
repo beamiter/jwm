@@ -168,6 +168,10 @@ pub struct BehaviorConfig {
     pub lock_fullscreen: bool,
     #[serde(default)]
     pub compositor: bool,
+    /// X11 compositor graphics API: "glx" (legacy/default), "egl" (GLES 3),
+    /// or "auto" (prefer EGL/GLES and fall back to GLX).
+    #[serde(default = "default_compositor_api")]
+    pub compositor_api: String,
     /// Corner radius in pixels for window rounding (0 = sharp corners).
     #[serde(default = "default_corner_radius")]
     pub corner_radius: f32,
@@ -825,6 +829,11 @@ fn default_shadow_bottom_extra() -> f32 {
 fn default_transition_mode() -> String {
     "none".to_string()
 }
+fn default_compositor_api() -> String {
+    // Preserve the established GLX path unless users explicitly opt into EGL
+    // or choose automatic probing.
+    "glx".to_string()
+}
 fn default_vsync_method() -> String {
     "global".to_string()
 }
@@ -1192,6 +1201,7 @@ impl Default for Config {
                     resize_hints: true,
                     lock_fullscreen: true,
                     compositor: true,
+                    compositor_api: default_compositor_api(),
                     corner_radius: default_corner_radius(),
                     shadow_enabled: default_true(),
                     shadow_radius: default_shadow_radius(),

@@ -246,7 +246,7 @@ impl<C: CompositorConnection> Compositor<C> {
         while i < self.genie_active.len() {
             if now.duration_since(self.genie_active[i].start) >= duration {
                 let ga = self.genie_active.remove(i);
-                self.free_texture_resources(ga.gl_texture, ga.glx_pixmap, ga.pixmap, ga.damage);
+                self.free_texture_resources(ga.gl_texture, ga.binding, ga.pixmap, ga.damage);
                 self.needs_render = true;
             } else {
                 i += 1;
@@ -257,7 +257,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
     /// Start a genie animation for a window being removed.
     ///
-    /// Takes ownership of the window's GL texture + GLX/X pixmap + damage by
+    /// Takes ownership of the window's GL texture + imported/X pixmap + damage by
     /// removing the WindowTexture from the live set and moving its resources
     /// into the animation. `tick_genie` frees them when the animation ends.
     /// This avoids both double-drawing the window and sampling a freed texture.
@@ -278,7 +278,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 h,
                 gl_texture: wt.gl_texture,
                 has_rgba: wt.has_rgba,
-                glx_pixmap: wt.glx_pixmap,
+                binding: wt.binding,
                 pixmap: wt.pixmap,
                 damage: wt.damage,
             });

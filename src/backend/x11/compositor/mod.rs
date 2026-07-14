@@ -4,6 +4,7 @@ mod expose;
 mod font;
 mod overview;
 mod pipeline;
+mod platform;
 mod postprocess;
 mod slime;
 mod tfp;
@@ -156,6 +157,7 @@ pub use pbo_uploader::PBOUploader;
 pub use per_monitor::{MonitorRenderRegion, PerMonitorRenderer};
 pub use perf_metrics::PerfMetrics;
 pub use pixel_buffer_pool::PixelBufferPool;
+use platform::*;
 pub use power_saving::{BatteryStatus, PowerProfile, PowerSavingConfig, PowerSavingManager};
 pub use predictive_render::{PredictiveRenderManager, SceneActivity};
 pub use profiler::{FrameProfiler, ProfileZone, ZoneStats};
@@ -241,24 +243,11 @@ where
     C: CompositorConnection,
 {
     conn: Arc<C>,
-    xlib_display: *mut x11::xlib::Display,
-    tfp: TfpFunctions,
-    glx_context: x11::glx::GLXContext,
-    fbconfig_rgba: x11::glx::GLXFBConfig,
-    fbconfig_rgb: x11::glx::GLXFBConfig,
-    /// Per-visual TFP FBConfig map: visual_id -> (FBConfig, is_rgba).
-    /// On some drivers (e.g. Ubuntu 20's Mesa), TFP requires the FBConfig to
-    /// match the source window's visual exactly — a generic depth-based
-    /// fallback produces garbled textures for mismatched visuals.
-    tfp_visual_configs: HashMap<u32, (x11::glx::GLXFBConfig, bool)>,
-    /// 10-bit TFP FBConfig map (for HDR source windows): visual_id -> (FBConfig, is_rgba)
-    #[allow(dead_code)]
-    tfp_visual_configs_10bit: HashMap<u32, (x11::glx::GLXFBConfig, bool)>,
+    graphics: GraphicsPlatform,
     overlay_window: u32,
     /// Window that owns the _NET_WM_CM_Sn selection, advertising this
     /// compositor to other clients (screenshot tools, etc.).
     cm_selection_owner: u32,
-    glx_drawable: x11::glx::GLXDrawable,
     gl: glow::Context,
     #[allow(dead_code)]
     shader_cache: ShaderCache,
@@ -739,7 +728,7 @@ where
 }
 
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
-// All raw pointers (Display*, GLXContext, etc.) are only used from that thread.
+// All raw graphics-platform handles are only used from that thread.
 unsafe impl<C: CompositorConnection> Send for Compositor<C> {}
 
 impl<C: CompositorConnection> Drop for Compositor<C> {
@@ -816,10 +805,6 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                     self.gl.delete_texture(tex);
                 }
             }
-            // Phase 3.2: Clean up genie animation textures
-            for ga in self.genie_active.drain(..) {
-                self.gl.delete_texture(ga.gl_texture);
-            }
             // Phase 3.5: Clean up old wallpaper crossfade texture
             if let Some(tex) = self.old_wallpaper_texture.take() {
                 self.gl.delete_texture(tex);
@@ -840,8 +825,17 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
             }
         }
         // Tear down synchronously: remove_window() would start a fade-out / genie
-        // animation that never ticks again during Drop, leaking the GL texture,
-        // GLX pixmap, X pixmap and Damage. Free everything immediately instead.
+        // animation that never ticks again during Drop. Free imported pixmaps,
+        // textures, X pixmaps, and Damage objects immediately instead.
+        let animations = std::mem::take(&mut self.genie_active);
+        for animation in animations {
+            self.free_texture_resources(
+                animation.gl_texture,
+                animation.binding,
+                animation.pixmap,
+                animation.damage,
+            );
+        }
         let wins: Vec<u32> = self.windows.keys().copied().collect();
         for w in wins {
             self.remove_window_immediate(w);
@@ -852,10 +846,7 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
         let _ = self.conn.unredirect_subwindows_manual(self.root);
         let _ = self.conn.release_overlay_window(self.overlay_window);
         let _ = self.conn.flush_x11();
-        unsafe {
-            x11::glx::glXDestroyContext(self.xlib_display, self.glx_context);
-            x11::xlib::XCloseDisplay(self.xlib_display);
-        }
+        self.graphics.shutdown();
     }
 }
 

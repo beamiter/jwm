@@ -273,9 +273,9 @@ impl X11rbBackend {
         };
 
         // Try to initialize compositor (GPU compositing)
-        // Compositor uses MANUAL redirect + GLX texture_from_pixmap, which requires
-        // direct GLX rendering. This does NOT work in nested X servers (Xephyr/Xnest)
-        // because GLX renders to the host GPU framebuffer, not the nested server's.
+        // The shared compositor uses MANUAL redirect and imports named X pixmaps
+        // through the configured GLX/OpenGL or EGL/GLES platform. GLX still requires
+        // direct rendering; `compositor_api = "auto"` can probe EGL before GLX.
         // Enabled via config.toml [behavior] compositor = true, or env JWM_COMPOSITOR=1.
         let compositor_enabled = env::var("JWM_COMPOSITOR")
             .map(|v| v == "1")
