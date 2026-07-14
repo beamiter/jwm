@@ -41,14 +41,16 @@ falls back to global platform vsync.
 
 ## Partial redraw
 
-When the driver exposes `EGL_EXT_buffer_age`, JWM tracks a bounded history of
-scene changes. A recycled back buffer is repaired by merging the current X
-Damage region with the changes from the missing frames. An undefined buffer
-(age zero), an unusually old buffer, resize, or failed query safely falls back
-to a full redraw. This avoids the per-frame copy-back dependency of preserved
-swap. On drivers without buffer-age support, JWM retains the previous
-`EGL_BUFFER_PRESERVED` compatibility path when the matching EGLConfig supports
-it.
+When the driver exposes `EGL_EXT_buffer_age` or `EGL_KHR_partial_update`, JWM
+tracks a bounded history of scene changes. A recycled back buffer is repaired
+by merging the current X Damage region with the changes from the missing
+frames. With partial-update support, that merged buffer-damage region is sent
+to EGL before any drawing so the producer can skip untouched tiles. An
+undefined buffer (age zero), an unusually old buffer, resize, or failed safety
+requirement falls back to a full redraw. This avoids the per-frame copy-back
+dependency of preserved swap. On drivers without buffer-age support, JWM
+retains the previous `EGL_BUFFER_PRESERVED` compatibility path when the
+matching EGLConfig supports it.
 
 If the driver also exposes `EGL_KHR_swap_buffers_with_damage` or
 `EGL_EXT_swap_buffers_with_damage`, the current frame's disjoint dirty
@@ -56,7 +58,9 @@ rectangles are passed in bottom-left-origin coordinates to the surface swap.
 Rendering keeps a single merged repair scissor, while the window system can
 avoid processing unchanged pixels between distant updates. A driver that
 rejects an advertised buffer-age query or damage-swap entry point is downgraded
-once for that surface.
+once for that surface. Multi-monitor wallpaper passes intersect each monitor
+with the repair scissor, and the scissor remains active through post-processing
+and overlays instead of reverting to full-screen work late in the frame.
 
 ## Window import hot path
 

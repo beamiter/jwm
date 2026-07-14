@@ -164,6 +164,15 @@ impl GraphicsPlatform {
         }
     }
 
+    /// Tell EGL which pixels of the current back buffer will be repaired. The
+    /// return value says whether partial rendering remains safe for this frame.
+    pub(super) fn set_damage_region(&self, damage: &[i32]) -> bool {
+        match &self.backend {
+            PlatformBackend::Glx(_) => true,
+            PlatformBackend::Egl(egl) => egl.set_damage_region(damage),
+        }
+    }
+
     pub(super) fn make_current(&self) -> Result<(), String> {
         match &self.backend {
             PlatformBackend::Glx(glx) => glx.make_current(self.xlib_display),
@@ -771,6 +780,8 @@ type EglCreateImage = unsafe extern "C" fn(
 type EglDestroyImage = unsafe extern "C" fn(EglDisplay, EglImage) -> EglBoolean;
 type EglSwapBuffersWithDamage =
     unsafe extern "C" fn(EglDisplay, EglSurface, *const EglInt, EglInt) -> EglBoolean;
+type EglSetDamageRegion =
+    unsafe extern "C" fn(EglDisplay, EglSurface, *const EglInt, EglInt) -> EglBoolean;
 type GlEglImageTargetTexture2dOes = unsafe extern "system" fn(u32, *const c_void);
 
 const EGL_FALSE: EglBoolean = 0;
@@ -863,7 +874,9 @@ struct EglPlatform {
     destroy_image: EglDestroyImage,
     image_target_texture: GlEglImageTargetTexture2dOes,
     swap_buffers_with_damage: Cell<Option<EglSwapBuffersWithDamage>>,
+    set_damage_region: Cell<Option<EglSetDamageRegion>>,
     buffer_age_supported: Cell<bool>,
+    ext_buffer_age_supported: bool,
     buffer_preserved: bool,
     gles_library: *mut c_void,
     output_is_10bit: bool,
@@ -907,7 +920,19 @@ impl EglPlatform {
                     "EGL image-pixmap import unavailable (extensions: {extensions})"
                 ));
             }
-            let buffer_age_supported = has_egl_extension(extensions, "EGL_EXT_buffer_age");
+            let partial_update_advertised = has_egl_extension(extensions, "EGL_KHR_partial_update");
+            // KHR_partial_update exposes the same buffer-age query token and
+            // semantics even when EXT_buffer_age is not separately advertised.
+            let ext_buffer_age_supported = has_egl_extension(extensions, "EGL_EXT_buffer_age");
+            let set_damage_region: Option<EglSetDamageRegion> = if partial_update_advertised {
+                let proc = egl_proc_any(&["eglSetDamageRegionKHR"]);
+                (!proc.is_null()).then(|| unsafe {
+                    std::mem::transmute::<*const c_void, EglSetDamageRegion>(proc)
+                })
+            } else {
+                None
+            };
+            let buffer_age_supported = ext_buffer_age_supported || set_damage_region.is_some();
             let swap_buffers_with_damage: Option<EglSwapBuffersWithDamage> =
                 if has_egl_extension(extensions, "EGL_KHR_swap_buffers_with_damage") {
                     let proc = egl_proc_any(&["eglSwapBuffersWithDamageKHR"]);
@@ -978,8 +1003,9 @@ impl EglPlatform {
                 false
             };
             log::info!(
-                "compositor: EGL partial redraw buffer_age={} preserved_back_buffer={} swap_with_damage={}",
+                "compositor: EGL partial redraw buffer_age={} partial_update={} preserved_back_buffer={} swap_with_damage={}",
                 buffer_age_supported,
+                set_damage_region.is_some(),
                 buffer_preserved,
                 swap_buffers_with_damage.is_some()
             );
@@ -1046,7 +1072,9 @@ impl EglPlatform {
                 destroy_image: unsafe { std::mem::transmute(destroy_image_ptr) },
                 image_target_texture: unsafe { std::mem::transmute(image_target_ptr) },
                 swap_buffers_with_damage: Cell::new(swap_buffers_with_damage),
+                set_damage_region: Cell::new(set_damage_region),
                 buffer_age_supported: Cell::new(buffer_age_supported),
+                ext_buffer_age_supported,
                 buffer_preserved,
                 gles_library,
                 output_is_10bit,
@@ -1087,6 +1115,7 @@ impl EglPlatform {
             // particular surface. Downgrade once and use full redraws instead of
             // repeating a failing query every frame.
             self.buffer_age_supported.set(false);
+            self.set_damage_region.set(None);
             log::warn!(
                 "compositor: EGL buffer-age query failed; disabling partial redraw for this surface: {}",
                 egl_error("eglQuerySurface(EGL_BUFFER_AGE_EXT)")
@@ -1094,6 +1123,33 @@ impl EglPlatform {
             return 0;
         }
         u32::try_from(age).unwrap_or(0)
+    }
+
+    fn set_damage_region(&self, damage: &[EglInt]) -> bool {
+        let Some(set_damage_region) = self.set_damage_region.get() else {
+            return self.ext_buffer_age_supported;
+        };
+        let Some(rect_count) = egl_damage_rect_count(damage) else {
+            return self.ext_buffer_age_supported;
+        };
+        if unsafe { set_damage_region(self.display, self.surface, damage.as_ptr(), rect_count) }
+            != EGL_FALSE
+        {
+            return true;
+        }
+
+        // EXT_buffer_age remains sufficient on its own. A KHR-only path must
+        // stop reusing buffers because content inside the default full damage
+        // region would otherwise be undefined.
+        self.set_damage_region.set(None);
+        if !self.ext_buffer_age_supported {
+            self.buffer_age_supported.set(false);
+        }
+        log::warn!(
+            "compositor: EGL partial-update failed; disabling it for this surface: {}",
+            egl_error("eglSetDamageRegionKHR")
+        );
+        self.ext_buffer_age_supported
     }
 
     fn swap_buffers(&self, damage: Option<&[EglInt]>) -> Result<(), String> {
@@ -1426,10 +1482,11 @@ mod tests {
 
     #[test]
     fn matches_complete_egl_extension_names() {
-        let extensions = "EGL_EXT_buffer_age EGL_KHR_image_base EGL_KHR_swap_buffers_with_damage";
+        let extensions = "EGL_EXT_buffer_age EGL_KHR_image_base EGL_KHR_partial_update EGL_KHR_swap_buffers_with_damage";
 
         assert!(has_egl_extension(extensions, "EGL_EXT_buffer_age"));
         assert!(has_egl_extension(extensions, "EGL_KHR_image_base"));
+        assert!(has_egl_extension(extensions, "EGL_KHR_partial_update"));
         assert!(!has_egl_extension(extensions, "EGL_KHR_image"));
         assert!(!has_egl_extension(extensions, "EGL_EXT_buffer"));
     }

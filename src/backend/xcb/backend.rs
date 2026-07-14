@@ -5629,8 +5629,20 @@ mod parity_tests {
             render_impl.contains("self.damage_render_pending = false")
                 && render_impl.contains("partial_redraw_buffer_age()")
                 && render_impl.contains("buffer_age_damage_history")
+                && render_impl.contains("set_damage_region(&[")
+                && render_impl.contains("intersect_gl_scissors(monitor_scissor, damage_scissor)")
                 && X11_COMPOSITOR_TFP_SRC.contains("self.damage_render_pending = true"),
             "shared X11 compositor should keep damage wakeups incremental and repair recycled EGL buffers"
+        );
+        let partial_update = render_impl
+            .find("set_damage_region(&[")
+            .expect("missing EGL partial-update submission");
+        let first_clear = render_impl
+            .find("// Clear")
+            .expect("missing first framebuffer clear");
+        assert!(
+            partial_update < first_clear,
+            "EGL buffer damage must be submitted before the first drawing command"
         );
         let tfp_order_start = render_impl
             .find("Build priority-ordered window list")

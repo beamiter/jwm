@@ -14,6 +14,16 @@ use std::sync::Arc;
 #[allow(unused_imports)]
 use std::sync::mpsc;
 
+type GlScissor = (i32, i32, i32, i32);
+
+fn intersect_gl_scissors(a: GlScissor, b: GlScissor) -> Option<GlScissor> {
+    let x0 = a.0.max(b.0);
+    let y0 = a.1.max(b.1);
+    let x1 = a.0.saturating_add(a.2).min(b.0.saturating_add(b.2));
+    let y1 = a.1.saturating_add(a.3).min(b.1.saturating_add(b.3));
+    (x1 > x0 && y1 > y0).then_some((x0, y0, x1 - x0, y1 - y0))
+}
+
 impl<C: CompositorConnection> Compositor<C> {
     // =====================================================================
     // Tag-switch slide transition
@@ -1046,7 +1056,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.buffer_age_damage_history
                 .repair_region(damage, buffer_age)
         });
-        let use_scissor = repair_damage.is_some();
+        let mut use_scissor = repair_damage.is_some();
         let full_frame_damage = DirtyRect::new(0, 0, self.screen_w, self.screen_h);
         let frame_damage = if incremental_frame {
             current_damage.unwrap_or(full_frame_damage)
@@ -1090,6 +1100,24 @@ impl<C: CompositorConnection> Compositor<C> {
                     ]);
                 }
             }
+        }
+        if use_scissor
+            && !self.graphics.set_damage_region(&[
+                damage_scissor.0,
+                damage_scissor.1,
+                damage_scissor.2,
+                damage_scissor.3,
+            ])
+        {
+            // KHR_partial_update consumes buffer damage (the full repair area),
+            // unlike swap-with-damage which consumes only this frame's surface
+            // changes. A KHR-only implementation must confirm this before any
+            // drawing; otherwise the contents inside its default full damage
+            // region are undefined and this frame must be redrawn completely.
+            unsafe {
+                self.gl.disable(glow::SCISSOR_TEST);
+            }
+            use_scissor = false;
         }
         self.damage_tracker.clear();
         self.dirty_region_tracker.clear(); // P5C: Clear rect tracker
@@ -1138,12 +1166,10 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.gl.active_texture(glow::TEXTURE0);
 
                     if !self.monitor_wallpapers.is_empty() {
-                        // Temporarily disable damage-region scissor for wallpaper
-                        if use_scissor {
-                            self.gl.disable(glow::SCISSOR_TEST);
-                        }
-
-                        // Per-monitor wallpaper rendering with per-monitor scissor
+                        // Per-monitor wallpaper rendering uses the intersection
+                        // of its monitor and the frame repair region. Previously
+                        // this disabled damage scissoring and redrew every monitor
+                        // for even a tiny window update.
                         for mw in &self.monitor_wallpapers {
                             // Resolve texture: per-monitor override or global default
                             let (tex, mode, iw, ih) = if let Some(t) = mw.texture {
@@ -1159,11 +1185,19 @@ impl<C: CompositorConnection> Compositor<C> {
                                 continue;
                             };
 
-                            // Scissor to this monitor's area
+                            // Scissor to this monitor's portion of the repair area.
                             let gl_y = self.screen_h as i32 - (mw.mon_y + mw.mon_h as i32);
+                            let monitor_scissor =
+                                (mw.mon_x, gl_y, mw.mon_w as i32, mw.mon_h as i32);
+                            let Some(scissor) = (if use_scissor {
+                                intersect_gl_scissors(monitor_scissor, damage_scissor)
+                            } else {
+                                Some(monitor_scissor)
+                            }) else {
+                                continue;
+                            };
                             self.gl.enable(glow::SCISSOR_TEST);
-                            self.gl
-                                .scissor(mw.mon_x, gl_y, mw.mon_w as i32, mw.mon_h as i32);
+                            self.gl.scissor(scissor.0, scissor.1, scissor.2, scissor.3);
 
                             let area = (
                                 mw.mon_x as f32,
@@ -1179,7 +1213,16 @@ impl<C: CompositorConnection> Compositor<C> {
                             self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
                             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                         }
-                        self.gl.disable(glow::SCISSOR_TEST);
+                        if use_scissor {
+                            self.gl.scissor(
+                                damage_scissor.0,
+                                damage_scissor.1,
+                                damage_scissor.2,
+                                damage_scissor.3,
+                            );
+                        } else {
+                            self.gl.disable(glow::SCISSOR_TEST);
+                        }
                     } else if let Some(wp_tex) = self.wallpaper_texture {
                         // Single global wallpaper (no monitors set yet)
                         let area = (0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
@@ -1229,17 +1272,6 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.gl.bind_texture(glow::TEXTURE_2D, None);
                     self.gl.bind_vertex_array(None);
                     self.gl.use_program(None);
-
-                    // Restore damage-region scissor if it was active
-                    if use_scissor {
-                        self.gl.scissor(
-                            damage_scissor.0,
-                            damage_scissor.1,
-                            damage_scissor.2,
-                            damage_scissor.3,
-                        );
-                        self.gl.enable(glow::SCISSOR_TEST);
-                    }
                 }
             }
         }
@@ -2169,13 +2201,6 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
 
-        // Disable scissor (feature 6)
-        if use_scissor {
-            unsafe {
-                self.gl.disable(glow::SCISSOR_TEST);
-            }
-        }
-
         // === Pass 4: Post-processing (features 8/9/10) ===
         if postprocess_active {
             if self.slime_state.is_visible() {
@@ -3078,6 +3103,15 @@ impl<C: CompositorConnection> Compositor<C> {
             self.render_system_ui(&proj);
         }
 
+        // Keep the repair scissor active through post-processing and overlays,
+        // then reset it before capture/swap so the next full frame starts from a
+        // known state.
+        if use_scissor {
+            unsafe {
+                self.gl.disable(glow::SCISSOR_TEST);
+            }
+        }
+
         // Capture before swapping: the graphics back buffer's contents are no
         // longer defined after SwapBuffers, which caused intermittent black or
         // corrupted frames in both X11RB and XCB backends.
@@ -3219,4 +3253,25 @@ impl<C: CompositorConnection> Compositor<C> {
     // =====================================================================
     // New feature methods
     // =====================================================================
+}
+
+#[cfg(test)]
+mod tests {
+    use super::intersect_gl_scissors;
+
+    #[test]
+    fn intersects_monitor_and_damage_scissors() {
+        assert_eq!(
+            intersect_gl_scissors((0, 0, 1920, 1080), (1800, 900, 300, 300)),
+            Some((1800, 900, 120, 180))
+        );
+        assert_eq!(
+            intersect_gl_scissors((1920, 0, 1920, 1080), (100, 100, 50, 50)),
+            None
+        );
+        assert_eq!(
+            intersect_gl_scissors((0, 0, 1920, 1080), (100, 100, 50, 50)),
+            Some((100, 100, 50, 50))
+        );
+    }
 }
