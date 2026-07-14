@@ -7,8 +7,9 @@
 //! * GLX imports them through `GLX_EXT_texture_from_pixmap`.
 //! * EGL/GLES imports them through `EGL_KHR_image_pixmap` + `GL_OES_EGL_image`.
 
-use super::{OmlSyncControl, PixmapBinding};
+use super::{DirtyRect, OmlSyncControl, PixmapBinding};
 use glow::HasContext;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
 use std::ptr;
@@ -155,6 +156,13 @@ impl GraphicsPlatform {
         }
     }
 
+    pub(super) fn supports_swap_with_damage(&self) -> bool {
+        match &self.backend {
+            PlatformBackend::Glx(_) => false,
+            PlatformBackend::Egl(egl) => egl.swap_buffers_with_damage.get().is_some(),
+        }
+    }
+
     pub(super) fn make_current(&self) -> Result<(), String> {
         match &self.backend {
             PlatformBackend::Glx(glx) => glx.make_current(self.xlib_display),
@@ -162,7 +170,7 @@ impl GraphicsPlatform {
         }
     }
 
-    pub(super) fn swap_buffers(&self, damage: Option<(i32, i32, i32, i32)>) -> Result<(), String> {
+    pub(super) fn swap_buffers(&self, damage: Option<&[i32]>) -> Result<(), String> {
         match &self.backend {
             PlatformBackend::Glx(glx) => glx.swap_buffers(self.xlib_display),
             PlatformBackend::Egl(egl) => egl.swap_buffers(damage),
@@ -846,7 +854,7 @@ struct EglPlatform {
     create_image: EglCreateImage,
     destroy_image: EglDestroyImage,
     image_target_texture: GlEglImageTargetTexture2dOes,
-    swap_buffers_with_damage: Option<EglSwapBuffersWithDamage>,
+    swap_buffers_with_damage: Cell<Option<EglSwapBuffersWithDamage>>,
     buffer_preserved: bool,
     gles_library: *mut c_void,
     output_is_10bit: bool,
@@ -1023,7 +1031,7 @@ impl EglPlatform {
                 create_image: unsafe { std::mem::transmute(create_image_ptr) },
                 destroy_image: unsafe { std::mem::transmute(destroy_image_ptr) },
                 image_target_texture: unsafe { std::mem::transmute(image_target_ptr) },
-                swap_buffers_with_damage,
+                swap_buffers_with_damage: Cell::new(swap_buffers_with_damage),
                 buffer_preserved,
                 gles_library,
                 output_is_10bit,
@@ -1048,24 +1056,23 @@ impl EglPlatform {
         }
     }
 
-    fn swap_buffers(&self, damage: Option<(i32, i32, i32, i32)>) -> Result<(), String> {
-        if let (Some(swap_with_damage), Some((x, y, width, height))) =
-            (self.swap_buffers_with_damage, damage)
+    fn swap_buffers(&self, damage: Option<&[EglInt]>) -> Result<(), String> {
+        if let (Some(swap_with_damage), Some(rects)) = (self.swap_buffers_with_damage.get(), damage)
+            && let Some(rect_count) = egl_damage_rect_count(rects)
         {
-            if width > 0 && height > 0 {
-                let rect = [x, y, width, height];
-                if unsafe { swap_with_damage(self.display, self.surface, rect.as_ptr(), 1) }
-                    != EGL_FALSE
-                {
-                    return Ok(());
-                }
-                // A driver may advertise the extension but reject a particular
-                // surface. Fall back to the core swap for correctness.
-                log::debug!(
-                    "compositor: EGL swap-with-damage failed; using full swap: {}",
-                    egl_error("eglSwapBuffersWithDamage")
-                );
+            if unsafe { swap_with_damage(self.display, self.surface, rects.as_ptr(), rect_count) }
+                != EGL_FALSE
+            {
+                return Ok(());
             }
+            // Some drivers advertise the extension but reject it for a specific
+            // surface. Disable the path after its first failure so every future
+            // frame does not repeat a failed entry point and eglGetError call.
+            self.swap_buffers_with_damage.set(None);
+            log::warn!(
+                "compositor: EGL swap-with-damage failed; disabling it for this surface: {}",
+                egl_error("eglSwapBuffersWithDamage")
+            );
         }
         if unsafe { eglSwapBuffers(self.display, self.surface) } == EGL_FALSE {
             Err(egl_error("eglSwapBuffers"))
@@ -1188,6 +1195,29 @@ impl EglPlatform {
     }
 }
 
+fn egl_damage_rect_count(rects: &[EglInt]) -> Option<EglInt> {
+    if rects.is_empty() || !rects.len().is_multiple_of(4) {
+        return None;
+    }
+    let count = rects.len() / 4;
+    EglInt::try_from(count).ok()
+}
+
+pub(super) fn append_egl_damage_rect(
+    output: &mut Vec<EglInt>,
+    surface_height: u32,
+    dirty: DirtyRect,
+) {
+    let (Ok(surface_height), Ok(width), Ok(height)) = (
+        EglInt::try_from(surface_height),
+        EglInt::try_from(dirty.width),
+        EglInt::try_from(dirty.height),
+    ) else {
+        return;
+    };
+    output.extend_from_slice(&[dirty.x, surface_height - dirty.y - height, width, height]);
+}
+
 fn choose_egl_config(
     display: EglDisplay,
     overlay_visual_id: u32,
@@ -1301,7 +1331,8 @@ fn egl_error(operation: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::GraphicsApiPreference;
+    use super::{GraphicsApiPreference, append_egl_damage_rect, egl_damage_rect_count};
+    use crate::backend::x11::compositor::DirtyRect;
 
     #[test]
     fn parses_graphics_api_aliases() {
@@ -1322,5 +1353,26 @@ mod tests {
             GraphicsApiPreference::Glx
         );
         assert!(GraphicsApiPreference::parse("vulkan").is_err());
+    }
+
+    #[test]
+    fn counts_flattened_egl_damage_rectangles() {
+        assert_eq!(egl_damage_rect_count(&[1, 2, 30, 40]), Some(1));
+        assert_eq!(
+            egl_damage_rect_count(&[1, 2, 30, 40, 100, 200, 5, 6]),
+            Some(2)
+        );
+        assert_eq!(egl_damage_rect_count(&[]), None);
+        assert_eq!(egl_damage_rect_count(&[1, 2, 3]), None);
+    }
+
+    #[test]
+    fn converts_disjoint_damage_to_egl_bottom_left_coordinates() {
+        let mut output = Vec::new();
+        append_egl_damage_rect(&mut output, 600, DirtyRect::new(10, 20, 30, 40));
+        append_egl_damage_rect(&mut output, 600, DirtyRect::new(500, 400, 20, 50));
+
+        assert_eq!(output, [10, 540, 30, 40, 500, 150, 20, 50]);
+        assert_eq!(egl_damage_rect_count(&output), Some(2));
     }
 }

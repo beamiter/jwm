@@ -1048,6 +1048,8 @@ impl<C: CompositorConnection> Compositor<C> {
             && dirty_rect.is_some()
             && !force_render;
         let mut damage_scissor = (0i32, 0i32, self.screen_w as i32, self.screen_h as i32);
+        let mut swap_damage_rects = std::mem::take(&mut self.scratch_swap_damage);
+        swap_damage_rects.clear();
         if let (true, Some(rect)) = (use_scissor, dirty_rect) {
             unsafe {
                 self.gl.enable(glow::SCISSOR_TEST);
@@ -1060,6 +1062,26 @@ impl<C: CompositorConnection> Compositor<C> {
                     damage_scissor.2,
                     damage_scissor.3,
                 );
+            }
+
+            // Keep GL rendering to one scissor bounding box, but preserve the
+            // disjoint rectangles for EGL_KHR/EXT_swap_buffers_with_damage.
+            // This avoids turning two small, distant window updates into an
+            // almost full-screen native buffer exchange. The Vec is compositor
+            // scratch storage and normally performs no allocation here.
+            if self.graphics.supports_swap_with_damage() {
+                swap_damage_rects.reserve(self.dirty_region_tracker.region_count() * 4);
+                for dirty in self.dirty_region_tracker.iter() {
+                    append_egl_damage_rect(&mut swap_damage_rects, self.screen_h, dirty);
+                }
+                if swap_damage_rects.is_empty() {
+                    swap_damage_rects.extend_from_slice(&[
+                        damage_scissor.0,
+                        damage_scissor.1,
+                        damage_scissor.2,
+                        damage_scissor.3,
+                    ]);
+                }
             }
         }
         self.damage_tracker.clear();
@@ -3056,10 +3078,9 @@ impl<C: CompositorConnection> Compositor<C> {
             self.capture_recording_frame();
         }
 
-        // Swap the selected platform surface. The scissor rectangle already
-        // uses EGL's bottom-left coordinate convention, so it can be forwarded
-        // directly to KHR/EXT_swap_buffers_with_damage.
-        let swap_damage = use_scissor.then_some(damage_scissor);
+        // Swap the selected platform surface. EGL receives the original damage
+        // rectangles converted to its bottom-left coordinate convention.
+        let swap_damage = (!swap_damage_rects.is_empty()).then_some(swap_damage_rects.as_slice());
         // OML remains a GLX-only pacing optimization; EGL/GLES uses
         // eglSwapInterval(1) or X Present pacing.
         let swap_result = match self.vsync_method {
@@ -3077,6 +3098,7 @@ impl<C: CompositorConnection> Compositor<C> {
             }
             VsyncMethod::Present | VsyncMethod::Global => self.graphics.swap_buffers(swap_damage),
         };
+        self.scratch_swap_damage = swap_damage_rects;
         if let Err(error) = swap_result {
             log::error!(
                 "compositor: {} buffer swap failed: {error}",

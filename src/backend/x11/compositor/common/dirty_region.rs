@@ -166,12 +166,17 @@ impl DirtyRegionTracker {
     /// Mark the entire screen as dirty
     pub fn mark_all_dirty(&mut self) {
         self.regions.clear();
-        self.merged_region = Some(DirtyRect {
+        let full_screen = DirtyRect {
             x: 0,
             y: 0,
             width: self.screen_w,
             height: self.screen_h,
-        });
+        };
+        // Keep the concrete region as well as the cached union.  Consumers such
+        // as EGL swap-with-damage need the original rectangles, and a later
+        // mark_dirty() must not accidentally replace a pending full redraw.
+        self.regions.push_back(full_screen);
+        self.merged_region = Some(full_screen);
     }
 
     /// Get the merged bounding rect of all dirty regions
@@ -196,6 +201,11 @@ impl DirtyRegionTracker {
     /// Get all dirty regions
     pub fn regions(&self) -> Vec<DirtyRect> {
         self.regions.iter().copied().collect()
+    }
+
+    /// Iterate over dirty rectangles without allocating a temporary Vec.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = DirtyRect> + '_ {
+        self.regions.iter().copied()
     }
 
     /// Clear all dirty regions
@@ -513,6 +523,16 @@ mod tests {
 
         let regions = tracker.regions();
         assert_eq!(regions.len(), 2);
+    }
+
+    #[test]
+    fn full_redraw_remains_pending_after_later_damage() {
+        let mut tracker = DirtyRegionTracker::new(1920, 1080);
+        tracker.mark_all_dirty();
+        tracker.mark_dirty(DirtyRect::new(100, 100, 200, 200));
+
+        assert_eq!(tracker.iter().count(), 1);
+        assert_eq!(tracker.merged(), Some(DirtyRect::new(0, 0, 1920, 1080)));
     }
 
     #[test]

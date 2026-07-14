@@ -44,10 +44,12 @@ falls back to global platform vsync.
 When the matching EGLConfig advertises `EGL_SWAP_BEHAVIOR_PRESERVED_BIT`, JWM
 requests `EGL_BUFFER_PRESERVED` and safely limits redraws to the merged X Damage
 region. If the driver also exposes `EGL_KHR_swap_buffers_with_damage` or
-`EGL_EXT_swap_buffers_with_damage`, the same bottom-left-origin rectangle is
-passed to the surface swap so the window-system compositor can avoid processing
-unchanged pixels. Drivers that cannot preserve the back buffer automatically use
-full-frame rendering and ordinary `eglSwapBuffers`.
+`EGL_EXT_swap_buffers_with_damage`, the disjoint tracked dirty rectangles are
+passed in bottom-left-origin coordinates to the surface swap. Rendering keeps a
+single merged scissor, while the window system can avoid processing unchanged
+pixels between distant updates. A driver that rejects its advertised damage-swap
+entry point is downgraded once for that surface; drivers that cannot preserve the
+back buffer use full-frame rendering and ordinary `eglSwapBuffers`.
 
 Output enumeration reports refresh rates in millihertz, while compositor policy
 uses rounded whole Hz. Startup logs therefore show both the precise rate (for

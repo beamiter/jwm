@@ -1111,6 +1111,7 @@ impl<C: CompositorConnection> Compositor<C> {
             scratch_tfp_order: Vec::new(),
             scratch_refresh_wins: Vec::new(),
             scratch_new_pixmaps: Vec::new(),
+            scratch_swap_damage: Vec::with_capacity(16 * 4),
         })
     }
 
