@@ -15,9 +15,11 @@ use winit::{
 };
 
 use xbar_core::{
+    AppState, BarConfig, Color, ShapeStyle, ThemeMode,
     cairo::{self, Context, Format, ImageSurface},
-    AppState, BarConfig, Color, ShapeStyle, ThemeMode, colors_for_theme, draw_bar,
-    initialize_logging, pango::FontDescription, spawn_shared_eventfd_notifier,
+    colors_for_theme, draw_bar, initialize_logging,
+    pango::FontDescription,
+    spawn_shared_eventfd_notifier,
 };
 
 fn tuned_colors_for_theme(mode: ThemeMode) -> xbar_core::Colors {
@@ -108,6 +110,7 @@ impl Gpu {
                 power_preference: wgpu::PowerPreference::LowPower,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await?; // 0.27 返回 Result<Adapter, RequestAdapterError>
 
@@ -133,6 +136,7 @@ impl Gpu {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
+            color_space: wgpu::SurfaceColorSpace::Auto,
             width,
             height,
             present_mode: wgpu::PresentMode::Fifo,
@@ -172,7 +176,7 @@ impl Gpu {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -205,8 +209,8 @@ impl Gpu {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pipeline-layout"),
-            bind_group_layouts: &[&bind_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_layout)],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -231,7 +235,7 @@ impl Gpu {
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -318,7 +322,7 @@ impl Gpu {
         let bpr = stride;
         let height = self.height;
         let width = self.width;
-        let aligned_bpr = ((bpr + 255) / 256) * 256;
+        let aligned_bpr = bpr.div_ceil(256) * 256;
 
         let mut padded: Vec<u8>;
         let data_ref: &[u8] = if aligned_bpr == bpr {
@@ -357,11 +361,26 @@ impl Gpu {
 
         // 绘制到 Surface
         let frame = match self.surface.get_current_texture() {
-            Ok(f) => f,
-            Err(e) => {
-                log::warn!("get_current_texture error: {e}, reconfiguring surface");
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                return Ok(());
+            }
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                log::warn!("surface is outdated or lost; reconfiguring");
                 self.surface.configure(&self.device, &self.config);
-                self.surface.get_current_texture()?
+                match self.surface.get_current_texture() {
+                    wgpu::CurrentSurfaceTexture::Success(frame)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+                    wgpu::CurrentSurfaceTexture::Timeout
+                    | wgpu::CurrentSurfaceTexture::Occluded => return Ok(()),
+                    status => anyhow::bail!(
+                        "failed to acquire a surface texture after reconfiguration: {status:?}"
+                    ),
+                }
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                anyhow::bail!("surface texture acquisition failed validation")
             }
         };
         let view = frame
@@ -389,6 +408,7 @@ impl Gpu {
                 depth_stencil_attachment: None,
                 occlusion_query_set: None,
                 timestamp_writes: None,
+                multiview_mask: None,
             });
 
             rp.set_pipeline(&self.pipeline);
@@ -397,7 +417,7 @@ impl Gpu {
         }
 
         self.queue.submit(Some(encoder.finish()));
-        frame.present();
+        self.queue.present(frame);
         Ok(())
     }
 }
@@ -438,10 +458,10 @@ fn spawn_shared_thread(proxy: EventLoopProxy<UserEvent>, shared_efd: Option<i32>
                 let pr = unsafe { libc::poll(&mut pfd as *mut libc::pollfd, 1, -1) };
                 if pr < 0 {
                     let err = std::io::Error::last_os_error();
-                    if let Some(code) = err.raw_os_error() {
-                        if code == libc::EINTR {
-                            continue;
-                        }
+                    if let Some(code) = err.raw_os_error()
+                        && code == libc::EINTR
+                    {
+                        continue;
                     }
                     warn!("[shared-thread] poll error: {}", err);
                     thread::sleep(Duration::from_millis(50));
@@ -453,10 +473,10 @@ fn spawn_shared_thread(proxy: EventLoopProxy<UserEvent>, shared_efd: Option<i32>
                         let _ = proxy.send_event(UserEvent::SharedUpdated);
                     } else if r < 0 {
                         let err = std::io::Error::last_os_error();
-                        if let Some(code) = err.raw_os_error() {
-                            if code == libc::EINTR {
-                                continue;
-                            }
+                        if let Some(code) = err.raw_os_error()
+                            && code == libc::EINTR
+                        {
+                            continue;
                         }
                         warn!("[shared-thread] eventfd read error: {}", err);
                         thread::sleep(Duration::from_millis(50));
@@ -821,18 +841,18 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 use winit::event::{ElementState, MouseButton};
-                if state == ElementState::Pressed {
-                    if let Some((px, py)) = self.last_cursor_pos_px {
-                        let button_id = match button {
-                            MouseButton::Left => 1,
-                            MouseButton::Middle => 2,
-                            MouseButton::Right => 3,
-                            MouseButton::Back => 8,
-                            MouseButton::Forward => 9,
-                            MouseButton::Other(n) => n as u8,
-                        };
-                        self.handle_button(px, py, button_id);
-                    }
+                if state == ElementState::Pressed
+                    && let Some((px, py)) = self.last_cursor_pos_px
+                {
+                    let button_id = match button {
+                        MouseButton::Left => 1,
+                        MouseButton::Middle => 2,
+                        MouseButton::Right => 3,
+                        MouseButton::Back => 8,
+                        MouseButton::Forward => 9,
+                        MouseButton::Other(n) => n as u8,
+                    };
+                    self.handle_button(px, py, button_id);
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
