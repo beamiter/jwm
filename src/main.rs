@@ -111,6 +111,7 @@ impl Gpu {
                 power_preference: wgpu::PowerPreference::LowPower,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await?;
 
@@ -136,6 +137,7 @@ impl Gpu {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
+            color_space: wgpu::SurfaceColorSpace::Auto,
             width,
             height,
             present_mode: wgpu::PresentMode::Fifo,
@@ -175,7 +177,7 @@ impl Gpu {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -208,8 +210,8 @@ impl Gpu {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pipeline-layout"),
-            bind_group_layouts: &[&bind_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_layout)],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -234,7 +236,7 @@ impl Gpu {
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -358,11 +360,16 @@ impl Gpu {
         );
 
         let frame = match self.surface.get_current_texture() {
-            Ok(f) => f,
-            Err(e) => {
-                log::warn!("get_current_texture error: {e}, reconfiguring surface");
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            status => {
+                log::warn!("get_current_texture returned {status:?}, reconfiguring surface");
                 self.surface.configure(&self.device, &self.config);
-                self.surface.get_current_texture()?
+                match self.surface.get_current_texture() {
+                    wgpu::CurrentSurfaceTexture::Success(frame)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+                    status => anyhow::bail!("failed to acquire surface texture: {status:?}"),
+                }
             }
         };
         let view = frame
@@ -390,6 +397,7 @@ impl Gpu {
                 depth_stencil_attachment: None,
                 occlusion_query_set: None,
                 timestamp_writes: None,
+                multiview_mask: None,
             });
 
             rp.set_pipeline(&self.pipeline);
@@ -398,7 +406,7 @@ impl Gpu {
         }
 
         self.queue.submit(Some(encoder.finish()));
-        frame.present();
+        self.queue.present(frame);
         Ok(())
     }
 }
