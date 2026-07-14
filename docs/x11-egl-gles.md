@@ -15,12 +15,13 @@ Configure the platform in `config.toml`:
 ```toml
 [behavior]
 compositor = true
-compositor_api = "egl" # "glx" or "auto"
+compositor_api = "egl" # "glx" or "auto"; "gles" is an alias for "egl"
 ```
 
-`JWM_COMPOSITOR_API=egl|glx|auto` overrides the file for one launch. This is
-useful for recovery if a driver update breaks one path. Graphics API selection happens
-when the compositor starts, so changing `compositor_api` requires restarting JWM.
+`JWM_COMPOSITOR_API=egl|gles|glx|auto` overrides the file for one launch. This
+is useful for recovery if a driver update breaks one path. Graphics API
+selection happens when the compositor starts, so changing `compositor_api`
+requires restarting JWM.
 
 ## Requirements
 
