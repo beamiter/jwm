@@ -18,27 +18,27 @@ path = "tools/jwm_tool.rs"
 clap = { version = "4.6.1", features = ["derive", "env"] }
 dirs = "6.0.0"
 glob = "0.3.3"
-signal-hook = "0.3.18"
+signal-hook = "0.4.4"
 slotmap = { version = "1.1.1", features = ["serde"] }
 x11 = { version = "2.21.0", features = ["glx", "xlib", "xlib_xcb", "xcursor", "xfixes", "xinput", "xrandr", "xrender", "dpms", "xf86vmode"] }
 x11rb = { version = "0.13.2", features = ["all-extensions", "allow-unsafe-code"] }
 x11rb-protocol = "0.13.2"
 
 libc = "0.2.186"
-notify = "7.0"
+notify = "8.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1"
 shared_structures = { git = "https://github.com/beamiter/shared_structures.git", features = ["use-futex"] }
 chrono = "0.4.45"
 log = "0.4.33"
-toml = "0.9.12"
+toml = "1.1.2"
 xbar_core = { git = "https://github.com/beamiter/xbar_core.git" }
-nix = { version = "0.30.1", features = ["signal", "inotify", "fs", "poll"] }
+nix = { version = "0.31.3", features = ["signal", "inotify", "fs", "poll"] }
 lazy_static = "1.5.0"
 arc-swap = "1"
-alsa = "0.10"
+alsa = "0.12"
 ab_glyph = "0.2.32"
-rand = "0.9.5"
+rand = "0.10.2"
 xkbcommon = "0.9.0"
 bitflags = "2.13.0"
 smithay = { git = "https://github.com/Smithay/smithay.git", branch = "master", default-features = false, features = [
@@ -58,13 +58,13 @@ smithay = { git = "https://github.com/Smithay/smithay.git", branch = "master", d
 "xwayland",
 ] }
 calloop = { version = "0.14.4", features = ["signals"] }
-glow = "0.16"
+glow = "0.18"
 winit = "0.30.13"
-png = "0.17"
+png = "0.18"
 image = "0.25"
 xcursor = "0.3.10"
 tracing = "0.1.44"
-drm = "0.14.1"
+drm = "0.15.0"
 drm-ffi = "0.9.1"
 libseat = "0.2.4"
 gbm = "0.18.0"
