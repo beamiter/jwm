@@ -7,26 +7,10 @@ pub(super) use crate::backend::x11::compositor_common::expose::{
 };
 use std::collections::VecDeque;
 
-pub(super) type GlXBindTexImageEXT =
-    unsafe extern "C" fn(*mut x11::xlib::Display, x11::glx::GLXDrawable, i32, *const i32);
-pub(super) type GlXReleaseTexImageEXT =
-    unsafe extern "C" fn(*mut x11::xlib::Display, x11::glx::GLXDrawable, i32);
-
-pub(super) struct TfpFunctions {
-    pub(super) bind: GlXBindTexImageEXT,
-    pub(super) release: GlXReleaseTexImageEXT,
+pub(super) enum PixmapBinding {
+    Glx { drawable: x11::glx::GLXPixmap },
+    Egl { image: *mut std::ffi::c_void },
 }
-
-pub(super) const GLX_BIND_TO_TEXTURE_RGBA_EXT: i32 = 0x20D1;
-pub(super) const GLX_BIND_TO_TEXTURE_RGB_EXT: i32 = 0x20D0;
-#[allow(dead_code)]
-pub(super) const GLX_Y_INVERTED_EXT: i32 = 0x20D4;
-pub(super) const GLX_TEXTURE_FORMAT_EXT: i32 = 0x20D5;
-pub(super) const GLX_TEXTURE_TARGET_EXT: i32 = 0x20D6;
-pub(super) const GLX_TEXTURE_2D_EXT: i32 = 0x20DC;
-pub(super) const GLX_TEXTURE_FORMAT_RGBA_EXT: i32 = 0x20DA;
-pub(super) const GLX_TEXTURE_FORMAT_RGB_EXT: i32 = 0x20D9;
-pub(super) const GLX_FRONT_LEFT_EXT: i32 = 0x20DE;
 
 pub(super) struct WindowTexture {
     pub(super) x: i32,
@@ -35,11 +19,10 @@ pub(super) struct WindowTexture {
     pub(super) h: u32,
     pub(super) damage: u32,
     pub(super) pixmap: u32,
-    pub(super) glx_pixmap: x11::glx::GLXPixmap,
+    pub(super) binding: Option<PixmapBinding>,
     pub(super) gl_texture: glow::Texture,
     pub(super) dirty: bool,
     pub(super) has_rgba: bool,
-    pub(super) fbconfig: x11::glx::GLXFBConfig,
     pub(super) needs_pixmap_refresh: bool,
     pub(super) x11_win: u32,
     pub(super) fade_opacity: f32,
@@ -325,7 +308,7 @@ pub(super) struct GenieAnimation {
     pub(super) h: f32,
     pub(super) gl_texture: glow::Texture,
     pub(super) has_rgba: bool,
-    pub(super) glx_pixmap: x11::glx::GLXPixmap,
+    pub(super) binding: Option<PixmapBinding>,
     pub(super) pixmap: u32,
     pub(super) damage: u32,
 }

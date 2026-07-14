@@ -29,15 +29,11 @@ impl<C: CompositorConnection> Compositor<C> {
         exclude_top: u32,
         mon_rect: (i32, i32, u32, u32),
     ) {
-        // Ensure GL context is current
+        // Ensure the selected graphics context is current.
         if !self.context_current {
-            unsafe {
-                x11::glx::glXMakeContextCurrent(
-                    self.xlib_display,
-                    self.glx_drawable,
-                    self.glx_drawable,
-                    self.glx_context,
-                );
+            if let Err(error) = self.graphics.make_current() {
+                log::error!("compositor: failed to make context current: {error}");
+                return;
             }
             self.context_current = true;
         }
@@ -876,15 +872,12 @@ impl<C: CompositorConnection> Compositor<C> {
             self.blur_cache_hash = 0;
         }
 
-        // Ensure context is current
+        // Ensure the selected graphics context is current.
         if !self.context_current {
-            unsafe {
-                x11::glx::glXMakeContextCurrent(
-                    self.xlib_display,
-                    self.glx_drawable,
-                    self.glx_drawable,
-                    self.glx_context,
-                );
+            if let Err(error) = self.graphics.make_current() {
+                log::error!("compositor: failed to make context current: {error}");
+                self.needs_render = true;
+                return false;
             }
             self.context_current = true;
         }
@@ -932,6 +925,17 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         let mut tfp_budget_exhausted = false;
+        let needs_native_sync = self.graphics.is_gles()
+            && tfp_order.iter().any(|win| {
+                self.windows
+                    .get(win)
+                    .is_some_and(|wt| wt.dirty && wt.binding.is_some())
+            });
+        if needs_native_sync {
+            if let Err(error) = self.graphics.sync_x11() {
+                log::warn!("compositor: native texture synchronization failed: {error}");
+            }
+        }
         for win in &tfp_order {
             let win = *win;
             // Budget check: focused window (index 0) always updates
@@ -939,7 +943,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 continue;
             }
             if let Some(wt) = self.windows.get_mut(&win) {
-                if wt.dirty && wt.glx_pixmap != 0 {
+                if wt.dirty && wt.binding.is_some() {
                     // Audio sync: skip texture update if this window's audio timing
                     // says it's not yet time to present the next frame.
                     // This prevents forcing all video windows into the compositor's
@@ -969,20 +973,23 @@ impl<C: CompositorConnection> Compositor<C> {
                         }
                     }
 
-                    unsafe {
-                        self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
-                        (self.tfp.release)(self.xlib_display, wt.glx_pixmap, GLX_FRONT_LEFT_EXT);
-                        (self.tfp.bind)(
-                            self.xlib_display,
-                            wt.glx_pixmap,
-                            GLX_FRONT_LEFT_EXT,
-                            std::ptr::null(),
-                        );
-                        self.gl.bind_texture(glow::TEXTURE_2D, None);
-
-                        // P6B: Use GPU fence sync manager for non-blocking TFP sync
-                        if let Ok(fence) = self.gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0) {
-                            self.gpu_fence_sync_mgr.register_fence(win, fence);
+                    if let Some(binding) = wt.binding.as_ref() {
+                        if let Err(error) =
+                            self.graphics
+                                .refresh_pixmap_binding(&self.gl, wt.gl_texture, binding)
+                        {
+                            log::warn!(
+                                "compositor: {} texture refresh failed for 0x{win:x}: {error}",
+                                self.graphics.api_name()
+                            );
+                            continue;
+                        }
+                        unsafe {
+                            if let Ok(fence) =
+                                self.gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0)
+                            {
+                                self.gpu_fence_sync_mgr.register_fence(win, fence);
+                            }
                         }
                     }
                     wt.dirty = false;
@@ -3039,56 +3046,38 @@ impl<C: CompositorConnection> Compositor<C> {
             self.render_system_ui(&proj);
         }
 
-        // Capture before swapping: the GLX back buffer's contents are no
+        // Capture before swapping: the graphics back buffer's contents are no
         // longer defined after SwapBuffers, which caused intermittent black or
         // corrupted frames in both X11RB and XCB backends.
         if self.recording_active {
             self.capture_recording_frame();
         }
 
-        // Swap buffers (double-buffered with vsync for tear-free output).
-        // VRR (Variable Refresh Rate) is automatically handled by the driver when using Present.
-        match self.vsync_method {
+        // Swap the selected platform surface. OML remains a GLX-only pacing
+        // optimization; EGL/GLES uses eglSwapInterval(1) or X Present pacing.
+        let swap_result = match self.vsync_method {
             VsyncMethod::OmlSyncControl => {
-                // Use GLX_OML_sync_control for per-window MSC-based timing
-                if let Some(oml) = &self.oml {
-                    // For now, use global swap (future: per-window MSC-based timing)
-                    // VRR target is available via get_vrr_refresh_rate() if needed
-                    if let Some(_sbc) = oml.swap_buffers_msc(0) {
-                        // Successfully used OML swap
-                    } else {
-                        // Fall back to traditional swap
-                        unsafe {
-                            x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable);
-                        }
-                    }
+                if self
+                    .oml
+                    .as_ref()
+                    .and_then(|oml| oml.swap_buffers_msc(0))
+                    .is_some()
+                {
+                    Ok(())
                 } else {
-                    // OML not available, fall back
-                    unsafe {
-                        x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable);
-                    }
+                    self.graphics.swap_buffers()
                 }
             }
-            VsyncMethod::Present => {
-                // Present extension with VRR support
-                // When VRR is active for a game window, the driver automatically uses
-                // adaptive refresh rates via the Present extension capabilities.
-                if self.vrr_active {
-                    log::debug!(
-                        "compositor: rendering frame with VRR active (target: {} Hz)",
-                        self.get_vrr_refresh_rate()
-                    );
-                }
-                unsafe {
-                    x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable);
-                }
-            }
-            VsyncMethod::Global => {
-                // Traditional global vsync (all windows locked to 60Hz)
-                unsafe {
-                    x11::glx::glXSwapBuffers(self.xlib_display, self.glx_drawable);
-                }
-            }
+            VsyncMethod::Present | VsyncMethod::Global => self.graphics.swap_buffers(),
+        };
+        if let Err(error) = swap_result {
+            log::error!(
+                "compositor: {} buffer swap failed: {error}",
+                self.graphics.api_name()
+            );
+            self.context_current = false;
+            self.needs_render = true;
+            return false;
         }
 
         // Schedule re-render if fades or transition are still in progress

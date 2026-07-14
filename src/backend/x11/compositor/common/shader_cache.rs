@@ -1,5 +1,6 @@
 use glow::HasContext;
 /// Shader compilation and caching
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -39,6 +40,20 @@ impl ShaderCache {
         hasher.finish()
     }
 
+    fn prepare_source(source: &str, is_gles: bool) -> Cow<'_, str> {
+        if !is_gles {
+            return Cow::Borrowed(source);
+        }
+        let source = source.trim_start();
+        let body = source
+            .strip_prefix("#version")
+            .and_then(|rest| rest.split_once('\n').map(|(_, body)| body))
+            .unwrap_or(source);
+        Cow::Owned(format!(
+            "#version 300 es\nprecision highp float;\nprecision highp int;\n{body}"
+        ))
+    }
+
     /// Get or compile a shader program
     pub fn get_or_compile(
         &self,
@@ -47,8 +62,11 @@ impl ShaderCache {
         vert: &str,
         frag: &str,
     ) -> Result<glow::Program, String> {
-        let vert_hash = Self::hash_shader(vert);
-        let frag_hash = Self::hash_shader(frag);
+        let is_gles = unsafe { gl.get_parameter_string(glow::VERSION).contains("OpenGL ES") };
+        let vert = Self::prepare_source(vert, is_gles);
+        let frag = Self::prepare_source(frag, is_gles);
+        let vert_hash = Self::hash_shader(vert.as_ref());
+        let frag_hash = Self::hash_shader(frag.as_ref());
         let cache_key = format!("{}_{:x}_{:x}", name, vert_hash, frag_hash);
 
         // Check memory cache
@@ -86,7 +104,7 @@ impl ShaderCache {
 
         // Compile from source
         log::info!("shader: compiling '{}'", name);
-        let program = self.compile_program(gl, vert, frag)?;
+        let program = self.compile_program(gl, vert.as_ref(), frag.as_ref())?;
 
         // Try to cache the binary
         if self.enable_cache {
@@ -287,6 +305,15 @@ mod tests {
         let mut p = std::env::temp_dir();
         p.push(format!("jwm_shader_cache_test_{}", std::process::id()));
         p
+    }
+
+    #[test]
+    fn gles_source_rewrites_version_and_precision() {
+        let source = "#version 330 core\nvoid main() {}\n";
+        let rewritten = ShaderCache::prepare_source(source, true);
+        assert!(rewritten.starts_with("#version 300 es\n"));
+        assert!(rewritten.contains("precision highp float;"));
+        assert!(!rewritten.contains("330 core"));
     }
 
     #[test]

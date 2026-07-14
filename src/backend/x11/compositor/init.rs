@@ -62,527 +62,32 @@ impl<C: CompositorConnection> Compositor<C> {
         } = conn.bootstrap_state(root)?;
         guard.overlay = Some(overlay_window);
 
-        // Read HDR setting from config early for GLX setup
-        let hdr_enabled = crate::config::CONFIG.load().behavior().hdr_enabled;
-
-        // 6. Open Xlib display for GLX
-        let xlib_display = unsafe { x11::xlib::XOpenDisplay(std::ptr::null()) };
-        if xlib_display.is_null() {
-            return Err("XOpenDisplay failed".into());
-        }
-        // Install a no-op error handler for this Xlib display permanently.
-        // The default Xlib handler calls exit() on ANY X error, which would
-        // kill the entire WM for benign issues like stale pixmaps.
-        unsafe {
-            x11::xlib::XSetErrorHandler(Some(ignore_x_error));
-        }
-
-        let screen_num = unsafe { x11::xlib::XDefaultScreen(xlib_display) };
-
-        // 6b. Verify GLX_EXT_texture_from_pixmap is advertised in the extension string.
-        // glXGetProcAddress can return non-null pointers even when the extension
-        // is not actually supported (e.g. indirect GLX in nested X servers).
-        {
-            let ext_str = unsafe {
-                let raw = x11::glx::glXQueryExtensionsString(xlib_display, screen_num);
-                if raw.is_null() {
-                    ""
-                } else {
-                    std::ffi::CStr::from_ptr(raw).to_str().unwrap_or("")
-                }
-            };
-            if !ext_str.contains("GLX_EXT_texture_from_pixmap") {
-                unsafe { x11::xlib::XCloseDisplay(xlib_display) };
-                // Guard will undo redirect + release overlay
-                return Err("GLX_EXT_texture_from_pixmap not available (nested X server?)".into());
-            }
-            log::info!("GLX extensions: {ext_str}");
-        }
-
-        let cm_selection_owner = conn.claim_compositor_selection_owner(root, screen_num)?;
-
-        // 7. Choose FBConfig for GLX context.
-        // We must pick an FBConfig whose visual matches the overlay window's
-        // visual — otherwise glXCreateWindow / glXMakeContextCurrent will fail
-        // (or even segfault) due to the visual mismatch.
-        let overlay_visual_id = conn.get_window_visual(overlay_window)?;
-        log::info!(
-            "compositor: overlay visual=0x{:x}, choosing matching FBConfig...",
-            overlay_visual_id
-        );
-
-        // Request a double-buffered FBConfig matching the overlay's exact visual.
-        // We use glXSwapBuffers with swap interval=1 for vsync, which eliminates
-        // tearing during window movement.
-        // If HDR is enabled, request 10-bit RGB instead of 8-bit
-        let ctx_attrs_visual: Vec<i32> = if hdr_enabled {
-            vec![
-                x11::glx::GLX_RENDER_TYPE,
-                x11::glx::GLX_RGBA_BIT,
-                x11::glx::GLX_DRAWABLE_TYPE,
-                x11::glx::GLX_WINDOW_BIT,
-                x11::glx::GLX_DOUBLEBUFFER,
-                1,
-                x11::glx::GLX_RED_SIZE,
-                10,
-                x11::glx::GLX_GREEN_SIZE,
-                10,
-                x11::glx::GLX_BLUE_SIZE,
-                10,
-                x11::glx::GLX_ALPHA_SIZE,
-                2,
-                0,
-            ]
-        } else {
-            vec![
-                x11::glx::GLX_RENDER_TYPE,
-                x11::glx::GLX_RGBA_BIT,
-                x11::glx::GLX_DRAWABLE_TYPE,
-                x11::glx::GLX_WINDOW_BIT,
-                x11::glx::GLX_DOUBLEBUFFER,
-                1,
-                x11::glx::GLX_RED_SIZE,
-                8,
-                x11::glx::GLX_GREEN_SIZE,
-                8,
-                x11::glx::GLX_BLUE_SIZE,
-                8,
-                0,
-            ]
+        // Select the shared X11 graphics platform. JWM_COMPOSITOR_API
+        // overrides config for diagnostics and recovery without editing files.
+        let (hdr_enabled, configured_api) = {
+            let cfg = crate::config::CONFIG.load();
+            let behavior = cfg.behavior();
+            (behavior.hdr_enabled, behavior.compositor_api.clone())
         };
-
-        let mut n_configs: i32 = 0;
-        let configs = unsafe {
-            x11::glx::glXChooseFBConfig(
-                xlib_display,
-                screen_num,
-                ctx_attrs_visual.as_ptr(),
-                &mut n_configs,
-            )
-        };
-
-        // H10: Graceful 10-bit fallback — if HDR requested 10-bit but got no configs,
-        // retry with 8-bit attributes
-        let mut hdr_got_10bit = false;
-        let (configs, n_configs) = if (configs.is_null() || n_configs == 0) && hdr_enabled {
-            log::warn!("compositor: 10-bit FBConfig unavailable, falling back to 8-bit for HDR");
-            let fallback_attrs: Vec<i32> = vec![
-                x11::glx::GLX_RENDER_TYPE,
-                x11::glx::GLX_RGBA_BIT,
-                x11::glx::GLX_DRAWABLE_TYPE,
-                x11::glx::GLX_WINDOW_BIT,
-                x11::glx::GLX_DOUBLEBUFFER,
-                1,
-                x11::glx::GLX_RED_SIZE,
-                8,
-                x11::glx::GLX_GREEN_SIZE,
-                8,
-                x11::glx::GLX_BLUE_SIZE,
-                8,
-                0,
-            ];
-            let mut n2: i32 = 0;
-            let c2 = unsafe {
-                x11::glx::glXChooseFBConfig(
-                    xlib_display,
-                    screen_num,
-                    fallback_attrs.as_ptr(),
-                    &mut n2,
-                )
-            };
-            if c2.is_null() || n2 == 0 {
-                return Err("No suitable GLX FBConfig found (tried 10-bit and 8-bit)".into());
-            }
-            (c2, n2)
-        } else if configs.is_null() || n_configs == 0 {
-            return Err("No suitable GLX FBConfig found".into());
-        } else {
-            if hdr_enabled {
-                hdr_got_10bit = true;
-            }
-            (configs, n_configs)
-        };
-
-        // Pick the first FBConfig whose visual matches the overlay window.
-        let mut ctx_fbconfig: x11::glx::GLXFBConfig = std::ptr::null_mut();
-        unsafe {
-            for i in 0..n_configs {
-                let cfg = *configs.offset(i as isize);
-                let vi = x11::glx::glXGetVisualFromFBConfig(xlib_display, cfg);
-                if !vi.is_null() {
-                    let vid = (*vi).visualid;
-                    x11::xlib::XFree(vi as *mut _);
-                    if vid == overlay_visual_id as u64 {
-                        ctx_fbconfig = cfg;
-                        break;
-                    }
-                }
-            }
-            // Fallback: if no exact match, just use the first config
-            if ctx_fbconfig.is_null() {
-                log::warn!(
-                    "compositor: no FBConfig matching overlay visual 0x{:x}, using first available",
-                    overlay_visual_id
-                );
-                ctx_fbconfig = *configs;
-            }
-            x11::xlib::XFree(configs as *mut _);
-        }
-        log::info!(
-            "compositor: found matching FBConfig for context (from {} candidates)",
-            n_configs
-        );
-
-        // Log the actual visual depth from selected FBConfig
-        let visual_depth = unsafe {
-            let vi = x11::glx::glXGetVisualFromFBConfig(xlib_display, ctx_fbconfig);
-            if !vi.is_null() {
-                let depth = (*vi).depth;
-                x11::xlib::XFree(vi as *mut _);
-                depth
-            } else {
-                0
-            }
-        };
-        if hdr_enabled {
-            if hdr_got_10bit {
-                log::info!(
-                    "compositor: HDR 10-bit output active, FBConfig visual depth={}",
-                    visual_depth
-                );
-            } else {
-                log::warn!(
-                    "compositor: HDR enabled but using 8-bit output (10-bit unavailable), depth={}",
-                    visual_depth
-                );
-            }
-        } else {
-            log::info!(
-                "compositor: HDR disabled, using standard 8-bit visual depth={}",
-                visual_depth
-            );
-        }
-
-        // 8. Create GLX context
-        log::info!("compositor: creating GLX context...");
-        let glx_context = unsafe {
-            x11::glx::glXCreateNewContext(
-                xlib_display,
-                ctx_fbconfig,
-                x11::glx::GLX_RGBA_TYPE,
-                std::ptr::null_mut(),
-                1,
-            )
-        };
-        if glx_context.is_null() {
-            return Err("glXCreateNewContext failed".into());
-        }
-
-        log::info!("compositor: GLX context created, checking direct rendering...");
-        // 8b. Require direct rendering — indirect GLX (e.g. in Xephyr) cannot
-        //     do texture-from-pixmap because the pixmaps live in the nested
-        //     server's address space, not the host GPU's.
-        let is_direct = unsafe { x11::glx::glXIsDirect(xlib_display, glx_context) };
-        if is_direct == 0 {
-            log::warn!("GLX context is indirect — compositor cannot work (nested X server?)");
-            unsafe {
-                x11::glx::glXDestroyContext(xlib_display, glx_context);
-                x11::xlib::XCloseDisplay(xlib_display);
-            }
-            return Err("GLX context is indirect; compositor requires direct rendering".into());
-        }
+        let requested_api = std::env::var("JWM_COMPOSITOR_API").unwrap_or(configured_api);
+        let graphics_preference = GraphicsApiPreference::parse(&requested_api)?;
+        let graphics = GraphicsPlatform::new(
+            overlay_window,
+            conn.get_window_visual(overlay_window)?,
+            hdr_enabled,
+            graphics_preference,
+        )?;
+        let cm_selection_owner =
+            conn.claim_compositor_selection_owner(root, graphics.screen_num())?;
+        graphics.make_current()?;
 
         log::info!(
-            "compositor: direct rendering OK, creating GLX window on overlay 0x{:x}...",
-            overlay_window
+            "compositor: creating glow context through {}",
+            graphics.api_name()
         );
-        // 9. Create GLX window on the overlay
-        let glx_drawable = unsafe {
-            x11::glx::glXCreateWindow(
-                xlib_display,
-                ctx_fbconfig,
-                overlay_window as _,
-                std::ptr::null(),
-            )
-        };
-        if glx_drawable == 0 {
-            return Err("glXCreateWindow failed".into());
-        }
-
-        log::info!("compositor: GLX window created, making context current...");
-        // Make context current
-        let ok = unsafe {
-            x11::glx::glXMakeContextCurrent(xlib_display, glx_drawable, glx_drawable, glx_context)
-        };
-        if ok == 0 {
-            return Err("glXMakeContextCurrent failed".into());
-        }
-
-        log::info!("compositor: context current OK, loading TFP extension functions...");
-        // 10. Load TFP extension functions
-        let bind_name = CString::new("glXBindTexImageEXT").unwrap();
-        let release_name = CString::new("glXReleaseTexImageEXT").unwrap();
-        let bind_ptr = unsafe { x11::glx::glXGetProcAddress(bind_name.as_ptr() as *const u8) };
-        let release_ptr =
-            unsafe { x11::glx::glXGetProcAddress(release_name.as_ptr() as *const u8) };
-        if bind_ptr.is_none() || release_ptr.is_none() {
-            return Err("glXBindTexImageEXT / glXReleaseTexImageEXT not available".into());
-        }
-        let tfp = TfpFunctions {
-            bind: unsafe { std::mem::transmute(bind_ptr.unwrap()) },
-            release: unsafe { std::mem::transmute(release_ptr.unwrap()) },
-        };
-
-        // VSync: set swap interval = 1 to synchronize buffer swaps with vblank,
-        // preventing tearing during window movement.
-        {
-            let swap_ext_name = CString::new("glXSwapIntervalEXT").unwrap();
-            let swap_mesa_name = CString::new("glXSwapIntervalMESA").unwrap();
-            let swap_ext_ptr =
-                unsafe { x11::glx::glXGetProcAddress(swap_ext_name.as_ptr() as *const u8) };
-            let swap_mesa_ptr =
-                unsafe { x11::glx::glXGetProcAddress(swap_mesa_name.as_ptr() as *const u8) };
-
-            if let Some(ptr) = swap_ext_ptr {
-                // glXSwapIntervalEXT(Display*, GLXDrawable, int interval)
-                type SwapIntervalEXT =
-                    unsafe extern "C" fn(*mut x11::xlib::Display, x11::glx::GLXDrawable, i32);
-                let swap_fn: SwapIntervalEXT = unsafe { std::mem::transmute(ptr) };
-                unsafe { swap_fn(xlib_display, glx_drawable, 1) };
-                log::info!("compositor: vsync enabled via glXSwapIntervalEXT(1)");
-            } else if let Some(ptr) = swap_mesa_ptr {
-                // glXSwapIntervalMESA(unsigned int interval)
-                type SwapIntervalMESA = unsafe extern "C" fn(u32) -> i32;
-                let swap_fn: SwapIntervalMESA = unsafe { std::mem::transmute(ptr) };
-                unsafe { swap_fn(1) };
-                log::info!("compositor: vsync enabled via glXSwapIntervalMESA(1)");
-            } else {
-                log::warn!("compositor: no swap interval extension available, tearing may occur");
-            }
-        }
-
-        // Attempt to load GLX_OML_sync_control (may not be available, and config will decide if it's used)
-        let oml_loaded = oml_sync_control::OmlSyncControl::load(xlib_display, glx_drawable);
-
-        log::info!("compositor: finding TFP FBConfigs...");
-        // 12. Find FBConfigs for TFP (RGBA and RGB, 8-bit and optionally 10-bit)
-        let tfp_rgba_attrs: Vec<i32> = vec![
-            x11::glx::GLX_DRAWABLE_TYPE,
-            x11::glx::GLX_PIXMAP_BIT,
-            x11::glx::GLX_RENDER_TYPE,
-            x11::glx::GLX_RGBA_BIT,
-            GLX_BIND_TO_TEXTURE_RGBA_EXT,
-            1,
-            x11::glx::GLX_RED_SIZE,
-            8,
-            x11::glx::GLX_GREEN_SIZE,
-            8,
-            x11::glx::GLX_BLUE_SIZE,
-            8,
-            x11::glx::GLX_ALPHA_SIZE,
-            8,
-            0,
-        ];
-        let tfp_rgb_attrs: Vec<i32> = vec![
-            x11::glx::GLX_DRAWABLE_TYPE,
-            x11::glx::GLX_PIXMAP_BIT,
-            x11::glx::GLX_RENDER_TYPE,
-            x11::glx::GLX_RGBA_BIT,
-            GLX_BIND_TO_TEXTURE_RGB_EXT,
-            1,
-            x11::glx::GLX_RED_SIZE,
-            8,
-            x11::glx::GLX_GREEN_SIZE,
-            8,
-            x11::glx::GLX_BLUE_SIZE,
-            8,
-            0,
-        ];
-
-        // 10-bit TFP configs (if HDR enabled)
-        let tfp_rgba_10bit_attrs: Vec<i32> = vec![
-            x11::glx::GLX_DRAWABLE_TYPE,
-            x11::glx::GLX_PIXMAP_BIT,
-            x11::glx::GLX_RENDER_TYPE,
-            x11::glx::GLX_RGBA_BIT,
-            GLX_BIND_TO_TEXTURE_RGBA_EXT,
-            1,
-            x11::glx::GLX_RED_SIZE,
-            10,
-            x11::glx::GLX_GREEN_SIZE,
-            10,
-            x11::glx::GLX_BLUE_SIZE,
-            10,
-            x11::glx::GLX_ALPHA_SIZE,
-            2,
-            0,
-        ];
-        let tfp_rgb_10bit_attrs: Vec<i32> = vec![
-            x11::glx::GLX_DRAWABLE_TYPE,
-            x11::glx::GLX_PIXMAP_BIT,
-            x11::glx::GLX_RENDER_TYPE,
-            x11::glx::GLX_RGBA_BIT,
-            GLX_BIND_TO_TEXTURE_RGB_EXT,
-            1,
-            x11::glx::GLX_RED_SIZE,
-            10,
-            x11::glx::GLX_GREEN_SIZE,
-            10,
-            x11::glx::GLX_BLUE_SIZE,
-            10,
-            0,
-        ];
-
-        // Enumerate ALL TFP-compatible FBConfigs and build a per-visual map.
-        // On older drivers (e.g. Ubuntu 20's Mesa), using a FBConfig whose
-        // visual doesn't match the source pixmap's visual produces garbled
-        // textures (e.g. solid orange).  Per-visual matching fixes this.
-        let mut tfp_visual_configs: HashMap<u32, (x11::glx::GLXFBConfig, bool)> = HashMap::new();
-        let mut tfp_visual_configs_10bit: HashMap<u32, (x11::glx::GLXFBConfig, bool)> =
-            HashMap::new();
-        let mut fbconfig_rgba: x11::glx::GLXFBConfig = std::ptr::null_mut();
-        let mut fbconfig_rgb: x11::glx::GLXFBConfig = std::ptr::null_mut();
-        let mut fbconfig_rgba_10bit: x11::glx::GLXFBConfig = std::ptr::null_mut();
-        let mut fbconfig_rgb_10bit: x11::glx::GLXFBConfig = std::ptr::null_mut();
-
-        let mut n = 0i32;
-
-        // --- RGBA TFP configs ---
-        let cfgs_rgba = unsafe {
-            x11::glx::glXChooseFBConfig(xlib_display, screen_num, tfp_rgba_attrs.as_ptr(), &mut n)
-        };
-        if !cfgs_rgba.is_null() && n > 0 {
-            fbconfig_rgba = unsafe { *cfgs_rgba };
-            for i in 0..n {
-                let cfg = unsafe { *cfgs_rgba.offset(i as isize) };
-                let mut vid: i32 = 0;
-                unsafe {
-                    x11::glx::glXGetFBConfigAttrib(
-                        xlib_display,
-                        cfg,
-                        x11::glx::GLX_VISUAL_ID,
-                        &mut vid,
-                    );
-                }
-                if vid != 0 {
-                    tfp_visual_configs.entry(vid as u32).or_insert((cfg, true));
-                }
-            }
-            unsafe { x11::xlib::XFree(cfgs_rgba as *mut _) };
-        }
-
-        // --- RGB TFP configs ---
-        let cfgs_rgb = unsafe {
-            x11::glx::glXChooseFBConfig(xlib_display, screen_num, tfp_rgb_attrs.as_ptr(), &mut n)
-        };
-        if !cfgs_rgb.is_null() && n > 0 {
-            fbconfig_rgb = unsafe { *cfgs_rgb };
-            for i in 0..n {
-                let cfg = unsafe { *cfgs_rgb.offset(i as isize) };
-                let mut vid: i32 = 0;
-                unsafe {
-                    x11::glx::glXGetFBConfigAttrib(
-                        xlib_display,
-                        cfg,
-                        x11::glx::GLX_VISUAL_ID,
-                        &mut vid,
-                    );
-                }
-                if vid != 0 {
-                    // Don't overwrite an RGBA entry — prefer RGBA for 32-bit visuals.
-                    tfp_visual_configs.entry(vid as u32).or_insert((cfg, false));
-                }
-            }
-            unsafe { x11::xlib::XFree(cfgs_rgb as *mut _) };
-        }
-
-        // --- 10-bit RGBA TFP configs (if HDR enabled) ---
-        if hdr_enabled {
-            let cfgs_rgba_10 = unsafe {
-                x11::glx::glXChooseFBConfig(
-                    xlib_display,
-                    screen_num,
-                    tfp_rgba_10bit_attrs.as_ptr(),
-                    &mut n,
-                )
-            };
-            if !cfgs_rgba_10.is_null() && n > 0 {
-                fbconfig_rgba_10bit = unsafe { *cfgs_rgba_10 };
-                for i in 0..n {
-                    let cfg = unsafe { *cfgs_rgba_10.offset(i as isize) };
-                    let mut vid: i32 = 0;
-                    unsafe {
-                        x11::glx::glXGetFBConfigAttrib(
-                            xlib_display,
-                            cfg,
-                            x11::glx::GLX_VISUAL_ID,
-                            &mut vid,
-                        );
-                    }
-                    if vid != 0 {
-                        tfp_visual_configs_10bit
-                            .entry(vid as u32)
-                            .or_insert((cfg, true));
-                    }
-                }
-                unsafe { x11::xlib::XFree(cfgs_rgba_10 as *mut _) };
-            }
-
-            // --- 10-bit RGB TFP configs ---
-            let cfgs_rgb_10 = unsafe {
-                x11::glx::glXChooseFBConfig(
-                    xlib_display,
-                    screen_num,
-                    tfp_rgb_10bit_attrs.as_ptr(),
-                    &mut n,
-                )
-            };
-            if !cfgs_rgb_10.is_null() && n > 0 {
-                fbconfig_rgb_10bit = unsafe { *cfgs_rgb_10 };
-                for i in 0..n {
-                    let cfg = unsafe { *cfgs_rgb_10.offset(i as isize) };
-                    let mut vid: i32 = 0;
-                    unsafe {
-                        x11::glx::glXGetFBConfigAttrib(
-                            xlib_display,
-                            cfg,
-                            x11::glx::GLX_VISUAL_ID,
-                            &mut vid,
-                        );
-                    }
-                    if vid != 0 {
-                        tfp_visual_configs_10bit
-                            .entry(vid as u32)
-                            .or_insert((cfg, false));
-                    }
-                }
-                unsafe { x11::xlib::XFree(cfgs_rgb_10 as *mut _) };
-            }
-        }
-
-        if fbconfig_rgba.is_null() && fbconfig_rgb.is_null() {
-            return Err("No FBConfig for texture_from_pixmap".into());
-        }
-        let has_10bit = !fbconfig_rgba_10bit.is_null() || !fbconfig_rgb_10bit.is_null();
-        log::info!(
-            "compositor: TFP FBConfigs: rgba={} rgb={} per_visual={} hdr_10bit={}",
-            !fbconfig_rgba.is_null(),
-            !fbconfig_rgb.is_null(),
-            tfp_visual_configs.len(),
-            has_10bit,
-        );
-
-        // 13. Create glow GL context
-        log::info!("compositor: creating glow GL context...");
-        let gl = unsafe {
-            glow::Context::from_loader_function(|name| {
-                let cname = CString::new(name).unwrap();
-                match x11::glx::glXGetProcAddress(cname.as_ptr() as *const u8) {
-                    Some(f) => f as *const _,
-                    None => std::ptr::null(),
-                }
-            })
-        };
+        let gl =
+            unsafe { glow::Context::from_loader_function(|name| graphics.get_proc_address(name)) };
+        let oml_loaded = graphics.load_oml();
 
         // P5D: Create shader cache
         let cache_dir = dirs::cache_dir()
@@ -1113,7 +618,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             }
             _ => {
-                log::info!("compositor: using global vsync (glXSwapInterval=1)");
+                log::info!("compositor: using graphics-platform global vsync");
                 (oml_loaded, VsyncMethod::Global, present_loaded)
             }
         };
@@ -1220,18 +725,13 @@ impl<C: CompositorConnection> Compositor<C> {
             );
         }
 
+        let hdr_output_10bit = graphics.output_is_10bit();
+
         Ok(Self {
             conn,
-            xlib_display,
-            tfp,
-            glx_context,
-            fbconfig_rgba,
-            fbconfig_rgb,
-            tfp_visual_configs,
-            tfp_visual_configs_10bit,
+            graphics,
             overlay_window,
             cm_selection_owner,
-            glx_drawable,
             gl,
             shader_cache,
             program,
@@ -1593,7 +1093,7 @@ impl<C: CompositorConnection> Compositor<C> {
             // HDR output control
             eotf_mode: 0,
             output_colorspace: 0,
-            hdr_output_10bit: hdr_got_10bit,
+            hdr_output_10bit,
             scratch_scene_info: Vec::new(),
             scratch_blur_dirty: Vec::new(),
             scratch_tfp_order: Vec::new(),

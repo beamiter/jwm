@@ -220,10 +220,10 @@ impl<C: CompositorConnection> Compositor<C> {
         // --- VSync method (runtime change support) ---
         let new_vsync_method = match behavior.vsync_method.as_str() {
             "oml_sync_control" => {
-                if self.oml.is_some()
-                    || oml_sync_control::OmlSyncControl::load(self.xlib_display, self.glx_drawable)
-                        .is_some()
-                {
+                if self.oml.is_none() {
+                    self.oml = self.graphics.load_oml();
+                }
+                if self.oml.is_some() {
                     VsyncMethod::OmlSyncControl
                 } else {
                     log::warn!("vsync_method: OML_sync_control not available, using global vsync");
@@ -247,8 +247,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.vsync_method = new_vsync_method;
             if new_vsync_method == VsyncMethod::OmlSyncControl && self.oml.is_none() {
                 // Try to load OML if not already loaded
-                self.oml =
-                    oml_sync_control::OmlSyncControl::load(self.xlib_display, self.glx_drawable);
+                self.oml = self.graphics.load_oml();
             }
         }
 

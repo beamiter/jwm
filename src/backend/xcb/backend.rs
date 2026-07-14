@@ -5184,6 +5184,7 @@ mod parity_tests {
     const X11_COMPOSITOR_INIT_SRC: &str = include_str!("../x11/compositor/init.rs");
     const X11_COMPOSITOR_RENDER_SRC: &str = include_str!("../x11/compositor/render.rs");
     const X11_COMPOSITOR_TFP_SRC: &str = include_str!("../x11/compositor/tfp.rs");
+    const X11_COMPOSITOR_PLATFORM_SRC: &str = include_str!("../x11/compositor/platform.rs");
 
     fn impl_body_after<'a>(src: &'a str, needle: &str) -> &'a str {
         let start = src
@@ -5685,9 +5686,10 @@ mod parity_tests {
                 && tfp_impl.contains("self.scratch_new_pixmaps = new_pixmaps"),
             "refresh_pixmaps should reuse compositor scratch Vecs"
         );
+        let platform_impl = impl_body_after(X11_COMPOSITOR_PLATFORM_SRC, "impl GlxPlatform");
         assert!(
-            !tfp_impl.contains("let pixmap_attrs: Vec<i32> = vec!")
-                && tfp_impl.contains("let pixmap_attrs = ["),
+            !platform_impl.contains("let attrs: Vec<i32> = vec!")
+                && platform_impl.contains("let attrs = ["),
             "GLX pixmap attributes should use stack arrays instead of heap Vecs"
         );
     }

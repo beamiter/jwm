@@ -1,8 +1,5 @@
 use super::Compositor;
-use super::{
-    GLX_FRONT_LEFT_EXT, GLX_TEXTURE_2D_EXT, GLX_TEXTURE_FORMAT_EXT, GLX_TEXTURE_FORMAT_RGB_EXT,
-    GLX_TEXTURE_FORMAT_RGBA_EXT, GLX_TEXTURE_TARGET_EXT, RippleState, WindowTexture,
-};
+use super::{PixmapBinding, RippleState, WindowTexture};
 use glow::HasContext;
 
 use super::CompositorConnection;
@@ -45,10 +42,7 @@ impl<C: CompositorConnection> Compositor<C> {
     // ----- Window management -----
 
     pub(crate) fn add_window(&mut self, x11_win: u32, x: i32, y: i32, w: u32, h: u32) {
-        if self.windows.contains_key(&x11_win) {
-            return;
-        }
-        if w == 0 || h == 0 {
+        if self.windows.contains_key(&x11_win) || w == 0 || h == 0 {
             return;
         }
         log::info!(
@@ -60,166 +54,46 @@ impl<C: CompositorConnection> Compositor<C> {
             y
         );
 
-        // Create damage
         let damage_id = match self.conn.generate_xid() {
             Ok(id) => id,
-            Err(e) => {
-                log::warn!("compositor: generate_id for damage failed: {e}");
+            Err(error) => {
+                log::warn!("compositor: generate_id for damage failed: {error}");
                 return;
             }
         };
-        if let Err(e) = self.conn.create_window_damage(damage_id, x11_win) {
-            log::warn!("compositor: damage_create failed for 0x{x11_win:x}: {e}");
+        if let Err(error) = self.conn.create_window_damage(damage_id, x11_win) {
+            log::warn!("compositor: damage_create failed for 0x{x11_win:x}: {error}");
             return;
         }
 
-        // NameWindowPixmap
         let pixmap = match self.conn.generate_xid() {
             Ok(id) => id,
-            Err(e) => {
-                log::warn!("compositor: generate_id for pixmap failed: {e}");
+            Err(error) => {
+                log::warn!("compositor: generate_id for pixmap failed: {error}");
                 let _ = self.conn.destroy_window_damage(damage_id);
                 return;
             }
         };
-        if let Err(e) = self.conn.name_window_pixmap(x11_win, pixmap) {
-            log::warn!("compositor: name_window_pixmap failed for 0x{x11_win:x}: {e}");
+        if let Err(error) = self.conn.name_window_pixmap(x11_win, pixmap) {
+            log::warn!("compositor: name_window_pixmap failed for 0x{x11_win:x}: {error}");
             let _ = self.conn.destroy_window_damage(damage_id);
             return;
         }
-        // Flush the X11 connection and sync Xlib so the pixmap XID is visible to GLX.
         let _ = self.conn.flush_x11();
 
-        // Select the TFP FBConfig for this window.  First try an exact match
-        // by visual ID (required on older Mesa, e.g. Ubuntu 20); fall back to
-        // the generic depth-based selection.
-        let win_visual = self.conn.get_window_visual(x11_win).unwrap_or(0);
-        let win_depth = self.conn.get_window_depth(x11_win).unwrap_or(24);
-
-        let (fbconfig, use_rgba) = if self.hdr_enabled {
-            // HDR mode: prefer 10-bit TFP configs when available
-            if let Some(&(cfg, is_rgba)) = self.tfp_visual_configs_10bit.get(&win_visual) {
-                log::debug!(
-                    "compositor: win 0x{:x} visual 0x{:x} -> 10-bit TFP FBConfig (rgba={})",
-                    x11_win,
-                    win_visual,
-                    is_rgba
-                );
-                (cfg, is_rgba)
-            } else if let Some(&(cfg, is_rgba)) = self.tfp_visual_configs.get(&win_visual) {
-                log::debug!(
-                    "compositor: win 0x{:x} visual 0x{:x} -> 8-bit TFP FBConfig (rgba={}, HDR fallback)",
-                    x11_win,
-                    win_visual,
-                    is_rgba
-                );
-                (cfg, is_rgba)
-            } else {
-                let rgba = win_depth == 32 && !self.fbconfig_rgba.is_null();
-                let cfg = if rgba {
-                    self.fbconfig_rgba
-                } else {
-                    self.fbconfig_rgb
-                };
-                (cfg, rgba)
-            }
-        } else if let Some(&(cfg, is_rgba)) = self.tfp_visual_configs.get(&win_visual) {
-            log::debug!(
-                "compositor: win 0x{:x} visual 0x{:x} -> per-visual FBConfig (rgba={})",
-                x11_win,
-                win_visual,
-                is_rgba
-            );
-            (cfg, is_rgba)
-        } else {
-            // Fallback: depth-based selection
-            let rgba = win_depth == 32 && !self.fbconfig_rgba.is_null();
-            let cfg = if rgba {
-                self.fbconfig_rgba
-            } else {
-                self.fbconfig_rgb
-            };
-            log::debug!(
-                "compositor: win 0x{:x} visual 0x{:x} depth={} -> depth-based FBConfig (rgba={})",
-                x11_win,
-                win_visual,
-                win_depth,
-                rgba
-            );
-            (cfg, rgba)
-        };
-        if fbconfig.is_null() {
-            log::warn!(
-                "compositor: no fbconfig for visual=0x{:x} depth={} win=0x{:x}",
-                win_visual,
-                win_depth,
-                x11_win
-            );
-            let _ = self.conn.free_window_pixmap(pixmap);
-            let _ = self.conn.destroy_window_damage(damage_id);
-            return;
-        }
-        let tex_fmt = if use_rgba {
-            GLX_TEXTURE_FORMAT_RGBA_EXT
-        } else {
-            GLX_TEXTURE_FORMAT_RGB_EXT
-        };
-
-        // Create GLX pixmap for TFP
-        let pixmap_attrs = [
-            GLX_TEXTURE_TARGET_EXT,
-            GLX_TEXTURE_2D_EXT,
-            GLX_TEXTURE_FORMAT_EXT,
-            tex_fmt,
-            0,
-        ];
-
-        log::info!(
-            "compositor: add_window 0x{:x} depth={} rgba={} pixmap=0x{:x}, calling glXCreatePixmap...",
-            x11_win,
-            win_depth,
-            use_rgba,
-            pixmap
-        );
-        let glx_pixmap = unsafe {
-            // Sync both connections so the Xlib display can see the pixmap
-            // created by the X11 connection backend.
-            x11::xlib::XSync(self.xlib_display, 0);
-
-            x11::glx::glXCreatePixmap(
-                self.xlib_display,
-                fbconfig,
-                pixmap as _,
-                pixmap_attrs.as_ptr(),
-            )
-        };
-        log::info!("compositor: glXCreatePixmap returned 0x{:x}", glx_pixmap);
-        if glx_pixmap == 0 {
-            log::warn!("compositor: glXCreatePixmap failed for 0x{x11_win:x}");
-            let _ = self.conn.free_window_pixmap(pixmap);
-            let _ = self.conn.destroy_window_damage(damage_id);
-            return;
-        }
-
-        // Create GL texture
+        let visual = self.conn.get_window_visual(x11_win).unwrap_or(0);
+        let depth = self.conn.get_window_depth(x11_win).unwrap_or(24);
         let gl_texture = unsafe {
             match self.gl.create_texture() {
-                Ok(t) => t,
-                Err(e) => {
-                    log::warn!("compositor: create_texture failed: {e}");
-                    x11::glx::glXDestroyPixmap(self.xlib_display, glx_pixmap);
+                Ok(texture) => texture,
+                Err(error) => {
+                    log::warn!("compositor: create_texture failed: {error}");
                     let _ = self.conn.free_window_pixmap(pixmap);
                     let _ = self.conn.destroy_window_damage(damage_id);
                     return;
                 }
             }
         };
-
-        // Bind texture
-        log::info!(
-            "compositor: add_window 0x{:x} binding TFP texture...",
-            x11_win
-        );
         unsafe {
             self.gl.bind_texture(glow::TEXTURE_2D, Some(gl_texture));
             self.gl.tex_parameter_i32(
@@ -242,19 +116,34 @@ impl<C: CompositorConnection> Compositor<C> {
                 glow::TEXTURE_WRAP_T,
                 glow::CLAMP_TO_EDGE as i32,
             );
-            (self.tfp.bind)(
-                self.xlib_display,
-                glx_pixmap,
-                GLX_FRONT_LEFT_EXT,
-                std::ptr::null(),
-            );
             self.gl.bind_texture(glow::TEXTURE_2D, None);
         }
-        log::info!("compositor: add_window 0x{:x} COMPLETE", x11_win);
 
-        // Start with fade opacity = 0 if fading is enabled (will fade in)
+        if let Err(error) = self.graphics.sync_x11() {
+            log::warn!("compositor: native pixmap synchronization failed: {error}");
+        }
+        let (binding, use_rgba) = match self.graphics.import_pixmap(
+            &self.gl,
+            gl_texture,
+            pixmap,
+            visual,
+            depth,
+            self.hdr_enabled,
+        ) {
+            Ok(import) => import,
+            Err(error) => {
+                log::warn!(
+                    "compositor: {} pixmap import failed for 0x{x11_win:x}: {error}",
+                    self.graphics.api_name()
+                );
+                unsafe { self.gl.delete_texture(gl_texture) };
+                let _ = self.conn.free_window_pixmap(pixmap);
+                let _ = self.conn.destroy_window_damage(damage_id);
+                return;
+            }
+        };
+
         let initial_fade = if self.fading { 0.0 } else { 1.0 };
-
         self.windows.insert(
             x11_win,
             WindowTexture {
@@ -264,11 +153,10 @@ impl<C: CompositorConnection> Compositor<C> {
                 h,
                 damage: damage_id,
                 pixmap,
-                glx_pixmap,
+                binding: Some(binding),
                 gl_texture,
                 dirty: true,
                 has_rgba: use_rgba,
-                fbconfig,
                 needs_pixmap_refresh: false,
                 x11_win,
                 fade_opacity: initial_fade,
@@ -297,23 +185,21 @@ impl<C: CompositorConnection> Compositor<C> {
             },
         );
 
-        // Phase 3.3: Trigger ripple effect on window open
         if self.ripple_on_open {
             self.ripple_active.push(RippleState {
                 x11_win,
                 start: std::time::Instant::now(),
             });
         }
-
         self.needs_render = true;
-
         log::debug!(
-            "compositor: add_window 0x{:x} {}x{} at ({},{})",
+            "compositor: add_window 0x{:x} {}x{} at ({},{}) via {}",
             x11_win,
             w,
             h,
             x,
-            y
+            y,
+            self.graphics.api_name()
         );
     }
 
@@ -424,25 +310,28 @@ impl<C: CompositorConnection> Compositor<C> {
         self.remove_window_immediate(x11_win);
     }
 
-    /// Release the GL texture + GLX/X pixmap + damage owned by a window.
-    /// Shared by immediate removal and by genie-animation cleanup (which takes
-    /// ownership of these resources so they outlive the WindowTexture).
+    /// Release the GL texture, imported native pixmap, X pixmap, and Damage.
+    /// Shared by immediate removal and genie-animation cleanup.
     pub(super) fn free_texture_resources(
         &mut self,
         gl_texture: glow::Texture,
-        glx_pixmap: x11::glx::GLXPixmap,
+        binding: Option<PixmapBinding>,
         pixmap: u32,
         damage: u32,
     ) {
-        unsafe {
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(gl_texture));
-            (self.tfp.release)(self.xlib_display, glx_pixmap, GLX_FRONT_LEFT_EXT);
-            self.gl.bind_texture(glow::TEXTURE_2D, None);
-            self.gl.delete_texture(gl_texture);
-            x11::glx::glXDestroyPixmap(self.xlib_display, glx_pixmap);
+        if let Some(binding) = binding {
+            self.graphics
+                .release_pixmap_binding(&self.gl, gl_texture, binding);
         }
-        let _ = self.conn.free_window_pixmap(pixmap);
-        let _ = self.conn.destroy_window_damage(damage);
+        unsafe {
+            self.gl.delete_texture(gl_texture);
+        }
+        if pixmap != 0 {
+            let _ = self.conn.free_window_pixmap(pixmap);
+        }
+        if damage != 0 {
+            let _ = self.conn.destroy_window_damage(damage);
+        }
     }
 
     /// Actually remove a window (no fade). Used internally.
@@ -456,7 +345,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.unredirected_window = None;
         }
 
-        self.free_texture_resources(wt.gl_texture, wt.glx_pixmap, wt.pixmap, wt.damage);
+        self.free_texture_resources(wt.gl_texture, wt.binding, wt.pixmap, wt.damage);
 
         log::debug!("compositor: remove_window 0x{:x}", x11_win);
     }
@@ -498,10 +387,9 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
-    /// Recreate GLX pixmaps for windows that had their size changed.
-    /// Called once per frame in render_frame() to batch all pending recreations.
+    /// Recreate native pixmap imports for windows whose backing pixmap changed.
+    /// Called once per frame so resize bursts are coalesced.
     pub(super) fn refresh_pixmaps(&mut self) {
-        // Collect window IDs that need refresh to avoid borrowing issues
         let mut refresh_wins = std::mem::take(&mut self.scratch_refresh_wins);
         refresh_wins.clear();
         refresh_wins.extend(
@@ -509,110 +397,110 @@ impl<C: CompositorConnection> Compositor<C> {
                 .iter()
                 .filter_map(|(&id, wt)| wt.needs_pixmap_refresh.then_some(id)),
         );
-
         if refresh_wins.is_empty() {
             self.scratch_refresh_wins = refresh_wins;
             return;
         }
 
-        // Release old pixmaps for all windows that need refresh
         for &win in &refresh_wins {
-            let wt = self.windows.get(&win).unwrap();
-            unsafe {
-                self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
-                (self.tfp.release)(self.xlib_display, wt.glx_pixmap, GLX_FRONT_LEFT_EXT);
-                self.gl.bind_texture(glow::TEXTURE_2D, None);
-                x11::glx::glXDestroyPixmap(self.xlib_display, wt.glx_pixmap);
+            let (texture, binding, pixmap) = {
+                let wt = self
+                    .windows
+                    .get_mut(&win)
+                    .expect("tracked window disappeared");
+                (wt.gl_texture, wt.binding.take(), wt.pixmap)
+            };
+            if let Some(binding) = binding {
+                self.graphics
+                    .release_pixmap_binding(&self.gl, texture, binding);
             }
-            let _ = self.conn.free_window_pixmap(wt.pixmap);
+            if pixmap != 0 {
+                let _ = self.conn.free_window_pixmap(pixmap);
+            }
         }
 
-        // Create new named pixmaps for all windows via the shared texture-source ops
         let mut new_pixmaps = std::mem::take(&mut self.scratch_new_pixmaps);
         new_pixmaps.clear();
         new_pixmaps.reserve(refresh_wins.len());
         for &win in &refresh_wins {
-            let wt = self.windows.get_mut(&win).unwrap();
+            let x11_win = self.windows[&win].x11_win;
             let pixmap = match self.conn.generate_xid() {
                 Ok(id) => id,
-                Err(_) => {
-                    wt.glx_pixmap = 0;
-                    wt.pixmap = 0;
-                    wt.needs_pixmap_refresh = false;
+                Err(error) => {
+                    log::warn!("compositor: resized pixmap XID allocation failed: {error}");
+                    if let Some(wt) = self.windows.get_mut(&win) {
+                        wt.pixmap = 0;
+                        wt.needs_pixmap_refresh = false;
+                    }
                     continue;
                 }
             };
-            if self.conn.name_window_pixmap(wt.x11_win, pixmap).is_err() {
-                wt.glx_pixmap = 0;
-                wt.pixmap = 0;
-                wt.needs_pixmap_refresh = false;
+            if let Err(error) = self.conn.name_window_pixmap(x11_win, pixmap) {
+                log::warn!("compositor: resized NameWindowPixmap failed: {error}");
+                if let Some(wt) = self.windows.get_mut(&win) {
+                    wt.pixmap = 0;
+                    wt.needs_pixmap_refresh = false;
+                }
                 continue;
             }
-            wt.pixmap = pixmap;
+            if let Some(wt) = self.windows.get_mut(&win) {
+                wt.pixmap = pixmap;
+            }
             new_pixmaps.push((win, pixmap));
         }
 
-        // Single flush + sync for the entire batch
         let _ = self.conn.flush_x11();
-        unsafe {
-            x11::xlib::XSync(self.xlib_display, 0);
+        if let Err(error) = self.graphics.sync_x11() {
+            log::warn!("compositor: resized pixmap synchronization failed: {error}");
         }
 
-        // Create GLX pixmaps and rebind textures
         for (win, pixmap) in new_pixmaps.drain(..) {
-            let wt = self.windows.get_mut(&win).unwrap();
-            let fbconfig = wt.fbconfig;
-            let tex_fmt = if wt.has_rgba {
-                GLX_TEXTURE_FORMAT_RGBA_EXT
-            } else {
-                GLX_TEXTURE_FORMAT_RGB_EXT
+            let (texture, x11_win) = {
+                let wt = &self.windows[&win];
+                (wt.gl_texture, wt.x11_win)
             };
-            let pixmap_attrs = [
-                GLX_TEXTURE_TARGET_EXT,
-                GLX_TEXTURE_2D_EXT,
-                GLX_TEXTURE_FORMAT_EXT,
-                tex_fmt,
-                0,
-            ];
-            let glx_pixmap = unsafe {
-                x11::glx::glXCreatePixmap(
-                    self.xlib_display,
-                    fbconfig,
-                    pixmap as _,
-                    pixmap_attrs.as_ptr(),
-                )
-            };
-            if glx_pixmap == 0 {
-                let _ = self.conn.free_window_pixmap(pixmap);
-                wt.pixmap = 0;
-                wt.glx_pixmap = 0;
-                wt.needs_pixmap_refresh = false;
-                continue;
-            }
-
-            unsafe {
-                self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
-                (self.tfp.bind)(
-                    self.xlib_display,
-                    glx_pixmap,
-                    GLX_FRONT_LEFT_EXT,
-                    std::ptr::null(),
-                );
-                self.gl.bind_texture(glow::TEXTURE_2D, None);
-
-                // Phase 2.3: Insert fence after rebind to avoid GPU stall
-                if let Some(old_fence) = wt.pending_fence.take() {
-                    self.gl.delete_sync(old_fence);
+            let visual = self.conn.get_window_visual(x11_win).unwrap_or(0);
+            let depth = self.conn.get_window_depth(x11_win).unwrap_or(24);
+            match self.graphics.import_pixmap(
+                &self.gl,
+                texture,
+                pixmap,
+                visual,
+                depth,
+                self.hdr_enabled,
+            ) {
+                Ok((binding, rgba)) => {
+                    let wt = self
+                        .windows
+                        .get_mut(&win)
+                        .expect("tracked window disappeared");
+                    wt.binding = Some(binding);
+                    wt.has_rgba = rgba;
+                    wt.dirty = true;
+                    wt.needs_pixmap_refresh = false;
+                    unsafe {
+                        if let Some(old_fence) = wt.pending_fence.take() {
+                            self.gl.delete_sync(old_fence);
+                        }
+                        wt.pending_fence =
+                            self.gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0).ok();
+                    }
                 }
-                wt.pending_fence = self.gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0).ok();
+                Err(error) => {
+                    log::warn!(
+                        "compositor: resized {} pixmap import failed for 0x{x11_win:x}: {error}",
+                        self.graphics.api_name()
+                    );
+                    let _ = self.conn.free_window_pixmap(pixmap);
+                    if let Some(wt) = self.windows.get_mut(&win) {
+                        wt.pixmap = 0;
+                        wt.binding = None;
+                        wt.needs_pixmap_refresh = false;
+                    }
+                }
             }
-
-            wt.glx_pixmap = glx_pixmap;
-            wt.dirty = true;
-            wt.needs_pixmap_refresh = false;
         }
 
-        // Clear flag for any remaining windows (error paths above)
         for &win in &refresh_wins {
             if let Some(wt) = self.windows.get_mut(&win) {
                 wt.needs_pixmap_refresh = false;
