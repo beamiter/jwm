@@ -6,12 +6,12 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.103"
 chrono = "0.4.45"
-sysinfo = { version = "0.37.2", features = ["multithread"] }
+sysinfo = { version = "0.39.6", features = ["multithread"] }
 
 shared_structures = { git = "https://github.com/beamiter/shared_structures.git", features = ["use-futex"] }
 serde = { version = "1.0.228", features = ["derive"] }
 
-alsa = "0.10.0"
+alsa = "0.12.0"
 log = "0.4.33"
 flexi_logger = "0.31.9"
 battery = "0.7.8"
