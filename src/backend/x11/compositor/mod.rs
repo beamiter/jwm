@@ -24,6 +24,9 @@ pub mod benchmark {
 pub mod blur_optimize {
     pub use crate::backend::x11::compositor_common::blur_optimize::*;
 }
+pub(crate) mod buffer_age {
+    pub(crate) use crate::backend::x11::compositor_common::buffer_age::*;
+}
 pub mod cache_warmup {
     pub use crate::backend::x11::compositor_common::cache_warmup::*;
 }
@@ -143,6 +146,7 @@ mod wallpaper;
 pub use crate::backend::x11::compositor_common::present::PresentController;
 pub use async_x11::{DeferredOpQueue, EventQueue, InputPriority, PriorityEventQueue};
 pub use blur_optimize::{AdaptiveBlur, BlurCache, BlurCacheStats, GaussianBlurParams};
+pub(crate) use buffer_age::BufferAgeDamageHistory;
 pub use cache_warmup::{BlurSizeStats, CacheWarmupManager};
 pub(crate) use damage_tracker::DamageTracker;
 pub use direct_scanout::{DirectScanoutManager, DirectScanoutStats, WindowScanoutInfo};
@@ -271,6 +275,9 @@ where
     #[allow(dead_code)]
     root: u32,
     needs_render: bool,
+    /// Wakeup requested by X Damage alone; unlike `needs_render`, this does not
+    /// imply that compositor state outside the tracked dirty windows changed.
+    damage_render_pending: bool,
     context_current: bool,
     /// Hash of the last rendered scene for skip-unchanged-frame optimization.
     last_scene_hash: u64,
@@ -331,6 +338,8 @@ where
     damage_tracker: DamageTracker,
     // P5C: Rectangle-level precise dirty tracking
     dirty_region_tracker: DirtyRegionTracker,
+    /// Scene changes from recent swaps, used to repair recycled EGL buffers.
+    buffer_age_damage_history: BufferAgeDamageHistory,
 
     // --- Phase 2.2: Blur quality auto-downgrade ---
     blur_quality: BlurQuality,

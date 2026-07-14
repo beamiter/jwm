@@ -5625,6 +5625,13 @@ mod parity_tests {
                     == 1,
             "shared X11 compositor render path should combine dirty detection and dirty-rect marking"
         );
+        assert!(
+            render_impl.contains("self.damage_render_pending = false")
+                && render_impl.contains("partial_redraw_buffer_age()")
+                && render_impl.contains("buffer_age_damage_history")
+                && X11_COMPOSITOR_TFP_SRC.contains("self.damage_render_pending = true"),
+            "shared X11 compositor should keep damage wakeups incremental and repair recycled EGL buffers"
+        );
         let tfp_order_start = render_impl
             .find("Build priority-ordered window list")
             .expect("missing TFP order block");

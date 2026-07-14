@@ -16,7 +16,7 @@ use std::sync::mpsc;
 
 impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn needs_render(&self) -> bool {
-        if self.needs_render || self.recording_active {
+        if self.needs_render || self.damage_render_pending || self.recording_active {
             return true;
         }
         // Also need render if any fade animations are in progress
@@ -138,6 +138,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
     pub(crate) fn clear_needs_render(&mut self) {
         self.needs_render = false;
+        self.damage_render_pending = false;
     }
 
     // =====================================================================

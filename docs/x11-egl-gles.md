@@ -41,15 +41,22 @@ falls back to global platform vsync.
 
 ## Partial redraw
 
-When the matching EGLConfig advertises `EGL_SWAP_BEHAVIOR_PRESERVED_BIT`, JWM
-requests `EGL_BUFFER_PRESERVED` and safely limits redraws to the merged X Damage
-region. If the driver also exposes `EGL_KHR_swap_buffers_with_damage` or
-`EGL_EXT_swap_buffers_with_damage`, the disjoint tracked dirty rectangles are
-passed in bottom-left-origin coordinates to the surface swap. Rendering keeps a
-single merged scissor, while the window system can avoid processing unchanged
-pixels between distant updates. A driver that rejects its advertised damage-swap
-entry point is downgraded once for that surface; drivers that cannot preserve the
-back buffer use full-frame rendering and ordinary `eglSwapBuffers`.
+When the driver exposes `EGL_EXT_buffer_age`, JWM tracks a bounded history of
+scene changes. A recycled back buffer is repaired by merging the current X
+Damage region with the changes from the missing frames. An undefined buffer
+(age zero), an unusually old buffer, resize, or failed query safely falls back
+to a full redraw. This avoids the per-frame copy-back dependency of preserved
+swap. On drivers without buffer-age support, JWM retains the previous
+`EGL_BUFFER_PRESERVED` compatibility path when the matching EGLConfig supports
+it.
+
+If the driver also exposes `EGL_KHR_swap_buffers_with_damage` or
+`EGL_EXT_swap_buffers_with_damage`, the current frame's disjoint dirty
+rectangles are passed in bottom-left-origin coordinates to the surface swap.
+Rendering keeps a single merged repair scissor, while the window system can
+avoid processing unchanged pixels between distant updates. A driver that
+rejects an advertised buffer-age query or damage-swap entry point is downgraded
+once for that surface.
 
 ## Window import hot path
 

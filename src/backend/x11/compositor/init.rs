@@ -762,6 +762,7 @@ impl<C: CompositorConnection> Compositor<C> {
             screen_h,
             root,
             needs_render: true,
+            damage_render_pending: false,
             context_current: true,
             last_scene_hash: 0,
             corner_radius: behavior.corner_radius,
@@ -805,6 +806,7 @@ impl<C: CompositorConnection> Compositor<C> {
             damage_tracker: DamageTracker::new(screen_w, screen_h),
             // P5C: Rectangle-level dirty tracking
             dirty_region_tracker: DirtyRegionTracker::new(screen_w, screen_h),
+            buffer_age_damage_history: BufferAgeDamageHistory::new(),
             // Phase 2.2: Blur quality auto-downgrade
             blur_quality: BlurQuality::Full,
             blur_quality_auto: behavior.blur_quality_auto,

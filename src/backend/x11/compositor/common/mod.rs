@@ -5,6 +5,7 @@ pub mod async_x11;
 pub mod audio_sync;
 pub mod benchmark;
 pub mod blur_optimize;
+pub mod buffer_age;
 pub mod cache_warmup;
 pub mod damage_tracker;
 pub mod direct_scanout;

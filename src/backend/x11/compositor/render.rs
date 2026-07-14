@@ -147,6 +147,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
     pub(crate) fn force_full_redraw(&mut self) {
         self.damage_tracker.mark_all_dirty();
+        self.dirty_region_tracker.mark_all_dirty();
         self.needs_render = true;
     }
 
@@ -821,6 +822,7 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
         let explicit_render = std::mem::replace(&mut self.needs_render, false);
+        self.damage_render_pending = false;
         let force_render = self.screenshot_requests.has_pending()
             || self.debug_hud
             || self.transition_active()
@@ -1028,16 +1030,33 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
 
-        // P5C Phase 3: Apply scissor test using rectangle-based dirty tracker
-        let dirty_rect = self.dirty_region_tracker.merged();
-        let use_scissor = self.partial_damage_enabled
-            && self.graphics.supports_partial_redraw()
-            && dirty_rect.is_some()
-            && !force_render;
+        // Apply a scissor using the current scene changes plus any intervening
+        // damage missing from a recycled EGL back buffer. Unknown/undefined
+        // buffers safely fall back to a full redraw while still building useful
+        // history for subsequent frames.
+        let current_damage = self.dirty_region_tracker.merged();
+        let incremental_frame = !force_render && !scene_changed && !fades_active;
+        let buffer_age =
+            if self.partial_damage_enabled && incremental_frame && current_damage.is_some() {
+                self.graphics.partial_redraw_buffer_age()
+            } else {
+                0
+            };
+        let repair_damage = current_damage.and_then(|damage| {
+            self.buffer_age_damage_history
+                .repair_region(damage, buffer_age)
+        });
+        let use_scissor = repair_damage.is_some();
+        let full_frame_damage = DirtyRect::new(0, 0, self.screen_w, self.screen_h);
+        let frame_damage = if incremental_frame {
+            current_damage.unwrap_or(full_frame_damage)
+        } else {
+            full_frame_damage
+        };
         let mut damage_scissor = (0i32, 0i32, self.screen_w as i32, self.screen_h as i32);
         let mut swap_damage_rects = std::mem::take(&mut self.scratch_swap_damage);
         swap_damage_rects.clear();
-        if let (true, Some(rect)) = (use_scissor, dirty_rect) {
+        if let Some(rect) = repair_damage {
             unsafe {
                 self.gl.enable(glow::SCISSOR_TEST);
                 // GL scissor uses bottom-left origin
@@ -1051,11 +1070,12 @@ impl<C: CompositorConnection> Compositor<C> {
                 );
             }
 
-            // Keep GL rendering to one scissor bounding box, but preserve the
-            // disjoint rectangles for EGL_KHR/EXT_swap_buffers_with_damage.
-            // This avoids turning two small, distant window updates into an
-            // almost full-screen native buffer exchange. The Vec is compositor
-            // scratch storage and normally performs no allocation here.
+            // Keep GL repair to one scissor bounding box, but submit only the
+            // current frame's disjoint scene changes to EGL. Damage from older
+            // frames is needed to repair this back buffer, but already matches
+            // the current front buffer and does not need to be presented again.
+            // The Vec is compositor scratch storage and normally allocates no
+            // memory here.
             if self.graphics.supports_swap_with_damage() {
                 swap_damage_rects.reserve(self.dirty_region_tracker.region_count() * 4);
                 for dirty in self.dirty_region_tracker.iter() {
@@ -3091,10 +3111,12 @@ impl<C: CompositorConnection> Compositor<C> {
                 "compositor: {} buffer swap failed: {error}",
                 self.graphics.api_name()
             );
+            self.buffer_age_damage_history.clear();
             self.context_current = false;
             self.needs_render = true;
             return false;
         }
+        self.buffer_age_damage_history.record(frame_damage);
 
         // Schedule re-render if fades or transition are still in progress
         if fades_active

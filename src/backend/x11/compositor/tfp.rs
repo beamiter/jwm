@@ -248,6 +248,8 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // Resize damage tracker for new screen dimensions
         self.damage_tracker.resize(new_w, new_h);
+        self.dirty_region_tracker.resize(new_w, new_h);
+        self.buffer_age_damage_history.clear();
 
         // Recreate blur FBOs for new screen size
         if self.blur_enabled {
@@ -536,7 +538,7 @@ impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn mark_damaged(&mut self, x11_win: u32) {
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             wt.dirty = true;
-            self.needs_render = true;
+            self.damage_render_pending = true;
             // Mark the window's region as dirty in the damage tracker
             // Expand by shadow radius to cover shadow
             let expand = self.shadow_radius as i32 + self.shadow_offset[0].abs() as i32 + 4;

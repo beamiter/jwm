@@ -147,12 +147,13 @@ impl GraphicsPlatform {
         matches!(self.backend, PlatformBackend::Egl(_))
     }
 
-    /// Partial redraw is safe only when the post-swap back buffer is retained.
-    pub(super) fn supports_partial_redraw(&self) -> bool {
+    /// Return the number of frames since the current back buffer was defined.
+    /// Zero means its contents cannot be reused and requires a full redraw.
+    pub(super) fn partial_redraw_buffer_age(&self) -> u32 {
         match &self.backend {
             // Preserve the established GLX behavior. EGL explicitly verifies it.
-            PlatformBackend::Glx(_) => true,
-            PlatformBackend::Egl(egl) => egl.buffer_preserved,
+            PlatformBackend::Glx(_) => 1,
+            PlatformBackend::Egl(egl) => egl.buffer_age(),
         }
     }
 
@@ -793,6 +794,7 @@ const EGL_CORE_NATIVE_ENGINE: EglInt = 0x305B;
 const EGL_SWAP_BEHAVIOR: EglInt = 0x3093;
 const EGL_BUFFER_PRESERVED: EglInt = 0x3094;
 const EGL_SWAP_BEHAVIOR_PRESERVED_BIT: EglInt = 0x0400;
+const EGL_BUFFER_AGE_EXT: EglInt = 0x313D;
 
 #[link(name = "EGL")]
 unsafe extern "C" {
@@ -841,6 +843,12 @@ unsafe extern "C" {
         attribute: EglInt,
         value: EglInt,
     ) -> EglBoolean;
+    fn eglQuerySurface(
+        display: EglDisplay,
+        surface: EglSurface,
+        attribute: EglInt,
+        value: *mut EglInt,
+    ) -> EglBoolean;
     fn eglWaitNative(engine: EglInt) -> EglBoolean;
     fn eglQueryString(display: EglDisplay, name: EglInt) -> *const libc::c_char;
     fn eglGetError() -> EglInt;
@@ -855,6 +863,7 @@ struct EglPlatform {
     destroy_image: EglDestroyImage,
     image_target_texture: GlEglImageTargetTexture2dOes,
     swap_buffers_with_damage: Cell<Option<EglSwapBuffersWithDamage>>,
+    buffer_age_supported: Cell<bool>,
     buffer_preserved: bool,
     gles_library: *mut c_void,
     output_is_10bit: bool,
@@ -891,20 +900,21 @@ impl EglPlatform {
                     CStr::from_ptr(value).to_str().unwrap_or("")
                 }
             };
-            let has_image_base =
-                extensions.contains("EGL_KHR_image_base") || extensions.contains("EGL_KHR_image");
-            if !has_image_base || !extensions.contains("EGL_KHR_image_pixmap") {
+            let has_image_base = has_egl_extension(extensions, "EGL_KHR_image_base")
+                || has_egl_extension(extensions, "EGL_KHR_image");
+            if !has_image_base || !has_egl_extension(extensions, "EGL_KHR_image_pixmap") {
                 return Err(format!(
                     "EGL image-pixmap import unavailable (extensions: {extensions})"
                 ));
             }
+            let buffer_age_supported = has_egl_extension(extensions, "EGL_EXT_buffer_age");
             let swap_buffers_with_damage: Option<EglSwapBuffersWithDamage> =
-                if extensions.contains("EGL_KHR_swap_buffers_with_damage") {
+                if has_egl_extension(extensions, "EGL_KHR_swap_buffers_with_damage") {
                     let proc = egl_proc_any(&["eglSwapBuffersWithDamageKHR"]);
                     (!proc.is_null()).then(|| unsafe {
                         std::mem::transmute::<*const c_void, EglSwapBuffersWithDamage>(proc)
                     })
-                } else if extensions.contains("EGL_EXT_swap_buffers_with_damage") {
+                } else if has_egl_extension(extensions, "EGL_EXT_swap_buffers_with_damage") {
                     let proc = egl_proc_any(&["eglSwapBuffersWithDamageEXT"]);
                     (!proc.is_null()).then(|| unsafe {
                         std::mem::transmute::<*const c_void, EglSwapBuffersWithDamage>(proc)
@@ -950,7 +960,10 @@ impl EglPlatform {
                 unsafe { eglGetConfigAttrib(display, config, EGL_SURFACE_TYPE, &mut surface_type) }
                     != EGL_FALSE
                     && surface_type & EGL_SWAP_BEHAVIOR_PRESERVED_BIT != 0;
-            let buffer_preserved = if supports_preserved_swap {
+            // Buffer age avoids the copy-back dependency introduced by preserved
+            // swap. Keep preserved swap only as the compatibility fallback when
+            // EGL_EXT_buffer_age is unavailable.
+            let buffer_preserved = if !buffer_age_supported && supports_preserved_swap {
                 let preserved = unsafe {
                     eglSurfaceAttrib(display, surface, EGL_SWAP_BEHAVIOR, EGL_BUFFER_PRESERVED)
                 } != EGL_FALSE;
@@ -965,7 +978,8 @@ impl EglPlatform {
                 false
             };
             log::info!(
-                "compositor: EGL partial redraw preserved_back_buffer={} swap_with_damage={}",
+                "compositor: EGL partial redraw buffer_age={} preserved_back_buffer={} swap_with_damage={}",
+                buffer_age_supported,
                 buffer_preserved,
                 swap_buffers_with_damage.is_some()
             );
@@ -1032,6 +1046,7 @@ impl EglPlatform {
                 destroy_image: unsafe { std::mem::transmute(destroy_image_ptr) },
                 image_target_texture: unsafe { std::mem::transmute(image_target_ptr) },
                 swap_buffers_with_damage: Cell::new(swap_buffers_with_damage),
+                buffer_age_supported: Cell::new(buffer_age_supported),
                 buffer_preserved,
                 gles_library,
                 output_is_10bit,
@@ -1054,6 +1069,31 @@ impl EglPlatform {
         } else {
             Ok(())
         }
+    }
+
+    fn buffer_age(&self) -> u32 {
+        if self.buffer_preserved {
+            return 1;
+        }
+        if !self.buffer_age_supported.get() {
+            return 0;
+        }
+
+        let mut age = 0;
+        if unsafe { eglQuerySurface(self.display, self.surface, EGL_BUFFER_AGE_EXT, &mut age) }
+            == EGL_FALSE
+        {
+            // A few drivers expose the extension globally but reject it for a
+            // particular surface. Downgrade once and use full redraws instead of
+            // repeating a failing query every frame.
+            self.buffer_age_supported.set(false);
+            log::warn!(
+                "compositor: EGL buffer-age query failed; disabling partial redraw for this surface: {}",
+                egl_error("eglQuerySurface(EGL_BUFFER_AGE_EXT)")
+            );
+            return 0;
+        }
+        u32::try_from(age).unwrap_or(0)
     }
 
     fn swap_buffers(&self, damage: Option<&[EglInt]>) -> Result<(), String> {
@@ -1203,6 +1243,12 @@ fn egl_damage_rect_count(rects: &[EglInt]) -> Option<EglInt> {
     EglInt::try_from(count).ok()
 }
 
+fn has_egl_extension(extensions: &str, expected: &str) -> bool {
+    extensions
+        .split_ascii_whitespace()
+        .any(|extension| extension == expected)
+}
+
 pub(super) fn append_egl_damage_rect(
     output: &mut Vec<EglInt>,
     surface_height: u32,
@@ -1331,7 +1377,9 @@ fn egl_error(operation: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{GraphicsApiPreference, append_egl_damage_rect, egl_damage_rect_count};
+    use super::{
+        GraphicsApiPreference, append_egl_damage_rect, egl_damage_rect_count, has_egl_extension,
+    };
     use crate::backend::x11::compositor::DirtyRect;
 
     #[test]
@@ -1374,5 +1422,15 @@ mod tests {
 
         assert_eq!(output, [10, 540, 30, 40, 500, 150, 20, 50]);
         assert_eq!(egl_damage_rect_count(&output), Some(2));
+    }
+
+    #[test]
+    fn matches_complete_egl_extension_names() {
+        let extensions = "EGL_EXT_buffer_age EGL_KHR_image_base EGL_KHR_swap_buffers_with_damage";
+
+        assert!(has_egl_extension(extensions, "EGL_EXT_buffer_age"));
+        assert!(has_egl_extension(extensions, "EGL_KHR_image_base"));
+        assert!(!has_egl_extension(extensions, "EGL_KHR_image"));
+        assert!(!has_egl_extension(extensions, "EGL_EXT_buffer"));
     }
 }
