@@ -669,10 +669,6 @@ where
     /// PBO uploader for async texture uploads (overview/font rendering)
     pbo_uploader: PBOUploader,
 
-    // --- P6B: GPU Fence Sync optimization ---
-    /// GPU fence manager for non-blocking TFP sync
-    gpu_fence_sync_mgr: GPUFenceSyncManager,
-
     // --- P6A: Async X11 communication ---
     /// Priority-aware event queue (separates event processing from rendering)
     #[allow(dead_code)]

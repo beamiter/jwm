@@ -54,20 +54,16 @@ impl<C: CompositorConnection> Compositor<C> {
             y
         );
 
-        let visual = match self.conn.get_window_visual(x11_win) {
-            Ok(visual) => visual,
-            Err(error) => {
-                log::debug!(
-                    "compositor: skipping stale window 0x{x11_win:x}; attributes unavailable: {error}"
-                );
-                return;
-            }
+        let format = if self.graphics.is_gles() {
+            self.conn.get_window_depth(x11_win).map(|depth| (0, depth))
+        } else {
+            self.conn.get_window_visual_and_depth(x11_win)
         };
-        let depth = match self.conn.get_window_depth(x11_win) {
-            Ok(depth) => depth,
+        let (visual, depth) = match format {
+            Ok(format) => format,
             Err(error) => {
                 log::debug!(
-                    "compositor: skipping stale window 0x{x11_win:x}; geometry unavailable: {error}"
+                    "compositor: skipping stale window 0x{x11_win:x}; format unavailable: {error}"
                 );
                 return;
             }
@@ -180,6 +176,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 h,
                 damage: damage_id,
                 pixmap,
+                visual,
+                depth,
                 binding: Some(binding),
                 gl_texture,
                 dirty: true,
@@ -482,12 +480,10 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         for (win, pixmap) in new_pixmaps.drain(..) {
-            let (texture, x11_win) = {
+            let (texture, x11_win, visual, depth) = {
                 let wt = &self.windows[&win];
-                (wt.gl_texture, wt.x11_win)
+                (wt.gl_texture, wt.x11_win, wt.visual, wt.depth)
             };
-            let visual = self.conn.get_window_visual(x11_win).unwrap_or(0);
-            let depth = self.conn.get_window_depth(x11_win).unwrap_or(24);
             match self.graphics.import_pixmap(
                 &self.gl,
                 texture,

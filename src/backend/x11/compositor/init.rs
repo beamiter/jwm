@@ -1073,8 +1073,6 @@ impl<C: CompositorConnection> Compositor<C> {
             temporal_blur_total_count: 0,
             // P6C: PBO uploader (4MB PBOs, pool of 4)
             pbo_uploader: PBOUploader::new(4 * 1024 * 1024, 4),
-            // P6B: GPU fence sync manager
-            gpu_fence_sync_mgr: GPUFenceSyncManager::new(),
             // P6A: Async X11 communication
             priority_event_queue: PriorityEventQueue::new(),
             deferred_ops_queue: DeferredOpQueue::new(256),

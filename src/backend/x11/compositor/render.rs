@@ -597,12 +597,6 @@ impl<C: CompositorConnection> Compositor<C> {
         // the mix call inside the loop can run with &self while wt borrows are live.
         self.ensure_prev_blur_fbo();
 
-        // P6B: Update GPU fence states (non-blocking check)
-        unsafe {
-            self.gpu_fence_sync_mgr.update_fence_states(&self.gl);
-            self.gpu_fence_sync_mgr.cleanup_old_fences(&self.gl);
-        }
-
         // Update GPU load cache with hysteresis: update if delta > 5% or elapsed > 0.5s
         let current_gpu_load = {
             let target_frame_time_ms = 1000.0 / 60.0;
@@ -983,13 +977,6 @@ impl<C: CompositorConnection> Compositor<C> {
                                 self.graphics.api_name()
                             );
                             continue;
-                        }
-                        unsafe {
-                            if let Ok(fence) =
-                                self.gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0)
-                            {
-                                self.gpu_fence_sync_mgr.register_fence(win, fence);
-                            }
                         }
                     }
                     wt.dirty = false;

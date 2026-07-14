@@ -8,4 +8,14 @@ pub trait X11TextureSourceOps {
     fn free_window_pixmap(&self, pixmap: u32) -> Result<(), String>;
     fn get_window_visual(&self, window: u32) -> Result<u32, String>;
     fn get_window_depth(&self, window: u32) -> Result<u8, String>;
+
+    /// Query immutable window format metadata. Backends override this to send
+    /// both requests before waiting for either reply, reducing GLX setup to one
+    /// protocol round trip.
+    fn get_window_visual_and_depth(&self, window: u32) -> Result<(u32, u8), String> {
+        Ok((
+            self.get_window_visual(window)?,
+            self.get_window_depth(window)?,
+        ))
+    }
 }

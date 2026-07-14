@@ -51,6 +51,16 @@ pixels between distant updates. A driver that rejects its advertised damage-swap
 entry point is downgraded once for that surface; drivers that cannot preserve the
 back buffer use full-frame rendering and ordinary `eglSwapBuffers`.
 
+## Window import hot path
+
+Window visual and depth are immutable after X11 window creation. JWM caches the
+format metadata needed by the selected API with each imported texture, so resize
+bursts can recreate named pixmaps without synchronous `GetWindowAttributes` /
+`GetGeometry` requests. GLES only queries depth on first import; GLX sends both
+format requests before waiting for their replies. Damage refreshes also avoid
+creating per-window GL fences that are not consumed by a later rendering
+decision.
+
 Output enumeration reports refresh rates in millihertz, while compositor policy
 uses rounded whole Hz. Startup logs therefore show both the precise rate (for
 example `120.081Hz`) and the policy value (`120Hz`).

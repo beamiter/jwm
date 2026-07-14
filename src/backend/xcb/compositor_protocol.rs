@@ -599,6 +599,28 @@ impl X11TextureSourceOps for XcbCompositorProtocol<'_> {
             .map(|reply| reply.depth())
             .map_err(|e| format!("get_geometry reply: {e}"))
     }
+
+    fn get_window_visual_and_depth(&self, window: u32) -> Result<(u32, u8), String> {
+        let attributes = self.conn.send_request(&x::GetWindowAttributes {
+            window: x::Window::new(window),
+        });
+        let geometry = self.conn.send_request(&x::GetGeometry {
+            drawable: x::Drawable::Window(x::Window::new(window)),
+        });
+        // Consume both replies even if one window query fails, so stale-window
+        // races cannot leave an unread response queued on the connection.
+        let attributes = self
+            .conn
+            .wait_for_reply(attributes)
+            .map_err(|e| format!("get_window_attributes reply: {e}"));
+        let geometry = self
+            .conn
+            .wait_for_reply(geometry)
+            .map_err(|e| format!("get_geometry reply: {e}"));
+        let attributes = attributes?;
+        let geometry = geometry?;
+        Ok((attributes.visual(), geometry.depth()))
+    }
 }
 
 impl X11WindowResourceOps for XcbCompositorProtocol<'_> {
@@ -794,6 +816,13 @@ impl X11TextureSourceOps for XcbSharedCompositorConnection {
     fn get_window_depth(&self, window: u32) -> Result<u8, String> {
         let protocol = self.protocol();
         <XcbCompositorProtocol<'_> as X11TextureSourceOps>::get_window_depth(&protocol, window)
+    }
+
+    fn get_window_visual_and_depth(&self, window: u32) -> Result<(u32, u8), String> {
+        let protocol = self.protocol();
+        <XcbCompositorProtocol<'_> as X11TextureSourceOps>::get_window_visual_and_depth(
+            &protocol, window,
+        )
     }
 }
 

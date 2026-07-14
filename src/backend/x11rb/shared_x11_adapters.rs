@@ -319,6 +319,26 @@ where
             .map(|reply| reply.depth)
             .map_err(|e| format!("get_geometry reply: {e}"))
     }
+
+    fn get_window_visual_and_depth(&self, window: u32) -> Result<(u32, u8), String> {
+        let attributes = self
+            .get_window_attributes(window)
+            .map_err(|e| format!("get_window_attributes: {e}"))?;
+        let geometry = self
+            .get_geometry(window)
+            .map_err(|e| format!("get_geometry: {e}"))?;
+        // Consume both replies even if one window query fails, so stale-window
+        // races cannot leave an unread response queued on the connection.
+        let attributes = attributes
+            .reply()
+            .map_err(|e| format!("get_window_attributes reply: {e}"));
+        let geometry = geometry
+            .reply()
+            .map_err(|e| format!("get_geometry reply: {e}"));
+        let attributes = attributes?;
+        let geometry = geometry?;
+        Ok((attributes.visual, geometry.depth))
+    }
 }
 
 fn build_monitor_rects_from_randr<C>(conn: &C, root: u32) -> Vec<(u32, i32, i32, u32, u32)>

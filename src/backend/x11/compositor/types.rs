@@ -19,6 +19,10 @@ pub(super) struct WindowTexture {
     pub(super) h: u32,
     pub(super) damage: u32,
     pub(super) pixmap: u32,
+    /// X11 window format is immutable for the lifetime of a window. Cache it
+    /// so resize-driven pixmap recreation needs no GetAttributes/GetGeometry.
+    pub(super) visual: u32,
+    pub(super) depth: u8,
     pub(super) binding: Option<PixmapBinding>,
     pub(super) gl_texture: glow::Texture,
     pub(super) dirty: bool,

@@ -5688,6 +5688,20 @@ mod parity_tests {
                 && tfp_impl.contains("self.scratch_new_pixmaps = new_pixmaps"),
             "refresh_pixmaps should reuse compositor scratch Vecs"
         );
+        assert!(
+            tfp_impl.matches("get_window_visual_and_depth").count() == 1
+                && tfp_impl.matches("get_window_depth").count() == 1
+                && tfp_impl.contains("wt.visual, wt.depth")
+                && !tfp_impl.contains("get_window_visual(x11_win)"),
+            "window format should be queried once and reused across pixmap refreshes"
+        );
+        assert!(
+            !compositor_struct.contains("gpu_fence_sync_mgr")
+                && !init_impl.contains("GPUFenceSyncManager::new()")
+                && !render_impl.contains("register_fence")
+                && !render_impl.contains("cleanup_old_fences"),
+            "rendering should not create unconsumed per-damage GPU fences"
+        );
         let platform_impl = impl_body_after(X11_COMPOSITOR_PLATFORM_SRC, "impl GlxPlatform");
         assert!(
             !platform_impl.contains("let attrs: Vec<i32> = vec!")
