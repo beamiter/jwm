@@ -123,7 +123,7 @@ usage() {
   -b, --bar <bar_name>        指定要构建的 bar，同时把该 bar 加入克隆列表；
                               可重复传入或使用逗号分隔；第一个显式传入的 bar 会被构建，
                               其余仅作为额外的本地克隆目标（不参与构建）。
-                              jwm 启动时通过 config.toml 的 status_bar.name 选择 bar，
+                              jwm 启动时通过 config_x11.toml/config_wayland.toml 的 status_bar.name 选择 bar，
                               不再使用 cargo feature。
   -l, --list-bars             列出所有可用的 bar
   -j, --jobs <N>              并行编译任务数（传给 cargo）
@@ -137,7 +137,10 @@ usage() {
   - 真正会被安装的 bar 只有 JWM_BAR_NAME（即 -b 的第一个参数，或脚本顶部默认值）。
   - bar 使用 cargo install --path ... 安装到 cargo bin 目录（通常是 ~/.cargo/bin）。
   - jwm / jwm-tool 只通过 cargo build 构建，并安装到 /usr/local/bin，不会安装到 cargo bin。
-  - jwm 通过 config.toml 的 status_bar.name 在运行时选择 bar，切换 bar 不需要重编 jwm。
+  - jwm 通过 ~/.config/jwm/config_x11.toml 和 config_wayland.toml 的 status_bar.name
+    在运行时选择 bar，切换 bar 不需要重编 jwm。
+  - 安装完成后，脚本会把选中的 bar 同步写入 config_x11.toml 和 config_wayland.toml；
+    如果任一配置文件不存在，会先运行 jwm --gen-config 生成默认配置。
 
 示例:
   $(basename "$0")                           # 安装 jwm + 默认 bar，按 CLONE_BARS 同步其它仓库
@@ -323,6 +326,29 @@ cargo_bin_dir() {
     echo "$(cargo_install_root)/bin"
 }
 
+target_user_home() {
+    local target_home="${HOME}"
+    if [[ "$(id -u)" -eq 0 && -n "${SUDO_USER:-}" ]]; then
+        local sudo_home
+        sudo_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+        if [[ -n "$sudo_home" ]]; then
+            target_home="$sudo_home"
+        else
+            target_home="/home/$SUDO_USER"
+        fi
+    fi
+
+    echo "$target_home"
+}
+
+jwm_config_dir() {
+    if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+        echo "$XDG_CONFIG_HOME/jwm"
+    else
+        echo "$(target_user_home)/.config/jwm"
+    fi
+}
+
 ensure_cargo_bin_dir() {
     mkdir -p "$(cargo_bin_dir)"
 }
@@ -373,13 +399,97 @@ build_bar() {
 }
 
 # ============================================================
+# 同步选中的 bar 到用户配置
+# ============================================================
+update_toml_status_bar_name() {
+    local path="$1"
+    local bar="$2"
+    local tmp
+
+    tmp="$(mktemp "${path}.tmp.XXXXXX")"
+    awk -v bar="$bar" '
+        BEGIN {
+            in_status_bar = 0
+            saw_status_bar = 0
+            wrote_name = 0
+        }
+
+        /^\[status_bar\][[:space:]]*$/ {
+            print
+            in_status_bar = 1
+            saw_status_bar = 1
+            wrote_name = 0
+            next
+        }
+
+        /^\[/ && in_status_bar {
+            if (!wrote_name) {
+                print "name = \"" bar "\""
+            }
+            in_status_bar = 0
+            print
+            next
+        }
+
+        in_status_bar && /^[[:space:]]*name[[:space:]]*=/ {
+            print "name = \"" bar "\""
+            wrote_name = 1
+            next
+        }
+
+        { print }
+
+        END {
+            if (in_status_bar && !wrote_name) {
+                print "name = \"" bar "\""
+            } else if (!saw_status_bar) {
+                print ""
+                print "[status_bar]"
+                print "name = \"" bar "\""
+                print "show_bar = true"
+            }
+        }
+    ' "$path" > "$tmp"
+    mv "$tmp" "$path"
+}
+
+sync_selected_bar_config() {
+    local bar="$1"
+    local config_dir
+    local path
+
+    if [[ -z "$bar" ]]; then
+        return
+    fi
+
+    config_dir="$(jwm_config_dir)"
+    mkdir -p "$config_dir"
+
+    if [[ ! -f "$config_dir/config_x11.toml" || ! -f "$config_dir/config_wayland.toml" ]]; then
+        info "config_x11.toml 或 config_wayland.toml 不存在，先生成默认配置..."
+        regenerate_config
+    fi
+
+    for path in "$config_dir/config_x11.toml" "$config_dir/config_wayland.toml"; do
+        if [[ ! -f "$path" ]]; then
+            err "配置文件不存在，无法同步 bar: $path"
+            err "请确认 jwm --gen-config 可用，或手动生成该配置文件后重试"
+            exit 1
+        fi
+
+        update_toml_status_bar_name "$path" "$bar"
+        ok "已同步 bar 到配置: $path -> $bar"
+    done
+}
+
+# ============================================================
 # 构建 JWM，并将 desktop 依赖的二进制安装到 /usr/local/bin
 # ============================================================
 build_and_install_jwm() {
     info "安装 jwm（$BUILD_MODE 模式）..."
 
     if [[ -n "$JWM_BAR_NAME" ]]; then
-        info "当前 bar: $JWM_BAR_NAME（bar 已安装到 cargo bin；jwm 通过 config.toml 的 status_bar.name 选择 bar）"
+        info "当前 bar: $JWM_BAR_NAME（bar 已安装到 cargo bin；jwm 通过用户配置的 status_bar.name 选择 bar）"
     fi
 
     cd "$PROJECT_ROOT"
@@ -504,6 +614,11 @@ fi
 # 3. 重新生成配置（可选）
 if [[ "$REGEN_CONFIG" == true ]]; then
     regenerate_config
+fi
+
+# 4. 同步选中的 bar 到用户配置。放在 --gen-config 之后，避免重新生成配置覆盖选择。
+if [[ "$SKIP_BAR" == false && -n "$JWM_BAR_NAME" ]]; then
+    sync_selected_bar_config "$JWM_BAR_NAME"
 fi
 
 echo ""
