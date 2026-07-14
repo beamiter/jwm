@@ -5,12 +5,12 @@ edition = "2024"
 
 [dependencies]
 x11rb = { version = "0.13.2", features = ["all-extensions", "allow-unsafe-code", "dl-libxcb", "extra-traits"] }
-anyhow = "1.0.100"
-chrono = "0.4.42"
-sysinfo = { version = "0.37.1", features = ["multithread"] }
+anyhow = "1.0.103"
+chrono = "0.4.45"
+sysinfo = { version = "0.39.6", features = ["multithread"] }
 xbar_core = { git = "https://github.com/beamiter/xbar_core.git" }
 shared_structures = { git = "https://github.com/beamiter/shared_structures.git", features = ["use-futex"] }
-libc = "0.2.176"
-log = "0.4.28"
+libc = "0.2.186"
+log = "0.4.33"
 
-xcb = "1.6.0"
+xcb = "1.7.0"
