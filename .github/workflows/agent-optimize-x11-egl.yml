@@ -1,0 +1,104 @@
+name: Agent optimize X11 EGL
+
+on:
+  push:
+    branches:
+      - agent/optimize-x11-egl
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-optimize-x11-egl-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  optimize-and-verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Check out optimization branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libglib2.0-dev \
+            libcairo2-dev \
+            libpango1.0-dev \
+            libasound2-dev \
+            libdbus-1-dev \
+            libudev-dev \
+            libinput-dev \
+            libseat-dev \
+            libdrm-dev \
+            libgbm-dev \
+            libegl1-mesa-dev \
+            libgles2-mesa-dev \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxext-dev \
+            libxxf86vm-dev \
+            libxcb1-dev \
+            libxcb-composite0-dev \
+            libxcb-damage0-dev \
+            libxcb-present-dev \
+            libxcb-randr0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcursor-dev \
+            libxfixes-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libxrender-dev
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Apply optimization patch
+        run: python3 .github/bootstrap/optimize_x11_egl.py
+
+      - name: Remove bootstrap files
+        run: |
+          rm .github/bootstrap/optimize_x11_egl.py
+          rm .github/workflows/agent-optimize-x11-egl.yml
+
+      - name: Format sources
+        run: cargo fmt --all
+
+      - name: Check whitespace
+        run: git diff --check
+
+      - name: Check production targets and tests
+        run: cargo check --lib --bins --tests
+
+      - name: Run Clippy
+        run: cargo clippy --lib --bins --tests --no-deps -- -D warnings
+
+      - name: Run tests
+        run: cargo test --lib --bins --tests
+
+      - name: Commit verified optimization
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --stat
+          git commit -m "perf(x11): optimize EGL compositor path"
+          git push origin HEAD:agent/optimize-x11-egl
