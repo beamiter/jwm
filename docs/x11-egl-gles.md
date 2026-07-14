@@ -70,7 +70,10 @@ bursts can recreate named pixmaps without synchronous `GetWindowAttributes` /
 `GetGeometry` requests. GLES only queries depth on first import; GLX sends both
 format requests before waiting for their replies. Damage refreshes also avoid
 creating per-window GL fences that are not consumed by a later rendering
-decision.
+decision. The initial dirty-region scan also records whether GLES native
+texture synchronization is needed, avoiding another scene lookup pass. During
+resize bursts, the synchronization performed before pixmap import is reused by
+the ensuing texture refresh instead of issuing a second native round trip.
 
 Output enumeration reports refresh rates in millihertz, while compositor policy
 uses rounded whole Hz. Startup logs therefore show both the precise rate (for

@@ -45,7 +45,6 @@ pub(super) struct WindowTexture {
     pub(super) is_frosted: bool,
     pub(super) is_override_redirect: bool,
     pub(super) wobbly: Option<WobblyState>,
-    pub(super) pending_fence: Option<glow::Fence>,
     pub(super) motion_trail: VecDeque<(i32, i32)>,
     pub(super) audio_sync_target: Option<f32>,
 }

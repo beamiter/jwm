@@ -820,14 +820,19 @@ impl<C: CompositorConnection> Compositor<C> {
         // dirty, we can skip the entire GL render (unless screenshot pending or HUD active).
         // While scanning, also feed the precise dirty-rect tracker so we do not
         // walk the scene a second time later in the frame.
+        let is_gles = self.graphics.is_gles();
         let mut has_dirty = false;
+        let mut needs_native_texture_sync = false;
         for &(win, _, _, _, _) in scene {
-            let dirty_rect = self.windows.get(&win).and_then(|wt| {
-                (wt.dirty || wt.needs_pixmap_refresh)
-                    .then(|| DirtyRect::new(wt.x, wt.y, wt.w, wt.h))
-            });
-            if let Some(dirty_rect) = dirty_rect {
+            let Some(wt) = self.windows.get(&win) else {
+                continue;
+            };
+            if is_gles && ((wt.dirty && wt.binding.is_some()) || wt.needs_pixmap_refresh) {
+                needs_native_texture_sync = true;
+            }
+            if wt.dirty || wt.needs_pixmap_refresh {
                 has_dirty = true;
+                let dirty_rect = DirtyRect::new(wt.x, wt.y, wt.w, wt.h);
                 self.dirty_region_tracker.mark_dirty(dirty_rect);
             }
         }
@@ -889,7 +894,7 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         // Recreate pixmaps for windows that were resized (batched, single XSync)
-        self.refresh_pixmaps();
+        let pixmaps_native_synced = self.refresh_pixmaps();
 
         // Collect which windows are dirty this frame (before TFP refresh clears
         // the flags).  Used by the blur cache to skip expensive blur passes when
@@ -931,13 +936,7 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         let mut tfp_budget_exhausted = false;
-        let needs_native_sync = self.graphics.is_gles()
-            && tfp_order.iter().any(|win| {
-                self.windows
-                    .get(win)
-                    .is_some_and(|wt| wt.dirty && wt.binding.is_some())
-            });
-        if needs_native_sync {
+        if needs_native_texture_sync && !pixmaps_native_synced {
             if let Err(error) = self.graphics.sync_x11() {
                 log::warn!("compositor: native texture synchronization failed: {error}");
             }
@@ -963,19 +962,6 @@ impl<C: CompositorConnection> Compositor<C> {
                             self.audio_sync.unregister_stream(win);
                             wt.audio_sync_target = None;
                             log::debug!("compositor: audio sync fallback for 0x{:x} (stale)", win);
-                        }
-                    }
-
-                    // Phase 2.3: Check fence before rebind — skip if GPU not done yet
-                    if let Some(fence) = wt.pending_fence.take() {
-                        let status = unsafe { self.gl.client_wait_sync(fence, 0, 0) };
-                        if status == glow::TIMEOUT_EXPIRED {
-                            // GPU not done yet, skip this window's update; use old texture
-                            wt.pending_fence = Some(fence);
-                            continue;
-                        }
-                        unsafe {
-                            self.gl.delete_sync(fence);
                         }
                     }
 

@@ -5618,6 +5618,9 @@ mod parity_tests {
         );
         assert!(
             render_impl.contains("let mut has_dirty = false")
+                && render_impl.contains("let mut needs_native_texture_sync = false")
+                && render_impl.contains("if needs_native_texture_sync && !pixmaps_native_synced",)
+                && !render_impl.contains("tfp_order.iter().any")
                 && render_impl.contains("self.dirty_region_tracker.mark_dirty(dirty_rect)")
                 && render_impl
                     .matches("dirty_region_tracker.mark_dirty")
@@ -5718,8 +5721,10 @@ mod parity_tests {
             !compositor_struct.contains("gpu_fence_sync_mgr")
                 && !init_impl.contains("GPUFenceSyncManager::new()")
                 && !render_impl.contains("register_fence")
-                && !render_impl.contains("cleanup_old_fences"),
-            "rendering should not create unconsumed per-damage GPU fences"
+                && !render_impl.contains("cleanup_old_fences")
+                && !render_impl.contains("pending_fence")
+                && !tfp_impl.contains("pending_fence"),
+            "rendering should not create unconsumed per-window GPU fences"
         );
         let platform_impl = impl_body_after(X11_COMPOSITOR_PLATFORM_SRC, "impl GlxPlatform");
         assert!(

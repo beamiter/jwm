@@ -204,7 +204,6 @@ impl<C: CompositorConnection> Compositor<C> {
                 is_frosted: false,
                 is_override_redirect: false,
                 wobbly: None,
-                pending_fence: None,
                 motion_trail: std::collections::VecDeque::new(),
                 audio_sync_target: None,
             },
@@ -416,7 +415,8 @@ impl<C: CompositorConnection> Compositor<C> {
 
     /// Recreate native pixmap imports for windows whose backing pixmap changed.
     /// Called once per frame so resize bursts are coalesced.
-    pub(super) fn refresh_pixmaps(&mut self) {
+    /// Returns whether the batch's native synchronization completed.
+    pub(super) fn refresh_pixmaps(&mut self) -> bool {
         let mut refresh_wins = std::mem::take(&mut self.scratch_refresh_wins);
         refresh_wins.clear();
         refresh_wins.extend(
@@ -426,7 +426,7 @@ impl<C: CompositorConnection> Compositor<C> {
         );
         if refresh_wins.is_empty() {
             self.scratch_refresh_wins = refresh_wins;
-            return;
+            return false;
         }
 
         for &win in &refresh_wins {
@@ -477,9 +477,13 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         let _ = self.conn.flush_x11();
-        if let Err(error) = self.graphics.sync_x11() {
-            log::warn!("compositor: resized pixmap synchronization failed: {error}");
-        }
+        let native_sync_succeeded = match self.graphics.sync_x11() {
+            Ok(()) => true,
+            Err(error) => {
+                log::warn!("compositor: resized pixmap synchronization failed: {error}");
+                false
+            }
+        };
 
         for (win, pixmap) in new_pixmaps.drain(..) {
             let (texture, x11_win, visual, depth) = {
@@ -503,13 +507,6 @@ impl<C: CompositorConnection> Compositor<C> {
                     wt.has_rgba = rgba;
                     wt.dirty = true;
                     wt.needs_pixmap_refresh = false;
-                    unsafe {
-                        if let Some(old_fence) = wt.pending_fence.take() {
-                            self.gl.delete_sync(old_fence);
-                        }
-                        wt.pending_fence =
-                            self.gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0).ok();
-                    }
                 }
                 Err(error) => {
                     log::warn!(
@@ -533,6 +530,7 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         self.scratch_refresh_wins = refresh_wins;
         self.scratch_new_pixmaps = new_pixmaps;
+        native_sync_succeeded
     }
 
     pub(crate) fn mark_damaged(&mut self, x11_win: u32) {
