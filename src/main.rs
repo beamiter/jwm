@@ -20,7 +20,7 @@ use winit::{
 use xbar_core::{
     AppState, BarConfig, Color, ShapeStyle, ThemeMode,
     cairo::{self, Context, Format, ImageSurface},
-    colors_for_theme, draw_bar, initialize_logging,
+    colors_for_theme, draw_bar_with_background_opacity, initialize_logging,
     pango::FontDescription,
     spawn_shared_eventfd_notifier,
 };
@@ -283,14 +283,17 @@ impl App {
 
                 let cr = Context::new(&surface)?;
                 cr.save()?;
-                cr.set_source_rgba(0.0, 0.0, 0.0, 1.0);
+                // The winit surface has an alpha channel.  Start every frame
+                // fully transparent so only the controls painted below remain
+                // visible to the compositor.
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
                 cr.set_operator(cairo::Operator::Source);
                 cr.paint()?;
                 cr.restore()?;
 
                 let w_u16 = (width_px as u32).min(u16::MAX as u32) as u16;
                 let h_u16 = (height_px as u32).min(u16::MAX as u32) as u16;
-                draw_bar(
+                draw_bar_with_background_opacity(
                     &cr,
                     w_u16,
                     h_u16,
@@ -298,6 +301,7 @@ impl App {
                     &mut self.state,
                     &self.font,
                     &self.cfg,
+                    0.0,
                 )?;
 
                 surface.flush();
@@ -378,7 +382,7 @@ impl ApplicationHandler<UserEvent> for App {
                 .with_decorations(false)
                 .with_resizable(true)
                 .with_visible(true)
-                .with_transparent(false);
+                .with_transparent(true);
 
             let window = event_loop
                 .create_window(attrs)
