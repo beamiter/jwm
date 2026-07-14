@@ -1,20 +1,20 @@
 name: Agent optimize X11 EGL
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/optimize-x11-egl
+      - master
 
 permissions:
   contents: write
 
 concurrency:
-  group: agent-optimize-x11-egl-${{ github.ref }}
+  group: agent-optimize-x11-egl-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   optimize-and-verify:
-    if: github.actor != 'github-actions[bot]'
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     env:
       CARGO_TERM_COLOR: always
@@ -23,6 +23,7 @@ jobs:
       - name: Check out optimization branch
         uses: actions/checkout@v4
         with:
+          ref: agent/optimize-x11-egl
           fetch-depth: 0
 
       - name: Install Linux build dependencies
@@ -102,5 +103,3 @@ jobs:
           git diff --cached --stat
           git commit -m "perf(x11): optimize EGL compositor path"
           git push origin HEAD:agent/optimize-x11-egl
-
-# bootstrap revision 2
