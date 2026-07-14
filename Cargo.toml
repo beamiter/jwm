@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-anyhow = "1.0.100"
-libc = "0.2.176"
-log = "0.4.28"
+anyhow = "1.0.103"
+libc = "0.2.186"
+log = "0.4.33"
 xbar_core = { git = "https://github.com/beamiter/xbar_core.git" }
 shared_structures = { git = "https://github.com/beamiter/shared_structures.git", features = ["use-futex"] }
 pixels = "0.15.0"
 raw-window-handle = "0.6.2"
-tao = "0.34.3"
+tao = "0.34.8"
