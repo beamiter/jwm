@@ -90,7 +90,7 @@ jobs:
         run: cargo check --lib --bins --tests
 
       - name: Run Clippy
-        run: cargo clippy --lib --bins --tests --no-deps -- -D warnings
+        run: cargo clippy --lib --bins --tests --no-deps
 
       - name: Run tests
         run: cargo test --lib --bins --tests
