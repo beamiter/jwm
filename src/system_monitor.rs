@@ -24,10 +24,14 @@ impl RollingAverage {
     }
 
     pub fn add(&mut self, value: f64) {
-        if self.values.len() >= self.capacity {
-            if let Some(old_value) = self.values.pop_front() {
-                self.sum -= old_value;
-            }
+        if self.capacity == 0 {
+            return;
+        }
+
+        if self.values.len() >= self.capacity
+            && let Some(old_value) = self.values.pop_front()
+        {
+            self.sum -= old_value;
         }
 
         self.values.push_back(value);
@@ -46,9 +50,12 @@ impl RollingAverage {
         self.values.len()
     }
 
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
+    }
+
+    fn values(&self) -> impl Iterator<Item = f64> + '_ {
+        self.values.iter().copied()
     }
 }
 
@@ -112,11 +119,10 @@ pub struct SystemMonitor {
 impl SystemMonitor {
     /// Create a new system monitor
     pub fn new(history_length: usize) -> Self {
-        let mut system = System::new_all();
-        system.refresh_all();
+        let system = System::new();
         let battery_manager = Manager::new().ok();
 
-        Self {
+        let mut monitor = Self {
             system,
             last_update: Instant::now(),
             update_interval: Duration::from_millis(500),
@@ -124,26 +130,23 @@ impl SystemMonitor {
             memory_history: RollingAverage::new(history_length),
             last_snapshot: None,
             battery_manager,
-        }
+        };
+        monitor.refresh();
+        monitor.last_update = Instant::now();
+        monitor
     }
 
     // 获取电池信息的方法
     fn get_battery_info(&self) -> (f32, bool) {
-        if let Some(ref manager) = self.battery_manager {
-            match manager.batteries() {
-                Ok(batteries) => {
-                    for battery_result in batteries {
-                        if let Ok(battery) = battery_result {
-                            let percentage = battery
-                                .state_of_charge()
-                                .get::<battery::units::ratio::percent>();
-                            let is_charging = matches!(battery.state(), battery::State::Charging);
-                            return (percentage, is_charging);
-                        }
-                    }
-                }
-                Err(_) => {}
-            }
+        if let Some(manager) = &self.battery_manager
+            && let Ok(batteries) = manager.batteries()
+            && let Some(battery) = batteries.flatten().next()
+        {
+            let percentage = battery
+                .state_of_charge()
+                .get::<battery::units::ratio::percent>();
+            let is_charging = matches!(battery.state(), battery::State::Charging);
+            return (percentage, is_charging);
         }
 
         // 默认值：无电池或获取失败
@@ -251,16 +254,12 @@ impl SystemMonitor {
 
     /// Get CPU usage history
     pub fn get_cpu_history(&self) -> Vec<f64> {
-        (0..self.cpu_history.len())
-            .map(|_| self.cpu_history.average())
-            .collect()
+        self.cpu_history.values().collect()
     }
 
     /// Get memory usage history
     pub fn get_memory_history(&self) -> Vec<f64> {
-        (0..self.memory_history.len())
-            .map(|_| self.memory_history.average())
-            .collect()
+        self.memory_history.values().collect()
     }
 
     /// Get individual CPU information
@@ -340,11 +339,11 @@ impl SystemMonitor {
         let minutes = (uptime % 3600) / 60;
 
         if days > 0 {
-            format!("{}d {}h {}m", days, hours, minutes)
+            format!("{days}d {hours}h {minutes}m")
         } else if hours > 0 {
-            format!("{}h {}m", hours, minutes)
+            format!("{hours}h {minutes}m")
         } else {
-            format!("{}m", minutes)
+            format!("{minutes}m")
         }
     }
 
@@ -367,5 +366,62 @@ impl SystemMonitor {
 impl Default for SystemMonitor {
     fn default() -> Self {
         Self::new(6) // Default to 6 samples
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_capacity_rolling_average_does_not_retain_samples() {
+        let mut average = RollingAverage::new(0);
+
+        average.add(10.0);
+        average.add(20.0);
+
+        assert!(average.is_empty());
+        assert_eq!(average.len(), 0);
+        assert_eq!(average.average(), 0.0);
+        assert_eq!(average.values().collect::<Vec<_>>(), Vec::<f64>::new());
+    }
+
+    #[test]
+    fn rolling_average_retains_the_actual_bounded_history() {
+        let mut average = RollingAverage::new(3);
+        average.add(10.0);
+        average.add(20.0);
+        average.add(30.0);
+
+        assert_eq!(average.values().collect::<Vec<_>>(), vec![10.0, 20.0, 30.0]);
+        assert_eq!(average.average(), 20.0);
+
+        average.add(40.0);
+
+        assert_eq!(average.values().collect::<Vec<_>>(), vec![20.0, 30.0, 40.0]);
+        assert_eq!(average.average(), 30.0);
+    }
+
+    #[test]
+    fn monitor_starts_with_a_snapshot_and_exposes_actual_histories() {
+        let mut monitor = SystemMonitor::new(3);
+
+        // This checks the constructor invariant without assuming anything about
+        // the host's CPU, memory, battery, or load values.
+        assert!(monitor.get_snapshot().is_some());
+        assert_eq!(monitor.get_cpu_history().len(), 1);
+        assert_eq!(monitor.get_memory_history().len(), 1);
+
+        monitor.cpu_history = RollingAverage::new(3);
+        monitor.memory_history = RollingAverage::new(3);
+        for value in [10.0, 20.0, 30.0] {
+            monitor.cpu_history.add(value);
+        }
+        for value in [40.0, 50.0, 60.0] {
+            monitor.memory_history.add(value);
+        }
+
+        assert_eq!(monitor.get_cpu_history(), vec![10.0, 20.0, 30.0]);
+        assert_eq!(monitor.get_memory_history(), vec![40.0, 50.0, 60.0]);
     }
 }

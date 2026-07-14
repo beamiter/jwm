@@ -2,21 +2,50 @@
 name = "xbar_core"
 version = "0.1.0"
 edition = "2024"
+description = "Backend-independent status-bar model with compatibility adapters for JWM frontends"
+repository = "https://github.com/beamiter/xbar_core"
+
+[features]
+default = ["legacy-full"]
+
+# Compatibility umbrella used by the existing xcb/x11rb/winit/tao/toolkit
+# frontends. New renderers can start with `default-features = false` and opt in
+# only to the adapters they need.
+legacy-full = [
+    "clock-chrono",
+    "logging-flexi",
+    "provider-alsa",
+    "provider-battery-sysfs",
+    "provider-brightnessctl",
+    "provider-system",
+    "render-cairo",
+    "runtime-linux",
+    "transport-shared",
+]
+clock-chrono = ["dep:chrono"]
+logging-flexi = ["dep:anyhow", "dep:flexi_logger", "dep:log"]
+provider-alsa = ["dep:alsa", "dep:anyhow", "dep:log"]
+provider-battery-sysfs = []
+provider-brightnessctl = ["dep:log"]
+provider-system = ["dep:battery", "dep:sysinfo"]
+render-cairo = ["dep:anyhow", "dep:cairo-rs", "dep:pango", "dep:pangocairo"]
+runtime-linux = ["dep:libc", "dep:log"]
+transport-shared = ["dep:shared_structures"]
 
 [dependencies]
-anyhow = "1.0.103"
-chrono = "0.4.45"
-sysinfo = { version = "0.39.6", features = ["multithread"] }
+anyhow = { version = "1.0.103", optional = true }
+chrono = { version = "0.4.45", optional = true }
+sysinfo = { version = "0.39.6", features = ["multithread"], optional = true }
 
-shared_structures = { git = "https://github.com/beamiter/shared_structures.git", features = ["use-futex"] }
+shared_structures = { git = "https://github.com/beamiter/shared_structures.git", features = ["use-futex"], optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 
-alsa = "0.12.0"
-log = "0.4.33"
-flexi_logger = "0.31.9"
-battery = "0.7.8"
-libc = "0.2.186"
+alsa = { version = "0.12.0", optional = true }
+log = { version = "0.4.33", optional = true }
+flexi_logger = { version = "0.31.9", optional = true }
+battery = { version = "0.7.8", optional = true }
+libc = { version = "0.2.186", optional = true }
 
-cairo-rs = { version = "0.22.0", features = ["xcb"] }
-pango = "0.22.8"
-pangocairo = "0.22.8"
+cairo-rs = { version = "0.22.0", features = ["xcb"], optional = true }
+pango = { version = "0.22.8", optional = true }
+pangocairo = { version = "0.22.8", optional = true }

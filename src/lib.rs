@@ -1,55 +1,109 @@
-// bar_core/src/lib.rs
-// 单文件版核心库：UI 颜色/形状/Pango 文本、AppState、绘制、timerfd、eventfd、日志
-// 依赖：anyhow, cairo-rs(xcb), pango, pangocairo, flexi_logger, log, libc, chrono, shared_structures
+//! Shared status-bar model and compatibility facade for the JWM bar family.
+//!
+//! New frontends should use [`BarModel`], [`BarEvent`] and [`BarEffect`] with
+//! `default-features = false`. Existing Cairo/Linux frontends keep their
+//! `AppState` and `draw_bar*` API through the default `legacy-full` feature.
 
+#[cfg(feature = "legacy-full")]
 use anyhow::Result;
+#[cfg(feature = "legacy-full")]
 use cairo::{Context, LinearGradient};
+#[cfg(feature = "legacy-full")]
 use chrono::Local;
-use libc;
+#[cfg(feature = "legacy-full")]
 use log::{debug, error, info, warn};
+#[cfg(feature = "legacy-full")]
 use pango::FontDescription;
+#[cfg(feature = "legacy-full")]
 use pangocairo::functions::{create_layout, show_layout};
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "legacy-full")]
 use shared_structures::{CommandType, MonitorInfo, SharedCommand, SharedMessage, SharedRingBuffer};
+#[cfg(feature = "legacy-full")]
 use std::sync::Arc;
+#[cfg(feature = "legacy-full")]
 use std::time::Instant;
 
+#[cfg(feature = "legacy-full")]
 use std::f64::consts::{FRAC_PI_2, PI};
 
+#[cfg(feature = "provider-alsa")]
 pub mod audio_manager;
+#[cfg(feature = "provider-battery-sysfs")]
 pub mod battery;
+#[cfg(feature = "provider-brightnessctl")]
 pub mod brightness;
+pub mod model;
+#[cfg(all(feature = "runtime-linux", feature = "transport-shared"))]
+pub mod notifier;
+#[cfg(feature = "provider-system")]
 pub mod system_monitor;
-pub use cairo;
-pub use pango;
-pub use pangocairo;
+#[cfg(feature = "provider-alsa")]
 pub use audio_manager::AudioManager;
+#[cfg(feature = "provider-battery-sysfs")]
 pub use battery::BatteryManager;
+#[cfg(feature = "provider-brightnessctl")]
 pub use brightness::BrightnessManager;
+#[cfg(feature = "render-cairo")]
+pub use cairo;
+pub use model::{
+    AudioState as ModelAudioState, BarEffect, BarEvent, BarModel, BarView, BatteryState,
+    BrightnessState, ClockState, LayoutId, ModelConfig, ModelError, ModelUpdate, MonitorGeometry,
+    MonitorId, SystemState as ModelSystemState, TagId, TagState, UserAction, WmCommand, WmSnapshot,
+};
+#[cfg(all(feature = "runtime-linux", feature = "transport-shared"))]
+pub use notifier::SharedEventNotifier;
+#[cfg(feature = "render-cairo")]
+pub use pango;
+#[cfg(feature = "render-cairo")]
+pub use pangocairo;
+#[cfg(feature = "provider-system")]
 pub use system_monitor::SystemMonitor;
 
 // ================= Dirty Region Tracking =================
 
-/// Bitmask to track which UI regions have changed since last redraw
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Bitmask describing which parts of the model changed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirtyBits(u32);
 
 impl DirtyBits {
     pub const NONE: u32 = 0;
-    pub const TIME_CHANGED: u32 = 1 << 0;        // Clock/time display changed
-    pub const HOVER_CHANGED: u32 = 1 << 1;       // Hover state changed
-    pub const MONITOR_CHANGED: u32 = 1 << 2;     // Tag/window manager state changed
-    pub const AUDIO_CHANGED: u32 = 1 << 3;       // Volume/audio changed
-    pub const SYSTEM_CHANGED: u32 = 1 << 4;      // CPU/memory stats changed
-    pub const LAYOUT_CHANGED: u32 = 1 << 5;      // Layout symbol changed
-    pub const THEME_CHANGED: u32 = 1 << 6;       // Dark/Light mode changed
-    pub const BRIGHTNESS_CHANGED: u32 = 1 << 7;  // Backlight brightness changed
-    pub const BATTERY_CHANGED: u32 = 1 << 8;     // Battery capacity/status changed
+    pub const TIME_CHANGED: u32 = 1 << 0; // Clock/time display changed
+    pub const HOVER_CHANGED: u32 = 1 << 1; // Hover state changed
+    pub const MONITOR_CHANGED: u32 = 1 << 2; // Tag/window manager state changed
+    pub const AUDIO_CHANGED: u32 = 1 << 3; // Volume/audio changed
+    pub const SYSTEM_CHANGED: u32 = 1 << 4; // CPU/memory stats changed
+    pub const LAYOUT_CHANGED: u32 = 1 << 5; // Layout symbol changed
+    pub const THEME_CHANGED: u32 = 1 << 6; // Dark/Light mode changed
+    pub const BRIGHTNESS_CHANGED: u32 = 1 << 7; // Backlight brightness changed
+    pub const BATTERY_CHANGED: u32 = 1 << 8; // Battery capacity/status changed
+    pub const CLIENT_CHANGED: u32 = 1 << 9;
+    pub const GEOMETRY_CHANGED: u32 = 1 << 10;
 
-    pub fn new(bits: u32) -> Self {
-        DirtyBits(bits)
+    const KNOWN: u32 = Self::TIME_CHANGED
+        | Self::HOVER_CHANGED
+        | Self::MONITOR_CHANGED
+        | Self::AUDIO_CHANGED
+        | Self::SYSTEM_CHANGED
+        | Self::LAYOUT_CHANGED
+        | Self::THEME_CHANGED
+        | Self::BRIGHTNESS_CHANGED
+        | Self::BATTERY_CHANGED
+        | Self::CLIENT_CHANGED
+        | Self::GEOMETRY_CHANGED;
+
+    #[must_use]
+    pub const fn new(bits: u32) -> Self {
+        Self(bits)
     }
 
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
         self.0 == 0
     }
 
@@ -57,22 +111,53 @@ impl DirtyBits {
         self.0 |= flag;
     }
 
-    pub fn contains(&self, flag: u32) -> bool {
+    pub fn insert(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+
+    pub fn remove(&mut self, other: Self) {
+        self.0 &= !other.0;
+    }
+
+    pub const fn contains(self, flag: u32) -> bool {
         (self.0 & flag) != 0
+    }
+
+    #[must_use]
+    pub const fn intersects(self, other: Self) -> bool {
+        (self.0 & other.0) != 0
     }
 
     pub fn clear(&mut self) {
         self.0 = 0;
     }
 
-    pub fn all() -> Self {
-        DirtyBits(!0u32)
+    pub fn take(&mut self) -> Self {
+        std::mem::take(self)
+    }
+
+    pub const fn all() -> Self {
+        Self(Self::KNOWN)
+    }
+}
+
+impl std::ops::BitOr for DirtyBits {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for DirtyBits {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
     }
 }
 
 // ================= 公共类型 =================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThemeMode {
     Dark,
     Light,
@@ -211,14 +296,20 @@ pub fn tuned_colors_for_theme(mode: ThemeMode) -> Colors {
         ThemeMode::Dark => {
             c.bg = Color::rgb(13, 16, 23);
             c.text = Color::rgb(235, 238, 245);
-            c.gray = Color::rgb(90, 96, 110);
-            c.time = Color::rgb(86, 156, 214);
+            c.gray = Color::rgb(45, 55, 72);
+            c.time = Color::rgb(9, 41, 64);
+            c.accent = Color::rgb(8, 145, 178);
+            c.accent_light = Color::rgb(34, 211, 238);
+            c.dim = Color::rgb(81, 90, 104);
         }
         ThemeMode::Light => {
             c.bg = Color::rgb(246, 247, 250);
             c.text = Color::rgb(22, 24, 28);
-            c.gray = Color::rgb(120, 128, 145);
-            c.time = Color::rgb(60, 120, 210);
+            c.gray = Color::rgb(203, 213, 225);
+            c.time = Color::rgb(224, 242, 254);
+            c.accent = Color::rgb(59, 130, 246);
+            c.accent_light = Color::rgb(96, 165, 250);
+            c.dim = Color::rgb(100, 116, 139);
         }
     }
     c
@@ -279,6 +370,98 @@ pub struct BarConfig {
     pub volume_step: i32,
     pub brightness_step: i32,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BarConfigError {
+    InvalidBarHeight(u16),
+    InvalidMetric(&'static str),
+    InvalidStep { field: &'static str, value: i32 },
+}
+
+impl std::fmt::Display for BarConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidBarHeight(height) => {
+                write!(
+                    f,
+                    "bar height must leave positive drawable space, got {height}"
+                )
+            }
+            Self::InvalidMetric(field) => write!(f, "{field} must be finite and non-negative"),
+            Self::InvalidStep { field, value } => {
+                write!(f, "{field} must be between 1 and 100, got {value}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BarConfigError {}
+
+impl BarConfig {
+    /// Shared preset matching the low-level XCB/x11rb/winit/tao frontends.
+    #[must_use]
+    pub fn desktop_emoji() -> Self {
+        Self {
+            bar_height: 38,
+            padding_x: 10.0,
+            padding_y: 6.0,
+            tag_spacing: 6.0,
+            pill_hpadding: 10.0,
+            pill_radius: 12.0,
+            shape_style: ShapeStyle::Pill,
+            time_icon: "🕐",
+            screenshot_label: "📸",
+            tag_labels: ["🖥", "🌐", "📁", "💬", "📝", "🎵", "⚙", "📊", "🏠"],
+            theme_dark_label: "🌙",
+            theme_light_label: "☀️",
+            monitor_labels: ["🥇", "🥈", "🥉", "❔"],
+            volume_label: "🔊",
+            mute_label: "🔇",
+            brightness_label: "🔆",
+            battery_label: "🔋",
+            battery_charging_label: "⚡",
+            cpu_label: "🧠",
+            mem_label: "💾",
+            show_audio: true,
+            show_theme_toggle: true,
+            show_brightness: true,
+            show_battery: true,
+            volume_step: 5,
+            brightness_step: 5,
+        }
+    }
+
+    pub fn validate(&self) -> std::result::Result<(), BarConfigError> {
+        self.validate_for_height(self.bar_height)
+    }
+
+    pub fn validate_for_height(&self, height: u16) -> std::result::Result<(), BarConfigError> {
+        for (name, value) in [
+            ("padding_x", self.padding_x),
+            ("padding_y", self.padding_y),
+            ("tag_spacing", self.tag_spacing),
+            ("pill_hpadding", self.pill_hpadding),
+            ("pill_radius", self.pill_radius),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(BarConfigError::InvalidMetric(name));
+            }
+        }
+        if height == 0 || self.padding_y * 2.0 >= f64::from(height) {
+            return Err(BarConfigError::InvalidBarHeight(height));
+        }
+        for (field, value) in [
+            ("volume_step", self.volume_step),
+            ("brightness_step", self.brightness_step),
+        ] {
+            if !(1..=100).contains(&value) {
+                return Err(BarConfigError::InvalidStep { field, value });
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Default for BarConfig {
     fn default() -> Self {
         Self {
@@ -314,7 +497,113 @@ impl Default for BarConfig {
     }
 }
 
+#[cfg(test)]
+mod core_tests {
+    use super::*;
+
+    #[test]
+    fn desktop_preset_is_valid() {
+        BarConfig::desktop_emoji().validate().unwrap();
+    }
+
+    #[test]
+    fn config_validation_rejects_impossible_geometry_and_steps() {
+        let config = BarConfig {
+            padding_y: f64::NAN,
+            ..BarConfig::default()
+        };
+        assert_eq!(
+            config.validate(),
+            Err(BarConfigError::InvalidMetric("padding_y"))
+        );
+
+        let config = BarConfig {
+            volume_step: 0,
+            ..BarConfig::default()
+        };
+        assert_eq!(
+            config.validate(),
+            Err(BarConfigError::InvalidStep {
+                field: "volume_step",
+                value: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn dirty_bits_accumulate_and_take_atomically() {
+        let mut dirty = DirtyBits::default();
+        dirty.set(DirtyBits::TIME_CHANGED);
+        dirty |= DirtyBits::new(DirtyBits::AUDIO_CHANGED);
+
+        let taken = dirty.take();
+        assert!(taken.contains(DirtyBits::TIME_CHANGED));
+        assert!(taken.contains(DirtyBits::AUDIO_CHANGED));
+        assert!(dirty.is_empty());
+    }
+
+    #[cfg(feature = "legacy-full")]
+    #[test]
+    fn non_empty_dirty_draw_preserves_the_complete_frame() {
+        use cairo::{Context, Format, ImageSurface};
+        use pango::FontDescription;
+
+        let width = 1200;
+        let height = 40;
+        let mut surface = ImageSurface::create(Format::ARgb32, width, height).unwrap();
+        let mut state = AppState::new(None);
+        let config = BarConfig::default();
+        let colors = tuned_colors_for_theme(ThemeMode::Dark);
+        let font = FontDescription::from_string("monospace 11");
+
+        {
+            let context = Context::new(&surface).unwrap();
+            draw_bar(
+                &context,
+                width as u16,
+                height as u16,
+                &colors,
+                &mut state,
+                &font,
+                &config,
+            )
+            .unwrap();
+        }
+        surface.flush();
+        let full_frame = surface.data().unwrap().to_vec();
+
+        {
+            let context = Context::new(&surface).unwrap();
+            draw_bar_with_dirty(
+                &context,
+                width as u16,
+                height as u16,
+                &colors,
+                &mut state,
+                &font,
+                &config,
+                Some(DirtyBits::new(DirtyBits::TIME_CHANGED)),
+            )
+            .unwrap();
+        }
+        surface.flush();
+        let dirty_frame = surface.data().unwrap().to_vec();
+
+        assert_eq!(dirty_frame, full_frame);
+    }
+}
+
 // ================= AppState 与业务逻辑 =================
+
+#[rustfmt::skip]
+#[cfg(feature = "legacy-full")]
+#[allow(
+    clippy::collapsible_if,
+    clippy::needless_borrow,
+    clippy::too_many_arguments
+)]
+mod legacy {
+use super::*;
 
 pub struct AppState {
     pub shared_buffer: Option<Arc<SharedRingBuffer>>,
@@ -355,6 +644,8 @@ pub struct AppState {
 
     /// Relative step (percentage) applied on a brightness click/scroll.
     pub brightness_step: i32,
+    /// Relative step (percentage) applied on an audio scroll.
+    pub volume_step: i32,
 
     pub last_time_string: String,
     pub last_monitor_update: Instant,
@@ -420,6 +711,7 @@ impl AppState {
             battery_manager: BatteryManager::new(),
 
             brightness_step: 5,
+            volume_step: 5,
 
             last_time_string: String::new(),
             last_monitor_update: Instant::now(),
@@ -429,6 +721,63 @@ impl AppState {
             // Initialize with all dirty to force full redraw on first draw
             dirty_fields: DirtyBits::all(),
         }
+    }
+
+    pub fn new_with_config(
+        shared_buffer: Option<Arc<SharedRingBuffer>>,
+        cfg: &BarConfig,
+    ) -> std::result::Result<Self, BarConfigError> {
+        cfg.validate()?;
+        let mut state = Self::new(shared_buffer);
+        state.apply_config(cfg);
+        Ok(state)
+    }
+
+    pub fn apply_config(&mut self, cfg: &BarConfig) {
+        self.shape_style = cfg.shape_style;
+        self.volume_step = cfg.volume_step.clamp(1, 100);
+        self.brightness_step = cfg.brightness_step.clamp(1, 100);
+    }
+
+    /// Refresh the clock and every provider on its own interval.
+    pub fn tick(&mut self) -> DirtyBits {
+        let mut changed = DirtyBits::default();
+        let time = self.format_time();
+        if time != self.last_time_string {
+            self.last_time_string = time;
+            changed.set(DirtyBits::TIME_CHANGED);
+        }
+        if self.system_monitor.update_if_needed() {
+            changed.set(DirtyBits::SYSTEM_CHANGED);
+        }
+        if self.audio_manager.update_if_needed() {
+            changed.set(DirtyBits::AUDIO_CHANGED);
+        }
+        if self.brightness_manager.update_if_needed() {
+            changed.set(DirtyBits::BRIGHTNESS_CHANGED);
+        }
+        if self.battery_manager.update_if_needed() {
+            changed.set(DirtyBits::BATTERY_CHANGED);
+        }
+        self.last_monitor_update = Instant::now();
+        self.dirty_fields |= changed;
+        changed
+    }
+
+    pub fn poll_shared_latest(&mut self) -> std::io::Result<bool> {
+        let Some(buffer) = self.shared_buffer.as_ref().cloned() else {
+            return Ok(false);
+        };
+        if let Some(message) = buffer.try_read_latest_message()? {
+            self.update_from_shared(message);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn take_dirty(&mut self) -> DirtyBits {
+        self.dirty_fields.take()
     }
     pub fn monitor_num_to_label(num: i32) -> String {
         format!("M{}", num)
@@ -443,7 +792,7 @@ impl AppState {
     }
     pub fn update_from_shared(&mut self, msg: SharedMessage) {
         debug!("SharedMemoryUpdated: {:?}", msg.timestamp);
-        let old_info = self.monitor_info.clone();
+        let old_info = self.monitor_info;
         self.monitor_info = Some(msg.monitor_info);
         if let Some(mi) = self.monitor_info.as_ref() {
             // Mark monitor state changed if info differs
@@ -466,7 +815,10 @@ impl AppState {
         }
     }
     pub fn send_tag_command_index(&mut self, idx: usize, is_view: bool) {
-        let tag_bit = 1 << idx;
+        let Some(tag_bit) = 1_u32.checked_shl(idx as u32) else {
+            warn!("Ignoring out-of-range tag index: {idx}");
+            return;
+        };
         let cmd = if is_view {
             SharedCommand::view_tag(tag_bit, self.monitor_num)
         } else {
@@ -560,12 +912,12 @@ impl AppState {
                         need_redraw = true;
                     }
                     4 => {
-                        let _ = self.audio_manager.adjust_volume(&dev.name, 5);
+                        let _ = self.audio_manager.adjust_volume(&dev.name, self.volume_step);
                         self.dirty_fields.set(DirtyBits::AUDIO_CHANGED);
                         need_redraw = true;
                     }
                     5 => {
-                        let _ = self.audio_manager.adjust_volume(&dev.name, -5);
+                        let _ = self.audio_manager.adjust_volume(&dev.name, -self.volume_step);
                         self.dirty_fields.set(DirtyBits::AUDIO_CHANGED);
                         need_redraw = true;
                     }
@@ -934,8 +1286,16 @@ fn paint_bar_background(
     let w = width as f64;
     let h = height as f64;
     // relm_bar inspired: subtler gradient
-    let top = if is_light { bg.darken(0.02) } else { bg.lighten(0.03) };
-    let bottom = if is_light { bg.lighten(0.01) } else { bg.darken(0.03) };
+    let top = if is_light {
+        bg.darken(0.02)
+    } else {
+        bg.lighten(0.03)
+    };
+    let bottom = if is_light {
+        bg.lighten(0.01)
+    } else {
+        bg.darken(0.03)
+    };
 
     let grad = LinearGradient::new(0.0, 0.0, 0.0, h);
     grad.add_color_stop_rgba(0.0, top.r, top.g, top.b, background_opacity);
@@ -945,8 +1305,16 @@ fn paint_bar_background(
     cr.fill()?;
 
     // 顶部高光线 + 底部阴影线（更柔和）
-    let top_line = if is_light { bg.lighten(0.12) } else { bg.lighten(0.06) };
-    let bottom_line = if is_light { bg.darken(0.06) } else { bg.darken(0.15) };
+    let top_line = if is_light {
+        bg.lighten(0.12)
+    } else {
+        bg.lighten(0.06)
+    };
+    let bottom_line = if is_light {
+        bg.darken(0.06)
+    } else {
+        bg.darken(0.15)
+    };
     set_source_color_with_alpha(cr, top_line, background_opacity);
     cr.rectangle(0.0, 0.0, w, 1.0);
     cr.fill()?;
@@ -955,7 +1323,11 @@ fn paint_bar_background(
     cr.fill()?;
 
     // 外框（极轻微）
-    let frame = if is_light { bg.darken(0.05) } else { bg.darken(0.10) };
+    let frame = if is_light {
+        bg.darken(0.05)
+    } else {
+        bg.darken(0.10)
+    };
     set_source_color_with_alpha(cr, frame, background_opacity);
     cr.set_line_width(1.0);
     cr.rectangle(0.5, 0.5, (w - 1.0).max(0.0), (h - 1.0).max(0.0));
@@ -1209,9 +1581,17 @@ pub fn draw_layout_button(
     let lw_total = lw as f64 + 2.0 * cfg.pill_hpadding;
 
     let mut layout_fill = if state.layout_selector_open {
-        if is_light_theme { Color::rgb(20, 184, 166) } else { Color::rgb(13, 120, 110) }
+        if is_light_theme {
+            Color::rgb(20, 184, 166)
+        } else {
+            Color::rgb(13, 120, 110)
+        }
     } else {
-        if is_light_theme { Color::rgb(249, 115, 22) } else { Color::rgb(160, 75, 15) }
+        if is_light_theme {
+            Color::rgb(249, 115, 22)
+        } else {
+            Color::rgb(160, 75, 15)
+        }
     };
     let mut layout_border = pill_border_color(layout_fill, is_light_theme);
     let mut layout_bw = 1.0;
@@ -1278,21 +1658,57 @@ pub fn draw_layout_options(
         let current_sym = state.layout_symbol.as_str();
         let layout_defs: [(&str, u32); 3] = [("[]=", 0), ("><>", 1), ("[M]", 2)];
         let layouts: [(&str, u32, Color); 3] = [
-            (layout_defs[0].0, layout_defs[0].1, if layout_defs[0].0 == current_sym {
-                if is_light_theme { Color::rgb(34, 197, 94) } else { Color::rgb(16, 120, 80) }
-            } else {
-                if is_light_theme { Color::rgb(220, 225, 230) } else { Color::rgb(30, 41, 59) }
-            }),
-            (layout_defs[1].0, layout_defs[1].1, if layout_defs[1].0 == current_sym {
-                if is_light_theme { Color::rgb(34, 197, 94) } else { Color::rgb(16, 120, 80) }
-            } else {
-                if is_light_theme { Color::rgb(220, 225, 230) } else { Color::rgb(30, 41, 59) }
-            }),
-            (layout_defs[2].0, layout_defs[2].1, if layout_defs[2].0 == current_sym {
-                if is_light_theme { Color::rgb(34, 197, 94) } else { Color::rgb(16, 120, 80) }
-            } else {
-                if is_light_theme { Color::rgb(220, 225, 230) } else { Color::rgb(30, 41, 59) }
-            }),
+            (
+                layout_defs[0].0,
+                layout_defs[0].1,
+                if layout_defs[0].0 == current_sym {
+                    if is_light_theme {
+                        Color::rgb(34, 197, 94)
+                    } else {
+                        Color::rgb(16, 120, 80)
+                    }
+                } else {
+                    if is_light_theme {
+                        Color::rgb(220, 225, 230)
+                    } else {
+                        Color::rgb(30, 41, 59)
+                    }
+                },
+            ),
+            (
+                layout_defs[1].0,
+                layout_defs[1].1,
+                if layout_defs[1].0 == current_sym {
+                    if is_light_theme {
+                        Color::rgb(34, 197, 94)
+                    } else {
+                        Color::rgb(16, 120, 80)
+                    }
+                } else {
+                    if is_light_theme {
+                        Color::rgb(220, 225, 230)
+                    } else {
+                        Color::rgb(30, 41, 59)
+                    }
+                },
+            ),
+            (
+                layout_defs[2].0,
+                layout_defs[2].1,
+                if layout_defs[2].0 == current_sym {
+                    if is_light_theme {
+                        Color::rgb(34, 197, 94)
+                    } else {
+                        Color::rgb(16, 120, 80)
+                    }
+                } else {
+                    if is_light_theme {
+                        Color::rgb(220, 225, 230)
+                    } else {
+                        Color::rgb(30, 41, 59)
+                    }
+                },
+            ),
         ];
         let mut opt_x = x;
         for (i, (sym, _idx, base_color)) in layouts.iter().enumerate() {
@@ -1411,7 +1827,11 @@ pub fn draw_theme_toggle(
             border,
             Some(fill),
         )?;
-        let theme_text = if is_light_theme { colors.text } else { Color::rgb(229, 231, 235) };
+        let theme_text = if is_light_theme {
+            colors.text
+        } else {
+            Color::rgb(229, 231, 235)
+        };
         let ty = cfg.padding_y + (pill_h - th as f64) / 2.0 - 1.0;
         pango_draw_text_left(
             cr,
@@ -1488,7 +1908,11 @@ pub fn draw_monitor_badge(
         mon_border,
         Some(mon_fill),
     )?;
-    let mon_text = if is_light_theme { colors.text } else { Color::rgb(226, 232, 240) };
+    let mon_text = if is_light_theme {
+        colors.text
+    } else {
+        Color::rgb(226, 232, 240)
+    };
     let ty_mon = cfg.padding_y + (pill_h - mon_h as f64) / 2.0 - 1.0;
     pango_draw_text_left(
         cr,
@@ -1563,7 +1987,11 @@ pub fn draw_time_display(
         time_border,
         Some(time_fill),
     )?;
-    let time_text = if is_light_theme { Color::rgb(15, 23, 42) } else { Color::rgb(236, 254, 255) };
+    let time_text = if is_light_theme {
+        Color::rgb(15, 23, 42)
+    } else {
+        Color::rgb(236, 254, 255)
+    };
     let ty_time = cfg.padding_y + (pill_h - time_h as f64) / 2.0 - 1.0;
     pango_draw_text_left(
         cr,
@@ -1637,7 +2065,11 @@ pub fn draw_screenshot_button(
         ss_border,
         Some(ss_fill),
     )?;
-    let ss_text = if is_light_theme { Color::rgb(21, 94, 117) } else { Color::rgb(226, 232, 240) };
+    let ss_text = if is_light_theme {
+        Color::rgb(21, 94, 117)
+    } else {
+        Color::rgb(226, 232, 240)
+    };
     let ty_ss = cfg.padding_y + (pill_h - ss_h as f64) / 2.0 - 1.0;
     pango_draw_text_left(
         cr,
@@ -1669,7 +2101,11 @@ pub fn draw_audio_volume(
 ) -> Result<()> {
     if cfg.show_audio {
         let (label, muted) = if let Some(dev) = state.audio_manager.get_master_device() {
-            let tag = if dev.is_muted { cfg.mute_label } else { cfg.volume_label };
+            let tag = if dev.is_muted {
+                cfg.mute_label
+            } else {
+                cfg.volume_label
+            };
             (
                 format!("{} {}%", tag, dev.volume.clamp(0, 100)),
                 dev.is_muted,
@@ -1684,14 +2120,30 @@ pub fn draw_audio_volume(
 
         // relm_bar style: teal accent for volume, subtle for muted
         let mut fill = if muted {
-            if is_light_theme { Color::rgb(243, 244, 246) } else { Color::rgb(30, 41, 59) }
+            if is_light_theme {
+                Color::rgb(243, 244, 246)
+            } else {
+                Color::rgb(30, 41, 59)
+            }
         } else {
-            if is_light_theme { Color::rgb(255, 255, 255) } else { Color::rgb(12, 50, 70) }
+            if is_light_theme {
+                Color::rgb(255, 255, 255)
+            } else {
+                Color::rgb(12, 50, 70)
+            }
         };
         let mut border = if muted {
-            if is_light_theme { Color::rgb(209, 213, 219) } else { Color::rgb(45, 55, 72) }
+            if is_light_theme {
+                Color::rgb(209, 213, 219)
+            } else {
+                Color::rgb(45, 55, 72)
+            }
         } else {
-            if is_light_theme { Color::rgb(147, 197, 253) } else { Color::rgb(20, 70, 90) }
+            if is_light_theme {
+                Color::rgb(147, 197, 253)
+            } else {
+                Color::rgb(20, 70, 90)
+            }
         };
         let mut bw = 1.0;
         if HoverTarget::Audio == state.hover_target {
@@ -1724,11 +2176,22 @@ pub fn draw_audio_volume(
         )?;
         let ty = cfg.padding_y + (pill_h - ah as f64) / 2.0 - 1.0;
         let audio_text = if is_light_theme {
-            if muted { colors.text } else { Color::rgb(15, 23, 42) }
+            if muted {
+                colors.text
+            } else {
+                Color::rgb(15, 23, 42)
+            }
         } else {
             Color::rgb(236, 254, 255)
         };
-        pango_draw_text_left(cr, &layout, audio_text, *right_x + cfg.pill_hpadding, ty, &label);
+        pango_draw_text_left(
+            cr,
+            &layout,
+            audio_text,
+            *right_x + cfg.pill_hpadding,
+            ty,
+            &label,
+        );
         state.audio_rect = Rect {
             x: *right_x as i16,
             y: cfg.padding_y as i16,
@@ -1959,7 +2422,14 @@ pub fn draw_brightness(
         Color::rgb(254, 243, 199)
     };
     let ty = cfg.padding_y + (pill_h - bh_t as f64) / 2.0 - 1.0;
-    pango_draw_text_left(cr, &layout, text_color, *right_x + cfg.pill_hpadding, ty, &label);
+    pango_draw_text_left(
+        cr,
+        &layout,
+        text_color,
+        *right_x + cfg.pill_hpadding,
+        ty,
+        &label,
+    );
     state.brightness_rect = Rect {
         x: *right_x as i16,
         y: cfg.padding_y as i16,
@@ -2072,7 +2542,14 @@ pub fn draw_battery(
         Some(fill),
     )?;
     let ty = cfg.padding_y + (pill_h - bh_t as f64) / 2.0 - 1.0;
-    pango_draw_text_left(cr, &layout, text_color, *right_x + cfg.pill_hpadding, ty, &label);
+    pango_draw_text_left(
+        cr,
+        &layout,
+        text_color,
+        *right_x + cfg.pill_hpadding,
+        ty,
+        &label,
+    );
     state.battery_rect = Rect {
         x: *right_x as i16,
         y: cfg.padding_y as i16,
@@ -2083,6 +2560,40 @@ pub fn draw_battery(
 }
 
 // ================= 对外：绘制入口 =================
+
+/// Render with the canonical palette for `state.theme_mode`.
+pub fn draw_bar_for_theme(
+    cr: &Context,
+    width: u16,
+    height: u16,
+    state: &mut AppState,
+    font: &FontDescription,
+    cfg: &BarConfig,
+) -> Result<()> {
+    draw_bar_for_theme_with_background_opacity(cr, width, height, state, font, cfg, 1.0)
+}
+
+pub fn draw_bar_for_theme_with_background_opacity(
+    cr: &Context,
+    width: u16,
+    height: u16,
+    state: &mut AppState,
+    font: &FontDescription,
+    cfg: &BarConfig,
+    background_opacity: f64,
+) -> Result<()> {
+    let colors = tuned_colors_for_theme(state.theme_mode);
+    draw_bar_with_background_opacity(
+        cr,
+        width,
+        height,
+        &colors,
+        state,
+        font,
+        cfg,
+        background_opacity,
+    )
+}
 
 pub fn draw_bar(
     cr: &Context,
@@ -2106,8 +2617,17 @@ pub fn draw_bar_with_background_opacity(
     cfg: &BarConfig,
     background_opacity: f64,
 ) -> Result<()> {
+    cfg.validate_for_height(height)?;
+    state.apply_config(cfg);
     let is_light_theme = colors.bg.r > 0.7 && colors.bg.g > 0.7 && colors.bg.b > 0.7;
-    paint_bar_background(cr, width, height, colors.bg, is_light_theme, background_opacity)?;
+    paint_bar_background(
+        cr,
+        width,
+        height,
+        colors.bg,
+        is_light_theme,
+        background_opacity,
+    )?;
 
     let layout = create_layout(cr);
     layout.set_font_description(Some(font));
@@ -2121,27 +2641,111 @@ pub fn draw_bar_with_background_opacity(
 
     // Right side: right-to-left
     let mut right_x = width as f64 - cfg.padding_x;
-    draw_theme_toggle(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
-    draw_monitor_badge(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
-    draw_time_display(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
-    draw_screenshot_button(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
-    draw_audio_volume(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
-    let cpu_avg = draw_memory_stats(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
-    draw_cpu_stats(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x, cpu_avg)?;
-    draw_brightness(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
-    draw_battery(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+    draw_theme_toggle(
+        cr,
+        cfg,
+        state,
+        &layout,
+        pill_h,
+        is_light_theme,
+        colors,
+        &mut right_x,
+    )?;
+    draw_monitor_badge(
+        cr,
+        cfg,
+        state,
+        &layout,
+        pill_h,
+        is_light_theme,
+        colors,
+        &mut right_x,
+    )?;
+    draw_time_display(
+        cr,
+        cfg,
+        state,
+        &layout,
+        pill_h,
+        is_light_theme,
+        colors,
+        &mut right_x,
+    )?;
+    draw_screenshot_button(
+        cr,
+        cfg,
+        state,
+        &layout,
+        pill_h,
+        is_light_theme,
+        colors,
+        &mut right_x,
+    )?;
+    draw_audio_volume(
+        cr,
+        cfg,
+        state,
+        &layout,
+        pill_h,
+        is_light_theme,
+        colors,
+        &mut right_x,
+    )?;
+    let cpu_avg = draw_memory_stats(
+        cr,
+        cfg,
+        state,
+        &layout,
+        pill_h,
+        is_light_theme,
+        colors,
+        &mut right_x,
+    )?;
+    draw_cpu_stats(
+        cr,
+        cfg,
+        state,
+        &layout,
+        pill_h,
+        is_light_theme,
+        colors,
+        &mut right_x,
+        cpu_avg,
+    )?;
+    draw_brightness(
+        cr,
+        cfg,
+        state,
+        &layout,
+        pill_h,
+        is_light_theme,
+        colors,
+        &mut right_x,
+    )?;
+    draw_battery(
+        cr,
+        cfg,
+        state,
+        &layout,
+        pill_h,
+        is_light_theme,
+        colors,
+        &mut right_x,
+    )?;
 
     Ok(())
 }
 
-/// Draw bar with selective region redrawing based on dirty bits.
+/// Draw only when the supplied change set is non-empty.
 ///
 /// - `dirty_bits = None`       -> Full redraw (all regions)
 /// - `dirty_bits = Some(0)`    -> Skip redraw entirely
-/// - `dirty_bits = Some(bits)` -> Redraw only the affected regions
+/// - `dirty_bits = Some(bits)` -> Full redraw
 ///
-/// HOVER_CHANGED and THEME_CHANGED trigger a full redraw because they
-/// affect the visual appearance of every region.
+/// Partial drawing is intentionally disabled until a retained scene can
+/// invalidate both old and new widget bounds. The previous implementation
+/// cleared the whole background before drawing only changed widgets, which
+/// erased unchanged content.
 pub fn draw_bar_with_dirty(
     cr: &Context,
     width: u16,
@@ -2153,15 +2757,7 @@ pub fn draw_bar_with_dirty(
     dirty_bits: Option<DirtyBits>,
 ) -> Result<()> {
     draw_bar_with_dirty_background_opacity(
-        cr,
-        width,
-        height,
-        colors,
-        state,
-        font,
-        cfg,
-        dirty_bits,
-        1.0,
+        cr, width, height, colors, state, font, cfg, dirty_bits, 1.0,
     )
 }
 
@@ -2176,26 +2772,28 @@ pub fn draw_bar_with_dirty_background_opacity(
     dirty_bits: Option<DirtyBits>,
     background_opacity: f64,
 ) -> Result<()> {
+    cfg.validate_for_height(height)?;
+    state.apply_config(cfg);
     // If dirty_bits is Some(0), nothing changed -- skip entirely.
-    if let Some(ref dirty) = dirty_bits {
-        if dirty.is_empty() {
-            return Ok(());
-        }
+    if let Some(dirty) = dirty_bits
+        && dirty.is_empty()
+    {
+        return Ok(());
     }
 
-    // Determine whether we need a full redraw.
-    // None means "no tracking, redraw everything".
-    // HOVER_CHANGED / THEME_CHANGED affect all regions, so treat as full.
-    let full_redraw = match dirty_bits {
-        None => true,
-        Some(ref d) => {
-            d.contains(DirtyBits::HOVER_CHANGED) || d.contains(DirtyBits::THEME_CHANGED)
-        }
-    };
+    // Correctness first; true damage rendering requires old/new scene bounds.
+    let full_redraw = true;
 
     // ── Always: background, layout object, theme detection, pill_h ──
     let is_light_theme = colors.bg.r > 0.7 && colors.bg.g > 0.7 && colors.bg.b > 0.7;
-    paint_bar_background(cr, width, height, colors.bg, is_light_theme, background_opacity)?;
+    paint_bar_background(
+        cr,
+        width,
+        height,
+        colors.bg,
+        is_light_theme,
+        background_opacity,
+    )?;
 
     let layout = create_layout(cr);
     layout.set_font_description(Some(font));
@@ -2285,7 +2883,16 @@ pub fn draw_bar_with_dirty_background_opacity(
     // THEME_CHANGED already triggers full_redraw, so under selective mode this
     // is always skipped unless full_redraw. We draw it under full_redraw.)
     if full_redraw {
-        draw_theme_toggle(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+        draw_theme_toggle(
+            cr,
+            cfg,
+            state,
+            &layout,
+            pill_h,
+            is_light_theme,
+            colors,
+            &mut right_x,
+        )?;
     } else if cfg.show_theme_toggle {
         // Advance right_x without drawing so subsequent positions are correct.
         let label = match state.theme_mode {
@@ -2299,7 +2906,16 @@ pub fn draw_bar_with_dirty_background_opacity(
 
     // Monitor badge
     if should_draw(DirtyBits::MONITOR_CHANGED) {
-        draw_monitor_badge(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+        draw_monitor_badge(
+            cr,
+            cfg,
+            state,
+            &layout,
+            pill_h,
+            is_light_theme,
+            colors,
+            &mut right_x,
+        )?;
     } else {
         let mon_label = state.monitor_label(cfg).to_string();
         let (mon_w, _) = pango_text_size(&layout, &mon_label);
@@ -2309,7 +2925,16 @@ pub fn draw_bar_with_dirty_background_opacity(
 
     // Time display
     if should_draw(DirtyBits::TIME_CHANGED) {
-        draw_time_display(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+        draw_time_display(
+            cr,
+            cfg,
+            state,
+            &layout,
+            pill_h,
+            is_light_theme,
+            colors,
+            &mut right_x,
+        )?;
     } else {
         // Advance past time pill. Use the cached rect width if available,
         // otherwise measure the current time string.
@@ -2326,7 +2951,16 @@ pub fn draw_bar_with_dirty_background_opacity(
 
     // Screenshot button (static, always drawn on full redraw; skip on selective)
     if full_redraw {
-        draw_screenshot_button(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+        draw_screenshot_button(
+            cr,
+            cfg,
+            state,
+            &layout,
+            pill_h,
+            is_light_theme,
+            colors,
+            &mut right_x,
+        )?;
     } else {
         let ss_label = cfg.screenshot_label;
         let (ss_w, _) = pango_text_size(&layout, ss_label);
@@ -2336,12 +2970,28 @@ pub fn draw_bar_with_dirty_background_opacity(
 
     // Audio volume
     if should_draw(DirtyBits::AUDIO_CHANGED) {
-        draw_audio_volume(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+        draw_audio_volume(
+            cr,
+            cfg,
+            state,
+            &layout,
+            pill_h,
+            is_light_theme,
+            colors,
+            &mut right_x,
+        )?;
     } else if cfg.show_audio {
         // Advance past audio pill without drawing.
         let (label, _muted) = if let Some(dev) = state.audio_manager.get_master_device() {
-            let tag = if dev.is_muted { cfg.mute_label } else { cfg.volume_label };
-            (format!("{} {}%", tag, dev.volume.clamp(0, 100)), dev.is_muted)
+            let tag = if dev.is_muted {
+                cfg.mute_label
+            } else {
+                cfg.volume_label
+            };
+            (
+                format!("{} {}%", tag, dev.volume.clamp(0, 100)),
+                dev.is_muted,
+            )
         } else {
             (format!("{} --", cfg.volume_label), true)
         };
@@ -2353,17 +3003,44 @@ pub fn draw_bar_with_dirty_background_opacity(
     // Memory stats + CPU stats (coupled: memory returns cpu_avg for cpu pill)
     let draw_system = should_draw(DirtyBits::SYSTEM_CHANGED);
     if draw_system {
-        let cpu_avg = draw_memory_stats(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
-        draw_cpu_stats(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x, cpu_avg)?;
+        let cpu_avg = draw_memory_stats(
+            cr,
+            cfg,
+            state,
+            &layout,
+            pill_h,
+            is_light_theme,
+            colors,
+            &mut right_x,
+        )?;
+        draw_cpu_stats(
+            cr,
+            cfg,
+            state,
+            &layout,
+            pill_h,
+            is_light_theme,
+            colors,
+            &mut right_x,
+            cpu_avg,
+        )?;
     } else {
         // Advance past memory pill.
         let (mem_total_gb, mem_used_gb, cpu_avg) =
             if let Some(snap) = state.system_monitor.get_snapshot() {
-                ((snap.memory_total as f32) / 1e9, (snap.memory_used as f32) / 1e9, snap.cpu_average)
+                (
+                    (snap.memory_total as f32) / 1e9,
+                    (snap.memory_used as f32) / 1e9,
+                    snap.cpu_average,
+                )
             } else {
                 (0.0, 0.0, 0.0)
             };
-        let mem_usage = if mem_total_gb > 0.0 { (mem_used_gb / mem_total_gb) * 100.0 } else { 0.0 };
+        let mem_usage = if mem_total_gb > 0.0 {
+            (mem_used_gb / mem_total_gb) * 100.0
+        } else {
+            0.0
+        };
         let mem_label = format!("{} {:.0}%", cfg.mem_label, mem_usage.clamp(0.0, 100.0));
         let (mem_w, _) = pango_text_size(&layout, &mem_label);
         let mem_total = mem_w as f64 + 2.0 * cfg.pill_hpadding;
@@ -2378,7 +3055,16 @@ pub fn draw_bar_with_dirty_background_opacity(
 
     // Brightness
     if should_draw(DirtyBits::BRIGHTNESS_CHANGED) {
-        draw_brightness(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+        draw_brightness(
+            cr,
+            cfg,
+            state,
+            &layout,
+            pill_h,
+            is_light_theme,
+            colors,
+            &mut right_x,
+        )?;
     } else if cfg.show_brightness {
         let label = match state.brightness_manager.percent() {
             Some(p) => format!("{} {}%", cfg.brightness_label, p),
@@ -2391,7 +3077,16 @@ pub fn draw_bar_with_dirty_background_opacity(
 
     // Battery
     if should_draw(DirtyBits::BATTERY_CHANGED) {
-        draw_battery(cr, cfg, state, &layout, pill_h, is_light_theme, colors, &mut right_x)?;
+        draw_battery(
+            cr,
+            cfg,
+            state,
+            &layout,
+            pill_h,
+            is_light_theme,
+            colors,
+            &mut right_x,
+        )?;
     } else if cfg.show_battery {
         let charging = state.battery_manager.is_charging();
         let label = match state.battery_manager.capacity() {
@@ -2457,9 +3152,7 @@ pub fn spawn_shared_eventfd_notifier(
     shared_buffer: Option<Arc<SharedRingBuffer>>,
     non_block: bool,
 ) -> Option<libc::c_int> {
-    let Some(buf) = shared_buffer.clone() else {
-        return None;
-    };
+    let buf = shared_buffer?;
     // 创建 eventfd：非阻塞 + CLOEXEC
     let efd = unsafe {
         if non_block {
@@ -2472,14 +3165,26 @@ pub fn spawn_shared_eventfd_notifier(
         error!("eventfd create failed: {}", std::io::Error::last_os_error());
         return None;
     }
+    // Keep the worker on a duplicate descriptor. If a legacy caller closes
+    // and the OS reuses the returned number, worker writes cannot hit the new
+    // resource. `SharedEventNotifier` additionally provides clean shutdown.
+    let writer_fd = unsafe { libc::fcntl(efd, libc::F_DUPFD_CLOEXEC, 0) };
+    if writer_fd < 0 {
+        error!(
+            "eventfd duplicate failed: {}",
+            std::io::Error::last_os_error()
+        );
+        unsafe { libc::close(efd) };
+        return None;
+    }
     std::thread::spawn(move || {
         loop {
-            match buf.wait_for_message(None) {
+            match buf.wait_for_message(Some(std::time::Duration::from_millis(250))) {
                 Ok(true) => {
                     // 有新消息到达，通知主线程
                     let one: u64 = 1;
                     let ptr = &one as *const u64 as *const libc::c_void;
-                    let r = unsafe { libc::write(efd, ptr, std::mem::size_of::<u64>()) };
+                    let r = unsafe { libc::write(writer_fd, ptr, std::mem::size_of::<u64>()) };
                     if r < 0 {
                         let err = std::io::Error::last_os_error();
                         if let Some(code) = err.raw_os_error() {
@@ -2494,13 +3199,14 @@ pub fn spawn_shared_eventfd_notifier(
                         }
                     }
                 }
-                Ok(false) => {}
+                Ok(false) => std::thread::sleep(std::time::Duration::from_millis(1)),
                 Err(e) => {
                     warn!("Shared wait failed: {}", e);
                     break;
                 }
             }
         }
+        unsafe { libc::close(writer_fd) };
     });
     Some(efd)
 }
@@ -2558,3 +3264,8 @@ pub fn initialize_logging(program_name: &str, shared_path: &str) -> Result<()> {
     info!("Log directory: {}", log_dir);
     Ok(())
 }
+
+} // mod legacy
+
+#[cfg(feature = "legacy-full")]
+pub use legacy::*;
