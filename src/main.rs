@@ -1,16 +1,12 @@
 use std::env;
 use std::process::Command;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::{Duration, Instant};
 
-use chrono::Local;
-use futures::StreamExt;
 use gpui::{
     App, Application, Bounds, Context, IntoElement, MouseButton, ParentElement, Pixels, Render,
-    ScrollDelta, ScrollWheelEvent, SharedString, Styled, Task, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, prelude::*,
-    px, rgb, size,
+    ScrollDelta, ScrollWheelEvent, SharedString, Styled, Task, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowKind, WindowOptions, div, point, prelude::*, px, rgb, size,
 };
 use gpui_component::{
     Root, Selectable, Sizable, Size, black, blue_400, blue_500, cyan_500, emerald_500, emerald_600,
@@ -21,12 +17,12 @@ use gpui_component::{
     button::{Button, ButtonCustomVariant, ButtonVariants},
     init as init_components,
 };
-use log::{error, info, warn};
-use shared_structures::{CommandType, MonitorInfo, SharedCommand, SharedMessage, SharedRingBuffer};
-use xbar_core::audio_manager::AudioManager;
-use xbar_core::brightness::BrightnessManager;
-use xbar_core::initialize_logging;
-use xbar_core::system_monitor::SystemMonitor;
+use log::{debug, info, warn};
+use xbar_core::logging::init as initialize_logging;
+use xbar_core::{
+    BarEffect, BarRuntime, LayoutId, ModelConfig, MonitorGeometry, RuntimeAdapter, RuntimeIssue,
+    RuntimeUpdate, SharedTransport, TagId, UserAction,
+};
 
 const NERD_FONT: &str = "JetBrainsMono Nerd Font";
 
@@ -60,51 +56,61 @@ const ICON_M1: &str = "\u{F02DB}";
 const TAG_ACCENTS: [u32; 9] = [
     0xEF4444, 0x14B8A6, 0x0EA5E9, 0x22C55E, 0xF59E0B, 0xEC4899, 0x3B82F6, 0x6366F1, 0x06B6D4,
 ];
+const TRANSPORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 struct GpuiComponentBar {
-    active_tab: usize,
-    shared_buffer: Option<Arc<SharedRingBuffer>>,
-    monitor_info: Option<MonitorInfo>,
-    formatted_now: String,
-    show_seconds: bool,
-    layout_symbol: String,
-    monitor_num: i32,
-    layout_selector_open: bool,
-    audio_manager: AudioManager,
-    system_monitor: SystemMonitor,
-    brightness_manager: BrightnessManager,
-    last_clock_update: Instant,
-    last_monitor_update: Instant,
-    stop_flag: Arc<AtomicBool>,
+    runtime: BarRuntime,
+    shared_path: String,
+    last_transport_retry: Instant,
+    active_geometry: Option<MonitorGeometry>,
+    default_size: Option<gpui::Size<Pixels>>,
+    last_scale_factor: Option<f32>,
+    geometry_dirty: bool,
     _timer_task: Option<Task<()>>,
+    _transport_task: Option<Task<()>>,
 }
 
 impl GpuiComponentBar {
     fn new(cx: &mut Context<Self>) -> Self {
         let shared_path = env::args().skip(1).last().unwrap_or_default();
-        let shared_buffer =
-            SharedRingBuffer::create_shared_ring_buffer_aux(&shared_path).map(Arc::new);
+        let transport = if shared_path.is_empty() {
+            None
+        } else {
+            match SharedTransport::open(&shared_path) {
+                Ok(transport) => Some(transport),
+                Err(error) => {
+                    warn!("failed to open WM transport at {shared_path:?}: {error}");
+                    None
+                }
+            }
+        };
+        let runtime = BarRuntime::with_transport(
+            ModelConfig {
+                show_seconds: true,
+                clock_minute_format: "%m-%d %H:%M".into(),
+                clock_second_format: "%m-%d %H:%M:%S".into(),
+                ..ModelConfig::default()
+            },
+            transport,
+        )
+        .expect("gpui component bar model configuration is valid");
 
         let mut this = Self {
-            active_tab: 0,
-            shared_buffer,
-            monitor_info: None,
-            formatted_now: String::new(),
-            show_seconds: true,
-            layout_symbol: "[]=".to_string(),
-            monitor_num: 0,
-            layout_selector_open: false,
-            audio_manager: AudioManager::new(),
-            system_monitor: SystemMonitor::new(5),
-            brightness_manager: BrightnessManager::new(),
-            last_clock_update: Instant::now() - Duration::from_secs(2),
-            last_monitor_update: Instant::now() - Duration::from_secs(3),
-            stop_flag: Arc::new(AtomicBool::new(false)),
+            runtime,
+            shared_path,
+            last_transport_retry: Instant::now(),
+            active_geometry: None,
+            default_size: None,
+            last_scale_factor: None,
+            geometry_dirty: false,
             _timer_task: None,
+            _transport_task: None,
         };
-        this.tick();
+        let update = this.runtime.tick();
+        this.handle_runtime_update(update);
         this.spawn_clock(cx);
-        this.spawn_shared_watcher(cx);
+        this.spawn_transport_poller(cx);
         this
     }
 
@@ -113,7 +119,8 @@ impl GpuiComponentBar {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 let _ = this.update(cx, |this, cx| {
-                    this.tick();
+                    let update = this.runtime.tick();
+                    this.handle_runtime_update(update);
                     cx.notify();
                 });
             }
@@ -121,103 +128,85 @@ impl GpuiComponentBar {
         self._timer_task = Some(task);
     }
 
-    fn spawn_shared_watcher(&mut self, cx: &mut Context<Self>) {
-        let Some(buf) = self.shared_buffer.clone() else {
-            warn!("No shared buffer; skipping watcher thread");
-            return;
-        };
-
-        let (tx, mut rx) = futures::channel::mpsc::channel::<SharedMessage>(64);
-        let stop = self.stop_flag.clone();
-        std::thread::spawn(move || {
-            let mut previous_timestamp: u128 = 0;
-            let mut tx = tx;
-            while !stop.load(Ordering::Relaxed) {
-                match buf.wait_for_message(Some(Duration::from_secs(2))) {
-                    Ok(true) => {
-                        if let Ok(Some(message)) = buf.try_read_latest_message() {
-                            let ts = message.timestamp as u128;
-                            if ts != previous_timestamp {
-                                previous_timestamp = ts;
-                                if tx.try_send(message).is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Ok(false) => {}
-                    Err(err) => {
-                        warn!("wait_for_message failed: {err}");
-                        break;
-                    }
-                }
-            }
-        });
-
-        cx.spawn(async move |this, cx| {
-            while let Some(message) = rx.next().await {
+    fn spawn_transport_poller(&mut self, cx: &mut Context<Self>) {
+        let task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(TRANSPORT_POLL_INTERVAL)
+                    .await;
                 let _ = this.update(cx, |this, cx| {
-                    this.apply_shared(message);
+                    this.ensure_transport();
+                    let update = this.runtime.poll_transport();
+                    this.handle_runtime_update(update);
                     cx.notify();
                 });
             }
-        })
-        .detach();
+        });
+        self._transport_task = Some(task);
     }
 
-    fn tick(&mut self) {
-        if self.last_clock_update.elapsed() >= Duration::from_millis(900) {
-            let fmt = if self.show_seconds {
-                "%m-%d %H:%M:%S"
-            } else {
-                "%m-%d %H:%M"
-            };
-            self.formatted_now = Local::now().format(fmt).to_string();
-            self.last_clock_update = Instant::now();
-        }
-
-        if self.last_monitor_update.elapsed() >= Duration::from_secs(2) {
-            self.system_monitor.update_if_needed();
-            self.audio_manager.update_if_needed();
-            self.brightness_manager.update_if_needed();
-            self.last_monitor_update = Instant::now();
-        }
+    fn dispatch(&mut self, action: UserAction) {
+        let update = self.runtime.dispatch(action);
+        self.handle_runtime_update(update);
     }
 
-    fn apply_shared(&mut self, message: SharedMessage) {
-        self.monitor_info = Some(message.monitor_info);
-        if let Some(monitor) = &self.monitor_info {
-            self.layout_symbol = monitor.get_ltsymbol();
-            self.monitor_num = monitor.monitor_num;
-            for (index, status) in monitor.tag_status_vec.iter().enumerate() {
-                if status.is_selected {
-                    self.active_tab = index;
+    fn dispatch_wm(&mut self, action: UserAction) {
+        if !self.runtime.view().wm_available {
+            debug!("ignoring WM action while the WM projection is unavailable");
+            return;
+        }
+        self.dispatch(action);
+    }
+
+    fn handle_runtime_update(&mut self, update: RuntimeUpdate) {
+        if has_transport_failure(&update) {
+            self.runtime.set_transport(None);
+            self.last_transport_retry = Instant::now();
+        }
+        for issue in update.issues {
+            warn!("xbar runtime issue: {issue:?}");
+        }
+        for effect in update.platform_effects {
+            match effect {
+                BarEffect::ApplyMonitorGeometry(geometry) => {
+                    self.active_geometry = Some(geometry);
+                    self.geometry_dirty = true;
                 }
+                BarEffect::ClearMonitorGeometry => {
+                    self.active_geometry = None;
+                    self.geometry_dirty = true;
+                }
+                BarEffect::Screenshot => {
+                    spawn_program("flameshot", &["gui"]);
+                }
+                BarEffect::OpenAudioControl => {
+                    spawn_program("pavucontrol", &[]);
+                }
+                unhandled => warn!("unhandled xbar platform effect: {unhandled:?}"),
             }
         }
     }
 
-    fn send_tag_command(&mut self, is_view: bool) {
-        let tag_bit = 1 << self.active_tab;
-        let command = if is_view {
-            SharedCommand::view_tag(tag_bit, self.monitor_num)
-        } else {
-            SharedCommand::toggle_tag(tag_bit, self.monitor_num)
-        };
-
-        if let Some(buf) = &self.shared_buffer {
-            match buf.send_command(command) {
-                Ok(true) => info!("Sent command: {:?}", command),
-                Ok(false) => warn!("Command buffer full, command dropped"),
-                Err(err) => error!("Failed to send command: {err}"),
-            }
+    fn ensure_transport(&mut self) {
+        if self.shared_path.is_empty()
+            || self.runtime.transport().is_some()
+            || self.last_transport_retry.elapsed() < TRANSPORT_RETRY_INTERVAL
+        {
+            return;
         }
-    }
 
-    fn send_layout_command(&mut self, layout_index: u32) {
-        let command = SharedCommand::new(CommandType::SetLayout, layout_index, self.monitor_num);
-        if let Some(buf) = &self.shared_buffer {
-            let _ = buf.send_command(command);
+        self.last_transport_retry = Instant::now();
+        match SharedTransport::open(&self.shared_path) {
+            Ok(transport) => {
+                self.runtime.set_transport(Some(transport));
+                info!("reconnected WM transport at {:?}", self.shared_path);
+            }
+            Err(error) => {
+                debug!(
+                    "WM transport at {:?} is still unavailable: {error}",
+                    self.shared_path
+                );
+            }
         }
     }
 
@@ -225,38 +214,28 @@ impl GpuiComponentBar {
         let accent = TAG_ACCENTS[index];
         let label = TAG_ICONS[index];
 
-        let (color, border, foreground, hover, selected) = if let Some(monitor) = &self.monitor_info
+        let view = self.runtime.view();
+        let (color, border, foreground, hover, selected) = if view.wm_available
+            && let Some(status) = view.tags.get(index)
         {
-            if let Some(status) = monitor.tag_status_vec.get(index) {
-                if status.is_urg {
-                    (red_500(), rose_500(), white(), rose_500(), true)
-                } else if status.is_filled {
-                    (
-                        rgb(accent).into(),
-                        rgb(accent).into(),
-                        white(),
-                        rgb(accent).into(),
-                        true,
-                    )
-                } else if status.is_selected {
-                    (
-                        rgb(accent).into(),
-                        rgb(accent).into(),
-                        white(),
-                        rgb(accent).into(),
-                        true,
-                    )
-                } else if status.is_occ {
-                    (
-                        slate_800(),
-                        rgb(accent).into(),
-                        slate_100(),
-                        slate_700(),
-                        false,
-                    )
-                } else {
-                    (slate_900(), slate_700(), slate_300(), slate_800(), false)
-                }
+            if status.urgent {
+                (red_500(), rose_500(), white(), rose_500(), true)
+            } else if status.filled || status.selected {
+                (
+                    rgb(accent).into(),
+                    rgb(accent).into(),
+                    white(),
+                    rgb(accent).into(),
+                    true,
+                )
+            } else if status.occupied {
+                (
+                    slate_800(),
+                    rgb(accent).into(),
+                    slate_100(),
+                    slate_700(),
+                    false,
+                )
             } else {
                 (slate_900(), slate_700(), slate_300(), slate_800(), false)
             }
@@ -319,8 +298,9 @@ impl GpuiComponentBar {
         for index in 0..TAG_ICONS.len() {
             row = row.child(self.workspace_button(index, cx).on_click(cx.listener(
                 move |this, _, _, cx| {
-                    this.active_tab = index;
-                    this.send_tag_command(true);
+                    if let Some(tag) = TagId::new(index) {
+                        this.dispatch_wm(UserAction::ViewTag(tag));
+                    }
                     cx.notify();
                 },
             )));
@@ -331,14 +311,14 @@ impl GpuiComponentBar {
     fn render_layouts(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let toggle = Self::chip_button(
             "layout-toggle",
-            self.layout_symbol.clone(),
+            self.runtime.view().layout_symbol.to_owned(),
             orange_500(),
             orange_500(),
             white(),
             cx,
         )
         .on_click(cx.listener(|this, _, _, cx| {
-            this.layout_selector_open = !this.layout_selector_open;
+            this.dispatch(UserAction::ToggleLayoutSelector);
             cx.notify();
         }));
 
@@ -348,11 +328,11 @@ impl GpuiComponentBar {
             .items_center()
             .gap(px(6.))
             .child(toggle);
-        if self.layout_selector_open {
+        if self.runtime.view().layout_selector_open {
             let options = [("[]=", 0_u32), ("><>", 1_u32), ("[M]", 2_u32)];
             let mut row = div().flex().flex_row().items_center().gap(px(4.));
             for (symbol, layout_index) in options {
-                let selected = symbol == self.layout_symbol;
+                let selected = symbol == self.runtime.view().layout_symbol;
                 let button = Self::chip_button(
                     "layout-option",
                     symbol,
@@ -371,8 +351,7 @@ impl GpuiComponentBar {
                 )
                 .selected(selected)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.send_layout_command(layout_index);
-                    this.layout_selector_open = false;
+                    this.dispatch_wm(UserAction::SetLayout(LayoutId(layout_index)));
                     cx.notify();
                 }));
                 row = row.child(button);
@@ -383,9 +362,9 @@ impl GpuiComponentBar {
     }
 
     fn render_usage_pills(&self) -> impl IntoElement {
-        let snapshot = self.system_monitor.get_snapshot();
-        let cpu = snapshot.map(|s| s.cpu_average).unwrap_or(0.0);
-        let mem = snapshot.map(|s| s.memory_usage_percent).unwrap_or(0.0);
+        let system = self.runtime.view().system;
+        let cpu = system.cpu_percent.map_or(0.0, |value| value.as_f32());
+        let mem = system.memory_percent.map_or(0.0, |value| value.as_f32());
 
         div()
             .flex()
@@ -411,11 +390,9 @@ impl GpuiComponentBar {
     }
 
     fn battery_chip(&self) -> impl IntoElement {
-        let (percent, charging) = self
-            .system_monitor
-            .get_snapshot()
-            .map(|snapshot| (snapshot.battery_percent, snapshot.is_charging))
-            .unwrap_or((0.0, false));
+        let battery = self.runtime.view().battery;
+        let percent = battery.percent.map_or(100.0, |value| value.as_f32());
+        let charging = battery.charging;
         let icon = if charging {
             ICON_BAT_CHG
         } else {
@@ -432,17 +409,16 @@ impl GpuiComponentBar {
     }
 
     fn render_interactive_pills(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let brightness = match self.brightness_manager.percent() {
-            Some(value) => format!("{ICON_BRIGHT}  {value}%"),
+        let brightness = match self.runtime.view().brightness.percent {
+            Some(value) => format!("{ICON_BRIGHT}  {}%", value.rounded()),
             None => format!("{ICON_BRIGHT}  --"),
         };
 
-        let master = self.audio_manager.get_master_device();
-        let (volume, muted, has_device) = if let Some(device) = master {
-            (device.volume.clamp(0, 100), device.is_muted, true)
-        } else {
-            (0, true, false)
-        };
+        let audio = self.runtime.view().audio;
+        let (volume, has_device) = audio
+            .volume_percent
+            .map_or((0, false), |value| (i32::from(value.rounded()), true));
+        let muted = audio.muted;
         let volume_icon = volume_icon(volume, muted, has_device);
         let volume_label = if has_device {
             format!("{volume_icon}  {volume}%")
@@ -450,21 +426,25 @@ impl GpuiComponentBar {
             format!("{volume_icon}  --")
         };
 
-        let time = format!("{ICON_TIME}  {}", self.formatted_now);
-        let monitor = format!("{ICON_MON}  {}", monitor_num_to_icon(self.monitor_num));
+        let time = self.runtime.view().time;
+        let time = format!("{ICON_TIME}  {time}");
+        let monitor = format!(
+            "{ICON_MON}  {}",
+            monitor_num_to_icon(self.runtime.view().monitor.0)
+        );
 
         let brightness_chip = div()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    this.brightness_manager.adjust(5);
+                    this.dispatch(UserAction::BrightnessUp);
                     cx.notify();
                 }),
             )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, _, _, cx| {
-                    this.brightness_manager.adjust(-5);
+                    this.dispatch(UserAction::BrightnessDown);
                     cx.notify();
                 }),
             )
@@ -481,9 +461,7 @@ impl GpuiComponentBar {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    if let Some(device) = this.audio_manager.get_master_device().cloned() {
-                        let _ = this.audio_manager.toggle_mute(&device.name);
-                    }
+                    this.dispatch(UserAction::ToggleMute);
                     cx.notify();
                 }),
             )
@@ -497,13 +475,12 @@ impl GpuiComponentBar {
                     return;
                 }
 
-                if let Some(device) = this.audio_manager.get_master_device().cloned() {
-                    let step = if delta_y > 0.0 { 5 } else { -5 };
-                    let new_volume = (device.volume + step).clamp(0, 100);
-                    let _ =
-                        this.audio_manager
-                            .set_volume(&device.name, new_volume, device.is_muted);
-                }
+                let action = if delta_y > 0.0 {
+                    UserAction::VolumeUp
+                } else {
+                    UserAction::VolumeDown
+                };
+                this.dispatch(action);
 
                 cx.notify();
             }))
@@ -526,16 +503,16 @@ impl GpuiComponentBar {
 
         let screenshot_chip =
             Self::chip_button("screenshot", ICON_SHOT, cyan_500(), blue_500(), white(), cx)
-                .on_click(cx.listener(|_, _, _, _| {
-                    if let Err(err) = Command::new("flameshot").arg("gui").spawn() {
-                        warn!("Failed to spawn flameshot: {err}");
-                    }
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.dispatch(UserAction::Screenshot);
+                    cx.notify();
                 }));
 
         let time_chip = Self::chip_button("time", time, blue_400(), blue_500(), white(), cx)
             .on_click(cx.listener(|this, _, _, cx| {
-                this.show_seconds = !this.show_seconds;
-                this.tick();
+                this.dispatch(UserAction::ToggleSeconds);
+                let update = this.runtime.tick();
+                this.handle_runtime_update(update);
                 cx.notify();
             }));
 
@@ -553,14 +530,53 @@ impl GpuiComponentBar {
     }
 }
 
-impl Drop for GpuiComponentBar {
-    fn drop(&mut self) {
-        self.stop_flag.store(true, Ordering::Relaxed);
+fn has_transport_failure(update: &RuntimeUpdate) -> bool {
+    update.issues.iter().any(|issue| {
+        matches!(
+            issue,
+            RuntimeIssue::AdapterFailed {
+                adapter: RuntimeAdapter::Transport,
+                ..
+            }
+        )
+    })
+}
+
+fn spawn_program(program: &str, args: &[&str]) {
+    let program = program.to_owned();
+    let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+    let thread_name = format!("wait-{program}");
+    if let Err(error) = thread::Builder::new().name(thread_name).spawn(move || {
+        if let Err(error) = Command::new(&program).args(&args).status() {
+            warn!("failed to run {program}: {error}");
+        }
+    }) {
+        warn!("failed to start process waiter: {error}");
     }
 }
 
 impl Render for GpuiComponentBar {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let scale_factor = window.scale_factor().max(f32::EPSILON);
+        self.default_size
+            .get_or_insert_with(|| window.bounds().size);
+        let scale_changed = self
+            .last_scale_factor
+            .is_none_or(|previous| previous.to_bits() != scale_factor.to_bits());
+        if self.geometry_dirty || scale_changed {
+            let default_size = self.default_size.expect("default size is initialized");
+            let target_size = self.active_geometry.map_or(default_size, |geometry| {
+                size(
+                    px(geometry.width as f32 / scale_factor),
+                    default_size.height,
+                )
+            });
+            // GPUI has no public window-position API. JWM remains responsible
+            // for applying geometry.x/y; this frontend applies the logical size.
+            window.resize(target_size);
+            self.geometry_dirty = false;
+            self.last_scale_factor = Some(scale_factor);
+        }
         let left = div()
             .flex()
             .flex_row()
@@ -639,7 +655,6 @@ fn main() {
             kind: WindowKind::Normal,
             is_resizable: false,
             is_minimizable: false,
-            window_min_size: Some(size(width, height)),
             app_id: Some("gpui_component_bar".into()),
             ..Default::default()
         };

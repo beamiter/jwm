@@ -11,7 +11,8 @@
 - screenshot launcher via `flameshot gui`
 - time display with seconds toggle
 - monitor indicator and scale chip
-- shared memory updates through `shared_structures::SharedRingBuffer`
+- provider state, WM snapshots, and typed commands through `xbar_core::BarRuntime`
+- nonblocking shared transport polling with bounded reconnect after WM restarts
 
 ## Build
 
