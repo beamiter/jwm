@@ -1,28 +1,25 @@
-use chrono::Local;
 use gdk4::prelude::*;
 use gtk4::gio::{self};
 use gtk4::prelude::*;
-use gtk4::{Application, ApplicationWindow, Builder, Button, EventControllerScroll, EventControllerScrollFlags, Label, Revealer, glib};
-use log::{error, info, warn};
+use gtk4::{
+    Application, ApplicationWindow, Builder, Button, EventControllerScroll,
+    EventControllerScrollFlags, Label, Revealer, glib,
+};
+use log::{debug, info, warn};
 use std::cell::{Cell, RefCell};
 use std::env;
+use std::process::{Child, Command};
 use std::rc::Rc;
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use shared_structures::{CommandType, SharedCommand, SharedMessage, SharedRingBuffer, TagStatus};
-use xbar_core::audio_manager::AudioManager;
-use xbar_core::initialize_logging;
-use xbar_core::system_monitor::SystemMonitor;
+use xbar_core::logging::init as initialize_logging;
+use xbar_core::{
+    BarEffect, BarRuntime, BarSnapshot, LayoutId, ModelConfig, RuntimeAdapter, RuntimeIssue,
+    RuntimeUpdate, SharedTransport, TagId, TagState, ThemeMode, UserAction,
+};
 
 use gtk4::glib::ControlFlow;
 use gtk4::glib::Propagation;
-
-// ========= 事件与命令 =========
-enum AppEvent {
-    SharedMessage(SharedMessage),
-}
 
 // ========= 常量 =========
 const CPU_REDRAW_THRESHOLD: f64 = 0.01; // 1%
@@ -43,24 +40,7 @@ const CLS_EMPTY: u8 = 1 << 4;
 // ========= 状态 =========
 #[allow(dead_code)]
 struct AppState {
-    // UI state
-    active_tab: usize,
-    layout_symbol: String,
-    layout_open: bool,
-    monitor_num: u8,
-    show_seconds: bool,
-    tag_status_vec: Vec<TagStatus>,
-
-    // Components
-    audio_manager: AudioManager,
-    system_monitor: SystemMonitor,
-
-    // Theme
-    is_dark: bool,
-
-    // Audio UI cache
-    last_volume: i32,
-    last_muted: bool,
+    snapshot: BarSnapshot,
 
     // Last values to control redraw
     last_cpu_usage: f64,
@@ -68,29 +48,15 @@ struct AppState {
 
     // 上一帧每个 tab 的 class 掩码，用于差量更新
     last_class_masks: Vec<u8>,
-
-    // 最近消息时间戳
-    last_message_ts: u128,
 }
 
 impl AppState {
-    fn new() -> Self {
+    fn new(snapshot: BarSnapshot) -> Self {
         Self {
-            active_tab: 0,
-            layout_symbol: " ? ".to_string(),
-            layout_open: false,
-            monitor_num: 0,
-            show_seconds: false,
-            tag_status_vec: Vec::new(),
-            audio_manager: AudioManager::new(),
-            system_monitor: SystemMonitor::new(10),
-            is_dark: true,
-            last_volume: -1,
-            last_muted: false,
+            snapshot,
             last_cpu_usage: 0.0,
             last_mem_fraction: 0.0,
             last_class_masks: Vec::new(),
-            last_message_ts: 0,
         }
     }
 }
@@ -143,11 +109,13 @@ struct TabBarApp {
 
     // Shared state
     state: SharedAppState,
-
-    shared_buffer_rc: Option<Arc<SharedRingBuffer>>,
+    runtime: RefCell<BarRuntime>,
+    shared_path: String,
+    last_transport_attempt: Cell<Instant>,
+    platform_children: RefCell<Vec<Child>>,
 
     // Cached UI-applied values for diff
-    ui_last_monitor_num: Cell<u8>,
+    ui_last_monitor_num: Cell<i32>,
 }
 
 impl TabBarApp {
@@ -183,7 +151,7 @@ impl TabBarApp {
             let button_id = format!("tab_button_{}", i);
             let button: Button = builder
                 .object(&button_id)
-                .expect(&format!("Failed to get {} from builder", button_id));
+                .unwrap_or_else(|| panic!("Failed to get {button_id} from builder"));
             tab_buttons.push(button);
         }
 
@@ -224,20 +192,27 @@ impl TabBarApp {
             .object("layout_option_monocle")
             .expect("Failed to get layout_option_monocle");
 
-        // 状态
-        let state: SharedAppState = Rc::new(RefCell::new(AppState::new()));
+        let transport = if shared_path.is_empty() {
+            None
+        } else {
+            match SharedTransport::open(&shared_path) {
+                Ok(transport) => Some(transport),
+                Err(err) => {
+                    warn!("Failed to open WM transport at {shared_path}: {err}");
+                    None
+                }
+            }
+        };
+        let mut runtime = BarRuntime::with_transport(ModelConfig::default(), transport)
+            .expect("default xbar_core model config is valid");
+        let mut initial_update = runtime.tick();
+        initial_update.merge(runtime.poll_transport());
+
+        // UI state is an owned projection; providers and transport stay in runtime.
+        let state: SharedAppState = Rc::new(RefCell::new(AppState::new(runtime.snapshot())));
 
         // 样式
         Self::apply_styles();
-
-        // 异步事件通道（worker -> 主线程）
-        let (ui_sender, ui_receiver) = async_channel::unbounded::<AppEvent>();
-        let shared_buffer_rc =
-            SharedRingBuffer::create_shared_ring_buffer_aux(&shared_path).map(Arc::new);
-        let shared_buffer_rc_clone = shared_buffer_rc.clone();
-        thread::spawn(move || {
-            worker_thread(shared_buffer_rc_clone, ui_sender);
-        });
 
         let app_instance = Rc::new(Self {
             builder,
@@ -255,8 +230,11 @@ impl TabBarApp {
             layout_btn_floating,
             layout_btn_monocle,
             state,
-            shared_buffer_rc,
-            ui_last_monitor_num: Cell::new(255),
+            runtime: RefCell::new(runtime),
+            shared_path,
+            last_transport_attempt: Cell::new(Instant::now()),
+            platform_children: RefCell::new(Vec::new()),
+            ui_last_monitor_num: Cell::new(i32::MIN),
         });
 
         // Default theme: dark
@@ -267,83 +245,32 @@ impl TabBarApp {
         app_instance.cpu_label.add_css_class("metric-label");
         app_instance.memory_label.add_css_class("metric-label");
 
-        // 使用 glib::spawn_future_local 在主线程消费异步通道
-        {
-            let app_clone = app_instance.clone();
-            glib::spawn_future_local(async move {
-                while let Ok(event) = ui_receiver.recv().await {
-                    match event {
-                        AppEvent::SharedMessage(message) => {
-                            app_clone.on_shared_message(message);
-                        }
-                    }
-                }
-            });
-        }
-
         // 事件绑定
         Self::setup_event_handlers(app_instance.clone());
 
-        // 定时器：每秒更新时间
+        // Provider and clock refresh stays in the core runtime.
         {
             let app_clone = app_instance.clone();
             glib::timeout_add_seconds_local(1, move || {
-                app_clone.update_time_display();
+                app_clone.ensure_transport();
+                let update = app_clone.runtime.borrow_mut().tick();
+                app_clone.handle_runtime_update(update);
+                app_clone.reap_platform_children();
                 ControlFlow::Continue
             });
         }
-        // 定时器：每2秒更新系统资源（含阈值和等级变化检测）
+
+        // Shared transport polling is non-blocking and owned by the UI runtime.
         {
             let app_clone = app_instance.clone();
-            glib::timeout_add_seconds_local(2, move || {
-                if let Ok(mut st) = app_clone.state.try_borrow_mut() {
-                    st.system_monitor.update_if_needed();
-                    if let Some(snapshot_ref) = st.system_monitor.get_snapshot() {
-                        let snapshot = snapshot_ref.clone();
-                        let total = snapshot.memory_available + snapshot.memory_used;
-                        if total > 0 {
-                            // 内存占用比例
-                            let mem_ratio =
-                                (snapshot.memory_used as f64 / total as f64).clamp(0.0, 1.0);
-                            let prev_mem = st.last_mem_fraction;
-                            let mem_level_changed =
-                                usage_to_level_class(mem_ratio) != usage_to_level_class(prev_mem);
-                            if (mem_ratio - prev_mem).abs() > MEM_REDRAW_THRESHOLD
-                                || mem_level_changed
-                            {
-                                st.last_mem_fraction = mem_ratio;
-                                set_metric_capsule(&app_clone.memory_label, "MEM", mem_ratio);
-                            }
-
-                            // CPU 占用比例（0~1）
-                            let cpu_ratio = (snapshot.cpu_average as f64 / 100.0).clamp(0.0, 1.0);
-                            let prev_cpu = st.last_cpu_usage;
-                            let cpu_level_changed =
-                                usage_to_level_class(cpu_ratio) != usage_to_level_class(prev_cpu);
-                            if (cpu_ratio - prev_cpu).abs() > CPU_REDRAW_THRESHOLD
-                                || cpu_level_changed
-                            {
-                                st.last_cpu_usage = cpu_ratio;
-                                set_metric_capsule(&app_clone.cpu_label, "CPU", cpu_ratio);
-                            }
-                        }
-                    }
-
-                    // Audio refresh + diff update
-                    let _ = st.audio_manager.update_if_needed();
-                    if let Some(dev) = st.audio_manager.get_master_device() {
-                        let vol = dev.volume.clamp(0, 100);
-                        let muted = dev.is_muted;
-                        if vol != st.last_volume || muted != st.last_muted {
-                            st.last_volume = vol;
-                            st.last_muted = muted;
-                            app_clone.update_volume_display_inner(vol, muted);
-                        }
-                    }
-                }
+            glib::timeout_add_local(Duration::from_millis(50), move || {
+                let update = app_clone.runtime.borrow_mut().poll_transport();
+                app_clone.handle_runtime_update(update);
                 ControlFlow::Continue
             });
         }
+
+        app_instance.handle_runtime_update(initial_update);
 
         // 首次时间显示
         app_instance.update_time_display();
@@ -386,10 +313,7 @@ impl TabBarApp {
         app.layout_toggle.connect_clicked({
             let app = app.clone();
             move |_| {
-                if let Ok(mut st) = app.state.try_borrow_mut() {
-                    st.layout_open = !st.layout_open;
-                }
-                app.update_layout_ui();
+                app.dispatch(UserAction::ToggleLayoutSelector);
             }
         });
 
@@ -463,137 +387,179 @@ impl TabBarApp {
         }
     }
 
-    // ========= Worker事件处理 =========
-    fn on_shared_message(&self, message: SharedMessage) {
-        if let Ok(mut st) = self.state.try_borrow_mut() {
-            let ts: u128 = message.timestamp.into();
-            if st.last_message_ts == ts {
-                return; // 去重
-            }
-            st.last_message_ts = ts;
-
-            st.layout_symbol = message.monitor_info.get_ltsymbol();
-            st.monitor_num = message.monitor_info.monitor_num as u8;
-            st.tag_status_vec = message.monitor_info.tag_status_vec.to_vec();
-
-            // 更新活动标签
-            for (idx, tag) in message.monitor_info.tag_status_vec.iter().enumerate() {
-                if tag.is_selected {
-                    st.active_tab = idx;
-                    break;
-                }
-            }
-
-            // 确保掩码数组长度匹配
-            if st.last_class_masks.len() != self.tab_buttons.len() {
-                st.last_class_masks = vec![0u8; self.tab_buttons.len()];
-            }
-        }
-        // 更新 UI（差量）
-        self.update_ui();
-        self.update_layout_ui();
-    }
-
     // ========= 交互 =========
     fn handle_tab_selected(app: Rc<Self>, index: usize) {
         info!("Tab selected: {}", index);
-        if let Ok(mut st) = app.state.try_borrow_mut() {
-            st.active_tab = index;
-            if let Some(command) = Self::build_tag_command(&st, true) {
-                if let Some(shared_buffer) = app.shared_buffer_rc.as_ref() {
-                    let _ = shared_buffer.send_command(command);
+        let Some(tag) = TagId::new(index) else {
+            warn!("Ignoring out-of-range tag index {index}");
+            return;
+        };
+        let state = app.state.borrow();
+        if !state.snapshot.wm_available {
+            warn!("Ignoring tag input until the first WM snapshot arrives");
+            return;
+        }
+        let monitor = state.snapshot.monitor;
+        drop(state);
+        app.dispatch(UserAction::ViewTagOn { tag, monitor });
+    }
+
+    fn ensure_transport(&self) {
+        if self.shared_path.is_empty()
+            || self.runtime.borrow().transport().is_some()
+            || self.last_transport_attempt.get().elapsed() < Duration::from_secs(2)
+        {
+            return;
+        }
+        self.last_transport_attempt.set(Instant::now());
+        match SharedTransport::open(&self.shared_path) {
+            Ok(transport) => {
+                self.runtime.borrow_mut().set_transport(Some(transport));
+                info!("Connected to WM transport at {}", self.shared_path);
+            }
+            Err(err) => debug!("WM transport is still unavailable: {err}"),
+        }
+    }
+
+    fn dispatch(&self, action: UserAction) {
+        let update = self.runtime.borrow_mut().dispatch(action);
+        self.handle_runtime_update(update);
+    }
+
+    fn handle_runtime_update(&self, update: RuntimeUpdate) {
+        let transport_failed = update.issues.iter().any(|issue| {
+            matches!(
+                issue,
+                RuntimeIssue::AdapterFailed {
+                    adapter: RuntimeAdapter::Transport,
+                    ..
                 }
+            )
+        });
+        for issue in &update.issues {
+            warn!("xbar runtime issue: {issue:?}");
+        }
+        let needs_redraw = update.needs_redraw();
+        for effect in update.platform_effects {
+            self.handle_platform_effect(effect);
+        }
+
+        if transport_failed {
+            let _ = self.runtime.borrow_mut().set_transport(None);
+            self.last_transport_attempt.set(Instant::now());
+        }
+
+        if needs_redraw {
+            let snapshot = self.runtime.borrow().snapshot();
+            self.state.borrow_mut().snapshot = snapshot;
+            self.update_all_views();
+        }
+    }
+
+    fn handle_platform_effect(&self, effect: BarEffect) {
+        match effect {
+            BarEffect::ApplyMonitorGeometry(geometry) => self.resize_window_to_monitor(
+                geometry.x,
+                geometry.y,
+                geometry.width,
+                geometry.height,
+            ),
+            BarEffect::ClearMonitorGeometry => self.window.set_default_size(1000, 40),
+            BarEffect::Screenshot => self.spawn_platform_helper("flameshot", &["gui"]),
+            BarEffect::OpenAudioControl => self.spawn_platform_helper("pavucontrol", &[]),
+            BarEffect::WindowManager(command) => {
+                warn!("No WM transport available for command: {command:?}");
+            }
+            BarEffect::ToggleMute
+            | BarEffect::AdjustVolume(_)
+            | BarEffect::AdjustBrightness(_)
+            | BarEffect::RefreshBattery => {
+                warn!("No enabled runtime adapter handled effect: {effect:?}");
             }
         }
-        app.update_tab_styles();
+    }
+
+    fn spawn_platform_helper(&self, program: &str, args: &[&str]) {
+        match Command::new(program).args(args).spawn() {
+            Ok(child) => self.platform_children.borrow_mut().push(child),
+            Err(err) => warn!("Failed to launch {program}: {err}"),
+        }
+    }
+
+    fn reap_platform_children(&self) {
+        self.platform_children
+            .borrow_mut()
+            .retain_mut(|child| match child.try_wait() {
+                Ok(Some(_)) => false,
+                Ok(None) => true,
+                Err(err) => {
+                    warn!("Failed to reap platform helper: {err}");
+                    false
+                }
+            });
+    }
+
+    fn update_all_views(&self) {
+        self.update_ui();
+        self.update_layout_ui();
+        self.update_time_display();
+        self.update_volume_display();
+        self.update_theme_display();
+        self.update_metrics();
     }
 
     fn handle_layout_clicked(app: Rc<Self>, layout_index: u32) {
-        if let Ok(st) = app.state.try_borrow() {
-            let monitor_id = st.monitor_num as i32;
-            let command = SharedCommand::new(CommandType::SetLayout, layout_index, monitor_id);
-            if let Some(shared_buffer) = app.shared_buffer_rc.as_ref() {
-                let _ = shared_buffer.send_command(command);
-            }
-            info!("Sent SetLayout command: layout_index={}", layout_index);
+        let state = app.state.borrow();
+        if !state.snapshot.wm_available {
+            warn!("Ignoring layout input until the first WM snapshot arrives");
+            return;
         }
-        if let Ok(mut st) = app.state.try_borrow_mut() {
-            st.layout_open = false; // 选择后收起
-        }
-        app.update_layout_ui();
+        let monitor = state.snapshot.monitor;
+        drop(state);
+        app.dispatch(UserAction::SetLayoutOn {
+            layout: LayoutId(layout_index),
+            monitor,
+        });
     }
 
     fn handle_toggle_seconds(app: Rc<Self>) {
-        if let Ok(mut st) = app.state.try_borrow_mut() {
-            st.show_seconds = !st.show_seconds;
-        }
-        app.update_time_display();
+        app.dispatch(UserAction::ToggleSeconds);
     }
 
-    fn handle_screenshot(_app: Rc<Self>) {
+    fn handle_screenshot(app: Rc<Self>) {
         info!("Taking screenshot");
-        let _ = std::process::Command::new("flameshot").arg("gui").spawn();
+        app.dispatch(UserAction::Screenshot);
     }
 
     fn handle_toggle_theme(app: Rc<Self>) {
-        if let Ok(mut st) = app.state.try_borrow_mut() {
-            st.is_dark = !st.is_dark;
-        }
-        app.update_theme_display();
+        app.dispatch(UserAction::ToggleTheme);
     }
 
     fn handle_toggle_mute(app: Rc<Self>) {
-        if let Ok(mut st) = app.state.try_borrow_mut() {
-            let _ = st.audio_manager.update_if_needed();
-            let master = st.audio_manager.get_master_device().cloned();
-            if let Some(dev) = master {
-                let name = dev.name;
-                let prev_volume = dev.volume;
-                match st.audio_manager.toggle_mute(&name) {
-                    Ok(muted) => {
-                        st.last_muted = muted;
-                        st.last_volume = prev_volume.clamp(0, 100);
-                        app.update_volume_display_inner(st.last_volume, st.last_muted);
-                    }
-                    Err(e) => warn!("toggle_mute failed: {:?}", e),
-                }
-            }
-        }
+        app.dispatch(UserAction::ToggleMute);
     }
 
     fn handle_adjust_volume(app: Rc<Self>, step: i32) {
-        if let Ok(mut st) = app.state.try_borrow_mut() {
-            let _ = st.audio_manager.update_if_needed();
-            let master = st.audio_manager.get_master_device().cloned();
-            if let Some(dev) = master {
-                let name = dev.name;
-                let prev_muted = dev.is_muted;
-                match st.audio_manager.adjust_volume(&name, step) {
-                    Ok(new_vol) => {
-                        // keep mute state as-is
-                        let muted = st
-                            .audio_manager
-                            .find_device(&name)
-                            .map(|d| d.is_muted)
-                            .unwrap_or(prev_muted);
-                        st.last_volume = new_vol.clamp(0, 100);
-                        st.last_muted = muted;
-                        app.update_volume_display_inner(st.last_volume, st.last_muted);
-                    }
-                    Err(e) => warn!("adjust_volume failed: {:?}", e),
-                }
-            }
-        }
+        app.dispatch(UserAction::AdjustVolume(step));
     }
 
     // ========= UI 更新 =========
     fn update_ui(&self) {
         if let Ok(st) = self.state.try_borrow() {
             // monitor_label 差量
-            if self.ui_last_monitor_num.get() != st.monitor_num {
-                let monitor_icon = Self::monitor_num_to_icon(st.monitor_num);
+            let monitor_num = if st.snapshot.wm_available {
+                st.snapshot.monitor.0
+            } else {
+                i32::MIN
+            };
+            if self.ui_last_monitor_num.get() != monitor_num {
+                let monitor_icon = if st.snapshot.wm_available {
+                    Self::monitor_num_to_icon(monitor_num)
+                } else {
+                    "•"
+                };
                 self.monitor_label.set_text(monitor_icon);
-                self.ui_last_monitor_num.set(st.monitor_num);
+                self.ui_last_monitor_num.set(monitor_num);
             }
         }
         self.update_tab_styles();
@@ -605,9 +571,19 @@ impl TabBarApp {
                 st.last_class_masks = vec![0u8; self.tab_buttons.len()];
             }
 
+            let active_tab = st
+                .snapshot
+                .wm_available
+                .then_some(st.snapshot.active_tag)
+                .flatten()
+                .map(TagId::index);
             for (i, button) in self.tab_buttons.iter().enumerate() {
-                let tag_opt = st.tag_status_vec.get(i);
-                let desired_mask = Self::classes_mask_for(tag_opt, i == st.active_tab);
+                let tag_opt = st
+                    .snapshot
+                    .wm_available
+                    .then(|| st.snapshot.tags.get(i))
+                    .flatten();
+                let desired_mask = Self::classes_mask_for(tag_opt, active_tab == Some(i));
                 let prev_mask = st.last_class_masks[i];
 
                 if desired_mask == prev_mask {
@@ -644,21 +620,30 @@ impl TabBarApp {
     fn update_layout_ui(&self) {
         if let Ok(st) = self.state.try_borrow() {
             // 开关按钮文本：显示当前布局符号
-            self.layout_toggle.set_label(&st.layout_symbol);
+            self.layout_toggle.set_label(if st.snapshot.wm_available {
+                &st.snapshot.layout_symbol
+            } else {
+                " ? "
+            });
 
             // revealer 展开/收起
-            self.layout_revealer.set_reveal_child(st.layout_open);
+            self.layout_revealer
+                .set_reveal_child(st.snapshot.layout_selector_open);
 
             // 开关按钮 open/closed 类
             self.layout_toggle.remove_css_class("open");
             self.layout_toggle.remove_css_class("closed");
             self.layout_toggle
-                .add_css_class(if st.layout_open { "open" } else { "closed" });
+                .add_css_class(if st.snapshot.layout_selector_open {
+                    "open"
+                } else {
+                    "closed"
+                });
 
             // 当前布局高亮
-            let is_tiled = st.layout_symbol.contains("[]=");
-            let is_floating = st.layout_symbol.contains("><>");
-            let is_monocle = st.layout_symbol.contains("[M]");
+            let is_tiled = st.snapshot.layout_symbol.contains("[]=");
+            let is_floating = st.snapshot.layout_symbol.contains("><>");
+            let is_monocle = st.snapshot.layout_symbol.contains("[M]");
 
             for b in [
                 &self.layout_btn_tiled,
@@ -678,33 +663,19 @@ impl TabBarApp {
     }
 
     fn update_time_display(&self) {
-        let now = Local::now();
-        let show_seconds = if let Ok(st) = self.state.try_borrow() {
-            st.show_seconds
-        } else {
-            false
-        };
-
-        let format_str = if show_seconds {
-            "%Y-%m-%d %H:%M:%S"
-        } else {
-            "%Y-%m-%d %H:%M"
-        };
-        let formatted_time = now.format(format_str).to_string();
-        self.time_button.set_label(&formatted_time);
+        if let Ok(st) = self.state.try_borrow() {
+            self.time_button.set_label(&st.snapshot.time);
+        }
     }
 
     fn update_volume_display(&self) {
-        if let Ok(mut st) = self.state.try_borrow_mut() {
-            let _ = st.audio_manager.update_if_needed();
-            if let Some(dev) = st.audio_manager.get_master_device() {
-                let vol = dev.volume.clamp(0, 100);
-                let muted = dev.is_muted;
-                st.last_volume = vol;
-                st.last_muted = muted;
-                self.update_volume_display_inner(vol, muted);
-            } else {
-                self.volume_button.set_label("Vol --%");
+        if let Ok(st) = self.state.try_borrow() {
+            match st.snapshot.audio.volume_percent {
+                Some(volume) => self.update_volume_display_inner(
+                    i32::from(volume.rounded()),
+                    st.snapshot.audio.muted,
+                ),
+                None => self.volume_button.set_label("Vol --%"),
             }
         }
     }
@@ -720,7 +691,7 @@ impl TabBarApp {
 
     fn update_theme_display(&self) {
         let is_dark = if let Ok(st) = self.state.try_borrow() {
-            st.is_dark
+            st.snapshot.theme == ThemeMode::Dark
         } else {
             true
         };
@@ -730,12 +701,45 @@ impl TabBarApp {
         self.window
             .add_css_class(if is_dark { "theme-dark" } else { "theme-light" });
 
-        self.theme_button
-            .set_label(if is_dark { "☾" } else { "☀" });
+        self.theme_button.set_label(if is_dark { "☾" } else { "☀" });
+    }
+
+    fn update_metrics(&self) {
+        if let Ok(mut st) = self.state.try_borrow_mut() {
+            let mem_ratio = st
+                .snapshot
+                .system
+                .memory_percent
+                .map(|value| value.as_f64() / 100.0)
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0);
+            let prev_mem = st.last_mem_fraction;
+            let mem_level_changed =
+                usage_to_level_class(mem_ratio) != usage_to_level_class(prev_mem);
+            if (mem_ratio - prev_mem).abs() > MEM_REDRAW_THRESHOLD || mem_level_changed {
+                st.last_mem_fraction = mem_ratio;
+                set_metric_capsule(&self.memory_label, "MEM", mem_ratio);
+            }
+
+            let cpu_ratio = st
+                .snapshot
+                .system
+                .cpu_percent
+                .map(|value| value.as_f64() / 100.0)
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0);
+            let prev_cpu = st.last_cpu_usage;
+            let cpu_level_changed =
+                usage_to_level_class(cpu_ratio) != usage_to_level_class(prev_cpu);
+            if (cpu_ratio - prev_cpu).abs() > CPU_REDRAW_THRESHOLD || cpu_level_changed {
+                st.last_cpu_usage = cpu_ratio;
+                set_metric_capsule(&self.cpu_label, "CPU", cpu_ratio);
+            }
+        }
     }
 
     // ========= 工具 =========
-    fn monitor_num_to_icon(monitor_num: u8) -> &'static str {
+    fn monitor_num_to_icon(monitor_num: i32) -> &'static str {
         match monitor_num {
             0 => "1",
             1 => "2",
@@ -744,17 +748,17 @@ impl TabBarApp {
         }
     }
 
-    fn classes_mask_for(tag: Option<&TagStatus>, is_active_index: bool) -> u8 {
+    fn classes_mask_for(tag: Option<&TagState>, is_active_index: bool) -> u8 {
         if let Some(t) = tag {
-            if t.is_urg {
+            if t.urgent {
                 CLS_URGENT
-            } else if t.is_filled {
+            } else if t.filled {
                 CLS_FILLED
-            } else if t.is_selected && t.is_occ {
+            } else if t.selected && t.occupied {
                 CLS_SELECTED | CLS_OCCUPIED
-            } else if t.is_selected || is_active_index {
+            } else if t.selected || is_active_index {
                 CLS_SELECTED
-            } else if t.is_occ {
+            } else if t.occupied {
                 CLS_OCCUPIED
             } else {
                 CLS_EMPTY
@@ -768,30 +772,23 @@ impl TabBarApp {
         }
     }
 
-    fn build_tag_command(state: &AppState, is_view: bool) -> Option<SharedCommand> {
-        if state.active_tab >= 32 {
-            return None;
-        }
-        let tag_bit: u32 = 1u32 << (state.active_tab as u32);
-        let monitor_id = state.monitor_num as i32;
-        let cmd = if is_view {
-            SharedCommand::view_tag(tag_bit, monitor_id)
-        } else {
-            SharedCommand::toggle_tag(tag_bit, monitor_id)
-        };
-        Some(cmd)
-    }
-
     #[allow(dead_code)]
     fn resize_window_to_monitor(
         &self,
         _expected_x: i32,
         _expected_y: i32,
-        expected_width: i32,
-        expected_height: i32,
+        expected_width: u32,
+        _expected_height: u32,
     ) {
-        self.window
-            .set_default_size(expected_width, expected_height);
+        let scale_factor = self.window.scale_factor().max(1);
+        let logical_width = (f64::from(expected_width) / f64::from(scale_factor))
+            .round()
+            .clamp(1.0, f64::from(i32::MAX)) as i32;
+
+        // GTK4 deliberately exposes no general window-position API: on
+        // Wayland the compositor/JWM owns placement. Size is logical, while
+        // xbar_core monitor geometry is physical pixels.
+        self.window.set_default_size(logical_width, 40);
     }
 
     fn show(&self) {
@@ -807,41 +804,6 @@ impl TabBarApp {
         }
         self.window.queue_draw();
     }
-}
-
-// ========= Worker 线程：独占 SharedRingBuffer =========
-fn worker_thread(
-    shared_buffer_rc: Option<Arc<SharedRingBuffer>>,
-    ui_sender: async_channel::Sender<AppEvent>,
-) {
-    if let Some(shared_buffer) = shared_buffer_rc {
-        let mut prev_timestamp: u128 = 0;
-        loop {
-            match shared_buffer.wait_for_message(Some(Duration::from_millis(2000))) {
-                Ok(true) => {
-                    if let Ok(Some(message)) = shared_buffer.try_read_latest_message() {
-                        let ts: u128 = message.timestamp.into();
-                        if ts != prev_timestamp {
-                            prev_timestamp = ts;
-                            if let Err(e) = ui_sender.try_send(AppEvent::SharedMessage(message)) {
-                                if !e.is_full() {
-                                    warn!("Failed to send SharedMessage to UI: {}", e);
-                                }
-                            }
-                        }
-                    }
-                }
-                Ok(false) => {
-                    // timeout
-                }
-                Err(e) => {
-                    error!("[worker] wait_for_message failed: {}", e);
-                    thread::sleep(Duration::from_millis(200));
-                }
-            }
-        }
-    }
-    info!("Worker thread exited");
 }
 
 // ========= main =========
@@ -861,7 +823,7 @@ fn main() -> glib::ExitCode {
         // Extract monitor ID from shared path like "/dev/shm/jwm_bar_mon_1"
         shared_path
             .split('_')
-            .last()
+            .next_back()
             .and_then(|s| s.parse::<i32>().ok())
             .map(|id| id.to_string())
             .unwrap_or_else(|| "0".to_string())
@@ -880,11 +842,6 @@ fn main() -> glib::ExitCode {
     app.connect_activate(move |app| {
         let app_instance = TabBarApp::new(app, shared_path_clone.clone());
         app_instance.show();
-
-        let app_weak = Rc::downgrade(&app_instance);
-        app.connect_shutdown(move |_| {
-            let _ = app_weak.upgrade(); // Drop 即触发 worker 停止
-        });
     });
 
     // 文件打开处理

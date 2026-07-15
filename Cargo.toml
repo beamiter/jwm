@@ -5,10 +5,6 @@ edition = "2024"
 
 [dependencies]
 log = "0.4.29"
-shared_structures = { git = "https://github.com/beamiter/shared_structures.git", features = ["use-futex"] }
-xbar_core = { git = "https://github.com/beamiter/xbar_core.git" }
-chrono = "0.4.44"
-
-async-channel = "2.5.0"
+xbar_core = { git = "https://github.com/beamiter/xbar_core.git", default-features = false, features = ["clock-chrono", "logging-flexi", "provider-alsa", "provider-system", "transport-shared"] }
 gtk4 = { version = "0.11.4", features = ["v4_14"] }
 gdk4 = { version = "0.11.4", features = ["v4_14"] }
