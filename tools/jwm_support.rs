@@ -338,6 +338,25 @@ fn sanitize_live_data(query: &str, data: &mut Value) {
     if query != "get_status" {
         return;
     }
+
+    if let Some(reasons) = data
+        .get_mut("health")
+        .and_then(Value::as_object_mut)
+        .and_then(|health| health.get_mut("reasons"))
+        .and_then(Value::as_array_mut)
+    {
+        for reason in reasons {
+            let Some(text) = reason.as_str() else {
+                continue;
+            };
+            *reason = Value::String(if text.starts_with("last configuration reload failed:") {
+                "last configuration reload failed (detail redacted)".to_string()
+            } else {
+                sanitize_reported_value(text)
+            });
+        }
+    }
+
     let Some(config) = data.get_mut("config").and_then(Value::as_object_mut) else {
         return;
     };
@@ -358,12 +377,11 @@ fn sanitize_live_data(query: &str, data: &mut Value) {
         reload.insert("last_error_present".to_string(), Value::Bool(error_present));
     }
 }
-
 fn collect_live_snapshot() -> LiveSnapshot {
     let socket = match jwm::ipc_server::validated_socket_path() {
         Ok(path) => path,
-        Err(error) => {
-            let message = format!("cannot resolve a safe IPC socket: {error}");
+        Err(_) => {
+            let message = "cannot resolve a safe IPC socket".to_string();
             return LiveSnapshot {
                 socket: None,
                 health: QueryProbe::failed(message.clone()),
@@ -388,7 +406,9 @@ fn query_ipc(socket: &Path, query: &str) -> QueryProbe {
             }
             probe
         }
-        Err(error) => QueryProbe::failed(error),
+        Err(_) => QueryProbe::failed(format!(
+            "live IPC query {query:?} failed; inspect locally with jwm-tool"
+        )),
     }
 }
 
@@ -605,6 +625,12 @@ SECRET_TOKEN=do-not-copy
     #[test]
     fn live_status_drops_config_paths_issue_details_and_reload_errors() {
         let mut status = json!({
+            "health": {
+                "reasons": [
+                    "configuration has 1 error(s)",
+                    "last configuration reload failed: /home/alice/private"
+                ]
+            },
             "config": {
                 "path": "/home/alice/.config/jwm/config_x11.toml",
                 "diagnostics": {
@@ -622,6 +648,10 @@ SECRET_TOKEN=do-not-copy
         assert!(status["config"]["diagnostics"].get("issues").is_none());
         assert_eq!(status["config"]["reload"]["last_error"], Value::Null);
         assert_eq!(status["config"]["reload"]["last_error_present"], true);
+        assert_eq!(
+            status["health"]["reasons"][1],
+            "last configuration reload failed (detail redacted)"
+        );
     }
 
     #[test]

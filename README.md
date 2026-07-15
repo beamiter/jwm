@@ -107,9 +107,10 @@ jwm-support --strict --compact > jwm-support.json
 ```
 
 File output is private (`0600`) and atomically replaced. The collector uses a
-small environment allowlist and deliberately excludes HOME, PATH, D-Bus
-addresses, process command lines, window titles, and arbitrary environment
-variables. Review [support bundles](docs/support-bundles.md) before attaching a
+small environment allowlist and redacts configuration, executable, runtime,
+and IPC error details; it excludes HOME, PATH, D-Bus addresses, process command
+lines, window titles, and arbitrary environment variables. Review
+[support bundles](docs/support-bundles.md) before attaching a
 report to a public issue.
 
 The default modifier is Alt (`Mod1`). Useful built-in bindings include:

@@ -22,8 +22,8 @@ not authorize a rewrite or a release-profile change without measurements.
 - [x] Versioned live health, capability, doctor, and session schemas.
 - [x] CI coverage for formatting, all-target compilation, Clippy, and tests.
 - [x] Privacy-aware support bundle generation.
-- [ ] Commit and enforce `Cargo.lock` for reproducible application builds.
-- [ ] Pin git dependencies to reviewed revisions or release tags.
+- [x] Commit and enforce `Cargo.lock` for reproducible application builds.
+- [x] Pin git dependencies to reviewed revisions or release tags.
 - [ ] Select and add the project license before publishing releases or crates.
 - [ ] Establish a documented minimum supported Rust version after testing it.
 

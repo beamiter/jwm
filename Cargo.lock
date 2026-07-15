@@ -1074,6 +1074,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "flexi_logger"
+version = "0.31.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e90140a77c0ffbe2e4839e062983ec4ec60d4473e41a4fcce0884809d1b76d6"
+dependencies = [
+ "chrono",
+ "log",
+ "nu-ansi-term",
+ "regex",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "foreign-types"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1953,6 +1966,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42b8cfee0e339a0337359f3c88165702ac6e600dc01c0cc9579a92d62b08477a"
 dependencies = [
  "bitflags 2.13.0",
+]
+
+[[package]]
+name = "nu-ansi-term"
+version = "0.50.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3101,7 +3123,7 @@ dependencies = [
 [[package]]
 name = "shared_structures"
 version = "0.2.0"
-source = "git+https://github.com/beamiter/shared_structures.git#8c162f3b4a4cdeac49ef1a47545a2f4427f98dff"
+source = "git+https://github.com/beamiter/shared_structures.git?rev=8c162f3b4a4cdeac49ef1a47545a2f4427f98dff#8c162f3b4a4cdeac49ef1a47545a2f4427f98dff"
 dependencies = [
  "libc 0.2.186",
  "log",
@@ -3194,7 +3216,7 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 [[package]]
 name = "smithay"
 version = "0.7.0"
-source = "git+https://github.com/Smithay/smithay.git?branch=master#e76f1af1418e9cdf012da9020c2f1ecc0fe020fa"
+source = "git+https://github.com/Smithay/smithay.git?rev=e76f1af1418e9cdf012da9020c2f1ecc0fe020fa#e76f1af1418e9cdf012da9020c2f1ecc0fe020fa"
 dependencies = [
  "appendlist",
  "atomic_float",
@@ -4590,8 +4612,11 @@ checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
 [[package]]
 name = "xbar_core"
 version = "0.3.0"
-source = "git+https://github.com/beamiter/xbar_core.git#6a4b136c8158824e5857b438e3fcf1cf8e21974c"
+source = "git+https://github.com/beamiter/xbar_core.git?rev=6a4b136c8158824e5857b438e3fcf1cf8e21974c#6a4b136c8158824e5857b438e3fcf1cf8e21974c"
 dependencies = [
+ "anyhow",
+ "flexi_logger",
+ "log",
  "serde",
 ]
 

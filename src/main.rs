@@ -8,7 +8,7 @@ use std::env;
 use std::fmt;
 use std::os::unix::fs::FileTypeExt;
 use std::process::Command;
-use xbar_core::initialize_logging;
+use xbar_core::logging::init as initialize_logging;
 
 use jwm::doctor::{DoctorReport, DoctorStatus, diagnose};
 

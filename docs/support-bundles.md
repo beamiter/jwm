@@ -33,8 +33,8 @@ Schema version 1 contains:
 - operating-system, architecture, kernel-release, and selected `/etc/os-release`
   fields;
 - a small allowlist of desktop-session variables;
-- the versioned `DoctorReport` used by `jwm --doctor --json`;
-- optional `get_status` and `get_capabilities` IPC response data.
+- a support-safe projection of the versioned startup doctor report;
+- optional, redacted `get_status` data and the `get_capabilities` catalog.
 
 The live queries have a two-second read/write timeout and a four-megabyte
 response limit. A stopped compositor therefore produces a useful report rather
@@ -45,6 +45,8 @@ than leaving the command blocked indefinitely.
 The collector deliberately excludes:
 
 - `HOME`, `PATH`, and other user paths;
+- configuration, executable, runtime-socket, and runtime-directory paths;
+- raw configuration issue bodies, reload errors, and IPC transport errors;
 - D-Bus addresses and authentication material;
 - process command lines;
 - window titles and application content;
