@@ -132,11 +132,12 @@ impl From<DoctorReport> for SupportDoctorReport {
             .into_iter()
             .map(|check| {
                 let id = check.id;
+                let summary = sanitize_doctor_summary(&id, &check.summary);
                 SupportDoctorCheck {
                     status: check.status,
                     detail: sanitize_doctor_detail(&id, check.detail),
                     id,
-                    summary: sanitize_reported_value(&check.summary),
+                    summary,
                     hint: check.hint.map(|hint| sanitize_reported_value(&hint)),
                 }
             })
@@ -319,6 +320,19 @@ fn sanitize_reported_value(value: &str) -> String {
         reported_characters += 1;
     }
     sanitized
+}
+
+fn sanitize_doctor_summary(id: &str, summary: &str) -> String {
+    if id == "command.status_bar" && summary.starts_with("Configured status bar ") {
+        if summary.ends_with(" is executable") {
+            return "Configured status bar is executable".to_string();
+        }
+        if summary.ends_with(" is not executable from PATH") {
+            return "Configured status bar is not executable from PATH".to_string();
+        }
+        return "Configured status bar check completed".to_string();
+    }
+    sanitize_reported_value(summary)
 }
 
 fn sanitize_doctor_detail(id: &str, detail: Option<String>) -> Option<String> {
@@ -620,6 +634,33 @@ SECRET_TOKEN=do-not-copy
         assert!(!encoded.contains("/home/alice"));
         assert!(encoded.contains("configuration path redacted"));
         assert!(encoded.contains("\"config_diagnostics_included\":false"));
+    }
+
+    #[test]
+    fn doctor_report_redacts_status_bar_commands_from_summaries() {
+        let report = DoctorReport {
+            schema_version: 1,
+            backend: "x11rb".to_string(),
+            status: DoctorStatus::Pass,
+            summary: DoctorSummary {
+                passed: 1,
+                warnings: 0,
+                errors: 0,
+            },
+            checks: vec![DoctorCheck {
+                status: DoctorStatus::Pass,
+                id: "command.status_bar".to_string(),
+                summary: "Configured status bar \"/home/alice/private-bar\" is executable"
+                    .to_string(),
+                detail: Some("/home/alice/private-bar".to_string()),
+                hint: None,
+                config_diagnostics: None,
+            }],
+        };
+
+        let encoded = serde_json::to_string(&SupportDoctorReport::from(report)).unwrap();
+        assert!(!encoded.contains("/home/alice"));
+        assert!(encoded.contains("Configured status bar is executable"));
     }
 
     #[test]
