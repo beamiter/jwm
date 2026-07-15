@@ -9,324 +9,244 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
+cargo_path = Path("Cargo.toml")
+cargo = cargo_path.read_text()
+cargo = replace_once(
+    cargo,
+    'shared_structures = { git = "https://github.com/beamiter/shared_structures.git", features = ["use-futex"] }',
+    'shared_structures = { git = "https://github.com/beamiter/shared_structures.git", rev = "8c162f3b4a4cdeac49ef1a47545a2f4427f98dff", features = ["use-futex"] }',
+    "shared_structures revision",
+)
+cargo = replace_once(
+    cargo,
+    'xbar_core = { git = "https://github.com/beamiter/xbar_core.git" }',
+    'xbar_core = { git = "https://github.com/beamiter/xbar_core.git", rev = "6a4b136c8158824e5857b438e3fcf1cf8e21974c", features = ["logging-flexi"] }',
+    "xbar_core revision and logging feature",
+)
+cargo = replace_once(
+    cargo,
+    'smithay = { git = "https://github.com/Smithay/smithay.git", branch = "master", default-features = false, features = [',
+    'smithay = { git = "https://github.com/Smithay/smithay.git", rev = "e76f1af1418e9cdf012da9020c2f1ecc0fe020fa", default-features = false, features = [',
+    "smithay revision",
+)
+cargo_path.write_text(cargo)
+
+main_path = Path("src/main.rs")
+main = main_path.read_text()
+main = replace_once(
+    main,
+    "use xbar_core::initialize_logging;",
+    "use xbar_core::logging::init as initialize_logging;",
+    "xbar_core logging API",
+)
+main_path.write_text(main)
+
 support_path = Path("tools/jwm_support.rs")
 support = support_path.read_text()
 support = replace_once(
     support,
-    "use jwm::doctor::{self, DoctorReport, DoctorStatus};",
-    "use jwm::doctor::{self, DoctorReport, DoctorStatus, DoctorSummary};",
-    "doctor imports",
-)
-support = replace_once(
-    support,
-    "use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};",
-    "use std::os::unix::fs::OpenOptionsExt;",
-    "unix fs imports",
-)
-support = replace_once(
-    support,
-    "    doctor: DoctorReport,",
-    "    doctor: SupportDoctorReport,",
-    "bundle doctor field",
-)
-support = replace_once(
-    support,
-    """#[derive(Debug, Serialize)]
-struct LiveSnapshot {
-""",
-    """#[derive(Debug, Serialize)]
-struct SupportDoctorReport {
-    schema_version: u32,
-    backend: String,
-    status: DoctorStatus,
-    summary: DoctorSummary,
-    checks: Vec<SupportDoctorCheck>,
-    config_diagnostics_included: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct SupportDoctorCheck {
-    status: DoctorStatus,
-    id: String,
-    summary: String,
-    #[serde(skip_serializing_if = \"Option::is_none\")]
-    detail: Option<String>,
-    #[serde(skip_serializing_if = \"Option::is_none\")]
-    hint: Option<String>,
-}
-
-impl From<DoctorReport> for SupportDoctorReport {
-    fn from(report: DoctorReport) -> Self {
-        let checks = report
-            .checks
-            .into_iter()
-            .map(|check| {
-                let id = check.id;
-                SupportDoctorCheck {
-                    status: check.status,
-                    detail: sanitize_doctor_detail(&id, check.detail),
-                    id,
-                    summary: sanitize_reported_value(&check.summary),
-                    hint: check.hint.map(|hint| sanitize_reported_value(&hint)),
-                }
-            })
-            .collect();
-
-        Self {
-            schema_version: report.schema_version,
-            backend: report.backend,
-            status: report.status,
-            summary: report.summary,
-            checks,
-            config_diagnostics_included: false,
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct LiveSnapshot {
-""",
-    "support doctor structs",
-)
-support = replace_once(
-    support,
-    """    let doctor = doctor::diagnose(cli.backend);
-    let live = (!cli.offline).then(collect_live_snapshot);
-    let strict_failure = doctor.status == DoctorStatus::Error
-        || live
-            .as_ref()
-            .is_some_and(|snapshot| !snapshot.health.success || !snapshot.capabilities.success);
-""",
-    """    let doctor_report = doctor::diagnose(cli.backend);
-    let doctor_failed = doctor_report.status == DoctorStatus::Error;
-    let doctor = SupportDoctorReport::from(doctor_report);
-    let live = (!cli.offline).then(collect_live_snapshot);
-    let strict_failure = doctor_failed
-        || live
-            .as_ref()
-            .is_some_and(|snapshot| !snapshot.health.success || !snapshot.capabilities.success);
-""",
-    "doctor conversion",
-)
-support = replace_once(
-    support,
-    """fn sanitize_reported_value(value: &str) -> String {
-    let mut sanitized = String::with_capacity(value.len().min(MAX_REPORTED_VALUE_CHARS));
-    for character in value.chars().filter(|character| !character.is_control()) {
-        if sanitized.chars().count() >= MAX_REPORTED_VALUE_CHARS {
-            sanitized.push('…');
-            break;
-        }
-        sanitized.push(character);
-    }
-    sanitized
-}
-
-fn collect_live_snapshot() -> LiveSnapshot {
-""",
-    """fn sanitize_reported_value(value: &str) -> String {
-    let mut sanitized = String::with_capacity(value.len().min(MAX_REPORTED_VALUE_CHARS));
-    let mut reported_characters = 0;
-    for character in value.chars().filter(|character| !character.is_control()) {
-        if reported_characters >= MAX_REPORTED_VALUE_CHARS {
-            sanitized.push('…');
-            break;
-        }
-        sanitized.push(character);
-        reported_characters += 1;
-    }
-    sanitized
-}
-
-fn sanitize_doctor_detail(id: &str, detail: Option<String>) -> Option<String> {
-    let detail = detail?;
-    match id {
-        \"backend.display\" | \"backend.host_display\" | \"backend.dri\" | \"session.dbus\" => {
-            Some(sanitize_reported_value(&detail))
-        }
-        \"config.file\" => Some(\"<configuration path redacted>\".to_string()),
-        \"runtime.xdg_runtime_dir\" => Some(\"<runtime directory details redacted>\".to_string()),
-        \"command.jwm_tool\" | \"command.status_bar\" => {
-            Some(\"<executable path redacted>\".to_string())
-        }
-        _ => None,
-    }
-}
-
-fn sanitize_live_data(query: &str, data: &mut Value) {
-    if query != \"get_status\" {
+    '''fn sanitize_live_data(query: &str, data: &mut Value) {
+    if query != "get_status" {
         return;
     }
-    let Some(config) = data.get_mut(\"config\").and_then(Value::as_object_mut) else {
+    let Some(config) = data.get_mut("config").and_then(Value::as_object_mut) else {
         return;
     };
 
     config.insert(
-        \"path\".to_string(),
-        Value::String(\"<configuration path redacted>\".to_string()),
+        "path".to_string(),
+        Value::String("<configuration path redacted>".to_string()),
     );
-    if let Some(diagnostics) = config
-        .get_mut(\"diagnostics\")
-        .and_then(Value::as_object_mut)
-    {
-        diagnostics.remove(\"issues\");
-        diagnostics.insert(\"issues_included\".to_string(), Value::Bool(false));
+    if let Some(diagnostics) = config.get_mut("diagnostics").and_then(Value::as_object_mut) {
+        diagnostics.remove("issues");
+        diagnostics.insert("issues_included".to_string(), Value::Bool(false));
     }
-    if let Some(reload) = config.get_mut(\"reload\").and_then(Value::as_object_mut) {
+    if let Some(reload) = config.get_mut("reload").and_then(Value::as_object_mut) {
         let error_present = reload
-            .get(\"last_error\")
+            .get("last_error")
             .is_some_and(|error| !error.is_null());
-        reload.insert(\"last_error\".to_string(), Value::Null);
+        reload.insert("last_error".to_string(), Value::Null);
         reload.insert(
-            \"last_error_present\".to_string(),
+            "last_error_present".to_string(),
             Value::Bool(error_present),
         );
     }
 }
-
-fn collect_live_snapshot() -> LiveSnapshot {
-""",
-    "sanitizers",
-)
-support = replace_once(
-    support,
-    "        socket: Some(socket.display().to_string()),",
-    "        socket: Some(\"<validated runtime socket redacted>\".to_string()),",
-    "socket redaction",
-)
-support = replace_once(
-    support,
-    """fn query_ipc(socket: &Path, query: &str) -> QueryProbe {
-    match query_ipc_value(socket, query) {
-        Ok(response) => normalize_ipc_response(response),
-        Err(error) => QueryProbe::failed(error),
+''',
+    '''fn sanitize_live_data(query: &str, data: &mut Value) {
+    if query != "get_status" {
+        return;
     }
-}
-""",
-    """fn query_ipc(socket: &Path, query: &str) -> QueryProbe {
-    match query_ipc_value(socket, query) {
-        Ok(response) => {
-            let mut probe = normalize_ipc_response(response);
-            if let Some(data) = probe.data.as_mut() {
-                sanitize_live_data(query, data);
-            }
-            probe
+
+    if let Some(reasons) = data
+        .get_mut("health")
+        .and_then(Value::as_object_mut)
+        .and_then(|health| health.get_mut("reasons"))
+        .and_then(Value::as_array_mut)
+    {
+        for reason in reasons {
+            let Some(text) = reason.as_str() else {
+                continue;
+            };
+            *reason = Value::String(if text.starts_with("last configuration reload failed:") {
+                "last configuration reload failed (detail redacted)".to_string()
+            } else {
+                sanitize_reported_value(text)
+            });
         }
-        Err(error) => QueryProbe::failed(error),
+    }
+
+    let Some(config) = data.get_mut("config").and_then(Value::as_object_mut) else {
+        return;
+    };
+
+    config.insert(
+        "path".to_string(),
+        Value::String("<configuration path redacted>".to_string()),
+    );
+    if let Some(diagnostics) = config.get_mut("diagnostics").and_then(Value::as_object_mut) {
+        diagnostics.remove("issues");
+        diagnostics.insert("issues_included".to_string(), Value::Bool(false));
+    }
+    if let Some(reload) = config.get_mut("reload").and_then(Value::as_object_mut) {
+        let error_present = reload
+            .get("last_error")
+            .is_some_and(|error| !error.is_null());
+        reload.insert("last_error".to_string(), Value::Null);
+        reload.insert(
+            "last_error_present".to_string(),
+            Value::Bool(error_present),
+        );
     }
 }
-""",
-    "IPC sanitization",
+''',
+    "live health reason redaction",
 )
 support = replace_once(
     support,
-    """mod tests {
-    use super::*;
-""",
-    """mod tests {
-    use super::*;
-    use jwm::doctor::DoctorCheck;
-    use std::os::unix::fs::PermissionsExt;
-""",
-    "test imports",
+    '''        Err(error) => {
+            let message = format!("cannot resolve a safe IPC socket: {error}");
+            return LiveSnapshot {
+''',
+    '''        Err(_) => {
+            let message = "cannot resolve a safe IPC socket".to_string();
+            return LiveSnapshot {
+''',
+    "socket resolution error redaction",
 )
 support = replace_once(
     support,
-    """    #[test]
-    fn bundle_files_are_private_and_replaced_atomically() {
-""",
-    """    #[test]
-    fn doctor_report_redacts_paths_and_drops_config_diagnostics() {
-        let report = DoctorReport {
-            schema_version: 1,
-            backend: \"x11rb\".to_string(),
-            status: DoctorStatus::Pass,
-            summary: DoctorSummary {
-                passed: 1,
-                warnings: 0,
-                errors: 0,
-            },
-            checks: vec![DoctorCheck {
-                status: DoctorStatus::Pass,
-                id: \"config.file\".to_string(),
-                summary: \"Configuration exists\".to_string(),
-                detail: Some(\"/home/alice/.config/jwm/config_x11.toml\".to_string()),
-                hint: None,
-                config_diagnostics: None,
-            }],
-        };
-
-        let encoded = serde_json::to_string(&SupportDoctorReport::from(report)).unwrap();
-        assert!(!encoded.contains(\"/home/alice\"));
-        assert!(encoded.contains(\"configuration path redacted\"));
-        assert!(encoded.contains(\"\\\"config_diagnostics_included\\\":false\"));
-    }
-
-    #[test]
-    fn live_status_drops_config_paths_issue_details_and_reload_errors() {
-        let mut status = json!({
-            \"config\": {
-                \"path\": \"/home/alice/.config/jwm/config_x11.toml\",
-                \"diagnostics\": {
-                    \"error_count\": 1,
-                    \"issues\": [{\"detail\": \"/home/alice/private\"}]
+    '''        Err(error) => QueryProbe::failed(error),
+''',
+    '''        Err(_) => QueryProbe::failed(format!(
+            "live IPC query {query:?} failed; inspect locally with jwm-tool"
+        )),
+''',
+    "IPC transport error redaction",
+)
+support = replace_once(
+    support,
+    '''        let mut status = json!({
+            "config": {
+                "path": "/home/alice/.config/jwm/config_x11.toml",
+                "diagnostics": {
+                    "error_count": 1,
+                    "issues": [{"detail": "/home/alice/private"}]
                 },
-                \"reload\": {\"last_error\": \"failed under /home/alice\"}
+                "reload": {"last_error": "failed under /home/alice"}
             }
         });
-
-        sanitize_live_data(\"get_status\", &mut status);
-        let encoded = serde_json::to_string(&status).unwrap();
-        assert!(!encoded.contains(\"/home/alice\"));
-        assert_eq!(status[\"config\"][\"diagnostics\"][\"issues_included\"], false);
-        assert!(status[\"config\"][\"diagnostics\"].get(\"issues\").is_none());
-        assert_eq!(status[\"config\"][\"reload\"][\"last_error\"], Value::Null);
-        assert_eq!(status[\"config\"][\"reload\"][\"last_error_present\"], true);
-    }
-
-    #[test]
-    fn bundle_files_are_private_and_replaced_atomically() {
-""",
-    "privacy tests",
+''',
+    '''        let mut status = json!({
+            "health": {
+                "reasons": [
+                    "configuration has 1 error(s)",
+                    "last configuration reload failed: /home/alice/private"
+                ]
+            },
+            "config": {
+                "path": "/home/alice/.config/jwm/config_x11.toml",
+                "diagnostics": {
+                    "error_count": 1,
+                    "issues": [{"detail": "/home/alice/private"}]
+                },
+                "reload": {"last_error": "failed under /home/alice"}
+            }
+        });
+''',
+    "privacy fixture health reason",
+)
+support = replace_once(
+    support,
+    '''        assert_eq!(status["config"]["reload"]["last_error_present"], true);
+''',
+    '''        assert_eq!(status["config"]["reload"]["last_error_present"], true);
+        assert_eq!(
+            status["health"]["reasons"][1],
+            "last configuration reload failed (detail redacted)"
+        );
+''',
+    "privacy health assertion",
 )
 support_path.write_text(support)
 
-installer_path = Path("scripts/install_jwm_scripts.sh")
-installer = installer_path.read_text()
-installer = replace_once(
-    installer,
-    "for binary in jwm jwm-tool; do",
-    "for binary in jwm jwm-tool jwm-support; do",
-    "legacy binary cleanup",
+roadmap_path = Path("docs/roadmap.md")
+roadmap = roadmap_path.read_text()
+roadmap = replace_once(
+    roadmap,
+    '- [ ] Commit and enforce `Cargo.lock` for reproducible application builds.',
+    '- [x] Commit and enforce `Cargo.lock` for reproducible application builds.',
+    "lockfile roadmap item",
 )
-installer = replace_once(
-    installer,
-    "# JWM 不使用 cargo install，避免把 jwm/jwm-tool 写入 cargo bin。",
-    "# JWM 不使用 cargo install，避免把 jwm/jwm-tool/jwm-support 写入 cargo bin。",
-    "installer comment",
+roadmap = replace_once(
+    roadmap,
+    '- [ ] Pin git dependencies to reviewed revisions or release tags.',
+    '- [x] Pin git dependencies to reviewed revisions or release tags.',
+    "git revision roadmap item",
 )
-installer = replace_once(
-    installer,
-    'info "同步 jwm, jwm-tool 到 /usr/local/bin ..."',
-    'info "同步 jwm, jwm-tool, jwm-support 到 /usr/local/bin ..."',
-    "installer status",
+roadmap_path.write_text(roadmap)
+
+support_docs_path = Path("docs/support-bundles.md")
+support_docs = support_docs_path.read_text()
+support_docs = replace_once(
+    support_docs,
+    '- the versioned `DoctorReport` used by `jwm --doctor --json`;\n- optional `get_status` and `get_capabilities` IPC response data.',
+    '- a support-safe projection of the versioned startup doctor report;\n- optional, redacted `get_status` data and the `get_capabilities` catalog.',
+    "support schema description",
 )
-installer = replace_once(
-    installer,
-    '    install_system_binary "$target_dir/jwm-tool" /usr/local/bin\n',
-    '    install_system_binary "$target_dir/jwm-tool" /usr/local/bin\n    install_system_binary "$target_dir/jwm-support" /usr/local/bin\n',
-    "support binary install",
+support_docs = replace_once(
+    support_docs,
+    '''- `HOME`, `PATH`, and other user paths;
+- D-Bus addresses and authentication material;
+- process command lines;
+- window titles and application content;
+- all environment variables outside the documented allowlist.
+''',
+    '''- `HOME`, `PATH`, and other user paths;
+- configuration, executable, runtime-socket, and runtime-directory paths;
+- raw configuration issue bodies, reload errors, and IPC transport errors;
+- D-Bus addresses and authentication material;
+- process command lines;
+- window titles and application content;
+- all environment variables outside the documented allowlist.
+''',
+    "support privacy details",
 )
-installer = replace_once(
-    installer,
-    'ok "jwm, jwm-tool 安装完成: /usr/local/bin（未安装到 cargo bin）"',
-    'ok "jwm, jwm-tool, jwm-support 安装完成: /usr/local/bin（未安装到 cargo bin）"',
-    "installer completion",
+support_docs_path.write_text(support_docs)
+
+readme_path = Path("README.md")
+readme = readme_path.read_text()
+readme = replace_once(
+    readme,
+    '''small environment allowlist and deliberately excludes HOME, PATH, D-Bus
+addresses, process command lines, window titles, and arbitrary environment
+variables. Review [support bundles](docs/support-bundles.md) before attaching a
+''',
+    '''small environment allowlist and redacts configuration, executable, runtime,
+and IPC error details; it excludes HOME, PATH, D-Bus addresses, process command
+lines, window titles, and arbitrary environment variables. Review
+[support bundles](docs/support-bundles.md) before attaching a
+''',
+    "README support privacy",
 )
-installer = replace_once(
-    installer,
-    "  - jwm / jwm-tool 只通过 cargo build 构建，并安装到 /usr/local/bin，不会安装到 cargo bin。",
-    "  - jwm / jwm-tool / jwm-support 只通过 cargo build 构建，并安装到 /usr/local/bin，不会安装到 cargo bin。",
-    "installer usage",
-)
-installer_path.write_text(installer)
+readme_path.write_text(readme)
