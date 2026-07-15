@@ -140,7 +140,7 @@ usage() {
   - 真正会被安装的 bar 只有 JWM_BAR_NAME（即 -b 的第一个参数，或脚本顶部默认值）。
   - 除 dioxus_bar 外，bar 使用 cargo install --path ... 安装到 cargo bin 目录（通常是 ~/.cargo/bin）。
     dioxus_bar 使用 dx build --release 构建，并把其 Dioxus 产物安装到同一目录。
-  - jwm / jwm-tool 只通过 cargo build 构建，并安装到 /usr/local/bin，不会安装到 cargo bin。
+  - jwm / jwm-tool / jwm-support 只通过 cargo build 构建，并安装到 /usr/local/bin，不会安装到 cargo bin。
   - jwm 通过 ~/.config/jwm/config_x11.toml 和 config_wayland.toml 的 status_bar.name
     在运行时选择 bar，切换 bar 不需要重编 jwm。
   - 安装完成后，脚本会把选中的 bar 同步写入 config_x11.toml 和 config_wayland.toml；
@@ -362,7 +362,7 @@ remove_jwm_cargo_bins() {
     local binary
 
     # JWM 不再安装到 cargo bin；清理历史版本遗留的 JWM 二进制。
-    for binary in jwm jwm-tool; do
+    for binary in jwm jwm-tool jwm-support; do
         if [[ -e "$bin_dir/$binary" ]]; then
             info "清理旧的 cargo bin/$binary ..."
             rm -f -- "$bin_dir/$binary"
@@ -524,7 +524,7 @@ build_and_install_jwm() {
 
     cd "$PROJECT_ROOT"
 
-    # JWM 不使用 cargo install，避免把 jwm/jwm-tool 写入 cargo bin。
+    # JWM 不使用 cargo install，避免把 jwm/jwm-tool/jwm-support 写入 cargo bin。
     # shellcheck disable=SC2086
     cargo build $CARGO_BUILD_MODE_FLAG $CARGO_JOBS
 
@@ -535,11 +535,12 @@ build_and_install_jwm() {
         target_dir="$target_dir/debug"
     fi
 
-    info "同步 jwm, jwm-tool 到 /usr/local/bin ..."
+    info "同步 jwm, jwm-tool, jwm-support 到 /usr/local/bin ..."
     install_system_binary "$target_dir/jwm" /usr/local/bin
     install_system_binary "$target_dir/jwm-tool" /usr/local/bin
+    install_system_binary "$target_dir/jwm-support" /usr/local/bin
 
-    ok "jwm, jwm-tool 安装完成: /usr/local/bin（未安装到 cargo bin）"
+    ok "jwm, jwm-tool, jwm-support 安装完成: /usr/local/bin（未安装到 cargo bin）"
 
     info "安装 desktop 文件 ..."
     [[ -f jwm-x11rb.desktop ]]         && sudo install -m644 jwm-x11rb.desktop         /usr/share/xsessions/
