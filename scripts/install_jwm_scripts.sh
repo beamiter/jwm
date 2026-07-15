@@ -77,7 +77,7 @@ ALL_BARS=(
 # 默认值
 # ============================================================
 BUILD_MODE="release"
-JWM_BAR_NAME="winit_pixels_bar"
+JWM_BAR_NAME="dioxus_bar"
 JWM_BAR_SET_BY_ARGS=false
 
 # CLONE_BARS：仅用于把这些 bar 仓库拉到本地（git clone / pull），
@@ -138,7 +138,8 @@ usage() {
 说明:
   - CLONE_BARS（脚本顶部）只用于把哪些 bar 仓库 git clone/pull 到本地，不会构建。
   - 真正会被安装的 bar 只有 JWM_BAR_NAME（即 -b 的第一个参数，或脚本顶部默认值）。
-  - bar 使用 cargo install --path ... 安装到 cargo bin 目录（通常是 ~/.cargo/bin）。
+  - 除 dioxus_bar 外，bar 使用 cargo install --path ... 安装到 cargo bin 目录（通常是 ~/.cargo/bin）。
+    dioxus_bar 使用 dx build --release 构建，并把其 Dioxus 产物安装到同一目录。
   - jwm / jwm-tool 只通过 cargo build 构建，并安装到 /usr/local/bin，不会安装到 cargo bin。
   - jwm 通过 ~/.config/jwm/config_x11.toml 和 config_wayland.toml 的 status_bar.name
     在运行时选择 bar，切换 bar 不需要重编 jwm。
@@ -393,8 +394,34 @@ build_bar() {
         exit 1
     fi
 
-    info "安装 $bar（$BUILD_MODE 模式）..."
     ensure_cargo_bin_dir
+
+    # Dioxus desktop 的最终可执行文件由 dx 输出，而不是 cargo build/install 的默认 target 路径。
+    if [[ "$bar" == "dioxus_bar" ]]; then
+        local dioxus_output="$bar_dir/target/dx/dioxus_bar/release/linux/app/dioxus_bar"
+
+        if ! command -v dx &>/dev/null; then
+            err "dx 未找到；请先安装 Dioxus CLI（cargo install dioxus-cli）"
+            exit 1
+        fi
+
+        info "构建 dioxus_bar（dx build --release）..."
+        (
+            cd "$bar_dir"
+            dx build --release
+        )
+
+        if [[ ! -x "$dioxus_output" ]]; then
+            err "dioxus_bar 构建产物不存在或不可执行: $dioxus_output"
+            exit 1
+        fi
+
+        install -m755 "$dioxus_output" "$(cargo_bin_dir)/dioxus_bar"
+        ok "dioxus_bar 安装完成: $(cargo_bin_dir)/dioxus_bar"
+        return
+    fi
+
+    info "安装 $bar（$BUILD_MODE 模式）..."
     # shellcheck disable=SC2086
     cargo install --path "$bar_dir" --force $CARGO_INSTALL_MODE_FLAG $CARGO_JOBS --root "$(cargo_install_root)"
 
