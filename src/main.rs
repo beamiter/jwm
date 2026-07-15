@@ -2,8 +2,8 @@ use chrono::{Datelike, Local, Timelike};
 use gloo_console::error;
 use gloo_timers::callback::Interval;
 use serde::{Deserialize, Serialize};
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsValue;
+use wasm_bindgen::prelude::*;
 use yew::prelude::*;
 
 #[wasm_bindgen]
@@ -12,7 +12,10 @@ extern "C" {
     async fn tauri_invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
 
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "event"], js_name = listen, catch)]
-    async fn tauri_listen(event: &str, handler: &Closure<dyn FnMut(JsValue)>) -> Result<JsValue, JsValue>;
+    async fn tauri_listen(
+        event: &str,
+        handler: &Closure<dyn FnMut(JsValue)>,
+    ) -> Result<JsValue, JsValue>;
 }
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
@@ -121,18 +124,16 @@ fn parse_lt_symbol(lts: &str) -> (String, Option<f32>) {
     if lts.is_empty() {
         return ("[]=".to_string(), None);
     }
-    let symbol = lts
-        .split_whitespace()
-        .next()
-        .unwrap_or("[]=")
-        .to_string();
-    let scale = lts
-        .find("s:")
-        .and_then(|i| {
-            let rest = &lts[i + 2..];
-            let s: String = rest.chars().skip_while(|c| c.is_whitespace()).take_while(|c| c.is_ascii_digit() || *c == '.').collect();
-            s.parse::<f32>().ok()
-        });
+    let symbol = lts.split_whitespace().next().unwrap_or("[]=").to_string();
+    let scale = lts.find("s:").and_then(|i| {
+        let rest = &lts[i + 2..];
+        let s: String = rest
+            .chars()
+            .skip_while(|c| c.is_whitespace())
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        s.parse::<f32>().ok()
+    });
     (symbol, scale)
 }
 
@@ -218,77 +219,55 @@ fn app() -> Html {
     let now = use_state(Local::now);
     let is_taking = use_state(|| false);
 
-    // listen monitor-update
+    // Register every state listener before asking the backend for a full replay.
     {
         let monitor = monitor.clone();
-        use_effect_with((), move |_| {
-            let cb = Closure::<dyn FnMut(JsValue)>::new(move |evt: JsValue| {
-                if let Ok(p) = serde_wasm_bindgen::from_value::<EventPayload<MonitorInfoSnapshot>>(evt) {
-                    monitor.set(Some(p.payload));
-                }
-            });
-            wasm_bindgen_futures::spawn_local(async move {
-                if let Err(e) = tauri_listen("monitor-update", &cb).await {
-                    error!(format!("listen failed: {:?}", e));
-                }
-                cb.forget();
-            });
-            || ()
-        });
-    }
-
-    // listen system-update
-    {
         let system = system.clone();
+        let audio = audio.clone();
+        let brightness = brightness.clone();
         use_effect_with((), move |_| {
-            let cb = Closure::<dyn FnMut(JsValue)>::new(move |evt: JsValue| {
+            let monitor_cb = Closure::<dyn FnMut(JsValue)>::new(move |evt: JsValue| {
+                if let Ok(p) =
+                    serde_wasm_bindgen::from_value::<EventPayload<Option<MonitorInfoSnapshot>>>(evt)
+                {
+                    monitor.set(p.payload);
+                }
+            });
+            let system_cb = Closure::<dyn FnMut(JsValue)>::new(move |evt: JsValue| {
                 if let Ok(p) = serde_wasm_bindgen::from_value::<EventPayload<SystemSnapshot>>(evt) {
                     system.set(Some(p.payload));
                 }
             });
-            wasm_bindgen_futures::spawn_local(async move {
-                if let Err(e) = tauri_listen("system-update", &cb).await {
-                    error!(format!("listen failed: {:?}", e));
-                }
-                cb.forget();
-            });
-            || ()
-        });
-    }
-
-    // listen audio-update
-    {
-        let audio = audio.clone();
-        use_effect_with((), move |_| {
-            let cb = Closure::<dyn FnMut(JsValue)>::new(move |evt: JsValue| {
+            let audio_cb = Closure::<dyn FnMut(JsValue)>::new(move |evt: JsValue| {
                 if let Ok(p) = serde_wasm_bindgen::from_value::<EventPayload<AudioSnapshot>>(evt) {
                     audio.set(Some(p.payload));
                 }
             });
-            wasm_bindgen_futures::spawn_local(async move {
-                if let Err(e) = tauri_listen("audio-update", &cb).await {
-                    error!(format!("listen failed: {:?}", e));
-                }
-                cb.forget();
-            });
-            || ()
-        });
-    }
-
-    // listen brightness-update
-    {
-        let brightness = brightness.clone();
-        use_effect_with((), move |_| {
-            let cb = Closure::<dyn FnMut(JsValue)>::new(move |evt: JsValue| {
-                if let Ok(p) = serde_wasm_bindgen::from_value::<EventPayload<BrightnessSnapshot>>(evt) {
+            let brightness_cb = Closure::<dyn FnMut(JsValue)>::new(move |evt: JsValue| {
+                if let Ok(p) =
+                    serde_wasm_bindgen::from_value::<EventPayload<BrightnessSnapshot>>(evt)
+                {
                     brightness.set(Some(p.payload));
                 }
             });
+
             wasm_bindgen_futures::spawn_local(async move {
-                if let Err(e) = tauri_listen("brightness-update", &cb).await {
-                    error!(format!("listen failed: {:?}", e));
+                let registration = async {
+                    tauri_listen("monitor-update", &monitor_cb).await?;
+                    tauri_listen("system-update", &system_cb).await?;
+                    tauri_listen("audio-update", &audio_cb).await?;
+                    tauri_listen("brightness-update", &brightness_cb).await?;
+                    tauri_invoke("frontend_ready", JsValue::NULL).await?;
+                    Ok::<(), JsValue>(())
                 }
-                cb.forget();
+                .await;
+                if let Err(e) = registration {
+                    error!(format!("failed to initialize Tauri event bridge: {:?}", e));
+                }
+                monitor_cb.forget();
+                system_cb.forget();
+                audio_cb.forget();
+                brightness_cb.forget();
             });
             || ()
         });
@@ -449,7 +428,11 @@ fn app() -> Html {
             None => true,
             Some(s) => s.is_muted || !s.has_device,
         };
-        if muted { "pill volume-pill muted" } else { "pill volume-pill" }
+        if muted {
+            "pill volume-pill muted"
+        } else {
+            "pill volume-pill"
+        }
     };
     let volume_label = match audio_val.as_ref() {
         Some(s) if s.has_device => format!("{}%", s.volume),
