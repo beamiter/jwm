@@ -1,9 +1,12 @@
-use anyhow::Result;
+use anyhow::{Context as _, Result};
+use cairo::{Context as CairoContext, Format, ImageSurface};
 use log::warn;
+use pango::FontDescription;
 use pixels::wgpu::TextureFormat;
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
-use shared_structures::SharedRingBuffer;
 use std::env;
+use std::os::fd::AsRawFd;
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -11,464 +14,408 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use winit::window::Window;
 use winit::{
     application::ApplicationHandler,
-    dpi::{LogicalSize, PhysicalSize},
+    dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
     event::WindowEvent,
     event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
     window::{WindowAttributes, WindowId},
 };
-
 use xbar_core::{
-    AppState, BarConfig, Color, ShapeStyle, ThemeMode,
-    cairo::{self, Context, Format, ImageSurface},
-    colors_for_theme, draw_bar_with_background_opacity, initialize_logging,
-    pango::FontDescription,
-    spawn_shared_eventfd_notifier,
+    BarEffect, BarRuntime, ModelConfig, RuntimeUpdate, SharedEventNotifier, SharedTransport,
+    logging::init as initialize_logging,
+    presentation::{Point, PointerAction, PresentationConfig, Size},
+    render::cairo::CairoBar,
 };
 
-fn tuned_colors_for_theme(mode: ThemeMode) -> xbar_core::Colors {
-    let mut c = colors_for_theme(mode);
-    match mode {
-        ThemeMode::Dark => {
-            c.bg = Color::rgb(13, 16, 23);
-            c.text = Color::rgb(235, 238, 245);
-            c.gray = Color::rgb(45, 55, 72);
-            c.time = Color::rgb(9, 41, 64);
-            c.accent = Color::rgb(8, 145, 178);
-            c.accent_light = Color::rgb(34, 211, 238);
-            c.dim = Color::rgb(81, 90, 104);
-        }
-        ThemeMode::Light => {
-            c.bg = Color::rgb(246, 247, 250);
-            c.text = Color::rgb(22, 24, 28);
-            c.gray = Color::rgb(203, 213, 225);
-            c.time = Color::rgb(224, 242, 254);
-            c.accent = Color::rgb(59, 130, 246);
-            c.accent_light = Color::rgb(96, 165, 250);
-            c.dim = Color::rgb(100, 116, 139);
-        }
-    }
-    c
-}
+const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum UserEvent {
     Tick,
-    SharedUpdated,
+    SharedUpdated(Arc<AtomicBool>),
 }
 
-// ============ 事件合并机制（防止内存泄漏的关键） ============
-#[derive(Clone)]
-struct EventCoalescer {
-    shared_dirty: Arc<AtomicBool>,
-    tick_pending: Arc<AtomicBool>,
+/// Owns a forwarding thread and gives it a bounded shutdown path.
+struct EventForwarder {
+    stop: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
 }
 
-impl EventCoalescer {
-    fn new() -> Self {
-        Self {
-            shared_dirty: Arc::new(AtomicBool::new(false)),
-            tick_pending: Arc::new(AtomicBool::new(false)),
+impl Drop for EventForwarder {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take()
+            && let Err(payload) = worker.join()
+        {
+            warn!("event forwarding thread panicked: {payload:?}");
         }
     }
 }
 
-// ============ Tick 线程（带事件合并） ============
-fn spawn_tick_thread(proxy: EventLoopProxy<UserEvent>, signals: EventCoalescer) {
-    thread::spawn(move || {
-        let mut last_bucket: u64 = 0;
-        loop {
+fn spawn_tick_thread(proxy: EventLoopProxy<UserEvent>) -> EventForwarder {
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stop);
+    let worker = thread::spawn(move || {
+        while !worker_stop.load(Ordering::Acquire) {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_else(|_| Duration::from_secs(0));
-            let bucket = now.as_secs();
-
-            if bucket != last_bucket {
-                last_bucket = bucket;
-                // 只有在之前没有待处理的 tick 时才发送
-                if signals
-                    .tick_pending
-                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    let _ = proxy.send_event(UserEvent::Tick);
-                }
+            let subns = u64::from(now.subsec_nanos());
+            thread::sleep(Duration::from_nanos(
+                1_000_000_000_u64.saturating_sub(subns).max(1),
+            ));
+            if worker_stop.load(Ordering::Acquire) || proxy.send_event(UserEvent::Tick).is_err() {
+                break;
             }
-
-            // 精确 sleep 到下一秒边界
-            let subns = now.subsec_nanos() as u64;
-            let remain_ns = 1_000_000_000u64.saturating_sub(subns).max(1);
-            thread::sleep(Duration::from_nanos(remain_ns));
         }
     });
+    EventForwarder {
+        stop,
+        worker: Some(worker),
+    }
 }
 
-// ============ 共享内存线程（带事件合并） ============
 fn spawn_shared_thread(
     proxy: EventLoopProxy<UserEvent>,
-    shared_efd: Option<i32>,
-    signals: EventCoalescer,
-) {
-    if let Some(efd) = shared_efd {
-        thread::spawn(move || {
-            let mut buf8 = [0u8; 8];
-            let mut pfd = libc::pollfd {
-                fd: efd,
+    notifier: Option<SharedEventNotifier>,
+) -> Option<EventForwarder> {
+    notifier.map(|notifier| {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        // The event-loop handler clears this only after it has drained the
+        // transport, so at most one shared update can be queued at a time.
+        let worker_pending = Arc::new(AtomicBool::new(false));
+        let worker = thread::spawn(move || {
+            let mut descriptor = libc::pollfd {
+                fd: notifier.as_raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
             };
-            loop {
-                let pr = unsafe { libc::poll(&mut pfd as *mut libc::pollfd, 1, -1) };
-                if pr < 0 {
-                    let err = std::io::Error::last_os_error();
-                    if let Some(code) = err.raw_os_error() {
-                        if code == libc::EINTR {
-                            continue;
-                        }
+            while !worker_stop.load(Ordering::Acquire) {
+                descriptor.revents = 0;
+                let ready = unsafe { libc::poll(&mut descriptor, 1, 250) };
+                if ready < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() == Some(libc::EINTR) {
+                        continue;
                     }
-                    warn!("[shared-thread] poll error: {}", err);
-                    thread::sleep(Duration::from_millis(50));
+                    warn!("shared notifier poll failed: {error}");
+                    break;
+                }
+                if ready == 0 {
                     continue;
                 }
-                if (pfd.revents & libc::POLLIN) != 0 {
-                    let r = unsafe { libc::read(efd, buf8.as_mut_ptr() as *mut _, buf8.len()) };
-                    if r == 8 {
-                        // 只有在之前没有待处理的共享更新时才发送
-                        if signals
-                            .shared_dirty
-                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-                            .is_ok()
-                        {
-                            let _ = proxy.send_event(UserEvent::SharedUpdated);
-                        }
-                    } else if r < 0 {
-                        let err = std::io::Error::last_os_error();
-                        if let Some(code) = err.raw_os_error() {
-                            if code == libc::EINTR {
-                                continue;
+                if descriptor.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                    warn!("shared notifier fd became unusable: {}", descriptor.revents);
+                    break;
+                }
+                if descriptor.revents & libc::POLLIN != 0 {
+                    match notifier.drain() {
+                        Ok(0) => {}
+                        Ok(_) => {
+                            if worker_pending
+                                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                                .is_ok()
+                            {
+                                let event = UserEvent::SharedUpdated(Arc::clone(&worker_pending));
+                                if proxy.send_event(event).is_err() {
+                                    worker_pending.store(false, Ordering::Release);
+                                    break;
+                                }
+                            }
+                            while worker_pending.load(Ordering::Acquire)
+                                && !worker_stop.load(Ordering::Acquire)
+                            {
+                                thread::sleep(Duration::from_millis(10));
                             }
                         }
-                        warn!("[shared-thread] eventfd read error: {}", err);
-                        thread::sleep(Duration::from_millis(50));
+                        Err(error) => {
+                            warn!("shared notifier drain failed: {error}");
+                            break;
+                        }
                     }
                 }
             }
         });
-    }
+        EventForwarder {
+            stop,
+            worker: Some(worker),
+        }
+    })
 }
 
 struct App {
     window_id: Option<WindowId>,
     window: Option<Arc<Window>>,
-
-    colors: xbar_core::Colors,
-    cfg: BarConfig,
-    font: FontDescription,
-    state: AppState,
-
+    bar: CairoBar,
     scale_factor: f64,
     logical_size: LogicalSize<f64>,
+    default_logical_size: LogicalSize<f64>,
     last_physical_size: PhysicalSize<u32>,
-
-    last_monitor_update: Instant,
-    last_cursor_pos_px: Option<(i32, i32)>,
-
+    last_cursor_pos: Option<Point>,
     pixels: Option<Pixels<'static>>,
-    pixels_w: u32,
-    pixels_h: u32,
-
-    last_time_bucket: u64,
-
-    // 事件合并信号
-    signals: EventCoalescer,
+    pixels_width: u32,
+    pixels_height: u32,
+    shared_path: String,
+    last_transport_attempt: Instant,
 }
 
 impl App {
     fn new(
-        shared_buffer: Option<Arc<SharedRingBuffer>>,
+        bar: CairoBar,
         logical_size: LogicalSize<f64>,
-        scale: f64,
-        signals: EventCoalescer,
+        scale_factor: f64,
+        shared_path: String,
     ) -> Self {
-        let cfg = BarConfig {
-            bar_height: 38,
-            padding_x: 10.0,
-            padding_y: 6.0,
-            tag_spacing: 6.0,
-            pill_hpadding: 10.0,
-            pill_radius: 12.0,
-            shape_style: ShapeStyle::Pill,
-            time_icon: "🕐",
-            screenshot_label: "📸",
-
-            tag_labels: ["🖥", "🌐", "📁", "💬", "📝", "🎵", "⚙", "📊", "🏠"],
-            theme_dark_label: "🌙",
-            theme_light_label: "☀️",
-            monitor_labels: ["🥇", "🥈", "🥉", "❔"],
-            volume_label: "🔊",
-            mute_label: "🔇",
-            brightness_label: "🔆",
-            battery_label: "🔋",
-            battery_charging_label: "⚡",
-            cpu_label: "🧠",
-            mem_label: "💾",
-
-            show_audio: true,
-            show_theme_toggle: true,
-            show_brightness: true,
-            show_battery: true,
-            volume_step: 5,
-            brightness_step: 5,
-        };
-
-        // 字体（尽量不依赖 Nerd Font；可用 XBAR_FONT 覆盖）
-        let font_str = env::var("XBAR_FONT").unwrap_or_else(|_| "monospace 11".to_string());
-        let font = FontDescription::from_string(&font_str);
-
-        let mut state = AppState::new(shared_buffer);
-        state.theme_mode = ThemeMode::Dark;
-        let colors = tuned_colors_for_theme(state.theme_mode);
-
         Self {
             window_id: None,
             window: None,
-            colors,
-            cfg,
-            font,
-            state,
-            scale_factor: scale,
+            bar,
+            scale_factor,
             logical_size,
+            default_logical_size: logical_size,
             last_physical_size: PhysicalSize::new(
                 logical_size.width.round() as u32,
                 logical_size.height.round() as u32,
             ),
-            last_monitor_update: Instant::now(),
-            last_cursor_pos_px: None,
+            last_cursor_pos: None,
             pixels: None,
-            pixels_w: 0,
-            pixels_h: 0,
-            last_time_bucket: 0,
-            signals,
+            pixels_width: 0,
+            pixels_height: 0,
+            shared_path,
+            last_transport_attempt: Instant::now(),
         }
     }
 
-    fn redraw(&mut self) -> anyhow::Result<()> {
-        if self.window_id.is_none() {
+    fn redraw(&mut self) -> Result<()> {
+        if self.window_id.is_none() || self.pixels.is_none() {
             return Ok(());
         }
 
-        let width_px = (self.logical_size.width * self.scale_factor).round() as i32;
-        let height_px = (self.logical_size.height * self.scale_factor).round() as i32;
-
-        // 零尺寸保护
-        if width_px <= 0 || height_px <= 0 {
+        let width = self.last_physical_size.width;
+        let height = self.last_physical_size.height;
+        if width == 0 || height == 0 {
             return Ok(());
         }
-
-        let stride = width_px
+        let width_i32 = i32::try_from(width).context("window width does not fit Cairo")?;
+        let height_i32 = i32::try_from(height).context("window height does not fit Cairo")?;
+        let stride = width_i32
             .checked_mul(4)
-            .ok_or_else(|| anyhow::anyhow!("stride overflow"))?;
+            .ok_or_else(|| anyhow::anyhow!("Cairo stride overflow"))?;
 
-        if let Some(pixels) = self.pixels.as_mut() {
-            {
-                let frame: &mut [u8] = pixels.frame_mut();
-                let surface = unsafe {
-                    ImageSurface::create_for_data_unsafe(
-                        frame.as_mut_ptr(),
-                        Format::ARgb32,
-                        width_px,
-                        height_px,
-                        stride,
-                    )?
-                };
-
-                let cr = Context::new(&surface)?;
-                cr.save()?;
-                // The winit surface has an alpha channel.  Start every frame
-                // fully transparent so only the controls painted below remain
-                // visible to the compositor.
-                cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
-                cr.set_operator(cairo::Operator::Source);
-                cr.paint()?;
-                cr.restore()?;
-
-                let w_u16 = (width_px as u32).min(u16::MAX as u32) as u16;
-                let h_u16 = (height_px as u32).min(u16::MAX as u32) as u16;
-                draw_bar_with_background_opacity(
-                    &cr,
-                    w_u16,
-                    h_u16,
-                    &self.colors,
-                    &mut self.state,
-                    &self.font,
-                    &self.cfg,
-                    0.0,
-                )?;
-
-                surface.flush();
+        let pixels = self.pixels.as_mut().expect("pixels presence checked above");
+        {
+            let frame = pixels.frame_mut();
+            let required = usize::try_from(stride)?
+                .checked_mul(usize::try_from(height_i32)?)
+                .ok_or_else(|| anyhow::anyhow!("frame size overflow"))?;
+            if frame.len() < required {
+                anyhow::bail!(
+                    "pixels frame is too small: expected {required}, got {}",
+                    frame.len()
+                );
             }
-
-            pixels
-                .render()
-                .map_err(|e| anyhow::anyhow!("pixels render: {}", e))?;
+            let surface = unsafe {
+                ImageSurface::create_for_data_unsafe(
+                    frame.as_mut_ptr(),
+                    Format::ARgb32,
+                    width_i32,
+                    height_i32,
+                    stride,
+                )?
+            };
+            let context = CairoContext::new(&surface)?;
+            context.scale(self.scale_factor, self.scale_factor);
+            self.bar.render(
+                &context,
+                Size::new(
+                    self.logical_size.width as f32,
+                    self.logical_size.height as f32,
+                ),
+            )?;
+            surface.flush();
         }
+        pixels
+            .render()
+            .map_err(|error| anyhow::anyhow!("pixels render failed: {error}"))?;
         Ok(())
     }
 
-    #[inline]
     fn request_redraw(&self) {
-        if let Some(win) = self.window.as_ref() {
-            win.request_redraw();
+        if let Some(window) = &self.window {
+            window.request_redraw();
         }
     }
 
-    fn update_hover_and_redraw(&mut self, px: i32, py: i32) {
-        if self.state.update_hover(px as i16, py as i16) {
+    fn resize_pixels(&mut self, size: PhysicalSize<u32>) {
+        self.last_physical_size = size;
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+        self.logical_size = size.to_logical(self.scale_factor);
+        if self.pixels_width == size.width && self.pixels_height == size.height {
+            return;
+        }
+        if let Some(pixels) = self.pixels.as_mut() {
+            let surface_result = pixels.resize_surface(size.width, size.height);
+            let buffer_result = pixels.resize_buffer(size.width, size.height);
+            if let Err(error) = &surface_result {
+                warn!("pixels surface resize failed: {error}");
+            }
+            if let Err(error) = &buffer_result {
+                warn!("pixels buffer resize failed: {error}");
+            }
+            if surface_result.is_ok() && buffer_result.is_ok() {
+                self.pixels_width = size.width;
+                self.pixels_height = size.height;
+            }
+        }
+    }
+
+    fn handle_pointer_action(&mut self, point: Point, action: PointerAction) {
+        let update = self.bar.pointer_action(point, action);
+        self.handle_runtime_update(update);
+    }
+
+    fn handle_runtime_update(&mut self, update: RuntimeUpdate) {
+        let RuntimeUpdate {
+            changes,
+            platform_effects,
+            issues,
+        } = update;
+        for issue in issues {
+            warn!("xbar runtime issue: {issue:?}");
+        }
+        for effect in platform_effects {
+            self.handle_platform_effect(effect);
+        }
+        if !changes.is_empty() {
             self.request_redraw();
         }
     }
 
-    fn handle_button(&mut self, px: i32, py: i32, button_id: u8) {
-        let prev_show_seconds = self.state.show_seconds;
-        let prev_theme = self.state.theme_mode;
+    fn tick_and_poll(&mut self) {
+        if !self.shared_path.is_empty()
+            && self.bar.runtime().transport().is_none()
+            && self.last_transport_attempt.elapsed() >= TRANSPORT_RETRY_INTERVAL
+        {
+            self.last_transport_attempt = Instant::now();
+            match SharedTransport::open(&self.shared_path) {
+                Ok(transport) => {
+                    self.bar.runtime_mut().set_transport(Some(transport));
+                    log::debug!("reconnected WM transport at {}", self.shared_path);
+                }
+                Err(error) => log::debug!("WM transport is still unavailable: {error}"),
+            }
+        }
 
-        if self.state.handle_buttons(px as i16, py as i16, button_id) {
-            if self.state.theme_mode != prev_theme {
-                self.colors = tuned_colors_for_theme(self.state.theme_mode);
+        let mut update = self.bar.tick();
+        update.merge(self.bar.poll_transport());
+        self.handle_runtime_update(update);
+    }
+
+    fn handle_platform_effect(&mut self, effect: BarEffect) {
+        match effect {
+            BarEffect::ApplyMonitorGeometry(geometry) => self.apply_monitor_geometry(geometry),
+            BarEffect::ClearMonitorGeometry => {
+                if let Some(window) = &self.window {
+                    window.set_outer_position(LogicalPosition::new(0.0, 0.0));
+                    let _ = window.request_inner_size(self.default_logical_size);
+                }
             }
-            if self.state.show_seconds != prev_show_seconds {
-                self.last_time_bucket = self.current_time_bucket();
+            BarEffect::Screenshot => spawn_program("flameshot", &["gui"]),
+            BarEffect::OpenAudioControl => spawn_program("pavucontrol", &[]),
+            BarEffect::WindowManager(_)
+            | BarEffect::ToggleMute
+            | BarEffect::AdjustVolume(_)
+            | BarEffect::AdjustBrightness(_)
+            | BarEffect::RefreshBattery => {
+                warn!("no frontend adapter handled platform effect: {effect:?}");
             }
-            self.request_redraw();
         }
     }
 
-    fn current_time_bucket(&self) -> u64 {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| Duration::from_secs(0));
-        if self.state.show_seconds {
-            now.as_secs()
-        } else {
-            now.as_secs() / 60
+    fn apply_monitor_geometry(&self, geometry: xbar_core::MonitorGeometry) {
+        if let Some(window) = &self.window {
+            let height = (f64::from(self.bar.config().bar_height) * self.scale_factor)
+                .round()
+                .clamp(1.0, f64::from(u32::MAX)) as u32;
+            window.set_outer_position(PhysicalPosition::new(geometry.x, geometry.y));
+            let _ = window.request_inner_size(PhysicalSize::new(geometry.width, height));
         }
     }
 }
 
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window_id.is_none() {
-            let primary = event_loop
-                .primary_monitor()
-                .or_else(|| event_loop.available_monitors().next());
-            let scale = primary.as_ref().map(|m| m.scale_factor()).unwrap_or(1.0);
-            self.scale_factor = scale;
-
-            let screen_size: PhysicalSize<u32> = primary
-                .as_ref()
-                .map(|m| m.size())
-                .unwrap_or(PhysicalSize::new(1920, 1080));
-            let width_px = screen_size.width;
-            let height_px = self.cfg.bar_height as u32;
-
-            self.logical_size = LogicalSize::new(
-                (width_px as f64) / self.scale_factor,
-                (height_px as f64) / self.scale_factor,
-            );
-            self.last_physical_size = PhysicalSize::new(width_px, height_px);
-
-            let attrs = WindowAttributes::default()
-                .with_title("winit_pixels_bar")
-                .with_inner_size(self.logical_size)
-                .with_decorations(false)
-                .with_resizable(true)
-                .with_visible(true)
-                .with_transparent(true);
-
-            let window = event_loop
-                .create_window(attrs)
-                .expect("create_window failed");
-            let win_id = window.id();
-            let arc = Arc::new(window);
-
-            let width_px = (self.logical_size.width * self.scale_factor).round() as u32;
-            let height_px = (self.logical_size.height * self.scale_factor).round() as u32;
-
-            // 零尺寸保护
-            let safe_w = width_px.max(1);
-            let safe_h = height_px.max(1);
-
-            let surface_texture = SurfaceTexture::new(safe_w, safe_h, arc.clone());
-            self.window = Some(arc);
-
-            let pixels: Pixels<'static> = PixelsBuilder::new(safe_w, safe_h, surface_texture)
-                .texture_format(TextureFormat::Bgra8UnormSrgb)
-                .enable_vsync(true)
-                .request_adapter_options(pixels::wgpu::RequestAdapterOptions {
-                    power_preference: pixels::wgpu::PowerPreference::LowPower,
-                    ..Default::default()
-                })
-                .build()
-                .map_err(|e| anyhow::anyhow!("pixels::new: {}", e))
-                .expect("pixels create failed");
-
-            self.window_id = Some(win_id);
-            self.pixels_w = safe_w;
-            self.pixels_h = safe_h;
-            self.pixels = Some(pixels);
-
-            self.last_time_bucket = self.current_time_bucket();
-            self.request_redraw();
+        if self.window_id.is_some() {
+            return;
         }
+
+        let primary = event_loop
+            .primary_monitor()
+            .or_else(|| event_loop.available_monitors().next());
+        self.scale_factor = primary
+            .as_ref()
+            .map_or(1.0, |monitor| monitor.scale_factor());
+        let screen_size = primary
+            .as_ref()
+            .map_or(PhysicalSize::new(1920, 1080), |monitor| monitor.size());
+        self.logical_size = LogicalSize::new(
+            f64::from(screen_size.width) / self.scale_factor,
+            f64::from(self.bar.config().bar_height),
+        );
+        self.default_logical_size = self.logical_size;
+
+        let attributes = WindowAttributes::default()
+            .with_title("winit_pixels_bar")
+            .with_inner_size(self.logical_size)
+            .with_decorations(false)
+            .with_resizable(true)
+            .with_visible(true)
+            .with_transparent(true);
+        let window = Arc::new(
+            event_loop
+                .create_window(attributes)
+                .expect("create_window failed"),
+        );
+        let window_id = window.id();
+        let size = window.inner_size();
+        self.last_physical_size = size;
+
+        let safe_width = size.width.max(1);
+        let safe_height = size.height.max(1);
+        let surface_texture = SurfaceTexture::new(safe_width, safe_height, Arc::clone(&window));
+        let pixels = PixelsBuilder::new(safe_width, safe_height, surface_texture)
+            .texture_format(TextureFormat::Bgra8UnormSrgb)
+            .enable_vsync(true)
+            .request_adapter_options(pixels::wgpu::RequestAdapterOptions {
+                power_preference: pixels::wgpu::PowerPreference::LowPower,
+                ..Default::default()
+            })
+            .build()
+            .map_err(|error| anyhow::anyhow!("pixels initialization failed: {error}"))
+            .expect("pixels create failed");
+
+        self.window_id = Some(window_id);
+        self.window = Some(window);
+        self.pixels_width = safe_width;
+        self.pixels_height = safe_height;
+        self.pixels = Some(pixels);
+
+        let tick = self.bar.tick();
+        self.handle_runtime_update(tick);
+        let shared = self.bar.poll_transport();
+        self.handle_runtime_update(shared);
+        self.request_redraw();
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::Tick => {
-                // 清理待处理标记
-                self.signals.tick_pending.store(false, Ordering::Release);
-
-                let mut need_redraw = false;
-
-                let bucket = self.current_time_bucket();
-                if bucket != self.last_time_bucket {
-                    self.last_time_bucket = bucket;
-                    log::trace!("redraw by time bucket update: {}", bucket);
-                    need_redraw = true;
-                }
-
-                if self.last_monitor_update.elapsed() >= Duration::from_secs(2) {
-                    self.state.system_monitor.update_if_needed();
-                    self.state.audio_manager.update_if_needed();
-                    self.last_monitor_update = Instant::now();
-                    log::trace!("maybe redraw by system update");
-                    need_redraw = true;
-                }
-
-                if need_redraw {
-                    self.request_redraw();
-                }
-            }
-            UserEvent::SharedUpdated => {
-                // 清理待处理标记
-                self.signals.shared_dirty.store(false, Ordering::Release);
-
-                let mut need_redraw = false;
-                if let Some(buf_arc) = self.state.shared_buffer.as_ref().cloned() {
-                    match buf_arc.try_read_latest_message() {
-                        Ok(Some(msg)) => {
-                            log::trace!("redraw by msg: {:?}", msg);
-                            self.state.update_from_shared(msg);
-                            need_redraw = true;
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            warn!("Shared try_read_latest_message failed: {}", e);
-                        }
-                    }
-                }
-                if need_redraw {
-                    self.request_redraw();
-                }
+            UserEvent::Tick => self.tick_and_poll(),
+            UserEvent::SharedUpdated(pending) => {
+                let update = self.bar.poll_transport();
+                self.handle_runtime_update(update);
+                pending.store(false, Ordering::Release);
             }
         }
     }
@@ -484,139 +431,124 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         match event {
-            WindowEvent::CloseRequested => {
-                event_loop.exit();
-            }
-            WindowEvent::Resized(new_size) => {
-                self.last_physical_size = new_size;
-
-                // 零尺寸保护
-                if new_size.width == 0 || new_size.height == 0 {
-                    return;
-                }
-
-                self.logical_size = new_size.to_logical::<f64>(self.scale_factor);
-
-                if let Some(pixels) = self.pixels.as_mut() {
-                    let w = (self.logical_size.width * self.scale_factor).round() as u32;
-                    let h = (self.logical_size.height * self.scale_factor).round() as u32;
-                    if w > 0 && h > 0 && (self.pixels_w != w || self.pixels_h != h) {
-                        if let Err(e) = pixels.resize_surface(w, h) {
-                            warn!("pixels.resize_surface error: {}", e);
-                        }
-                        if let Err(e) = pixels.resize_buffer(w, h) {
-                            warn!("pixels.resize_buffer error: {}", e);
-                        }
-                        self.pixels_w = w;
-                        self.pixels_h = h;
-                    }
-                }
-
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Resized(size) => {
+                self.resize_pixels(size);
                 self.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.scale_factor = scale_factor;
-                self.logical_size = self.last_physical_size.to_logical::<f64>(self.scale_factor);
-
-                if let Some(pixels) = self.pixels.as_mut() {
-                    let w = (self.logical_size.width * self.scale_factor).round() as u32;
-                    let h = (self.logical_size.height * self.scale_factor).round() as u32;
-                    if w > 0 && h > 0 && (self.pixels_w != w || self.pixels_h != h) {
-                        if let Err(e) = pixels.resize_surface(w, h) {
-                            warn!("pixels.resize_surface error: {}", e);
-                        }
-                        if let Err(e) = pixels.resize_buffer(w, h) {
-                            warn!("pixels.resize_buffer error: {}", e);
-                        }
-                        self.pixels_w = w;
-                        self.pixels_h = h;
-                    }
+                if let Some(window) = &self.window {
+                    self.resize_pixels(window.inner_size());
                 }
-
+                if let Some(geometry) = self.bar.runtime().view().geometry {
+                    self.apply_monitor_geometry(geometry);
+                }
                 self.request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let px = position.x.round() as i32;
-                let py = position.y.round() as i32;
-                self.last_cursor_pos_px = Some((px, py));
-                self.update_hover_and_redraw(px, py);
-                log::trace!("cursor px={}, py={}", px, py);
+                let position = position.to_logical::<f64>(self.scale_factor);
+                let point = Point::new(position.x as f32, position.y as f32);
+                self.last_cursor_pos = Some(point);
+                if self.bar.pointer_motion(point) {
+                    self.request_redraw();
+                }
             }
             WindowEvent::CursorLeft { .. } => {
-                self.state.clear_hover();
-                self.request_redraw();
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                use winit::event::MouseScrollDelta;
-                if let Some((px, py)) = self.last_cursor_pos_px {
-                    let dy = match delta {
-                        MouseScrollDelta::LineDelta(_x, y) => y as f64,
-                        MouseScrollDelta::PixelDelta(pos) => pos.y,
-                    };
-                    let button_id = if dy > 0.0 {
-                        4
-                    } else if dy < 0.0 {
-                        5
-                    } else {
-                        0
-                    };
-                    if button_id != 0 {
-                        self.handle_button(px, py, button_id);
-                    }
+                self.last_cursor_pos = None;
+                if self.bar.pointer_leave() {
+                    self.request_redraw();
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 use winit::event::{ElementState, MouseButton};
-                if state == ElementState::Pressed {
-                    if let Some((px, py)) = self.last_cursor_pos_px {
-                        let button_id = match button {
-                            MouseButton::Left => 1,
-                            MouseButton::Middle => 2,
-                            MouseButton::Right => 3,
-                            MouseButton::Back => 8,
-                            MouseButton::Forward => 9,
-                            MouseButton::Other(n) => n as u8,
-                        };
-                        self.handle_button(px, py, button_id);
+                if state == ElementState::Pressed
+                    && let Some(point) = self.last_cursor_pos
+                {
+                    let action = match button {
+                        MouseButton::Left => Some(PointerAction::Primary),
+                        MouseButton::Right => Some(PointerAction::Secondary),
+                        MouseButton::Middle
+                        | MouseButton::Back
+                        | MouseButton::Forward
+                        | MouseButton::Other(_) => None,
+                    };
+                    if let Some(action) = action {
+                        self.handle_pointer_action(point, action);
+                    }
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                use winit::event::MouseScrollDelta;
+                if let Some(point) = self.last_cursor_pos {
+                    let vertical = match delta {
+                        MouseScrollDelta::LineDelta(_, value) => f64::from(value),
+                        MouseScrollDelta::PixelDelta(position) => position.y,
+                    };
+                    let action = if vertical > 0.0 {
+                        Some(PointerAction::ScrollUp)
+                    } else if vertical < 0.0 {
+                        Some(PointerAction::ScrollDown)
+                    } else {
+                        None
+                    };
+                    if let Some(action) = action {
+                        self.handle_pointer_action(point, action);
                     }
                 }
             }
             WindowEvent::RedrawRequested => {
-                if let Err(e) = self.redraw() {
-                    warn!("redraw error (RedrawRequested): {}", e);
+                if let Err(error) = self.redraw() {
+                    warn!("redraw failed: {error}");
                 }
             }
             _ => {}
         }
     }
+}
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {}
+fn spawn_program(program: &str, args: &[&str]) {
+    let program = program.to_owned();
+    let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+    thread::spawn(move || {
+        if let Err(error) = Command::new(&program).args(&args).status() {
+            warn!("failed to run {program}: {error}");
+        }
+    });
 }
 
 fn main() -> Result<()> {
-    let args: Vec<String> = env::args().collect();
-    let shared_path = args.iter().skip(1).last().cloned().unwrap_or_default();
+    let shared_path = env::args().skip(1).last().unwrap_or_default();
+    initialize_logging("winit_pixels_bar", &shared_path)?;
 
-    if let Err(e) = initialize_logging("winit_pixels_bar", &shared_path) {
-        eprintln!("Failed to initialize logging: {}", e);
-        std::process::exit(1);
-    }
-
-    let shared_buffer = SharedRingBuffer::create_shared_ring_buffer_aux(&shared_path).map(Arc::new);
-    let shared_efd = spawn_shared_eventfd_notifier(shared_buffer.clone(), false);
+    let transport = if shared_path.is_empty() {
+        None
+    } else {
+        Some(
+            SharedTransport::open(&shared_path)
+                .with_context(|| format!("failed to open shared transport {shared_path}"))?,
+        )
+    };
+    let notifier = transport
+        .as_ref()
+        .map(|transport| transport.notifier(true))
+        .transpose()
+        .context("failed to start shared transport notifier")?;
+    let runtime = BarRuntime::with_transport(ModelConfig::default(), transport)?;
+    let presentation = PresentationConfig {
+        bar_height: 38.0,
+        ..PresentationConfig::default()
+    };
+    let font = env::var("XBAR_FONT").unwrap_or_else(|_| "monospace 11".to_owned());
+    let mut bar = CairoBar::new(runtime, presentation, FontDescription::from_string(&font));
+    bar.renderer_mut().set_background_opacity(Some(0.0));
 
     let event_loop: EventLoop<UserEvent> = EventLoop::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
+    let _tick_forwarder = spawn_tick_thread(proxy.clone());
+    let _shared_forwarder = spawn_shared_thread(proxy, notifier);
 
-    // 创建事件合并信号
-    let signals = EventCoalescer::new();
-
-    spawn_tick_thread(proxy.clone(), signals.clone());
-    spawn_shared_thread(proxy.clone(), shared_efd, signals.clone());
-
-    let logical_size = LogicalSize::new(800.0, 40.0);
-    let mut app = App::new(shared_buffer, logical_size, 1.0, signals);
-
+    let mut app = App::new(bar, LogicalSize::new(800.0, 38.0), 1.0, shared_path);
     event_loop.run_app(&mut app)?;
     Ok(())
 }
