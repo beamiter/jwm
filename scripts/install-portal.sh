@@ -27,7 +27,7 @@ fi
 echo "[install-portal] building jwm-portal (release)…"
 (
     cd "$ROOT"
-    cargo build --release --target-dir "$PORTAL_TARGET_DIR" --manifest-path "$PORTAL_MANIFEST"
+    cargo build --locked --release --target-dir "$PORTAL_TARGET_DIR" --manifest-path "$PORTAL_MANIFEST"
 )
 
 mkdir -p "$LIBEXEC" "$DBUS_SVC" "$PORTAL_DIR" "$PORTAL_CONF"

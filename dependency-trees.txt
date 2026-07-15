@@ -1,0 +1,73 @@
+=== quick-xml 0.30.0 ===
+quick-xml v0.30.0
+[94m[1m[build-dependencies][39m[22m
+[1m[34m└──[0m xcb v1.7.0
+[1m[34m [0m   [2m└──[0m jwm v0.2.0 (/home/runner/work/jwm/jwm)
+
+=== quick-xml 0.39.4 ===
+quick-xml v0.39.4
+[2m└──[0m wayland-scanner v0.31.10 (proc-macro)
+[2m [0m   [2m├──[0m smithay-client-toolkit v0.19.2
+[2m [0m   [2m│[0m   [2m├──[0m sctk-adwaita v0.10.1
+[2m [0m   [2m│[0m   [2m│[0m   [2m└──[0m winit v0.30.13
+[2m [0m   [2m│[0m   [2m│[0m   [2m [0m   [2m└──[0m jwm v0.2.0 (/home/runner/work/jwm/jwm)
+[2m [0m   [2m│[0m   [2m└──[0m winit v0.30.13 [33m[2m(*)[39m[22m
+[2m [0m   [2m├──[0m smithay-client-toolkit v0.20.0
+[2m [0m   [2m│[0m   [2m└──[0m winit-wayland v0.31.0-beta.2
+[2m [0m   [2m│[0m   [2m [0m   [2m└──[0m winit v0.31.0-beta.2
+[2m [0m   [2m│[0m   [2m [0m   [2m [0m   [2m└──[0m smithay v0.7.0 (https://github.com/Smithay/smithay.git?rev=e76f1af1418e9cdf012da9020c2f1ecc0fe020fa#e76f1af1)
+[2m [0m   [2m│[0m   [2m [0m   [2m [0m   [2m [0m   [2m└──[0m jwm v0.2.0 (/home/runner/work/jwm/jwm)
+[2m [0m   [2m├──[0m wayland-client v0.31.14
+[2m [0m   [2m│[0m   [2m├──[0m calloop-wayland-source v0.3.0
+[2m [0m   [2m│[0m   [2m│[0m   [2m└──[0m smithay-client-toolkit v0.19.2 [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m├──[0m calloop-wayland-source v0.4.1
+[2m [0m   [2m│[0m   [2m│[0m   [2m└──[0m smithay-client-toolkit v0.20.0 [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m├──[0m smithay v0.7.0 (https://github.com/Smithay/smithay.git?rev=e76f1af1418e9cdf012da9020c2f1ecc0fe020fa#e76f1af1) [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m├──[0m smithay-client-toolkit v0.19.2 [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m├──[0m smithay-client-toolkit v0.20.0 [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m├──[0m wayland-cursor v0.31.14
+[2m [0m   [2m│[0m   [2m│[0m   [2m├──[0m smithay v0.7.0 (https://github.com/Smithay/smithay.git?rev=e76f1af1418e9cdf012da9020c2f1ecc0fe020fa#e76f1af1) [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m│[0m   [2m├──[0m smithay-client-toolkit v0.19.2 [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m│[0m   [2m└──[0m smithay-client-toolkit v0.20.0 [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m├──[0m wayland-protocols v0.32.13
+[2m [0m   [2m│[0m   [2m│[0m   [2m├──[0m smithay v0.7.0 (https://github.com/Smithay/smithay.git?rev=e76f1af1418e9cdf012da9020c2f1ecc0fe020fa#e76f1af1) [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m│[0m   [2m├──[0m smithay-client-toolkit v0.19.2 [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m│[0m   [2m├──[0m smithay-client-toolkit v0.20.0 [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m│[0m   [2m├──[0m wayland-protocols-experimental v20250721.0.1
+[2m [0m   [2m│[0m   [2m│[0m   [2m│[0m   [2m└──[0m smithay-client-toolkit v0.20.0 [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m│[0m   [2m├──[0m wayland-protocols-misc v0.3.12
+[2m [0m   [2m│[0m   [2m│[0m   [2m│[0m   [2m├──[0m smithay v0.7.0 (https://github.com/Smithay/smithay.git?rev=e76f1af1418e9cdf012da9020c2f1ecc0fe020fa#e76f1af1) [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m│[0m   [2m│[0m   [2m└──[0m smithay-client-toolkit v0.20.0 [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m│[0m   [2m├──[0m wayland-protocols-plasma v0.3.12
+[2m [0m   [2m│[0m   [2m│[0m   [2m│[0m   [2m├──[0m winit v0.30.13 [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m│[0m   [2m│[0m   [2m└──[0m winit-wayland v0.31.0-beta.2 [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m│[0m   [2m├──[0m wayland-protocols-wlr v0.3.12
+[2m [0m   [2m│[0m   [2m│[0m   [2m│[0m   [2m├──[0m smithay v0.7.0 (https://github.com/Smithay/smithay.git?rev=e76f1af1418e9cdf012da9020c2f1ecc0fe020fa#e76f1af1) [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m│[0m   [2m│[0m   [2m├──[0m smithay-client-toolkit v0.19.2 [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m│[0m   [2m│[0m   [2m└──[0m smithay-client-toolkit v0.20.0 [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m│[0m   [2m├──[0m winit v0.30.13 [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m│[0m   [2m└──[0m winit-wayland v0.31.0-beta.2 [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m├──[0m wayland-protocols-experimental v20250721.0.1 [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m├──[0m wayland-protocols-misc v0.3.12 [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m├──[0m wayland-protocols-plasma v0.3.12 [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m├──[0m wayland-protocols-wlr v0.3.12 [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m├──[0m winit v0.30.13 [33m[2m(*)[39m[22m
+[2m [0m   [2m│[0m   [2m└──[0m winit-wayland v0.31.0-beta.2 [33m[2m(*)[39m[22m
+[2m [0m   [2m├──[0m wayland-protocols v0.32.13 [33m[2m(*)[39m[22m
+[2m [0m   [2m├──[0m wayland-protocols-experimental v20250721.0.1 [33m[2m(*)[39m[22m
+[2m [0m   [2m├──[0m wayland-protocols-misc v0.3.12 [33m[2m(*)[39m[22m
+[2m [0m   [2m├──[0m wayland-protocols-plasma v0.3.12 [33m[2m(*)[39m[22m
+[2m [0m   [2m├──[0m wayland-protocols-wlr v0.3.12 [33m[2m(*)[39m[22m
+[2m [0m   [2m└──[0m wayland-server v0.31.13
+[2m [0m   [2m [0m   [2m├──[0m gbm v0.18.0
+[2m [0m   [2m [0m   [2m│[0m   [2m├──[0m jwm v0.2.0 (/home/runner/work/jwm/jwm)
+[2m [0m   [2m [0m   [2m│[0m   [2m└──[0m smithay v0.7.0 (https://github.com/Smithay/smithay.git?rev=e76f1af1418e9cdf012da9020c2f1ecc0fe020fa#e76f1af1) [33m[2m(*)[39m[22m
+[2m [0m   [2m [0m   [2m├──[0m smithay v0.7.0 (https://github.com/Smithay/smithay.git?rev=e76f1af1418e9cdf012da9020c2f1ecc0fe020fa#e76f1af1) [33m[2m(*)[39m[22m
+[2m [0m   [2m [0m   [2m├──[0m wayland-protocols v0.32.13 [33m[2m(*)[39m[22m
+[2m [0m   [2m [0m   [2m├──[0m wayland-protocols-misc v0.3.12 [33m[2m(*)[39m[22m
+[2m [0m   [2m [0m   [2m└──[0m wayland-protocols-wlr v0.3.12 [33m[2m(*)[39m[22m
+
+=== cgmath 0.18.0 ===
+cgmath v0.18.0
+[2m└──[0m smithay v0.7.0 (https://github.com/Smithay/smithay.git?rev=e76f1af1418e9cdf012da9020c2f1ecc0fe020fa#e76f1af1)
+[2m [0m   [2m└──[0m jwm v0.2.0 (/home/runner/work/jwm/jwm)

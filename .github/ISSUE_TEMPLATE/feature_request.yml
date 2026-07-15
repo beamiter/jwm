@@ -1,0 +1,66 @@
+name: Feature request
+description: Propose a focused JWM capability or improvement
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the user or developer problem without prescribing an implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain observable behavior, configuration, IPC, and interaction details.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Primary scope
+      options:
+        - Core window-management policy
+        - X11RB/XCB
+        - Wayland DRM/KMS
+        - Nested Wayland development backends
+        - Renderer/compositor effects
+        - IPC/tooling/diagnostics
+        - Configuration/session state
+        - Portal/capture/media
+        - Documentation/build/release
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include existing commands, scripts, compositor features, or smaller designs that may solve the problem.
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and migration
+      description: Note backend differences, configuration or schema changes, and how existing users remain supported.
+
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation plan
+      description: Describe deterministic tests, nested/native backend checks, and performance evidence where relevant.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Request checks
+      options:
+        - label: I searched existing issues, pull requests, and the roadmap.
+          required: true
+        - label: The request can be delivered in independently reviewable steps.
+          required: true

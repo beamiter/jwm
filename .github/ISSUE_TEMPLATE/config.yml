@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private security report
+    url: https://github.com/beamiter/jwm/security/advisories/new
+    about: Report vulnerabilities, exploits, credentials, or sensitive diagnostics privately.

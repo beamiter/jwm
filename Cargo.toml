@@ -14,6 +14,10 @@ readme = "README.md"
 name = "jwm-tool"
 path = "tools/jwm_tool.rs"
 
+[[bin]]
+name = "jwm-support"
+path = "tools/jwm_support.rs"
+
 [dependencies]
 clap = { version = "4.6.1", features = ["derive", "env"] }
 dirs = "6.0.0"
@@ -28,11 +32,11 @@ libc = "0.2.186"
 notify = "8.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1"
-shared_structures = { git = "https://github.com/beamiter/shared_structures.git", features = ["use-futex"] }
+shared_structures = { git = "https://github.com/beamiter/shared_structures.git", rev = "8c162f3b4a4cdeac49ef1a47545a2f4427f98dff", features = ["use-futex"] }
 chrono = "0.4.45"
 log = "0.4.33"
 toml = "1.1.2"
-xbar_core = { git = "https://github.com/beamiter/xbar_core.git" }
+xbar_core = { git = "https://github.com/beamiter/xbar_core.git", rev = "6a4b136c8158824e5857b438e3fcf1cf8e21974c", features = ["logging-flexi"] }
 nix = { version = "0.31.3", features = ["signal", "inotify", "fs", "poll"] }
 lazy_static = "1.5.0"
 arc-swap = "1"
@@ -41,7 +45,7 @@ ab_glyph = "0.2.32"
 rand = "0.10.2"
 xkbcommon = "0.9.0"
 bitflags = "2.13.0"
-smithay = { git = "https://github.com/Smithay/smithay.git", branch = "master", default-features = false, features = [
+smithay = { git = "https://github.com/Smithay/smithay.git", rev = "e76f1af1418e9cdf012da9020c2f1ecc0fe020fa", default-features = false, features = [
 "use_system_lib",
 "wayland-backend",
 "wayland_frontend",

@@ -17,7 +17,8 @@ development backends.
   HDR/VRR/color-management plumbing, and direct-scanout diagnostics.
 - Live configuration reload and a newline-delimited JSON IPC API exposed through
   `jwm-tool`.
-- Read-only startup health checks and semantic configuration diagnostics.
+- Read-only startup health checks, semantic configuration diagnostics, and
+  privacy-aware support bundles.
 
 ## Build and verify
 
@@ -25,11 +26,12 @@ JWM requires the normal Linux X11, Wayland, DRM/GBM, libinput, libseat, EGL/GL,
 ALSA, D-Bus, and font/rendering development packages for your distribution.
 
 ```bash
-cargo build --release
-cargo test --lib --bins --tests
+cargo build --locked --release
+cargo test --locked --lib --bins --tests
 ```
 
-Before starting a display backend, inspect the environment and configuration:
+The release build produces `jwm`, `jwm-tool`, and `jwm-support`. Before starting
+a display backend, inspect the environment and configuration:
 
 ```bash
 target/release/jwm --backend x11rb --doctor
@@ -93,6 +95,24 @@ than querying JWM's live IPC socket.
 `~/.local/state/jwm/session.json`); restore also recognizes the legacy cache
 location. `restore_session` reapplies monitor, tag, and floating-window state.
 
+## Create a support bundle
+
+`jwm-support` combines the offline startup doctor with optional live health and
+capability queries in a versioned JSON document:
+
+```bash
+jwm-support --backend x11rb --output jwm-support.json
+jwm-support --backend wayland-udev --offline --output jwm-support.json
+jwm-support --strict --compact > jwm-support.json
+```
+
+File output is private (`0600`) and atomically replaced. The collector uses a
+small environment allowlist and redacts configuration, executable, runtime,
+and IPC error details; it excludes HOME, PATH, D-Bus addresses, process command
+lines, window titles, and arbitrary environment variables. Review
+[support bundles](docs/support-bundles.md) before attaching a
+report to a public issue.
+
 The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 
 | Binding | Action |
@@ -129,4 +149,11 @@ JWM_PIPEWIRE_PREFIX=/opt/pipewire-1.2 scripts/install-portal.sh
 
 Additional operational tools are documented in [tools/README.md](tools/README.md).
 Architecture boundaries and the incremental migration plan are in
-[docs/architecture.md](docs/architecture.md).
+[docs/architecture.md](docs/architecture.md). The delivery sequence for larger
+changes is tracked in [the evolution roadmap](docs/roadmap.md).
+
+## Contributing and security
+
+Before opening a pull request, read [CONTRIBUTING.md](CONTRIBUTING.md). Please
+report security-sensitive problems through the private process described in
+[SECURITY.md](SECURITY.md), not a public issue.

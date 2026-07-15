@@ -4,7 +4,6 @@
 /video-demo/generated
 /video-demo/tmp
 __pycache__/
-Cargo.lock
 **/*.rs.bk
 *.pdb
 .idea/
@@ -13,3 +12,5 @@ Cargo.lock
 *.swp
 *.swo
 /submodules/
+
+# `Cargo.lock` is committed for reproducible JWM application builds.

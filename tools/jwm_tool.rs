@@ -899,6 +899,7 @@ fn rebuild_and_restart(jwm_dir: &str) -> io::Result<()> {
     println!("开始编译JWM...");
     let status = Command::new("cargo")
         .arg("build")
+        .arg("--locked")
         .arg("--release")
         .current_dir(jwm_dir)
         .status()?;
@@ -961,6 +962,12 @@ fn jwm_install_plan(jwm_dir: &Path) -> Vec<InstallPlanEntry> {
             mode: "0755",
         },
         InstallPlanEntry {
+            name: "jwm-support",
+            source: jwm_dir.join("target/release/jwm-support"),
+            destination_dir: "/usr/local/bin/",
+            mode: "0755",
+        },
+        InstallPlanEntry {
             name: "jwm-x11rb.desktop",
             source: jwm_dir.join("jwm-x11rb.desktop"),
             destination_dir: "/usr/share/xsessions/",
@@ -1006,10 +1013,16 @@ fn install_jwm(jwm_dir: &str) -> io::Result<()> {
         }
     }
 
-    println!("安装 JWM 与 jwm-tool...");
+    println!("安装 JWM、jwm-tool 与 jwm-support...");
 
     let status = Command::new("sudo")
-        .args(["rm", "-f", "/usr/local/bin/jwm", "/usr/local/bin/jwm-tool"])
+        .args([
+            "rm",
+            "-f",
+            "/usr/local/bin/jwm",
+            "/usr/local/bin/jwm-tool",
+            "/usr/local/bin/jwm-support",
+        ])
         .status()?;
     if !status.success() {
         eprintln!("清理旧二进制失败！");
@@ -2281,6 +2294,12 @@ mod tests {
                 InstallPlanEntry {
                     name: "jwm-tool",
                     source: PathBuf::from("/src/jwm/target/release/jwm-tool"),
+                    destination_dir: "/usr/local/bin/",
+                    mode: "0755",
+                },
+                InstallPlanEntry {
+                    name: "jwm-support",
+                    source: PathBuf::from("/src/jwm/target/release/jwm-support"),
                     destination_dir: "/usr/local/bin/",
                     mode: "0755",
                 },

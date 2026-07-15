@@ -1,0 +1,873 @@
+[1m[92m    Updating[0m git repository `https://github.com/Smithay/wayland-rs.git`
+[1m[92m    Updating[0m git submodule `https://github.com/KDE/plasma-wayland-protocols.git`
+[1m[92m    Updating[0m git submodule `https://gitlab.freedesktop.org/wlroots/wlr-protocols.git`
+[1m[92m    Updating[0m git submodule `https://gitlab.freedesktop.org/wayland/wayland-protocols.git`
+[1m[92m    Updating[0m crates.io index
+[1m[92m    Updating[0m git repository `https://github.com/beamiter/shared_structures.git`
+[1m[92m    Updating[0m git repository `https://github.com/Smithay/smithay.git`
+[1m[92m    Updating[0m git repository `https://github.com/beamiter/xbar_core.git`
+[1m[92m    Updating[0m git repository `https://github.com/rust-x-bindings/rust-xcb.git`
+[1m[92m     Locking[0m 471 packages to latest Rust 1.97.0 compatible versions
+[1m[92m      Adding[0m generic-array v0.14.7 [1m[33m(available: v0.14.9)[0m
+=== resolved quick-xml versions ===
+[1m[92m Downloading[0m crates ...
+[1m[92m  Downloaded[0m ab_glyph_rasterizer v0.1.10
+[1m[92m  Downloaded[0m adler2 v2.0.1
+[1m[92m  Downloaded[0m ab_glyph v0.2.32
+[1m[92m  Downloaded[0m ahash v0.8.12
+[1m[92m  Downloaded[0m aligned v0.4.3
+[1m[92m  Downloaded[0m atomic_float v1.1.0
+[1m[92m  Downloaded[0m flate2 v1.1.9
+[1m[92m  Downloaded[0m aligned-vec v0.6.4
+[1m[92m  Downloaded[0m arrayref v0.3.9
+[1m[92m  Downloaded[0m approx v0.4.0
+[1m[92m  Downloaded[0m as-raw-xcb-connection v1.0.1
+[1m[92m  Downloaded[0m downcast-rs v1.2.1
+[1m[92m  Downloaded[0m stable_deref_trait v1.2.1
+[1m[92m  Downloaded[0m rend v0.5.4
+[1m[92m  Downloaded[0m rand_core v0.6.4
+[1m[92m  Downloaded[0m rand_core v0.10.1
+[1m[92m  Downloaded[0m byteorder-lite v0.1.0
+[1m[92m  Downloaded[0m bytecheck v0.8.2
+[1m[92m  Downloaded[0m cursor-icon v1.2.0
+[1m[92m  Downloaded[0m arg_enum_proc_macro v0.3.4
+[1m[92m  Downloaded[0m as-slice v0.2.1
+[1m[92m  Downloaded[0m bit_field v0.10.3
+[1m[92m  Downloaded[0m ciborium-ll v0.2.2
+[1m[92m  Downloaded[0m shared_memory v0.12.4
+[1m[92m  Downloaded[0m ciborium-io v0.2.2
+[1m[92m  Downloaded[0m equator-macro v0.4.2
+[1m[92m  Downloaded[0m drm-sys v0.8.1
+[1m[92m  Downloaded[0m calloop-wayland-source v0.3.0
+[1m[92m  Downloaded[0m calloop-wayland-source v0.4.1
+[1m[92m  Downloaded[0m cast v0.3.0
+[1m[92m  Downloaded[0m cfg_aliases v0.2.1
+[1m[92m  Downloaded[0m dpi v0.1.2
+[1m[92m  Downloaded[0m enumflags2_derive v0.7.12
+[1m[92m  Downloaded[0m serde_core v1.0.228
+[1m[92m  Downloaded[0m strsim v0.11.1
+[1m[92m  Downloaded[0m dlib v0.5.3
+[1m[92m  Downloaded[0m colorchoice v1.0.5
+[1m[92m  Downloaded[0m drm-fourcc v2.2.0
+[1m[92m  Downloaded[0m cfg-if v1.0.4
+[1m[92m  Downloaded[0m errno v0.3.14
+[1m[92m  Downloaded[0m appendlist v1.4.0
+[1m[92m  Downloaded[0m color_quant v1.1.0
+[1m[92m  Downloaded[0m equivalent v1.0.2
+[1m[92m  Downloaded[0m clap_lex v1.1.0
+[1m[92m  Downloaded[0m dirs v6.0.0
+[1m[92m  Downloaded[0m equator v0.4.2
+[1m[92m  Downloaded[0m wayland-egl v0.32.11
+[1m[92m  Downloaded[0m alloca v0.4.0
+[1m[92m  Downloaded[0m anstyle v1.0.14
+[1m[92m  Downloaded[0m bitflags v1.3.2
+[1m[92m  Downloaded[0m cpufeatures v0.2.17
+[1m[92m  Downloaded[0m cpufeatures v0.3.0
+[1m[92m  Downloaded[0m reborrow v0.5.5
+[1m[92m  Downloaded[0m wayland-sys v0.31.11
+[1m[92m  Downloaded[0m serde_spanned v1.1.1
+[1m[92m  Downloaded[0m simd_helpers v0.1.0
+[1m[92m  Downloaded[0m autocfg v1.5.1
+[1m[92m  Downloaded[0m avif-serialize v0.8.9
+[1m[92m  Downloaded[0m anstream v1.0.0
+[1m[92m  Downloaded[0m arc-swap v1.9.2
+[1m[92m  Downloaded[0m drm-ffi v0.9.1
+[1m[92m  Downloaded[0m dirs-sys v0.5.0
+[1m[92m  Downloaded[0m anstyle-query v1.1.5
+[1m[92m  Downloaded[0m crypto-common v0.1.7
+[1m[92m  Downloaded[0m rand_chacha v0.3.1
+[1m[92m  Downloaded[0m version_check v0.9.5
+[1m[92m  Downloaded[0m wayland-cursor v0.31.14
+[1m[92m  Downloaded[0m pastey v0.1.1
+[1m[92m  Downloaded[0m smol_str v0.2.2
+[1m[92m  Downloaded[0m same-file v1.0.6
+[1m[92m  Downloaded[0m serde-big-array v0.5.1
+[1m[92m  Downloaded[0m strict-num v0.1.1
+[1m[92m  Downloaded[0m tinyvec_macros v0.1.1
+[1m[92m  Downloaded[0m utf8parse v0.2.2
+[1m[92m  Downloaded[0m profiling-procmacros v1.0.18
+[1m[92m  Downloaded[0m pulp-wasm-simd-flag v0.1.1
+[1m[92m  Downloaded[0m anstyle-parse v1.0.0
+[1m[92m  Downloaded[0m block-buffer v0.10.4
+[1m[92m  Downloaded[0m enumflags2 v0.7.12
+[1m[92m  Downloaded[0m criterion-plot v0.8.2
+[1m[92m  Downloaded[0m digest v0.10.7
+[1m[92m  Downloaded[0m quote v1.0.46
+[1m[92m  Downloaded[0m xcursor v0.3.10
+[1m[92m  Downloaded[0m alsa-sys v0.6.0
+[1m[92m  Downloaded[0m arrayvec v0.7.8
+[1m[92m  Downloaded[0m av1-grain v0.2.5
+[1m[92m  Downloaded[0m bytecheck_derive v0.8.2
+[1m[92m  Downloaded[0m ciborium v0.2.2
+[1m[92m  Downloaded[0m crossbeam-deque v0.8.7
+[1m[92m  Downloaded[0m either v1.16.0
+[1m[92m  Downloaded[0m fastrand v2.4.1
+[1m[92m  Downloaded[0m y4m v0.8.0
+[1m[92m  Downloaded[0m bytemuck_derive v1.11.0
+[1m[92m  Downloaded[0m fdeflate v0.3.7
+[1m[92m  Downloaded[0m find-msvc-tools v0.1.9
+[1m[92m  Downloaded[0m scoped-tls v1.0.1
+[1m[92m  Downloaded[0m scopeguard v1.2.0
+[1m[92m  Downloaded[0m wayland-csd-frame v0.3.0
+[1m[92m  Downloaded[0m anyhow v1.0.103
+[1m[92m  Downloaded[0m wasm-bindgen-macro v0.2.126
+[1m[92m  Downloaded[0m wayland-protocols-misc v0.3.12
+[1m[92m  Downloaded[0m crc32fast v1.5.0
+[1m[92m  Downloaded[0m anes v0.1.6
+[1m[92m  Downloaded[0m clap_derive v4.6.1
+[1m[92m  Downloaded[0m crossbeam-epoch v0.9.20
+[1m[92m  Downloaded[0m block2 v0.6.2
+[1m[92m  Downloaded[0m itoa v1.0.18
+[1m[92m  Downloaded[0m winit-common v0.31.0-beta.2
+[1m[92m  Downloaded[0m built v0.8.1
+[1m[92m  Downloaded[0m crossbeam-utils v0.8.22
+[1m[92m  Downloaded[0m fax v0.2.7
+[1m[92m  Downloaded[0m maybe-rayon v0.1.1
+[1m[92m  Downloaded[0m munge v0.4.7
+[1m[92m  Downloaded[0m wasm-bindgen-shared v0.2.126
+[1m[92m  Downloaded[0m chacha20 v0.10.1
+[1m[92m  Downloaded[0m clap v4.6.1
+[1m[92m  Downloaded[0m thiserror-impl v2.0.18
+[1m[92m  Downloaded[0m generic-array v0.14.7
+[1m[92m  Downloaded[0m ravif v0.13.0
+[1m[92m  Downloaded[0m raw-window-handle v0.6.2
+[1m[92m  Downloaded[0m rkyv_derive v0.8.17
+[1m[92m  Downloaded[0m rustversion v1.0.23
+[1m[92m  Downloaded[0m sha2 v0.10.9
+[1m[92m  Downloaded[0m simdutf8 v0.1.5
+[1m[92m  Downloaded[0m toml_datetime v1.1.1+spec-1.1.0
+[1m[92m  Downloaded[0m toml_writer v1.1.2+spec-1.1.0
+[1m[92m  Downloaded[0m v_frame v0.3.9
+[1m[92m  Downloaded[0m walkdir v2.5.0
+[1m[92m  Downloaded[0m rand_chacha v0.9.0
+[1m[92m  Downloaded[0m rgb v0.8.53
+[1m[92m  Downloaded[0m tinytemplate v1.2.1
+[1m[92m  Downloaded[0m aho-corasick v1.1.4
+[1m[92m  Downloaded[0m bitflags v2.13.0
+[1m[92m  Downloaded[0m bitstream-io v4.10.0
+[1m[92m  Downloaded[0m bytemuck v1.25.1
+[1m[92m  Downloaded[0m bytes v1.12.1
+[1m[92m  Downloaded[0m calloop v0.13.0
+[1m[92m  Downloaded[0m calloop v0.14.4
+[1m[92m  Downloaded[0m cgmath v0.18.0
+[1m[92m  Downloaded[0m drm v0.14.1
+[1m[92m  Downloaded[0m drm v0.15.0
+[1m[92m  Downloaded[0m iana-time-zone v0.1.65
+[1m[92m  Downloaded[0m inotify v0.11.4
+[1m[92m  Downloaded[0m jobserver v0.1.35
+[1m[92m  Downloaded[0m ptr_meta_derive v0.3.1
+[1m[92m  Downloaded[0m quick-error v2.0.1
+[1m[92m  Downloaded[0m polling v3.11.0
+[1m[92m  Downloaded[0m dispatch2 v0.3.1
+[1m[92m  Downloaded[0m winit-core v0.31.0-beta.2
+[1m[92m  Downloaded[0m gbm v0.18.0
+[1m[92m  Downloaded[0m gbm-sys v0.4.0
+[1m[92m  Downloaded[0m is_terminal_polyfill v1.70.2
+[1m[92m  Downloaded[0m num-traits v0.2.19
+[1m[92m  Downloaded[0m zune-core v0.5.1
+[1m[92m  Downloaded[0m alsa v0.12.0
+[1m[92m  Downloaded[0m borsh v1.7.0
+[1m[92m  Downloaded[0m bumpalo v3.20.3
+[1m[92m  Downloaded[0m simd-adler32 v0.3.10
+[1m[92m  Downloaded[0m thiserror-impl v1.0.69
+[1m[92m  Downloaded[0m zmij v1.0.23
+[1m[92m  Downloaded[0m cc v1.2.67
+[1m[92m  Downloaded[0m no_std_io2 v0.9.4
+[1m[92m  Downloaded[0m rand_core v0.9.5
+[1m[92m  Downloaded[0m thiserror v1.0.69
+[1m[92m  Downloaded[0m thiserror v2.0.18
+[1m[92m  Downloaded[0m udev v0.9.3
+[1m[92m  Downloaded[0m shlex v2.0.1
+[1m[92m  Downloaded[0m signal-hook v0.4.4
+[1m[92m  Downloaded[0m signal-hook-registry v1.4.8
+[1m[92m  Downloaded[0m smallvec v1.15.2
+[1m[92m  Downloaded[0m lazy_static v1.5.0
+[1m[92m  Downloaded[0m noop_proc_macro v0.3.0
+[1m[92m  Downloaded[0m pin-project-lite v0.2.17
+[1m[92m  Downloaded[0m keyboard-types v0.8.3
+[1m[92m  Downloaded[0m pkg-config v0.3.33
+[1m[92m  Downloaded[0m indexmap v2.14.0
+[1m[92m  Downloaded[0m io-lifetimes v1.0.11
+[1m[92m  Downloaded[0m memchr v2.8.3
+[1m[92m  Downloaded[0m criterion v0.8.2
+[1m[92m  Downloaded[0m tempfile v3.27.0
+[1m[92m  Downloaded[0m tracing-attributes v0.1.31
+[1m[92m  Downloaded[0m weezl v0.1.12
+[1m[92m  Downloaded[0m plotters v0.3.7
+[1m[92m  Downloaded[0m rand v0.9.5
+[1m[92m  Downloaded[0m slab v0.4.12
+[1m[92m  Downloaded[0m smol_str v0.3.6
+[1m[92m  Downloaded[0m x11-dl v2.21.0
+[1m[92m  Downloaded[0m clap_builder v4.6.0
+[1m[92m  Downloaded[0m getrandom v0.2.17
+[1m[92m  Downloaded[0m libseat-sys v0.2.0
+[1m[92m  Downloaded[0m tiny-skia-path v0.11.4
+[1m[92m  Downloaded[0m wayland-protocols-experimental v20250721.0.1
+[1m[92m  Downloaded[0m paste v1.0.15
+[1m[92m  Downloaded[0m ppv-lite86 v0.2.21
+[1m[92m  Downloaded[0m memoffset v0.9.1
+[1m[92m  Downloaded[0m sctk-adwaita v0.10.1
+[1m[92m  Downloaded[0m serde_derive v1.0.228
+[1m[92m  Downloaded[0m toml v1.1.3+spec-1.1.0
+[1m[92m  Downloaded[0m toml_parser v1.1.2+spec-1.1.0
+[1m[92m  Downloaded[0m wayland-protocols-wlr v0.3.12
+[1m[92m  Downloaded[0m heck v0.5.0
+[1m[92m  Downloaded[0m objc2-encode v4.1.0
+[1m[92m  Downloaded[0m tinyvec v1.12.0
+[1m[92m  Downloaded[0m unicode-ident v1.0.24
+[1m[92m  Downloaded[0m uuid v1.23.5
+[1m[92m  Downloaded[0m getrandom v0.3.4
+[1m[92m  Downloaded[0m itertools v0.14.0
+[1m[92m  Downloaded[0m zerocopy-derive v0.8.54
+[1m[92m  Downloaded[0m egl v0.2.7
+[1m[92m  Downloaded[0m objc2-core-foundation v0.3.2
+[1m[92m  Downloaded[0m plotters-svg v0.3.7
+[1m[92m  Downloaded[0m pulp v0.22.3
+[1m[92m  Downloaded[0m winit-x11 v0.31.0-beta.2
+[1m[92m  Downloaded[0m xkeysym v0.2.1
+[1m[92m  Downloaded[0m chrono v0.4.45
+[1m[92m  Downloaded[0m itertools v0.13.0
+[1m[92m  Downloaded[0m num-complex v0.4.6
+[1m[92m  Downloaded[0m owned_ttf_parser v0.25.1
+[1m[92m  Downloaded[0m proc-macro2 v1.0.106
+[1m[92m  Downloaded[0m profiling v1.0.18
+[1m[92m  Downloaded[0m slotmap v1.1.1
+[1m[92m  Downloaded[0m x11rb v0.13.2
+[1m[92m  Downloaded[0m exr v1.74.2
+[1m[92m  Downloaded[0m flexi_logger v0.31.9
+[1m[92m  Downloaded[0m gethostname v1.1.0
+[1m[92m  Downloaded[0m getrandom v0.4.3
+[1m[92m  Downloaded[0m gif v0.14.2
+[1m[92m  Downloaded[0m libseat v0.2.4
+[1m[92m  Downloaded[0m libudev-sys v0.1.4
+[1m[92m  Downloaded[0m nix v0.23.2
+[1m[92m  Downloaded[0m notify v8.2.0
+[1m[92m  Downloaded[0m objc2 v0.6.4
+[1m[92m  Downloaded[0m png v0.18.1
+[1m[92m  Downloaded[0m rayon-core v1.13.0
+[1m[92m  Downloaded[0m wasm-bindgen v0.2.126
+[1m[92m  Downloaded[0m wayland-backend v0.3.15
+[1m[92m  Downloaded[0m wayland-protocols-plasma v0.3.12
+[1m[92m  Downloaded[0m wayland-server v0.31.13
+[1m[92m  Downloaded[0m gl_generator v0.14.0
+[1m[92m  Downloaded[0m glob v0.3.3
+[1m[92m  Downloaded[0m lebe v0.5.3
+[1m[92m  Downloaded[0m libc v0.1.12
+[1m[92m  Downloaded[0m tracing-core v0.1.36
+[1m[92m  Downloaded[0m num-rational v0.4.2
+[1m[92m  Downloaded[0m nu-ansi-term v0.50.3
+[1m[92m  Downloaded[0m page_size v0.6.0
+[1m[92m  Downloaded[0m reis v0.7.0
+[1m[92m  Downloaded[0m wasm-bindgen-macro-support v0.2.126
+[1m[92m  Downloaded[0m wayland-client v0.31.14
+[1m[92m  Downloaded[0m nix v0.31.3
+[1m[92m  Downloaded[0m num-derive v0.4.2
+[1m[92m  Downloaded[0m percent-encoding v2.3.2
+[1m[92m  Downloaded[0m serde v1.0.228
+[1m[92m  Downloaded[0m av-scenechange v0.14.1
+[1m[92m  Downloaded[0m glow v0.18.0
+[1m[92m  Downloaded[0m half v2.7.1
+[1m[92m  Downloaded[0m image-webp v0.2.4
+[1m[92m  Downloaded[0m libloading v0.8.9
+[1m[92m  Downloaded[0m x11rb-protocol v0.13.2
+[1m[92m  Downloaded[0m option-ext v0.2.0
+[1m[92m  Downloaded[0m imgref v1.12.2
+[1m[92m  Downloaded[0m khronos_api v3.1.0
+[1m[92m  Downloaded[0m libm v0.2.16
+[1m[92m  Downloaded[0m log v0.4.33
+[1m[92m  Downloaded[0m loop9 v0.1.5
+[1m[92m  Downloaded[0m tiff v0.11.3
+[1m[92m  Downloaded[0m zune-inflate v0.2.54
+[1m[92m  Downloaded[0m miniz_oxide v0.8.9
+[1m[92m  Downloaded[0m notify-types v2.1.0
+[1m[92m  Downloaded[0m num-integer v0.1.46
+[1m[92m  Downloaded[0m rand v0.10.2
+[1m[92m  Downloaded[0m smithay-client-toolkit v0.19.2
+[1m[92m  Downloaded[0m typenum v1.20.1
+[1m[92m  Downloaded[0m inotify-sys v0.1.8
+[1m[92m  Downloaded[0m memoffset v0.6.5
+[1m[92m  Downloaded[0m num-bigint v0.4.8
+[1m[92m  Downloaded[0m pxfm v0.1.30
+[1m[92m  Downloaded[0m raw-cpuid v11.6.0
+[1m[92m  Downloaded[0m regex v1.13.0
+[1m[92m  Downloaded[0m once_cell v1.21.4
+[1m[92m  Downloaded[0m oorandom v11.1.5
+[1m[92m  Downloaded[0m plotters-backend v0.3.7
+[1m[92m  Downloaded[0m rancor v0.1.2
+[1m[92m  Downloaded[0m rayon v1.12.0
+[1m[92m  Downloaded[0m serde_json v1.0.150
+[1m[92m  Downloaded[0m smithay-client-toolkit v0.20.0
+[1m[92m  Downloaded[0m xkbcommon-dl v0.4.2
+[1m[92m  Downloaded[0m xml-rs v0.8.28
+[1m[92m  Downloaded[0m encoding_rs v0.8.35
+[1m[92m  Downloaded[0m munge_macro v0.4.7
+[1m[92m  Downloaded[0m ptr_meta v0.3.1
+[1m[92m  Downloaded[0m qoi v0.4.1
+[1m[92m  Downloaded[0m rkyv v0.8.17
+[1m[92m  Downloaded[0m wayland-protocols v0.32.13
+[1m[92m  Downloaded[0m memmap2 v0.9.11
+[1m[92m  Downloaded[0m new_debug_unreachable v1.0.6
+[1m[92m  Downloaded[0m xkbcommon v0.9.0
+[1m[92m  Downloaded[0m zune-jpeg v0.5.15
+[1m[92m  Downloaded[0m input v0.10.0
+[1m[92m  Downloaded[0m moxcms v0.8.1
+[1m[92m  Downloaded[0m libc v0.2.186
+[1m[92m  Downloaded[0m winit-wayland v0.31.0-beta.2
+[1m[92m  Downloaded[0m tiny-skia v0.11.4
+[1m[92m  Downloaded[0m hashbrown v0.17.1
+[1m[92m  Downloaded[0m ttf-parser v0.25.1
+[1m[92m  Downloaded[0m rand v0.8.7
+[1m[92m  Downloaded[0m x11 v2.21.0
+[1m[92m  Downloaded[0m nom v8.0.0
+[1m[92m  Downloaded[0m quick-xml v0.41.0
+[1m[92m  Downloaded[0m mio v1.2.2
+[1m[92m  Downloaded[0m zerocopy v0.8.54
+[1m[92m  Downloaded[0m syn v2.0.119
+[1m[92m  Downloaded[0m winnow v1.0.4
+[1m[92m  Downloaded[0m image v0.25.10
+[1m[92m  Downloaded[0m regex-syntax v0.8.11
+[1m[92m  Downloaded[0m rustix v0.38.44
+[1m[92m  Downloaded[0m rustix v1.1.4
+[1m[92m  Downloaded[0m winit v0.31.0-beta.2
+[1m[92m  Downloaded[0m linux-raw-sys v0.4.15
+[1m[92m  Downloaded[0m tracing v0.1.44
+[1m[92m  Downloaded[0m regex-automata v0.4.15
+[1m[92m  Downloaded[0m winit v0.30.13
+[1m[92m  Downloaded[0m input-sys v1.19.0
+[1m[92m  Downloaded[0m linux-raw-sys v0.12.1
+[1m[92m  Downloaded[0m rav1e v0.8.1
+[1m[92m  Downloaded[0m linux-raw-sys v0.9.4
+[1m[92m  Downloaded[0m khronos v0.1.2
+[2m│[0m   [1m[34m└──[0m quick-xml v0.41.0 [33m[2m(*)[39m[22m
+[2m│[0m   [2m [0m   [2m [0m   [2m├──[0m quick-xml v0.41.0
+[1m[92m   Compiling[0m proc-macro2 v1.0.106
+[1m[92m   Compiling[0m unicode-ident v1.0.24
+[1m[92m   Compiling[0m quote v1.0.46
+[1m[92m   Compiling[0m libc v0.2.186
+[1m[92m    Checking[0m cfg-if v1.0.4
+[1m[92m   Compiling[0m autocfg v1.5.1
+[1m[92m    Checking[0m bitflags v2.13.0
+[1m[92m   Compiling[0m pkg-config v0.3.33
+[1m[92m    Checking[0m log v0.4.33
+[1m[92m   Compiling[0m find-msvc-tools v0.1.9
+[1m[92m   Compiling[0m shlex v2.0.1
+[1m[92m   Compiling[0m cc v1.2.67
+[1m[92m   Compiling[0m rustix v1.1.4
+[1m[92m   Compiling[0m syn v2.0.119
+[1m[92m    Checking[0m linux-raw-sys v0.12.1
+[1m[92m    Checking[0m once_cell v1.21.4
+[1m[92m   Compiling[0m memoffset v0.9.1
+[1m[92m    Checking[0m libloading v0.8.9
+[1m[92m    Checking[0m dlib v0.5.3
+[1m[92m   Compiling[0m wayland-sys v0.31.11
+[1m[92m   Compiling[0m num-traits v0.2.19
+[1m[92m   Compiling[0m memchr v2.8.3
+[1m[92m    Checking[0m smallvec v1.15.2
+[1m[92m   Compiling[0m wayland-backend v0.3.15
+[1m[92m   Compiling[0m version_check v0.9.5
+[1m[92m   Compiling[0m quick-xml v0.41.0
+[1m[92m   Compiling[0m zerocopy v0.8.54
+[1m[92m    Checking[0m downcast-rs v1.2.1
+[1m[92m    Checking[0m scoped-tls v1.0.1
+[1m[92m   Compiling[0m wayland-scanner v0.31.10 (https://github.com/Smithay/wayland-rs.git?rev=d07c4f91f28b42e5a485823ffd9d8d5a210b1053#d07c4f91)
+[1m[92m   Compiling[0m cfg_aliases v0.2.1
+[1m[92m   Compiling[0m wayland-client v0.31.14
+[1m[92m   Compiling[0m serde_core v1.0.228
+[1m[92m   Compiling[0m crossbeam-utils v0.8.22
+[1m[92m    Checking[0m slab v0.4.12
+[1m[92m   Compiling[0m thiserror v2.0.18
+[1m[92m   Compiling[0m crossbeam-epoch v0.9.20
+[1m[92m   Compiling[0m zerocopy-derive v0.8.54
+[1m[92m   Compiling[0m bytemuck_derive v1.11.0
+[1m[92m    Checking[0m polling v3.11.0
+[1m[92m   Compiling[0m tracing-attributes v0.1.31
+[1m[92m    Checking[0m bytemuck v1.25.1
+[1m[92m   Compiling[0m thiserror-impl v2.0.18
+[1m[91merror[E0433][0m[1m: cannot find `CWlMessage` in `protocol`[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/lib.rs:219:9
+    [1m[94m|[0m
+[1m[94m219[0m [1m[94m|[0m         wayland_scanner::generate_interfaces!("wayland.xml");
+    [1m[94m|[0m         [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mcould not find `CWlMessage` in `protocol`[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_interfaces` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: a struct with a similar name exists
+    [1m[94m|[0m
+[1m[94m219[0m [91m- [0m        [91mwayland_scanner::generate_interfaces!("wayland.xml")[0m;
+[1m[94m219[0m [92m+ [0m        [92mMessage[0m;
+    [1m[94m|[0m
+
+[1m[91merror[E0433][0m[1m: cannot find `CWlInterface` in `protocol`[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/lib.rs:219:9
+    [1m[94m|[0m
+[1m[94m219[0m [1m[94m|[0m         wayland_scanner::generate_interfaces!("wayland.xml");
+    [1m[94m|[0m         [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mcould not find `CWlInterface` in `protocol`[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_interfaces` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: a struct with a similar name exists
+    [1m[94m|[0m
+[1m[94m219[0m [91m- [0m        [91mwayland_scanner::generate_interfaces!("wayland.xml")[0m;
+[1m[94m219[0m [92m+ [0m        [92mInterface[0m;
+    [1m[94m|[0m
+
+[1m[92m    Checking[0m wayland-server v0.31.13
+[1m[91merror[E0433][0m[1m: cannot find `CWlMessage` in `protocol`[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-server-0.31.13/src/lib.rs:121:9
+    [1m[94m|[0m
+[1m[94m121[0m [1m[94m|[0m         wayland_scanner::generate_interfaces!("wayland.xml");
+    [1m[94m|[0m         [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mcould not find `CWlMessage` in `protocol`[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_interfaces` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: a struct with a similar name exists
+    [1m[94m|[0m
+[1m[94m121[0m [91m- [0m        [91mwayland_scanner::generate_interfaces!("wayland.xml")[0m;
+[1m[94m121[0m [92m+ [0m        [92mMessage[0m;
+    [1m[94m|[0m
+
+[1m[91merror[E0433][0m[1m: cannot find `CWlInterface` in `protocol`[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-server-0.31.13/src/lib.rs:121:9
+    [1m[94m|[0m
+[1m[94m121[0m [1m[94m|[0m         wayland_scanner::generate_interfaces!("wayland.xml");
+    [1m[94m|[0m         [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mcould not find `CWlInterface` in `protocol`[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_interfaces` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: a struct with a similar name exists
+    [1m[94m|[0m
+[1m[94m121[0m [91m- [0m        [91mwayland_scanner::generate_interfaces!("wayland.xml")[0m;
+[1m[94m121[0m [92m+ [0m        [92mInterface[0m;
+    [1m[94m|[0m
+
+[1m[92m   Compiling[0m nix v0.31.3
+[1m[91merror[E0425][0m[1m: cannot find type `CWlInterface` in module `wayland_backend::protocol`[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/lib.rs:219:9
+    [1m[94m|[0m
+[1m[94m219[0m [1m[94m|[0m         wayland_scanner::generate_interfaces!("wayland.xml");
+    [1m[94m|[0m         [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+    [1m[94m|[0m
+   [1m[94m::: [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-backend-0.3.15/src/protocol.rs:144:1
+    [1m[94m|[0m
+[1m[94m144[0m [1m[94m|[0m pub struct Interface {
+    [1m[94m|[0m [1m[94m--------------------[0m [1m[94msimilarly named struct `Interface` defined here[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_interfaces` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: a struct with a similar name exists
+    [1m[94m|[0m
+[1m[94m219[0m [91m- [0m        [91mwayland_scanner::generate_interfaces!("wayland.xml")[0m;
+[1m[94m219[0m [92m+ [0m        [92mInterface[0m;
+    [1m[94m|[0m
+
+[1m[91merror[E0425][0m[1m: cannot find type `CWlMessage` in module `wayland_backend::protocol`[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/lib.rs:219:9
+    [1m[94m|[0m
+[1m[94m219[0m [1m[94m|[0m         wayland_scanner::generate_interfaces!("wayland.xml");
+    [1m[94m|[0m         [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+    [1m[94m|[0m
+   [1m[94m::: [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-backend-0.3.15/src/protocol.rs:226:1
+    [1m[94m|[0m
+[1m[94m226[0m [1m[94m|[0m pub struct Message<Id, Fd> {
+    [1m[94m|[0m [1m[94m--------------------------[0m [1m[94msimilarly named struct `Message` defined here[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_interfaces` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: a struct with a similar name exists
+    [1m[94m|[0m
+[1m[94m219[0m [91m- [0m        [91mwayland_scanner::generate_interfaces!("wayland.xml")[0m;
+[1m[94m219[0m [92m+ [0m        [92mMessage[0m;
+    [1m[94m|[0m
+
+[1m[92m    Checking[0m tracing-core v0.1.36
+[1m[91merror[E0046][0m[1m: not all trait items implemented, missing: `data`, `send_request`, `send_constructor`[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/lib.rs:221:5
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m|[0m       wayland_scanner::generate_client_code!("wayland.xml");
+    [1m[94m|[0m       [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mmissing `data`, `send_request`, `send_constructor` in implementation[0m
+[1m[94m...[0m
+[1m[94m250[0m [1m[94m|[0m       fn data<U: Send + Sync + 'static>(&self) -> Option<&U>;
+    [1m[94m|[0m       [1m[94m-------------------------------------------------------[0m [1m[94m`data` from trait[0m
+[1m[94m...[0m
+[1m[94m280[0m [1m[94m|[0m       fn send_request(&self, req: Self::Request<'_>) -> Result<(), InvalidId>;
+    [1m[94m|[0m       [1m[94m------------------------------------------------------------------------[0m [1m[94m`send_request` from trait[0m
+[1m[94m...[0m
+[1m[94m286[0m [1m[94m|[0m [1m[94m/[0m     fn send_constructor<I: Proxy>(
+[1m[94m287[0m [1m[94m|[0m [1m[94m|[0m         &self,
+[1m[94m288[0m [1m[94m|[0m [1m[94m|[0m         req: Self::Request<'_>,
+[1m[94m289[0m [1m[94m|[0m [1m[94m|[0m         data: Arc<dyn ObjectData>,
+[1m[94m290[0m [1m[94m|[0m [1m[94m|[0m     ) -> Result<I, InvalidId>;
+    [1m[94m|[0m [1m[94m|______________________________-[0m [1m[94m`send_constructor` from trait[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_client_code` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+[1m[91merror[E0277][0m[1m: the trait bound `U: Dispatch<_, State>` is not satisfied[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/globals.rs:197:50
+    [1m[94m|[0m
+[1m[94m197[0m [1m[94m|[0m         Ok(self.registry.bind(name, version, qh, udata))
+    [1m[94m|[0m                          [1m[94m----[0m                    [1m[91m^^^^^[0m [1m[91mthe trait `Dispatch<_, State>` is not implemented for `U`[0m
+    [1m[94m|[0m                          [1m[94m|[0m
+    [1m[94m|[0m                          [1m[94mrequired by a bound introduced by this call[0m
+    [1m[94m|[0m
+[1m[96mhelp[0m: this trait has no implementations, consider adding one
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/event_queue.rs:95:1
+    [1m[94m|[0m
+[1m[94m 95[0m [1m[94m|[0m pub trait Dispatch<I, UserData, State = Self>
+    [1m[94m|[0m [1m[96m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+[1m[92mnote[0m: required by a bound in `WlRegistry::bind`
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/lib.rs:221:5
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m|[0m     wayland_scanner::generate_client_code!("wayland.xml");
+    [1m[94m|[0m     [1m[92m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[92mrequired by this bound in `WlRegistry::bind`[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_client_code` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+[1m[91merror[E0560][0m[1m: struct `Interface` has no field named `c_interface`[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/lib.rs:219:9
+    [1m[94m|[0m
+[1m[94m219[0m [1m[94m|[0m         wayland_scanner::generate_interfaces!("wayland.xml");
+    [1m[94m|[0m         [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91m`Interface` does not have this field[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: all struct fields are already assigned
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_interfaces` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+[1m[91merror[E0277][0m[1m: the trait bound `D: Dispatch<WlCallback, U>` is not satisfied[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/lib.rs:221:5
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m|[0m     wayland_scanner::generate_client_code!("wayland.xml");
+    [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `Dispatch<WlCallback, U>` is not implemented for `D`[0m
+    [1m[94m|[0m
+[1m[92mnote[0m: required by a bound in `QueueHandle::<State>::make_data`
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/event_queue.rs:616:16
+    [1m[94m|[0m
+[1m[94m611[0m [1m[94m|[0m     pub fn make_data<I: Proxy + 'static, U: Send + Sync + 'static>(
+    [1m[94m|[0m            [1m[94m---------[0m [1m[94mrequired by a bound in this associated function[0m
+[1m[94m...[0m
+[1m[94m616[0m [1m[94m|[0m         State: Dispatch<I, U, State>,
+    [1m[94m|[0m                [1m[92m^^^^^^^^^^^^^^^^^^^^^[0m [1m[92mrequired by this bound in `QueueHandle::<State>::make_data`[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_client_code` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: consider further restricting type parameter `D` with trait `Dispatch`
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m| [0m    wayland_scanner::generate_client_code!("wayland.xml")[92m, D: event_queue::Dispatch<protocol::wl_callback::WlCallback, U>[0m;
+    [1m[94m|[0m                                                          [92m++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++[0m
+
+[1m[91merror[E0277][0m[1m: the trait bound `D: Dispatch<WlRegistry, U>` is not satisfied[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/lib.rs:221:5
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m|[0m     wayland_scanner::generate_client_code!("wayland.xml");
+    [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `Dispatch<WlRegistry, U>` is not implemented for `D`[0m
+    [1m[94m|[0m
+[1m[92mnote[0m: required by a bound in `QueueHandle::<State>::make_data`
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/event_queue.rs:616:16
+    [1m[94m|[0m
+[1m[94m611[0m [1m[94m|[0m     pub fn make_data<I: Proxy + 'static, U: Send + Sync + 'static>(
+    [1m[94m|[0m            [1m[94m---------[0m [1m[94mrequired by a bound in this associated function[0m
+[1m[94m...[0m
+[1m[94m616[0m [1m[94m|[0m         State: Dispatch<I, U, State>,
+    [1m[94m|[0m                [1m[92m^^^^^^^^^^^^^^^^^^^^^[0m [1m[92mrequired by this bound in `QueueHandle::<State>::make_data`[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_client_code` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: consider further restricting type parameter `D` with trait `Dispatch`
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m| [0m    wayland_scanner::generate_client_code!("wayland.xml")[92m, D: event_queue::Dispatch<protocol::wl_registry::WlRegistry, U>[0m;
+    [1m[94m|[0m                                                          [92m++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++[0m
+
+[1m[91merror[E0277][0m[1m: the trait bound `D: Dispatch<I, U>` is not satisfied[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/lib.rs:221:5
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m|[0m     wayland_scanner::generate_client_code!("wayland.xml");
+    [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `Dispatch<I, U>` is not implemented for `D`[0m
+    [1m[94m|[0m
+[1m[92mnote[0m: required by a bound in `QueueHandle::<State>::make_data`
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/event_queue.rs:616:16
+    [1m[94m|[0m
+[1m[94m611[0m [1m[94m|[0m     pub fn make_data<I: Proxy + 'static, U: Send + Sync + 'static>(
+    [1m[94m|[0m            [1m[94m---------[0m [1m[94mrequired by a bound in this associated function[0m
+[1m[94m...[0m
+[1m[94m616[0m [1m[94m|[0m         State: Dispatch<I, U, State>,
+    [1m[94m|[0m                [1m[92m^^^^^^^^^^^^^^^^^^^^^[0m [1m[92mrequired by this bound in `QueueHandle::<State>::make_data`[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_client_code` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: consider further restricting type parameter `D` with trait `Dispatch`
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m| [0m    wayland_scanner::generate_client_code!("wayland.xml")[92m, D: event_queue::Dispatch<I, U>[0m;
+    [1m[94m|[0m                                                          [92m++++++++++++++++++++++++++++++++[0m
+
+[1m[91merror[E0277][0m[1m: the trait bound `D: Dispatch<WlSurface, U>` is not satisfied[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/lib.rs:221:5
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m|[0m     wayland_scanner::generate_client_code!("wayland.xml");
+    [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `Dispatch<WlSurface, U>` is not implemented for `D`[0m
+    [1m[94m|[0m
+[1m[92mnote[0m: required by a bound in `QueueHandle::<State>::make_data`
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/event_queue.rs:616:16
+    [1m[94m|[0m
+[1m[94m611[0m [1m[94m|[0m     pub fn make_data<I: Proxy + 'static, U: Send + Sync + 'static>(
+    [1m[94m|[0m            [1m[94m---------[0m [1m[94mrequired by a bound in this associated function[0m
+[1m[94m...[0m
+[1m[94m616[0m [1m[94m|[0m         State: Dispatch<I, U, State>,
+    [1m[94m|[0m                [1m[92m^^^^^^^^^^^^^^^^^^^^^[0m [1m[92mrequired by this bound in `QueueHandle::<State>::make_data`[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_client_code` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: consider further restricting type parameter `D` with trait `Dispatch`
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m| [0m    wayland_scanner::generate_client_code!("wayland.xml")[92m, D: event_queue::Dispatch<protocol::wl_surface::WlSurface, U>[0m;
+    [1m[94m|[0m                                                          [92m++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++[0m
+
+[1m[91merror[E0277][0m[1m: the trait bound `D: Dispatch<WlRegion, U>` is not satisfied[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/lib.rs:221:5
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m|[0m     wayland_scanner::generate_client_code!("wayland.xml");
+    [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `Dispatch<WlRegion, U>` is not implemented for `D`[0m
+    [1m[94m|[0m
+[1m[92mnote[0m: required by a bound in `QueueHandle::<State>::make_data`
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/event_queue.rs:616:16
+    [1m[94m|[0m
+[1m[94m611[0m [1m[94m|[0m     pub fn make_data<I: Proxy + 'static, U: Send + Sync + 'static>(
+    [1m[94m|[0m            [1m[94m---------[0m [1m[94mrequired by a bound in this associated function[0m
+[1m[94m...[0m
+[1m[94m616[0m [1m[94m|[0m         State: Dispatch<I, U, State>,
+    [1m[94m|[0m                [1m[92m^^^^^^^^^^^^^^^^^^^^^[0m [1m[92mrequired by this bound in `QueueHandle::<State>::make_data`[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_client_code` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: consider further restricting type parameter `D` with trait `Dispatch`
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m| [0m    wayland_scanner::generate_client_code!("wayland.xml")[92m, D: event_queue::Dispatch<protocol::wl_region::WlRegion, U>[0m;
+    [1m[94m|[0m                                                          [92m++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++[0m
+
+[1m[91merror[E0277][0m[1m: the trait bound `D: Dispatch<WlBuffer, U>` is not satisfied[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/lib.rs:221:5
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m|[0m     wayland_scanner::generate_client_code!("wayland.xml");
+    [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `Dispatch<WlBuffer, U>` is not implemented for `D`[0m
+    [1m[94m|[0m
+[1m[92mnote[0m: required by a bound in `QueueHandle::<State>::make_data`
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/event_queue.rs:616:16
+    [1m[94m|[0m
+[1m[94m611[0m [1m[94m|[0m     pub fn make_data<I: Proxy + 'static, U: Send + Sync + 'static>(
+    [1m[94m|[0m            [1m[94m---------[0m [1m[94mrequired by a bound in this associated function[0m
+[1m[94m...[0m
+[1m[94m616[0m [1m[94m|[0m         State: Dispatch<I, U, State>,
+    [1m[94m|[0m                [1m[92m^^^^^^^^^^^^^^^^^^^^^[0m [1m[92mrequired by this bound in `QueueHandle::<State>::make_data`[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_client_code` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: consider further restricting type parameter `D` with trait `Dispatch`
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m| [0m    wayland_scanner::generate_client_code!("wayland.xml")[92m, D: event_queue::Dispatch<protocol::wl_buffer::WlBuffer, U>[0m;
+    [1m[94m|[0m                                                          [92m++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++[0m
+
+[1m[91merror[E0277][0m[1m: the trait bound `D: Dispatch<WlShmPool, U>` is not satisfied[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/lib.rs:221:5
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m|[0m     wayland_scanner::generate_client_code!("wayland.xml");
+    [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `Dispatch<WlShmPool, U>` is not implemented for `D`[0m
+    [1m[94m|[0m
+[1m[92mnote[0m: required by a bound in `QueueHandle::<State>::make_data`
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/event_queue.rs:616:16
+    [1m[94m|[0m
+[1m[94m611[0m [1m[94m|[0m     pub fn make_data<I: Proxy + 'static, U: Send + Sync + 'static>(
+    [1m[94m|[0m            [1m[94m---------[0m [1m[94mrequired by a bound in this associated function[0m
+[1m[94m...[0m
+[1m[94m616[0m [1m[94m|[0m         State: Dispatch<I, U, State>,
+    [1m[94m|[0m                [1m[92m^^^^^^^^^^^^^^^^^^^^^[0m [1m[92mrequired by this bound in `QueueHandle::<State>::make_data`[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_client_code` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: consider further restricting type parameter `D` with trait `Dispatch`
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m| [0m    wayland_scanner::generate_client_code!("wayland.xml")[92m, D: event_queue::Dispatch<protocol::wl_shm_pool::WlShmPool, U>[0m;
+    [1m[94m|[0m                                                          [92m+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++[0m
+
+[1m[91merror[E0277][0m[1m: the trait bound `D: Dispatch<WlDataSource, U>` is not satisfied[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/lib.rs:221:5
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m|[0m     wayland_scanner::generate_client_code!("wayland.xml");
+    [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `Dispatch<WlDataSource, U>` is not implemented for `D`[0m
+    [1m[94m|[0m
+[1m[92mnote[0m: required by a bound in `QueueHandle::<State>::make_data`
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/event_queue.rs:616:16
+    [1m[94m|[0m
+[1m[94m611[0m [1m[94m|[0m     pub fn make_data<I: Proxy + 'static, U: Send + Sync + 'static>(
+    [1m[94m|[0m            [1m[94m---------[0m [1m[94mrequired by a bound in this associated function[0m
+[1m[94m...[0m
+[1m[94m616[0m [1m[94m|[0m         State: Dispatch<I, U, State>,
+    [1m[94m|[0m                [1m[92m^^^^^^^^^^^^^^^^^^^^^[0m [1m[92mrequired by this bound in `QueueHandle::<State>::make_data`[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_client_code` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: consider further restricting type parameter `D` with trait `Dispatch`
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m| [0m    wayland_scanner::generate_client_code!("wayland.xml")[92m, D: event_queue::Dispatch<protocol::wl_data_source::WlDataSource, U>[0m;
+    [1m[94m|[0m                                                          [92m+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++[0m
+
+[1m[91merror[E0277][0m[1m: the trait bound `D: Dispatch<WlDataDevice, U>` is not satisfied[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/lib.rs:221:5
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m|[0m     wayland_scanner::generate_client_code!("wayland.xml");
+    [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `Dispatch<WlDataDevice, U>` is not implemented for `D`[0m
+    [1m[94m|[0m
+[1m[92mnote[0m: required by a bound in `QueueHandle::<State>::make_data`
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/event_queue.rs:616:16
+    [1m[94m|[0m
+[1m[94m611[0m [1m[94m|[0m     pub fn make_data<I: Proxy + 'static, U: Send + Sync + 'static>(
+    [1m[94m|[0m            [1m[94m---------[0m [1m[94mrequired by a bound in this associated function[0m
+[1m[94m...[0m
+[1m[94m616[0m [1m[94m|[0m         State: Dispatch<I, U, State>,
+    [1m[94m|[0m                [1m[92m^^^^^^^^^^^^^^^^^^^^^[0m [1m[92mrequired by this bound in `QueueHandle::<State>::make_data`[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_client_code` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: consider further restricting type parameter `D` with trait `Dispatch`
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m| [0m    wayland_scanner::generate_client_code!("wayland.xml")[92m, D: event_queue::Dispatch<protocol::wl_data_device::WlDataDevice, U>[0m;
+    [1m[94m|[0m                                                          [92m+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++[0m
+
+[1m[91merror[E0277][0m[1m: the trait bound `D: Dispatch<WlShellSurface, U>` is not satisfied[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/lib.rs:221:5
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m|[0m     wayland_scanner::generate_client_code!("wayland.xml");
+    [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `Dispatch<WlShellSurface, U>` is not implemented for `D`[0m
+    [1m[94m|[0m
+[1m[92mnote[0m: required by a bound in `QueueHandle::<State>::make_data`
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/event_queue.rs:616:16
+    [1m[94m|[0m
+[1m[94m611[0m [1m[94m|[0m     pub fn make_data<I: Proxy + 'static, U: Send + Sync + 'static>(
+    [1m[94m|[0m            [1m[94m---------[0m [1m[94mrequired by a bound in this associated function[0m
+[1m[94m...[0m
+[1m[94m616[0m [1m[94m|[0m         State: Dispatch<I, U, State>,
+    [1m[94m|[0m                [1m[92m^^^^^^^^^^^^^^^^^^^^^[0m [1m[92mrequired by this bound in `QueueHandle::<State>::make_data`[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_client_code` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: consider further restricting type parameter `D` with trait `Dispatch`
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m| [0m    wayland_scanner::generate_client_code!("wayland.xml")[92m, D: event_queue::Dispatch<protocol::wl_shell_surface::WlShellSurface, U>[0m;
+    [1m[94m|[0m                                                          [92m+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++[0m
+
+[1m[92m    Checking[0m cursor-icon v1.2.0
+[1m[91merror[E0277][0m[1m: the trait bound `D: Dispatch<WlPointer, U>` is not satisfied[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/lib.rs:221:5
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m|[0m     wayland_scanner::generate_client_code!("wayland.xml");
+    [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `Dispatch<WlPointer, U>` is not implemented for `D`[0m
+    [1m[94m|[0m
+[1m[92mnote[0m: required by a bound in `QueueHandle::<State>::make_data`
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/event_queue.rs:616:16
+    [1m[94m|[0m
+[1m[94m611[0m [1m[94m|[0m     pub fn make_data<I: Proxy + 'static, U: Send + Sync + 'static>(
+    [1m[94m|[0m            [1m[94m---------[0m [1m[94mrequired by a bound in this associated function[0m
+[1m[94m...[0m
+[1m[94m616[0m [1m[94m|[0m         State: Dispatch<I, U, State>,
+    [1m[94m|[0m                [1m[92m^^^^^^^^^^^^^^^^^^^^^[0m [1m[92mrequired by this bound in `QueueHandle::<State>::make_data`[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_client_code` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: consider further restricting type parameter `D` with trait `Dispatch`
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m| [0m    wayland_scanner::generate_client_code!("wayland.xml")[92m, D: event_queue::Dispatch<protocol::wl_pointer::WlPointer, U>[0m;
+    [1m[94m|[0m                                                          [92m++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++[0m
+
+[1m[91merror[E0277][0m[1m: the trait bound `D: Dispatch<WlKeyboard, U>` is not satisfied[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/lib.rs:221:5
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m|[0m     wayland_scanner::generate_client_code!("wayland.xml");
+    [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `Dispatch<WlKeyboard, U>` is not implemented for `D`[0m
+    [1m[94m|[0m
+[1m[92mnote[0m: required by a bound in `QueueHandle::<State>::make_data`
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/event_queue.rs:616:16
+    [1m[94m|[0m
+[1m[94m611[0m [1m[94m|[0m     pub fn make_data<I: Proxy + 'static, U: Send + Sync + 'static>(
+    [1m[94m|[0m            [1m[94m---------[0m [1m[94mrequired by a bound in this associated function[0m
+[1m[94m...[0m
+[1m[94m616[0m [1m[94m|[0m         State: Dispatch<I, U, State>,
+    [1m[94m|[0m                [1m[92m^^^^^^^^^^^^^^^^^^^^^[0m [1m[92mrequired by this bound in `QueueHandle::<State>::make_data`[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_client_code` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: consider further restricting type parameter `D` with trait `Dispatch`
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m| [0m    wayland_scanner::generate_client_code!("wayland.xml")[92m, D: event_queue::Dispatch<protocol::wl_keyboard::WlKeyboard, U>[0m;
+    [1m[94m|[0m                                                          [92m++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++[0m
+
+[1m[91merror[E0277][0m[1m: the trait bound `D: Dispatch<WlTouch, U>` is not satisfied[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/lib.rs:221:5
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m|[0m     wayland_scanner::generate_client_code!("wayland.xml");
+    [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `Dispatch<WlTouch, U>` is not implemented for `D`[0m
+    [1m[94m|[0m
+[1m[92mnote[0m: required by a bound in `QueueHandle::<State>::make_data`
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/event_queue.rs:616:16
+    [1m[94m|[0m
+[1m[94m611[0m [1m[94m|[0m     pub fn make_data<I: Proxy + 'static, U: Send + Sync + 'static>(
+    [1m[94m|[0m            [1m[94m---------[0m [1m[94mrequired by a bound in this associated function[0m
+[1m[94m...[0m
+[1m[94m616[0m [1m[94m|[0m         State: Dispatch<I, U, State>,
+    [1m[94m|[0m                [1m[92m^^^^^^^^^^^^^^^^^^^^^[0m [1m[92mrequired by this bound in `QueueHandle::<State>::make_data`[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_client_code` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: consider further restricting type parameter `D` with trait `Dispatch`
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m| [0m    wayland_scanner::generate_client_code!("wayland.xml")[92m, D: event_queue::Dispatch<protocol::wl_touch::WlTouch, U>[0m;
+    [1m[94m|[0m                                                          [92m++++++++++++++++++++++++++++++++++++++++++++++++++++++++++[0m
+
+[1m[92m    Checking[0m xkeysym v0.2.1
+[1m[91merror[E0277][0m[1m: the trait bound `D: Dispatch<WlSubsurface, U>` is not satisfied[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/lib.rs:221:5
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m|[0m     wayland_scanner::generate_client_code!("wayland.xml");
+    [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mthe trait `Dispatch<WlSubsurface, U>` is not implemented for `D`[0m
+    [1m[94m|[0m
+[1m[92mnote[0m: required by a bound in `QueueHandle::<State>::make_data`
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-client-0.31.14/src/event_queue.rs:616:16
+    [1m[94m|[0m
+[1m[94m611[0m [1m[94m|[0m     pub fn make_data<I: Proxy + 'static, U: Send + Sync + 'static>(
+    [1m[94m|[0m            [1m[94m---------[0m [1m[94mrequired by a bound in this associated function[0m
+[1m[94m...[0m
+[1m[94m616[0m [1m[94m|[0m         State: Dispatch<I, U, State>,
+    [1m[94m|[0m                [1m[92m^^^^^^^^^^^^^^^^^^^^^[0m [1m[92mrequired by this bound in `QueueHandle::<State>::make_data`[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_client_code` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: consider further restricting type parameter `D` with trait `Dispatch`
+    [1m[94m|[0m
+[1m[94m221[0m [1m[94m| [0m    wayland_scanner::generate_client_code!("wayland.xml")[92m, D: event_queue::Dispatch<protocol::wl_subsurface::WlSubsurface, U>[0m;
+    [1m[94m|[0m                                                          [92m++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++[0m
+
+[1m[91merror[E0425][0m[1m: cannot find type `CWlInterface` in module `wayland_backend::protocol`[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-server-0.31.13/src/lib.rs:121:9
+    [1m[94m|[0m
+[1m[94m121[0m [1m[94m|[0m         wayland_scanner::generate_interfaces!("wayland.xml");
+    [1m[94m|[0m         [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+    [1m[94m|[0m
+   [1m[94m::: [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-backend-0.3.15/src/protocol.rs:144:1
+    [1m[94m|[0m
+[1m[94m144[0m [1m[94m|[0m pub struct Interface {
+    [1m[94m|[0m [1m[94m--------------------[0m [1m[94msimilarly named struct `Interface` defined here[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_interfaces` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: a struct with a similar name exists
+    [1m[94m|[0m
+[1m[94m121[0m [91m- [0m        [91mwayland_scanner::generate_interfaces!("wayland.xml")[0m;
+[1m[94m121[0m [92m+ [0m        [92mInterface[0m;
+    [1m[94m|[0m
+
+[1m[91merror[E0425][0m[1m: cannot find type `CWlMessage` in module `wayland_backend::protocol`[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-server-0.31.13/src/lib.rs:121:9
+    [1m[94m|[0m
+[1m[94m121[0m [1m[94m|[0m         wayland_scanner::generate_interfaces!("wayland.xml");
+    [1m[94m|[0m         [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m
+    [1m[94m|[0m
+   [1m[94m::: [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-backend-0.3.15/src/protocol.rs:226:1
+    [1m[94m|[0m
+[1m[94m226[0m [1m[94m|[0m pub struct Message<Id, Fd> {
+    [1m[94m|[0m [1m[94m--------------------------[0m [1m[94msimilarly named struct `Message` defined here[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_interfaces` (in Nightly builds, run with -Z macro-backtrace for more info)
+[1m[96mhelp[0m: a struct with a similar name exists
+    [1m[94m|[0m
+[1m[94m121[0m [91m- [0m        [91mwayland_scanner::generate_interfaces!("wayland.xml")[0m;
+[1m[94m121[0m [92m+ [0m        [92mMessage[0m;
+    [1m[94m|[0m
+
+[1m[91merror[E0046][0m[1m: not all trait items implemented, missing: `data`, `send_event`[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-server-0.31.13/src/lib.rs:123:5
+    [1m[94m|[0m
+[1m[94m123[0m [1m[94m|[0m     wayland_scanner::generate_server_code!("wayland.xml");
+    [1m[94m|[0m     [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91mmissing `data`, `send_event` in implementation[0m
+[1m[94m...[0m
+[1m[94m173[0m [1m[94m|[0m     fn data<U: 'static>(&self) -> Option<&U>;
+    [1m[94m|[0m     [1m[94m-----------------------------------------[0m [1m[94m`data` from trait[0m
+[1m[94m...[0m
+[1m[94m195[0m [1m[94m|[0m     fn send_event(&self, evt: Self::Event<'_>) -> Result<(), InvalidId>;
+    [1m[94m|[0m     [1m[94m--------------------------------------------------------------------[0m [1m[94m`send_event` from trait[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_server_code` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+[1m[91merror[E0560][0m[1m: struct `Interface` has no field named `c_interface`[0m
+   [1m[94m--> [0m/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-server-0.31.13/src/lib.rs:121:9
+    [1m[94m|[0m
+[1m[94m121[0m [1m[94m|[0m         wayland_scanner::generate_interfaces!("wayland.xml");
+    [1m[94m|[0m         [1m[91m^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^[0m [1m[91m`Interface` does not have this field[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: all struct fields are already assigned
+    [1m[94m= [0m[1mnote[0m: this error originates in the macro `wayland_scanner::generate_interfaces` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+[1mSome errors have detailed explanations: E0046, E0277, E0425, E0433, E0560.[0m
+[1mFor more information about an error, try `rustc --explain E0046`.[0m
+[1m[91merror[0m: could not compile `wayland-client` (lib) due to 21 previous errors
+[1m[33mwarning[0m: build failed, waiting for other jobs to finish...
+[1mSome errors have detailed explanations: E0046, E0425, E0433, E0560.[0m
+[1m[91merror[0m: could not compile `wayland-server` (lib) due to 6 previous errors
