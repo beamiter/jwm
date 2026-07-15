@@ -1,4 +1,4 @@
-use log::error;
+use xbar_core::UserAction;
 
 use crate::state::AppState;
 use crate::theme::icons;
@@ -23,7 +23,8 @@ impl BarModule for AudioModule {
     }
 
     fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
-        let (volume_icon, volume) = if let Some(device) = state.get_master_audio_device() {
+        let audio_device = state.get_master_audio_device().cloned();
+        let (volume_icon, volume) = if let Some(device) = &audio_device {
             let icon = if device.is_muted || device.volume == 0 {
                 icons::VOLUME_MUTED
             } else if device.volume < 30 {
@@ -60,29 +61,27 @@ impl BarModule for AudioModule {
                     .sum::<f32>()
             });
             if scroll > 0.0 {
-                if let Some(device_name) = state.get_master_audio_device().map(|d| d.name.clone()) {
-                    if let Err(e) = state.audio_manager.adjust_volume(&device_name, 5) {
-                        error!("Failed to adjust volume: {}", e);
-                    }
+                if audio_device
+                    .as_ref()
+                    .is_some_and(|device| device.has_volume_control)
+                {
+                    state.dispatch(UserAction::AdjustVolume(5));
                 }
-            } else if scroll < 0.0 {
-                if let Some(device_name) = state.get_master_audio_device().map(|d| d.name.clone()) {
-                    if let Err(e) = state.audio_manager.adjust_volume(&device_name, -5) {
-                        error!("Failed to adjust volume: {}", e);
-                    }
-                }
+            } else if scroll < 0.0
+                && audio_device
+                    .as_ref()
+                    .is_some_and(|device| device.has_volume_control)
+            {
+                state.dispatch(UserAction::AdjustVolume(-5));
             }
         }
 
-        if label_clicked {
-            if let Some(device) = state.get_master_audio_device() {
-                if device.has_switch_control {
-                    let device_name = device.name.clone();
-                    if let Err(e) = state.audio_manager.toggle_mute(&device_name) {
-                        error!("Failed to toggle mute: {}", e);
-                    }
-                }
-            }
+        if label_clicked
+            && audio_device
+                .as_ref()
+                .is_some_and(|device| device.has_switch_control)
+        {
+            state.dispatch(UserAction::ToggleMute);
         }
     }
 }

@@ -1,21 +1,17 @@
 use egui::{Button, Color32, Stroke, StrokeKind, Vec2};
 use log::info;
-use shared_structures::SharedRingBuffer;
-use std::sync::Arc;
+use xbar_core::{TagId, UserAction};
 
-use crate::ipc;
 use crate::state::AppState;
 use crate::theme::{colors, icons, with_alpha};
 
 use super::BarModule;
 
-pub struct WorkspacesModule {
-    shared_buffer: Option<Arc<SharedRingBuffer>>,
-}
+pub struct WorkspacesModule;
 
 impl WorkspacesModule {
-    pub fn new(shared_buffer: Option<Arc<SharedRingBuffer>>) -> Self {
-        Self { shared_buffer }
+    pub fn new() -> Self {
+        Self
     }
 }
 
@@ -31,11 +27,8 @@ impl BarModule for WorkspacesModule {
     fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         let bold_thickness = 2.5;
         let light_thickness = 1.5;
-        let monitor_info = state
-            .current_message
-            .as_ref()
-            .map(|m| m.monitor_info)
-            .unwrap_or_default();
+        let wm_available = state.snapshot.wm_available;
+        let monitor = state.snapshot.monitor;
 
         for (index, &tag_icon) in icons::TAG_ICONS.iter().enumerate() {
             let tag_color = colors::TAG_COLORS[index];
@@ -49,20 +42,23 @@ impl BarModule for WorkspacesModule {
             let mut tooltip = format!("Tag {}", index + 1);
             let mut button_bg_color = Color32::TRANSPARENT;
 
-            if let Some(tag_status) = monitor_info.tag_status_vec.get(index) {
-                if tag_status.is_urg {
+            if let Some(tag_status) = wm_available
+                .then(|| state.snapshot.tags.get(index))
+                .flatten()
+            {
+                if tag_status.urgent {
                     tooltip.push_str(" (urgent)");
                     is_urg = true;
                     button_bg_color = with_alpha(colors::RED, 90);
-                } else if tag_status.is_filled {
+                } else if tag_status.filled {
                     is_filled = true;
                     tooltip.push_str(" (has windows)");
                     button_bg_color = with_alpha(tag_color, 55);
-                } else if tag_status.is_selected {
+                } else if tag_status.selected {
                     tooltip.push_str(" (current)");
                     is_selected = true;
                     button_bg_color = with_alpha(tag_color, 85);
-                } else if tag_status.is_occ {
+                } else if tag_status.occupied {
                     button_bg_color = with_alpha(tag_color, 40);
                 }
             }
@@ -102,12 +98,16 @@ impl BarModule for WorkspacesModule {
             // Handle interactions
             if label_response.clicked() {
                 info!("{} clicked", tag_bit);
-                ipc::send_tag_command(&self.shared_buffer, &state.current_message, tag_bit, true);
+                if wm_available && let Some(tag) = TagId::new(index) {
+                    state.dispatch(UserAction::ViewTagOn { tag, monitor });
+                }
             }
 
             if label_response.secondary_clicked() {
                 info!("{} secondary_clicked", tag_bit);
-                ipc::send_tag_command(&self.shared_buffer, &state.current_message, tag_bit, false);
+                if wm_available && let Some(tag) = TagId::new(index) {
+                    state.dispatch(UserAction::ToggleTagOn { tag, monitor });
+                }
             }
         }
     }

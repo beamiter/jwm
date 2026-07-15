@@ -11,8 +11,6 @@ pub mod network;
 pub mod workspaces;
 
 use crate::state::AppState;
-use shared_structures::SharedRingBuffer;
-use std::sync::Arc;
 
 /// Trait for all bar modules
 #[allow(dead_code)]
@@ -55,29 +53,25 @@ pub struct ModuleRegistry {
 
 impl ModuleRegistry {
     /// Create module registry with default modules
-    pub fn new(
-        shared_buffer: &Option<Arc<SharedRingBuffer>>,
-        _egui_ctx: &egui::Context,
-        _rt_handle: &tokio::runtime::Handle,
-    ) -> Self {
+    pub fn new() -> Self {
         // Default module layout
-        let left_names = vec!["workspaces", "layout"];
-        let center_names: Vec<&str> = vec![];
-        let right_names = vec!["cpu", "memory", "battery", "audio", "clock"];
+        let left_names = ["workspaces", "layout"];
+        let center_names: [&str; 0] = [];
+        let right_names = ["cpu", "memory", "battery", "audio", "clock"];
 
         let left: Vec<Box<dyn BarModule>> = left_names
             .iter()
-            .filter_map(|name| create_module(name, shared_buffer))
+            .filter_map(|name| create_module(name))
             .collect();
 
         let center: Vec<Box<dyn BarModule>> = center_names
             .iter()
-            .filter_map(|name| create_module(name, shared_buffer))
+            .filter_map(|name| create_module(name))
             .collect();
 
         let right: Vec<Box<dyn BarModule>> = right_names
             .iter()
-            .filter_map(|name| create_module(name, shared_buffer))
+            .filter_map(|name| create_module(name))
             .collect();
 
         Self {
@@ -89,15 +83,10 @@ impl ModuleRegistry {
 }
 
 /// Factory function: create a module by name
-fn create_module(
-    name: &str,
-    shared_buffer: &Option<Arc<SharedRingBuffer>>,
-) -> Option<Box<dyn BarModule>> {
+fn create_module(name: &str) -> Option<Box<dyn BarModule>> {
     match name {
-        "workspaces" => Some(Box::new(workspaces::WorkspacesModule::new(
-            shared_buffer.clone(),
-        ))),
-        "layout" => Some(Box::new(layout::LayoutModule::new(shared_buffer.clone()))),
+        "workspaces" => Some(Box::new(workspaces::WorkspacesModule::new())),
+        "layout" => Some(Box::new(layout::LayoutModule::new())),
         "clock" => Some(Box::new(clock::ClockModule::new())),
         "cpu" => Some(Box::new(cpu::CpuModule::new())),
         "memory" => Some(Box::new(memory::MemoryModule::new())),

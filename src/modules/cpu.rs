@@ -34,18 +34,15 @@ impl BarModule for CpuModule {
     }
 
     fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
-        if let Some(snapshot) = state.system_monitor.get_snapshot() {
-            let cpu_color = Self::get_cpu_color(snapshot.cpu_average as f64 / 100.0);
+        let cpu_average = state.snapshot.system_details.cpu_average;
+        if state.snapshot.system.cpu_percent.is_some() {
+            let cpu_color = Self::get_cpu_color(cpu_average as f64 / 100.0);
             ui.label(
-                egui::RichText::new(format!(
-                    "{} {}%",
-                    icons::CPU_ICON,
-                    snapshot.cpu_average as i32
-                ))
-                .color(cpu_color),
+                egui::RichText::new(format!("{} {}%", icons::CPU_ICON, cpu_average as i32))
+                    .color(cpu_color),
             );
 
-            if snapshot.cpu_average > 0.8 * 100.0 {
+            if cpu_average > 0.8 * 100.0 {
                 ui.label(egui::RichText::new("🔥").color(colors::WARNING));
             }
         }

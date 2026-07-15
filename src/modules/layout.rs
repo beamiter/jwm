@@ -1,35 +1,31 @@
 use egui::{Button, Color32, Vec2};
 use log::info;
-use shared_structures::SharedRingBuffer;
-use std::sync::Arc;
+use xbar_core::{LayoutId, UserAction};
 
-use crate::ipc;
 use crate::state::AppState;
 use crate::theme::{colors, with_alpha};
 
 use super::BarModule;
 
 pub struct LayoutModule {
-    shared_buffer: Option<Arc<SharedRingBuffer>>,
     show_popup: bool,
     button_rect: Option<egui::Rect>,
 }
 
 impl LayoutModule {
-    pub fn new(shared_buffer: Option<Arc<SharedRingBuffer>>) -> Self {
+    pub fn new() -> Self {
         Self {
-            shared_buffer,
             show_popup: false,
             button_rect: None,
         }
     }
 
     fn get_layout_symbol(state: &AppState) -> String {
-        state
-            .current_message
-            .as_ref()
-            .map(|m| m.monitor_info.get_ltsymbol())
-            .unwrap_or_else(|| "?".to_string())
+        if state.snapshot.wm_available {
+            state.snapshot.layout_symbol.clone()
+        } else {
+            "?".to_string()
+        }
     }
 
     fn detect_layout_type(symbol: &str) -> &'static str {
@@ -100,7 +96,8 @@ impl BarModule for LayoutModule {
 
         // Toggle popup on click
         if response.clicked() {
-            self.show_popup = !self.show_popup;
+            state.dispatch(UserAction::ToggleLayoutSelector);
+            self.show_popup = state.snapshot.layout_selector_open;
         }
     }
 
@@ -111,11 +108,8 @@ impl BarModule for LayoutModule {
 
         let layout_symbol = Self::get_layout_symbol(state);
         let layout_type = Self::detect_layout_type(&layout_symbol);
-        let monitor_num = state
-            .current_message
-            .as_ref()
-            .map(|m| m.monitor_info.monitor_num as i32)
-            .unwrap_or(0);
+        let monitor = state.snapshot.monitor;
+        let wm_available = state.snapshot.wm_available;
 
         let button_rect = match self.button_rect {
             Some(rect) => rect,
@@ -133,7 +127,12 @@ impl BarModule for LayoutModule {
                     if Self::layout_button(ui, "▦", layout_type == "tiled", colors::BLUE).clicked()
                     {
                         info!("Setting layout to tiled");
-                        ipc::send_layout_command(&self.shared_buffer, monitor_num, 0);
+                        if wm_available {
+                            state.dispatch(UserAction::SetLayoutOn {
+                                layout: LayoutId(0),
+                                monitor,
+                            });
+                        }
                         self.show_popup = false;
                     }
 
@@ -141,7 +140,12 @@ impl BarModule for LayoutModule {
                         .clicked()
                     {
                         info!("Setting layout to floating");
-                        ipc::send_layout_command(&self.shared_buffer, monitor_num, 1);
+                        if wm_available {
+                            state.dispatch(UserAction::SetLayoutOn {
+                                layout: LayoutId(1),
+                                monitor,
+                            });
+                        }
                         self.show_popup = false;
                     }
 
@@ -149,7 +153,12 @@ impl BarModule for LayoutModule {
                         .clicked()
                     {
                         info!("Setting layout to monocle");
-                        ipc::send_layout_command(&self.shared_buffer, monitor_num, 2);
+                        if wm_available {
+                            state.dispatch(UserAction::SetLayoutOn {
+                                layout: LayoutId(2),
+                                monitor,
+                            });
+                        }
                         self.show_popup = false;
                     }
                 });
@@ -160,11 +169,14 @@ impl BarModule for LayoutModule {
             let popup_rect = ctx.memory(|mem| mem.area_rect(popup_id));
             let pointer_pos = ctx.pointer_latest_pos();
 
-            let is_on_button = pointer_pos.map_or(false, |p| button_rect.contains(p));
-            let is_on_popup =
-                popup_rect.map_or(false, |r| pointer_pos.map_or(false, |p| r.contains(p)));
+            let is_on_button = pointer_pos.is_some_and(|p| button_rect.contains(p));
+            let is_on_popup = popup_rect
+                .is_some_and(|rect| pointer_pos.is_some_and(|point| rect.contains(point)));
 
             if !is_on_button && !is_on_popup {
+                if state.snapshot.layout_selector_open {
+                    state.dispatch(UserAction::ToggleLayoutSelector);
+                }
                 self.show_popup = false;
             }
         }
@@ -172,5 +184,12 @@ impl BarModule for LayoutModule {
 
     fn has_popup(&self) -> bool {
         self.show_popup
+    }
+
+    fn update(&mut self, state: &AppState) -> bool {
+        let show_popup = state.snapshot.layout_selector_open;
+        let changed = self.show_popup != show_popup;
+        self.show_popup = show_popup;
+        changed
     }
 }

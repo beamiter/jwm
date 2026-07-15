@@ -30,10 +30,8 @@ impl BarModule for MemoryModule {
 
         ui.label(egui::RichText::new(format!("{:.1}G", used_gb)).color(colors::MEMORY_USED));
 
-        if let Some(snapshot) = state.system_monitor.get_snapshot() {
-            if snapshot.memory_usage_percent > 0.8 * 100.0 {
-                ui.label("⚠️");
-            }
+        if state.snapshot.system_details.memory_usage_percent > 0.8 * 100.0 {
+            ui.label("⚠️");
         }
         ui.separator();
     }

@@ -63,26 +63,26 @@ impl MediaModule {
     }
 
     fn toggle_playback() {
-        if let Ok(finder) = mpris::PlayerFinder::new() {
-            if let Ok(player) = finder.find_active() {
-                let _ = player.play_pause();
-            }
+        if let Ok(finder) = mpris::PlayerFinder::new()
+            && let Ok(player) = finder.find_active()
+        {
+            let _ = player.play_pause();
         }
     }
 
     fn next_track() {
-        if let Ok(finder) = mpris::PlayerFinder::new() {
-            if let Ok(player) = finder.find_active() {
-                let _ = player.next();
-            }
+        if let Ok(finder) = mpris::PlayerFinder::new()
+            && let Ok(player) = finder.find_active()
+        {
+            let _ = player.next();
         }
     }
 
     fn prev_track() {
-        if let Ok(finder) = mpris::PlayerFinder::new() {
-            if let Ok(player) = finder.find_active() {
-                let _ = player.previous();
-            }
+        if let Ok(finder) = mpris::PlayerFinder::new()
+            && let Ok(player) = finder.find_active()
+        {
+            let _ = player.previous();
         }
     }
 }

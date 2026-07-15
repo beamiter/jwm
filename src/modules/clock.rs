@@ -1,5 +1,6 @@
 use crate::state::AppState;
 use crate::theme::{colors, icons};
+use xbar_core::UserAction;
 
 use super::BarModule;
 
@@ -21,24 +22,16 @@ impl BarModule for ClockModule {
     }
 
     fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
-        let format_str = if state.ui_state.show_seconds {
-            "%Y-%m-%d %H:%M:%S"
-        } else {
-            "%Y-%m-%d %H:%M"
-        };
-
-        let current_time = chrono::Local::now().format(format_str).to_string();
-
         if ui
             .selectable_label(
                 true,
-                egui::RichText::new(format!("{} {}", icons::TIME_ICON, current_time))
+                egui::RichText::new(format!("{} {}", icons::TIME_ICON, state.snapshot.time))
                     .color(colors::GREEN)
                     .small(),
             )
             .clicked()
         {
-            state.ui_state.toggle_time_format();
+            state.dispatch(UserAction::ToggleSeconds);
         }
     }
 }

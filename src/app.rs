@@ -1,38 +1,30 @@
 use egui::{Align, Button, Label, Layout, Stroke};
-use log::info;
-use shared_structures::SharedRingBuffer;
-use std::sync::{Arc, Mutex};
+use log::{info, warn};
+use std::process::{Child, Command};
 
 use anyhow::Result;
+use xbar_core::{BarEffect, MonitorGeometry, UserAction};
 
-use crate::ipc;
 use crate::modules::ModuleRegistry;
-use crate::state::{AppState, SharedAppState};
+use crate::state::AppState;
 use crate::theme::{self, colors, icons};
 
 /// Main egui application
 pub struct EguiBarApp {
     /// Application state
     state: AppState,
-    /// Thread-safe shared state
-    shared_state: Arc<Mutex<SharedAppState>>,
-    /// Shared buffer for communication (retained for future use by non-module code)
-    #[allow(dead_code)]
-    shared_buffer_rc: Option<Arc<SharedRingBuffer>>,
     /// Module registry
     modules: ModuleRegistry,
+    platform_children: Vec<Child>,
+    active_monitor_geometry: Option<MonitorGeometry>,
+    last_pixels_per_point: f32,
 }
 
 impl EguiBarApp {
     /// Create new application instance
-    pub fn new(
-        cc: &eframe::CreationContext<'_>,
-        shared_path: String,
-        rt_handle: tokio::runtime::Handle,
-    ) -> Result<Self> {
+    pub fn new(cc: &eframe::CreationContext<'_>, shared_path: String) -> Result<Self> {
         theme::apply_theme(&cc.egui_ctx);
-        let state = AppState::new();
-        let shared_state = Arc::new(Mutex::new(SharedAppState::new()));
+        let state = AppState::new(shared_path);
 
         #[cfg(feature = "debug_mode")]
         {
@@ -42,38 +34,21 @@ impl EguiBarApp {
         theme::setup_custom_fonts(&cc.egui_ctx)?;
         theme::configure_text_styles(&cc.egui_ctx);
 
-        let shared_buffer_rc =
-            SharedRingBuffer::create_shared_ring_buffer_aux(&shared_path).map(Arc::new);
-
-        ipc::start_background_tasks(&shared_state, &cc.egui_ctx, shared_buffer_rc.clone());
-
-        let modules = ModuleRegistry::new(&shared_buffer_rc, &cc.egui_ctx, &rt_handle);
+        let modules = ModuleRegistry::new();
 
         Ok(Self {
             state,
-            shared_state,
-            shared_buffer_rc,
             modules,
+            platform_children: Vec::new(),
+            active_monitor_geometry: None,
+            last_pixels_per_point: cc.egui_ctx.pixels_per_point(),
         })
-    }
-
-    /// Get current message from shared state
-    fn get_current_message(&self) -> Option<shared_structures::SharedMessage> {
-        self.shared_state
-            .lock()
-            .ok()
-            .and_then(|state| state.current_message.clone())
     }
 
     // Main UI via Module System
     // ================================
 
     fn draw_main_ui(&mut self, ui: &mut egui::Ui) {
-        // Sync shared state
-        if let Some(message) = self.get_current_message() {
-            self.state.current_message = Some(message);
-        }
-
         ui.horizontal_centered(|ui| {
             // Left modules
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
@@ -110,15 +85,17 @@ impl EguiBarApp {
         {
             let label_response = ui.add(Button::new(icons::SCREENSHOT_ICON));
             if label_response.clicked() {
-                let _ = std::process::Command::new("flameshot").arg("gui").spawn();
+                self.state.dispatch(UserAction::Screenshot);
             }
         }
 
         // Monitor number
-        if let Some(ref message) = self.state.current_message {
-            let monitor_num = (message.monitor_info.monitor_num as usize).min(1);
+        if self.state.snapshot.wm_available {
+            let monitor_num = usize::try_from(self.state.snapshot.monitor.0)
+                .unwrap_or_default()
+                .min(icons::MONITOR_NUMBERS.len().saturating_sub(1));
             ui.add(Label::new(
-                egui::RichText::new(format!("{}", icons::MONITOR_NUMBERS[monitor_num])).strong(),
+                egui::RichText::new(icons::MONITOR_NUMBERS[monitor_num].to_string()).strong(),
             ));
         }
     }
@@ -138,12 +115,79 @@ impl EguiBarApp {
             }
         }
     }
+
+    fn handle_platform_effects(&mut self, ctx: &egui::Context) {
+        for effect in self.state.take_platform_effects() {
+            match effect {
+                BarEffect::ApplyMonitorGeometry(geometry) => {
+                    self.active_monitor_geometry = Some(geometry);
+                    Self::apply_monitor_geometry(ctx, geometry);
+                }
+                BarEffect::ClearMonitorGeometry => {
+                    self.active_monitor_geometry = None;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                        1080.0, 40.0,
+                    )));
+                }
+                BarEffect::Screenshot => self.spawn_platform_helper("flameshot", &["gui"]),
+                BarEffect::OpenAudioControl => self.spawn_platform_helper("pavucontrol", &[]),
+                BarEffect::WindowManager(command) => {
+                    warn!("No WM transport available for command: {command:?}");
+                }
+                BarEffect::ToggleMute
+                | BarEffect::AdjustVolume(_)
+                | BarEffect::AdjustBrightness(_)
+                | BarEffect::RefreshBattery => {
+                    warn!("No enabled runtime adapter handled effect: {effect:?}");
+                }
+            }
+        }
+    }
+
+    fn apply_monitor_geometry(ctx: &egui::Context, geometry: MonitorGeometry) {
+        // eframe's viewport commands use egui points and convert them back to
+        // physical winit coordinates. The core geometry is already physical.
+        let pixels_per_point = ctx.pixels_per_point().max(f32::EPSILON);
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+            geometry.x as f32 / pixels_per_point,
+            geometry.y as f32 / pixels_per_point,
+        )));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+            geometry.width as f32 / pixels_per_point,
+            40.0,
+        )));
+    }
+
+    fn spawn_platform_helper(&mut self, program: &str, args: &[&str]) {
+        match Command::new(program).args(args).spawn() {
+            Ok(child) => self.platform_children.push(child),
+            Err(err) => warn!("Failed to launch {program}: {err}"),
+        }
+    }
+
+    fn reap_platform_children(&mut self) {
+        self.platform_children
+            .retain_mut(|child| match child.try_wait() {
+                Ok(Some(_)) => false,
+                Ok(None) => true,
+                Err(err) => {
+                    warn!("Failed to reap platform helper: {err}");
+                    false
+                }
+            });
+    }
 }
 
 impl eframe::App for EguiBarApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        ctx.set_pixels_per_point(self.state.ui_state.scale_factor);
+        let pixels_per_point = ctx.pixels_per_point();
+        if pixels_per_point.to_bits() != self.last_pixels_per_point.to_bits() {
+            self.last_pixels_per_point = pixels_per_point;
+            if let Some(geometry) = self.active_monitor_geometry {
+                Self::apply_monitor_geometry(&ctx, geometry);
+            }
+        }
 
         self.state.update();
 
@@ -187,6 +231,10 @@ impl eframe::App for EguiBarApp {
                 self.draw_main_ui(ui);
                 self.render_popups(&ctx);
             });
+
+        self.handle_platform_effects(&ctx);
+        self.reap_platform_children();
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
 
         if self.state.ui_state.need_resize {
             info!("request for resize");

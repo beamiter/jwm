@@ -21,9 +21,14 @@ impl BarModule for BatteryModule {
     }
 
     fn render_bar(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
-        if let Some(snapshot) = state.system_monitor.get_snapshot() {
-            let battery_percent = snapshot.battery_percent;
-            let is_charging = snapshot.is_charging;
+        if state.snapshot.battery.present {
+            let battery_percent = state
+                .snapshot
+                .battery
+                .percent
+                .map(|value| value.as_f32())
+                .unwrap_or(0.0);
+            let is_charging = state.snapshot.battery.charging;
 
             let battery_color = match battery_percent {
                 p if p > 50.0 => colors::BATTERY_HIGH,
