@@ -9,7 +9,18 @@ wgpu = "30.0.0"
 anyhow = "1.0.103"
 libc = "0.2.186"
 log = "0.4.33"
-xbar_core = { git = "https://github.com/beamiter/xbar_core.git" }
-shared_structures = { git = "https://github.com/beamiter/shared_structures.git", features = ["use-futex"] }
+xbar_core = { git = "https://github.com/beamiter/xbar_core.git", default-features = false, features = [
+    "clock-chrono",
+    "logging-flexi",
+    "provider-alsa",
+    "provider-battery-sysfs",
+    "provider-brightnessctl",
+    "provider-system",
+    "render-cairo",
+    "runtime-linux",
+    "transport-shared",
+] }
+cairo-rs = "0.22.0"
+pango = "0.22.8"
 winit = "0.30.13"
 raw-window-handle = "0.6.2"
