@@ -34,7 +34,12 @@ pub use model::{
     MonitorId, Percent, PercentError, SystemDetails, SystemLoadAverage, SystemState, TagId,
     TagState, UserAction, WmCommand, WmSnapshot,
 };
-pub use runtime::{BarRuntime, RuntimeAdapter, RuntimeIssue, RuntimeUpdate};
+pub use runtime::{
+    BarRuntime, DEFAULT_RUNTIME_TICK_INTERVAL, RuntimeAdapter, RuntimeConfigError, RuntimeIssue,
+    RuntimeSchedule, RuntimeUpdate,
+};
+#[cfg(feature = "transport-shared")]
+pub use runtime::{DEFAULT_TRANSPORT_RETRY_INTERVAL, TransportRecoveryConfig, TransportStatus};
 
 #[cfg(all(feature = "runtime-linux", feature = "transport-shared"))]
 pub use notifier::SharedEventNotifier;

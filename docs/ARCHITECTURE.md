@@ -27,8 +27,9 @@ WM snapshot ──────────────────────�
 
 - `model`: checked values, state invariants, reducer, typed events/effects,
   borrowed view, and owned serializable snapshot.
-- `runtime`: optional provider/transport orchestration. The embedded
-  `BarModel` remains the only semantic state owner.
+- `runtime`: optional provider/transport orchestration, managed reconnect
+  policy, transport lifecycle status/generation, and portable service cadence.
+  The embedded `BarModel` remains the only semantic state owner.
 - `presentation`: owned dynamic configuration, logical-coordinate layout,
   stable scene nodes, interaction state, semantic hit regions, and old/new
   scene damage.
@@ -76,9 +77,10 @@ Core owns:
 - Only the core transport adapter depends on `shared_structures`; frontend
   repositories consume `SharedTransport`, `BarSnapshot`, and typed actions.
 - A broken transport is reduced as `WindowManagerUnavailable`: the runtime
-  drops the adapter, clears every WM-owned projection, and returns
-  `ClearMonitorGeometry` when a constraint had been active. Frontends only
-  schedule reopen attempts; they do not maintain a second availability cache.
+  drops the adapter, clears every WM-owned projection, returns
+  `ClearMonitorGeometry` when a constraint had been active, and—when a
+  `TransportRecoveryConfig` is installed—schedules a bounded reopen itself.
+  Frontends do not maintain a second availability or retry cache.
 - Installing or reopening a transport does not make WM state authoritative.
   `BarRuntime` rejects WM commands with an explicit issue until a fresh WM
   snapshot has been reduced, so a reconnect gap cannot target fallback monitor
@@ -86,10 +88,11 @@ Core owns:
 - Event-loop proxies coalesce shared notifications until the main loop has
   drained the transport, preventing an unbounded queue during UI stalls.
 - Native notifier registration is an optimization, not the only progress
-  path. The existing one-second tick also polls the transport and frontends
-  throttle reopen attempts after the runtime drops a broken adapter. This
-  lets an old notifier generation go quiet without touching a UI loop from a
-  worker thread.
+  path. Native timer turns also poll the transport, and frontends can observe
+  `transport_generation()` to replace a notifier after reconnect.
+  `RuntimeSchedule` always polls on service turns while coalescing missed
+  provider ticks. This lets an old notifier generation go quiet without
+  touching a UI loop from a worker thread.
 
 ## Removed 0.1 surface
 

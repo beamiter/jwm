@@ -5,6 +5,9 @@
 //! state; adapters merely translate snapshots and execute effects.  Effects
 //! that require a window/event-loop integration are returned to the frontend.
 
+use std::fmt;
+use std::time::{Duration, Instant};
+
 use crate::{
     BarEffect, BarEvent, BarModel, BarSnapshot, BarView, DirtyBits, ModelConfig, ModelError,
     ModelUpdate, PercentError, UserAction, WmCommand,
@@ -30,6 +33,19 @@ pub enum RuntimeAdapter {
     Brightness,
     Battery,
     Clock,
+}
+
+impl fmt::Display for RuntimeAdapter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Transport => "window-manager transport",
+            Self::Audio => "audio provider",
+            Self::System => "system provider",
+            Self::Brightness => "brightness provider",
+            Self::Battery => "battery provider",
+            Self::Clock => "clock provider",
+        })
+    }
 }
 
 /// A recoverable problem observed while reducing an event or executing an
@@ -58,6 +74,213 @@ pub enum RuntimeIssue {
     },
 }
 
+impl RuntimeIssue {
+    /// Return the adapter responsible for this issue, when the issue came
+    /// from an adapter rather than model validation or queue backpressure.
+    #[must_use]
+    pub const fn adapter(&self) -> Option<RuntimeAdapter> {
+        match self {
+            Self::AdapterFailed { adapter, .. } | Self::InvalidProviderPercent { adapter, .. } => {
+                Some(*adapter)
+            }
+            Self::Model(_) | Self::WindowManagerUnavailable { .. } | Self::QueueFull { .. } => None,
+        }
+    }
+}
+
+impl fmt::Display for RuntimeIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Model(error) => write!(f, "model rejected event: {error}"),
+            Self::WindowManagerUnavailable { command } => write!(
+                f,
+                "window-manager state is unavailable; command rejected: {command:?}"
+            ),
+            Self::QueueFull { command } => {
+                write!(f, "window-manager command queue is full: {command:?}")
+            }
+            Self::AdapterFailed {
+                adapter,
+                operation,
+                message,
+            } => write!(f, "{adapter} {operation} failed: {message}"),
+            Self::InvalidProviderPercent {
+                adapter,
+                field,
+                error,
+            } => write!(f, "{adapter} returned invalid {field}: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for RuntimeIssue {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Model(error) => Some(error),
+            Self::InvalidProviderPercent { error, .. } => Some(error),
+            Self::WindowManagerUnavailable { .. }
+            | Self::QueueFull { .. }
+            | Self::AdapterFailed { .. } => None,
+        }
+    }
+}
+
+/// Invalid lifecycle configuration supplied to [`RuntimeSchedule`] or the
+/// managed shared-transport recovery policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeConfigError {
+    EmptyTransportPath,
+    ZeroInterval { field: &'static str },
+    IntervalTooLarge { field: &'static str },
+}
+
+impl fmt::Display for RuntimeConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyTransportPath => f.write_str("managed transport path must not be empty"),
+            Self::ZeroInterval { field } => write!(f, "{field} must be greater than zero"),
+            Self::IntervalTooLarge { field } => {
+                write!(f, "{field} is too large for the monotonic clock")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RuntimeConfigError {}
+
+/// Recommended cadence for clock and provider refreshes.
+pub const DEFAULT_RUNTIME_TICK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Recommended bounded retry interval for the JWM shared transport.
+#[cfg(feature = "transport-shared")]
+pub const DEFAULT_TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Portable scheduling state for event loops that poll frequently but only
+/// want to refresh providers at a lower cadence.
+///
+/// Every service call polls the WM transport. The clock and providers are
+/// refreshed immediately on the first call and then at `tick_interval`.
+/// Deadlines are monotonic and missed intervals are coalesced into one tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeSchedule {
+    tick_interval: Duration,
+    next_tick: Option<Instant>,
+}
+
+impl Default for RuntimeSchedule {
+    fn default() -> Self {
+        Self {
+            tick_interval: DEFAULT_RUNTIME_TICK_INTERVAL,
+            next_tick: None,
+        }
+    }
+}
+
+impl RuntimeSchedule {
+    pub fn new(tick_interval: Duration) -> Result<Self, RuntimeConfigError> {
+        validate_runtime_interval("runtime tick interval", tick_interval)?;
+        Ok(Self {
+            tick_interval,
+            next_tick: None,
+        })
+    }
+
+    #[must_use]
+    pub const fn tick_interval(&self) -> Duration {
+        self.tick_interval
+    }
+
+    #[must_use]
+    pub const fn next_tick(&self) -> Option<Instant> {
+        self.next_tick
+    }
+
+    /// Make the next service call refresh providers regardless of its time.
+    pub fn reset(&mut self) {
+        self.next_tick = None;
+    }
+
+    /// Poll transport now and refresh providers when the cadence is due.
+    pub fn service(&mut self, runtime: &mut BarRuntime) -> RuntimeUpdate {
+        self.service_at(runtime, Instant::now())
+    }
+
+    /// Deterministic variant of [`Self::service`] for event loops that already
+    /// sampled their monotonic clock and for tests.
+    pub fn service_at(&mut self, runtime: &mut BarRuntime, now: Instant) -> RuntimeUpdate {
+        let mut update = runtime.poll_transport_at(now);
+        if self.next_tick.is_none_or(|deadline| now >= deadline) {
+            update.merge(runtime.tick());
+            self.next_tick = Some(runtime_deadline(now, self.tick_interval));
+        }
+        update
+    }
+}
+
+#[cfg(feature = "transport-shared")]
+/// Configuration for core-owned opening and bounded retry of a JWM shared
+/// transport. A configured runtime remains semantically unavailable until a
+/// fresh snapshot arrives from a successfully opened transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransportRecoveryConfig {
+    path: String,
+    retry_interval: Duration,
+}
+
+#[cfg(feature = "transport-shared")]
+/// Observable lifecycle state of the optional shared transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportStatus {
+    /// No transport handle or automatic recovery policy is installed.
+    Disabled,
+    /// Automatic recovery is configured and waiting for/opening the path.
+    Recovering,
+    /// A handle is open but no authoritative WM snapshot has arrived yet.
+    Connected,
+    /// A handle is open and its latest WM projection is authoritative.
+    Ready,
+}
+
+#[cfg(feature = "transport-shared")]
+impl TransportRecoveryConfig {
+    pub fn with_default_retry(path: impl Into<String>) -> Result<Self, RuntimeConfigError> {
+        Self::new(path, DEFAULT_TRANSPORT_RETRY_INTERVAL)
+    }
+
+    pub fn new(
+        path: impl Into<String>,
+        retry_interval: Duration,
+    ) -> Result<Self, RuntimeConfigError> {
+        let path = path.into();
+        if path.is_empty() {
+            return Err(RuntimeConfigError::EmptyTransportPath);
+        }
+        validate_runtime_interval("transport retry interval", retry_interval)?;
+        Ok(Self {
+            path,
+            retry_interval,
+        })
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    #[must_use]
+    pub const fn retry_interval(&self) -> Duration {
+        self.retry_interval
+    }
+}
+
+#[cfg(feature = "transport-shared")]
+#[derive(Debug)]
+struct TransportRecoveryState {
+    config: TransportRecoveryConfig,
+    /// `None` means the next disconnected poll may attempt immediately.
+    next_attempt: Option<Instant>,
+}
+
 /// Result of one runtime operation.
 ///
 /// `changes` is suitable for frame scheduling. `platform_effects` contains
@@ -72,6 +295,11 @@ pub struct RuntimeUpdate {
 
 impl RuntimeUpdate {
     #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.changes.is_empty() && self.platform_effects.is_empty() && self.issues.is_empty()
+    }
+
+    #[must_use]
     pub const fn needs_redraw(&self) -> bool {
         !self.changes.is_empty()
     }
@@ -79,6 +307,35 @@ impl RuntimeUpdate {
     #[must_use]
     pub fn has_platform_work(&self) -> bool {
         !self.platform_effects.is_empty()
+    }
+
+    #[must_use]
+    pub fn has_issues(&self) -> bool {
+        !self.issues.is_empty()
+    }
+
+    /// Whether any issue was produced by `adapter`.
+    #[must_use]
+    pub fn has_adapter_issue(&self, adapter: RuntimeAdapter) -> bool {
+        self.issues
+            .iter()
+            .any(|issue| issue.adapter() == Some(adapter))
+    }
+
+    /// Whether the shared transport failed an open, read, or write operation.
+    /// An unavailable-yet-authoritative WM projection and a full command queue
+    /// are deliberately not classified as broken connections.
+    #[must_use]
+    pub fn transport_failed(&self) -> bool {
+        self.issues.iter().any(|issue| {
+            matches!(
+                issue,
+                RuntimeIssue::AdapterFailed {
+                    adapter: RuntimeAdapter::Transport,
+                    ..
+                }
+            )
+        })
     }
 
     pub fn merge(&mut self, mut other: Self) {
@@ -109,6 +366,10 @@ pub struct BarRuntime {
 
     #[cfg(feature = "transport-shared")]
     transport: Option<SharedTransport>,
+    #[cfg(feature = "transport-shared")]
+    transport_generation: u64,
+    #[cfg(feature = "transport-shared")]
+    transport_recovery: Option<TransportRecoveryState>,
     #[cfg(feature = "provider-alsa")]
     audio: crate::audio_manager::AudioManager,
     #[cfg(feature = "provider-system")]
@@ -132,6 +393,10 @@ impl BarRuntime {
             pending_changes: DirtyBits::all(),
             #[cfg(feature = "transport-shared")]
             transport: None,
+            #[cfg(feature = "transport-shared")]
+            transport_generation: 0,
+            #[cfg(feature = "transport-shared")]
+            transport_recovery: None,
             #[cfg(feature = "provider-alsa")]
             audio: crate::audio_manager::AudioManager::new(),
             #[cfg(feature = "provider-system")]
@@ -150,18 +415,96 @@ impl BarRuntime {
     ) -> Result<Self, ModelError> {
         let mut runtime = Self::new(config)?;
         runtime.transport = transport;
+        if runtime.transport.is_some() {
+            runtime.transport_generation = 1;
+        }
+        Ok(runtime)
+    }
+
+    /// Construct a runtime whose normal transport polling also opens and
+    /// recovers the configured shared transport. The first
+    /// [`Self::poll_transport`] or scheduled service call attempts the open,
+    /// so startup failures are returned as ordinary [`RuntimeIssue`] values.
+    #[cfg(feature = "transport-shared")]
+    pub fn with_managed_transport(
+        config: ModelConfig,
+        recovery: TransportRecoveryConfig,
+    ) -> Result<Self, ModelError> {
+        let mut runtime = Self::new(config)?;
+        runtime.transport_recovery = Some(TransportRecoveryState {
+            config: recovery,
+            next_attempt: None,
+        });
         Ok(runtime)
     }
 
     #[cfg(feature = "transport-shared")]
     pub fn set_transport(&mut self, transport: Option<SharedTransport>) -> Option<SharedTransport> {
-        std::mem::replace(&mut self.transport, transport)
+        let replacing_handle = self.transport.is_some() || transport.is_some();
+        let previous = std::mem::replace(&mut self.transport, transport);
+        if replacing_handle {
+            self.bump_transport_generation();
+        }
+        if let Some(recovery) = self.transport_recovery.as_mut() {
+            if self.transport.is_some() {
+                recovery.next_attempt = None;
+            } else if previous.is_some() {
+                recovery.next_attempt = Some(runtime_deadline(
+                    Instant::now(),
+                    recovery.config.retry_interval,
+                ));
+            }
+        }
+        previous
     }
 
     #[cfg(feature = "transport-shared")]
     #[must_use]
     pub fn transport(&self) -> Option<&SharedTransport> {
         self.transport.as_ref()
+    }
+
+    /// Opaque generation that changes whenever a transport handle is
+    /// installed, replaced, or removed. Native event loops can rebuild an
+    /// optional notifier when this value changes while periodic polling keeps
+    /// correctness independent of notifier registration.
+    #[cfg(feature = "transport-shared")]
+    #[must_use]
+    pub const fn transport_generation(&self) -> u64 {
+        self.transport_generation
+    }
+
+    #[cfg(feature = "transport-shared")]
+    #[must_use]
+    pub fn transport_status(&self) -> TransportStatus {
+        if self.transport.is_some() {
+            if self.model.view().wm_available {
+                TransportStatus::Ready
+            } else {
+                TransportStatus::Connected
+            }
+        } else if self.transport_recovery.is_some() {
+            TransportStatus::Recovering
+        } else {
+            TransportStatus::Disabled
+        }
+    }
+
+    /// Replace the automatic recovery policy without replacing an already
+    /// installed transport. If disconnected, the next poll attempts the new
+    /// path immediately.
+    #[cfg(feature = "transport-shared")]
+    pub fn set_transport_recovery(&mut self, recovery: Option<TransportRecoveryConfig>) {
+        self.transport_recovery = recovery.map(|config| TransportRecoveryState {
+            config,
+            next_attempt: None,
+        });
+    }
+
+    #[cfg(feature = "transport-shared")]
+    #[must_use]
+    pub fn transport_recovery(&self) -> Option<&TransportRecoveryConfig> {
+        self.transport_recovery.as_ref().map(|state| &state.config)
     }
 
     #[must_use]
@@ -280,35 +623,114 @@ impl BarRuntime {
         update
     }
 
+    /// Perform one complete unscheduled service pass: poll (and, when
+    /// configured, recover) the WM transport, then refresh all providers.
+    /// Event loops that run faster than the provider cadence should use
+    /// [`RuntimeSchedule`] instead.
+    pub fn service(&mut self) -> RuntimeUpdate {
+        let mut update = self.poll_transport();
+        update.merge(self.tick());
+        update
+    }
+
     /// Drain the configured shared transport and reduce its newest WM
-    /// snapshot. Without the feature or a configured transport this is a
-    /// harmless no-op.
+    /// snapshot. A managed transport is opened or retried when due. Without
+    /// the feature or a configured transport this is a harmless no-op.
     pub fn poll_transport(&mut self) -> RuntimeUpdate {
+        self.poll_transport_at(Instant::now())
+    }
+
+    /// Deterministic transport poll using a caller-supplied monotonic time.
+    /// This is useful to share one `Instant` across an event-loop turn and to
+    /// test retry boundaries without sleeping.
+    pub fn poll_transport_at(&mut self, now: Instant) -> RuntimeUpdate {
         #[cfg(feature = "transport-shared")]
         {
+            let mut update = self.reconnect_transport_at(now);
             let result = match self.transport.as_ref() {
                 Some(transport) => transport.drain_latest(),
-                None => return RuntimeUpdate::default(),
+                None => return update,
             };
 
             match result {
-                Ok(Some(snapshot)) => self.apply_event(BarEvent::WindowManager(snapshot)),
-                Ok(None) => RuntimeUpdate::default(),
+                Ok(Some(snapshot)) => {
+                    update.merge(self.apply_event(BarEvent::WindowManager(snapshot)));
+                }
+                Ok(None) => {}
                 Err(error) => {
-                    self.transport = None;
-                    let mut update = self.apply_event(BarEvent::WindowManagerUnavailable);
+                    self.drop_transport();
+                    self.schedule_transport_retry_at(now);
+                    update.merge(self.apply_event(BarEvent::WindowManagerUnavailable));
                     update.issues.push(RuntimeIssue::AdapterFailed {
                         adapter: RuntimeAdapter::Transport,
                         operation: "drain_latest",
                         message: error.to_string(),
                     });
-                    update
                 }
             }
+            update
         }
 
         #[cfg(not(feature = "transport-shared"))]
-        RuntimeUpdate::default()
+        {
+            let _ = now;
+            RuntimeUpdate::default()
+        }
+    }
+
+    #[cfg(feature = "transport-shared")]
+    fn reconnect_transport_at(&mut self, now: Instant) -> RuntimeUpdate {
+        if self.transport.is_some() {
+            return RuntimeUpdate::default();
+        }
+
+        let path = {
+            let Some(recovery) = self.transport_recovery.as_ref() else {
+                return RuntimeUpdate::default();
+            };
+            if recovery.next_attempt.is_some_and(|deadline| now < deadline) {
+                return RuntimeUpdate::default();
+            }
+            recovery.config.path.clone()
+        };
+
+        match SharedTransport::open(&path) {
+            Ok(transport) => {
+                self.transport = Some(transport);
+                self.bump_transport_generation();
+                if let Some(recovery) = self.transport_recovery.as_mut() {
+                    recovery.next_attempt = None;
+                }
+                RuntimeUpdate::default()
+            }
+            Err(error) => {
+                self.schedule_transport_retry_at(now);
+                RuntimeUpdate::issue(RuntimeIssue::AdapterFailed {
+                    adapter: RuntimeAdapter::Transport,
+                    operation: "open",
+                    message: error.to_string(),
+                })
+            }
+        }
+    }
+
+    #[cfg(feature = "transport-shared")]
+    fn schedule_transport_retry_at(&mut self, now: Instant) {
+        if let Some(recovery) = self.transport_recovery.as_mut() {
+            recovery.next_attempt = Some(runtime_deadline(now, recovery.config.retry_interval));
+        }
+    }
+
+    #[cfg(feature = "transport-shared")]
+    fn drop_transport(&mut self) {
+        if self.transport.take().is_some() {
+            self.bump_transport_generation();
+        }
+    }
+
+    #[cfg(feature = "transport-shared")]
+    fn bump_transport_generation(&mut self) {
+        self.transport_generation = self.transport_generation.wrapping_add(1);
     }
 
     /// Return and clear all accumulated model changes, including changes from
@@ -360,7 +782,8 @@ impl BarRuntime {
                 Ok(SendOutcome::Sent) => RuntimeUpdate::default(),
                 Ok(SendOutcome::Full) => RuntimeUpdate::issue(RuntimeIssue::QueueFull { command }),
                 Err(error) => {
-                    self.transport = None;
+                    self.drop_transport();
+                    self.schedule_transport_retry_at(Instant::now());
                     let mut update = self.apply_event(BarEvent::WindowManagerUnavailable);
                     update.issues.push(RuntimeIssue::AdapterFailed {
                         adapter: RuntimeAdapter::Transport,
@@ -544,6 +967,27 @@ impl BarRuntime {
     }
 }
 
+fn validate_runtime_interval(
+    field: &'static str,
+    interval: Duration,
+) -> Result<(), RuntimeConfigError> {
+    if interval.is_zero() {
+        return Err(RuntimeConfigError::ZeroInterval { field });
+    }
+    if Instant::now().checked_add(interval).is_none() {
+        return Err(RuntimeConfigError::IntervalTooLarge { field });
+    }
+    Ok(())
+}
+
+fn runtime_deadline(now: Instant, interval: Duration) -> Instant {
+    // Constructors reject intervals that overflow the process's current
+    // monotonic instant. A synthetic caller-supplied instant can still sit at
+    // the representable edge; treating it as immediately due is safe and
+    // avoids a panic in deterministic tests or unusual embedders.
+    now.checked_add(interval).unwrap_or(now)
+}
+
 #[cfg(feature = "clock-chrono")]
 fn format_clock(now: &chrono::DateTime<chrono::Local>, pattern: &str) -> Result<String, String> {
     use chrono::format::{Item, StrftimeItems};
@@ -583,6 +1027,166 @@ mod tests {
 
     #[cfg(feature = "transport-shared")]
     static NEXT_TRANSPORT_PATH: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn lifecycle_intervals_are_validated_and_schedule_is_monotonic() {
+        assert!(matches!(
+            RuntimeSchedule::new(Duration::ZERO),
+            Err(RuntimeConfigError::ZeroInterval {
+                field: "runtime tick interval"
+            })
+        ));
+        assert!(matches!(
+            RuntimeSchedule::new(Duration::MAX),
+            Err(RuntimeConfigError::IntervalTooLarge {
+                field: "runtime tick interval"
+            })
+        ));
+
+        let interval = Duration::from_secs(1);
+        let start = Instant::now();
+        let mut schedule = RuntimeSchedule::new(interval).unwrap();
+        let mut runtime = BarRuntime::default();
+
+        let _ = schedule.service_at(&mut runtime, start);
+        assert_eq!(schedule.next_tick(), start.checked_add(interval));
+        let deadline = schedule.next_tick();
+
+        let _ = schedule.service_at(&mut runtime, start + Duration::from_millis(500));
+        assert_eq!(schedule.next_tick(), deadline);
+
+        let delayed = start + Duration::from_secs(5);
+        let _ = schedule.service_at(&mut runtime, delayed);
+        assert_eq!(schedule.next_tick(), delayed.checked_add(interval));
+
+        schedule.reset();
+        assert_eq!(schedule.next_tick(), None);
+    }
+
+    #[test]
+    fn runtime_update_classifies_adapter_failures_without_false_disconnects() {
+        let command = WmCommand::SetLayout {
+            layout: LayoutId(1),
+            monitor: MonitorId(2),
+        };
+        let unavailable = RuntimeUpdate::issue(RuntimeIssue::WindowManagerUnavailable { command });
+        assert!(unavailable.has_issues());
+        assert!(!unavailable.transport_failed());
+
+        let mut failed = RuntimeUpdate::default();
+        failed.issues.push(RuntimeIssue::AdapterFailed {
+            adapter: RuntimeAdapter::Transport,
+            operation: "open",
+            message: "not found".into(),
+        });
+        assert!(failed.transport_failed());
+        assert!(failed.has_adapter_issue(RuntimeAdapter::Transport));
+        assert!(!failed.has_adapter_issue(RuntimeAdapter::Audio));
+        assert_eq!(
+            failed.issues[0].to_string(),
+            "window-manager transport open failed: not found"
+        );
+    }
+
+    #[cfg(feature = "transport-shared")]
+    #[test]
+    fn managed_transport_config_rejects_invalid_input() {
+        assert_eq!(
+            TransportRecoveryConfig::with_default_retry("").unwrap_err(),
+            RuntimeConfigError::EmptyTransportPath
+        );
+        assert!(matches!(
+            TransportRecoveryConfig::new("/tmp/xbar", Duration::ZERO),
+            Err(RuntimeConfigError::ZeroInterval {
+                field: "transport retry interval"
+            })
+        ));
+        assert!(matches!(
+            TransportRecoveryConfig::new("/tmp/xbar", Duration::MAX),
+            Err(RuntimeConfigError::IntervalTooLarge {
+                field: "transport retry interval"
+            })
+        ));
+    }
+
+    #[cfg(feature = "transport-shared")]
+    #[test]
+    fn managed_transport_retries_on_deadline_and_recovers_authoritative_state() {
+        let sequence = NEXT_TRANSPORT_PATH.fetch_add(1, Ordering::Relaxed);
+        let path = format!(
+            "/tmp/xbar-core-runtime-managed-{}-{sequence}",
+            std::process::id()
+        );
+        let retry = Duration::from_secs(2);
+        let recovery = TransportRecoveryConfig::new(path.clone(), retry).unwrap();
+        let mut runtime =
+            BarRuntime::with_managed_transport(ModelConfig::default(), recovery).unwrap();
+        let start = Instant::now();
+        assert_eq!(runtime.transport_status(), TransportStatus::Recovering);
+        assert_eq!(runtime.transport_generation(), 0);
+
+        let first = runtime.poll_transport_at(start);
+        assert!(first.transport_failed());
+        assert!(matches!(
+            first.issues.as_slice(),
+            [RuntimeIssue::AdapterFailed {
+                adapter: RuntimeAdapter::Transport,
+                operation: "open",
+                ..
+            }]
+        ));
+
+        let early = runtime.poll_transport_at(start + Duration::from_secs(1));
+        assert!(early.is_empty());
+
+        let owner = shared_structures::SharedRingBuffer::create_aux(&path, Some(8), Some(0))
+            .expect("create isolated transport");
+        let mut monitor_info = shared_structures::MonitorInfo {
+            monitor_num: 4,
+            ..shared_structures::MonitorInfo::default()
+        };
+        monitor_info.set_ltsymbol("[M]");
+        let message = shared_structures::SharedMessage {
+            timestamp: 91,
+            monitor_info,
+        };
+        assert!(owner.try_write_message(&message).unwrap());
+
+        let recovered = runtime.poll_transport_at(start + retry);
+        assert!(!recovered.transport_failed());
+        assert!(runtime.transport().is_some());
+        assert!(runtime.view().wm_available);
+        assert_eq!(runtime.transport_status(), TransportStatus::Ready);
+        assert_eq!(runtime.transport_generation(), 1);
+        assert_eq!(runtime.view().monitor, MonitorId(4));
+        assert_eq!(runtime.view().wm_sequence, Some(91));
+
+        owner.destroy().unwrap();
+        let disconnected = runtime.poll_transport_at(start + retry + Duration::from_secs(1));
+        assert!(disconnected.transport_failed());
+        assert!(runtime.transport().is_none());
+        assert!(!runtime.view().wm_available);
+        assert_eq!(runtime.transport_status(), TransportStatus::Recovering);
+        assert_eq!(runtime.transport_generation(), 2);
+
+        let before_retry = runtime.poll_transport_at(start + retry + Duration::from_secs(2));
+        assert!(before_retry.is_empty());
+        assert!(runtime.transport().is_none());
+
+        let after_retry = runtime.poll_transport_at(start + retry + Duration::from_secs(3));
+        assert!(after_retry.transport_failed());
+        assert!(matches!(
+            after_retry.issues.as_slice(),
+            [RuntimeIssue::AdapterFailed {
+                adapter: RuntimeAdapter::Transport,
+                operation: "open",
+                ..
+            }]
+        ));
+        assert!(runtime.transport().is_none());
+        assert!(!runtime.view().wm_available);
+        assert_eq!(runtime.transport_generation(), 2);
+    }
 
     #[test]
     fn pure_runtime_reduces_actions_and_accumulates_changes() {

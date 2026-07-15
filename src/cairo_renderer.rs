@@ -341,6 +341,11 @@ impl CairoBar {
         self.runtime.tick()
     }
 
+    /// Poll/recover transport and refresh providers in one service pass.
+    pub fn service(&mut self) -> RuntimeUpdate {
+        self.runtime.service()
+    }
+
     pub fn poll_transport(&mut self) -> RuntimeUpdate {
         self.runtime.poll_transport()
     }
