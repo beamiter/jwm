@@ -24,6 +24,7 @@ jobs:
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -39,6 +40,7 @@ jobs:
   check-and-test:
     name: Check, Clippy, and test
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -89,10 +91,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Check all targets
-        run: cargo check --all-targets
+        run: cargo check --locked --all-targets
 
       - name: Run Clippy
-        run: cargo clippy --lib --bins --tests --no-deps
+        run: cargo clippy --locked --lib --bins --tests --no-deps
 
       - name: Run tests
-        run: cargo test --lib --bins --tests
+        run: cargo test --locked --lib --bins --tests
