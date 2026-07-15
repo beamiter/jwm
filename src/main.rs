@@ -1,6 +1,4 @@
-use chrono::Local;
-use iced::futures::channel::mpsc;
-use iced::futures::{SinkExt, Stream, StreamExt};
+use iced::futures::{SinkExt, Stream};
 use iced::mouse;
 use iced::time::{self, milliseconds};
 use iced::widget::container;
@@ -15,19 +13,18 @@ use iced::{
     window,
 };
 
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use std::env;
 use std::process::Command;
-use std::sync::Arc;
 use std::sync::Once;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::{Duration, Instant};
 
-use shared_structures::{CommandType, MonitorInfo, SharedCommand, SharedMessage, SharedRingBuffer};
-use xbar_core::audio_manager::AudioManager;
-use xbar_core::brightness::BrightnessManager;
-use xbar_core::initialize_logging;
-use xbar_core::system_monitor::SystemMonitor;
+use xbar_core::logging::init as initialize_logging;
+use xbar_core::{
+    BarEffect, BarRuntime, LayoutId, ModelConfig, RuntimeAdapter, RuntimeIssue, RuntimeUpdate,
+    SharedTransport, TagId, UserAction,
+};
 
 static _START: Once = Once::new();
 
@@ -60,6 +57,9 @@ const ICON_TIME: &str = "\u{F0954}";
 const ICON_MON: &str = "\u{F0379}";
 const ICON_M0: &str = "\u{F02DA}";
 const ICON_M1: &str = "\u{F02DB}";
+const TRANSPORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+const WINDOW_METRICS_READY: u8 = 0b111;
 
 fn main() -> iced::Result {
     let args: Vec<String> = env::args().collect();
@@ -86,7 +86,6 @@ fn main() -> iced::Result {
         .default_font(NERD_FONT)
         .subscription(IcedBar::subscription)
         .title("iced_bar")
-        .scale_factor(IcedBar::scale_factor)
         .run()
 }
 
@@ -107,15 +106,17 @@ enum Message {
     WindowIdReceived(Option<Id>),
 
     GetScaleFactor(f32),
+    InitialWindowSize(Size),
+    InitialWindowPosition(Option<iced::Point>),
+    WindowEvent(Id, window::Event),
 
     MouseEnterScreenShot,
     MouseExitScreenShot,
     LeftClick,
     RightClick,
 
-    UpdateTime,
-    SharedMemoryUpdated(SharedMessage),
-    SharedMemoryError(String),
+    RuntimeTick,
+    TransportPoll,
 
     // Audio
     AudioToggleMute,
@@ -126,34 +127,19 @@ enum Message {
 }
 
 struct IcedBar {
-    active_tab: usize,
     tabs: [&'static str; 9],
     tab_colors: [Color; 9],
-    shared_buffer_rc: Option<Arc<SharedRingBuffer>>,
+    runtime: BarRuntime,
     shared_path: String,
-    monitor_info_opt: Option<MonitorInfo>,
-    formated_now: String,
+    last_transport_retry: Instant,
     current_window_id: Option<Id>,
+    window_metrics_received: u8,
     scale_factor: f32,
+    initial_window_size: Size,
+    initial_window_position: Option<iced::Point>,
     is_hovered: bool,
     mouse_position: Option<iced::Point>,
-    show_seconds: bool,
-    layout_symbol: String,
-    monitor_num: i32,
-
-    // Audio + System + Brightness
-    audio_manager: AudioManager,
-    system_monitor: SystemMonitor,
-    brightness_manager: BrightnessManager,
-
     transparent: bool,
-
-    // throttle
-    last_clock_update: Instant,
-    last_monitor_update: Instant,
-
-    // layout selector
-    layout_selector_open: bool,
 }
 
 impl Default for IcedBar {
@@ -173,11 +159,27 @@ impl IcedBar {
         let args: Vec<String> = env::args().collect();
         let shared_path = args.iter().skip(1).last().cloned().unwrap_or_default();
 
-        let shared_buffer_rc =
-            SharedRingBuffer::create_shared_ring_buffer_aux(&shared_path).map(Arc::new);
+        let transport = if shared_path.is_empty() {
+            None
+        } else {
+            match SharedTransport::open(&shared_path) {
+                Ok(transport) => Some(transport),
+                Err(error) => {
+                    warn!("failed to open WM transport at {shared_path:?}: {error}");
+                    None
+                }
+            }
+        };
+        let runtime = BarRuntime::with_transport(
+            ModelConfig {
+                show_seconds: true,
+                ..ModelConfig::default()
+            },
+            transport,
+        )
+        .expect("iced bar model configuration is valid");
 
         Self {
-            active_tab: 0,
             tabs: TAG_ICONS,
             tab_colors: [
                 color!(0xFF6B6B), // red
@@ -190,24 +192,17 @@ impl IcedBar {
                 color!(0x5F27CD), // purple
                 color!(0x00D2D3), // teal
             ],
-            shared_buffer_rc,
+            runtime,
             shared_path,
-            monitor_info_opt: None,
-            formated_now: String::new(),
+            last_transport_retry: Instant::now(),
             current_window_id: None,
+            window_metrics_received: 0,
             scale_factor: 1.0,
+            initial_window_size: Size::new(800.0, 40.0),
+            initial_window_position: None,
             is_hovered: false,
             mouse_position: None,
-            show_seconds: true,
-            layout_symbol: "[]=".to_string(),
-            monitor_num: 0,
-            audio_manager: AudioManager::new(),
-            system_monitor: SystemMonitor::new(5),
-            brightness_manager: BrightnessManager::new(),
             transparent: true,
-            last_clock_update: Instant::now(),
-            last_monitor_update: Instant::now(),
-            layout_selector_open: false,
         }
     }
 
@@ -217,117 +212,20 @@ impl IcedBar {
         })
     }
 
-    fn message_notify_subscription(
-        shared_buffer_rc: Option<Arc<SharedRingBuffer>>,
-    ) -> Subscription<Message> {
-        Subscription::run_with(shared_buffer_rc, |shared_buffer_rc_ref| {
-            let owned_shared_buffer_rc = shared_buffer_rc_ref.clone();
-            stream::channel(100, move |mut output: mpsc::Sender<Message>| async move {
-                let shared_buffer = if let Some(shared_buffer) = owned_shared_buffer_rc {
-                    shared_buffer
-                } else {
-                    let _ = output
-                        .send(Message::SharedMemoryError(
-                            "Empty shared buffer".to_string(),
-                        ))
-                        .await;
-                    return;
-                };
-
-                let (mut tx, mut rx) = mpsc::channel::<Message>(100);
-                let buffer_clone = shared_buffer.clone();
-                let stop = Arc::new(AtomicBool::new(false));
-                let stop_c = stop.clone();
-
-                std::thread::spawn(move || {
-                    let mut prev_timestamp: u128 = 0;
-                    while !stop_c.load(Ordering::Relaxed) {
-                        match buffer_clone.wait_for_message(Some(Duration::from_secs(2))) {
-                            Ok(true) => {
-                                if let Ok(Some(message)) = buffer_clone.try_read_latest_message() {
-                                    let ts: u128 = message.timestamp as u128;
-                                    if prev_timestamp != ts {
-                                        prev_timestamp = ts;
-                                        if tx
-                                            .try_send(Message::SharedMemoryUpdated(message))
-                                            .is_err()
-                                        {
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            Ok(false) => { /* timeout */ }
-                            Err(e) => {
-                                let _ = tx.try_send(Message::SharedMemoryError(format!(
-                                    "Wait for message failed: {}",
-                                    e
-                                )));
-                                break;
-                            }
-                        }
-                    }
-                });
-
-                while let Some(msg) = rx.next().await {
-                    if output.send(msg).await.is_err() {
-                        break;
-                    }
-                }
-
-                stop.store(true, Ordering::Relaxed);
-            })
-        })
-    }
-
-    fn send_tag_command(&mut self, is_view: bool) {
-        let tag_bit = 1 << self.active_tab;
-        let command = if is_view {
-            SharedCommand::view_tag(tag_bit, self.monitor_num)
-        } else {
-            SharedCommand::toggle_tag(tag_bit, self.monitor_num)
-        };
-
-        if let Some(shared_buffer) = &self.shared_buffer_rc {
-            match shared_buffer.send_command(command) {
-                Ok(true) => info!("Sent command: {:?} by shared_buffer", command),
-                Ok(false) => warn!("Command buffer full, command dropped"),
-                Err(e) => error!("Failed to send command: {}", e),
-            }
-        }
-    }
-
-    fn send_layout_command(&mut self, layout_index: u32) {
-        let command = SharedCommand::new(CommandType::SetLayout, layout_index, self.monitor_num);
-        if let Some(shared_buffer) = &self.shared_buffer_rc {
-            match shared_buffer.send_command(command) {
-                Ok(true) => info!("Sent command: {:?} by shared_buffer", command),
-                Ok(false) => warn!("Command buffer full, command dropped"),
-                Err(e) => error!("Failed to send command: {}", e),
-            }
-        }
-    }
-
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::TabSelected(tab_index) => {
                 info!("Tab selected: {}", tab_index);
-                self.active_tab = tab_index;
-                self.send_tag_command(true);
-                Task::none()
+                TagId::new(tab_index)
+                    .map_or_else(Task::none, |tag| self.dispatch_wm(UserAction::ViewTag(tag)))
             }
 
             Message::LayoutClicked(layout_index) => {
-                self.send_layout_command(layout_index);
                 info!("Layout selected: {}", layout_index);
-                self.layout_selector_open = false;
-                Task::none()
+                self.dispatch_wm(UserAction::SetLayout(LayoutId(layout_index)))
             }
 
-            Message::ToggleLayoutSelector => {
-                self.layout_selector_open = !self.layout_selector_open;
-                Task::none()
-            }
+            Message::ToggleLayoutSelector => self.dispatch(UserAction::ToggleLayoutSelector),
 
             Message::GetWindowId => {
                 info!("GetWindowId");
@@ -338,7 +236,12 @@ impl IcedBar {
                 if let Some(wid) = window_id {
                     info!("WindowIdReceived: {:?}", wid);
                     self.current_window_id = Some(wid);
-                    Task::batch([window::scale_factor(wid).map(Message::GetScaleFactor)])
+                    self.window_metrics_received = 0;
+                    Task::batch([
+                        window::scale_factor(wid).map(Message::GetScaleFactor),
+                        window::size(wid).map(Message::InitialWindowSize),
+                        window::position(wid).map(Message::InitialWindowPosition),
+                    ])
                 } else {
                     warn!("WindowId not available yet");
                     Task::none()
@@ -357,85 +260,164 @@ impl IcedBar {
             }
 
             Message::ShowSecondsToggle => {
-                self.show_seconds = !self.show_seconds;
-                return Task::perform(async {}, |_| Message::UpdateTime);
+                let toggle = self.dispatch(UserAction::ToggleSeconds);
+                let update = self.runtime.tick();
+                let tick = self.handle_runtime_update(update);
+                Task::batch([toggle, tick])
             }
 
-            Message::LeftClick => {
-                if let Err(e) = Command::new("flameshot").arg("gui").spawn() {
-                    warn!("Failed to spawn flameshot: {e}");
-                }
-                Task::none()
-            }
+            Message::LeftClick => self.dispatch(UserAction::Screenshot),
 
             Message::RightClick => Task::none(),
 
-            Message::AudioToggleMute => {
-                if let Some(dev) = self.audio_manager.get_master_device().cloned() {
-                    let _ = self.audio_manager.toggle_mute(&dev.name);
-                }
-                Task::none()
-            }
+            Message::AudioToggleMute => self.dispatch(UserAction::ToggleMute),
 
-            Message::AudioAdjust(delta) => {
-                if let Some(dev) = self.audio_manager.get_master_device().cloned() {
-                    let new_v = (dev.volume + delta).clamp(0, 100);
-                    let _ = self.audio_manager.set_volume(&dev.name, new_v, dev.is_muted);
-                }
-                Task::none()
-            }
+            Message::AudioAdjust(delta) => self.dispatch(UserAction::AdjustVolume(delta)),
 
-            Message::BrightnessAdjust(delta) => {
-                self.brightness_manager.adjust(delta);
-                Task::none()
-            }
+            Message::BrightnessAdjust(delta) => self.dispatch(UserAction::AdjustBrightness(delta)),
 
             Message::GetScaleFactor(scale_factor) => {
                 info!("scale_factor: {}", scale_factor);
                 self.scale_factor = scale_factor;
+                self.window_metrics_received |= 0b001;
+                self.runtime
+                    .view()
+                    .geometry
+                    .zip(self.current_window_id)
+                    .map_or_else(Task::none, |(geometry, window_id)| {
+                        self.apply_monitor_geometry(window_id, geometry)
+                    })
+            }
+
+            Message::InitialWindowSize(size) => {
+                self.initial_window_size = size;
+                self.window_metrics_received |= 0b010;
                 Task::none()
             }
 
-            Message::UpdateTime => {
-                if self.last_clock_update.elapsed() >= Duration::from_millis(900) {
-                    let tmp_now = Local::now();
-                    let format_str = if self.show_seconds {
-                        "%Y-%m-%d %H:%M:%S"
-                    } else {
-                        "%Y-%m-%d %H:%M"
-                    };
-                    self.formated_now = tmp_now.format(format_str).to_string();
-                    self.last_clock_update = Instant::now();
-                }
-
-                if self.last_monitor_update.elapsed() >= Duration::from_secs(2) {
-                    self.system_monitor.update_if_needed();
-                    self.audio_manager.update_if_needed();
-                    self.brightness_manager.update_if_needed();
-                    self.last_monitor_update = Instant::now();
-                }
-
+            Message::InitialWindowPosition(position) => {
+                self.initial_window_position = position;
+                self.window_metrics_received |= 0b100;
                 Task::none()
             }
 
-            Message::SharedMemoryUpdated(message) => {
-                debug!("SharedMemoryUpdated: {:?}", message.timestamp);
-                self.monitor_info_opt = Some(message.monitor_info);
-                if let Some(monitor_info) = self.monitor_info_opt.as_ref() {
-                    self.layout_symbol = monitor_info.get_ltsymbol();
-                    self.monitor_num = monitor_info.monitor_num;
-                    for (index, tag_status) in monitor_info.tag_status_vec.iter().enumerate() {
-                        if tag_status.is_selected {
-                            self.active_tab = index;
+            Message::WindowEvent(window_id, window::Event::Rescaled(scale_factor))
+                if Some(window_id) == self.current_window_id =>
+            {
+                self.scale_factor = scale_factor;
+                self.runtime
+                    .view()
+                    .geometry
+                    .map_or_else(Task::none, |geometry| {
+                        self.apply_monitor_geometry(window_id, geometry)
+                    })
+            }
+
+            Message::WindowEvent(_, _) => Task::none(),
+
+            Message::RuntimeTick => {
+                let update = self.runtime.tick();
+                self.handle_runtime_update(update)
+            }
+
+            Message::TransportPoll => {
+                self.ensure_transport();
+                let update = self.runtime.poll_transport();
+                self.handle_runtime_update(update)
+            }
+        }
+    }
+
+    fn dispatch(&mut self, action: UserAction) -> Task<Message> {
+        let update = self.runtime.dispatch(action);
+        self.handle_runtime_update(update)
+    }
+
+    fn dispatch_wm(&mut self, action: UserAction) -> Task<Message> {
+        if !self.runtime.view().wm_available {
+            debug!("ignoring WM action while the WM projection is unavailable");
+            return Task::none();
+        }
+        self.dispatch(action)
+    }
+
+    fn handle_runtime_update(&mut self, update: RuntimeUpdate) -> Task<Message> {
+        if has_transport_failure(&update) {
+            self.runtime.set_transport(None);
+            self.last_transport_retry = Instant::now();
+        }
+        for issue in update.issues {
+            warn!("xbar runtime issue: {issue:?}");
+        }
+
+        let mut tasks = Vec::new();
+        for effect in update.platform_effects {
+            match effect {
+                BarEffect::ApplyMonitorGeometry(geometry) => {
+                    if let Some(window_id) = self.current_window_id {
+                        tasks.push(self.apply_monitor_geometry(window_id, geometry));
+                    }
+                }
+                BarEffect::ClearMonitorGeometry => {
+                    if let Some(window_id) = self.current_window_id {
+                        tasks.push(window::resize(window_id, self.initial_window_size));
+                        if let Some(position) = self.initial_window_position {
+                            tasks.push(window::move_to(window_id, position));
                         }
                     }
                 }
-                Task::none()
+                BarEffect::Screenshot => {
+                    spawn_program("flameshot", &["gui"]);
+                }
+                BarEffect::OpenAudioControl => {
+                    spawn_program("pavucontrol", &[]);
+                }
+                unhandled => warn!("unhandled xbar platform effect: {unhandled:?}"),
             }
+        }
+        Task::batch(tasks)
+    }
 
-            Message::SharedMemoryError(err) => {
-                warn!("SharedMemoryError: {err}");
-                Task::none()
+    fn apply_monitor_geometry(
+        &self,
+        window_id: Id,
+        geometry: xbar_core::MonitorGeometry,
+    ) -> Task<Message> {
+        let scale_factor = self.scale_factor.max(f32::EPSILON);
+        Task::batch([
+            window::move_to(
+                window_id,
+                iced::Point::new(
+                    geometry.x as f32 / scale_factor,
+                    geometry.y as f32 / scale_factor,
+                ),
+            ),
+            window::resize(
+                window_id,
+                Size::new(geometry.width as f32 / scale_factor, 40.0),
+            ),
+        ])
+    }
+
+    fn ensure_transport(&mut self) {
+        if self.shared_path.is_empty()
+            || self.runtime.transport().is_some()
+            || self.last_transport_retry.elapsed() < TRANSPORT_RETRY_INTERVAL
+        {
+            return;
+        }
+
+        self.last_transport_retry = Instant::now();
+        match SharedTransport::open(&self.shared_path) {
+            Ok(transport) => {
+                self.runtime.set_transport(Some(transport));
+                info!("reconnected WM transport at {:?}", self.shared_path);
+            }
+            Err(error) => {
+                debug!(
+                    "WM transport at {:?} is still unavailable: {error}",
+                    self.shared_path
+                );
             }
         }
     }
@@ -444,13 +426,14 @@ impl IcedBar {
         if self.current_window_id.is_none() {
             Subscription::run(Self::prepare_worker)
         } else {
-            let clock = time::every(milliseconds(1000)).map(|_| Message::UpdateTime);
-            let shared = if self.shared_path.is_empty() {
-                Subscription::none()
+            let window_events = window::events().map(|(id, event)| Message::WindowEvent(id, event));
+            if self.window_metrics_received == WINDOW_METRICS_READY {
+                let clock = time::every(milliseconds(1000)).map(|_| Message::RuntimeTick);
+                let shared = time::every(TRANSPORT_POLL_INTERVAL).map(|_| Message::TransportPoll);
+                Subscription::batch(vec![clock, shared, window_events])
             } else {
-                Self::message_notify_subscription(self.shared_buffer_rc.clone())
-            };
-            Subscription::batch(vec![clock, shared])
+                window_events
+            }
         }
     }
 
@@ -464,10 +447,6 @@ impl IcedBar {
         } else {
             theme::default(theme)
         }
-    }
-
-    fn scale_factor(&self) -> f32 {
-        1.0 / self.scale_factor
     }
 
     fn monitor_num_to_icon(monitor_num: i32) -> String {
@@ -498,21 +477,22 @@ impl IcedBar {
             .copied()
             .unwrap_or(Self::DEFAULT_COLOR);
 
-        if let Some(monitor) = self.monitor_info_opt.as_ref() {
-            if let Some(status) = monitor.tag_status_vec.get(index) {
-                if status.is_urg {
-                    return (
-                        Color::from_rgba(0.86, 0.21, 0.27, 1.0),
-                        2.0,
-                        Color::from_rgba(0.74, 0.13, 0.19, 1.0),
-                    );
-                } else if status.is_filled {
-                    return (tag_color.scale_alpha(1.0), 2.0, tag_color);
-                } else if status.is_selected {
-                    return (tag_color.scale_alpha(0.7), 1.5, tag_color);
-                } else if status.is_occ {
-                    return (tag_color.scale_alpha(0.3), 1.0, tag_color.scale_alpha(0.6));
-                }
+        let view = self.runtime.view();
+        if view.wm_available
+            && let Some(status) = view.tags.get(index)
+        {
+            if status.urgent {
+                return (
+                    Color::from_rgba(0.86, 0.21, 0.27, 1.0),
+                    2.0,
+                    Color::from_rgba(0.74, 0.13, 0.19, 1.0),
+                );
+            } else if status.filled {
+                return (tag_color.scale_alpha(1.0), 2.0, tag_color);
+            } else if status.selected {
+                return (tag_color.scale_alpha(0.7), 1.5, tag_color);
+            } else if status.occupied {
+                return (tag_color.scale_alpha(0.3), 1.0, tag_color.scale_alpha(0.6));
             }
         }
 
@@ -526,12 +506,12 @@ impl IcedBar {
         label: &'a str,
     ) -> iced::widget::Button<'a, Message> {
         let (bg, border_w, border_c) = self.tag_visuals(index);
-        let is_selected = self
-            .monitor_info_opt
-            .as_ref()
-            .and_then(|m| m.tag_status_vec.get(index))
-            .map(|s| s.is_filled || s.is_selected || s.is_urg)
-            .unwrap_or(false);
+        let view = self.runtime.view();
+        let is_selected = view.wm_available
+            && view
+                .tags
+                .get(index)
+                .is_some_and(|s| s.filled || s.selected || s.urgent);
 
         let text_color = if is_selected {
             // Yellow tag uses dark text for legibility
@@ -626,39 +606,33 @@ impl IcedBar {
 
     fn usage_pill<'a>(&self, icon: &'a str, value: f32) -> Element<'a, Message> {
         let (bg, fg) = Self::usage_colors(value);
-        container(
-            text(format!("{}  {:.0}%", icon, value))
-                .size(14)
-                .color(fg),
-        )
-        .padding([3, 10])
-        .height(Self::PILL_HEIGHT)
-        .style(move |_theme: &Theme| Self::pill_style(bg, bg, fg))
-        .into()
+        container(text(format!("{}  {:.0}%", icon, value)).size(14).color(fg))
+            .padding([3, 10])
+            .height(Self::PILL_HEIGHT)
+            .style(move |_theme: &Theme| Self::pill_style(bg, bg, fg))
+            .into()
     }
 
     fn battery_pill<'a>(&self) -> Element<'a, Message> {
-        let (pct, charging) = self
-            .system_monitor
-            .get_snapshot()
-            .map(|s| (s.battery_percent, s.is_charging))
-            .unwrap_or((0.0, false));
-        let icon = if charging { ICON_BAT_CHG } else { ICON_BAT_FULL };
+        let battery = self.runtime.view().battery;
+        let pct = battery.percent.map_or(100.0, |value| value.as_f32());
+        let charging = battery.charging;
+        let icon = if charging {
+            ICON_BAT_CHG
+        } else {
+            ICON_BAT_FULL
+        };
         let (bg, fg) = Self::battery_colors(pct);
-        container(
-            text(format!("{}  {:.0}%", icon, pct))
-                .size(14)
-                .color(fg),
-        )
-        .padding([3, 10])
-        .height(Self::PILL_HEIGHT)
-        .style(move |_theme: &Theme| Self::pill_style(bg, bg, fg))
-        .into()
+        container(text(format!("{}  {:.0}%", icon, pct)).size(14).color(fg))
+            .padding([3, 10])
+            .height(Self::PILL_HEIGHT)
+            .style(move |_theme: &Theme| Self::pill_style(bg, bg, fg))
+            .into()
     }
 
     fn brightness_pill<'a>(&self) -> Element<'a, Message> {
-        let label = match self.brightness_manager.percent() {
-            Some(p) => format!("{}  {}%", ICON_BRIGHT, p),
+        let label = match self.runtime.view().brightness.percent {
+            Some(percent) => format!("{}  {}%", ICON_BRIGHT, percent.rounded()),
             None => format!("{}  --", ICON_BRIGHT),
         };
         let bg = color!(0xFDE047).scale_alpha(0.92);
@@ -686,12 +660,11 @@ impl IcedBar {
     }
 
     fn volume_pill<'a>(&self) -> Element<'a, Message> {
-        let master = self.audio_manager.get_master_device();
-        let (volume, muted, has_device) = if let Some(dev) = master {
-            (dev.volume.clamp(0, 100), dev.is_muted, true)
-        } else {
-            (0, true, false)
-        };
+        let audio = self.runtime.view().audio;
+        let (volume, has_device) = audio
+            .volume_percent
+            .map_or((0, false), |percent| (i32::from(percent.rounded()), true));
+        let muted = audio.muted;
 
         let icon = Self::volume_icon(volume, muted, has_device);
         let label = if has_device {
@@ -759,7 +732,7 @@ impl IcedBar {
     fn time_pill<'a>(&self) -> Element<'a, Message> {
         let bg = color!(0x4DA3FF).scale_alpha(0.9);
         let pill = container(
-            text(format!("{}  {}", ICON_TIME, self.formated_now))
+            text(format!("{}  {}", ICON_TIME, self.runtime.view().time))
                 .size(14)
                 .color(Color::WHITE),
         )
@@ -801,12 +774,13 @@ impl IcedBar {
     }
 
     fn layout_toggle_button<'a>(&self) -> iced::widget::Button<'a, Message> {
-        let is_open = self.layout_selector_open;
+        let view = self.runtime.view();
+        let is_open = view.layout_selector_open;
         let color_open = color!(0x3CB371);
         let color_close = color!(0xD35400);
 
         let pill_color = if is_open { color_open } else { color_close };
-        let label = self.layout_symbol.clone();
+        let label = view.layout_symbol.to_owned();
 
         button(rich_text![span(label).color(Color::WHITE)].on_link_click(std::convert::identity))
             .padding([3, 10])
@@ -836,7 +810,7 @@ impl IcedBar {
 
     fn layout_options_row(&self) -> Element<'_, Message> {
         let layouts: [(&str, u32); 3] = [("[]=", 0), ("><>", 1), ("[M]", 2)];
-        let current = self.layout_symbol.as_str();
+        let current = self.runtime.view().layout_symbol;
 
         let mut row = Row::new().spacing(6);
         for (sym, idx) in layouts {
@@ -889,16 +863,16 @@ impl IcedBar {
         }
 
         let layout_button = self.layout_toggle_button();
-        let layout_selector = if self.layout_selector_open {
+        let layout_selector = if self.runtime.view().layout_selector_open {
             self.layout_options_row()
         } else {
             Row::new().into()
         };
 
         // System info pills
-        let snapshot = self.system_monitor.get_snapshot();
-        let cpu_usage = snapshot.map(|s| s.cpu_average).unwrap_or(0.0);
-        let memory_usage = snapshot.map(|s| s.memory_usage_percent).unwrap_or(0.0);
+        let system = self.runtime.view().system;
+        let cpu_usage = system.cpu_percent.map_or(0.0, |value| value.as_f32());
+        let memory_usage = system.memory_percent.map_or(0.0, |value| value.as_f32());
 
         let cpu_pill = self.usage_pill(ICON_CPU, cpu_usage);
         let memory_pill = self.usage_pill(ICON_MEM, memory_usage);
@@ -909,11 +883,7 @@ impl IcedBar {
         let screenshot_pill = self.screenshot_pill();
         let time_pill = self.time_pill();
 
-        let monitor_num = self
-            .monitor_info_opt
-            .as_ref()
-            .map(|m| m.monitor_num)
-            .unwrap_or(0);
+        let monitor_num = self.runtime.view().monitor.0;
         let monitor_pill = self.monitor_pill(monitor_num);
 
         let scale_pill = self.scale_pill(Some(self.scale_factor));
@@ -954,5 +924,30 @@ impl IcedBar {
             .spacing(Self::TAB_SPACING)
             .push(work_space_row)
             .into()
+    }
+}
+
+fn has_transport_failure(update: &RuntimeUpdate) -> bool {
+    update.issues.iter().any(|issue| {
+        matches!(
+            issue,
+            RuntimeIssue::AdapterFailed {
+                adapter: RuntimeAdapter::Transport,
+                ..
+            }
+        )
+    })
+}
+
+fn spawn_program(program: &str, args: &[&str]) {
+    let program = program.to_owned();
+    let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+    let thread_name = format!("wait-{program}");
+    if let Err(error) = thread::Builder::new().name(thread_name).spawn(move || {
+        if let Err(error) = Command::new(&program).args(&args).status() {
+            warn!("failed to run {program}: {error}");
+        }
+    }) {
+        warn!("failed to start process waiter: {error}");
     }
 }
