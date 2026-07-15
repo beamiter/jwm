@@ -10,7 +10,113 @@ use log::{info, warn};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
+
+const CONFIG_RELOAD_DEBOUNCE: Duration = Duration::from_millis(300);
+const CONFIG_RELOAD_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Clone, Copy)]
+struct PendingConfigReload {
+    revision: SystemTime,
+    changed_at: Instant,
+}
+
+/// Shared state for event-driven and polling-based config reload detection.
+///
+/// A revision is its file modification time. Attempts are recorded before the
+/// parser runs, so a malformed revision cannot produce an error on every
+/// update tick; editing the file gives it a new revision and enables one new
+/// attempt.
+#[derive(Debug)]
+pub(crate) struct ConfigReloadTracker {
+    last_observed: Option<SystemTime>,
+    last_attempted: Option<SystemTime>,
+    pending: Option<PendingConfigReload>,
+    last_poll_at: Option<Instant>,
+}
+
+impl ConfigReloadTracker {
+    pub(crate) fn new(initial_revision: Option<SystemTime>) -> Self {
+        Self {
+            last_observed: initial_revision,
+            // Loading CONFIG during startup settles the initial revision even
+            // when parsing falls back to defaults. Wait for the next edit.
+            last_attempted: initial_revision,
+            pending: None,
+            last_poll_at: None,
+        }
+    }
+
+    fn should_poll(&mut self, now: Instant) -> bool {
+        if self.last_poll_at.is_some_and(|last_poll| {
+            now.saturating_duration_since(last_poll) < CONFIG_RELOAD_POLL_INTERVAL
+        }) {
+            return false;
+        }
+
+        self.last_poll_at = Some(now);
+        true
+    }
+
+    fn observe(&mut self, revision: SystemTime, now: Instant) -> bool {
+        if self.last_observed == Some(revision) {
+            return false;
+        }
+
+        self.last_observed = Some(revision);
+        if self.last_attempted == Some(revision) {
+            self.pending = None;
+            return false;
+        }
+
+        // A new revision restarts the debounce period. Repeated notifications
+        // for the same revision are handled by the early return above and do
+        // not postpone a stable reload indefinitely.
+        self.pending = Some(PendingConfigReload {
+            revision,
+            changed_at: now,
+        });
+        true
+    }
+
+    fn take_due_attempt(&mut self, now: Instant) -> Option<SystemTime> {
+        let pending = self.pending?;
+        if !self.pending_is_due(now) {
+            return None;
+        }
+
+        self.pending = None;
+        self.last_attempted = Some(pending.revision);
+        Some(pending.revision)
+    }
+
+    fn pending_is_due(&self, now: Instant) -> bool {
+        self.pending.is_some_and(|pending| {
+            now.saturating_duration_since(pending.changed_at) >= CONFIG_RELOAD_DEBOUNCE
+        })
+    }
+
+    fn next_wakeup_in(&self, now: Instant) -> Duration {
+        let poll_in = self.last_poll_at.map_or(Duration::ZERO, |last_poll| {
+            CONFIG_RELOAD_POLL_INTERVAL.saturating_sub(now.saturating_duration_since(last_poll))
+        });
+        let debounce_in = self.pending.map(|pending| {
+            CONFIG_RELOAD_DEBOUNCE.saturating_sub(now.saturating_duration_since(pending.changed_at))
+        });
+
+        debounce_in.map_or(poll_in, |debounce_in| poll_in.min(debounce_in))
+    }
+
+    fn deadline_is_due(&self, now: Instant) -> bool {
+        self.next_wakeup_in(now).is_zero()
+    }
+
+    fn mark_attempted(&mut self, revision: SystemTime) {
+        self.last_observed = Some(revision);
+        self.last_attempted = Some(revision);
+        self.pending = None;
+    }
+}
 
 impl Jwm {
     fn record_config_reload_result(&mut self, success: bool, error: Option<String>) {
@@ -18,7 +124,7 @@ impl Jwm {
         self.config_reload_last_unix_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .ok()
-            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64);
+            .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
         self.config_reload_last_success = Some(success);
         self.config_reload_last_error = error;
     }
@@ -253,11 +359,10 @@ impl Jwm {
         }
         Ok(())
     }
-    pub(crate) fn do_config_reload(&mut self, backend: &mut dyn Backend) -> IpcResponse {
+    fn perform_config_reload(&mut self, backend: &mut dyn Backend) -> IpcResponse {
         match crate::config::reload_global() {
             Ok(()) => {
                 self.record_config_reload_result(true, None);
-                self.config_last_modified = crate::config::Config::get_config_modified_time().ok();
                 self.apply_config_changes(backend);
                 self.broadcast_ipc_event(
                     "config/reload",
@@ -284,6 +389,70 @@ impl Jwm {
                 IpcResponse::err(error)
             }
         }
+    }
+
+    /// Explicit reloads (for example IPC) bypass the debounce but still settle
+    /// the current revision so the polling fallback cannot reload it again.
+    pub(crate) fn do_config_reload(&mut self, backend: &mut dyn Backend) -> IpcResponse {
+        if let Ok(revision) = crate::config::Config::get_config_modified_time() {
+            self.config_reload_tracker.mark_attempted(revision);
+            self.config_last_modified = Some(revision);
+        }
+        self.config_reload_debounce = None;
+        self.perform_config_reload(backend)
+    }
+
+    /// Fast-path notification used by backends with inotify support. The
+    /// periodic poll below uses the same state, preventing duplicate reloads.
+    pub(crate) fn observe_config_reload(&mut self, now: Instant, source: &str) {
+        let Ok(revision) = crate::config::Config::get_config_modified_time() else {
+            // Atomic replacement can briefly make the path unavailable. The
+            // next update tick will observe the completed file.
+            return;
+        };
+
+        if self.config_reload_tracker.observe(revision, now) {
+            self.config_last_modified = Some(revision);
+            self.config_reload_debounce = Some(now);
+            info!("[config] file change detected via {source}; waiting for the revision to settle");
+        }
+    }
+
+    /// Backend-neutral fallback run from every backend's periodic update.
+    pub(crate) fn poll_config_reload(&mut self, backend: &mut dyn Backend, now: Instant) {
+        let polled_now = self.config_reload_tracker.should_poll(now);
+        if polled_now {
+            self.observe_config_reload(now, "mtime poll");
+        }
+
+        // Re-stat once at the debounce boundary even within the one-second
+        // polling interval. If an atomic-save burst produced a newer revision,
+        // observing it here restarts the debounce instead of loading an older
+        // revision and then loading the final revision again on the next poll.
+        if !polled_now && self.config_reload_tracker.pending_is_due(now) {
+            self.observe_config_reload(now, "debounce verification");
+        }
+
+        if self.config_reload_tracker.take_due_attempt(now).is_none() {
+            return;
+        }
+        self.config_reload_debounce = None;
+
+        info!("[config] debounced config revision is stable, reloading");
+        let response = self.perform_config_reload(backend);
+        if response.success {
+            info!("[config] reload successful");
+        } else {
+            warn!("[config] reload failed: {:?}", response.error);
+        }
+    }
+
+    pub(crate) fn config_reload_next_wakeup(&self, now: Instant) -> Duration {
+        self.config_reload_tracker.next_wakeup_in(now)
+    }
+
+    pub(crate) fn config_reload_deadline_is_due(&self, now: Instant) -> bool {
+        self.config_reload_tracker.deadline_is_due(now)
     }
 
     pub(crate) fn apply_config_changes(&mut self, backend: &mut dyn Backend) {
@@ -364,5 +533,152 @@ impl Jwm {
                 let _ = self.update_client_decoration(backend, ck, is_sel);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod config_reload_tests {
+    use super::*;
+
+    fn revision(seconds: u64) -> SystemTime {
+        std::time::UNIX_EPOCH + Duration::from_secs(seconds)
+    }
+
+    #[test]
+    fn unchanged_revision_does_not_schedule_reload() {
+        let now = Instant::now();
+        let original = revision(1);
+        let mut tracker = ConfigReloadTracker::new(Some(original));
+
+        assert!(!tracker.observe(original, now));
+        assert_eq!(tracker.take_due_attempt(now + CONFIG_RELOAD_DEBOUNCE), None);
+        assert!(tracker.pending.is_none());
+    }
+
+    #[test]
+    fn mtime_poll_is_gated_until_interval_expires() {
+        let now = Instant::now();
+        let mut tracker = ConfigReloadTracker::new(Some(revision(1)));
+        let just_before_interval = (now + CONFIG_RELOAD_POLL_INTERVAL)
+            .checked_sub(Duration::from_millis(1))
+            .unwrap();
+
+        assert!(tracker.should_poll(now));
+        assert!(!tracker.should_poll(now + Duration::from_millis(250)));
+        assert!(!tracker.should_poll(just_before_interval));
+        assert!(tracker.should_poll(now + CONFIG_RELOAD_POLL_INTERVAL));
+        assert!(!tracker.should_poll(now + CONFIG_RELOAD_POLL_INTERVAL));
+    }
+
+    #[test]
+    fn poll_deadline_counts_down_without_continuous_ticks() {
+        let now = Instant::now();
+        let mut tracker = ConfigReloadTracker::new(Some(revision(1)));
+
+        assert_eq!(tracker.next_wakeup_in(now), Duration::ZERO);
+        assert!(tracker.deadline_is_due(now));
+
+        assert!(tracker.should_poll(now));
+        assert_eq!(
+            tracker.next_wakeup_in(now + Duration::from_millis(250)),
+            Duration::from_millis(750)
+        );
+        let just_before_interval = (now + CONFIG_RELOAD_POLL_INTERVAL)
+            .checked_sub(Duration::from_millis(1))
+            .unwrap();
+        assert!(!tracker.deadline_is_due(just_before_interval));
+        assert!(tracker.deadline_is_due(now + CONFIG_RELOAD_POLL_INTERVAL));
+    }
+
+    #[test]
+    fn next_wakeup_uses_earliest_poll_or_debounce_deadline() {
+        let now = Instant::now();
+        let mut tracker = ConfigReloadTracker::new(Some(revision(1)));
+        assert!(tracker.should_poll(now));
+
+        let changed_at = now + Duration::from_millis(800);
+        assert!(tracker.observe(revision(2), changed_at));
+        // The next mtime poll is 200ms away, earlier than the 300ms debounce.
+        assert_eq!(
+            tracker.next_wakeup_in(changed_at),
+            Duration::from_millis(200)
+        );
+
+        assert!(tracker.should_poll(now + CONFIG_RELOAD_POLL_INTERVAL));
+        // Once the earlier poll is serviced, the remaining debounce deadline
+        // becomes the next wakeup.
+        assert_eq!(
+            tracker.next_wakeup_in(now + CONFIG_RELOAD_POLL_INTERVAL),
+            Duration::from_millis(100)
+        );
+        assert!(tracker.deadline_is_due(changed_at + CONFIG_RELOAD_DEBOUNCE));
+    }
+
+    #[test]
+    fn changed_revision_reloads_once_after_debounce() {
+        let now = Instant::now();
+        let changed = revision(2);
+        let mut tracker = ConfigReloadTracker::new(Some(revision(1)));
+        let just_before_debounce = (now + CONFIG_RELOAD_DEBOUNCE)
+            .checked_sub(Duration::from_millis(1))
+            .unwrap();
+
+        assert!(tracker.observe(changed, now));
+        assert!(!tracker.observe(changed, now + Duration::from_millis(100)));
+        assert_eq!(tracker.take_due_attempt(just_before_debounce), None);
+        assert_eq!(
+            tracker.take_due_attempt(now + CONFIG_RELOAD_DEBOUNCE),
+            Some(changed)
+        );
+
+        assert!(!tracker.observe(changed, now + CONFIG_RELOAD_DEBOUNCE));
+        assert_eq!(
+            tracker.take_due_attempt(now + CONFIG_RELOAD_DEBOUNCE * 2),
+            None
+        );
+    }
+
+    #[test]
+    fn newer_revision_restarts_debounce_window() {
+        let now = Instant::now();
+        let first_change = revision(2);
+        let final_change = revision(3);
+        let burst_gap = Duration::from_millis(100);
+        let mut tracker = ConfigReloadTracker::new(Some(revision(1)));
+
+        assert!(tracker.observe(first_change, now));
+        assert!(tracker.observe(final_change, now + burst_gap));
+        assert_eq!(tracker.take_due_attempt(now + CONFIG_RELOAD_DEBOUNCE), None);
+        assert_eq!(
+            tracker.take_due_attempt(now + burst_gap + CONFIG_RELOAD_DEBOUNCE),
+            Some(final_change)
+        );
+    }
+
+    #[test]
+    fn failed_attempt_waits_for_next_revision() {
+        let now = Instant::now();
+        let malformed = revision(2);
+        let fixed = revision(3);
+        let mut tracker = ConfigReloadTracker::new(Some(revision(1)));
+
+        assert!(tracker.observe(malformed, now));
+        // Taking the due revision records the attempt before parsing. Simulate
+        // a parse failure by intentionally providing no success callback.
+        assert_eq!(
+            tracker.take_due_attempt(now + CONFIG_RELOAD_DEBOUNCE),
+            Some(malformed)
+        );
+        assert!(!tracker.observe(malformed, now + CONFIG_RELOAD_DEBOUNCE * 2));
+        assert_eq!(
+            tracker.take_due_attempt(now + CONFIG_RELOAD_DEBOUNCE * 2),
+            None
+        );
+
+        assert!(tracker.observe(fixed, now + CONFIG_RELOAD_DEBOUNCE * 2));
+        assert_eq!(
+            tracker.take_due_attempt(now + CONFIG_RELOAD_DEBOUNCE * 3),
+            Some(fixed)
+        );
     }
 }

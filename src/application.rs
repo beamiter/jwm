@@ -88,9 +88,41 @@ pub struct BenchmarkRequest {
 }
 
 impl BenchmarkRequest {
+    /// Maximum number of measured frames retained by one benchmark run.
+    ///
+    /// A benchmark stores several per-frame sample streams in memory. Keeping
+    /// this at 100,000 bounds those buffers while still allowing roughly 28
+    /// minutes of measurements at 60 Hz.
+    pub const MAX_FRAMES: u32 = 100_000;
+
+    /// Maximum number of frames discarded before measurement begins.
+    ///
+    /// Warm-up frames are not retained, but bounding them prevents an
+    /// accidental or remote request from keeping benchmark mode in warm-up
+    /// indefinitely (10,000 frames is roughly 2.8 minutes at 60 Hz).
+    pub const MAX_WARMUP_FRAMES: u32 = 10_000;
+
+    /// Validate and construct a bounded benchmark request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the measured frame count is zero or either count
+    /// exceeds its documented resource limit.
     pub fn new(frames: u32, warmup: u32) -> Result<Self, String> {
         if frames == 0 {
             return Err("benchmark frame count must be greater than zero".to_string());
+        }
+        if frames > Self::MAX_FRAMES {
+            return Err(format!(
+                "benchmark frame count {frames} exceeds the maximum of {}",
+                Self::MAX_FRAMES
+            ));
+        }
+        if warmup > Self::MAX_WARMUP_FRAMES {
+            return Err(format!(
+                "benchmark warm-up frame count {warmup} exceeds the maximum of {}",
+                Self::MAX_WARMUP_FRAMES
+            ));
         }
         Ok(Self { frames, warmup })
     }
@@ -239,7 +271,7 @@ pub fn run_with_options(options: ApplicationOptions) -> Result<(), Box<dyn std::
 
         backend.check_existing_wm()?;
 
-        let mut jwm = Jwm::new(&mut *backend)?;
+        let mut jwm = Jwm::new_with_runtime_backend(&mut *backend, options.backend.as_str())?;
         jwm.setup(&mut *backend)?;
         jwm.setup_initial_windows(&mut *backend)?;
         configure_benchmark(&mut *backend, options.benchmark);
@@ -299,7 +331,17 @@ fn configure_benchmark<B: CompositorBenchmark + ?Sized>(
     let Some(request) = request else {
         return;
     };
-    backend.compositor_benchmark_start(request.frames, request.warmup);
+    let request = match BenchmarkRequest::new(request.frames, request.warmup) {
+        Ok(request) => request,
+        Err(error) => {
+            error!("Benchmark mode rejected: {error}");
+            return;
+        }
+    };
+    if !backend.compositor_benchmark_start(request.frames, request.warmup) {
+        error!("Benchmark mode could not start: compositor unavailable or request refused");
+        return;
+    }
     backend.compositor_benchmark_set_auto_exit(true);
     info!(
         "Benchmark mode: collecting {} frames (warmup={})",
@@ -380,30 +422,64 @@ mod tests {
     #[test]
     fn benchmark_configuration_uses_narrow_capability() {
         let mut backend = BenchmarkSpy::default();
-        configure_benchmark(
-            &mut backend,
-            Some(BenchmarkRequest {
-                frames: 120,
-                warmup: 30,
-            }),
-        );
+        configure_benchmark(&mut backend, Some(BenchmarkRequest::new(120, 30).unwrap()));
 
         assert_eq!(backend.started, Some((120, 30)));
         assert!(backend.auto_exit);
     }
 
     #[test]
+    fn benchmark_configuration_revalidates_explicit_options() {
+        let mut backend = BenchmarkSpy::default();
+        configure_benchmark(
+            &mut backend,
+            Some(BenchmarkRequest {
+                frames: u32::MAX,
+                warmup: 0,
+            }),
+        );
+
+        assert_eq!(backend.started, None);
+        assert!(!backend.auto_exit);
+    }
+
+    #[test]
     fn benchmark_values_are_validated_without_environment_access() {
         assert_eq!(
             parse_benchmark(Some("120"), None),
-            Ok(Some(BenchmarkRequest {
-                frames: 120,
-                warmup: 60,
-            }))
+            Ok(Some(BenchmarkRequest::new(120, 60).unwrap()))
         );
         assert!(parse_benchmark(Some("invalid"), Some("10")).is_err());
         assert!(parse_benchmark(Some("0"), Some("10")).is_err());
         assert!(parse_benchmark(None, Some("10")).is_err());
         assert_eq!(parse_benchmark(None, None), Ok(None));
+
+        let too_many_frames = (BenchmarkRequest::MAX_FRAMES + 1).to_string();
+        let too_much_warmup = (BenchmarkRequest::MAX_WARMUP_FRAMES + 1).to_string();
+        assert!(parse_benchmark(Some(&too_many_frames), Some("0")).is_err());
+        assert!(parse_benchmark(Some("1"), Some(&too_much_warmup)).is_err());
+    }
+
+    #[test]
+    fn benchmark_request_accepts_limits_and_rejects_values_beyond_them() {
+        assert_eq!(
+            BenchmarkRequest::new(
+                BenchmarkRequest::MAX_FRAMES,
+                BenchmarkRequest::MAX_WARMUP_FRAMES,
+            ),
+            Ok(BenchmarkRequest {
+                frames: BenchmarkRequest::MAX_FRAMES,
+                warmup: BenchmarkRequest::MAX_WARMUP_FRAMES,
+            })
+        );
+
+        let frames_error = BenchmarkRequest::new(BenchmarkRequest::MAX_FRAMES + 1, 0).unwrap_err();
+        assert!(frames_error.contains("frame count"));
+        assert!(frames_error.contains(&BenchmarkRequest::MAX_FRAMES.to_string()));
+
+        let warmup_error =
+            BenchmarkRequest::new(1, BenchmarkRequest::MAX_WARMUP_FRAMES + 1).unwrap_err();
+        assert!(warmup_error.contains("warm-up"));
+        assert!(warmup_error.contains(&BenchmarkRequest::MAX_WARMUP_FRAMES.to_string()));
     }
 }

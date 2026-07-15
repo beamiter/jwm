@@ -75,9 +75,22 @@ src/backend/api.rs          platform boundary
   serializable diagnostics shared by startup preflight, `--check-config`, the
   doctor, live reload, and IPC status. Blocking errors never replace the active
   runtime snapshot; generated files are atomically written and symlink-safe.
+- Live reload combines backend-specific inotify notifications with a
+  backend-neutral, low-frequency revision poll. Both paths share debounce and
+  revision deduplication, so nested backends reload reliably without repeatedly
+  parsing the same malformed edit.
 - IPC command arguments use checked conversions and reject malformed shapes,
   empty spawn commands and numeric overflow instead of silently defaulting or
   narrowing. The CLI propagates server failures through its exit status.
+- The IPC endpoint validates private runtime directories, preserves active
+  instances and reclaims only unchanged stale sockets. Per-client buffering,
+  connection intake and subscription state are bounded so control traffic
+  cannot monopolize the compositor loop.
+- Versioned runtime health and capability snapshots expose the actual selected
+  backend and supported control surface without changing legacy IPC envelopes.
+- Session snapshots use an atomic private state store, validate schema and
+  payload limits, and restore monitor/tag placement with on-screen floating
+  geometry while continuing to read the legacy cache location.
 - `EventHandler` explicitly delegates immediate compositor rendering to JWM's
   render pump. X11 Damage events no longer fall through the trait's no-op
   default and wait for the periodic update tick.

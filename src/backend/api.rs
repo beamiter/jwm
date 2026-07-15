@@ -1367,10 +1367,19 @@ pub trait EventHandler {
 
     fn should_exit(&self) -> bool;
 
-    /// Returns true when the handler has active animations and needs
-    /// the event loop to keep ticking (non-blocking dispatch).
+    /// Returns true when the handler has active work or a deadline that is due
+    /// and needs the event loop to tick now.
     fn needs_tick(&self) -> bool {
         false
+    }
+
+    /// Returns the maximum duration an event loop may sleep before calling
+    /// [`EventHandler::update`] again. Event loops with their own periodic
+    /// timers may ignore this; loops that otherwise block indefinitely should
+    /// include it in their dispatch timeout. `Duration::ZERO` means the update
+    /// is due now.
+    fn next_wakeup(&self) -> Option<std::time::Duration> {
+        None
     }
 
     /// Immediately render the compositor if it has pending damage.

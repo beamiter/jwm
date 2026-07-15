@@ -723,8 +723,7 @@ impl X11rbBackend {
 impl CompositorBenchmark for X11rbBackend {
     fn compositor_benchmark_start(&mut self, frames: u32, warmup: u32) -> bool {
         if let Some(compositor) = self.compositor.as_mut() {
-            compositor.benchmark_start(frames, warmup);
-            true
+            compositor.benchmark_start(frames, warmup)
         } else {
             false
         }

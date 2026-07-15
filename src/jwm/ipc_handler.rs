@@ -1,13 +1,78 @@
 // IPC handling: command processing, queries, and event broadcasting
 
 use crate::Jwm;
+use crate::application::BenchmarkRequest;
 use crate::backend::api::Backend;
 use crate::config::{ArgumentConfig, BackendFamily, CONFIG, get_backend_family};
 use crate::core::layout::LayoutEnum;
+use crate::core::models::{ClientKey, MonitorKey, WMClient, WMMonitor};
+use crate::core::state::WMState;
 use crate::ipc::{
-    self, IpcEvent, IpcResponse, MonitorInfoIpc, TreeNode, WindowInfo, WorkspaceInfo,
+    self, IpcEvent, IpcResponse, MonitorInfoIpc, RuntimeCounts, RuntimeFeatureStates,
+    RuntimeHealth, RuntimeStatusV1, TreeNode, WindowInfo, WorkspaceInfo,
 };
 use crate::ipc_server::IncomingIpc;
+
+fn runtime_health(config_status: &serde_json::Value, monitor_count: usize) -> RuntimeHealth {
+    let mut reasons = Vec::new();
+    if !config_status
+        .get("exists")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        reasons.push("configuration file is missing".to_string());
+    }
+
+    let diagnostics = &config_status["diagnostics"];
+    let errors = diagnostics
+        .get("error_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let warnings = diagnostics
+        .get("warning_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if errors != 0 {
+        reasons.push(format!("configuration has {errors} error(s)"));
+    }
+    if warnings != 0 {
+        reasons.push(format!("configuration has {warnings} warning(s)"));
+    }
+    if config_status["reload"]["last_success"].as_bool() == Some(false) {
+        let detail = config_status["reload"]["last_error"]
+            .as_str()
+            .unwrap_or("unknown error");
+        reasons.push(format!("last configuration reload failed: {detail}"));
+    }
+    if monitor_count == 0 {
+        reasons.push("no monitors are available".to_string());
+    }
+    RuntimeHealth::from_reasons(reasons)
+}
+
+fn resolved_client_monitor_num(
+    monitors: &slotmap::SlotMap<MonitorKey, WMMonitor>,
+    client: &WMClient,
+) -> i32 {
+    client
+        .mon
+        .and_then(|key| monitors.get(key))
+        .map_or(-1, |monitor| monitor.num)
+}
+
+fn tagged_client_count(state: &WMState, monitor: MonitorKey, tag_mask: u32) -> usize {
+    state.monitor_clients.get(monitor).map_or(0, |clients| {
+        clients
+            .iter()
+            .filter(|&&key| {
+                state
+                    .clients
+                    .get(key)
+                    .is_some_and(|client| client.state.tags & tag_mask != 0)
+            })
+            .count()
+    })
+}
 
 fn recording_file_is_valid(path: &str) -> bool {
     std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0)
@@ -123,10 +188,82 @@ fn parse_command_batch_entries(
     Ok(commands)
 }
 
+fn parse_optional_u32_ipc_arg(
+    args: &serde_json::Value,
+    command: &str,
+    field: &str,
+    default: u32,
+) -> Result<u32, String> {
+    let Some(value) = args.get(field) else {
+        return Ok(default);
+    };
+    let raw = value
+        .as_u64()
+        .ok_or_else(|| format!("{command}: '{field}' must be an unsigned 32-bit integer"))?;
+    u32::try_from(raw)
+        .map_err(|_| format!("{command}: '{field}' value {raw} is outside the u32 range"))
+}
+
+fn parse_benchmark_request(args: &serde_json::Value) -> Result<BenchmarkRequest, String> {
+    let frames = parse_optional_u32_ipc_arg(args, "benchmark", "frames", 600)?;
+    let warmup = parse_optional_u32_ipc_arg(args, "benchmark", "warmup", 60)?;
+    BenchmarkRequest::new(frames, warmup).map_err(|error| format!("benchmark: {error}"))
+}
+
+fn parse_required_i32_ipc_arg(
+    args: &serde_json::Value,
+    command: &str,
+    field: &str,
+) -> Result<i32, String> {
+    let value = args
+        .get(field)
+        .ok_or_else(|| format!("{command}: missing '{field}' (i32)"))?;
+
+    if let Some(raw) = value.as_i64() {
+        return i32::try_from(raw)
+            .map_err(|_| format!("{command}: '{field}' value {raw} is outside the i32 range"));
+    }
+    if let Some(raw) = value.as_u64() {
+        return i32::try_from(raw)
+            .map_err(|_| format!("{command}: '{field}' value {raw} is outside the i32 range"));
+    }
+
+    Err(format!("{command}: '{field}' must be a 32-bit integer"))
+}
+
+fn workspace_layout_state(mon: &WMMonitor, tag_index: usize) -> (String, f32, u32) {
+    let current_layout = || format!("{:?}", *mon.lt[mon.sel_lt]);
+    let Some(pertag_index) = tag_index.checked_add(1) else {
+        return (current_layout(), mon.layout.m_fact, mon.layout.n_master);
+    };
+    let Some(pertag) = mon.pertag.as_ref() else {
+        return (current_layout(), mon.layout.m_fact, mon.layout.n_master);
+    };
+
+    let layout = pertag
+        .sel_lts
+        .get(pertag_index)
+        .and_then(|&selected| pertag.lt_idxs.get(pertag_index)?.get(selected))
+        .and_then(Option::as_ref)
+        .map_or_else(current_layout, |layout| format!("{:?}", **layout));
+    let m_fact = pertag
+        .m_facts
+        .get(pertag_index)
+        .copied()
+        .unwrap_or(mon.layout.m_fact);
+    let n_master = pertag
+        .n_masters
+        .get(pertag_index)
+        .copied()
+        .unwrap_or(mon.layout.n_master);
+
+    (layout, m_fact, n_master)
+}
+
 fn system_time_unix_ms(time: std::time::SystemTime) -> Option<u64> {
     time.duration_since(std::time::UNIX_EPOCH)
         .ok()
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
 }
 
 fn protocol_bind_count(
@@ -965,6 +1102,12 @@ impl Jwm {
     ) -> IpcResponse {
         let cfg = CONFIG.load();
         match name {
+            "get_status" => IpcResponse::ok(Some(
+                serde_json::to_value(self.query_runtime_status(backend)).unwrap_or_default(),
+            )),
+            "get_capabilities" => IpcResponse::ok(Some(
+                serde_json::to_value(ipc::ipc_capabilities()).unwrap_or_default(),
+            )),
             "get_windows" => {
                 let windows = self.query_windows();
                 IpcResponse::ok(Some(serde_json::to_value(windows).unwrap_or_default()))
@@ -1051,7 +1194,7 @@ impl Jwm {
                     "active": recording.active,
                     "output_path": recording.output_path,
                     "output_exists": output_exists,
-                    "elapsed_ms": recording.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                    "elapsed_ms": u64::try_from(recording.elapsed().as_millis()).unwrap_or(u64::MAX),
                     "device": recording.device,
                     "backend": recording.backend,
                     "format": recording.format,
@@ -1203,7 +1346,7 @@ impl Jwm {
             "get_version" => IpcResponse::ok(Some(serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "name": "jwm",
-                "backend": std::env::var("JWM_BACKEND").unwrap_or_else(|_| "x11rb".to_string()),
+                "backend": self.runtime_backend.as_str(),
                 "build_profile": if cfg!(debug_assertions) { "debug" } else { "release" },
             }))),
             "get_metrics" => {
@@ -1654,13 +1797,10 @@ impl Jwm {
                 );
             }
         };
-        let target_num = match args.get("monitor").and_then(|v| v.as_i64()) {
-            Some(v) => v as i32,
-            None => {
-                return IpcResponse::err(
-                    "move_window_to_monitor: missing 'monitor' (i32)".to_string(),
-                );
-            }
+        let target_num = match parse_required_i32_ipc_arg(args, "move_window_to_monitor", "monitor")
+        {
+            Ok(value) => value,
+            Err(error) => return IpcResponse::err(error),
         };
 
         let win = crate::backend::common_define::WindowId::from_raw(win_id);
@@ -1697,14 +1837,21 @@ impl Jwm {
         let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
         match action {
             "start" => {
-                let frames = args.get("frames").and_then(|v| v.as_u64()).unwrap_or(600) as u32;
-                let warmup = args.get("warmup").and_then(|v| v.as_u64()).unwrap_or(60) as u32;
-                if backend.compositor_benchmark_start(frames, warmup) {
-                    IpcResponse::ok(Some(
-                        serde_json::json!({"status": "started", "frames": frames, "warmup": warmup}),
-                    ))
+                let request = match parse_benchmark_request(args) {
+                    Ok(request) => request,
+                    Err(error) => return IpcResponse::err(error),
+                };
+                if backend.compositor_benchmark_start(request.frames, request.warmup) {
+                    IpcResponse::ok(Some(serde_json::json!({
+                        "status": "started",
+                        "frames": request.frames,
+                        "warmup": request.warmup,
+                    })))
                 } else {
-                    IpcResponse::err("compositor not available".to_string())
+                    IpcResponse::err(
+                        "benchmark: compositor unavailable or benchmark could not be started"
+                            .to_string(),
+                    )
                 }
             }
             "stop" => {
@@ -1722,32 +1869,71 @@ impl Jwm {
     // Query helpers
     // -------------------------------------------------------------------------
 
+    fn query_runtime_status(&self, backend: &dyn Backend) -> RuntimeStatusV1 {
+        let config = self.query_config_status();
+        let windows = self.query_windows().len();
+        let monitors = self.query_monitors().len();
+        let workspaces = self.query_workspaces().len();
+        let uptime_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        RuntimeStatusV1 {
+            schema_version: 1,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            backend: self.runtime_backend.clone(),
+            uptime_ms,
+            health: runtime_health(&config, monitors),
+            counts: RuntimeCounts {
+                windows,
+                monitors,
+                workspaces,
+            },
+            config,
+            features: RuntimeFeatureStates {
+                do_not_disturb: self.do_not_disturb,
+                screenshot: self.features.screenshot.active,
+                overview: self.features.overview.active,
+                recording: self.features.recording.active,
+                audio_recording: self.features.audio_recording.active,
+                magnifier: self.features.magnifier.enabled,
+                system_ui: self.features.system_ui.is_active(),
+                peek: self.features.peek_active,
+                expose: self.features.expose_active,
+                annotation: self.features.annotation_active,
+            },
+            compositor_metrics: backend
+                .compositor_get_metrics()
+                .and_then(|metrics| serde_json::to_value(metrics).ok()),
+        }
+    }
+
+    fn window_info(&self, client_key: ClientKey, is_focused: bool) -> Option<WindowInfo> {
+        let client = self.state.clients.get(client_key)?;
+        Some(WindowInfo {
+            id: client.win.raw(),
+            name: client.name.clone(),
+            class: client.class.clone(),
+            instance: client.instance.clone(),
+            tags: client.state.tags,
+            monitor: resolved_client_monitor_num(&self.state.monitors, client),
+            x: client.geometry.x,
+            y: client.geometry.y,
+            w: client.geometry.w,
+            h: client.geometry.h,
+            is_floating: client.state.is_floating,
+            is_fullscreen: client.state.is_fullscreen,
+            is_urgent: client.state.is_urgent,
+            is_sticky: client.state.is_sticky,
+            is_pip: client.state.is_pip,
+            is_focused,
+        })
+    }
+
     pub(crate) fn query_windows(&self) -> Vec<WindowInfo> {
         let sel_client = self.get_selected_client_key();
         self.state
             .client_order
             .iter()
-            .filter_map(|&ck| {
-                let c = self.state.clients.get(ck)?;
-                Some(WindowInfo {
-                    id: c.win.raw(),
-                    name: c.name.clone(),
-                    class: c.class.clone(),
-                    instance: c.instance.clone(),
-                    tags: c.state.tags,
-                    monitor: c.monitor_num as i32,
-                    x: c.geometry.x,
-                    y: c.geometry.y,
-                    w: c.geometry.w,
-                    h: c.geometry.h,
-                    is_floating: c.state.is_floating,
-                    is_fullscreen: c.state.is_fullscreen,
-                    is_urgent: c.state.is_urgent,
-                    is_sticky: c.state.is_sticky,
-                    is_pip: c.state.is_pip,
-                    is_focused: sel_client == Some(ck),
-                })
-            })
+            .filter_map(|&ck| self.window_info(ck, sel_client == Some(ck)))
             .collect()
     }
 
@@ -1760,23 +1946,18 @@ impl Jwm {
                 None => continue,
             };
             let active_tags = mon.get_active_tags();
-            let client_count = self
-                .state
-                .monitor_clients
-                .get(mk)
-                .map(|v| v.len())
-                .unwrap_or(0);
             for i in 0..cfg.tags_length() {
                 let tag_bit = 1u32 << i;
                 let is_active = (active_tags & tag_bit) != 0;
+                let (layout, m_fact, n_master) = workspace_layout_state(mon, i);
                 result.push(WorkspaceInfo {
                     tag_mask: tag_bit,
                     tag_index: i,
                     monitor: mon.num,
-                    layout: format!("{:?}", *mon.lt[mon.sel_lt]),
-                    m_fact: mon.layout.m_fact,
-                    n_master: mon.layout.n_master,
-                    num_clients: if is_active { client_count } else { 0 },
+                    layout,
+                    m_fact,
+                    n_master,
+                    num_clients: tagged_client_count(&self.state, mk, tag_bit),
                     focused: is_active && self.state.sel_mon == Some(mk),
                 });
             }
@@ -2100,27 +2281,7 @@ impl Jwm {
                     .map(|clients| {
                         clients
                             .iter()
-                            .filter_map(|&ck| {
-                                let c = self.state.clients.get(ck)?;
-                                Some(WindowInfo {
-                                    id: c.win.raw(),
-                                    name: c.name.clone(),
-                                    class: c.class.clone(),
-                                    instance: c.instance.clone(),
-                                    tags: c.state.tags,
-                                    monitor: c.monitor_num as i32,
-                                    x: c.geometry.x,
-                                    y: c.geometry.y,
-                                    w: c.geometry.w,
-                                    h: c.geometry.h,
-                                    is_floating: c.state.is_floating,
-                                    is_fullscreen: c.state.is_fullscreen,
-                                    is_urgent: c.state.is_urgent,
-                                    is_sticky: c.state.is_sticky,
-                                    is_pip: c.state.is_pip,
-                                    is_focused: sel_client == Some(ck),
-                                })
-                            })
+                            .filter_map(|&ck| self.window_info(ck, sel_client == Some(ck)))
                             .collect()
                     })
                     .unwrap_or_default();
@@ -2159,12 +2320,20 @@ impl Jwm {
 mod tests {
     use super::{
         color_managed_surface_json, color_session_policy_json, color_surface_summary_json,
-        optional_protocol_enabled_from_flags, output_color_policy_json,
-        parse_command_batch_entries, parse_config_batch_changes, render_decisions_json,
+        optional_protocol_enabled_from_flags, output_color_policy_json, parse_benchmark_request,
+        parse_command_batch_entries, parse_config_batch_changes, parse_optional_u32_ipc_arg,
+        parse_required_i32_ipc_arg, render_decisions_json, resolved_client_monitor_num,
+        runtime_health, tagged_client_count, workspace_layout_state,
     };
+    use crate::application::BenchmarkRequest;
     use crate::backend::api::{ColorManagedSurfaceInfo, OutputIdentity, OutputInfo};
-    use crate::backend::common_define::OutputId;
+    use crate::backend::common_define::{OutputId, WindowId};
     use crate::backend::edid::EdidHdrCapabilities;
+    use crate::core::layout::LayoutEnum;
+    use crate::core::models::{Pertag, WMClient, WMMonitor};
+    use crate::core::state::WMState;
+    use crate::ipc::RuntimeHealthStatus;
+    use std::rc::Rc;
 
     fn output(hdr_metadata: Option<EdidHdrCapabilities>) -> OutputInfo {
         OutputInfo {
@@ -2180,6 +2349,231 @@ mod tests {
             hdr_metadata,
             identity: OutputIdentity::connector_only("HDMI-A-1"),
         }
+    }
+
+    #[test]
+    fn runtime_health_reports_config_and_monitor_problems() {
+        let healthy_config = serde_json::json!({
+            "exists": true,
+            "diagnostics": {"error_count": 0, "warning_count": 0},
+            "reload": {"last_success": null, "last_error": null}
+        });
+        assert_eq!(
+            runtime_health(&healthy_config, 1).status,
+            RuntimeHealthStatus::Healthy
+        );
+
+        let failed_reload = serde_json::json!({
+            "exists": true,
+            "diagnostics": {"error_count": 0, "warning_count": 1},
+            "reload": {"last_success": false, "last_error": "bad TOML"}
+        });
+        let health = runtime_health(&failed_reload, 0);
+        assert_eq!(health.status, RuntimeHealthStatus::Degraded);
+        assert_eq!(health.reasons.len(), 3);
+        assert!(
+            health
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("bad TOML"))
+        );
+    }
+
+    #[test]
+    fn ipc_window_helpers_use_live_monitor_keys_and_per_tag_counts() {
+        let mut state = WMState::new();
+        let mut monitor = WMMonitor::new();
+        monitor.num = 7;
+        let monitor_key = state.monitors.insert(monitor);
+
+        let mut first = WMClient::new(WindowId::from_raw(1));
+        first.mon = Some(monitor_key);
+        first.state.tags = 0b0101;
+        let first_key = state.clients.insert(first);
+
+        let mut second = WMClient::new(WindowId::from_raw(2));
+        second.mon = Some(monitor_key);
+        second.state.tags = 0b0010;
+        let second_key = state.clients.insert(second);
+        state
+            .monitor_clients
+            .insert(monitor_key, vec![first_key, second_key]);
+
+        let first = state.clients.get(first_key).unwrap();
+        assert_eq!(resolved_client_monitor_num(&state.monitors, first), 7);
+        assert_eq!(tagged_client_count(&state, monitor_key, 0b0001), 1);
+        assert_eq!(tagged_client_count(&state, monitor_key, 0b0010), 1);
+        assert_eq!(tagged_client_count(&state, monitor_key, 0b0100), 1);
+        assert_eq!(tagged_client_count(&state, monitor_key, 0b1000), 0);
+    }
+
+    #[test]
+    fn numeric_ipc_args_accept_boundaries_and_defaults() {
+        assert_eq!(
+            parse_optional_u32_ipc_arg(&serde_json::json!({}), "benchmark", "frames", 600),
+            Ok(600)
+        );
+        assert_eq!(
+            parse_optional_u32_ipc_arg(
+                &serde_json::json!({"frames": u32::MAX}),
+                "benchmark",
+                "frames",
+                600,
+            ),
+            Ok(u32::MAX)
+        );
+        assert_eq!(
+            parse_required_i32_ipc_arg(
+                &serde_json::json!({"monitor": i32::MIN}),
+                "move_window_to_monitor",
+                "monitor",
+            ),
+            Ok(i32::MIN)
+        );
+        assert_eq!(
+            parse_required_i32_ipc_arg(
+                &serde_json::json!({"monitor": i32::MAX}),
+                "move_window_to_monitor",
+                "monitor",
+            ),
+            Ok(i32::MAX)
+        );
+    }
+
+    #[test]
+    fn numeric_ipc_args_reject_invalid_or_out_of_range_values() {
+        let too_many_frames = u64::from(u32::MAX) + 1;
+        let err = parse_optional_u32_ipc_arg(
+            &serde_json::json!({"frames": too_many_frames}),
+            "benchmark",
+            "frames",
+            600,
+        )
+        .unwrap_err();
+        assert!(err.contains("frames"));
+        assert!(err.contains("outside the u32 range"));
+
+        for invalid in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("600"),
+            serde_json::Value::Null,
+        ] {
+            let err = parse_optional_u32_ipc_arg(
+                &serde_json::json!({"warmup": invalid}),
+                "benchmark",
+                "warmup",
+                60,
+            )
+            .unwrap_err();
+            assert!(err.contains("warmup"));
+            assert!(err.contains("unsigned 32-bit integer"));
+        }
+
+        for invalid in [
+            serde_json::json!(i64::from(i32::MIN) - 1),
+            serde_json::json!(i64::from(i32::MAX) + 1),
+            serde_json::json!(u64::MAX),
+        ] {
+            let err = parse_required_i32_ipc_arg(
+                &serde_json::json!({"monitor": invalid}),
+                "move_window_to_monitor",
+                "monitor",
+            )
+            .unwrap_err();
+            assert!(err.contains("monitor"));
+            assert!(err.contains("outside the i32 range"));
+        }
+
+        let err = parse_required_i32_ipc_arg(
+            &serde_json::json!({"monitor": 1.5}),
+            "move_window_to_monitor",
+            "monitor",
+        )
+        .unwrap_err();
+        assert!(err.contains("32-bit integer"));
+    }
+
+    #[test]
+    fn benchmark_ipc_request_enforces_application_resource_limits() {
+        assert_eq!(
+            parse_benchmark_request(&serde_json::json!({"action": "start"})),
+            BenchmarkRequest::new(600, 60)
+        );
+        assert_eq!(
+            parse_benchmark_request(&serde_json::json!({
+                "frames": BenchmarkRequest::MAX_FRAMES,
+                "warmup": BenchmarkRequest::MAX_WARMUP_FRAMES,
+            })),
+            BenchmarkRequest::new(
+                BenchmarkRequest::MAX_FRAMES,
+                BenchmarkRequest::MAX_WARMUP_FRAMES,
+            )
+        );
+
+        for (request, expected_detail) in [
+            (serde_json::json!({"frames": 0}), "greater than zero"),
+            (
+                serde_json::json!({"frames": BenchmarkRequest::MAX_FRAMES + 1}),
+                "exceeds the maximum",
+            ),
+            (
+                serde_json::json!({"warmup": BenchmarkRequest::MAX_WARMUP_FRAMES + 1}),
+                "exceeds the maximum",
+            ),
+            (
+                serde_json::json!({"frames": u32::MAX}),
+                "exceeds the maximum",
+            ),
+        ] {
+            let error = parse_benchmark_request(&request).unwrap_err();
+            assert!(error.starts_with("benchmark:"), "{error}");
+            assert!(error.contains(expected_detail), "{error}");
+        }
+    }
+
+    #[test]
+    fn workspace_layout_state_uses_one_based_pertag_slots() {
+        let mut monitor = WMMonitor::new();
+        monitor.layout.m_fact = 0.55;
+        monitor.layout.n_master = 1;
+
+        let mut pertag = Pertag::new(true, 2);
+        pertag.m_facts[0] = 0.11;
+        pertag.n_masters[0] = 9;
+        pertag.m_facts[1] = 0.61;
+        pertag.n_masters[1] = 2;
+        pertag.sel_lts[1] = 1;
+        pertag.lt_idxs[1][1] = Some(Rc::new(LayoutEnum::MONOCLE));
+        pertag.m_facts[2] = 0.72;
+        pertag.n_masters[2] = 3;
+        pertag.sel_lts[2] = 0;
+        pertag.lt_idxs[2][0] = Some(Rc::new(LayoutEnum::GRID));
+        monitor.pertag = Some(pertag);
+
+        assert_eq!(
+            workspace_layout_state(&monitor, 0),
+            (format!("{:?}", LayoutEnum::MONOCLE), 0.61, 2)
+        );
+        assert_eq!(
+            workspace_layout_state(&monitor, 1),
+            (format!("{:?}", LayoutEnum::GRID), 0.72, 3)
+        );
+    }
+
+    #[test]
+    fn workspace_layout_state_falls_back_without_safe_pertag_data() {
+        let mut monitor = WMMonitor::new();
+        monitor.sel_lt = 1;
+        monitor.layout.m_fact = 0.66;
+        monitor.layout.n_master = 4;
+        let current = (format!("{:?}", LayoutEnum::TILE), 0.66, 4);
+
+        assert_eq!(workspace_layout_state(&monitor, 0), current);
+
+        monitor.pertag = Some(Pertag::new(true, 0));
+        assert_eq!(workspace_layout_state(&monitor, 1), current);
+        assert_eq!(workspace_layout_state(&monitor, usize::MAX), current);
     }
 
     #[test]

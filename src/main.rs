@@ -82,6 +82,7 @@ struct Cli {
         long,
         env = "JWM_BENCHMARK_WARMUP",
         requires = "benchmark",
+        value_parser = parse_benchmark_warmup,
         value_name = "FRAMES"
     )]
     benchmark_warmup: Option<u32>,
@@ -99,10 +100,14 @@ fn parse_positive_u32(value: &str) -> Result<u32, String> {
     let parsed = value
         .parse::<u32>()
         .map_err(|error| format!("expected a positive integer: {error}"))?;
-    if parsed == 0 {
-        return Err("value must be greater than zero".to_string());
-    }
-    Ok(parsed)
+    BenchmarkRequest::new(parsed, 0).map(|_| parsed)
+}
+
+fn parse_benchmark_warmup(value: &str) -> Result<u32, String> {
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|error| format!("expected a non-negative integer: {error}"))?;
+    BenchmarkRequest::new(1, parsed).map(|_| parsed)
 }
 
 #[derive(Debug)]
@@ -199,10 +204,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     setup_locale();
     ensure_dbus_session();
 
-    let benchmark = cli.benchmark.map(|frames| BenchmarkRequest {
-        frames,
-        warmup: cli.benchmark_warmup.unwrap_or(60),
-    });
+    let benchmark = cli
+        .benchmark
+        .map(|frames| BenchmarkRequest::new(frames, cli.benchmark_warmup.unwrap_or(60)))
+        .transpose()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     run_with_options(ApplicationOptions {
         backend: cli.backend,
         benchmark,
@@ -417,6 +423,25 @@ mod tests {
     #[test]
     fn cli_rejects_zero_length_benchmark() {
         assert!(Cli::try_parse_from(["jwm", "--benchmark", "0"]).is_err());
+    }
+
+    #[test]
+    fn cli_rejects_benchmark_values_above_resource_limits() {
+        let too_many_frames = (jwm::application::BenchmarkRequest::MAX_FRAMES + 1).to_string();
+        assert!(Cli::try_parse_from(["jwm", "--benchmark", too_many_frames.as_str()]).is_err());
+
+        let too_much_warmup =
+            (jwm::application::BenchmarkRequest::MAX_WARMUP_FRAMES + 1).to_string();
+        assert!(
+            Cli::try_parse_from([
+                "jwm",
+                "--benchmark",
+                "1",
+                "--benchmark-warmup",
+                too_much_warmup.as_str(),
+            ])
+            .is_err()
+        );
     }
 
     #[test]

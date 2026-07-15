@@ -458,7 +458,11 @@ impl<C: CompositorConnection> Compositor<C> {
     // Benchmark API
     // =====================================================================
 
-    pub(crate) fn benchmark_start(&mut self, frames: u32, warmup: u32) {
+    pub(crate) fn benchmark_start(&mut self, frames: u32, warmup: u32) -> bool {
+        if let Err(error) = self.benchmark.try_start(frames, warmup) {
+            log::warn!("benchmark: refused to start: {error}");
+            return false;
+        }
         self.benchmark.system_info = super::benchmark::SystemInfo {
             gpu: String::new(),
             driver: String::new(),
@@ -471,7 +475,7 @@ impl<C: CompositorConnection> Compositor<C> {
             hdr_enabled: self.hdr_enabled,
             vrr_active: self.vrr_active,
         };
-        self.benchmark.start(frames, warmup);
+        true
     }
 
     pub(crate) fn benchmark_stop(&mut self) -> Option<String> {

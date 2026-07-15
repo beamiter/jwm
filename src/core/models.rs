@@ -267,6 +267,9 @@ pub struct WMClient {
 
     pub mon: Option<MonitorKey>,
 
+    /// Legacy compatibility field. The authoritative monitor association is
+    /// [`Self::mon`]; code that needs a monitor number must resolve that key
+    /// through `WMState::monitors` because monitor numbers can change.
     pub monitor_num: u32,
 
     /// PID of the process that owns this window (None when unknown / Wayland).

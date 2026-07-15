@@ -71,11 +71,27 @@ jwm-tool msg view --args '{"tag":2}'
 jwm-tool msg setlayout --args '{"layout":"scrolling"}'
 jwm-tool msg spawn --args '{"cmd":["alacritty"]}'
 jwm-tool msg '' --subscribe 'window,tag,layout'
+jwm-tool health
+jwm-tool health --json
+jwm-tool capabilities --json
 ```
 
 Malformed JSON, invalid argument types, overflow, empty spawn commands, unknown
 commands, and `{ "success": false }` responses produce a non-zero exit status,
 so the tool is safe to use from scripts.
+
+`health` is a backend-neutral live snapshot of the running JWM instance. Its
+versioned JSON includes the actual selected backend, uptime, configuration
+health, window/monitor/workspace counts, active features, and compositor metrics
+when the backend exposes them. `capabilities` discovers the supported IPC
+commands, queries, and subscription topics. The older `jwm-tool status` command
+retains its existing meaning: it reports the optional process supervisor rather
+than querying JWM's live IPC socket.
+
+`save_session` writes a private, atomic snapshot under
+`$XDG_STATE_HOME/jwm/session.json` (normally
+`~/.local/state/jwm/session.json`); restore also recognizes the legacy cache
+location. `restore_session` reapplies monitor, tag, and floating-window state.
 
 The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 

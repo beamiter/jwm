@@ -1,3 +1,4 @@
+use crate::application::BenchmarkRequest;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -139,8 +140,30 @@ impl BenchmarkHarness {
         }
     }
 
+    /// Start a benchmark, preserving the original fire-and-forget API.
+    ///
+    /// Invalid or unallocatable requests are refused and logged without
+    /// changing the current run. Internal callers that need the outcome use
+    /// [`Self::try_start`].
     pub fn start(&mut self, target_frames: u32, warmup_frames: u32) {
-        self.frame_times_us.clear();
+        if let Err(error) = self.try_start(target_frames, warmup_frames) {
+            log::warn!("benchmark: refused to start: {error}");
+        }
+    }
+
+    pub(crate) fn try_start(
+        &mut self,
+        target_frames: u32,
+        warmup_frames: u32,
+    ) -> Result<(), String> {
+        let request = BenchmarkRequest::new(target_frames, warmup_frames)?;
+        let mut frame_times_us = Vec::new();
+        frame_times_us
+            .try_reserve_exact(request.frames as usize)
+            .map_err(|error| format!("failed to reserve benchmark sample buffer: {error}"))?;
+
+        self.state = BenchmarkState::Idle;
+        self.frame_times_us = frame_times_us;
         self.zone_times.clear();
         self.blur_cost_samples.clear();
         self.input_latency_samples.clear();
@@ -149,25 +172,25 @@ impl BenchmarkHarness {
         self.gl_texture_binds.clear();
         self.blur_cache_hits = 0;
         self.blur_cache_misses = 0;
-        self.warmup_frames = warmup_frames;
-        self.target_frames = target_frames;
-        self.frame_times_us.reserve(target_frames as usize);
-        self.state = if warmup_frames > 0 {
+        self.warmup_frames = request.warmup;
+        self.target_frames = request.frames;
+        self.state = if request.warmup > 0 {
             BenchmarkState::Warmup {
-                remaining: warmup_frames,
+                remaining: request.warmup,
             }
         } else {
             BenchmarkState::Running {
-                target_frames,
+                target_frames: request.frames,
                 collected: 0,
             }
         };
         self.start_time = Some(Instant::now());
         log::info!(
             "benchmark: started (warmup={}, target={})",
-            warmup_frames,
-            target_frames
+            request.warmup,
+            request.frames
         );
+        Ok(())
     }
 
     pub fn stop(&mut self) -> Option<BenchmarkReport> {
@@ -448,4 +471,39 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     }
     let idx = (p * (sorted.len() - 1) as f64).round() as usize;
     sorted[idx.min(sorted.len() - 1)]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BenchmarkHarness, BenchmarkState};
+    use crate::application::BenchmarkRequest;
+
+    #[test]
+    fn start_rejects_invalid_sizes_before_reserving_samples() {
+        let mut harness = BenchmarkHarness::new();
+        let initial_capacity = harness.frame_times_us.capacity();
+
+        assert!(harness.try_start(0, 0).is_err());
+        assert!(harness.try_start(u32::MAX, 0).is_err());
+        assert!(
+            harness
+                .try_start(1, BenchmarkRequest::MAX_WARMUP_FRAMES + 1)
+                .is_err()
+        );
+        assert_eq!(harness.state, BenchmarkState::Idle);
+        assert_eq!(harness.frame_times_us.capacity(), initial_capacity);
+    }
+
+    #[test]
+    fn start_accepts_valid_request_and_completes_collection() {
+        let mut harness = BenchmarkHarness::new();
+        harness.start(2, 0);
+
+        harness.record_frame(16_000);
+        assert!(harness.is_running());
+        harness.record_frame(17_000);
+
+        assert!(harness.is_complete());
+        assert_eq!(harness.frame_times_us, vec![16_000, 17_000]);
+    }
 }

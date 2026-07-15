@@ -16,8 +16,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::AsFd;
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::FileTypeExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -33,14 +32,18 @@ const RESPONSE_LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
 // --- Runtime directory (XDG_RUNTIME_DIR) ---
 
 fn runtime_dir() -> PathBuf {
-    if let Ok(dir) = env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(dir)
-    } else {
-        // Fallback: /tmp/jwm-<uid>
-        let uid = unsafe { libc::getuid() };
-        let dir = PathBuf::from(format!("/tmp/jwm-{}", uid));
-        let _ = fs::create_dir_all(&dir);
-        dir
+    match jwm::ipc_server::validated_socket_path() {
+        Ok(socket) => socket
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("/dev/null/jwm-runtime-unavailable")),
+        Err(error) => {
+            eprintln!("Refusing unsafe JWM runtime directory: {error}");
+            // A deterministic path below a regular device file makes later
+            // filesystem operations fail closed instead of following an
+            // attacker-controlled runtime directory.
+            PathBuf::from("/dev/null/jwm-runtime-unavailable")
+        }
     }
 }
 
@@ -130,6 +133,8 @@ fn control_pipe_glob_pattern() -> String {
     after_help = "\x1b[1m示例:\x1b[0m\n  \
                   jwm-tool daemon                        # 启动守护进程\n  \
                   jwm-tool status                        # 查看守护进程状态\n  \
+                  jwm-tool health --json                 # 查看 JWM 实时健康状态\n  \
+                  jwm-tool capabilities                  # 发现 IPC 控制面\n  \
                   jwm-tool msg view --args '{\"tag\":2}'   # 切换到标签 2\n  \
                   jwm-tool msg get_windows               # 查询所有窗口\n  \
                   jwm-tool msg get_windows --raw          # 查询并输出原始 JSON\n  \
@@ -162,6 +167,20 @@ enum Commands {
     Quit,
     /// 查看守护进程与 JWM 运行状态
     Status,
+
+    /// 查看 JWM 实时健康状态（不依赖守护进程）
+    Health {
+        /// 输出版本化 JSON 状态
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// 列出 JWM IPC 支持的命令、查询和订阅主题
+    Capabilities {
+        /// 输出机器可读 JSON
+        #[arg(long)]
+        json: bool,
+    },
 
     /// 编译并重启 JWM（cargo build --release）
     Rebuild {
@@ -219,7 +238,7 @@ enum Commands {
     /// 向 JWM IPC 发送消息 (JSON)
     #[command(
         long_about = "通过 Unix 套接字向 JWM 发送 IPC 消息。\n\
-                      名称以 get_ 开头的自动作为查询发送，其余作为命令发送。\n\n\
+                      名称以 get_ 开头或已注册为查询时自动发送 query。\n\n\
                       \x1b[1m可用命令:\x1b[0m\n  \
                       窗口: focusstack, killclient, zoom, togglefloating, togglesticky,\n        \
                       togglepip, togglescratchpad, movestack\n  \
@@ -230,7 +249,9 @@ enum Commands {
                       录屏: start_recording, stop_recording, get_recording_status, toggle_recording\n  \
                       录音: start_audio_recording, stop_audio_recording, get_audio_recording_status, toggle_audio_recording\n\n\
                       \x1b[1m可用查询:\x1b[0m\n  \
-                      get_windows, get_workspaces, get_monitors, get_tree, get_config, get_config_status, get_version\n\n\
+                      get_status, get_capabilities, get_windows, get_workspaces, get_monitors, get_tree,\n  \
+                      get_config, get_config_status, get_version\n  \
+                      完整列表: jwm-tool capabilities\n\n\
                       \x1b[1m可用布局:\x1b[0m\n  \
                       tile, float, monocle, fibonacci, centered_master, bstack,\n  \
                       grid, deck, three_col, tatami, fullscreen\n\n\
@@ -258,7 +279,7 @@ enum Commands {
         /// 命令或查询名称（get_ 前缀自动识别为查询）
         #[arg(help = "命令或查询名称（get_ 前缀自动识别为查询）\n\
                       命令: view, tag, focusstack, killclient, zoom, setlayout, spawn, ...\n\
-                      查询: get_windows, get_workspaces, get_monitors, get_tree, get_config, get_version")]
+                      查询: get_status, get_capabilities, get_windows, get_workspaces, ...")]
         name: String,
         /// JSON 参数，格式取决于命令类型
         #[arg(
@@ -1964,6 +1985,8 @@ fn main() -> io::Result<()> {
         Commands::Start => send_command("start")?,
         Commands::Quit => send_command("quit")?,
         Commands::Status => send_command("status")?,
+        Commands::Health { json } => run_health(json)?,
+        Commands::Capabilities { json } => run_capabilities(json)?,
 
         Commands::Rebuild { jwm_dir } => {
             rebuild_and_restart(&jwm_dir)?;
@@ -2008,9 +2031,13 @@ fn main() -> io::Result<()> {
 // ---------------------------------------------------------------------------
 
 fn ipc_socket_path() -> PathBuf {
-    let runtime = env::var("XDG_RUNTIME_DIR")
-        .unwrap_or_else(|_| format!("/tmp/jwm-{}", unsafe { libc::getuid() }));
-    Path::new(&runtime).join("jwm-ipc.sock")
+    match jwm::ipc_server::validated_socket_path() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("Refusing unsafe JWM IPC endpoint: {error}");
+            PathBuf::from("/dev/null/jwm-runtime-unavailable/jwm-ipc.sock")
+        }
+    }
 }
 
 fn parse_msg_args(args: &str) -> io::Result<serde_json::Value> {
@@ -2061,7 +2088,7 @@ fn validate_ipc_response(line: &str) -> io::Result<()> {
 }
 
 fn ipc_request(name: &str, args: serde_json::Value) -> serde_json::Value {
-    if name.starts_with("get_") {
+    if name.starts_with("get_") || jwm::ipc::is_supported_query(name) {
         serde_json::json!({ "query": name, "args": args })
     } else {
         serde_json::json!({ "command": name, "args": args })
@@ -2162,14 +2189,81 @@ fn run_ipc_msg(name: &str, args_str: &str, subscribe: Option<&str>, raw: bool) -
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        InstallPlanEntry, SmokeTarget, acquire_response_lock, daemon_command_response,
-        ensure_ipc_response_succeeded, ipc_request, jwm_install_plan, parse_msg_args,
+        Cli, Commands, InstallPlanEntry, SmokeTarget, acquire_response_lock,
+        capabilities_output_lines, daemon_command_response, ensure_ipc_response_succeeded,
+        health_output_lines, ipc_request, jwm_install_plan, parse_msg_args,
         parse_subscription_topics, response_lock_path, session_install_targets,
         smoke_artifacts_json, smoke_ci_profile_json, smoke_manual_kms_checklist_json,
-        smoke_target_json, split_path_list, validate_daemon_response, validate_ipc_response,
+        smoke_target_json, split_path_list, successful_query_data, validate_daemon_response,
+        validate_ipc_response,
     };
+    use clap::Parser;
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn cli_accepts_health_and_capabilities_json_without_changing_status() {
+        assert!(matches!(
+            Cli::try_parse_from(["jwm-tool", "health", "--json"])
+                .unwrap()
+                .cmd,
+            Commands::Health { json: true }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["jwm-tool", "capabilities", "--json"])
+                .unwrap()
+                .cmd,
+            Commands::Capabilities { json: true }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["jwm-tool", "status"]).unwrap().cmd,
+            Commands::Status
+        ));
+    }
+
+    #[test]
+    fn insight_output_helpers_render_status_and_reject_failed_queries() {
+        let status = serde_json::json!({
+            "schema_version": 1,
+            "version": "0.2.0",
+            "backend": "wayland-winit",
+            "uptime_ms": 1234,
+            "health": {"status": "degraded", "reasons": ["no monitors are available"]},
+            "counts": {"windows": 2, "monitors": 0, "workspaces": 0},
+            "config": {
+                "path": "/tmp/config.toml",
+                "diagnostics": {"error_count": 0, "warning_count": 1}
+            },
+            "features": {"overview": true, "recording": false},
+            "compositor_metrics": null
+        });
+        let lines = health_output_lines(&status);
+        assert!(lines.iter().any(|line| line == "backend: wayland-winit"));
+        assert!(lines.iter().any(|line| line == "active_features: overview"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "reason: no monitors are available")
+        );
+
+        let capabilities = serde_json::json!({
+            "schema_version": 1,
+            "commands": ["focusstack", "reload_config"],
+            "queries": ["get_status"],
+            "subscription_topics": ["window"]
+        });
+        let lines = capabilities_output_lines(&capabilities);
+        assert!(lines[1].contains("reload_config"));
+        assert!(lines[2].contains("get_status"));
+
+        assert!(
+            successful_query_data(
+                "get_status",
+                serde_json::json!({"success": false, "error": "not ready"})
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn install_plan_routes_desktops_to_their_session_types() {
@@ -2457,6 +2551,138 @@ fn send_ipc_query(name: &str) -> io::Result<serde_json::Value> {
     let resp = read_ipc_line(&mut stream)?;
     serde_json::from_str::<serde_json::Value>(resp.trim())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{name}: {e}")))
+}
+
+fn successful_query_data(name: &str, response: serde_json::Value) -> io::Result<serde_json::Value> {
+    if response.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
+        let error = response
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("IPC query failed");
+        return Err(io::Error::other(format!("{name}: {error}")));
+    }
+    response.get("data").cloned().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{name}: successful response did not contain data"),
+        )
+    })
+}
+
+fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
+    let health = status["health"]["status"].as_str().unwrap_or("unknown");
+    let backend = status["backend"].as_str().unwrap_or("unknown");
+    let version = status["version"].as_str().unwrap_or("unknown");
+    let uptime_ms = status["uptime_ms"].as_u64().unwrap_or(0);
+    let windows = status["counts"]["windows"].as_u64().unwrap_or(0);
+    let monitors = status["counts"]["monitors"].as_u64().unwrap_or(0);
+    let workspaces = status["counts"]["workspaces"].as_u64().unwrap_or(0);
+    let config = &status["config"];
+    let config_path = config["path"].as_str().unwrap_or("unknown");
+    let config_errors = config["diagnostics"]["error_count"].as_u64().unwrap_or(0);
+    let config_warnings = config["diagnostics"]["warning_count"].as_u64().unwrap_or(0);
+
+    let mut active_features = status["features"]
+        .as_object()
+        .map(|features| {
+            features
+                .iter()
+                .filter(|(_, enabled)| enabled.as_bool() == Some(true))
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    active_features.sort_unstable();
+
+    let mut lines = vec![
+        "=== JWM Health ===".to_string(),
+        format!("status: {health}"),
+        format!("version: {version}"),
+        format!("backend: {backend}"),
+        format!("uptime_ms: {uptime_ms}"),
+        format!("windows: {windows}  monitors: {monitors}  workspaces: {workspaces}"),
+        format!("config: {config_path} (errors={config_errors}, warnings={config_warnings})"),
+        format!(
+            "active_features: {}",
+            if active_features.is_empty() {
+                "none".to_string()
+            } else {
+                active_features.join(",")
+            }
+        ),
+    ];
+
+    if let Some(metrics) = status["compositor_metrics"].as_object() {
+        let fps = metrics.get("fps").and_then(serde_json::Value::as_f64);
+        let input_p95 = metrics
+            .get("input_latency_p95_ms")
+            .and_then(serde_json::Value::as_f64);
+        if let (Some(fps), Some(input_p95)) = (fps, input_p95) {
+            lines.push(format!(
+                "compositor: fps={fps:.1} input_p95_ms={input_p95:.2}"
+            ));
+        }
+    }
+
+    if let Some(reasons) = status["health"]["reasons"].as_array() {
+        lines.extend(
+            reasons
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(|reason| format!("reason: {reason}")),
+        );
+    }
+    lines
+}
+
+fn capabilities_output_lines(capabilities: &serde_json::Value) -> Vec<String> {
+    let names = |field: &str| {
+        capabilities[field]
+            .as_array()
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default()
+    };
+    vec![
+        format!(
+            "JWM IPC capabilities (schema {})",
+            capabilities["schema_version"].as_u64().unwrap_or(0)
+        ),
+        format!("commands: {}", names("commands")),
+        format!("queries: {}", names("queries")),
+        format!("subscription_topics: {}", names("subscription_topics")),
+    ]
+}
+
+fn run_health(json_output: bool) -> io::Result<()> {
+    let response = send_ipc_query("get_status")?;
+    let status = successful_query_data("get_status", response)?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&status).unwrap());
+    } else {
+        for line in health_output_lines(&status) {
+            println!("{line}");
+        }
+    }
+    Ok(())
+}
+
+fn run_capabilities(json_output: bool) -> io::Result<()> {
+    let response = send_ipc_query("get_capabilities")?;
+    let capabilities = successful_query_data("get_capabilities", response)?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&capabilities).unwrap());
+    } else {
+        for line in capabilities_output_lines(&capabilities) {
+            println!("{line}");
+        }
+    }
+    Ok(())
 }
 
 fn response_data<'a>(

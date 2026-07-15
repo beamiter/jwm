@@ -287,7 +287,7 @@ fn check_runtime_dir(path: Option<&Path>, effective_uid: u32, required: bool) ->
         );
     }
 
-    let metadata = match fs::metadata(path) {
+    let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) => {
             return DoctorCheck::new(
@@ -302,6 +302,15 @@ fn check_runtime_dir(path: Option<&Path>, effective_uid: u32, required: bool) ->
             );
         }
     };
+    if metadata.file_type().is_symlink() {
+        return DoctorCheck::new(
+            failure_status,
+            "runtime.xdg_runtime_dir",
+            "XDG_RUNTIME_DIR must be a real directory, not a symbolic link",
+            Some(path.display().to_string()),
+            Some("Use the private directory path created by the login session directly".into()),
+        );
+    }
     if !metadata.is_dir() {
         return DoctorCheck::new(
             failure_status,
@@ -687,6 +696,17 @@ mod tests {
             check_runtime_dir(Some(&runtime), uid, true).status,
             DoctorStatus::Pass
         );
+
+        let runtime_link = root.path().join("runtime-link");
+        std::os::unix::fs::symlink(&runtime, &runtime_link).unwrap();
+        assert_eq!(
+            check_runtime_dir(Some(&runtime_link), uid, true).status,
+            DoctorStatus::Error
+        );
+        assert_eq!(
+            check_runtime_dir(Some(&runtime_link), uid, false).status,
+            DoctorStatus::Warning
+        );
         assert_eq!(
             check_runtime_dir(Some(Path::new("relative/runtime")), uid, true).status,
             DoctorStatus::Error
@@ -804,7 +824,7 @@ mod tests {
         let tool = root.path().join("jwm-tool");
         fs::write(&tool, b"test").unwrap();
         fs::set_permissions(&tool, fs::Permissions::from_mode(0o700)).unwrap();
-        let bar = root.path().join("egui_bar");
+        let bar = root.path().join(Config::default().status_bar_name());
         fs::write(&bar, b"test").unwrap();
         fs::set_permissions(&bar, fs::Permissions::from_mode(0o700)).unwrap();
         inputs.path = Some(root.path().as_os_str().to_owned());

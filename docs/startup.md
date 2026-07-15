@@ -69,6 +69,28 @@ the D-Bus session environment. JSON output has a versioned schema and is useful
 for installers and support bundles. Warnings return success; a blocking error
 returns a non-zero status.
 
+## Inspect a running instance
+
+The startup doctor intentionally remains offline and read-only. Once JWM is
+running, use the backend-neutral health query for live state:
+
+```bash
+jwm-tool health
+jwm-tool health --json
+jwm-tool capabilities
+```
+
+The health JSON schema starts at version 1 and reports the backend captured from
+the selected `ApplicationOptions`, not an inferred environment value. It also
+contains uptime, configuration/reload health, window/monitor/workspace counts,
+active feature states, and compositor metrics when available. Capabilities lists
+the commands, queries, and subscription topic prefixes supported by that binary.
+Unsupported optional compositor metrics are represented as `null`; they do not
+make an otherwise healthy instance degraded.
+
+`jwm-tool status` is preserved for compatibility and continues to query the
+optional JWM supervisor daemon. It is distinct from the live `health` command.
+
 ## Benchmark a compositor backend
 
 ```bash
@@ -78,6 +100,12 @@ jwm --backend wayland-udev --benchmark 600 --benchmark-warmup 60
 The benchmark starts after JWM setup, excludes the warm-up frames and requests
 automatic exit when the sample is complete. The compatibility environment
 variables `JWM_BENCHMARK` and `JWM_BENCHMARK_WARMUP` remain available.
+
+All startup and IPC benchmark requests use the same resource limits: measured
+frames must be in `1..=100000`, and warm-up frames in `0..=10000`. These limits
+bound the compositor's in-memory sample buffers and prevent accidentally
+starting an effectively unbounded run. At 60 Hz, the maxima are approximately
+28 minutes of measurement and 2.8 minutes of warm-up.
 
 ## Logging
 

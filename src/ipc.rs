@@ -68,6 +68,235 @@ pub struct IpcEvent {
 }
 
 // ---------------------------------------------------------------------------
+// Protocol discovery and versioned runtime snapshots
+// ---------------------------------------------------------------------------
+
+/// Static discovery data for the newline-delimited JSON IPC protocol.
+///
+/// Keep command/query/topic names here so clients can discover the supported
+/// control surface without duplicating JWM's CLI help text. Dispatch commands
+/// are separated from commands implemented directly by `Jwm::handle_ipc_command`
+/// so configuration validation can continue to accept only bindable WM actions.
+pub struct IpcRegistry {
+    pub dispatch_commands: &'static [&'static str],
+    pub special_commands: &'static [&'static str],
+    pub queries: &'static [&'static str],
+    pub subscription_topics: &'static [&'static str],
+}
+
+pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
+    dispatch_commands: &[
+        "app_launcher",
+        "cycle_overview",
+        "cyclelayout",
+        "focus_none",
+        "focus_tab",
+        "focus_window",
+        "focusmon",
+        "focusstack",
+        "incnmaster",
+        "killclient",
+        "lock_screen",
+        "loopview",
+        "monitor_layout",
+        "movestack",
+        "quit",
+        "refocus",
+        "restart",
+        "restore_session",
+        "save_session",
+        "scrolling_consume",
+        "scrolling_expel",
+        "scrolling_focus_column",
+        "scrolling_focus_window",
+        "scrolling_move_column",
+        "scrolling_toggle_attach_mode",
+        "setcfact",
+        "setlayout",
+        "setmfact",
+        "spawn",
+        "tag",
+        "tagmon",
+        "toggle_annotation",
+        "toggle_audio_recording",
+        "toggle_dnd",
+        "toggle_magnifier",
+        "toggle_overview",
+        "toggle_peek",
+        "toggle_recording",
+        "toggle_slime",
+        "togglebar",
+        "togglecompositor",
+        "togglefloating",
+        "togglepartialdamage",
+        "togglepip",
+        "togglescratchpad",
+        "togglesticky",
+        "toggletag",
+        "toggleview",
+        "view",
+        "zoom",
+    ],
+    special_commands: &[
+        "batch",
+        "benchmark",
+        "command_batch",
+        "move_window_to_monitor",
+        "reload_config",
+        "set_config",
+        "set_config_batch",
+        "set_hdr_metadata",
+        "start_audio_recording",
+        "start_recording",
+        "stop_audio_recording",
+        "stop_recording",
+    ],
+    queries: &[
+        "benchmark_report",
+        "get_audio_recording_status",
+        "get_blur_status",
+        "get_capabilities",
+        "get_capture_status",
+        "get_color_management_status",
+        "get_config",
+        "get_config_status",
+        "get_dnd",
+        "get_effect_status",
+        "get_gesture_status",
+        "get_hdr_status",
+        "get_metrics",
+        "get_monitors",
+        "get_recording_status",
+        "get_scrolling_status",
+        "get_session_lock",
+        "get_status",
+        "get_tearing_hints",
+        "get_tree",
+        "get_version",
+        "get_wayland_status",
+        "get_windows",
+        "get_workspaces",
+        "get_xwayland_status",
+    ],
+    subscription_topics: &[
+        "*",
+        "audio_recording",
+        "config",
+        "dnd",
+        "layout",
+        "monitor",
+        "recording",
+        "scrolling",
+        "tag",
+        "window",
+    ],
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeHealthStatus {
+    Healthy,
+    Degraded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RuntimeHealth {
+    pub status: RuntimeHealthStatus,
+    pub reasons: Vec<String>,
+}
+
+impl RuntimeHealth {
+    #[must_use]
+    pub fn from_reasons(reasons: Vec<String>) -> Self {
+        Self {
+            status: if reasons.is_empty() {
+                RuntimeHealthStatus::Healthy
+            } else {
+                RuntimeHealthStatus::Degraded
+            },
+            reasons,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RuntimeCounts {
+    pub windows: usize,
+    pub monitors: usize,
+    pub workspaces: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RuntimeFeatureStates {
+    pub do_not_disturb: bool,
+    pub screenshot: bool,
+    pub overview: bool,
+    pub recording: bool,
+    pub audio_recording: bool,
+    pub magnifier: bool,
+    pub system_ui: bool,
+    pub peek: bool,
+    pub expose: bool,
+    pub annotation: bool,
+}
+
+/// Backend-neutral live status. New fields may be added within a schema
+/// version; incompatible changes require incrementing `schema_version`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RuntimeStatusV1 {
+    pub schema_version: u32,
+    pub version: String,
+    pub backend: String,
+    pub uptime_ms: u64,
+    pub health: RuntimeHealth,
+    pub counts: RuntimeCounts,
+    pub config: Value,
+    pub features: RuntimeFeatureStates,
+    pub compositor_metrics: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IpcCapabilitiesV1 {
+    pub schema_version: u32,
+    pub commands: Vec<String>,
+    pub queries: Vec<String>,
+    pub subscription_topics: Vec<String>,
+}
+
+/// Return stable, sorted discovery data suitable for IPC serialization.
+#[must_use]
+pub fn ipc_capabilities() -> IpcCapabilitiesV1 {
+    let mut commands = IPC_REGISTRY
+        .dispatch_commands
+        .iter()
+        .chain(IPC_REGISTRY.special_commands)
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
+    commands.sort_unstable();
+    commands.dedup();
+
+    IpcCapabilitiesV1 {
+        schema_version: 1,
+        commands,
+        queries: IPC_REGISTRY
+            .queries
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect(),
+        subscription_topics: IPC_REGISTRY
+            .subscription_topics
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect(),
+    }
+}
+
+#[must_use]
+pub fn is_supported_query(name: &str) -> bool {
+    IPC_REGISTRY.queries.contains(&name)
+}
+
+// ---------------------------------------------------------------------------
 // Query result types
 // ---------------------------------------------------------------------------
 
@@ -655,5 +884,92 @@ mod tests {
         let json = serde_json::to_string(&err).unwrap();
         assert!(json.contains("\"success\":false"));
         assert!(json.contains("bad command"));
+    }
+
+    #[test]
+    fn registry_dispatch_commands_are_all_bindable() {
+        for command in IPC_REGISTRY.dispatch_commands {
+            assert!(
+                is_known_command(command),
+                "registry contains non-dispatch command {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn capabilities_include_special_commands_queries_and_topics() {
+        let capabilities = ipc_capabilities();
+        assert_eq!(capabilities.schema_version, 1);
+        assert!(
+            capabilities
+                .commands
+                .iter()
+                .any(|name| name == "focusstack")
+        );
+        assert!(
+            capabilities
+                .commands
+                .iter()
+                .any(|name| name == "reload_config")
+        );
+        assert!(
+            capabilities
+                .commands
+                .iter()
+                .any(|name| name == "start_recording")
+        );
+        assert!(capabilities.queries.iter().any(|name| name == "get_status"));
+        assert!(
+            capabilities
+                .queries
+                .iter()
+                .any(|name| name == "get_capabilities")
+        );
+        assert!(
+            capabilities
+                .subscription_topics
+                .iter()
+                .any(|name| name == "window")
+        );
+        assert!(is_supported_query("benchmark_report"));
+        assert!(!is_supported_query("not_a_query"));
+    }
+
+    #[test]
+    fn runtime_status_v1_serializes_stable_top_level_fields() {
+        let status = RuntimeStatusV1 {
+            schema_version: 1,
+            version: "0.2.0".into(),
+            backend: "wayland-winit".into(),
+            uptime_ms: 42,
+            health: RuntimeHealth::from_reasons(Vec::new()),
+            counts: RuntimeCounts {
+                windows: 3,
+                monitors: 1,
+                workspaces: 9,
+            },
+            config: serde_json::json!({"exists": true}),
+            features: RuntimeFeatureStates {
+                do_not_disturb: false,
+                screenshot: false,
+                overview: true,
+                recording: false,
+                audio_recording: false,
+                magnifier: false,
+                system_ui: false,
+                peek: false,
+                expose: false,
+                annotation: false,
+            },
+            compositor_metrics: None,
+        };
+
+        let json = serde_json::to_value(status).unwrap();
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["backend"], "wayland-winit");
+        assert_eq!(json["health"]["status"], "healthy");
+        assert_eq!(json["counts"]["windows"], 3);
+        assert_eq!(json["features"]["overview"], true);
+        assert!(json["compositor_metrics"].is_null());
     }
 }

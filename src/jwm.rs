@@ -85,6 +85,11 @@ pub struct Jwm {
     // 纯状态数据
     pub state: WMState,
 
+    /// Backend selected by the application composition root. This is captured
+    /// from `ApplicationOptions`, rather than inferred from environment state.
+    pub runtime_backend: String,
+    pub started_at: std::time::Instant,
+
     pub s_w: i32,
     pub s_h: i32,
     pub running: AtomicBool,
@@ -139,8 +144,13 @@ pub struct Jwm {
     // IPC
     pub ipc_server: Option<IpcServer>,
 
-    // Config hot-reload
+    // Config hot-reload. Both backend inotify events and the backend-neutral
+    // update-loop poll feed this tracker so a revision is only attempted once.
+    pub(crate) config_reload_tracker: lifecycle::ConfigReloadTracker,
+    /// Legacy observable value retained for source compatibility. Reload
+    /// decisions are made by `config_reload_tracker`.
     pub config_last_modified: Option<std::time::SystemTime>,
+    /// Legacy observable debounce timestamp retained for source compatibility.
     pub config_reload_debounce: Option<std::time::Instant>,
     pub config_reload_count: u64,
     pub config_reload_last_unix_ms: Option<u64>,
@@ -457,6 +467,18 @@ impl Jwm {
     }
 
     pub fn new(backend: &mut dyn Backend) -> Result<Self, Box<dyn std::error::Error>> {
+        // Preserve the public constructor's historical reporting contract for
+        // library callers. The application composition root uses the explicit
+        // constructor below and therefore never needs this compatibility
+        // inference.
+        let runtime_backend = std::env::var("JWM_BACKEND").unwrap_or_else(|_| "x11rb".to_string());
+        Self::new_with_runtime_backend(backend, runtime_backend)
+    }
+
+    pub(crate) fn new_with_runtime_backend(
+        backend: &mut dyn Backend,
+        runtime_backend: impl Into<String>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         info!("[new] Starting JWM initialization");
         Self::log_x11_environment();
         backend.cursor_provider().preload_common()?;
@@ -490,8 +512,11 @@ impl Jwm {
         backend.color_allocator().allocate_schemes_pixels()?;
         info!("[new] JWM initialization completed successfully");
         let outputs = backend.output_ops().enumerate_outputs();
+        let config_revision = crate::config::Config::get_config_modified_time().ok();
         let mut jwm = Jwm {
             state: WMState::new(),
+            runtime_backend: runtime_backend.into(),
+            started_at: std::time::Instant::now(),
 
             s_w,
             s_h,
@@ -529,7 +554,8 @@ impl Jwm {
                     None
                 }
             },
-            config_last_modified: crate::config::Config::get_config_modified_time().ok(),
+            config_reload_tracker: lifecycle::ConfigReloadTracker::new(config_revision),
+            config_last_modified: config_revision,
             config_reload_debounce: None,
             config_reload_count: 0,
             config_reload_last_unix_ms: None,

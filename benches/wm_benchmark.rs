@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use rand::Rng;
+use rand::RngExt;
 use slotmap::{SecondaryMap, SlotMap, new_key_type};
 use std::cell::RefCell;
 use std::rc::Rc;

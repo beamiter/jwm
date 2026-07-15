@@ -128,6 +128,10 @@ const KEY_REPEAT_DELAY: Duration = Duration::from_millis(400);
 const KEY_REPEAT_INTERVAL: Duration = Duration::from_millis(50);
 const KEY_REPEAT_TICK: Duration = Duration::from_millis(16);
 
+fn handler_wakeup_timeout(can_present: bool, next_wakeup: Option<Duration>) -> Option<Duration> {
+    if can_present { next_wakeup } else { None }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct RepeatState {
     keycode: u8,
@@ -4661,7 +4665,8 @@ impl Backend for UdevBackend {
                 }
             }
 
-            if (handled_any || handler.needs_tick() || needs_redraw) && can_present {
+            let handler_needs_tick = handler.needs_tick();
+            if (handled_any || handler_needs_tick || needs_redraw) && can_present {
                 handler.update(self)?;
             }
 
@@ -4683,25 +4688,31 @@ impl Backend for UdevBackend {
                 break;
             }
 
-            // Determine calloop timeout:
-            // - Zero-poll only for queued Wayland events that need draining
-            // - 16ms when animations need ticking (capped at vsync rate)
-            // - Block otherwise (vblank DRM event will wake us)
+            // Determine the nearest calloop wakeup:
+            // - Zero-poll for queued Wayland events that need draining
+            // - 16ms when animations/rendering need ticking (capped at vsync)
+            // - Handler deadlines for periodic work such as config polling
+            // - Block otherwise (a backend event will wake us)
             let has_pending_events = !self.pending_events.lock_safe().is_empty();
             let needs_tick = handler.needs_tick();
             let kms_pending = self.kms.as_ref().map_or(false, |k| k.borrow().needs_render);
             let render_work_pending =
                 session_active && (needs_tick || kms_pending || self.state.needs_redraw);
             let poll_session_activation = !session_active && self.kms.is_none();
-            let timeout = if has_pending_events {
-                Some(std::time::Duration::ZERO)
-            } else if poll_session_activation {
-                Some(std::time::Duration::from_millis(100))
-            } else if render_work_pending {
-                Some(std::time::Duration::from_millis(16))
-            } else {
-                None
-            };
+            // Jwm::update can apply compositor settings, so do not route its
+            // deadline through the loop while presentation is unavailable.
+            // Session/DRM events will wake us; the overdue deadline is then
+            // consumed as soon as `can_present` becomes true.
+            let handler_wakeup = handler_wakeup_timeout(can_present, handler.next_wakeup());
+            let timeout = [
+                has_pending_events.then_some(std::time::Duration::ZERO),
+                poll_session_activation.then_some(std::time::Duration::from_millis(100)),
+                render_work_pending.then_some(std::time::Duration::from_millis(16)),
+                handler_wakeup,
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             self.event_loop
                 .dispatch(timeout, &mut *self.state)
                 .map_err(|e| BackendError::Other(Box::new(e)))?;
@@ -4896,6 +4907,15 @@ mod udev_backend_selection_tests {
             3,
             &[swipe_binding(3, "left")]
         ));
+    }
+
+    #[test]
+    fn due_handler_deadline_is_ignored_while_presentation_is_unavailable() {
+        assert_eq!(handler_wakeup_timeout(false, Some(Duration::ZERO)), None);
+        assert_eq!(
+            handler_wakeup_timeout(true, Some(Duration::ZERO)),
+            Some(Duration::ZERO)
+        );
     }
 
     fn test_output(id: OutputId, name: &str) -> OutputInfo {

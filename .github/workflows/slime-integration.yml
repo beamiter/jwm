@@ -98,11 +98,8 @@ jobs:
       - name: Compile embedded slime shaders
         run: python3 tools/validate_slime_shaders.py
 
-      - name: Check production targets and tests
-        run: |
-          # The existing wm_benchmark target imports Criterion without declaring
-          # it as a dev-dependency, so validate library, binaries, and tests here.
-          cargo check --lib --bins --tests
+      - name: Check all targets
+        run: cargo check --all-targets
 
       - name: Run slime state tests
         run: cargo test --lib slime

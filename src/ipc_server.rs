@@ -1,7 +1,9 @@
 use log::{debug, info, warn};
 use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::fs;
 use std::io::{self, Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
@@ -10,6 +12,240 @@ use crate::ipc::{IpcEvent, IpcMessage, IpcResponse};
 /// 单个客户端未分帧缓冲的上限(1 MiB)。正常 IPC 消息远小于此值，
 /// 超限说明对端发送了无换行的巨型数据或恶意流量。
 const MAX_CLIENT_BUF: usize = 1024 * 1024;
+/// Per-client input work allowed in one compositor update tick.
+const MAX_READ_BYTES_PER_POLL: usize = 64 * 1024;
+const MAX_MESSAGES_PER_POLL: usize = 64;
+/// Bound the amount of per-client state retained by the WM process.
+const MAX_CLIENTS: usize = 128;
+/// Do not let a connection storm monopolize one compositor update tick.
+const MAX_ACCEPTS_PER_POLL: usize = 32;
+const MAX_SUBSCRIPTION_TOPICS: usize = 64;
+const MAX_SUBSCRIPTION_TOPIC_LEN: usize = 128;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeDirectorySource {
+    Xdg,
+    Fallback,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SocketIdentity {
+    device: u64,
+    inode: u64,
+    owner: u32,
+}
+
+impl SocketIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            owner: metadata.uid(),
+        }
+    }
+}
+
+fn current_uid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail. Filesystem access
+    // and ownership checks use the process's effective credentials.
+    unsafe { libc::geteuid() }
+}
+
+fn socket_location_from(
+    xdg_runtime_dir: Option<&OsStr>,
+    uid: u32,
+) -> (PathBuf, RuntimeDirectorySource) {
+    if let Some(runtime) = xdg_runtime_dir.filter(|runtime| !runtime.is_empty()) {
+        let runtime = PathBuf::from(runtime);
+        if runtime.is_absolute() {
+            return (runtime.join("jwm-ipc.sock"), RuntimeDirectorySource::Xdg);
+        }
+    }
+
+    (
+        PathBuf::from(format!("/tmp/jwm-{uid}")).join("jwm-ipc.sock"),
+        RuntimeDirectorySource::Fallback,
+    )
+}
+
+fn socket_location() -> (PathBuf, RuntimeDirectorySource) {
+    socket_location_from(
+        std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
+        current_uid(),
+    )
+}
+
+fn directory_error(kind: io::ErrorKind, path: &Path, message: &str) -> io::Error {
+    io::Error::new(kind, format!("{}: {message}", path.display()))
+}
+
+fn validate_private_directory(path: &Path, tighten_permissions: bool) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir() {
+        return Err(directory_error(
+            io::ErrorKind::InvalidInput,
+            path,
+            "IPC runtime path must be a real directory (not a symlink)",
+        ));
+    }
+    if metadata.uid() != current_uid() {
+        return Err(directory_error(
+            io::ErrorKind::PermissionDenied,
+            path,
+            "IPC runtime directory is not owned by the current user",
+        ));
+    }
+
+    let mode = metadata.mode() & 0o777;
+    if mode & 0o077 != 0 {
+        if !tighten_permissions {
+            return Err(directory_error(
+                io::ErrorKind::PermissionDenied,
+                path,
+                "IPC runtime directory must not be accessible by group or other users",
+            ));
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        let updated = fs::symlink_metadata(path)?;
+        if !updated.file_type().is_dir()
+            || updated.uid() != current_uid()
+            || updated.mode() & 0o077 != 0
+        {
+            return Err(directory_error(
+                io::ErrorKind::PermissionDenied,
+                path,
+                "failed to secure fallback IPC runtime directory",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn prepare_socket_directory(path: &Path, source: RuntimeDirectorySource) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| {
+            directory_error(
+                io::ErrorKind::InvalidInput,
+                path,
+                "IPC socket path has no runtime directory",
+            )
+        })?;
+
+    match source {
+        RuntimeDirectorySource::Xdg => {
+            // XDG_RUNTIME_DIR is session-manager owned. Validate it, but never
+            // create it or mutate its permissions.
+            validate_private_directory(parent, false)
+        }
+        RuntimeDirectorySource::Fallback => {
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700);
+            match builder.create(parent) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+            // The fallback directory belongs to JWM, so an older permissive
+            // directory may be tightened after ownership/type validation.
+            validate_private_directory(parent, true)
+        }
+    }
+}
+
+/// Resolve the IPC endpoint and verify (or create, for the private fallback)
+/// its runtime directory. IPC clients should use this before connecting so
+/// they apply exactly the same ownership and permission policy as the server.
+///
+/// # Errors
+///
+/// Returns an error if the runtime directory is missing or unsafe, or if the
+/// private fallback cannot be created and secured.
+pub fn validated_socket_path() -> io::Result<PathBuf> {
+    let (path, source) = socket_location();
+    prepare_socket_directory(&path, source)?;
+    Ok(path)
+}
+
+fn socket_identity(path: &Path) -> io::Result<SocketIdentity> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_socket() {
+        return Err(directory_error(
+            io::ErrorKind::InvalidInput,
+            path,
+            "IPC endpoint exists but is not a Unix socket",
+        ));
+    }
+    Ok(SocketIdentity::from_metadata(&metadata))
+}
+
+fn remove_socket_if_unchanged(path: &Path, expected: SocketIdentity) -> io::Result<bool> {
+    let current = match socket_identity(path) {
+        Ok(identity) => identity,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if current != expected {
+        return Ok(false);
+    }
+    fs::remove_file(path)?;
+    Ok(true)
+}
+
+fn bind_owned_socket(path: &Path) -> io::Result<(UnixListener, SocketIdentity)> {
+    match socket_identity(path) {
+        Ok(identity) => {
+            if identity.owner != current_uid() {
+                return Err(directory_error(
+                    io::ErrorKind::PermissionDenied,
+                    path,
+                    "refusing to replace a Unix socket owned by another user",
+                ));
+            }
+
+            match UnixStream::connect(path) {
+                Ok(stream) => {
+                    drop(stream);
+                    return Err(directory_error(
+                        io::ErrorKind::AddrInUse,
+                        path,
+                        "another JWM IPC server is already listening",
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+                    // A socket inode without a listener is stale. Re-check its
+                    // identity before unlinking so a concurrently replaced
+                    // endpoint is never removed.
+                    if !remove_socket_if_unchanged(path, identity)? {
+                        return Err(directory_error(
+                            io::ErrorKind::AddrInUse,
+                            path,
+                            "IPC endpoint changed while checking whether it was stale",
+                        ));
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!(
+                            "cannot determine whether IPC endpoint {} is active: {error}",
+                            path.display()
+                        ),
+                    ));
+                }
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let listener = UnixListener::bind(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    let identity = socket_identity(path)?;
+    Ok((listener, identity))
+}
 
 // ---------------------------------------------------------------------------
 // Client wrapper
@@ -19,8 +255,13 @@ const MAX_CLIENT_BUF: usize = 1024 * 1024;
 struct IpcClient {
     stream: UnixStream,
     buf: Vec<u8>,
+    /// First byte not consumed as a complete frame.
+    buf_start: usize,
+    /// First byte not yet inspected for a newline.
+    scan_pos: usize,
     out_buf: Vec<u8>,
     subscriptions: Vec<String>,
+    read_closed: bool,
 }
 
 impl IpcClient {
@@ -29,27 +270,106 @@ impl IpcClient {
         Ok(Self {
             stream,
             buf: Vec::with_capacity(4096),
+            buf_start: 0,
+            scan_pos: 0,
             out_buf: Vec::new(),
             subscriptions: Vec::new(),
+            read_closed: false,
         })
+    }
+
+    /// Extract up to `limit` complete frames without shifting the buffer.
+    /// `scan_pos` resumes at the first uninspected byte, so fragmented frames
+    /// and complete overflow frames are each scanned only once.
+    fn take_complete_messages(&mut self, limit: usize) -> Vec<String> {
+        if limit == 0 || self.buf_start == self.buf.len() {
+            return Vec::new();
+        }
+
+        let mut messages = Vec::with_capacity(limit.min(8));
+        let mut line_start = self.buf_start;
+        let mut scan_pos = self.scan_pos.max(line_start);
+
+        while scan_pos < self.buf.len() {
+            if self.buf[scan_pos] != b'\n' {
+                scan_pos += 1;
+                continue;
+            }
+
+            let line = &self.buf[line_start..scan_pos];
+            line_start = scan_pos + 1;
+            scan_pos = line_start;
+            if !line.is_empty() {
+                messages.push(String::from_utf8_lossy(line).into_owned());
+                if messages.len() == limit {
+                    break;
+                }
+            }
+        }
+
+        self.buf_start = line_start;
+        self.scan_pos = scan_pos;
+        messages
+    }
+
+    /// Reclaim consumed storage geometrically. This makes prefix removal
+    /// amortized O(n) even when a large batch is delivered over many ticks.
+    fn compact_input_buffer(&mut self) {
+        if self.buf_start == 0 {
+            return;
+        }
+        if self.buf_start == self.buf.len() {
+            self.buf.clear();
+            self.buf_start = 0;
+            self.scan_pos = 0;
+            return;
+        }
+        if self.buf_start >= 64 * 1024 || self.buf_start >= self.buf.len() / 2 {
+            let consumed = self.buf_start;
+            self.buf.copy_within(consumed.., 0);
+            self.buf.truncate(self.buf.len() - consumed);
+            self.buf_start = 0;
+            self.scan_pos = self.scan_pos.saturating_sub(consumed);
+        }
     }
 
     /// Try to read available data. Returns complete newline-delimited messages.
     fn read_messages(&mut self) -> io::Result<Vec<String>> {
+        // Drain already-buffered complete frames first. This is important when
+        // the previous tick stopped at the message fairness limit.
+        let mut messages = self.take_complete_messages(MAX_MESSAGES_PER_POLL);
+        self.compact_input_buffer();
+        if messages.len() == MAX_MESSAGES_PER_POLL {
+            return Ok(messages);
+        }
+
+        if self.read_closed {
+            return if messages.is_empty() {
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "client disconnected",
+                ))
+            } else {
+                Ok(messages)
+            };
+        }
+
         let mut tmp = [0u8; 4096];
-        loop {
-            match self.stream.read(&mut tmp) {
+        let mut bytes_read = 0;
+        while bytes_read < MAX_READ_BYTES_PER_POLL {
+            let remaining = MAX_READ_BYTES_PER_POLL - bytes_read;
+            let chunk_len = remaining.min(tmp.len());
+            match self.stream.read(&mut tmp[..chunk_len]) {
                 Ok(0) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "client disconnected",
-                    ));
+                    self.read_closed = true;
+                    break;
                 }
                 Ok(n) => {
+                    bytes_read += n;
                     self.buf.extend_from_slice(&tmp[..n]);
                     // 防止恶意/异常客户端发送无换行字节导致 buf 无界增长耗尽内存，
                     // 拖垮整个 WM。超过上限直接断开该客户端。
-                    if self.buf.len() > MAX_CLIENT_BUF {
+                    if self.buf.len() - self.buf_start > MAX_CLIENT_BUF {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             "client message buffer exceeded limit",
@@ -57,19 +377,22 @@ impl IpcClient {
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
             }
         }
 
-        let mut messages = Vec::new();
-        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
-            let line: Vec<u8> = self.buf.drain(..=pos).collect();
-            let line = String::from_utf8_lossy(&line[..line.len() - 1]).to_string();
-            if !line.is_empty() {
-                messages.push(line);
-            }
+        let remaining_messages = MAX_MESSAGES_PER_POLL - messages.len();
+        messages.extend(self.take_complete_messages(remaining_messages));
+        self.compact_input_buffer();
+        if messages.is_empty() && self.read_closed {
+            Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "client disconnected",
+            ))
+        } else {
+            Ok(messages)
         }
-        Ok(messages)
     }
 
     fn queue(&mut self, mut json: String) {
@@ -114,10 +437,32 @@ impl IpcClient {
     }
 
     fn is_subscribed(&self, event_type: &str) -> bool {
-        self.subscriptions
-            .iter()
-            .any(|s| s == "*" || s == event_type || event_type.starts_with(&format!("{s}/")))
+        self.subscriptions.iter().any(|subscription| {
+            subscription == "*"
+                || subscription == event_type
+                || event_type
+                    .strip_prefix(subscription)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        })
     }
+}
+
+fn normalize_subscriptions(topics: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::with_capacity(topics.len().min(MAX_SUBSCRIPTION_TOPICS));
+    for topic in topics {
+        let topic = topic.trim();
+        if topic.is_empty()
+            || topic.len() > MAX_SUBSCRIPTION_TOPIC_LEN
+            || normalized.iter().any(|existing| existing == topic)
+        {
+            continue;
+        }
+        normalized.push(topic.to_string());
+        if normalized.len() == MAX_SUBSCRIPTION_TOPICS {
+            break;
+        }
+    }
+    normalized
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +472,7 @@ impl IpcClient {
 pub struct IpcServer {
     listener: UnixListener,
     socket_path: PathBuf,
+    socket_identity: Option<SocketIdentity>,
     clients: HashMap<u64, IpcClient>,
     next_id: u64,
 }
@@ -151,47 +497,42 @@ pub enum IncomingIpc {
 
 impl IpcServer {
     /// Create and bind the IPC socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the runtime directory is unsafe, an active server
+    /// already owns the endpoint, or the socket cannot be bound.
     pub fn new() -> io::Result<Self> {
-        let path = Self::socket_path();
-        // Remove stale socket if present.
-        if path.exists() {
-            let _ = std::fs::remove_file(&path);
-        }
-        // Ensure parent directory exists and is private (0700). This matters for
-        // the /tmp/jwm-{uid} fallback used when XDG_RUNTIME_DIR is unset: with the
-        // default umask the dir/socket would be world-connectable, letting any
-        // local user send `spawn` commands and run code as the WM user.
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
-        }
-        let listener = UnixListener::bind(&path)?;
-        // Restrict the socket itself to the owner (bind honours umask, so set it
-        // explicitly rather than relying on the process umask).
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let path = validated_socket_path()?;
+        let (listener, identity) = bind_owned_socket(&path)?;
         listener.set_nonblocking(true)?;
         info!("[ipc] listening on {}", path.display());
         Ok(Self {
             listener,
             socket_path: path,
+            socket_identity: Some(identity),
             clients: HashMap::new(),
             next_id: 1,
         })
     }
 
+    #[must_use]
     pub fn socket_path() -> PathBuf {
-        let runtime = std::env::var("XDG_RUNTIME_DIR")
-            .unwrap_or_else(|_| format!("/tmp/jwm-{}", unsafe { libc::getuid() }));
-        Path::new(&runtime).join("jwm-ipc.sock")
+        socket_location().0
     }
 
     /// Accept any pending connections.
     pub fn accept_connections(&mut self) {
-        loop {
+        for _ in 0..MAX_ACCEPTS_PER_POLL {
             match self.listener.accept() {
                 Ok((stream, _addr)) => {
+                    if self.clients.len() >= MAX_CLIENTS {
+                        warn!("[ipc] rejecting client: connection limit ({MAX_CLIENTS}) reached");
+                        drop(stream);
+                        continue;
+                    }
                     let id = self.next_id;
-                    self.next_id += 1;
+                    self.next_id = self.next_id.wrapping_add(1).max(1);
                     match IpcClient::new(stream) {
                         Ok(client) => {
                             debug!("[ipc] client {} connected", id);
@@ -277,7 +618,7 @@ impl IpcServer {
     /// Register subscriptions for a client.
     pub fn subscribe(&mut self, client_id: u64, topics: Vec<String>) {
         if let Some(client) = self.clients.get_mut(&client_id) {
-            client.subscriptions = topics;
+            client.subscriptions = normalize_subscriptions(topics);
         }
     }
 
@@ -297,7 +638,19 @@ impl IpcServer {
     /// Clean shutdown: close all clients and remove the socket file.
     pub fn shutdown(&mut self) {
         self.clients.clear();
-        let _ = std::fs::remove_file(&self.socket_path);
+        if let Some(identity) = self.socket_identity.take() {
+            match remove_socket_if_unchanged(&self.socket_path, identity) {
+                Ok(true) => {}
+                Ok(false) => warn!(
+                    "[ipc] endpoint {} was replaced; leaving the newer socket intact",
+                    self.socket_path.display()
+                ),
+                Err(error) => warn!(
+                    "[ipc] failed to remove endpoint {} safely: {error}",
+                    self.socket_path.display()
+                ),
+            }
+        }
         info!("[ipc] server shut down");
     }
 }
@@ -316,20 +669,235 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    fn temporary_path(label: &str) -> PathBuf {
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("jwm-ipc-{label}-{}-{id}", std::process::id()))
+    }
+
     /// Helper: create an `IpcServer` bound to a unique temp path.
     fn make_test_server() -> IpcServer {
-        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("jwm-ipc-test-{}-{}.sock", std::process::id(), id));
+        let path = temporary_path("test").with_extension("sock");
         let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path).unwrap();
         listener.set_nonblocking(true).unwrap();
+        let identity = socket_identity(&path).unwrap();
         IpcServer {
             listener,
             socket_path: path,
+            socket_identity: Some(identity),
             clients: HashMap::new(),
             next_id: 1,
         }
+    }
+
+    #[test]
+    fn socket_location_uses_only_nonempty_absolute_xdg_paths() {
+        let uid = 4242;
+        let fallback = PathBuf::from("/tmp/jwm-4242/jwm-ipc.sock");
+        assert_eq!(socket_location_from(None, uid).0, fallback);
+        assert_eq!(socket_location_from(Some(OsStr::new("")), uid).0, fallback);
+        assert_eq!(
+            socket_location_from(Some(OsStr::new("relative/runtime")), uid).0,
+            fallback
+        );
+
+        let (path, source) = socket_location_from(Some(OsStr::new("/run/user/4242")), uid);
+        assert_eq!(path, PathBuf::from("/run/user/4242/jwm-ipc.sock"));
+        assert_eq!(source, RuntimeDirectorySource::Xdg);
+    }
+
+    #[test]
+    fn active_socket_is_never_unlinked() {
+        let path = temporary_path("active").with_extension("sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let original = socket_identity(&path).unwrap();
+
+        let error = bind_owned_socket(&path).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+        assert_eq!(socket_identity(&path).unwrap(), original);
+        assert!(UnixStream::connect(&path).is_ok());
+
+        drop(listener);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn stale_owned_socket_is_recovered() {
+        let path = temporary_path("stale").with_extension("sock");
+        let stale = UnixListener::bind(&path).unwrap();
+        drop(stale);
+
+        let (replacement, replacement_identity) = bind_owned_socket(&path).unwrap();
+
+        // Filesystems may immediately reuse the stale inode number, so success
+        // and connectability are the reliable recovery signals.
+        assert_eq!(socket_identity(&path).unwrap(), replacement_identity);
+        assert!(UnixStream::connect(&path).is_ok());
+        assert_eq!(replacement_identity.owner, current_uid());
+        assert_eq!(
+            std::fs::symlink_metadata(&path).unwrap().mode() & 0o777,
+            0o600
+        );
+
+        drop(replacement);
+        assert!(remove_socket_if_unchanged(&path, replacement_identity).unwrap());
+    }
+
+    #[test]
+    fn xdg_runtime_directory_permissions_are_never_mutated() {
+        let directory = temporary_path("xdg-dir");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let path = directory.join("jwm-ipc.sock");
+
+        let error = prepare_socket_directory(&path, RuntimeDirectorySource::Xdg).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            std::fs::symlink_metadata(&directory).unwrap().mode() & 0o777,
+            0o750
+        );
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn fallback_directory_is_private_and_rejects_symlinks() {
+        let directory = temporary_path("fallback-dir");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let path = directory.join("jwm-ipc.sock");
+
+        prepare_socket_directory(&path, RuntimeDirectorySource::Fallback).unwrap();
+        assert_eq!(
+            std::fs::symlink_metadata(&directory).unwrap().mode() & 0o777,
+            0o700
+        );
+
+        let target = temporary_path("fallback-target");
+        let link = temporary_path("fallback-link");
+        std::fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let error =
+            prepare_socket_directory(&link.join("jwm-ipc.sock"), RuntimeDirectorySource::Fallback)
+                .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+
+        std::fs::remove_file(link).unwrap();
+        std::fs::remove_dir(target).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn shutdown_does_not_remove_a_replacement_endpoint() {
+        let mut server = make_test_server();
+        let path = server.socket_path.clone();
+        std::fs::remove_file(&path).unwrap();
+        let replacement = UnixListener::bind(&path).unwrap();
+        let replacement_identity = socket_identity(&path).unwrap();
+
+        server.shutdown();
+
+        assert_eq!(socket_identity(&path).unwrap(), replacement_identity);
+        drop(replacement);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn batched_messages_are_limited_and_resumed_without_loss() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let mut client = IpcClient::new(reader).unwrap();
+        let total = MAX_MESSAGES_PER_POLL + 7;
+        let mut payload = String::new();
+        for index in 0..total {
+            std::fmt::Write::write_fmt(&mut payload, format_args!("message-{index}\n")).unwrap();
+        }
+        writer.write_all(payload.as_bytes()).unwrap();
+
+        let first = client.read_messages().unwrap();
+        let second = client.read_messages().unwrap();
+
+        assert_eq!(first.len(), MAX_MESSAGES_PER_POLL);
+        assert_eq!(first.first().unwrap(), "message-0");
+        assert_eq!(
+            first.last().unwrap(),
+            &format!("message-{}", MAX_MESSAGES_PER_POLL - 1)
+        );
+        assert_eq!(second.len(), 7);
+        assert_eq!(
+            second.first().unwrap(),
+            &format!("message-{MAX_MESSAGES_PER_POLL}")
+        );
+        assert_eq!(second.last().unwrap(), &format!("message-{}", total - 1));
+    }
+
+    #[test]
+    fn per_poll_read_bytes_are_bounded() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let mut client = IpcClient::new(reader).unwrap();
+        let payload = vec![b'x'; MAX_READ_BYTES_PER_POLL + 17];
+        writer.write_all(&payload).unwrap();
+
+        assert!(client.read_messages().unwrap().is_empty());
+        assert_eq!(client.buf.len(), MAX_READ_BYTES_PER_POLL);
+
+        assert!(client.read_messages().unwrap().is_empty());
+        assert_eq!(client.buf.len(), payload.len());
+    }
+
+    #[test]
+    fn complete_final_frame_is_delivered_before_disconnect() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let mut client = IpcClient::new(reader).unwrap();
+        writer.write_all(b"final-message\n").unwrap();
+        drop(writer);
+
+        assert_eq!(client.read_messages().unwrap(), ["final-message"]);
+        assert_eq!(
+            client.read_messages().unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+    }
+
+    #[test]
+    fn subscription_topics_are_trimmed_deduplicated_and_bounded() {
+        let mut topics = vec![
+            " window ".to_string(),
+            "window".to_string(),
+            String::new(),
+            "x".repeat(MAX_SUBSCRIPTION_TOPIC_LEN + 1),
+        ];
+        topics.extend((0..MAX_SUBSCRIPTION_TOPICS + 10).map(|index| format!("topic-{index}")));
+
+        let normalized = normalize_subscriptions(topics);
+
+        assert_eq!(normalized.len(), MAX_SUBSCRIPTION_TOPICS);
+        assert_eq!(normalized[0], "window");
+        assert_eq!(
+            normalized.iter().filter(|topic| *topic == "window").count(),
+            1
+        );
+        assert!(normalized.iter().all(|topic| !topic.trim().is_empty()));
+        assert!(
+            normalized
+                .iter()
+                .all(|topic| topic.len() <= MAX_SUBSCRIPTION_TOPIC_LEN)
+        );
+    }
+
+    #[test]
+    fn subscription_prefix_matching_respects_topic_boundaries() {
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let mut client = IpcClient::new(stream).unwrap();
+        client.subscriptions = normalize_subscriptions(vec![" window ".into()]);
+
+        assert!(client.is_subscribed("window"));
+        assert!(client.is_subscribed("window/new"));
+        assert!(!client.is_subscribed("windowing/new"));
+        assert!(!client.is_subscribed("monitor/new"));
+
+        client.subscriptions = normalize_subscriptions(vec!["*".into()]);
+        assert!(client.is_subscribed("monitor/new"));
     }
 
     #[test]

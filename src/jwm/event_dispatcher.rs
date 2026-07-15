@@ -13,7 +13,7 @@ use crate::config::{BackendFamily, CONFIG, get_backend_family};
 use crate::core::animation::AnimationKind;
 use crate::core::controller::WMController;
 use crate::jwm::Jwm;
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use std::sync::atomic::Ordering;
 
 fn sync_configured_client_geometry(
@@ -1074,6 +1074,8 @@ mod tests {
     fn empty_jwm() -> Jwm {
         Jwm {
             state: WMState::new(),
+            runtime_backend: "test".into(),
+            started_at: std::time::Instant::now(),
             s_w: 0,
             s_h: 0,
             running: AtomicBool::new(true),
@@ -1098,6 +1100,7 @@ mod tests {
             debug_hud_on: false,
             external_struts: HashMap::new(),
             ipc_server: None,
+            config_reload_tracker: crate::jwm::lifecycle::ConfigReloadTracker::new(None),
             config_last_modified: None,
             config_reload_debounce: None,
             config_reload_count: 0,
@@ -1149,13 +1152,7 @@ impl EventHandler for Jwm {
             BackendEvent::ScreenLayoutChanged => self.on_screen_layout_changed(backend),
             BackendEvent::ChildProcessExited => self.on_child_process_exited(backend),
             BackendEvent::ConfigChanged => {
-                info!("[config] file change detected via inotify, reloading");
-                let resp = self.do_config_reload(backend);
-                if resp.success {
-                    info!("[config] reload successful");
-                } else {
-                    warn!("[config] reload failed: {:?}", resp.error);
-                }
+                self.observe_config_reload(std::time::Instant::now(), "inotify");
             }
 
             // === 窗口生命周期 ===
@@ -1346,8 +1343,7 @@ impl EventHandler for Jwm {
 
         self.process_commands_from_status_bar(backend);
         self.process_ipc(backend);
-        // Config reload is now handled by inotify (ConfigChanged event)
-        // self.check_config_reload(backend);
+        self.poll_config_reload(backend, now);
         self.flush_pending_bar_updates();
         self.tick_animations(backend);
 
@@ -1375,7 +1371,14 @@ impl EventHandler for Jwm {
     }
 
     fn needs_tick(&self) -> bool {
-        self.animations.has_active() || self.features.overview.active || self.features.expose_active
+        self.animations.has_active()
+            || self.features.overview.active
+            || self.features.expose_active
+            || self.config_reload_deadline_is_due(std::time::Instant::now())
+    }
+
+    fn next_wakeup(&self) -> Option<std::time::Duration> {
+        Some(self.config_reload_next_wakeup(std::time::Instant::now()))
     }
 
     fn render_compositor_immediate(&mut self, backend: &mut dyn Backend) {
