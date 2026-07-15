@@ -157,9 +157,9 @@ fn run(cli: &Cli) -> Result<bool, Box<dyn std::error::Error>> {
     let doctor = doctor::diagnose(cli.backend);
     let live = (!cli.offline).then(collect_live_snapshot);
     let strict_failure = doctor.status == DoctorStatus::Error
-        || live.as_ref().is_some_and(|snapshot| {
-            !snapshot.health.success || !snapshot.capabilities.success
-        });
+        || live
+            .as_ref()
+            .is_some_and(|snapshot| !snapshot.health.success || !snapshot.capabilities.success);
 
     let bundle = SupportBundleV1 {
         schema_version: 1,
@@ -334,8 +334,7 @@ fn query_ipc_value(socket: &Path, query: &str) -> Result<Value, String> {
         response.pop();
     }
 
-    serde_json::from_slice(&response)
-        .map_err(|error| format!("JWM returned invalid JSON: {error}"))
+    serde_json::from_slice(&response).map_err(|error| format!("JWM returned invalid JSON: {error}"))
 }
 
 fn normalize_ipc_response(response: Value) -> QueryProbe {
@@ -435,7 +434,10 @@ SECRET_TOKEN=do-not-copy
 "#,
         );
 
-        assert_eq!(parsed.get("NAME").map(String::as_str), Some("Example Linux"));
+        assert_eq!(
+            parsed.get("NAME").map(String::as_str),
+            Some("Example Linux")
+        );
         assert_eq!(
             parsed.get("PRETTY_NAME").map(String::as_str),
             Some("Example Linux 42")
@@ -490,10 +492,7 @@ SECRET_TOKEN=do-not-copy
             fs::read_to_string(&path).unwrap(),
             "{\"schema_version\":1}\n"
         );
-        assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o077,
-            0
-        );
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
         fs::remove_dir_all(directory).unwrap();
     }
 }
