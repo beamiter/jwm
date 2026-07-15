@@ -28,12 +28,13 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_AUDIT_VERSION: "0.22.2"
 
 jobs:
   cargo-audit:
     name: RustSec audit
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -41,17 +42,23 @@ jobs:
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo-audit binary
+      - name: Cache cargo-audit installation
         uses: actions/cache@v4
         with:
-          path: ~/.cargo/bin/cargo-audit
-          key: cargo-audit-0.22.2-${{ runner.os }}
+          path: |
+            ~/.cargo/bin/cargo-audit
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/registry/src
+            ~/.cache/cargo-audit-target
+          key: cargo-audit-${{ env.CARGO_AUDIT_VERSION }}-${{ runner.os }}-${{ runner.arch }}
 
-      - name: Install cargo-audit 0.22.2
+      - name: Install cargo-audit
         shell: bash
         run: |
           if ! command -v cargo-audit >/dev/null 2>&1; then
-            cargo install cargo-audit --version 0.22.2 --locked
+            CARGO_TARGET_DIR="$HOME/.cache/cargo-audit-target" \
+              cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
           fi
 
       - name: Audit the locked Rust dependency graph
