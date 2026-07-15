@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   bootstrap:
-    name: Apply, format, and diagnose
+    name: Apply, lock, format, and diagnose
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -71,19 +71,26 @@ jobs:
       - name: Apply staged refinements
         run: python3 scripts/.jwm_evolution_patch.py
 
-      - name: Validate committed lockfile
-        run: cargo metadata --locked --format-version 1 --no-deps > /dev/null
+      - name: Resolve the pinned dependency graph
+        run: cargo generate-lockfile
 
       - name: Format Rust sources
         run: cargo fmt --all
 
-      - name: Commit refined source
+      - name: Commit refined source and lockfile
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add tools/jwm_support.rs scripts/install_jwm_scripts.sh
+          git add \
+            Cargo.toml \
+            Cargo.lock \
+            src/main.rs \
+            tools/jwm_support.rs \
+            README.md \
+            docs/support-bundles.md \
+            docs/roadmap.md
           if ! git diff --cached --quiet; then
-            git commit -m "feat: harden support bundle privacy and installation"
+            git commit -m "build: pin git dependencies and complete support redaction"
             git push
           fi
 
@@ -102,7 +109,7 @@ jobs:
         run: |
           git add -f cargo-check.log
           if ! git diff --cached --quiet; then
-            git commit -m "ci: capture hardened support compile diagnostics"
+            git commit -m "ci: capture pinned dependency compile diagnostics"
             git push
           fi
 
