@@ -105,6 +105,9 @@ CLONE_BARS=(
     # x11rb_wgpu_bar
     # x11rb_bar
     # xcb_bar
+    # xilem_bar
+    # gpui_bar
+    # gpui_component_bar
 )
 SKIP_BAR=false
 SKIP_JWM=false
