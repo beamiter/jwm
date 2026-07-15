@@ -27,25 +27,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  dependency-review:
+  pull-request-audit:
     if: github.event_name == 'pull_request'
-    name: Dependency review
+    name: RustSec audit
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: write
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Reject newly introduced high-severity vulnerabilities
-        uses: actions/dependency-review-action@v5
+      - name: Audit the locked Rust dependency graph
+        uses: rustsec/audit-check@v2.0.0
         with:
-          fail-on-severity: high
-          license-check: false
-          comment-summary-in-pr: never
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-  cargo-audit:
+  default-branch-audit:
     if: github.event_name != 'pull_request'
-    name: RustSec audit
+    name: RustSec audit and advisory issue sync
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
