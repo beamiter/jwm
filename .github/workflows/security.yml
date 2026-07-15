@@ -26,38 +26,61 @@ concurrency:
   group: security-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  pull-request-audit:
-    if: github.event_name == 'pull_request'
+  cargo-audit:
     name: RustSec audit
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      checks: write
+    timeout-minutes: 20
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Audit the locked Rust dependency graph
-        uses: rustsec/audit-check@v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
 
-  default-branch-audit:
-    if: github.event_name != 'pull_request'
-    name: RustSec audit and advisory issue sync
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      checks: write
-      issues: write
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v4
+      - name: Cache Cargo audit installation and advisory database
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-audit
+            ~/.cargo/advisory-db
+          key: cargo-audit-0.22.2-${{ runner.os }}
+
+      - name: Install cargo-audit 0.22.2
+        shell: bash
+        run: |
+          if ! command -v cargo-audit >/dev/null 2>&1; then
+            cargo install cargo-audit --version 0.22.2 --locked
+          fi
 
       - name: Audit the locked Rust dependency graph
-        uses: rustsec/audit-check@v2.0.0
+        id: audit
+        shell: bash
+        run: |
+          set +e
+          cargo audit --file Cargo.lock --json > cargo-audit.json 2> cargo-audit.stderr
+          status=$?
+          set -e
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          if [[ -s cargo-audit.stderr ]]; then
+            cat cargo-audit.stderr
+          fi
+          exit 0
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          name: cargo-audit-${{ github.run_id }}
+          path: |
+            cargo-audit.json
+            cargo-audit.stderr
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Fail on vulnerable dependencies or audit errors
+        if: steps.audit.outputs.status != '0'
+        run: exit 1
