@@ -1,41 +1,77 @@
-name: Generate Cargo lockfile
+name: Bootstrap reproducible build
 
 on:
-  pull_request:
+  push:
     branches:
-      - master
+      - agent/jwm-evolution-foundation
     paths:
       - Cargo.toml
       - rust-toolchain.toml
+      - tools/jwm_support.rs
       - .github/workflows/lockfile-artifact.yml
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: lockfile-${{ github.workflow }}-${{ github.ref }}
+  group: bootstrap-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  generate:
-    name: Resolve dependency lockfile
+  bootstrap:
+    name: Format, lock, and diagnose
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
 
       - name: Generate Cargo.lock
         run: cargo generate-lockfile
 
-      - name: Upload Cargo.lock
+      - name: Format Rust sources
+        run: cargo fmt --all
+
+      - name: Commit generated baseline
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock tools/jwm_support.rs
+          if ! git diff --cached --quiet; then
+            git commit -m "build: lock and format evolution baseline"
+            git push
+          fi
+
+      - name: Capture all-target check
+        id: check
+        shell: bash
+        run: |
+          set +e
+          cargo check --all-targets > cargo-check.log 2>&1
+          status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Upload bootstrap diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cargo-lock
-          path: Cargo.lock
+          name: evolution-bootstrap-${{ github.run_id }}
+          path: |
+            Cargo.lock
+            tools/jwm_support.rs
+            cargo-check.log
           if-no-files-found: error
           retention-days: 1
+
+      - name: Fail when compilation failed
+        if: steps.check.outputs.status != '0'
+        run: exit 1
