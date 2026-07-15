@@ -1,0 +1,51 @@
+name: Apply locked build workflow updates
+
+on:
+  push:
+    branches:
+      - agent/jwm-evolution-foundation
+    paths:
+      - .github/workflows/locked-workflow-patch.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out evolution branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/jwm-evolution-foundation
+          fetch-depth: 0
+
+      - name: Install Rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Apply locked workflow patch
+        run: python3 scripts/.locked_workflow_patch.py
+
+      - name: Format Rust source
+        run: cargo fmt --all
+
+      - name: Commit the final source and remove migration files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            README.md \
+            CONTRIBUTING.md \
+            scripts/install_jwm_scripts.sh \
+            scripts/install-portal.sh \
+            scripts/run_nested.sh \
+            tools/jwm_tool.rs
+          git rm scripts/.locked_workflow_patch.py
+          git rm .github/workflows/locked-workflow-patch.yml
+          git commit -m "build: use locked dependencies across user workflows"
+          git push
