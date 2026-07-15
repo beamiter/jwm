@@ -526,7 +526,7 @@ build_and_install_jwm() {
 
     # JWM 不使用 cargo install，避免把 jwm/jwm-tool/jwm-support 写入 cargo bin。
     # shellcheck disable=SC2086
-    cargo build $CARGO_BUILD_MODE_FLAG $CARGO_JOBS
+    cargo build --locked $CARGO_BUILD_MODE_FLAG $CARGO_JOBS
 
     local target_dir="$PROJECT_ROOT/target"
     if [[ "$BUILD_MODE" == "release" ]]; then

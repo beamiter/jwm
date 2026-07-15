@@ -26,8 +26,8 @@ JWM requires the normal Linux X11, Wayland, DRM/GBM, libinput, libseat, EGL/GL,
 ALSA, D-Bus, and font/rendering development packages for your distribution.
 
 ```bash
-cargo build --release
-cargo test --lib --bins --tests
+cargo build --locked --release
+cargo test --locked --lib --bins --tests
 ```
 
 The release build produces `jwm`, `jwm-tool`, and `jwm-support`. Before starting

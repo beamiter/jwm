@@ -22,11 +22,11 @@ repository toolchain file installs the expected Rust channel, Rustfmt, and
 Clippy components when Rustup is used.
 
 ```bash
-cargo build
+cargo build --locked
 cargo fmt --all -- --check
-cargo check --all-targets
-cargo clippy --all-targets --no-deps
-cargo test --lib --bins --tests
+cargo check --locked --all-targets
+cargo clippy --locked --all-targets --no-deps
+cargo test --locked --lib --bins --tests
 ```
 
 Run focused tests while iterating, but run the complete commands before opening
@@ -42,8 +42,8 @@ Prefer a nested backend for routine development so a failed compositor does not
 replace the active desktop session:
 
 ```bash
-cargo run -- --backend wayland-winit --doctor
-cargo run -- --backend wayland-winit
+cargo run --locked -- --backend wayland-winit --doctor
+cargo run --locked -- --backend wayland-winit
 
 # X11 development can also use Xephyr/Xnest as described in src/lib.rs.
 ```

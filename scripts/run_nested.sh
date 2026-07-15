@@ -55,7 +55,7 @@ fi
 
 # ---- 构建 --------------------------------------------------------------------
 echo "🔧 构建 jwm ($profile) ..."
-cargo build $build_flag --bin jwm
+cargo build --locked $build_flag --bin jwm
 
 # ---- 运行 --------------------------------------------------------------------
 export JWM_BACKEND
