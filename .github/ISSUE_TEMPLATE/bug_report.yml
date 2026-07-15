@@ -1,0 +1,87 @@
+name: Bug report
+description: Report a reproducible JWM defect
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Security-sensitive findings must use the private security reporting link instead of this form.
+
+  - type: input
+    id: commit
+    attributes:
+      label: Commit or version
+      description: Paste `git rev-parse HEAD` or the installed JWM version.
+      placeholder: f54fe749a9e90b509361e03d88f8a78943cb1163
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      options:
+        - x11rb
+        - xcb
+        - wayland-udev
+        - wayland-x11
+        - wayland-winit
+        - Unknown / multiple
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Distribution, kernel, GPU/driver, renderer API, monitor topology, refresh rates, and XWayland involvement.
+      placeholder: Fedora; kernel ...; AMD ...; EGL; two monitors at ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the smallest deterministic sequence that triggers the problem.
+      placeholder: |
+        1. Start JWM with ...
+        2. Launch ...
+        3. Run ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Paste a redacted doctor/health excerpt or attach a reviewed `jwm-support` JSON bundle. Do not publish secrets, private window content, or unreviewed logs.
+      render: text
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Reporter checks
+      options:
+        - label: I searched existing issues and pull requests.
+          required: true
+        - label: This is not a security-sensitive report.
+          required: true
+        - label: I reviewed all attached diagnostics for private data.
+          required: true
