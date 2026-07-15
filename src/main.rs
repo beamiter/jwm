@@ -6,35 +6,37 @@
 //   * Pills: CPU, memory, battery, brightness, volume, screenshot, time, monitor, scale
 //   * Click semantics: tag → view-tag command; volume scroll/click/right-click;
 //     brightness scroll/click/right-click; screenshot pill spawns `flameshot gui`
-//   * Background subscription thread reading SharedRingBuffer; 1Hz clock + system
-//     monitor refresh
+//   * Nonblocking transport polling with reconnect; 1Hz core runtime tick
 //
 // xilem is closure-based (no Message enum), so each interactive view directly
-// mutates state. A background thread pushes updates onto an mpsc channel that
-// xilem's `worker` view drains.
+// mutates state. Xilem tasks schedule provider and transport polls on the UI
+// runtime; transport access itself remains nonblocking.
 
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
-use chrono::Local;
-use log::{error, info, warn};
+use log::{debug, info, warn};
 
-use shared_structures::{CommandType, MonitorInfo, SharedCommand, SharedMessage, SharedRingBuffer};
-use xbar_core::audio_manager::AudioManager;
-use xbar_core::brightness::BrightnessManager;
-use xbar_core::initialize_logging;
-use xbar_core::system_monitor::SystemMonitor;
+use xbar_core::logging::init as initialize_logging;
+use xbar_core::{
+    BarEffect, BarRuntime, LayoutId, ModelConfig, MonitorGeometry, RuntimeAdapter, RuntimeIssue,
+    RuntimeUpdate, SharedTransport, TagId, ThemeMode, UserAction,
+};
 
+use masonry::core::{ErasedAction, WidgetId};
 use masonry::kurbo::Axis;
 use masonry::layout::{Dim, Length};
 use masonry::peniko::Color;
 use masonry::properties::{Dimensions, Padding};
-use winit::dpi::LogicalSize;
+use masonry_winit::app::{AppDriver, DriverCtx, MasonryState, WgpuContext, WindowId};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::window::WindowLevel;
 use xilem::core::{MessageProxy, NoElement, View, fork};
 use xilem::style::Style;
@@ -87,6 +89,167 @@ const LEFT_SECTION_GAP: f64 = 1.0;
 const CENTER_SECTION_GAP: f64 = 2.0;
 const RIGHT_SECTION_GAP: f64 = 4.0;
 const RIGHTMOST_SECTION_GAP: f64 = 8.0;
+const TRANSPORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Copy)]
+struct GeometryBridgeState {
+    generation: u64,
+    geometry: Option<MonitorGeometry>,
+    scale_factor: f64,
+}
+
+impl Default for GeometryBridgeState {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            geometry: None,
+            scale_factor: 1.0,
+        }
+    }
+}
+
+#[derive(Default)]
+struct GeometryBridge {
+    state: Mutex<GeometryBridgeState>,
+}
+
+impl GeometryBridge {
+    fn update_geometry(&self, geometry: Option<MonitorGeometry>) {
+        let mut state = self.state.lock().unwrap_or_else(|error| {
+            warn!("xilem geometry bridge mutex was poisoned");
+            error.into_inner()
+        });
+        state.generation = state.generation.wrapping_add(1).max(1);
+        state.geometry = geometry;
+    }
+
+    fn update_scale_factor(&self, scale_factor: f64) {
+        let mut state = self.state.lock().unwrap_or_else(|error| {
+            warn!("xilem geometry bridge mutex was poisoned");
+            error.into_inner()
+        });
+        state.scale_factor = scale_factor.max(f64::EPSILON);
+    }
+
+    fn snapshot(&self) -> GeometryBridgeState {
+        *self.state.lock().unwrap_or_else(|error| {
+            warn!("xilem geometry bridge mutex was poisoned");
+            error.into_inner()
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct WindowBaseline {
+    position: Option<PhysicalPosition<i32>>,
+    logical_size: LogicalSize<f64>,
+}
+
+struct AppliedWindowState {
+    baseline: WindowBaseline,
+    generation: u64,
+    scale_factor: f64,
+}
+
+struct GeometryDriver<D> {
+    inner: D,
+    bridge: Arc<GeometryBridge>,
+    windows: HashMap<WindowId, AppliedWindowState>,
+}
+
+impl<D> GeometryDriver<D> {
+    fn new(inner: D, bridge: Arc<GeometryBridge>) -> Self {
+        Self {
+            inner,
+            bridge,
+            windows: HashMap::new(),
+        }
+    }
+
+    fn sync_window(&mut self, window_id: WindowId, ctx: &mut DriverCtx<'_, '_>) {
+        let bridge = self.bridge.snapshot();
+        let window = ctx.window(window_id).handle();
+        let scale_factor = window.scale_factor().max(f64::EPSILON);
+        self.bridge.update_scale_factor(scale_factor);
+
+        let applied = self.windows.entry(window_id).or_insert_with(|| {
+            let physical_size = window.inner_size();
+            AppliedWindowState {
+                baseline: WindowBaseline {
+                    position: window.outer_position().ok(),
+                    logical_size: physical_size.to_logical(scale_factor),
+                },
+                generation: 0,
+                scale_factor,
+            }
+        });
+        let scale_changed = applied.scale_factor.to_bits() != scale_factor.to_bits();
+        if bridge.generation == 0 || (bridge.generation == applied.generation && !scale_changed) {
+            applied.scale_factor = scale_factor;
+            return;
+        }
+
+        let logical_height = applied.baseline.logical_size.height;
+        let physical_height = (logical_height * scale_factor)
+            .round()
+            .clamp(1.0, f64::from(u32::MAX)) as u32;
+        match bridge.geometry {
+            Some(geometry) => {
+                window.set_outer_position(PhysicalPosition::new(geometry.x, geometry.y));
+                let _ = window
+                    .request_inner_size(PhysicalSize::new(geometry.width.max(1), physical_height));
+            }
+            None => {
+                if let Some(position) = applied.baseline.position {
+                    window.set_outer_position(position);
+                }
+                let physical_width = (applied.baseline.logical_size.width * scale_factor)
+                    .round()
+                    .clamp(1.0, f64::from(u32::MAX)) as u32;
+                let _ =
+                    window.request_inner_size(PhysicalSize::new(physical_width, physical_height));
+            }
+        }
+        applied.generation = bridge.generation;
+        applied.scale_factor = scale_factor;
+    }
+}
+
+impl<D: AppDriver> AppDriver for GeometryDriver<D> {
+    fn on_action(
+        &mut self,
+        window_id: WindowId,
+        ctx: &mut DriverCtx<'_, '_>,
+        widget_id: WidgetId,
+        action: ErasedAction,
+    ) {
+        self.inner.on_action(window_id, ctx, widget_id, action);
+        self.sync_window(window_id, ctx);
+    }
+
+    fn on_async_action(
+        &mut self,
+        window_id: WindowId,
+        ctx: &mut DriverCtx<'_, '_>,
+        action: ErasedAction,
+    ) {
+        self.inner.on_async_action(window_id, ctx, action);
+        self.sync_window(window_id, ctx);
+    }
+
+    fn on_start(&mut self, state: &mut MasonryState<'_>) {
+        self.inner.on_start(state);
+    }
+
+    fn on_close_requested(&mut self, window_id: WindowId, ctx: &mut DriverCtx<'_, '_>) {
+        self.inner.on_close_requested(window_id, ctx);
+    }
+
+    fn on_wgpu_ready(&mut self, wgpu: &WgpuContext<'_>) {
+        self.inner.on_wgpu_ready(wgpu);
+    }
+}
 
 fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::from_rgb8(r, g, b)
@@ -96,53 +259,52 @@ fn pill_padding() -> Padding {
 }
 // -------- App state ----------------------------------------------------------
 
+#[derive(Debug, Default)]
+struct WorkerSignal {
+    pending: AtomicBool,
+    tick_due: AtomicBool,
+}
+
 #[derive(Debug, Clone)]
 enum WorkerEvent {
-    Tick,                       // 1Hz clock tick
-    Shared(Box<SharedMessage>), // shared-memory update
-    SharedError(String),
+    Drive(Arc<WorkerSignal>),
 }
 
 struct XilemBar {
-    active_tab: usize,
     tab_colors: [Color; 9],
-    shared_buffer_rc: Option<Arc<SharedRingBuffer>>,
-
-    monitor_info_opt: Option<MonitorInfo>,
-    formated_now: String,
-    show_seconds: bool,
-    layout_symbol: String,
-    monitor_num: i32,
-    layout_selector_open: bool,
-
-    audio_manager: AudioManager,
-    system_monitor: SystemMonitor,
-    brightness_manager: BrightnessManager,
-
-    theme_mode: ThemeMode,
+    runtime: BarRuntime,
+    shared_path: String,
+    last_transport_retry: Instant,
+    geometry_bridge: Arc<GeometryBridge>,
     theme: Theme,
-
-    last_clock_update: Instant,
-    last_monitor_update: Instant,
-}
-
-impl Default for XilemBar {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl XilemBar {
-    fn new() -> Self {
+    fn new(geometry_bridge: Arc<GeometryBridge>) -> Self {
         let args: Vec<String> = env::args().collect();
         let shared_path = args.iter().skip(1).last().cloned().unwrap_or_default();
 
-        let shared_buffer_rc =
-            SharedRingBuffer::create_shared_ring_buffer_aux(&shared_path).map(Arc::new);
-
         let theme_mode = load_theme_mode();
+        let transport = if shared_path.is_empty() {
+            None
+        } else {
+            match SharedTransport::open(&shared_path) {
+                Ok(transport) => Some(transport),
+                Err(error) => {
+                    warn!("failed to open WM transport at {shared_path:?}: {error}");
+                    None
+                }
+            }
+        };
+        let config = ModelConfig {
+            brightness_step: 10,
+            initial_theme: theme_mode,
+            show_seconds: true,
+            ..ModelConfig::default()
+        };
+        let runtime = BarRuntime::with_transport(config, transport)
+            .expect("xilem bar model configuration is valid");
         Self {
-            active_tab: 0,
             tab_colors: [
                 rgb(0xFF, 0x6B, 0x6B),
                 rgb(0x4E, 0xCD, 0xC4),
@@ -154,87 +316,93 @@ impl XilemBar {
                 rgb(0x5F, 0x27, 0xCD),
                 rgb(0x00, 0xD2, 0xD3),
             ],
-            shared_buffer_rc,
-            monitor_info_opt: None,
-            formated_now: String::new(),
-            show_seconds: true,
-            layout_symbol: "[]=".to_string(),
-            monitor_num: 0,
-            layout_selector_open: false,
-            audio_manager: AudioManager::new(),
-            system_monitor: SystemMonitor::new(5),
-            brightness_manager: BrightnessManager::new(),
-            theme_mode,
+            runtime,
+            shared_path,
+            last_transport_retry: Instant::now(),
+            geometry_bridge,
             theme: Theme::from_mode(theme_mode),
-            last_clock_update: Instant::now(),
-            last_monitor_update: Instant::now(),
         }
     }
 
     fn toggle_theme(&mut self) {
-        self.theme_mode = match self.theme_mode {
-            ThemeMode::Dark => ThemeMode::Light,
-            ThemeMode::Light => ThemeMode::Dark,
-        };
-        self.theme = Theme::from_mode(self.theme_mode);
-        save_theme_mode(self.theme_mode);
+        let update = self.runtime.dispatch(UserAction::ToggleTheme);
+        self.handle_runtime_update(update);
+        save_theme_mode(self.runtime.view().theme);
     }
 
-    fn send_tag_command(&mut self, is_view: bool) {
-        let tag_bit = 1 << self.active_tab;
-        let command = if is_view {
-            SharedCommand::view_tag(tag_bit, self.monitor_num)
-        } else {
-            SharedCommand::toggle_tag(tag_bit, self.monitor_num)
-        };
-        if let Some(buf) = &self.shared_buffer_rc {
-            match buf.send_command(command) {
-                Ok(true) => info!("Sent command: {:?}", command),
-                Ok(false) => warn!("Command buffer full, command dropped"),
-                Err(e) => error!("Failed to send command: {}", e),
+    fn dispatch(&mut self, action: UserAction) {
+        let update = self.runtime.dispatch(action);
+        self.handle_runtime_update(update);
+    }
+
+    fn dispatch_wm(&mut self, action: UserAction) {
+        if !self.runtime.view().wm_available {
+            debug!("ignoring WM action while the WM projection is unavailable");
+            return;
+        }
+        self.dispatch(action);
+    }
+
+    fn handle_runtime_update(&mut self, update: RuntimeUpdate) {
+        if has_transport_failure(&update) {
+            self.runtime.set_transport(None);
+            self.last_transport_retry = Instant::now();
+        }
+        for issue in update.issues {
+            warn!("xbar runtime issue: {issue:?}");
+        }
+        for effect in update.platform_effects {
+            match effect {
+                BarEffect::Screenshot => {
+                    spawn_program("flameshot", &["gui"]);
+                }
+                BarEffect::OpenAudioControl => {
+                    spawn_program("pavucontrol", &[]);
+                }
+                BarEffect::ApplyMonitorGeometry(geometry) => {
+                    self.geometry_bridge.update_geometry(Some(geometry));
+                }
+                BarEffect::ClearMonitorGeometry => self.geometry_bridge.update_geometry(None),
+                unhandled => warn!("unhandled xbar platform effect: {unhandled:?}"),
             }
         }
-    }
-
-    fn send_layout_command(&mut self, layout_index: u32) {
-        let cmd = SharedCommand::new(CommandType::SetLayout, layout_index, self.monitor_num);
-        if let Some(buf) = &self.shared_buffer_rc {
-            let _ = buf.send_command(cmd);
-        }
+        self.theme = Theme::from_mode(self.runtime.view().theme);
     }
 
     fn on_worker(&mut self, ev: WorkerEvent) {
         match ev {
-            WorkerEvent::Tick => {
-                if self.last_clock_update.elapsed() >= Duration::from_millis(900) {
-                    let fmt = if self.show_seconds {
-                        "%Y-%m-%d %H:%M:%S"
-                    } else {
-                        "%Y-%m-%d %H:%M"
-                    };
-                    self.formated_now = Local::now().format(fmt).to_string();
-                    self.last_clock_update = Instant::now();
+            WorkerEvent::Drive(signal) => {
+                self.ensure_transport();
+                let mut update = self.runtime.poll_transport();
+                if signal.tick_due.swap(false, Ordering::AcqRel) {
+                    update.merge(self.runtime.tick());
                 }
-                if self.last_monitor_update.elapsed() >= Duration::from_secs(2) {
-                    self.system_monitor.update_if_needed();
-                    self.audio_manager.update_if_needed();
-                    self.brightness_manager.update_if_needed();
-                    self.last_monitor_update = Instant::now();
-                }
+                self.handle_runtime_update(update);
+                signal.pending.store(false, Ordering::Release);
             }
-            WorkerEvent::Shared(msg) => {
-                self.monitor_info_opt = Some(msg.monitor_info);
-                if let Some(mi) = &self.monitor_info_opt {
-                    self.layout_symbol = mi.get_ltsymbol();
-                    self.monitor_num = mi.monitor_num;
-                    for (idx, ts) in mi.tag_status_vec.iter().enumerate() {
-                        if ts.is_selected {
-                            self.active_tab = idx;
-                        }
-                    }
-                }
+        }
+    }
+
+    fn ensure_transport(&mut self) {
+        if self.shared_path.is_empty()
+            || self.runtime.transport().is_some()
+            || self.last_transport_retry.elapsed() < TRANSPORT_RETRY_INTERVAL
+        {
+            return;
+        }
+
+        self.last_transport_retry = Instant::now();
+        match SharedTransport::open(&self.shared_path) {
+            Ok(transport) => {
+                self.runtime.set_transport(Some(transport));
+                info!("reconnected WM transport at {:?}", self.shared_path);
             }
-            WorkerEvent::SharedError(e) => warn!("SharedMemoryError: {e}"),
+            Err(error) => {
+                debug!(
+                    "WM transport at {:?} is still unavailable: {error}",
+                    self.shared_path
+                );
+            }
         }
     }
 
@@ -242,50 +410,55 @@ impl XilemBar {
 
     fn tag_visuals(&self, index: usize) -> (Color, f64, Color) {
         let tag_color = *self.tab_colors.get(index).unwrap_or(&rgb(0x66, 0x66, 0x66));
-        if let Some(monitor) = &self.monitor_info_opt {
-            if let Some(s) = monitor.tag_status_vec.get(index) {
-                if s.is_urg {
-                    return (self.theme.urgent_bg, 2.0, self.theme.urgent_border);
-                }
-                if s.is_filled {
-                    return (tag_color, 2.0, tag_color);
-                }
-                if s.is_selected {
-                    return (with_alpha(tag_color, 0.7), 1.5, tag_color);
-                }
-                if s.is_occ {
-                    return (
-                        with_alpha(tag_color, 0.22),
-                        1.5,
-                        with_alpha(tag_color, 0.95),
-                    );
-                }
+        let view = self.runtime.view();
+        if view.wm_available
+            && let Some(s) = view.tags.get(index)
+        {
+            if s.urgent {
+                return (self.theme.urgent_bg, 2.0, self.theme.urgent_border);
+            }
+            if s.filled {
+                return (tag_color, 2.0, tag_color);
+            }
+            if s.selected {
+                return (with_alpha(tag_color, 0.7), 1.5, tag_color);
+            }
+            if s.occupied {
+                return (
+                    with_alpha(tag_color, 0.22),
+                    1.5,
+                    with_alpha(tag_color, 0.95),
+                );
             }
         }
         (self.theme.tag_inactive_bg, 1.0, with_alpha(tag_color, 0.9))
     }
 
     fn is_tag_active(&self, index: usize) -> bool {
-        self.monitor_info_opt
-            .as_ref()
-            .and_then(|m| m.tag_status_vec.get(index))
-            .map(|s| s.is_filled || s.is_selected || s.is_urg || s.is_occ)
-            .unwrap_or(false)
+        let view = self.runtime.view();
+        view.wm_available
+            && view
+                .tags
+                .get(index)
+                .is_some_and(|s| s.filled || s.selected || s.urgent || s.occupied)
     }
 
     fn workspace_tab_width(&self) -> f64 {
         let Some(monitor_width) = self
-            .monitor_info_opt
-            .as_ref()
-            .map(|m| m.monitor_width)
-            .filter(|w| *w > 0)
+            .runtime
+            .view()
+            .geometry
+            .map(|geometry| {
+                f64::from(geometry.width) / self.geometry_bridge.snapshot().scale_factor
+            })
+            .filter(|w| *w > 0.0)
         else {
             return DEFAULT_TAB_WIDTH;
         };
 
         // Keep the left workspace group proportional to the monitor width,
         // while clamping individual tab width to avoid extreme sizes.
-        let group_width = (monitor_width as f64 * 0.20).clamp(360.0, 500.0);
+        let group_width = (monitor_width * 0.20).clamp(360.0, 500.0);
         let total_spacing = TAB_SPACING * (TAG_ICONS.len().saturating_sub(1) as f64);
         ((group_width - total_spacing) / TAG_ICONS.len() as f64).clamp(MIN_TAB_WIDTH, MAX_TAB_WIDTH)
     }
@@ -308,12 +481,6 @@ where
 }
 
 // Catppuccin Mocha (dark) / Latte (light) palettes, swapped at runtime.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-enum ThemeMode {
-    Dark,
-    Light,
-}
-
 #[derive(Copy, Clone)]
 struct Theme {
     bar_bg: Color,
@@ -473,8 +640,9 @@ fn workspace_tag(state: &mut XilemBar, index: usize) -> impl WidgetView<XilemBar
 
     let inner = label(label_str).text_size(TAB_FONT_SIZE).color(text_color);
     sized_box(button(inner, move |s: &mut XilemBar| {
-        s.active_tab = index;
-        s.send_tag_command(true);
+        if let Some(tag) = TagId::new(index) {
+            s.dispatch_wm(UserAction::ViewTag(tag));
+        }
     }))
     .dims(Dimensions::new(
         Dim::Fixed(Length::px(tab_width)),
@@ -505,24 +673,24 @@ fn workspace_row(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
 }
 
 fn layout_toggle(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
-    let open = state.layout_selector_open;
+    let open = state.runtime.view().layout_selector_open;
     let fg = if open {
         state.theme.green
     } else {
         state.theme.orange
     };
-    let label_str = state.layout_symbol.clone();
+    let label_str = state.runtime.view().layout_symbol.to_owned();
 
     flat(button(
         label(label_str).text_size(PILL_FONT_SIZE).color(fg),
         |s: &mut XilemBar| {
-            s.layout_selector_open = !s.layout_selector_open;
+            s.dispatch(UserAction::ToggleLayoutSelector);
         },
     ))
 }
 
 fn layout_options(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
-    let current = state.layout_symbol.clone();
+    let current = state.runtime.view().layout_symbol.to_owned();
     let theme = state.theme;
     let mk = move |sym: &'static str, idx: u32, current: String| {
         let is_current = sym == current;
@@ -530,8 +698,7 @@ fn layout_options(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
         flat(button(
             label(sym).text_size(PILL_FONT_SIZE).color(fg),
             move |s: &mut XilemBar| {
-                s.send_layout_command(idx);
-                s.layout_selector_open = false;
+                s.dispatch_wm(UserAction::SetLayout(LayoutId(idx)));
             },
         ))
     };
@@ -572,11 +739,9 @@ fn usage_pill_view(
 }
 
 fn battery_pill_view(state: &XilemBar) -> impl WidgetView<XilemBar> + use<> {
-    let (pct, charging) = state
-        .system_monitor
-        .get_snapshot()
-        .map(|s| (s.battery_percent, s.is_charging))
-        .unwrap_or((0.0, false));
+    let battery = state.runtime.view().battery;
+    let pct = battery.percent.map_or(100.0, |percent| percent.as_f32());
+    let charging = battery.charging;
     let icon = if charging {
         ICON_BAT_CHG
     } else {
@@ -601,9 +766,9 @@ fn battery_pill_view(state: &XilemBar) -> impl WidgetView<XilemBar> + use<> {
 }
 
 fn brightness_pill_view(state: &XilemBar) -> impl WidgetView<XilemBar> + use<> {
-    let pct = state.brightness_manager.percent();
+    let pct = state.runtime.view().brightness.percent;
     let pct_str = match pct {
-        Some(p) => format!("{}%", p),
+        Some(percent) => format!("{}%", percent.rounded()),
         None => "--".to_string(),
     };
     let accent = state.theme.yellow;
@@ -623,23 +788,22 @@ fn brightness_pill_view(state: &XilemBar) -> impl WidgetView<XilemBar> + use<> {
     flat(button_any_pointer(
         inner,
         |s: &mut XilemBar, btn: Option<PointerButton>| {
-            let delta = if matches!(btn, Some(PointerButton::Secondary)) {
-                -10
+            let action = if matches!(btn, Some(PointerButton::Secondary)) {
+                UserAction::BrightnessDown
             } else {
-                10
+                UserAction::BrightnessUp
             };
-            let _ = s.brightness_manager.adjust(delta);
+            s.dispatch(action);
         },
     ))
 }
 
 fn volume_pill_view(state: &XilemBar) -> impl WidgetView<XilemBar> + use<> {
-    let master = state.audio_manager.get_master_device();
-    let (vol, muted, has_dev) = if let Some(d) = master {
-        (d.volume.clamp(0, 100), d.is_muted, true)
-    } else {
-        (0, true, false)
-    };
+    let audio = state.runtime.view().audio;
+    let (vol, has_dev) = audio
+        .volume_percent
+        .map_or((0, false), |percent| (i32::from(percent.rounded()), true));
+    let muted = audio.muted;
     let icon = volume_icon(vol, muted, has_dev);
     let pct_str = if has_dev {
         format!("{}%", vol)
@@ -666,20 +830,12 @@ fn volume_pill_view(state: &XilemBar) -> impl WidgetView<XilemBar> + use<> {
     flat(button_any_pointer(
         inner,
         |s: &mut XilemBar, btn: Option<PointerButton>| {
-            let Some(d) = s.audio_manager.get_master_device().cloned() else {
-                return;
+            let action = match btn {
+                Some(PointerButton::Secondary) => UserAction::VolumeDown,
+                Some(PointerButton::Auxiliary) => UserAction::ToggleMute,
+                _ => UserAction::VolumeUp,
             };
-            match btn {
-                Some(PointerButton::Secondary) => {
-                    let _ = s.audio_manager.adjust_volume(&d.name, -5);
-                }
-                Some(PointerButton::Auxiliary) => {
-                    let _ = s.audio_manager.toggle_mute(&d.name);
-                }
-                _ => {
-                    let _ = s.audio_manager.adjust_volume(&d.name, 5);
-                }
-            }
+            s.dispatch(action);
         },
     ))
 }
@@ -688,16 +844,14 @@ fn screenshot_pill_view(state: &XilemBar) -> impl WidgetView<XilemBar> + use<> {
     let inner = label(ICON_SHOT.to_string())
         .text_size(PILL_FONT_SIZE)
         .color(state.theme.pink);
-    flat(button(inner, |_s: &mut XilemBar| {
-        if let Err(e) = Command::new("flameshot").arg("gui").spawn() {
-            warn!("Failed to spawn flameshot: {e}");
-        }
+    flat(button(inner, |s: &mut XilemBar| {
+        s.dispatch(UserAction::Screenshot);
     }))
 }
 
 fn theme_pill_view(state: &XilemBar) -> impl WidgetView<XilemBar> + use<> {
     // Show the icon for the mode you'll switch TO: sun if currently dark, moon if light.
-    let (icon, accent) = match state.theme_mode {
+    let (icon, accent) = match state.runtime.view().theme {
         ThemeMode::Dark => (ICON_SUN, state.theme.yellow),
         ThemeMode::Light => (ICON_MOON, state.theme.mauve),
     };
@@ -718,14 +872,14 @@ fn time_pill_view(state: &XilemBar) -> impl WidgetView<XilemBar> + use<> {
             label(ICON_TIME.to_string())
                 .text_size(PILL_FONT_SIZE)
                 .color(accent),
-            label(state.formated_now.clone())
+            label(state.runtime.view().time.to_owned())
                 .text_size(PILL_FONT_SIZE)
                 .color(fg),
         ),
     )
     .gap(Length::px(3.0));
     flat(button(inner, |s: &mut XilemBar| {
-        s.show_seconds = !s.show_seconds;
+        s.dispatch(UserAction::ToggleSeconds);
     }))
 }
 
@@ -760,20 +914,18 @@ fn scale_pill_view(theme: &Theme, scale: f32) -> impl WidgetView<XilemBar> + use
 // -------- Top-level view -----------------------------------------------------
 
 fn app_logic(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
-    let snapshot = state.system_monitor.get_snapshot();
-    let cpu = snapshot.map(|s| s.cpu_average).unwrap_or(0.0);
-    let mem = snapshot.map(|s| s.memory_usage_percent).unwrap_or(0.0);
-
-    let monitor_num = state
-        .monitor_info_opt
-        .as_ref()
-        .map(|m| m.monitor_num)
-        .unwrap_or(0);
+    let view = state.runtime.view();
+    let cpu = view.system.cpu_percent.map_or(0.0, |value| value.as_f32());
+    let mem = view
+        .system
+        .memory_percent
+        .map_or(0.0, |value| value.as_f32());
+    let monitor_num = view.monitor.0;
 
     let theme = state.theme;
     let tags = workspace_row(state);
     let lt_btn = layout_toggle(state);
-    let lt_options: Option<_> = if state.layout_selector_open {
+    let lt_options: Option<_> = if state.runtime.view().layout_selector_open {
         Some(layout_options(state))
     } else {
         None
@@ -821,64 +973,34 @@ fn app_logic(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
 
 // -------- Background workers -------------------------------------------------
 
-// 1Hz clock + system monitor tick.
-fn clock_task() -> impl View<XilemBar, (), ViewCtx, Element = NoElement> + use<> {
+// One coalesced driver task keeps at most one event in the winit queue. Polls
+// retain 100ms transport latency, while every tenth poll also advances the
+// core clock/providers.
+fn driver_task() -> impl View<XilemBar, (), ViewCtx, Element = NoElement> + use<> {
     task_raw(
         |proxy: MessageProxy<WorkerEvent>, _state: &mut XilemBar| async move {
-            let mut iv = tokio::time::interval(Duration::from_secs(1));
+            let signal = Arc::new(WorkerSignal::default());
+            let mut iv = tokio::time::interval(TRANSPORT_POLL_INTERVAL);
+            iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut poll_count = 9_u8;
             loop {
                 iv.tick().await;
-                if proxy.message(WorkerEvent::Tick).is_err() {
+                poll_count += 1;
+                if poll_count >= 10 {
+                    poll_count = 0;
+                    signal.tick_due.store(true, Ordering::Release);
+                }
+                if signal
+                    .pending
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                    && proxy
+                        .message(WorkerEvent::Drive(Arc::clone(&signal)))
+                        .is_err()
+                {
+                    signal.pending.store(false, Ordering::Release);
                     break;
                 }
-            }
-        },
-        |state: &mut XilemBar, ev: WorkerEvent| state.on_worker(ev),
-    )
-}
-
-// Shared-memory watcher: spawns an OS thread that blocks on the futex, posts
-// SharedMessage updates via the message proxy.
-fn shared_mem_worker(
-    state: &mut XilemBar,
-) -> impl View<XilemBar, (), ViewCtx, Element = NoElement> + use<> {
-    let buf = state.shared_buffer_rc.clone();
-    task_raw(
-        move |proxy: MessageProxy<WorkerEvent>, _state: &mut XilemBar| {
-            let buf = buf.clone();
-            async move {
-                std::thread::spawn(move || {
-                    let Some(buf) = buf else {
-                        let _ =
-                            proxy.message(WorkerEvent::SharedError("Empty shared buffer".into()));
-                        return;
-                    };
-                    let stop = Arc::new(AtomicBool::new(false));
-                    let mut prev_ts: u128 = 0;
-                    while !stop.load(Ordering::Relaxed) {
-                        match buf.wait_for_message(Some(Duration::from_secs(2))) {
-                            Ok(true) => {
-                                if let Ok(Some(msg)) = buf.try_read_latest_message() {
-                                    let ts = msg.timestamp as u128;
-                                    if prev_ts != ts {
-                                        prev_ts = ts;
-                                        if proxy
-                                            .message(WorkerEvent::Shared(Box::new(msg)))
-                                            .is_err()
-                                        {
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            Ok(false) => {}
-                            Err(e) => {
-                                let _ = proxy.message(WorkerEvent::SharedError(format!("{e}")));
-                                break;
-                            }
-                        }
-                    }
-                });
             }
         },
         |state: &mut XilemBar, ev: WorkerEvent| state.on_worker(ev),
@@ -892,8 +1014,33 @@ fn root(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
         sized_box(app_logic(state))
             .padding(Padding::from_vh(Length::px(0.0), Length::px(6.0)))
             .background(bar_bg),
-        (clock_task(), shared_mem_worker(state)),
+        (driver_task(),),
     )
+}
+
+fn has_transport_failure(update: &RuntimeUpdate) -> bool {
+    update.issues.iter().any(|issue| {
+        matches!(
+            issue,
+            RuntimeIssue::AdapterFailed {
+                adapter: RuntimeAdapter::Transport,
+                ..
+            }
+        )
+    })
+}
+
+fn spawn_program(program: &str, args: &[&str]) {
+    let program = program.to_owned();
+    let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+    let thread_name = format!("wait-{program}");
+    if let Err(error) = thread::Builder::new().name(thread_name).spawn(move || {
+        if let Err(error) = Command::new(&program).args(&args).status() {
+            warn!("failed to run {program}: {error}");
+        }
+    }) {
+        warn!("failed to start process waiter: {error}");
+    }
 }
 
 // -------- main ---------------------------------------------------------------
@@ -911,8 +1058,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_resizable(false);
 
     let _ = NERD_FONT;
-    Xilem::new_simple(XilemBar::new(), root, opts)
-        .with_default_base_color(Color::TRANSPARENT)
-        .run_in(EventLoop::with_user_event())?;
+    let geometry_bridge = Arc::new(GeometryBridge::default());
+    let app = Xilem::new_simple(XilemBar::new(Arc::clone(&geometry_bridge)), root, opts)
+        .with_default_base_color(Color::TRANSPARENT);
+    let event_loop = EventLoop::with_user_event().build()?;
+    let proxy = event_loop.create_proxy();
+    let (driver, windows) =
+        app.into_driver_and_windows(move |event| proxy.send_event(event).map_err(|error| error.0));
+    masonry_winit::app::run_with(
+        event_loop,
+        windows,
+        GeometryDriver::new(driver, geometry_bridge),
+        masonry::theme::default_property_set(),
+    )?;
     Ok(())
 }
