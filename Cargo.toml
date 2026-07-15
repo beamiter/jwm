@@ -1,33 +1,22 @@
 [package]
 name = "xbar_core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-description = "Backend-independent status-bar model with compatibility adapters for JWM frontends"
+description = "Backend-neutral status-bar model, scene graph, runtime, and explicit adapters"
 repository = "https://github.com/beamiter/xbar_core"
 
 [features]
-default = ["legacy-full"]
+# The semantic model is the only default surface. Every platform capability is
+# explicit so a toolkit or GPU frontend never inherits Cairo, ALSA, sysfs, or
+# Linux fd dependencies accidentally.
+default = []
 
-# Compatibility umbrella used by the existing xcb/x11rb/winit/tao/toolkit
-# frontends. New renderers can start with `default-features = false` and opt in
-# only to the adapters they need.
-legacy-full = [
-    "clock-chrono",
-    "logging-flexi",
-    "provider-alsa",
-    "provider-battery-sysfs",
-    "provider-brightnessctl",
-    "provider-system",
-    "render-cairo",
-    "runtime-linux",
-    "transport-shared",
-]
 clock-chrono = ["dep:chrono"]
 logging-flexi = ["dep:anyhow", "dep:flexi_logger", "dep:log"]
 provider-alsa = ["dep:alsa", "dep:anyhow", "dep:log"]
 provider-battery-sysfs = []
 provider-brightnessctl = ["dep:log"]
-provider-system = ["dep:battery", "dep:sysinfo"]
+provider-system = ["dep:sysinfo"]
 render-cairo = ["dep:anyhow", "dep:cairo-rs", "dep:pango", "dep:pangocairo"]
 runtime-linux = ["dep:libc", "dep:log"]
 transport-shared = ["dep:shared_structures"]
@@ -43,9 +32,8 @@ serde = { version = "1.0.228", features = ["derive"] }
 alsa = { version = "0.12.0", optional = true }
 log = { version = "0.4.33", optional = true }
 flexi_logger = { version = "0.31.9", optional = true }
-battery = { version = "0.7.8", optional = true }
 libc = { version = "0.2.186", optional = true }
 
-cairo-rs = { version = "0.22.0", features = ["xcb"], optional = true }
+cairo-rs = { version = "0.22.0", optional = true }
 pango = { version = "0.22.8", optional = true }
 pangocairo = { version = "0.22.8", optional = true }

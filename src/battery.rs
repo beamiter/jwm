@@ -1,10 +1,12 @@
 use std::fs;
+use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// Battery state read from `/sys/class/power_supply`.
 ///
 /// Aggregates all present `type == Battery` entries (capacity + status).
+#[derive(Debug)]
 pub struct BatteryManager {
     capacity: Option<u8>,
     charging: bool,
@@ -28,21 +30,33 @@ impl BatteryManager {
 
     /// Re-read battery state. Returns true if anything changed.
     pub fn refresh(&mut self) -> bool {
+        self.try_refresh().unwrap_or(false)
+    }
+
+    /// Re-read battery state and preserve the last good snapshot on failure.
+    pub fn try_refresh(&mut self) -> io::Result<bool> {
         let prev = (self.capacity, self.charging, self.present);
-        let snapshot = read_battery();
+        let snapshot = try_read_battery();
+        // Failed probes are rate-limited exactly like successful ones.
+        self.last_update = Instant::now();
+        let snapshot = snapshot?;
         self.capacity = snapshot.capacity;
         self.charging = snapshot.charging;
         self.present = snapshot.present;
-        self.last_update = Instant::now();
-        prev != (self.capacity, self.charging, self.present)
+        Ok(prev != (self.capacity, self.charging, self.present))
     }
 
     /// Refresh only when the cached value is older than the update interval.
     pub fn update_if_needed(&mut self) -> bool {
+        self.try_update_if_needed().unwrap_or(false)
+    }
+
+    /// Refresh stale state and return a sysfs error to an orchestrator.
+    pub fn try_update_if_needed(&mut self) -> io::Result<bool> {
         if self.last_update.elapsed() >= self.update_interval {
-            self.refresh()
+            self.try_refresh()
         } else {
-            false
+            Ok(false)
         }
     }
 
@@ -77,16 +91,20 @@ struct BatterySnapshot {
     present: bool,
 }
 
-fn read_battery() -> BatterySnapshot {
-    read_battery_from(Path::new("/sys/class/power_supply"))
+fn try_read_battery() -> io::Result<BatterySnapshot> {
+    try_read_battery_from(Path::new("/sys/class/power_supply"))
 }
 
+#[cfg(test)]
 fn read_battery_from(base: &Path) -> BatterySnapshot {
-    let Ok(entries) = fs::read_dir(base) else {
-        return BatterySnapshot::default();
-    };
+    try_read_battery_from(base).unwrap_or_default()
+}
 
-    let mut directories: Vec<_> = entries.flatten().map(|entry| entry.path()).collect();
+fn try_read_battery_from(base: &Path) -> io::Result<BatterySnapshot> {
+    let entries = fs::read_dir(base)?;
+    let mut directories: Vec<_> = entries
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<io::Result<_>>()?;
     directories.sort();
 
     let mut capacity_total = 0_u32;
@@ -120,12 +138,12 @@ fn read_battery_from(base: &Path) -> BatterySnapshot {
         charging |= matches!(status.trim(), "Charging" | "Full");
     }
 
-    BatterySnapshot {
+    Ok(BatterySnapshot {
         capacity: (capacity_count != 0)
             .then(|| ((capacity_total + capacity_count / 2) / capacity_count) as u8),
         charging,
         present,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -134,7 +152,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{BatterySnapshot, read_battery_from};
+    use super::{BatterySnapshot, read_battery_from, try_read_battery_from};
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -220,5 +238,9 @@ mod tests {
         let directory = TestDirectory::new();
         let missing = directory.path().join("missing");
         assert_eq!(read_battery_from(&missing), BatterySnapshot::default());
+        assert_eq!(
+            try_read_battery_from(&missing).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 }

@@ -1,77 +1,116 @@
 # Architecture
 
-## Boundary
+## Stable boundary
 
-`xbar_core` serves many frontends with very different window/event/rendering
-systems. The portable boundary is semantic state and intent, not an X11 event,
-Cairo context, winit callback, or wgpu surface.
+The portable boundary is semantic state, intent, and a renderer-neutral scene;
+it is not an X11 event, winit callback, Cairo context, GPU surface, process, or
+shared-memory layout.
 
 ```text
-native input ──> frontend adapter ──> BarModel::update ──> ModelUpdate
-provider data ───────────────────────>       │             ├── DirtyBits
-WM snapshot ─────────────────────────>       │             └── BarEffect[]
-                                             ▼
-                                           BarView
-                                             │
-                         Cairo / wgpu / egui / GTK / HTML renderer
+native input ──> UserAction ──> BarRuntime ──> BarModel
+provider data ──> BarEvent ───────┘              │
+WM snapshot ─────────────────────────────────────┤
+                                                 ├── RuntimeUpdate
+                                                 ├── BarView
+                                                 └── BarSnapshot
+                                                       │
+                    PresentationConfig + TextMeasurer ─┤
+                                                       ▼
+                                               retained Scene
+                                                │          │
+                                           HitRegion   damage_from
+                                                │          │
+                                       semantic action   repaint
 ```
 
-The core owns:
+## Module ownership
 
-- checked identifiers and canonical state invariants;
-- event reduction and optimistic UI state;
-- provider/WM snapshot normalization;
-- semantic effects;
-- a read-only renderer projection;
-- change classification.
+- `model`: checked values, state invariants, reducer, typed events/effects,
+  borrowed view, and owned serializable snapshot.
+- `runtime`: optional provider/transport orchestration. The embedded
+  `BarModel` remains the only semantic state owner.
+- `presentation`: owned dynamic configuration, logical-coordinate layout,
+  stable scene nodes, interaction state, semantic hit regions, and old/new
+  scene damage.
+- `render::cairo`: Cairo/Pango scene renderer and the high-level `CairoBar`
+  facade. It does not own window or transport resources.
+- provider modules: independently selected ALSA, sysinfo CPU/memory,
+  brightnessctl, and battery-sysfs adapters.
+- `transport`: current JWM shared-memory adapter and queue outcome mapping.
+- `notifier` and `linux`: owned eventfd/timerfd primitives. No public API asks
+  callers to close a raw descriptor.
+- `logging`: optional process-global logger setup.
 
-A frontend or adapter owns:
+## Frontend responsibilities
 
-- XCB/x11rb/winit/tao/toolkit event translation;
+Every frontend owns:
+
 - window creation, dock/strut properties, monitor placement, scale factor;
-- event-loop wakeups and frame scheduling;
-- execution of IPC, audio, brightness, screenshot, and other effects;
-- the concrete renderer and GPU/surface lifetime.
+- translation of native pointer/key events into semantic actions;
+- frame scheduling and execution of returned platform effects;
+- event-loop registration of owned notifier/timer descriptors;
+- renderer/GPU/surface lifetime and device-pixel transforms.
 
-## Current modules
+Core owns:
 
-- `model`: portable reducer, views, effects, monitor geometry, and the optional
-  current-JWM transport bridge.
-- `notifier`: owned eventfd bridge with cancellation and thread joining.
-- `audio_manager`, `system_monitor`, `brightness`, `battery`: compatibility
-  Linux providers, individually feature-gated.
-- `legacy` (inside `lib.rs`): current AppState/Cairo/runtime/logging facade.
+- state validation and normalization (`Percent`, checked tag IDs);
+- provider/WM snapshot reduction and suppression of semantically unchanged frames;
+- compact validated status plus rich provider projections (`SystemDetails`,
+  `AudioDeviceInfo`) for toolkit and web frontends;
+- semantic effects and explicit runtime failures/backpressure;
+- a single layout/hit-test result shared by every renderer;
+- correct damage as the union of previous and current component bounds.
 
-The default feature keeps all existing consumers building. A pure frontend can
-already compile with `--no-default-features`.
+## Feature rules
 
-## Compatibility rules
+- `default = []`; a default build stays platform-neutral.
+- Every optional feature must compile independently.
+- No umbrella feature may silently enable unrelated platform capabilities.
+- Frontend manifests use `default-features = false` and list exact adapters.
+- Cairo/Pango and shared protocol concrete types are not re-exported from the
+  crate root; adapters depend on their native libraries directly.
+- `provider-system` never probes batteries; consumers that display battery
+  state explicitly select `provider-battery-sysfs`.
+- Bars open an existing WM-owned shared ring. They never create the protocol
+  object implicitly, so dropping a consumer cannot destroy global transport.
+- Only the core transport adapter depends on `shared_structures`; frontend
+  repositories consume `SharedTransport`, `BarSnapshot`, and typed actions.
+- A broken transport is reduced as `WindowManagerUnavailable`: the runtime
+  drops the adapter, clears every WM-owned projection, and returns
+  `ClearMonitorGeometry` when a constraint had been active. Frontends only
+  schedule reopen attempts; they do not maintain a second availability cache.
+- Installing or reopening a transport does not make WM state authoritative.
+  `BarRuntime` rejects WM commands with an explicit issue until a fresh WM
+  snapshot has been reduced, so a reconnect gap cannot target fallback monitor
+  zero.
+- Event-loop proxies coalesce shared notifications until the main loop has
+  drained the transport, preventing an unbounded queue during UI stalls.
+- Native notifier registration is an optimization, not the only progress
+  path. The existing one-second tick also polls the transport and frontends
+  throttle reopen attempts after the runtime drops a broken adapter. This
+  lets an old notifier generation go quiet without touching a UI loop from a
+  worker thread.
 
-Until every frontend migrates:
+## Removed 0.1 surface
 
-- preserve root and module-path manager imports;
-- preserve `AppState`, `BarConfig`, Cairo/Pango re-exports, `draw_bar*`,
-  `arm_second_timer`, `spawn_shared_eventfd_notifier`, and `SHARED_TOKEN`;
-- do not add required fields to `BarConfig`, because existing consumers use
-  complete struct literals;
-- add new behavior through constructors, presets, and methods;
-- keep `legacy-full` enabled by default.
+Version 0.2 deliberately removes `legacy-full`, `AppState`, `BarConfig`,
+`Colors`, `draw_bar*`, root Cairo/Pango re-exports, raw
+`spawn_shared_eventfd_notifier`, `arm_second_timer`, `SHARED_TOKEN`, and root
+`initialize_logging`.
 
-## Next structural milestones
+Replacement mapping:
 
-1. Move the compatibility facade from the large `lib.rs` module into explicit
-   adapter crates without changing re-exported paths.
-2. Introduce provider traits and fake implementations; make controller tick
-   scheduling return the next provider deadline.
-3. Build a renderer-neutral layout tree and scene. Layout must produce both
-   paint bounds and hit actions, rather than mutating hit rectangles while
-   drawing.
-4. Diff old/new scenes to compute damage as the union of old and new bounds,
-   including shadows. Redraw every node intersecting each damage clip.
-5. Move the JWM `shared_structures` conversion to a dedicated transport crate.
-6. Migrate XCB and x11rb first, then wgpu/pixels/softbuffer, then winit/tao,
-   and finally toolkit/HTML frontends.
+| Removed | Replacement |
+|---|---|
+| `AppState` | `BarRuntime` or `render::cairo::CairoBar` |
+| fixed `BarConfig` | owned dynamic `presentation::PresentationConfig` |
+| draw-time rectangle mutation | `LayoutEngine -> Scene + HitRegion` |
+| `draw_bar*` | `CairoRenderer::render` / `CairoBar::render` |
+| raw timerfd helper | `linux::AlignedTimer` |
+| raw eventfd worker | `SharedEventNotifier` |
+| direct shared messages/commands | private conversion inside `SharedTransport` |
+| root logger function | `logging::init` |
 
-XCB-specific Cairo visuals, pixmap back buffers, EWMH atoms, and X connection
-error handling belong in an `xbar-xcb` adapter. They are valuable platform
-infrastructure but are not portable core state.
+Because consumers are separate Git repositories, this breaking release must
+be published atomically: migrate and validate every consumer first, then tag or
+pin the core revision before updating the remote dependency graph.

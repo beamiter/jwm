@@ -9,16 +9,149 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "transport-shared")]
-use shared_structures::{MonitorInfo, SharedCommand, SharedMessage};
 
 use crate::{DirtyBits, ThemeMode};
 
 /// The command protocol currently uses a 32-bit tag mask.
 pub const MAX_MODEL_TAGS: usize = u32::BITS as usize;
 
+/// A finite percentage in the inclusive `0..=100` range.
+///
+/// Values are stored as basis points (one hundredth of a percent).  This keeps
+/// equality deterministic for change detection while still preserving enough
+/// precision for CPU and memory measurements.  Serialization uses the human
+/// percentage value rather than the internal representation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Percent(u16);
+
+impl Percent {
+    const BASIS_POINTS_PER_PERCENT: f64 = 100.0;
+    const MAX_BASIS_POINTS: u16 = 10_000;
+
+    /// Validate and quantize a percentage to one hundredth of a percent.
+    pub fn new(value: f64) -> Result<Self, PercentError> {
+        if !value.is_finite() {
+            return Err(PercentError::NotFinite);
+        }
+        if !(0.0..=100.0).contains(&value) {
+            return Err(PercentError::OutOfRange);
+        }
+
+        let basis_points = (value * Self::BASIS_POINTS_PER_PERCENT).round() as u16;
+        Ok(Self(basis_points.min(Self::MAX_BASIS_POINTS)))
+    }
+
+    /// Construct an integral percentage without floating-point conversion.
+    pub const fn from_whole(value: u8) -> Result<Self, PercentError> {
+        if value <= 100 {
+            Ok(Self(value as u16 * 100))
+        } else {
+            Err(PercentError::OutOfRange)
+        }
+    }
+
+    #[must_use]
+    pub const fn basis_points(self) -> u16 {
+        self.0
+    }
+
+    #[must_use]
+    pub fn as_f64(self) -> f64 {
+        f64::from(self.0) / Self::BASIS_POINTS_PER_PERCENT
+    }
+
+    #[must_use]
+    pub fn as_f32(self) -> f32 {
+        self.as_f64() as f32
+    }
+
+    /// Return the nearest integral percentage for compact text displays.
+    #[must_use]
+    pub const fn rounded(self) -> u8 {
+        ((self.0 + 50) / 100) as u8
+    }
+}
+
+impl fmt::Display for Percent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_f64())
+    }
+}
+
+impl Serialize for Percent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_f64(self.as_f64())
+    }
+}
+
+impl<'de> Deserialize<'de> for Percent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = f64::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl TryFrom<u8> for Percent {
+    type Error = PercentError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Self::from_whole(value)
+    }
+}
+
+impl TryFrom<f32> for Percent {
+    type Error = PercentError;
+
+    fn try_from(value: f32) -> Result<Self, Self::Error> {
+        Self::new(f64::from(value))
+    }
+}
+
+impl TryFrom<f64> for Percent {
+    type Error = PercentError;
+
+    fn try_from(value: f64) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<Percent> for f32 {
+    fn from(value: Percent) -> Self {
+        value.as_f32()
+    }
+}
+
+impl From<Percent> for f64 {
+    fn from(value: Percent) -> Self {
+        value.as_f64()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PercentError {
+    NotFinite,
+    OutOfRange,
+}
+
+impl fmt::Display for PercentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFinite => f.write_str("percentage must be finite"),
+            Self::OutOfRange => f.write_str("percentage must be between 0 and 100"),
+        }
+    }
+}
+
+impl std::error::Error for PercentError {}
+
 /// A checked workspace/tag identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct TagId(u8);
 
@@ -50,6 +183,21 @@ impl TryFrom<usize> for TagId {
         Self::new(value).ok_or(ModelError::TagOutOfRange {
             index: value,
             tag_count: MAX_MODEL_TAGS,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for TagId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let index = u8::deserialize(deserializer)?;
+        Self::new(usize::from(index)).ok_or_else(|| {
+            serde::de::Error::custom(format_args!(
+                "tag index must be between 0 and {}, got {index}",
+                MAX_MODEL_TAGS - 1
+            ))
         })
     }
 }
@@ -104,56 +252,17 @@ pub struct TagState {
     pub occupied: bool,
 }
 
-#[cfg(feature = "transport-shared")]
-impl From<shared_structures::TagStatus> for TagState {
-    fn from(value: shared_structures::TagStatus) -> Self {
-        Self {
-            selected: value.is_selected,
-            urgent: value.is_urg,
-            filled: value.is_filled,
-            occupied: value.is_occ,
-        }
-    }
-}
-
 /// Transport-neutral snapshot received from a window manager.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WmSnapshot {
-    /// Optional transport sequence/timestamp used only to suppress duplicates.
+    /// Optional opaque transport metadata. Correctness never relies on it:
+    /// transports may reuse timestamps or sequence values.
     pub sequence: Option<u64>,
     pub monitor: MonitorId,
     pub geometry: Option<MonitorGeometry>,
     pub layout_symbol: String,
     pub client_name: String,
     pub tags: Vec<TagState>,
-}
-
-#[cfg(feature = "transport-shared")]
-impl From<MonitorInfo> for WmSnapshot {
-    fn from(info: MonitorInfo) -> Self {
-        Self {
-            sequence: None,
-            monitor: MonitorId(info.monitor_num),
-            geometry: MonitorGeometry::from_raw(
-                info.monitor_x,
-                info.monitor_y,
-                info.monitor_width,
-                info.monitor_height,
-            ),
-            layout_symbol: info.ltsymbol_lossy().into_owned(),
-            client_name: info.client_name_lossy().into_owned(),
-            tags: info.tag_status_vec.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
-#[cfg(feature = "transport-shared")]
-impl From<SharedMessage> for WmSnapshot {
-    fn from(message: SharedMessage) -> Self {
-        let mut snapshot = Self::from(message.monitor_info);
-        snapshot.sequence = Some(message.timestamp);
-        snapshot
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,37 +273,207 @@ pub struct ClockState {
     pub second: String,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct AudioState {
-    pub volume_percent: Option<u8>,
+    pub volume_percent: Option<Percent>,
     pub muted: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
-pub struct SystemState {
-    pub cpu_percent: Option<f32>,
-    pub memory_percent: Option<f32>,
+impl<'de> Deserialize<'de> for AudioState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireState {
+            volume_percent: Option<Percent>,
+            muted: bool,
+        }
+
+        let wire = WireState::deserialize(deserializer)?;
+        Ok(Self::new(wire.volume_percent, wire.muted))
+    }
 }
 
-impl SystemState {
+impl AudioState {
     #[must_use]
-    pub fn normalized(mut self) -> Self {
-        self.cpu_percent = self.cpu_percent.map(|value| value.clamp(0.0, 100.0));
-        self.memory_percent = self.memory_percent.map(|value| value.clamp(0.0, 100.0));
-        self
+    pub const fn new(volume_percent: Option<Percent>, muted: bool) -> Self {
+        Self {
+            volume_percent,
+            muted: muted && volume_percent.is_some(),
+        }
+    }
+
+    pub fn from_f64(volume_percent: Option<f64>, muted: bool) -> Result<Self, PercentError> {
+        Ok(Self::new(
+            volume_percent.map(Percent::new).transpose()?,
+            muted,
+        ))
+    }
+
+    #[must_use]
+    pub const fn normalized(self) -> Self {
+        Self::new(self.volume_percent, self.muted)
     }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BrightnessState {
-    pub percent: Option<u8>,
+pub struct SystemState {
+    pub cpu_percent: Option<Percent>,
+    pub memory_percent: Option<Percent>,
+}
+
+impl SystemState {
+    #[must_use]
+    pub const fn new(cpu_percent: Option<Percent>, memory_percent: Option<Percent>) -> Self {
+        Self {
+            cpu_percent,
+            memory_percent,
+        }
+    }
+
+    pub fn from_f64(
+        cpu_percent: Option<f64>,
+        memory_percent: Option<f64>,
+    ) -> Result<Self, PercentError> {
+        Ok(Self::new(
+            cpu_percent.map(Percent::new).transpose()?,
+            memory_percent.map(Percent::new).transpose()?,
+        ))
+    }
+
+    #[must_use]
+    pub const fn normalized(self) -> Self {
+        self
+    }
+}
+
+/// Transport-neutral metadata for the audio device selected by the provider.
+///
+/// Presence is represented by `Option<AudioDeviceInfo>` on [`BarView`] and
+/// [`BarSnapshot`]. Volume and mute remain in [`AudioState`] so renderers that
+/// only need the compact status do not have to inspect provider metadata.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioDeviceInfo {
+    pub name: String,
+    pub index: usize,
+    pub volume: i32,
+    pub is_muted: bool,
+    pub description: String,
+    pub has_volume_control: bool,
+    pub has_switch_control: bool,
+}
+
+/// Transport-neutral system load averages.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct SystemLoadAverage {
+    pub one_minute: f64,
+    pub five_minutes: f64,
+    pub fifteen_minutes: f64,
+}
+
+/// Rich system telemetry retained by the model for toolkit and web frontends.
+///
+/// The compact, validated percentages used by renderers stay in
+/// [`SystemState`]. This projection preserves provider detail that cannot be
+/// reconstructed from those percentages, including per-core samples and
+/// exact memory counters.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SystemDetails {
+    pub cpu_usage: Vec<f32>,
+    pub cpu_average: f32,
+    pub memory_total: u64,
+    pub memory_used: u64,
+    pub memory_available: u64,
+    pub memory_usage_percent: f32,
+    pub uptime: u64,
+    pub load_average: SystemLoadAverage,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrightnessState {
+    pub percent: Option<Percent>,
+}
+
+impl BrightnessState {
+    #[must_use]
+    pub const fn new(percent: Option<Percent>) -> Self {
+        Self { percent }
+    }
+
+    pub fn from_f64(percent: Option<f64>) -> Result<Self, PercentError> {
+        Ok(Self::new(percent.map(Percent::new).transpose()?))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct BatteryState {
-    pub percent: Option<u8>,
+    pub percent: Option<Percent>,
     pub charging: bool,
     pub present: bool,
+}
+
+impl<'de> Deserialize<'de> for BatteryState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireState {
+            percent: Option<Percent>,
+            charging: bool,
+            present: bool,
+        }
+
+        let wire = WireState::deserialize(deserializer)?;
+        Ok(if wire.present {
+            Self::present(wire.percent, wire.charging)
+        } else {
+            Self::absent()
+        })
+    }
+}
+
+impl BatteryState {
+    #[must_use]
+    pub const fn absent() -> Self {
+        Self {
+            percent: None,
+            charging: false,
+            present: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn present(percent: Option<Percent>, charging: bool) -> Self {
+        Self {
+            percent,
+            charging,
+            present: true,
+        }
+    }
+
+    pub fn from_f64(
+        percent: Option<f64>,
+        charging: bool,
+        present: bool,
+    ) -> Result<Self, PercentError> {
+        let percent = percent.map(Percent::new).transpose()?;
+        Ok(if present {
+            Self::present(percent, charging)
+        } else {
+            Self::absent()
+        })
+    }
+
+    #[must_use]
+    pub const fn normalized(self) -> Self {
+        if self.present {
+            Self::present(self.percent, self.charging)
+        } else {
+            Self::absent()
+        }
+    }
 }
 
 /// Runtime-neutral behavior configuration. Visual labels and layout belong to
@@ -207,6 +486,10 @@ pub struct ModelConfig {
     pub brightness_step: u8,
     pub initial_theme: ThemeMode,
     pub show_seconds: bool,
+    /// Chrono format used by the optional clock adapter without seconds.
+    pub clock_minute_format: String,
+    /// Chrono format used by the optional clock adapter with seconds.
+    pub clock_second_format: String,
 }
 
 impl Default for ModelConfig {
@@ -217,6 +500,8 @@ impl Default for ModelConfig {
             brightness_step: 5,
             initial_theme: ThemeMode::Dark,
             show_seconds: false,
+            clock_minute_format: "%Y-%m-%d %H:%M".to_owned(),
+            clock_second_format: "%Y-%m-%d %H:%M:%S".to_owned(),
         }
     }
 }
@@ -275,9 +560,15 @@ impl std::error::Error for ModelError {}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BarEvent {
     WindowManager(WmSnapshot),
+    /// The window-manager transport is no longer authoritative. This clears
+    /// every WM-owned projection while leaving provider state and persistent
+    /// UI preferences intact.
+    WindowManagerUnavailable,
     Clock(ClockState),
     Audio(AudioState),
+    AudioDevice(Option<AudioDeviceInfo>),
     System(SystemState),
+    SystemDetails(SystemDetails),
     Brightness(BrightnessState),
     Battery(BatteryState),
     User(UserAction),
@@ -288,8 +579,20 @@ pub enum BarEvent {
 pub enum UserAction {
     ViewTag(TagId),
     ToggleTag(TagId),
+    ViewTagOn {
+        tag: TagId,
+        monitor: MonitorId,
+    },
+    ToggleTagOn {
+        tag: TagId,
+        monitor: MonitorId,
+    },
     ToggleLayoutSelector,
     SetLayout(LayoutId),
+    SetLayoutOn {
+        layout: LayoutId,
+        monitor: MonitorId,
+    },
     ToggleSeconds,
     ToggleTheme,
     ToggleMute,
@@ -320,24 +623,13 @@ pub enum WmCommand {
     },
 }
 
-impl WmCommand {
-    /// Compatibility bridge for the current JWM shared-memory transport.
-    #[cfg(feature = "transport-shared")]
-    #[must_use]
-    pub fn into_shared_command(self) -> SharedCommand {
-        match self {
-            Self::ViewTag { tag, monitor } => SharedCommand::view_tag(tag.mask(), monitor.0),
-            Self::ToggleTag { tag, monitor } => SharedCommand::toggle_tag(tag.mask(), monitor.0),
-            Self::SetLayout { layout, monitor } => SharedCommand::set_layout(layout.0, monitor.0),
-        }
-    }
-}
-
 /// Side effects described by the core and executed by an adapter/provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BarEffect {
     WindowManager(WmCommand),
     ApplyMonitorGeometry(MonitorGeometry),
+    /// Remove a previously applied monitor geometry constraint.
+    ClearMonitorGeometry,
     ToggleMute,
     AdjustVolume(i32),
     AdjustBrightness(i32),
@@ -366,8 +658,12 @@ impl ModelUpdate {
 
 /// Read-only projection consumed by any renderer (Cairo, wgpu, egui, GTK,
 /// HTML, and so on).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BarView<'a> {
+    /// Whether at least one window-manager snapshot has been reduced.
+    pub wm_available: bool,
+    /// Last opaque transport sequence, retained only as metadata.
+    pub wm_sequence: Option<u64>,
     pub tags: &'a [TagState],
     pub active_tag: Option<TagId>,
     pub monitor: MonitorId,
@@ -379,9 +675,63 @@ pub struct BarView<'a> {
     pub layout_selector_open: bool,
     pub theme: ThemeMode,
     pub audio: AudioState,
+    pub audio_device: Option<&'a AudioDeviceInfo>,
     pub system: SystemState,
+    pub system_details: &'a SystemDetails,
     pub brightness: BrightnessState,
     pub battery: BatteryState,
+}
+
+/// An owned, serializable projection of [`BarModel`].
+///
+/// This mirrors [`BarView`] without borrowing the model, making it suitable
+/// for toolkit state stores, cross-thread messages, and Tauri/HTML frontends.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BarSnapshot {
+    pub wm_available: bool,
+    pub wm_sequence: Option<u64>,
+    pub tags: Vec<TagState>,
+    pub active_tag: Option<TagId>,
+    pub monitor: MonitorId,
+    pub geometry: Option<MonitorGeometry>,
+    pub layout_symbol: String,
+    pub client_name: String,
+    pub time: String,
+    pub show_seconds: bool,
+    pub layout_selector_open: bool,
+    pub theme: ThemeMode,
+    pub audio: AudioState,
+    pub audio_device: Option<AudioDeviceInfo>,
+    pub system: SystemState,
+    pub system_details: SystemDetails,
+    pub brightness: BrightnessState,
+    pub battery: BatteryState,
+}
+
+impl BarSnapshot {
+    #[must_use]
+    pub fn view(&self) -> BarView<'_> {
+        BarView {
+            wm_available: self.wm_available,
+            wm_sequence: self.wm_sequence,
+            tags: &self.tags,
+            active_tag: self.active_tag,
+            monitor: self.monitor,
+            geometry: self.geometry,
+            layout_symbol: &self.layout_symbol,
+            client_name: &self.client_name,
+            time: &self.time,
+            show_seconds: self.show_seconds,
+            layout_selector_open: self.layout_selector_open,
+            theme: self.theme,
+            audio: self.audio,
+            audio_device: self.audio_device.as_ref(),
+            system: self.system,
+            system_details: &self.system_details,
+            brightness: self.brightness,
+            battery: self.battery,
+        }
+    }
 }
 
 /// Canonical backend-independent model. All fields are private so invariants
@@ -389,6 +739,8 @@ pub struct BarView<'a> {
 #[derive(Debug, Clone)]
 pub struct BarModel {
     config: ModelConfig,
+    wm_available: bool,
+    wm_sequence: Option<u64>,
     tags: Vec<TagState>,
     active_tag: Option<TagId>,
     monitor: MonitorId,
@@ -400,10 +752,11 @@ pub struct BarModel {
     layout_selector_open: bool,
     theme: ThemeMode,
     audio: AudioState,
+    audio_device: Option<AudioDeviceInfo>,
     system: SystemState,
+    system_details: SystemDetails,
     brightness: BrightnessState,
     battery: BatteryState,
-    last_wm_sequence: Option<u64>,
 }
 
 impl Default for BarModel {
@@ -416,6 +769,8 @@ impl BarModel {
     pub fn new(config: ModelConfig) -> Result<Self, ModelError> {
         config.validate()?;
         Ok(Self {
+            wm_available: false,
+            wm_sequence: None,
             tags: vec![TagState::default(); config.tag_count],
             active_tag: None,
             monitor: MonitorId::default(),
@@ -427,10 +782,11 @@ impl BarModel {
             layout_selector_open: false,
             theme: config.initial_theme,
             audio: AudioState::default(),
+            audio_device: None,
             system: SystemState::default(),
+            system_details: SystemDetails::default(),
             brightness: BrightnessState::default(),
             battery: BatteryState::default(),
-            last_wm_sequence: None,
             config,
         })
     }
@@ -443,6 +799,8 @@ impl BarModel {
     #[must_use]
     pub fn view(&self) -> BarView<'_> {
         BarView {
+            wm_available: self.wm_available,
+            wm_sequence: self.wm_sequence,
             tags: &self.tags,
             active_tag: self.active_tag,
             monitor: self.monitor,
@@ -458,9 +816,36 @@ impl BarModel {
             layout_selector_open: self.layout_selector_open,
             theme: self.theme,
             audio: self.audio,
+            audio_device: self.audio_device.as_ref(),
             system: self.system,
+            system_details: &self.system_details,
             brightness: self.brightness,
             battery: self.battery,
+        }
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> BarSnapshot {
+        let view = self.view();
+        BarSnapshot {
+            wm_available: view.wm_available,
+            wm_sequence: view.wm_sequence,
+            tags: view.tags.to_vec(),
+            active_tag: view.active_tag,
+            monitor: view.monitor,
+            geometry: view.geometry,
+            layout_symbol: view.layout_symbol.to_owned(),
+            client_name: view.client_name.to_owned(),
+            time: view.time.to_owned(),
+            show_seconds: view.show_seconds,
+            layout_selector_open: view.layout_selector_open,
+            theme: view.theme,
+            audio: view.audio,
+            audio_device: view.audio_device.cloned(),
+            system: view.system,
+            system_details: view.system_details.clone(),
+            brightness: view.brightness,
+            battery: view.battery,
         }
     }
 
@@ -468,30 +853,19 @@ impl BarModel {
     pub fn update(&mut self, event: BarEvent) -> Result<ModelUpdate, ModelError> {
         match event {
             BarEvent::WindowManager(snapshot) => Ok(self.update_wm(snapshot)),
+            BarEvent::WindowManagerUnavailable => Ok(self.clear_wm()),
             BarEvent::Clock(clock) => Ok(self.update_clock(clock)),
             BarEvent::Audio(audio) => Ok(self.replace_audio(audio)),
+            BarEvent::AudioDevice(device) => Ok(self.replace_audio_device(device)),
             BarEvent::System(system) => Ok(self.replace_system(system.normalized())),
+            BarEvent::SystemDetails(details) => Ok(self.replace_system_details(details)),
             BarEvent::Brightness(brightness) => Ok(self.replace_brightness(brightness)),
             BarEvent::Battery(battery) => Ok(self.replace_battery(battery)),
             BarEvent::User(action) => self.update_user(action),
         }
     }
 
-    /// Compatibility bridge used while the current shared-memory frontends
-    /// migrate to transport-neutral [`WmSnapshot`] values.
-    #[cfg(feature = "transport-shared")]
-    pub fn update_from_shared(
-        &mut self,
-        message: SharedMessage,
-    ) -> Result<ModelUpdate, ModelError> {
-        self.update(BarEvent::WindowManager(message.into()))
-    }
-
     fn update_wm(&mut self, mut snapshot: WmSnapshot) -> ModelUpdate {
-        if snapshot.sequence.is_some() && snapshot.sequence == self.last_wm_sequence {
-            return ModelUpdate::default();
-        }
-
         snapshot
             .tags
             .resize(self.config.tag_count, TagState::default());
@@ -504,7 +878,8 @@ impl BarModel {
             .position(|tag| tag.selected)
             .and_then(TagId::new);
 
-        if self.tags != snapshot.tags
+        if !self.wm_available
+            || self.tags != snapshot.tags
             || self.active_tag != next_active
             || self.monitor != snapshot.monitor
         {
@@ -521,24 +896,65 @@ impl BarModel {
             dirty.set(DirtyBits::GEOMETRY_CHANGED);
         }
 
+        self.wm_available = true;
+        self.wm_sequence = snapshot.sequence;
         self.tags = snapshot.tags;
         self.active_tag = next_active;
         self.monitor = snapshot.monitor;
         self.geometry = snapshot.geometry;
         self.layout_symbol = snapshot.layout_symbol;
         self.client_name = snapshot.client_name;
-        self.last_wm_sequence = snapshot.sequence;
 
         ModelUpdate {
             dirty,
             effects: if geometry_changed {
-                self.geometry
-                    .map(BarEffect::ApplyMonitorGeometry)
-                    .into_iter()
-                    .collect()
+                vec![match self.geometry {
+                    Some(geometry) => BarEffect::ApplyMonitorGeometry(geometry),
+                    None => BarEffect::ClearMonitorGeometry,
+                }]
             } else {
                 Vec::new()
             },
+        }
+    }
+
+    fn clear_wm(&mut self) -> ModelUpdate {
+        if !self.wm_available {
+            return ModelUpdate::default();
+        }
+
+        let geometry_was_set = self.geometry.is_some();
+        let layout_changed = self.layout_symbol != "[]=" || self.layout_selector_open;
+        let client_changed = !self.client_name.is_empty();
+
+        self.wm_available = false;
+        self.wm_sequence = None;
+        self.tags.fill(TagState::default());
+        self.active_tag = None;
+        self.monitor = MonitorId::default();
+        self.geometry = None;
+        self.layout_symbol.clear();
+        self.layout_symbol.push_str("[]=");
+        self.client_name.clear();
+        self.layout_selector_open = false;
+
+        let mut dirty = DirtyBits::new(DirtyBits::MONITOR_CHANGED);
+        if geometry_was_set {
+            dirty.set(DirtyBits::GEOMETRY_CHANGED);
+        }
+        if layout_changed {
+            dirty.set(DirtyBits::LAYOUT_CHANGED);
+        }
+        if client_changed {
+            dirty.set(DirtyBits::CLIENT_CHANGED);
+        }
+
+        ModelUpdate {
+            dirty,
+            effects: geometry_was_set
+                .then_some(BarEffect::ClearMonitorGeometry)
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -558,10 +974,16 @@ impl BarModel {
         Self::changed(DirtyBits::TIME_CHANGED, changed)
     }
 
-    fn replace_audio(&mut self, mut audio: AudioState) -> ModelUpdate {
-        audio.volume_percent = audio.volume_percent.map(|value| value.min(100));
+    fn replace_audio(&mut self, audio: AudioState) -> ModelUpdate {
+        let audio = audio.normalized();
         let changed = self.audio != audio;
         self.audio = audio;
+        Self::changed(DirtyBits::AUDIO_CHANGED, changed)
+    }
+
+    fn replace_audio_device(&mut self, device: Option<AudioDeviceInfo>) -> ModelUpdate {
+        let changed = self.audio_device != device;
+        self.audio_device = device;
         Self::changed(DirtyBits::AUDIO_CHANGED, changed)
     }
 
@@ -571,19 +993,20 @@ impl BarModel {
         Self::changed(DirtyBits::SYSTEM_CHANGED, changed)
     }
 
-    fn replace_brightness(&mut self, mut brightness: BrightnessState) -> ModelUpdate {
-        brightness.percent = brightness.percent.map(|value| value.min(100));
+    fn replace_system_details(&mut self, details: SystemDetails) -> ModelUpdate {
+        let changed = self.system_details != details;
+        self.system_details = details;
+        Self::changed(DirtyBits::SYSTEM_CHANGED, changed)
+    }
+
+    fn replace_brightness(&mut self, brightness: BrightnessState) -> ModelUpdate {
         let changed = self.brightness != brightness;
         self.brightness = brightness;
         Self::changed(DirtyBits::BRIGHTNESS_CHANGED, changed)
     }
 
-    fn replace_battery(&mut self, mut battery: BatteryState) -> ModelUpdate {
-        battery.percent = battery.percent.map(|value| value.min(100));
-        if !battery.present {
-            battery.percent = None;
-            battery.charging = false;
-        }
+    fn replace_battery(&mut self, battery: BatteryState) -> ModelUpdate {
+        let battery = battery.normalized();
         let changed = self.battery != battery;
         self.battery = battery;
         Self::changed(DirtyBits::BATTERY_CHANGED, changed)
@@ -594,11 +1017,6 @@ impl BarModel {
         match action {
             UserAction::ViewTag(tag) => {
                 self.ensure_configured_tag(tag)?;
-                for (index, state) in self.tags.iter_mut().enumerate() {
-                    state.selected = index == tag.index();
-                }
-                self.active_tag = Some(tag);
-                update.dirty.set(DirtyBits::MONITOR_CHANGED);
                 update
                     .effects
                     .push(BarEffect::WindowManager(WmCommand::ViewTag {
@@ -615,6 +1033,24 @@ impl BarModel {
                         monitor: self.monitor,
                     }));
             }
+            UserAction::ViewTagOn { tag, monitor } => {
+                self.ensure_configured_tag(tag)?;
+                update
+                    .effects
+                    .push(BarEffect::WindowManager(WmCommand::ViewTag {
+                        tag,
+                        monitor,
+                    }));
+            }
+            UserAction::ToggleTagOn { tag, monitor } => {
+                self.ensure_configured_tag(tag)?;
+                update
+                    .effects
+                    .push(BarEffect::WindowManager(WmCommand::ToggleTag {
+                        tag,
+                        monitor,
+                    }));
+            }
             UserAction::ToggleLayoutSelector => {
                 self.layout_selector_open = !self.layout_selector_open;
                 update.dirty.set(DirtyBits::LAYOUT_CHANGED);
@@ -629,6 +1065,16 @@ impl BarModel {
                         monitor: self.monitor,
                     }));
             }
+            UserAction::SetLayoutOn { layout, monitor } => {
+                self.layout_selector_open = false;
+                update.dirty.set(DirtyBits::LAYOUT_CHANGED);
+                update
+                    .effects
+                    .push(BarEffect::WindowManager(WmCommand::SetLayout {
+                        layout,
+                        monitor,
+                    }));
+            }
             UserAction::ToggleSeconds => {
                 self.show_seconds = !self.show_seconds;
                 update.dirty.set(DirtyBits::TIME_CHANGED);
@@ -641,10 +1087,6 @@ impl BarModel {
                 update.dirty.set(DirtyBits::THEME_CHANGED);
             }
             UserAction::ToggleMute => {
-                if self.audio.volume_percent.is_some() {
-                    self.audio.muted = !self.audio.muted;
-                    update.dirty.set(DirtyBits::AUDIO_CHANGED);
-                }
                 update.effects.push(BarEffect::ToggleMute);
             }
             UserAction::VolumeUp => {
@@ -685,26 +1127,12 @@ impl BarModel {
         if delta == 0 {
             return;
         }
-        if let Some(value) = self.audio.volume_percent {
-            let next = (value as i32 + delta).clamp(0, 100) as u8;
-            if next != value {
-                self.audio.volume_percent = Some(next);
-                update.dirty.set(DirtyBits::AUDIO_CHANGED);
-            }
-        }
         update.effects.push(BarEffect::AdjustVolume(delta));
     }
 
     fn adjust_brightness(&mut self, delta: i32, update: &mut ModelUpdate) {
         if delta == 0 {
             return;
-        }
-        if let Some(value) = self.brightness.percent {
-            let next = (value as i32 + delta).clamp(0, 100) as u8;
-            if next != value {
-                self.brightness.percent = Some(next);
-                update.dirty.set(DirtyBits::BRIGHTNESS_CHANGED);
-            }
         }
         update.effects.push(BarEffect::AdjustBrightness(delta));
     }
@@ -729,6 +1157,44 @@ mod tests {
         TagId::new(index).unwrap()
     }
 
+    fn percent(value: u8) -> Percent {
+        Percent::from_whole(value).unwrap()
+    }
+
+    #[test]
+    fn percent_rejects_non_finite_and_out_of_range_values() {
+        assert_eq!(Percent::new(f64::NAN), Err(PercentError::NotFinite));
+        assert_eq!(Percent::new(f64::INFINITY), Err(PercentError::NotFinite));
+        assert_eq!(Percent::new(-0.01), Err(PercentError::OutOfRange));
+        assert_eq!(Percent::new(100.01), Err(PercentError::OutOfRange));
+
+        let value = Percent::new(42.345).unwrap();
+        assert_eq!(value.basis_points(), 4_235);
+        assert_eq!(value.as_f64(), 42.35);
+        assert_eq!(value.rounded(), 42);
+    }
+
+    #[test]
+    fn percent_deserialization_cannot_bypass_validation() {
+        use serde::de::value::{Error, F64Deserializer};
+
+        let deserialize = |value| Percent::deserialize(F64Deserializer::<Error>::new(value));
+        assert_eq!(deserialize(12.5).unwrap(), Percent::new(12.5).unwrap());
+        assert!(deserialize(f64::NAN).is_err());
+        assert!(deserialize(-1.0).is_err());
+        assert!(deserialize(101.0).is_err());
+    }
+
+    #[test]
+    fn tag_deserialization_cannot_bypass_mask_width() {
+        use serde::de::value::{Error, U8Deserializer};
+
+        let deserialize = |value| TagId::deserialize(U8Deserializer::<Error>::new(value));
+        assert_eq!(deserialize(31).unwrap(), tag(31));
+        assert!(deserialize(32).is_err());
+        assert!(deserialize(255).is_err());
+    }
+
     #[test]
     fn model_config_rejects_invalid_values() {
         assert!(matches!(
@@ -751,7 +1217,7 @@ mod tests {
     }
 
     #[test]
-    fn wm_snapshot_updates_model_and_suppresses_duplicate_sequence() {
+    fn wm_snapshot_updates_model_and_suppresses_unchanged_content() {
         let mut model = BarModel::default();
         let mut tags = vec![TagState::default(); 9];
         tags[2].selected = true;
@@ -776,12 +1242,104 @@ mod tests {
         assert!(first.dirty.contains(DirtyBits::LAYOUT_CHANGED));
         assert!(first.dirty.contains(DirtyBits::CLIENT_CHANGED));
         assert!(first.dirty.contains(DirtyBits::GEOMETRY_CHANGED));
+        assert!(model.view().wm_available);
+        assert_eq!(model.view().wm_sequence, Some(7));
         assert_eq!(model.view().active_tag, Some(tag(2)));
         assert_eq!(model.view().monitor, MonitorId(3));
         assert_eq!(model.view().geometry.unwrap().x, 1920);
 
-        let duplicate = model.update(BarEvent::WindowManager(snapshot)).unwrap();
+        let duplicate = model
+            .update(BarEvent::WindowManager(snapshot.clone()))
+            .unwrap();
         assert!(!duplicate.needs_redraw());
+
+        let cleared = model
+            .update(BarEvent::WindowManager(WmSnapshot {
+                sequence: Some(8),
+                geometry: None,
+                ..snapshot
+            }))
+            .unwrap();
+        assert!(cleared.dirty.contains(DirtyBits::GEOMETRY_CHANGED));
+        assert_eq!(cleared.effects, vec![BarEffect::ClearMonitorGeometry]);
+        assert_eq!(model.view().geometry, None);
+    }
+
+    #[test]
+    fn wm_unavailable_clears_authoritative_projection_and_geometry() {
+        let mut model = BarModel::default();
+        let geometry = MonitorGeometry {
+            x: 1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        model
+            .update(BarEvent::WindowManager(WmSnapshot {
+                sequence: Some(9),
+                monitor: MonitorId(2),
+                geometry: Some(geometry),
+                layout_symbol: "[M]".into(),
+                client_name: "terminal".into(),
+                tags: vec![TagState {
+                    selected: true,
+                    ..TagState::default()
+                }],
+            }))
+            .unwrap();
+        model
+            .update(BarEvent::User(UserAction::ToggleLayoutSelector))
+            .unwrap();
+
+        let update = model.update(BarEvent::WindowManagerUnavailable).unwrap();
+        let view = model.view();
+        assert!(!view.wm_available);
+        assert_eq!(view.wm_sequence, None);
+        assert_eq!(view.active_tag, None);
+        assert_eq!(view.monitor, MonitorId::default());
+        assert_eq!(view.geometry, None);
+        assert_eq!(view.layout_symbol, "[]=");
+        assert_eq!(view.client_name, "");
+        assert!(!view.layout_selector_open);
+        assert!(view.tags.iter().all(|tag| *tag == TagState::default()));
+        assert!(update.dirty.contains(DirtyBits::MONITOR_CHANGED));
+        assert!(update.dirty.contains(DirtyBits::GEOMETRY_CHANGED));
+        assert!(update.dirty.contains(DirtyBits::LAYOUT_CHANGED));
+        assert!(update.dirty.contains(DirtyBits::CLIENT_CHANGED));
+        assert_eq!(update.effects, vec![BarEffect::ClearMonitorGeometry]);
+
+        assert!(
+            !model
+                .update(BarEvent::WindowManagerUnavailable)
+                .unwrap()
+                .needs_redraw()
+        );
+    }
+
+    #[test]
+    fn equal_wm_sequence_never_hides_changed_content() {
+        let mut model = BarModel::default();
+        let original = WmSnapshot {
+            sequence: Some(7),
+            monitor: MonitorId(0),
+            geometry: None,
+            layout_symbol: "[T]".into(),
+            client_name: "first".into(),
+            tags: vec![TagState::default(); 9],
+        };
+        model
+            .update(BarEvent::WindowManager(original.clone()))
+            .unwrap();
+
+        let changed = model
+            .update(BarEvent::WindowManager(WmSnapshot {
+                client_name: "second".into(),
+                ..original
+            }))
+            .unwrap();
+
+        assert!(changed.dirty.contains(DirtyBits::CLIENT_CHANGED));
+        assert_eq!(model.view().client_name, "second");
     }
 
     #[test]
@@ -795,7 +1353,8 @@ mod tests {
         let update = model
             .update(BarEvent::User(UserAction::ViewTag(tag(2))))
             .unwrap();
-        assert_eq!(model.view().active_tag, Some(tag(2)));
+        assert_eq!(model.view().active_tag, None);
+        assert!(update.dirty.is_empty());
         assert_eq!(
             update.effects,
             vec![BarEffect::WindowManager(WmCommand::ViewTag {
@@ -814,7 +1373,89 @@ mod tests {
     }
 
     #[test]
-    fn configured_steps_drive_optimistic_provider_updates() {
+    fn targeted_actions_preserve_the_explicit_monitor() {
+        let mut model = BarModel::new(ModelConfig {
+            tag_count: 3,
+            ..ModelConfig::default()
+        })
+        .unwrap();
+        let monitor = MonitorId(7);
+
+        let tag_update = model
+            .update(BarEvent::User(UserAction::ViewTagOn {
+                tag: tag(1),
+                monitor,
+            }))
+            .unwrap();
+        let layout_update = model
+            .update(BarEvent::User(UserAction::SetLayoutOn {
+                layout: LayoutId(2),
+                monitor,
+            }))
+            .unwrap();
+
+        assert_eq!(
+            tag_update.effects,
+            vec![BarEffect::WindowManager(WmCommand::ViewTag {
+                tag: tag(1),
+                monitor,
+            })]
+        );
+        assert_eq!(
+            layout_update.effects,
+            vec![BarEffect::WindowManager(WmCommand::SetLayout {
+                layout: LayoutId(2),
+                monitor,
+            })]
+        );
+        assert_eq!(model.view().monitor, MonitorId(0));
+    }
+
+    #[test]
+    fn rich_provider_details_are_owned_by_the_model_snapshot() {
+        let mut model = BarModel::default();
+        let audio_device = AudioDeviceInfo {
+            name: "Master".into(),
+            index: 0,
+            volume: 73,
+            is_muted: false,
+            description: "Main output".into(),
+            has_volume_control: true,
+            has_switch_control: true,
+        };
+        let details = SystemDetails {
+            cpu_usage: vec![12.25, 48.5],
+            cpu_average: 30.375,
+            memory_total: 16_000,
+            memory_used: 7_000,
+            memory_available: 9_000,
+            memory_usage_percent: 43.75,
+            uptime: 123,
+            load_average: SystemLoadAverage {
+                one_minute: 0.5,
+                five_minutes: 0.25,
+                fifteen_minutes: 0.125,
+            },
+        };
+
+        model
+            .update(BarEvent::AudioDevice(Some(audio_device.clone())))
+            .unwrap();
+        model
+            .update(BarEvent::SystemDetails(details.clone()))
+            .unwrap();
+        let snapshot = model.snapshot();
+
+        assert_eq!(snapshot.audio_device, Some(audio_device));
+        assert_eq!(snapshot.system_details, details);
+        model
+            .update(BarEvent::SystemDetails(SystemDetails::default()))
+            .unwrap();
+        assert_eq!(snapshot.system_details.memory_used, 7_000);
+    }
+
+    #[test]
+    fn configured_steps_emit_effects_and_wait_for_authoritative_provider_updates() {
         let mut model = BarModel::new(ModelConfig {
             volume_step: 7,
             brightness_step: 9,
@@ -823,12 +1464,14 @@ mod tests {
         .unwrap();
         model
             .update(BarEvent::Audio(AudioState {
-                volume_percent: Some(98),
+                volume_percent: Some(percent(98)),
                 muted: false,
             }))
             .unwrap();
         model
-            .update(BarEvent::Brightness(BrightnessState { percent: Some(4) }))
+            .update(BarEvent::Brightness(BrightnessState {
+                percent: Some(percent(4)),
+            }))
             .unwrap();
 
         let volume = model.update(BarEvent::User(UserAction::VolumeUp)).unwrap();
@@ -836,8 +1479,10 @@ mod tests {
             .update(BarEvent::User(UserAction::BrightnessDown))
             .unwrap();
 
-        assert_eq!(model.view().audio.volume_percent, Some(100));
-        assert_eq!(model.view().brightness.percent, Some(0));
+        assert_eq!(model.view().audio.volume_percent, Some(percent(98)));
+        assert_eq!(model.view().brightness.percent, Some(percent(4)));
+        assert!(volume.dirty.is_empty());
+        assert!(brightness.dirty.is_empty());
         assert_eq!(volume.effects, vec![BarEffect::AdjustVolume(7)]);
         assert_eq!(brightness.effects, vec![BarEffect::AdjustBrightness(-9)]);
     }
@@ -859,19 +1504,69 @@ mod tests {
         assert_eq!(model.view().time, "12:34:56");
     }
 
-    #[cfg(feature = "transport-shared")]
     #[test]
-    fn wm_commands_bridge_to_current_shared_protocol() {
-        let command = WmCommand::ToggleTag {
-            tag: tag(4),
-            monitor: MonitorId(2),
-        }
-        .into_shared_command();
-        assert_eq!(command.get_parameter(), 1 << 4);
-        assert_eq!(command.get_monitor_id(), 2);
+    fn model_normalizes_inconsistent_optional_device_states() {
+        let mut model = BarModel::default();
+        model
+            .update(BarEvent::Audio(AudioState {
+                volume_percent: None,
+                muted: true,
+            }))
+            .unwrap();
+        model
+            .update(BarEvent::Battery(BatteryState {
+                percent: Some(percent(88)),
+                charging: true,
+                present: false,
+            }))
+            .unwrap();
+
+        assert_eq!(model.view().audio, AudioState::default());
+        assert_eq!(model.view().battery, BatteryState::absent());
+    }
+
+    #[test]
+    fn percentage_state_constructors_reject_invalid_provider_values() {
         assert_eq!(
-            command.get_command_type(),
-            shared_structures::CommandType::ToggleTag
+            SystemState::from_f64(Some(f64::NAN), Some(10.0)),
+            Err(PercentError::NotFinite)
         );
+        assert_eq!(
+            BrightnessState::from_f64(Some(120.0)),
+            Err(PercentError::OutOfRange)
+        );
+        assert_eq!(
+            BatteryState::from_f64(Some(-1.0), false, true),
+            Err(PercentError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn snapshot_is_owned_and_matches_the_borrowed_view() {
+        let mut model = BarModel::default();
+        model
+            .update(BarEvent::Clock(ClockState {
+                minute: "12:34".into(),
+                second: "12:34:56".into(),
+            }))
+            .unwrap();
+        model
+            .update(BarEvent::System(SystemState::new(
+                Some(Percent::new(12.34).unwrap()),
+                Some(Percent::new(56.78).unwrap()),
+            )))
+            .unwrap();
+
+        let snapshot = model.snapshot();
+        assert_eq!(snapshot.view(), model.view());
+
+        model
+            .update(BarEvent::Clock(ClockState {
+                minute: "13:00".into(),
+                second: "13:00:01".into(),
+            }))
+            .unwrap();
+        assert_eq!(snapshot.time, "12:34");
+        assert_eq!(model.view().time, "13:00");
     }
 }

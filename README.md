@@ -1,20 +1,37 @@
 # xbar_core
 
-`xbar_core` is the shared status-bar core used by the XCB, x11rb, winit, tao,
-wgpu, pixels, softbuffer, and toolkit-based bars in JWM.
+`xbar_core` 0.2 is the backend-neutral status-bar kernel shared by the XCB,
+x11rb, winit, tao, wgpu, pixels, softbuffer, toolkit, and web bars in JWM.
 
-The crate now has two API layers:
+The default build has no window-system, Cairo, ALSA, sysfs, logging, or shared
+memory dependency. There is no compatibility umbrella and no `legacy-full`:
+every frontend selects only the adapters it actually uses.
 
-- `model` is backend-independent. It reduces `BarEvent` into a read-only
-  `BarView`, visual `DirtyBits`, and typed `BarEffect` values. It never opens a
-  window, invokes a process, accesses ALSA/sysfs, or writes shared memory.
-- `legacy-full` is the default compatibility facade. It preserves the existing
-  `AppState`, Cairo/Pango renderer, Linux providers, shared-memory notifier,
-  timer, and logging APIs while frontends migrate incrementally.
+## Architecture
 
-## Pure model usage
+```text
+native/provider input -> BarRuntime -> BarModel -> BarSnapshot / BarView
+                                             |
+                                             v
+                               LayoutEngine -> Scene + HitRegion
+                                             |
+                              Cairo / wgpu / toolkit / web renderer
+```
 
-Use only the backend-independent layer:
+- `BarModel` is the only semantic state owner. It reduces typed `BarEvent`
+  values and emits change hints plus typed `BarEffect` values.
+- `BarSnapshot` is an owned, serializable projection for toolkit, Tauri, and
+  asynchronous consumers; it includes rich provider detail such as per-core
+  CPU/memory counters and audio-device capabilities. `BarView` is the borrowed
+  render fast path.
+- `BarRuntime` coordinates optional providers and transport without absorbing
+  platform/window responsibilities.
+- `LayoutEngine` produces a renderer-neutral retained `Scene` and semantic hit
+  map. `Scene::damage_from` invalidates both old and new component bounds.
+- `CairoBar` is the high-level native facade combining runtime, layout,
+  interaction, and Cairo rendering.
+
+## Pure model
 
 ```toml
 [dependencies]
@@ -30,67 +47,67 @@ let update = model.update(BarEvent::User(UserAction::ViewTag(
 )))?;
 
 if update.needs_redraw() {
-    let view = model.view();
-    // Render `view` with Cairo, wgpu, egui, GTK, HTML, or another backend.
-}
-
-for effect in update.effects {
-    // Execute the intent in the frontend/provider adapter.
-    println!("{effect:?}");
+    let snapshot = model.snapshot();
+    println!("active tag: {:?}", snapshot.active_tag);
 }
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-For the current JWM transport, enable `transport-shared`. The compatibility
-conversion is explicit: `SharedMessage -> WmSnapshot` and
-`WmCommand::into_shared_command()`.
+## Native Cairo frontend
 
-## Existing frontend migration
+```toml
+xbar_core = { git = "https://github.com/beamiter/xbar_core.git", default-features = false, features = [
+  "clock-chrono", "logging-flexi", "provider-alsa", "provider-system",
+  "provider-brightnessctl", "provider-battery-sysfs", "transport-shared",
+  "runtime-linux", "render-cairo",
+] }
+```
 
-Existing manifests do not need to change: default features preserve the old
-surface. A low-level frontend can migrate in small steps:
+Open the existing WM-owned ring with `SharedTransport::open`, attach its owned
+`SharedEventNotifier` to the native event loop, construct `BarRuntime`, then wrap it with
+`render::cairo::CairoBar`. Native pointer events map to
+`presentation::PointerAction`; unhandled `RuntimeUpdate::platform_effects`
+remain the frontend's responsibility (window geometry, screenshots, and
+process launching).
 
-1. Replace its copied visual defaults with `BarConfig::desktop_emoji()` and
-   `tuned_colors_for_theme()` or `draw_bar_for_theme()`.
-2. Replace its hand-written provider timer with `AppState::tick()`.
-3. Replace raw notifier ownership with `SharedEventNotifier`.
-4. Translate native input into `UserAction`, execute returned `BarEffect`
-   values, and render `BarModel::view()`.
-5. Once migrated, disable default features and opt into only the adapter crates
-   or features it actually uses.
+Toolkit and Tauri frontends use the same `BarRuntime` directly: poll/tick it,
+project `BarSnapshot` into widgets or JSON, and dispatch typed `UserAction`
+values. They do not depend on `shared_structures` or instantiate provider
+managers themselves. `SystemDetails` and `AudioDeviceInfo` preserve the rich
+provider data needed by those frontends without leaking adapter types.
+If the shared transport breaks, the runtime drops it, marks the WM projection
+unavailable, and returns any geometry-clear work before a frontend retries the
+open. A reopened transport remains command-gated until its first authoritative
+WM snapshot arrives; stale availability and monitor selection are never owned
+by widget state.
 
-The legacy dirty-render entry points currently do a correct full redraw for any
-non-empty change set. The previous partial implementation erased unchanged
-widgets after repainting the whole background. True partial redraw requires a
-retained layout/scene diff with old and new bounds.
+## Features
 
-## Feature overview
-
-| Feature | Purpose |
+| Feature | Capability |
 |---|---|
-| `legacy-full` | Existing all-in-one API; enabled by default |
-| `transport-shared` | JWM `shared_structures` compatibility bridge |
-| `provider-alsa` | ALSA audio provider |
-| `provider-system` | sysinfo system provider |
+| `clock-chrono` | Chrono clock adapter used by `BarRuntime::tick` |
+| `logging-flexi` | `logging::init` with rotation |
+| `provider-alsa` | ALSA audio manager/runtime adapter |
+| `provider-system` | sysinfo CPU/memory provider (no battery dependency) |
 | `provider-brightnessctl` | brightnessctl provider |
-| `provider-battery-sysfs` | Linux sysfs battery provider |
-| `render-cairo` | Cairo/Pango exports and legacy renderer dependency |
-| `runtime-linux` | Linux fd/event runtime support |
-| `logging-flexi` | Legacy flexi_logger integration |
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the target layering and
-frontend migration rules.
+| `provider-battery-sysfs` | independent deterministic multi-battery sysfs provider |
+| `transport-shared` | typed, consumer-owned JWM `SharedTransport` |
+| `runtime-linux` | `AlignedTimer` and owned shared event notifier |
+| `render-cairo` | Scene-based `CairoRenderer`, text measurer, and `CairoBar` |
 
 ## Validation
 
 ```bash
 cargo fmt --all -- --check
-cargo test --all-targets
 cargo test --no-default-features
-cargo check --all-features
+cargo test --no-default-features --features render-cairo
+cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
+cargo doc --no-default-features --no-deps
 ```
 
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for module ownership and
+[docs/MIGRATION-0.2.md](docs/MIGRATION-0.2.md) for the breaking API mapping.
+
 The repository intentionally does not declare a license until the project
-owner selects and adds one; downstream redistribution should not infer a
-license from dependencies.
+owner selects and adds one.

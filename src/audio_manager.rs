@@ -292,20 +292,26 @@ impl AudioManager {
 
     /// Refreshes devices if the update interval has passed.
     pub fn update_if_needed(&mut self) -> bool {
+        match self.try_update_if_needed() {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.handle_error(error);
+                false
+            }
+        }
+    }
+
+    /// Refresh stale devices and return an adapter error to an orchestrator.
+    pub fn try_update_if_needed(&mut self) -> Result<bool> {
         if !refresh_is_due(
             self.last_refresh_attempt.elapsed(),
             self.update_interval,
             self.consecutive_refresh_failures,
         ) {
-            return false;
+            return Ok(false);
         }
 
-        if let Err(e) = self.refresh_devices() {
-            self.handle_error(e);
-            return false;
-        }
-
-        true
+        self.refresh_devices().map(|_| true)
     }
 
     /// Gets the volume of an element as a percentage (0-100).
