@@ -403,45 +403,69 @@ function App() {
   useEffect(() => {
     console.log("Tauri React frontend has loaded.");
     mounted.current = true;
+    let cancelled = false;
+    const unlisteners: Array<() => void> = [];
 
-    const unlistenMonitor = listen<MonitorInfoSnapshot>(
-      "monitor-update",
-      (event) => {
+    const registerListeners = async () => {
+      const keep = (unlisten: () => void) => {
+        if (cancelled) {
+          unlisten();
+          return false;
+        }
+        unlisteners.push(unlisten);
+        return true;
+      };
+
+      const unlistenMonitor = await listen<MonitorInfoSnapshot | null>(
+        "monitor-update",
+        (event) => {
+          if (!mounted.current) return;
+          setAppState((prev) => ({
+            ...prev,
+            monitor_info_snapshot: event.payload,
+          }));
+        },
+      );
+      if (!keep(unlistenMonitor)) return;
+
+      const unlistenSystem = await listen<SystemSnapshot>(
+        "system-update",
+        (event) => {
+          if (!mounted.current) return;
+          setAppState((prev) => ({ ...prev, system_snapshot: event.payload }));
+        },
+      );
+      if (!keep(unlistenSystem)) return;
+
+      const unlistenAudio = await listen<AudioSnapshot>("audio-update", (event) => {
         if (!mounted.current) return;
-        setAppState((prev) => ({
-          ...prev,
-          monitor_info_snapshot: event.payload,
-        }));
-      },
-    );
+        setAppState((prev) => ({ ...prev, audio_snapshot: event.payload }));
+      });
+      if (!keep(unlistenAudio)) return;
 
-    const unlistenSystem = listen<SystemSnapshot>("system-update", (event) => {
-      if (!mounted.current) return;
-      setAppState((prev) => ({ ...prev, system_snapshot: event.payload }));
+      const unlistenBrightness = await listen<BrightnessSnapshot>(
+        "brightness-update",
+        (event) => {
+          if (!mounted.current) return;
+          setAppState((prev) => ({
+            ...prev,
+            brightness_snapshot: event.payload,
+          }));
+        },
+      );
+      if (!keep(unlistenBrightness)) return;
+
+      await invoke<void>("frontend_ready");
+    };
+
+    void registerListeners().catch((error) => {
+      console.error("Failed to initialize Tauri event bridge:", error);
     });
-
-    const unlistenAudio = listen<AudioSnapshot>("audio-update", (event) => {
-      if (!mounted.current) return;
-      setAppState((prev) => ({ ...prev, audio_snapshot: event.payload }));
-    });
-
-    const unlistenBrightness = listen<BrightnessSnapshot>(
-      "brightness-update",
-      (event) => {
-        if (!mounted.current) return;
-        setAppState((prev) => ({
-          ...prev,
-          brightness_snapshot: event.payload,
-        }));
-      },
-    );
 
     return () => {
+      cancelled = true;
       mounted.current = false;
-      unlistenMonitor.then((f) => f());
-      unlistenSystem.then((f) => f());
-      unlistenAudio.then((f) => f());
-      unlistenBrightness.then((f) => f());
+      unlisteners.splice(0).forEach((unlisten) => unlisten());
     };
   }, []);
 
