@@ -1,0 +1,130 @@
+name: Validate quick-xml security backports
+
+on:
+  push:
+    branches:
+      - agent/jwm-evolution-foundation
+    paths:
+      - .github/workflows/quick-xml-remediation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  remediate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out evolution branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/jwm-evolution-foundation
+          fetch-depth: 0
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libglib2.0-dev \
+            libcairo2-dev \
+            libpango1.0-dev \
+            libasound2-dev \
+            libdbus-1-dev \
+            libudev-dev \
+            libinput-dev \
+            libseat-dev \
+            libdrm-dev \
+            libgbm-dev \
+            libegl1-mesa-dev \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxext-dev \
+            libxxf86vm-dev \
+            libxcb1-dev \
+            libxcb-composite0-dev \
+            libxcb-damage0-dev \
+            libxcb-present-dev \
+            libxcb-randr0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcursor-dev \
+            libxfixes-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libxrender-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Apply reviewed upstream security backports
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("Cargo.toml")
+          text = path.read_text()
+          old = 'xcb = { version = "1.7.0", features = ["composite", "shape", "randr", "damage", "present", "xfixes"] }'
+          new = 'xcb = { git = "https://github.com/rust-x-bindings/rust-xcb.git", rev = "8f1a726abc8cb9f62169d0032a94e268fc3379af", features = ["composite", "shape", "randr", "damage", "present", "xfixes"] }'
+          if text.count(old) != 1:
+              raise SystemExit("unexpected xcb dependency declaration")
+          text = text.replace(old, new, 1)
+          patch = '''\n# Temporary security backport until wayland-scanner publishes quick-xml >= 0.41.\n[patch.crates-io]\nwayland-scanner = { git = "https://github.com/Smithay/wayland-rs.git", rev = "d07c4f91f28b42e5a485823ffd9d8d5a210b1053" }\n'''
+          if "[patch.crates-io]" in text:
+              raise SystemExit("unexpected existing crates.io patch table")
+          path.write_text(text.rstrip() + patch)
+          PY
+
+      - name: Resolve and compile the remediated graph
+        id: validate
+        shell: bash
+        run: |
+          set +e
+          (
+            set -e
+            cargo generate-lockfile
+            echo '=== resolved quick-xml versions ==='
+            cargo tree --locked | grep 'quick-xml v' | sort -u
+            if cargo tree --locked | grep -Eq 'quick-xml v(0\.30\.0|0\.39\.4)'; then
+              echo 'vulnerable quick-xml versions remain in the graph' >&2
+              exit 1
+            fi
+            cargo check --locked --all-targets
+          ) > quick-xml-remediation.log 2>&1
+          status=$?
+          set -e
+          cat quick-xml-remediation.log
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Commit successful remediation
+        if: steps.validate.outputs.status == '0'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git rm dependency-trees.txt
+          git rm .github/workflows/quick-xml-remediation.yml
+          git commit -m "fix(deps): backport quick-xml security updates"
+          git push
+
+      - name: Preserve failed validation diagnostics
+        if: steps.validate.outputs.status != '0'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -- Cargo.toml Cargo.lock
+          git add quick-xml-remediation.log
+          git rm .github/workflows/quick-xml-remediation.yml
+          git commit -m "ci: capture quick-xml remediation failure"
+          git push
+
+      - name: Fail when remediation validation failed
+        if: steps.validate.outputs.status != '0'
+        run: exit 1
