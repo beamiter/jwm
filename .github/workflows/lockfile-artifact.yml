@@ -5,9 +5,6 @@ on:
     branches:
       - agent/jwm-evolution-foundation
     paths:
-      - Cargo.toml
-      - rust-toolchain.toml
-      - tools/jwm_support.rs
       - .github/workflows/lockfile-artifact.yml
   workflow_dispatch:
 
@@ -20,42 +17,82 @@ concurrency:
 
 jobs:
   bootstrap:
-    name: Format, lock, and diagnose
+    name: Apply, format, and diagnose
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Check out source
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libglib2.0-dev \
+            libcairo2-dev \
+            libpango1.0-dev \
+            libasound2-dev \
+            libdbus-1-dev \
+            libudev-dev \
+            libinput-dev \
+            libseat-dev \
+            libdrm-dev \
+            libgbm-dev \
+            libegl1-mesa-dev \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxext-dev \
+            libxxf86vm-dev \
+            libxcb1-dev \
+            libxcb-composite0-dev \
+            libxcb-damage0-dev \
+            libxcb-present-dev \
+            libxcb-randr0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcursor-dev \
+            libxfixes-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libxrender-dev
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
 
-      - name: Generate Cargo.lock
-        run: cargo generate-lockfile
+      - name: Apply staged refinements
+        run: python3 scripts/.jwm_evolution_patch.py
+
+      - name: Validate committed lockfile
+        run: cargo metadata --locked --format-version 1 --no-deps > /dev/null
 
       - name: Format Rust sources
         run: cargo fmt --all
 
-      - name: Commit generated baseline
+      - name: Commit refined source
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Cargo.lock tools/jwm_support.rs
+          git add tools/jwm_support.rs scripts/install_jwm_scripts.sh
           if ! git diff --cached --quiet; then
-            git commit -m "build: lock and format evolution baseline"
+            git commit -m "feat: harden support bundle privacy and installation"
             git push
           fi
 
-      - name: Capture all-target check
+      - name: Capture locked all-target check
         id: check
         shell: bash
         run: |
           set +e
-          cargo check --all-targets > cargo-check.log 2>&1
+          cargo check --locked --all-targets > cargo-check.log 2>&1
           status=$?
           echo "status=$status" >> "$GITHUB_OUTPUT"
           exit 0
@@ -65,7 +102,7 @@ jobs:
         run: |
           git add -f cargo-check.log
           if ! git diff --cached --quiet; then
-            git commit -m "ci: capture evolution compile diagnostics"
+            git commit -m "ci: capture hardened support compile diagnostics"
             git push
           fi
 
