@@ -964,10 +964,19 @@ impl<M: TextMeasurer> LayoutEngine<M> {
         } else {
             palette.pill
         };
-        let stroke = spec.state.urgent.then_some(Stroke {
-            color: palette.urgent_stroke,
-            width: 1.0,
-        });
+        let stroke = if spec.state.urgent {
+            Some(Stroke {
+                color: palette.urgent_stroke,
+                width: 1.0,
+            })
+        } else if spec.state.occupied && !spec.state.selected {
+            Some(Stroke {
+                color: palette.accent,
+                width: 1.0,
+            })
+        } else {
+            None
+        };
         scene.nodes.push(SceneNode::RoundedRect {
             id: spec.id,
             bounds,
@@ -1330,6 +1339,43 @@ mod tests {
             scene.action_at(point, PointerAction::ScrollUp),
             Some(UserAction::VolumeUp)
         );
+    }
+
+    #[test]
+    fn occupied_tags_have_an_accent_stroke_unless_selected() {
+        let mut tags = vec![TagState::default(); 3];
+        tags[1].occupied = true;
+        tags[2].occupied = true;
+        tags[2].selected = true;
+        let scene = engine().build(
+            view(&tags, "client"),
+            Size::new(1600.0, 38.0),
+            &InteractionState::default(),
+        );
+        let palette = Palette::for_theme(ThemeMode::Dark);
+
+        let tag_rect = |index| {
+            scene
+                .nodes_for(NodeId::Tag(TagId::new(index).unwrap()))
+                .find_map(|node| match node {
+                    SceneNode::RoundedRect { fill, stroke, .. } => Some((*fill, *stroke)),
+                    _ => None,
+                })
+                .unwrap()
+        };
+
+        assert_eq!(tag_rect(0), (palette.pill, None));
+        assert_eq!(
+            tag_rect(1),
+            (
+                palette.occupied,
+                Some(Stroke {
+                    color: palette.accent,
+                    width: 1.0,
+                }),
+            )
+        );
+        assert_eq!(tag_rect(2), (palette.selected, None));
     }
 
     #[test]
