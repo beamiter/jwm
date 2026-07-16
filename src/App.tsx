@@ -1,159 +1,156 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 
-// --- 类型定义，与后端 Rust 结构体对应 ---
-interface TagStatus {
-  is_selected: boolean;
-  is_urg: boolean;
-  is_filled: boolean;
-  is_occ: boolean;
+interface TagState {
+  selected: boolean;
+  urgent: boolean;
+  filled: boolean;
+  occupied: boolean;
 }
 
-interface MonitorInfoSnapshot {
-  monitor_num: number;
-  monitor_width: number;
-  monitor_height: number;
-  monitor_x: number;
-  monitor_y: number;
-  tag_status_vec: TagStatus[];
-  client_name: string;
-  ltsymbol: string;
-}
-
-interface SystemSnapshot {
-  cpu_average: number;
-  memory_used: number;
-  memory_total: number;
-  memory_usage_percent: number;
-  battery_percent: number;
-  is_charging: boolean;
-}
-
-interface AudioSnapshot {
+interface AudioDeviceInfo {
+  name: string;
   volume: number;
   is_muted: boolean;
-  device_name: string;
-  has_device: boolean;
 }
 
-interface BrightnessSnapshot {
+interface SystemDetails {
+  cpu_average: number;
+  memory_total: number;
+  memory_used: number;
+  memory_usage_percent: number;
+}
+
+interface BatteryState {
   percent: number | null;
+  charging: boolean;
+  present: boolean;
 }
 
-interface UiState {
-  monitor_info_snapshot: MonitorInfoSnapshot | null;
-  system_snapshot: SystemSnapshot | null;
-  audio_snapshot: AudioSnapshot | null;
-  brightness_snapshot: BrightnessSnapshot | null;
+interface BarSnapshot {
+  wm_available: boolean;
+  tags: TagState[];
+  monitor: number;
+  layout_symbol: string;
+  client_name: string;
+  time: string;
+  show_seconds: boolean;
+  layout_selector_open: boolean;
+  audio_device: AudioDeviceInfo | null;
+  system_details: SystemDetails;
+  brightness: { percent: number | null };
+  battery: BatteryState;
 }
 
-// --- Nerd Font 图标 ---
-// 9 个 tag 使用工作流主题图标：终端 / 浏览器 / 代码 / 聊天 / 文件 / 音乐 / 视频 / 邮件 / 游戏
+interface FrontendEnvelope {
+  revision: number;
+  changes: number;
+  snapshot: BarSnapshot;
+  partition_changes?: number;
+}
+
+type ActionRequest =
+  | { action: "view_tag_on"; tag_index: number; monitor_id: number }
+  | { action: "toggle_layout_selector" }
+  | { action: "set_layout_on"; layout_id: number; monitor_id: number }
+  | { action: "toggle_seconds" }
+  | { action: "toggle_mute" }
+  | { action: "adjust_volume"; delta: number }
+  | { action: "adjust_brightness"; delta: number }
+  | { action: "screenshot" };
+
+const dispatchAction = (request: ActionRequest): Promise<void> =>
+  invoke("dispatch_action", { request });
+
 const TAG_ICONS = [
-  "\u{F0A1E}", // 󰨞 terminal
-  "\u{F0239}", // 󰈹 firefox/browser
-  "\u{F0A1B}", // 󰨛 code
-  "\u{F0B79}", // 󰭹 chat
-  "\u{F024B}", // 󰉋 folder
-  "\u{F0388}", // 󰎈 music
-  "\u{F0567}", // 󰕧 video
-  "\u{F01F0}", // 󰇰 mail
-  "\u{F0297}", // 󰊗 gamepad
+  "\u{F0A1E}",
+  "\u{F0239}",
+  "\u{F0A1B}",
+  "\u{F0B79}",
+  "\u{F024B}",
+  "\u{F0388}",
+  "\u{F0567}",
+  "\u{F01F0}",
+  "\u{F0297}",
 ];
 
-const ICON_CPU = "\u{F4BC}";        //  cpu chip
-const ICON_MEM = "\u{F035B}";       // 󰍛 memory
-const ICON_BAT_FULL = "\u{F0079}";  // 󰁹 battery full
-const ICON_BAT_CHG = "\u{F0084}";   // 󰂄 charging
-const ICON_VOL_HIGH = "\u{F057E}";  // 󰕾 volume high
-const ICON_VOL_MID = "\u{F0580}";   // 󰖀 volume mid
-const ICON_VOL_LOW = "\u{F057F}";   // 󰕿 volume low
-const ICON_VOL_MUTE = "\u{F075F}";  // 󰝟 muted
-const ICON_BRIGHT = "\u{F00DE}";    // 󰃞 brightness
-const ICON_SHOT = "\u{F0104}";      // 󰄄 camera
-const ICON_TIME = "\u{F0954}";      // 󰥔 clock
-const ICON_MON = "\u{F0379}";       // 󰍹 monitor
+const ICON_CPU = "\u{F4BC}";
+const ICON_MEM = "\u{F035B}";
+const ICON_BAT_FULL = "\u{F0079}";
+const ICON_BAT_CHG = "\u{F0084}";
+const ICON_VOL_HIGH = "\u{F057E}";
+const ICON_VOL_MID = "\u{F0580}";
+const ICON_VOL_LOW = "\u{F057F}";
+const ICON_VOL_MUTE = "\u{F075F}";
+const ICON_BRIGHT = "\u{F00DE}";
+const ICON_SHOT = "\u{F0104}";
+const ICON_TIME = "\u{F0954}";
+const ICON_MON = "\u{F0379}";
 
-const getButtonClass = (tagStatus: TagStatus): string => {
-  if (tagStatus.is_filled) return "emoji-button state-filtered";
-  if (tagStatus.is_selected) return "emoji-button state-selected";
-  if (tagStatus.is_urg) return "emoji-button state-urgent";
-  if (tagStatus.is_occ) return "emoji-button state-occupied";
+const getButtonClass = (tag: TagState): string => {
+  if (tag.filled) return "emoji-button state-filtered";
+  if (tag.selected) return "emoji-button state-selected";
+  if (tag.urgent) return "emoji-button state-urgent";
+  if (tag.occupied) return "emoji-button state-occupied";
   return "emoji-button state-default";
 };
 
 const formatBytes = (bytes: number): string => {
   if (bytes === 0) return "0B";
-  const UNITS = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  const size = parseFloat((bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1));
-  return `${size}${UNITS[i]}`;
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const index = Math.min(
+    units.length - 1,
+    Math.floor(Math.log(bytes) / Math.log(1024)),
+  );
+  const size = Number((bytes / Math.pow(1024, index)).toFixed(index === 0 ? 0 : 1));
+  return `${size}${units[index]}`;
 };
 
-function parseLtSymbol(lts: string | undefined) {
-  if (!lts) return { symbol: "[]=", scale: undefined };
-  const symbolMatch = lts.match(/^(\S+)/);
-  const scaleMatch = lts.match(/s:\s*([0-9.]+)/i);
-  const symbol = symbolMatch ? symbolMatch[1] : "[]=";
-  const scale = scaleMatch ? parseFloat(scaleMatch[1]) : undefined;
-  return { symbol, scale };
-}
+const monitorIcon = (monitor: number): string => {
+  if (monitor === 0) return "\u{F02DA}";
+  if (monitor === 1) return "\u{F02DB}";
+  return `M${monitor}`;
+};
 
-function monitorIcon(num: number) {
-  if (num === 0) return "\u{F02DA}"; // 󰋚 M0 indicator (numbered)
-  if (num === 1) return "\u{F02DB}";
-  return `M${num}`;
-}
-
-function volumeIcon(snap: AudioSnapshot | null): string {
-  if (!snap || !snap.has_device) return ICON_VOL_MUTE;
-  if (snap.is_muted) return ICON_VOL_MUTE;
-  if (snap.volume <= 0) return ICON_VOL_MUTE;
-  if (snap.volume < 34) return ICON_VOL_LOW;
-  if (snap.volume < 67) return ICON_VOL_MID;
+const volumeIcon = (device: AudioDeviceInfo | null): string => {
+  if (!device || device.is_muted || device.volume <= 0) return ICON_VOL_MUTE;
+  if (device.volume < 34) return ICON_VOL_LOW;
+  if (device.volume < 67) return ICON_VOL_MID;
   return ICON_VOL_HIGH;
-}
+};
 
-// --- 子组件 ---
-
-const TagButtons = (
-  { tags, monitorNum }: { tags: TagStatus[]; monitorNum: number },
-) => {
+function TagButtons({ tags, monitor }: { tags: TagState[]; monitor: number }) {
   const [pressedButton, setPressedButton] = useState<number | null>(null);
-
-  const handlePress = (index: number) => setPressedButton(index);
-  const handleRelease = (index: number) => {
-    setPressedButton(null);
-    invoke("send_tag_command", {
-      tagIndex: index,
-      isView: true,
-      monitorId: monitorNum,
-    }).catch((e) => console.error(e));
-  };
 
   return (
     <>
-      {TAG_ICONS.map((icon, i) => {
-        const tagStatus = tags[i] || {
-          is_selected: false,
-          is_urg: false,
-          is_filled: false,
-          is_occ: false,
+      {TAG_ICONS.map((icon, index) => {
+        const tag = tags[index] ?? {
+          selected: false,
+          urgent: false,
+          filled: false,
+          occupied: false,
         };
-        const baseClass = getButtonClass(tagStatus);
-        const isPressed = pressedButton === i;
-        const buttonClass = isPressed ? `${baseClass} pressed` : baseClass;
-
+        const baseClass = getButtonClass(tag);
+        const buttonClass = pressedButton === index ? `${baseClass} pressed` : baseClass;
         return (
           <button
-            key={i}
+            key={index}
             className={buttonClass}
-            onMouseDown={() => handlePress(i)}
-            onMouseUp={() => handleRelease(i)}
+            onMouseDown={() => setPressedButton(index)}
+            onMouseUp={() => {
+              setPressedButton(null);
+              dispatchAction({
+                action: "view_tag_on",
+                tag_index: index,
+                monitor_id: monitor,
+              }).catch(console.error);
+            }}
             onMouseLeave={() => setPressedButton(null)}
-            title={`Tag ${i + 1}`}
+            title={`Tag ${index + 1}`}
           >
             <span className="nf-icon">{icon}</span>
           </button>
@@ -161,341 +158,231 @@ const TagButtons = (
       })}
     </>
   );
-};
+}
 
-const SystemInfoDisplay = (
-  { snapshot }: { snapshot: SystemSnapshot | null },
-) => {
-  if (!snapshot) {
-    return (
-      <div className="system-info-container">
-        <div className="pill usage-pill usage-warn">
-          <span className="nf-icon">{ICON_CPU}</span> --%
-        </div>
-        <div className="pill usage-pill usage-warn">
-          <span className="nf-icon">{ICON_MEM}</span> --%
-        </div>
-        <div className="pill usage-pill usage-warn">
-          <span className="nf-icon">{ICON_BAT_FULL}</span> --%
-        </div>
-      </div>
-    );
-  }
-
-  const sev = (p: number) =>
-    p <= 30
+function SystemInfoDisplay({ snapshot }: { snapshot: BarSnapshot }) {
+  const details = snapshot.system_details;
+  const battery = snapshot.battery;
+  const batteryPercent = battery.present ? battery.percent : null;
+  const severity = (percent: number) =>
+    percent <= 30
       ? "usage-good"
-      : p <= 60
-      ? "usage-warn"
-      : p <= 80
-      ? "usage-caution"
-      : "usage-danger";
-
-  const cpuClass = sev(snapshot.cpu_average);
-  const memClass = sev(snapshot.memory_usage_percent);
-  const battClass = snapshot.battery_percent > 50
-    ? "usage-good"
-    : snapshot.battery_percent > 20
+      : percent <= 60
+        ? "usage-warn"
+        : percent <= 80
+          ? "usage-caution"
+          : "usage-danger";
+  const batteryClass = batteryPercent === null
     ? "usage-warn"
-    : "usage-danger";
-  const batteryIcon = snapshot.is_charging ? ICON_BAT_CHG : ICON_BAT_FULL;
+    : batteryPercent > 50
+      ? "usage-good"
+      : batteryPercent > 20
+        ? "usage-warn"
+        : "usage-danger";
 
   return (
     <div className="system-info-container">
-      <div className={`pill usage-pill ${cpuClass}`} title="CPU 平均使用率">
-        <span className="nf-icon">{ICON_CPU}</span>{" "}
-        {`${snapshot.cpu_average.toFixed(0)}%`}
+      <div className={`pill usage-pill ${severity(details.cpu_average)}`} title="CPU 平均使用率">
+        <span className="nf-icon">{ICON_CPU}</span> {details.cpu_average.toFixed(0)}%
       </div>
       <div
-        className={`pill usage-pill ${memClass}`}
-        title={`内存使用: ${formatBytes(snapshot.memory_used)} / ${
-          formatBytes(snapshot.memory_total)
-        }`}
+        className={`pill usage-pill ${severity(details.memory_usage_percent)}`}
+        title={`内存使用: ${formatBytes(details.memory_used)} / ${formatBytes(details.memory_total)}`}
       >
-        <span className="nf-icon">{ICON_MEM}</span>{" "}
-        {`${snapshot.memory_usage_percent.toFixed(0)}%`}
+        <span className="nf-icon">{ICON_MEM}</span> {details.memory_usage_percent.toFixed(0)}%
       </div>
       <div
-        className={`pill usage-pill ${battClass}`}
-        title={snapshot.is_charging
-          ? `电池充电中: ${snapshot.battery_percent.toFixed(1)}%`
-          : `电池电量: ${snapshot.battery_percent.toFixed(1)}%`}
+        className={`pill usage-pill ${batteryClass}`}
+        title={batteryPercent === null
+          ? "未检测到电池"
+          : battery.charging
+            ? `电池充电中: ${batteryPercent.toFixed(1)}%`
+            : `电池电量: ${batteryPercent.toFixed(1)}%`}
       >
-        <span className="nf-icon">{batteryIcon}</span>{" "}
-        {`${snapshot.battery_percent.toFixed(0)}%`}
+        <span className="nf-icon">{battery.charging ? ICON_BAT_CHG : ICON_BAT_FULL}</span>{" "}
+        {batteryPercent === null ? "--" : `${batteryPercent.toFixed(0)}%`}
       </div>
     </div>
   );
-};
+}
 
-const VolumeControl = ({ snapshot }: { snapshot: AudioSnapshot | null }) => {
-  const onClick = () => {
-    invoke("toggle_mute").catch((e) => console.error(e));
+function VolumeControl({ device }: { device: AudioDeviceInfo | null }) {
+  const muted = !device || device.is_muted;
+  const onWheel = (event: React.WheelEvent) => {
+    event.preventDefault();
+    dispatchAction({
+      action: "adjust_volume",
+      delta: event.deltaY < 0 ? 5 : -5,
+    }).catch(console.error);
   };
-  const onWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    const delta = e.deltaY < 0 ? 5 : -5;
-    invoke("adjust_volume", { delta }).catch((e2) => console.error(e2));
-  };
-
-  const muted = !snapshot || snapshot.is_muted || !snapshot.has_device;
-  const vol = snapshot?.volume ?? 0;
-  const cls = muted ? "pill volume-pill muted" : "pill volume-pill";
-  const label = snapshot?.has_device ? `${vol}%` : "--";
 
   return (
     <div
-      className={cls}
-      onClick={onClick}
+      className={muted ? "pill volume-pill muted" : "pill volume-pill"}
+      onClick={() => dispatchAction({ action: "toggle_mute" }).catch(console.error)}
       onWheel={onWheel}
-      title="左键静音 / 滚轮调节"
+      title={device?.name ?? "左键静音 / 滚轮调节"}
     >
-      <span className="nf-icon">{volumeIcon(snapshot)}</span> {label}
+      <span className="nf-icon">{volumeIcon(device)}</span>{" "}
+      {device ? `${device.volume}%` : "--"}
     </div>
   );
-};
+}
 
-const BrightnessControl = (
-  { snapshot }: { snapshot: BrightnessSnapshot | null },
-) => {
-  const onClick = () => {
-    invoke("adjust_brightness", { delta: 5 }).catch((e) => console.error(e));
-  };
-  const onContextMenu = (e: React.MouseEvent) => {
-    e.preventDefault();
-    invoke("adjust_brightness", { delta: -5 }).catch((e2) => console.error(e2));
-  };
-  const onWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    const delta = e.deltaY < 0 ? 5 : -5;
-    invoke("adjust_brightness", { delta }).catch((e2) => console.error(e2));
-  };
-
-  const pct = snapshot?.percent;
-  const label = typeof pct === "number" ? `${pct}%` : "--";
-
+function BrightnessControl({ percent }: { percent: number | null }) {
+  const adjust = (delta: number) =>
+    dispatchAction({ action: "adjust_brightness", delta }).catch(console.error);
   return (
     <div
       className="pill brightness-pill"
-      onClick={onClick}
-      onWheel={onWheel}
-      onContextMenu={onContextMenu}
+      onClick={() => adjust(5)}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        adjust(-5);
+      }}
+      onWheel={(event) => {
+        event.preventDefault();
+        adjust(event.deltaY < 0 ? 5 : -5);
+      }}
       title="左键加亮 / 右键减暗 / 滚轮调节"
     >
-      <span className="nf-icon">{ICON_BRIGHT}</span> {label}
+      <span className="nf-icon">{ICON_BRIGHT}</span>{" "}
+      {percent === null ? "--" : `${percent.toFixed(0)}%`}
     </div>
   );
-};
+}
 
-const ScreenshotButton = () => {
+function ScreenshotButton() {
   const [isTaking, setIsTaking] = useState(false);
-
-  const handleClick = async () => {
+  const takeScreenshot = async () => {
     if (isTaking) return;
     setIsTaking(true);
     try {
-      await invoke("take_screenshot");
-    } catch (e) {
-      console.error(e);
+      await dispatchAction({ action: "screenshot" });
+    } catch (error) {
+      console.error(error);
     } finally {
-      setTimeout(() => setIsTaking(false), 500);
+      window.setTimeout(() => setIsTaking(false), 500);
     }
   };
-
   return (
     <div
       className={`pill screenshot-pill ${isTaking ? "taking" : ""}`}
-      onClick={handleClick}
+      onClick={takeScreenshot}
       title="截图 (Flameshot)"
     >
       <span className="nf-icon">{ICON_SHOT}</span>
     </div>
   );
-};
+}
 
-const TimeDisplay = () => {
-  const [showSeconds, setShowSeconds] = useState(true);
-  const [time, setTime] = useState(new Date());
-
-  useEffect(() => {
-    const interval = setInterval(
-      () => setTime(new Date()),
-      showSeconds ? 1000 : 60000,
-    );
-    return () => clearInterval(interval);
-  }, [showSeconds]);
-
-  const pad = (n: number) => n.toString().padStart(2, "0");
-  const formatted = useMemo(() => {
-    const d = time;
-    const ts = `${pad(d.getHours())}:${pad(d.getMinutes())}${
-      showSeconds ? `:${pad(d.getSeconds())}` : ""
-    }`;
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${ts}`;
-  }, [time, showSeconds]);
-
+function TimeDisplay({ time, showSeconds }: { time: string; showSeconds: boolean }) {
   return (
     <div
       className="pill time-pill"
-      onClick={() => setShowSeconds(!showSeconds)}
-      title="点击切换秒显示"
+      onClick={() => dispatchAction({ action: "toggle_seconds" }).catch(console.error)}
+      title={showSeconds ? "点击隐藏秒" : "点击显示秒"}
     >
-      <span className="nf-icon">{ICON_TIME}</span> {formatted}
+      <span className="nf-icon">{ICON_TIME}</span> {time || "--"}
     </div>
   );
-};
+}
 
-const LayoutControls = ({
-  ltsymbol,
-  monitorNum,
+function LayoutControls({
+  symbol,
+  monitor,
+  open,
 }: {
-  ltsymbol: string;
-  monitorNum: number;
-}) => {
-  const [open, setOpen] = useState(false);
-  const { symbol } = parseLtSymbol(ltsymbol);
-
-  const toggleClass = `pill layout-toggle ${open ? "open" : "closed"}`;
-  const optClass = (sym: string) =>
-    `pill layout-option ${symbol === sym ? "current" : ""}`;
-
-  const onSelect = (idx: number) => {
-    setOpen(false);
-    invoke("send_layout_command", {
-      layoutIndex: idx,
-      monitorId: monitorNum,
-    }).catch((e) => console.error(e));
-  };
+  symbol: string;
+  monitor: number;
+  open: boolean;
+}) {
+  const selectLayout = (layoutId: number) =>
+    dispatchAction({
+      action: "set_layout_on",
+      layout_id: layoutId,
+      monitor_id: monitor,
+    }).catch(console.error);
+  const optionClass = (layoutSymbol: string) =>
+    `pill layout-option ${symbol === layoutSymbol ? "current" : ""}`;
 
   return (
     <div className="layout-controls">
-      <div className={toggleClass} onClick={() => setOpen(!open)} title="切换布局">
-        {symbol}
+      <div
+        className={`pill layout-toggle ${open ? "open" : "closed"}`}
+        onClick={() => dispatchAction({ action: "toggle_layout_selector" }).catch(console.error)}
+        title="切换布局"
+      >
+        {symbol || "[]="}
       </div>
       {open && (
         <div className="layout-selector">
-          <div className={optClass("[]=")} onClick={() => onSelect(0)}>
-            []=
-          </div>
-          <div className={optClass("><>")} onClick={() => onSelect(1)}>
-            <>{"><>"}</>
-          </div>
-          <div className={optClass("[M]")} onClick={() => onSelect(2)}>
-            [M]
-          </div>
+          <div className={optionClass("[]=")} onClick={() => selectLayout(0)}>[]=</div>
+          <div className={optionClass("><>")} onClick={() => selectLayout(1)}>{"><>"}</div>
+          <div className={optionClass("[M]")} onClick={() => selectLayout(2)}>[M]</div>
         </div>
       )}
     </div>
   );
-};
+}
 
-// --- 主 App 组件 ---
 function App() {
-  const [appState, setAppState] = useState<UiState>({
-    monitor_info_snapshot: null,
-    system_snapshot: null,
-    audio_snapshot: null,
-    brightness_snapshot: null,
-  });
-
-  const mounted = useRef(true);
+  const [snapshot, setSnapshot] = useState<BarSnapshot | null>(null);
+  const [scaleFactor, setScaleFactor] = useState<number | null>(null);
+  const revision = useRef<number | null>(null);
 
   useEffect(() => {
-    console.log("Tauri React frontend has loaded.");
-    mounted.current = true;
     let cancelled = false;
-    const unlisteners: Array<() => void> = [];
+    let unlisten: (() => void) | undefined;
 
-    const registerListeners = async () => {
-      const keep = (unlisten: () => void) => {
-        if (cancelled) {
-          unlisten();
-          return false;
-        }
-        unlisteners.push(unlisten);
-        return true;
-      };
-
-      const unlistenMonitor = await listen<MonitorInfoSnapshot | null>(
-        "monitor-update",
-        (event) => {
-          if (!mounted.current) return;
-          setAppState((prev) => ({
-            ...prev,
-            monitor_info_snapshot: event.payload,
-          }));
-        },
-      );
-      if (!keep(unlistenMonitor)) return;
-
-      const unlistenSystem = await listen<SystemSnapshot>(
-        "system-update",
-        (event) => {
-          if (!mounted.current) return;
-          setAppState((prev) => ({ ...prev, system_snapshot: event.payload }));
-        },
-      );
-      if (!keep(unlistenSystem)) return;
-
-      const unlistenAudio = await listen<AudioSnapshot>("audio-update", (event) => {
-        if (!mounted.current) return;
-        setAppState((prev) => ({ ...prev, audio_snapshot: event.payload }));
+    const initialize = async () => {
+      setScaleFactor(await getCurrentWindow().scaleFactor());
+      unlisten = await listen<FrontendEnvelope>("xbar-state", (event) => {
+        if (cancelled) return;
+        if (revision.current !== null && event.payload.revision < revision.current) return;
+        revision.current = event.payload.revision;
+        setSnapshot(event.payload.snapshot);
       });
-      if (!keep(unlistenAudio)) return;
-
-      const unlistenBrightness = await listen<BrightnessSnapshot>(
-        "brightness-update",
-        (event) => {
-          if (!mounted.current) return;
-          setAppState((prev) => ({
-            ...prev,
-            brightness_snapshot: event.payload,
-          }));
-        },
-      );
-      if (!keep(unlistenBrightness)) return;
-
-      await invoke<void>("frontend_ready");
+      if (cancelled) {
+        unlisten();
+        return;
+      }
+      await invoke("frontend_ready");
     };
 
-    void registerListeners().catch((error) => {
-      console.error("Failed to initialize Tauri event bridge:", error);
+    initialize().catch((error) => {
+      console.error("Failed to initialize xbar Tauri bridge:", error);
     });
-
     return () => {
       cancelled = true;
-      mounted.current = false;
-      unlisteners.splice(0).forEach((unlisten) => unlisten());
+      unlisten?.();
     };
   }, []);
 
-  if (!appState.monitor_info_snapshot) {
-    return <div className="button-row">Loading...</div>;
-  }
-
-  const mis = appState.monitor_info_snapshot;
-  const { scale } = parseLtSymbol(mis.ltsymbol);
+  if (!snapshot) return <div className="button-row">Loading...</div>;
 
   return (
     <div className="button-row">
       <div className="buttons-container">
-        <TagButtons tags={mis.tag_status_vec} monitorNum={mis.monitor_num} />
-        <LayoutControls ltsymbol={mis.ltsymbol} monitorNum={mis.monitor_num} />
+        <TagButtons tags={snapshot.tags} monitor={snapshot.monitor} />
+        <LayoutControls
+          symbol={snapshot.layout_symbol}
+          monitor={snapshot.monitor}
+          open={snapshot.layout_selector_open}
+        />
       </div>
-
       <div className="spacer" />
-
       <div className="right-info-container">
-        <SystemInfoDisplay snapshot={appState.system_snapshot} />
-        <BrightnessControl snapshot={appState.brightness_snapshot} />
-        <VolumeControl snapshot={appState.audio_snapshot} />
+        <SystemInfoDisplay snapshot={snapshot} />
+        <BrightnessControl percent={snapshot.brightness.percent} />
+        <VolumeControl device={snapshot.audio_device} />
         <ScreenshotButton />
-        <TimeDisplay />
-        <div className="pill monitor-pill" title="显示器">
-          <span className="nf-icon">{ICON_MON}</span> {monitorIcon(mis.monitor_num)}
+        <TimeDisplay time={snapshot.time} showSeconds={snapshot.show_seconds} />
+        <div className="pill monitor-pill" title={snapshot.client_name || "显示器"}>
+          <span className="nf-icon">{ICON_MON}</span> {monitorIcon(snapshot.monitor)}
         </div>
         <div className="pill scale-pill" title="Scale Factor">
-          {scale !== undefined ? `s: ${scale.toFixed(2)}` : "s: --"}
+          {scaleFactor === null ? "s: --" : `s: ${scaleFactor.toFixed(2)}`}
         </div>
       </div>
     </div>

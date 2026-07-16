@@ -19,5 +19,5 @@ tauri = { version = "2.8.5", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-opener = "2.5.0"
 log = "0.4.28"
-xbar_core = { git = "https://github.com/beamiter/xbar_core.git", default-features = false, features = ["logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-system", "transport-shared"] }
-serde = { version = "1.0.228", features = ["derive"] }
+xbar_core = { git = "https://github.com/beamiter/xbar_core.git", rev = "b6d5245b212f7cbf0ecb5ea3ef7187b9f77bd11e", default-features = false, features = ["logging-flexi"] }
+xbar_tauri = { git = "https://github.com/beamiter/xbar_core.git", rev = "b6d5245b212f7cbf0ecb5ea3ef7187b9f77bd11e", features = ["clock-chrono", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-system"] }
