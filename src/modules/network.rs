@@ -1,5 +1,6 @@
 use std::fs;
 use std::time::{Duration, Instant};
+use xbar_linux_actions::{CommandRunner, CommandSpec};
 
 use crate::state::AppState;
 use crate::theme::colors;
@@ -91,10 +92,14 @@ impl NetworkModule {
     fn get_ip_address(iface: &str) -> Option<String> {
         // Read IP from /proc/net/fib_trie or use a simple approach via command
         // For simplicity, try reading from ip command output cached approach
-        let output = std::process::Command::new("ip")
-            .args(["-4", "-o", "addr", "show", iface])
-            .output()
-            .ok()?;
+        let command = CommandSpec::new("ip").with_args(["-4", "-o", "addr", "show", iface]);
+        let output = match CommandRunner::output(&command) {
+            Ok(output) => output,
+            Err(error) => {
+                log::debug!("failed to query IPv4 address for {iface}: {error}");
+                return None;
+            }
+        };
         let stdout = String::from_utf8_lossy(&output.stdout);
         // Format: 2: eth0    inet 192.168.1.100/24 ...
         stdout.split_whitespace().find_map(|part| {

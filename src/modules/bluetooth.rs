@@ -1,4 +1,5 @@
 use std::time::{Duration, Instant};
+use xbar_linux_actions::{CommandRunner, CommandSpec};
 
 use crate::state::AppState;
 use crate::theme::colors;
@@ -62,24 +63,27 @@ impl BluetoothModule {
     }
 
     fn is_powered() -> bool {
-        std::process::Command::new("bluetoothctl")
-            .args(["show"])
-            .output()
-            .ok()
-            .map(|o| {
-                let s = String::from_utf8_lossy(&o.stdout);
+        match CommandRunner::output(&CommandSpec::new("bluetoothctl").with_arg("show")) {
+            Ok(output) => {
+                let s = String::from_utf8_lossy(&output.stdout);
                 s.contains("Powered: yes")
-            })
-            .unwrap_or(false)
+            }
+            Err(error) => {
+                log::debug!("failed to query Bluetooth controller: {error}");
+                false
+            }
+        }
     }
 
     fn get_connected_devices() -> Vec<BluetoothDevice> {
-        let output = match std::process::Command::new("bluetoothctl")
-            .args(["devices", "Connected"])
-            .output()
-        {
-            Ok(o) => o,
-            Err(_) => return Vec::new(),
+        let output = match CommandRunner::output(
+            &CommandSpec::new("bluetoothctl").with_args(["devices", "Connected"]),
+        ) {
+            Ok(output) => output,
+            Err(error) => {
+                log::debug!("failed to query connected Bluetooth devices: {error}");
+                return Vec::new();
+            }
         };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
