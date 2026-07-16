@@ -1,6 +1,6 @@
 use iced::futures::{SinkExt, Stream};
 use iced::mouse;
-use iced::time::{self, milliseconds};
+use iced::time;
 use iced::widget::container;
 use iced::widget::{Space, button, rich_text};
 use iced::widget::{mouse_area, span};
@@ -15,16 +15,15 @@ use iced::{
 
 use log::{debug, info, warn};
 use std::env;
-use std::process::Command;
 use std::sync::Once;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
-    BarEffect, BarRuntime, LayoutId, ModelConfig, RuntimeAdapter, RuntimeIssue, RuntimeUpdate,
-    SharedTransport, TagId, UserAction,
+    BarEffect, BarRuntime, LayoutId, ModelConfig, PlatformEffectHandler, RuntimeSchedule,
+    RuntimeUpdate, TagId, TransportRecoveryConfig, UserAction,
 };
+use xbar_linux_actions::ProcessActionHandler;
 
 static _START: Once = Once::new();
 
@@ -115,7 +114,6 @@ enum Message {
     LeftClick,
     RightClick,
 
-    RuntimeTick,
     TransportPoll,
 
     // Audio
@@ -130,8 +128,8 @@ struct IcedBar {
     tabs: [&'static str; 9],
     tab_colors: [Color; 9],
     runtime: BarRuntime,
-    shared_path: String,
-    last_transport_retry: Instant,
+    schedule: RuntimeSchedule,
+    process_actions: ProcessActionHandler,
     current_window_id: Option<Id>,
     window_metrics_received: u8,
     scale_factor: f32,
@@ -159,24 +157,17 @@ impl IcedBar {
         let args: Vec<String> = env::args().collect();
         let shared_path = args.iter().skip(1).last().cloned().unwrap_or_default();
 
-        let transport = if shared_path.is_empty() {
-            None
-        } else {
-            match SharedTransport::open(&shared_path) {
-                Ok(transport) => Some(transport),
-                Err(error) => {
-                    warn!("failed to open WM transport at {shared_path:?}: {error}");
-                    None
-                }
-            }
+        let config = ModelConfig {
+            show_seconds: true,
+            ..ModelConfig::default()
         };
-        let runtime = BarRuntime::with_transport(
-            ModelConfig {
-                show_seconds: true,
-                ..ModelConfig::default()
-            },
-            transport,
-        )
+        let runtime = if shared_path.is_empty() {
+            BarRuntime::new(config)
+        } else {
+            let recovery = TransportRecoveryConfig::new(shared_path, TRANSPORT_RETRY_INTERVAL)
+                .expect("static transport recovery config is valid");
+            BarRuntime::with_managed_transport(config, recovery)
+        }
         .expect("iced bar model configuration is valid");
 
         Self {
@@ -193,8 +184,8 @@ impl IcedBar {
                 color!(0x00D2D3), // teal
             ],
             runtime,
-            shared_path,
-            last_transport_retry: Instant::now(),
+            schedule: RuntimeSchedule::default(),
+            process_actions: ProcessActionHandler::default(),
             current_window_id: None,
             window_metrics_received: 0,
             scale_factor: 1.0,
@@ -315,14 +306,8 @@ impl IcedBar {
 
             Message::WindowEvent(_, _) => Task::none(),
 
-            Message::RuntimeTick => {
-                let update = self.runtime.tick();
-                self.handle_runtime_update(update)
-            }
-
             Message::TransportPoll => {
-                self.ensure_transport();
-                let update = self.runtime.poll_transport();
+                let update = self.schedule.service(&mut self.runtime);
                 self.handle_runtime_update(update)
             }
         }
@@ -342,10 +327,6 @@ impl IcedBar {
     }
 
     fn handle_runtime_update(&mut self, update: RuntimeUpdate) -> Task<Message> {
-        if has_transport_failure(&update) {
-            self.runtime.set_transport(None);
-            self.last_transport_retry = Instant::now();
-        }
         for issue in update.issues {
             warn!("xbar runtime issue: {issue:?}");
         }
@@ -366,11 +347,10 @@ impl IcedBar {
                         }
                     }
                 }
-                BarEffect::Screenshot => {
-                    spawn_program("flameshot", &["gui"]);
-                }
-                BarEffect::OpenAudioControl => {
-                    spawn_program("pavucontrol", &[]);
+                effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl) => {
+                    if let Err(error) = self.process_actions.handle(effect) {
+                        warn!("failed to handle platform effect: {error}");
+                    }
                 }
                 unhandled => warn!("unhandled xbar platform effect: {unhandled:?}"),
             }
@@ -399,38 +379,14 @@ impl IcedBar {
         ])
     }
 
-    fn ensure_transport(&mut self) {
-        if self.shared_path.is_empty()
-            || self.runtime.transport().is_some()
-            || self.last_transport_retry.elapsed() < TRANSPORT_RETRY_INTERVAL
-        {
-            return;
-        }
-
-        self.last_transport_retry = Instant::now();
-        match SharedTransport::open(&self.shared_path) {
-            Ok(transport) => {
-                self.runtime.set_transport(Some(transport));
-                info!("reconnected WM transport at {:?}", self.shared_path);
-            }
-            Err(error) => {
-                debug!(
-                    "WM transport at {:?} is still unavailable: {error}",
-                    self.shared_path
-                );
-            }
-        }
-    }
-
     fn subscription(&self) -> Subscription<Message> {
         if self.current_window_id.is_none() {
             Subscription::run(Self::prepare_worker)
         } else {
             let window_events = window::events().map(|(id, event)| Message::WindowEvent(id, event));
             if self.window_metrics_received == WINDOW_METRICS_READY {
-                let clock = time::every(milliseconds(1000)).map(|_| Message::RuntimeTick);
                 let shared = time::every(TRANSPORT_POLL_INTERVAL).map(|_| Message::TransportPoll);
-                Subscription::batch(vec![clock, shared, window_events])
+                Subscription::batch(vec![shared, window_events])
             } else {
                 window_events
             }
@@ -924,30 +880,5 @@ impl IcedBar {
             .spacing(Self::TAB_SPACING)
             .push(work_space_row)
             .into()
-    }
-}
-
-fn has_transport_failure(update: &RuntimeUpdate) -> bool {
-    update.issues.iter().any(|issue| {
-        matches!(
-            issue,
-            RuntimeIssue::AdapterFailed {
-                adapter: RuntimeAdapter::Transport,
-                ..
-            }
-        )
-    })
-}
-
-fn spawn_program(program: &str, args: &[&str]) {
-    let program = program.to_owned();
-    let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
-    let thread_name = format!("wait-{program}");
-    if let Err(error) = thread::Builder::new().name(thread_name).spawn(move || {
-        if let Err(error) = Command::new(&program).args(&args).status() {
-            warn!("failed to run {program}: {error}");
-        }
-    }) {
-        warn!("failed to start process waiter: {error}");
     }
 }
