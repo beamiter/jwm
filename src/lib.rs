@@ -14,6 +14,9 @@ pub mod battery;
 pub mod brightness;
 #[cfg(feature = "render-cairo")]
 mod cairo_renderer;
+pub mod controls;
+pub mod display;
+pub mod frontend;
 #[cfg(feature = "runtime-linux")]
 pub mod linux;
 #[cfg(feature = "logging-flexi")]
@@ -21,37 +24,63 @@ pub mod logging;
 pub mod model;
 #[cfg(all(feature = "runtime-linux", feature = "transport-shared"))]
 pub mod notifier;
+pub mod placement;
 pub mod presentation;
 pub mod runtime;
 #[cfg(feature = "provider-system")]
 pub mod system_monitor;
 #[cfg(feature = "transport-shared")]
 pub mod transport;
+#[cfg(all(feature = "runtime-linux", feature = "transport-shared"))]
+pub mod wake;
 
+pub use controls::{
+    BarPresentation, ControlSpec, ControlState, InputBindings, PresentationProjector,
+    STATUS_ORDER_RIGHT_TO_LEFT, UNKNOWN_VALUE,
+};
+pub use display::{
+    BatteryThresholds, IconSet, LayoutCatalogEntry, MetricTone, TagFallback, ThresholdError,
+    UsageThresholds, VolumeLevel, VolumeThresholds, battery_tone, canonical_layout_catalog,
+    canonical_layout_id, canonical_layout_symbol, compact_monitor_label, format_bytes, usage_tone,
+    volume_level, volume_level_for_device,
+};
+pub use frontend::{
+    ActionRequest, ActionRequestError, FrontendEnvelope, FrontendPartitions, SnapshotCursor,
+    snapshot_changes,
+};
 pub use model::{
     AudioDeviceInfo, AudioState, BarEffect, BarEvent, BarModel, BarSnapshot, BarView, BatteryState,
     BrightnessState, ClockState, LayoutId, ModelConfig, ModelError, ModelUpdate, MonitorGeometry,
     MonitorId, Percent, PercentError, SystemDetails, SystemLoadAverage, SystemState, TagId,
     TagState, UserAction, WmCommand, WmSnapshot,
 };
+pub use placement::{BarPlacement, EwmhStrut, PlacementError};
 pub use runtime::{
-    BarRuntime, DEFAULT_RUNTIME_TICK_INTERVAL, RuntimeAdapter, RuntimeConfigError, RuntimeIssue,
+    BarRuntime, DEFAULT_RUNTIME_TICK_INTERVAL, PlatformEffectFailure, PlatformEffectHandler,
+    PlatformEffectReport, RuntimeAdapter, RuntimeConfigError, RuntimeFrame, RuntimeIssue,
     RuntimeSchedule, RuntimeUpdate,
 };
 #[cfg(feature = "transport-shared")]
 pub use runtime::{DEFAULT_TRANSPORT_RETRY_INTERVAL, TransportRecoveryConfig, TransportStatus};
 
 #[cfg(all(feature = "runtime-linux", feature = "transport-shared"))]
-pub use notifier::SharedEventNotifier;
+pub use notifier::{NotifierChange, SharedEventNotifier, TransportNotifierSlot};
 #[cfg(feature = "transport-shared")]
 pub use transport::{SendOutcome, SharedTransport};
+#[cfg(all(feature = "runtime-linux", feature = "transport-shared"))]
+pub use wake::{
+    AlignedWakeThread, CoalescedNotifierForwarder, IntoWakeResult, TransportWakeChange,
+    TransportWakeSlot, WakeAck, WakeWorkerStatus,
+};
 
 /// Optional renderer adapters.
 pub mod render {
     /// Cairo/Pango renderer for [`crate::presentation::Scene`].
     #[cfg(feature = "render-cairo")]
     pub mod cairo {
-        pub use crate::cairo_renderer::{CairoBar, CairoRenderer, PangoTextMeasurer};
+        pub use crate::cairo_renderer::{
+            CairoBar, CairoRenderer, PangoTextMeasurer, PointerButton, PointerInput, PointerUpdate,
+        };
     }
 }
 

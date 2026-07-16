@@ -1,8 +1,8 @@
 [package]
 name = "xbar_core"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
-description = "Backend-neutral status-bar model, scene graph, runtime, and explicit adapters"
+description = "Backend-neutral status-bar model, frontend projection, runtime, and explicit adapters"
 repository = "https://github.com/beamiter/xbar_core"
 
 [features]

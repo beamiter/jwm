@@ -1,6 +1,6 @@
 # xbar_core
 
-`xbar_core` 0.3 is the backend-neutral status-bar kernel shared by the XCB,
+`xbar_core` 0.4 is the backend-neutral status-bar kernel shared by the XCB,
 x11rb, winit, tao, wgpu, pixels, softbuffer, toolkit, and web bars in JWM.
 
 The default build has no window-system, Cairo, ALSA, sysfs, logging, or shared
@@ -10,12 +10,16 @@ every frontend selects only the adapters it actually uses.
 ## Architecture
 
 ```text
-native/provider input -> BarRuntime -> BarModel -> BarSnapshot / BarView
+native/provider input -> BarRuntime -> RuntimeFrame -> FrontendEnvelope
+                              |              |               |
+                              v              v               v
+                           BarModel ----> BarView       toolkit / web
                                              |
-                                             v
-                               LayoutEngine -> Scene + HitRegion
-                                             |
-                              Cairo / wgpu / toolkit / web renderer
+                              PresentationProjector
+                                    |             |
+                              LayoutEngine    native widgets
+                                    |
+                              Scene + HitRegion -> Cairo / wgpu
 ```
 
 - `BarModel` is the only semantic state owner. It reduces typed `BarEvent`
@@ -24,6 +28,14 @@ native/provider input -> BarRuntime -> BarModel -> BarSnapshot / BarView
   asynchronous consumers; it includes rich provider detail such as per-core
   CPU/memory counters and audio-device capabilities. `BarView` is the borrowed
   render fast path.
+- `RuntimeFrame` captures a revision, accumulated changes, snapshot, issues,
+  and platform work coherently. `FrontendEnvelope`, `SnapshotCursor`, and
+  `ActionRequest` provide one host-neutral wire contract without a Tauri
+  dependency or framework-specific DTO copies.
+- `display` centralizes availability-aware metric tones, volume bands, byte
+  formatting, Nerd Font symbols, monitor labels, and explicit JWM layout IDs.
+  The geometry-free presentation projection gives widget toolkits the same
+  control state and input bindings used by the scene layout.
 - `BarRuntime` coordinates optional providers and transport without absorbing
   platform/window responsibilities. It can own transport opening, bounded
   reconnects, lifecycle status, and notifier generations.
@@ -33,7 +45,8 @@ native/provider input -> BarRuntime -> BarModel -> BarSnapshot / BarView
 - `LayoutEngine` produces a renderer-neutral retained `Scene` and semantic hit
   map. `Scene::damage_from` invalidates both old and new component bounds.
 - `CairoBar` is the high-level native facade combining runtime, layout,
-  interaction, and Cairo rendering.
+  interaction, and Cairo rendering. Its `handle_pointer` API owns hover and
+  matching press/release semantics.
 
 ## Pure model
 
@@ -71,18 +84,21 @@ For core-managed recovery, construct `TransportRecoveryConfig` and use
 `BarRuntime::with_managed_transport`; its first poll opens the existing
 WM-owned ring and later polls retry boundedly after failures. If low-latency
 native notification is useful, create a `SharedEventNotifier` from the current
-transport and rebuild it whenever `transport_generation()` changes. Then wrap
-the runtime with `render::cairo::CairoBar`. Native pointer events map to
-`presentation::PointerAction`; unhandled `RuntimeUpdate::platform_effects`
-remain the frontend's responsibility (window geometry, screenshots, and
-process launching).
+transport and let `TransportNotifierSlot` rebuild it whenever
+`transport_generation()` changes. Then wrap the runtime with
+`render::cairo::CairoBar`. Native pointer events map to `PointerInput`;
+`BarPlacement` and `EwmhStrut` centralize pure window geometry. Unhandled
+`RuntimeUpdate::platform_effects` remain the frontend's responsibility and can
+be drained through one `PlatformEffectHandler` policy.
 
 Toolkit and Tauri frontends use the same `BarRuntime` directly. A
 `RuntimeSchedule` replaces their local `last_tick`, reconnect deadline, and
-`tick + poll` merge logic; they project `BarSnapshot` into widgets or JSON and
-dispatch typed `UserAction` values. They do not depend on `shared_structures`
-or instantiate provider managers themselves. `SystemDetails` and
-`AudioDeviceInfo` preserve rich provider data without leaking adapter types.
+`tick + poll` merge logic; `service_frame` returns one coherent state handoff.
+Toolkits consume the geometry-free control projection, while web bridges send
+a complete `FrontendEnvelope` and dispatch a single `ActionRequest`. They do
+not depend on `shared_structures` or instantiate provider managers themselves.
+`SystemDetails` and `AudioDeviceInfo` preserve rich provider data without
+leaking adapter types.
 If the shared transport breaks, the runtime drops it, marks the WM projection
 unavailable, returns geometry-clear work, and schedules its own reopen. A
 reopened transport remains command-gated until its first authoritative WM
@@ -91,19 +107,18 @@ widget state.
 
 ```rust
 use std::time::Duration;
-use xbar_core::{
-    BarRuntime, ModelConfig, RuntimeSchedule, TransportRecoveryConfig,
-};
+use xbar_core::{BarRuntime, ModelConfig, RuntimeSchedule, SnapshotCursor,
+    TransportRecoveryConfig};
 
 let recovery = TransportRecoveryConfig::new("/run/user/1000/jwm", Duration::from_secs(2))?;
 let mut runtime = BarRuntime::with_managed_transport(ModelConfig::default(), recovery)?;
 let mut schedule = RuntimeSchedule::default();
 
 // Call from a framework timer, idle callback, or native event-loop turn.
-let update = schedule.service(&mut runtime);
-if update.needs_redraw() {
-    let snapshot = runtime.snapshot();
-    # let _ = snapshot;
+let frame = schedule.service_frame(&mut runtime);
+let mut cursor = SnapshotCursor::new();
+if let Some(envelope) = cursor.update_frame(&frame) {
+    # let _ = envelope; // emit/store one complete, revisioned snapshot
 }
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
@@ -119,7 +134,7 @@ if update.needs_redraw() {
 | `provider-brightnessctl` | brightnessctl provider |
 | `provider-battery-sysfs` | independent deterministic multi-battery sysfs provider |
 | `transport-shared` | typed JWM transport plus core-managed bounded recovery |
-| `runtime-linux` | `AlignedTimer` and owned shared event notifier |
+| `runtime-linux` | `AlignedTimer`, reconnect-aware notifier ownership, and owned wake forwarding |
 | `render-cairo` | Scene-based `CairoRenderer`, text measurer, and `CairoBar` |
 
 ## Validation
@@ -135,7 +150,8 @@ cargo doc --no-default-features --no-deps
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for module ownership,
 [docs/CONSUMER-MATRIX.md](docs/CONSUMER-MATRIX.md) for every JWM bar family,
-and [docs/MIGRATION-0.3.md](docs/MIGRATION-0.3.md) for lifecycle adoption.
+and [docs/MIGRATION-0.4.md](docs/MIGRATION-0.4.md) for projection/bridge adoption
+([0.3 lifecycle notes](docs/MIGRATION-0.3.md) remain relevant).
 
 The repository intentionally does not declare a license until the project
 owner selects and adds one.

@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::ThemeMode;
-use crate::model::{BarView, LayoutId, Percent, TagId, UserAction};
+use crate::controls::{BarPresentation, ControlSpec, PresentationProjector};
+use crate::display::{BatteryThresholds, IconSet, UsageThresholds, VolumeThresholds};
+use crate::model::{BarView, LayoutId, MAX_MODEL_TAGS, Percent, TagId, UserAction};
 
 /// A point in logical (DPI-independent) coordinates.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -310,6 +312,34 @@ pub enum PointerAction {
     ScrollDown,
 }
 
+impl PointerAction {
+    /// Translate the conventional X11 core pointer button numbers used by
+    /// XCB and x11rb frontends.
+    #[must_use]
+    pub const fn from_x11_button(button: u8) -> Option<Self> {
+        match button {
+            1 => Some(Self::Primary),
+            3 => Some(Self::Secondary),
+            4 => Some(Self::ScrollUp),
+            5 => Some(Self::ScrollDown),
+            _ => None,
+        }
+    }
+
+    /// Translate a vertical wheel/trackpad delta. Positive deltas scroll up;
+    /// zero and non-finite deltas do not produce an action.
+    #[must_use]
+    pub fn from_vertical_delta(delta: f64) -> Option<Self> {
+        if !delta.is_finite() || delta == 0.0 {
+            None
+        } else if delta > 0.0 {
+            Some(Self::ScrollUp)
+        } else {
+            Some(Self::ScrollDown)
+        }
+    }
+}
+
 /// One semantic interaction target in logical coordinates.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HitRegion {
@@ -488,9 +518,14 @@ impl InteractionState {
     }
 
     pub fn clear_hover(&mut self) -> bool {
-        let changed = self.hovered.take().is_some();
-        self.pressed = None;
-        changed
+        let hover_changed = self.hovered.take().is_some();
+        let press_changed = self.pressed.take().is_some();
+        hover_changed || press_changed
+    }
+
+    /// Cancel a pending activation without changing hover state.
+    pub fn cancel_press(&mut self) -> bool {
+        self.pressed.take().is_some()
     }
 
     pub fn press(&mut self, scene: &Scene, point: Point) -> bool {
@@ -557,6 +592,33 @@ impl Default for PresentationLabels {
     }
 }
 
+impl From<&IconSet> for PresentationLabels {
+    fn from(icons: &IconSet) -> Self {
+        Self {
+            clock: icons.clock.clone(),
+            screenshot: icons.screenshot.clone(),
+            theme_dark: icons.theme_dark.clone(),
+            theme_light: icons.theme_light.clone(),
+            monitor: icons.monitor.clone(),
+            cpu: icons.cpu.clone(),
+            memory: icons.memory.clone(),
+            audio: icons.volume_high.clone(),
+            muted: icons.volume_muted.clone(),
+            brightness: icons.brightness.clone(),
+            battery: icons.battery.clone(),
+            charging: icons.battery_charging.clone(),
+        }
+    }
+}
+
+impl PresentationLabels {
+    /// Labels matching the shared toolkit Nerd Font preset.
+    #[must_use]
+    pub fn nerd_font() -> Self {
+        Self::from(&IconSet::nerd_font())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PresentationVisibility {
     pub client_name: bool,
@@ -604,6 +666,15 @@ pub struct PresentationConfig {
     pub tag_labels: Vec<String>,
     pub layouts: Vec<LayoutChoice>,
     pub labels: PresentationLabels,
+    /// Optional band-aware/dynamic icon preset for widget and scene
+    /// projections. `labels` remains the fallback and customization surface.
+    pub icon_set: Option<IconSet>,
+    /// Renderer-independent CPU/memory severity policy.
+    pub usage_thresholds: UsageThresholds,
+    /// Renderer-independent remaining-battery severity policy.
+    pub battery_thresholds: BatteryThresholds,
+    /// Renderer-independent audio icon band policy.
+    pub volume_thresholds: VolumeThresholds,
     pub visibility: PresentationVisibility,
 }
 
@@ -623,17 +694,38 @@ impl Default for PresentationConfig {
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
-            layouts: ["[]=", "[M]", "><>"]
+            layouts: crate::display::CANONICAL_LAYOUTS
                 .into_iter()
-                .enumerate()
-                .map(|(index, label)| LayoutChoice {
-                    id: LayoutId(index as u32),
+                .map(|(id, label)| LayoutChoice {
+                    id,
                     label: label.to_owned(),
                 })
                 .collect(),
             labels: PresentationLabels::default(),
+            icon_set: None,
+            usage_thresholds: UsageThresholds::default(),
+            battery_thresholds: BatteryThresholds::default(),
+            volume_thresholds: VolumeThresholds::default(),
             visibility: PresentationVisibility::default(),
         }
+    }
+}
+
+impl PresentationConfig {
+    /// Replace semantic labels and dynamic tag labels from one shared icon
+    /// preset while preserving geometry, visibility, and threshold policy.
+    pub fn apply_icon_set(&mut self, icons: &IconSet) {
+        self.tag_labels = (0..MAX_MODEL_TAGS)
+            .map(|index| icons.tag_icon(index).into_owned())
+            .collect();
+        self.labels = PresentationLabels::from(icons);
+        self.icon_set = Some(icons.clone());
+    }
+
+    #[must_use]
+    pub fn with_icon_set(mut self, icons: &IconSet) -> Self {
+        self.apply_icon_set(icons);
+        self
     }
 }
 
@@ -700,11 +792,19 @@ impl<M: TextMeasurer> LayoutEngine<M> {
         viewport: Size,
         interaction: &InteractionState,
     ) -> Scene {
+        let BarPresentation {
+            theme,
+            tags,
+            layout_button,
+            layout_choices,
+            client_name,
+            status,
+        } = PresentationProjector::project(view, &self.config);
         let viewport = viewport.normalized();
         let clip = Rect::from_size(viewport);
         let bar_height = finite_non_negative(self.config.bar_height).min(viewport.height);
         let bar = Rect::new(0.0, 0.0, viewport.width, bar_height);
-        let palette = Palette::for_theme(view.theme);
+        let palette = Palette::for_theme(theme);
         let mut scene = Scene {
             viewport,
             clip,
@@ -743,8 +843,8 @@ impl<M: TextMeasurer> LayoutEngine<M> {
         let right_floor = content_left + (content_right - content_left) * left_fraction;
         let mut right_cursor = content_right;
 
-        let right_specs = self.right_specs(view);
-        for spec in right_specs {
+        for control in status {
+            let spec = PillSpec::from(control);
             let available = (right_cursor - right_floor).max(0.0);
             if available < self.minimum_visible_width() {
                 break;
@@ -762,41 +862,18 @@ impl<M: TextMeasurer> LayoutEngine<M> {
         let left_limit = (right_cursor - gap).max(content_left);
         let mut left_cursor = content_left;
 
-        for (index, tag) in view.tags.iter().copied().enumerate() {
-            let Some(tag_id) = TagId::new(index) else {
-                break;
-            };
+        for control in tags {
             let available = (left_limit - left_cursor).max(0.0);
             if available < self.minimum_visible_width() {
                 break;
             }
-            let label = self
-                .config
-                .tag_labels
-                .get(index)
-                .cloned()
-                .unwrap_or_else(|| (index + 1).to_string());
+            let label = control.text();
             let width = self.pill_width(&label).min(available);
             let bounds = Rect::new(left_cursor, y, width, pill_height);
-            let state = VisualState {
-                hovered: interaction.hovered == Some(NodeId::Tag(tag_id)),
-                selected: tag.selected || view.active_tag == Some(tag_id),
-                urgent: tag.urgent,
-                occupied: tag.occupied || tag.filled,
-            };
             self.push_pill(
                 &mut scene,
                 bounds,
-                PillSpec {
-                    id: NodeId::Tag(tag_id),
-                    text: label,
-                    primary: Some(UserAction::ViewTag(tag_id)),
-                    secondary: Some(UserAction::ToggleTag(tag_id)),
-                    scroll_up: None,
-                    scroll_down: None,
-                    state,
-                    progress: None,
-                },
+                PillSpec::from(control),
                 interaction,
                 palette,
                 Some(bar),
@@ -804,31 +881,14 @@ impl<M: TextMeasurer> LayoutEngine<M> {
             left_cursor = bounds.right() + gap;
         }
 
-        let layout_text = if view.layout_symbol.is_empty() {
-            "?"
-        } else {
-            view.layout_symbol
-        };
+        let layout_text = layout_button.text();
         if let Some(bounds) =
-            self.place_left_pill(left_cursor, left_limit, y, pill_height, layout_text)
+            self.place_left_pill(left_cursor, left_limit, y, pill_height, &layout_text)
         {
             self.push_pill(
                 &mut scene,
                 bounds,
-                PillSpec {
-                    id: NodeId::LayoutButton,
-                    text: layout_text.to_owned(),
-                    primary: Some(UserAction::ToggleLayoutSelector),
-                    secondary: None,
-                    scroll_up: None,
-                    scroll_down: None,
-                    state: VisualState {
-                        hovered: interaction.hovered == Some(NodeId::LayoutButton),
-                        selected: view.layout_selector_open,
-                        ..VisualState::default()
-                    },
-                    progress: None,
-                },
+                PillSpec::from(layout_button),
                 interaction,
                 palette,
                 Some(bar),
@@ -836,44 +896,30 @@ impl<M: TextMeasurer> LayoutEngine<M> {
             left_cursor = bounds.right() + gap;
         }
 
-        if view.layout_selector_open {
-            for layout in &self.config.layouts {
-                let Some(bounds) =
-                    self.place_left_pill(left_cursor, left_limit, y, pill_height, &layout.label)
-                else {
-                    break;
-                };
-                self.push_pill(
-                    &mut scene,
-                    bounds,
-                    PillSpec {
-                        id: NodeId::LayoutOption(layout.id),
-                        text: layout.label.clone(),
-                        primary: Some(UserAction::SetLayout(layout.id)),
-                        secondary: None,
-                        scroll_up: None,
-                        scroll_down: None,
-                        state: VisualState {
-                            hovered: interaction.hovered == Some(NodeId::LayoutOption(layout.id)),
-                            ..VisualState::default()
-                        },
-                        progress: None,
-                    },
-                    interaction,
-                    palette,
-                    Some(bar),
-                );
-                left_cursor = bounds.right() + gap;
-            }
+        for control in layout_choices {
+            let text = control.text();
+            let Some(bounds) = self.place_left_pill(left_cursor, left_limit, y, pill_height, &text)
+            else {
+                break;
+            };
+            self.push_pill(
+                &mut scene,
+                bounds,
+                PillSpec::from(control),
+                interaction,
+                palette,
+                Some(bar),
+            );
+            left_cursor = bounds.right() + gap;
         }
 
-        if self.config.visibility.client_name {
+        if let Some(client_name) = client_name {
             let client_left = left_cursor.max(content_left);
             let client_right = right_cursor.min(content_right);
             let available = client_right - client_left;
-            if available >= self.minimum_visible_width() && !view.client_name.is_empty() {
+            if available >= self.minimum_visible_width() {
                 let bounds = Rect::new(client_left, y, available, pill_height);
-                let text = self.fit_text(view.client_name, available, 0.0);
+                let text = self.fit_text(&client_name.value, available, 0.0);
                 if !text.is_empty() {
                     scene.nodes.push(SceneNode::Text {
                         id: NodeId::Client,
@@ -889,130 +935,6 @@ impl<M: TextMeasurer> LayoutEngine<M> {
         }
 
         scene
-    }
-
-    fn right_specs(&self, view: BarView<'_>) -> Vec<PillSpec> {
-        let labels = &self.config.labels;
-        let visibility = self.config.visibility;
-        let mut specs = Vec::new();
-
-        if visibility.clock {
-            specs.push(PillSpec::new(
-                NodeId::Clock,
-                join_label(&labels.clock, view.time),
-                Some(UserAction::ToggleSeconds),
-            ));
-        }
-        if visibility.screenshot {
-            specs.push(PillSpec::new(
-                NodeId::Screenshot,
-                labels.screenshot.clone(),
-                Some(UserAction::Screenshot),
-            ));
-        }
-        if visibility.theme {
-            let label = match view.theme {
-                ThemeMode::Dark => &labels.theme_dark,
-                ThemeMode::Light => &labels.theme_light,
-            };
-            specs.push(PillSpec::new(
-                NodeId::Theme,
-                label.clone(),
-                Some(UserAction::ToggleTheme),
-            ));
-        }
-        if visibility.battery {
-            let text = if view.battery.present {
-                let icon = if view.battery.charging {
-                    &labels.charging
-                } else {
-                    &labels.battery
-                };
-                join_label(
-                    icon,
-                    &view
-                        .battery
-                        .percent
-                        .map(percent_text)
-                        .unwrap_or_else(|| "--".to_owned()),
-                )
-            } else {
-                join_label(&labels.battery, "--")
-            };
-            specs.push(PillSpec::new(
-                NodeId::Battery,
-                text,
-                Some(UserAction::RefreshBattery),
-            ));
-        }
-        if visibility.brightness {
-            let value = view
-                .brightness
-                .percent
-                .map(percent_text)
-                .unwrap_or_else(|| "--".to_owned());
-            let mut spec = PillSpec::new(
-                NodeId::Brightness,
-                join_label(&labels.brightness, &value),
-                Some(UserAction::BrightnessUp),
-            );
-            spec.secondary = Some(UserAction::BrightnessDown);
-            spec.scroll_up = Some(UserAction::BrightnessUp);
-            spec.scroll_down = Some(UserAction::BrightnessDown);
-            spec.progress = view.brightness.percent.map(f32::from);
-            specs.push(spec);
-        }
-        if visibility.audio {
-            let icon = if view.audio.muted {
-                &labels.muted
-            } else {
-                &labels.audio
-            };
-            let value = view
-                .audio
-                .volume_percent
-                .map(percent_text)
-                .unwrap_or_else(|| "--".to_owned());
-            let mut spec = PillSpec::new(
-                NodeId::Audio,
-                join_label(icon, &value),
-                Some(UserAction::ToggleMute),
-            );
-            spec.secondary = Some(UserAction::OpenAudioControl);
-            spec.scroll_up = Some(UserAction::VolumeUp);
-            spec.scroll_down = Some(UserAction::VolumeDown);
-            spec.progress = view.audio.volume_percent.map(f32::from);
-            specs.push(spec);
-        }
-        if visibility.system {
-            let memory = view
-                .system
-                .memory_percent
-                .map(percent_text)
-                .unwrap_or_else(|| "--".to_owned());
-            let mut memory_spec =
-                PillSpec::new(NodeId::Memory, join_label(&labels.memory, &memory), None);
-            memory_spec.progress = view.system.memory_percent.map(Percent::as_f32);
-            specs.push(memory_spec);
-
-            let cpu = view
-                .system
-                .cpu_percent
-                .map(percent_text)
-                .unwrap_or_else(|| "--".to_owned());
-            let mut cpu_spec = PillSpec::new(NodeId::Cpu, join_label(&labels.cpu, &cpu), None);
-            cpu_spec.progress = view.system.cpu_percent.map(Percent::as_f32);
-            specs.push(cpu_spec);
-        }
-        if visibility.monitor {
-            specs.push(PillSpec::new(
-                NodeId::Monitor,
-                join_label(&labels.monitor, &view.monitor.0.to_string()),
-                None,
-            ));
-        }
-
-        specs
     }
 
     fn push_pill(
@@ -1174,17 +1096,28 @@ struct PillSpec {
     progress: Option<f32>,
 }
 
-impl PillSpec {
-    fn new(id: NodeId, text: String, primary: Option<UserAction>) -> Self {
+impl From<ControlSpec> for PillSpec {
+    fn from(control: ControlSpec) -> Self {
+        let text = control.text();
+        let bindings = if control.state.enabled {
+            control.bindings
+        } else {
+            crate::controls::InputBindings::default()
+        };
         Self {
-            id,
+            id: control.id,
             text,
-            primary,
-            secondary: None,
-            scroll_up: None,
-            scroll_down: None,
-            state: VisualState::default(),
-            progress: None,
+            primary: bindings.primary,
+            secondary: bindings.secondary,
+            scroll_up: bindings.scroll_up,
+            scroll_down: bindings.scroll_down,
+            state: VisualState {
+                hovered: control.state.hovered,
+                selected: control.state.selected,
+                urgent: control.state.urgent,
+                occupied: control.state.occupied || control.state.filled,
+            },
+            progress: control.progress.map(Percent::as_f32),
         }
     }
 }
@@ -1237,18 +1170,6 @@ impl Palette {
     }
 }
 
-fn join_label(label: &str, value: &str) -> String {
-    match (label.is_empty(), value.is_empty()) {
-        (true, _) => value.to_owned(),
-        (_, true) => label.to_owned(),
-        (false, false) => format!("{label} {value}"),
-    }
-}
-
-fn percent_text(value: Percent) -> String {
-    format!("{}%", value.rounded())
-}
-
 fn finite_non_negative(value: f32) -> f32 {
     if value.is_finite() {
         value.max(0.0)
@@ -1266,6 +1187,75 @@ mod tests {
     use std::sync::LazyLock;
 
     static SYSTEM_DETAILS: LazyLock<SystemDetails> = LazyLock::new(SystemDetails::default);
+
+    #[test]
+    fn pointer_adapters_reject_unknown_and_zero_motion() {
+        assert_eq!(
+            PointerAction::from_x11_button(1),
+            Some(PointerAction::Primary)
+        );
+        assert_eq!(
+            PointerAction::from_x11_button(3),
+            Some(PointerAction::Secondary)
+        );
+        assert_eq!(
+            PointerAction::from_x11_button(4),
+            Some(PointerAction::ScrollUp)
+        );
+        assert_eq!(
+            PointerAction::from_x11_button(5),
+            Some(PointerAction::ScrollDown)
+        );
+        assert_eq!(PointerAction::from_x11_button(2), None);
+
+        assert_eq!(
+            PointerAction::from_vertical_delta(1.0),
+            Some(PointerAction::ScrollUp)
+        );
+        assert_eq!(
+            PointerAction::from_vertical_delta(-1.0),
+            Some(PointerAction::ScrollDown)
+        );
+        assert_eq!(PointerAction::from_vertical_delta(0.0), None);
+        assert_eq!(PointerAction::from_vertical_delta(f64::NAN), None);
+    }
+
+    #[test]
+    fn default_layout_choices_follow_explicit_jwm_protocol_ids() {
+        let layouts = PresentationConfig::default().layouts;
+        assert_eq!(
+            layouts,
+            vec![
+                LayoutChoice {
+                    id: LayoutId(0),
+                    label: "[]=".to_owned(),
+                },
+                LayoutChoice {
+                    id: LayoutId(1),
+                    label: "><>".to_owned(),
+                },
+                LayoutChoice {
+                    id: LayoutId(2),
+                    label: "[M]".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn icon_set_populates_scene_and_dynamic_tag_labels_safely() {
+        let icons = IconSet::nerd_font();
+        let config = PresentationConfig::default().with_icon_set(&icons);
+
+        assert_eq!(config.labels.cpu, icons.cpu);
+        assert_eq!(config.labels.audio, icons.volume_high);
+        assert_eq!(config.tag_labels.len(), MAX_MODEL_TAGS);
+        assert_eq!(config.tag_labels[0], icons.tag_icon(0));
+        assert_eq!(
+            config.tag_labels[MAX_MODEL_TAGS - 1],
+            MAX_MODEL_TAGS.to_string()
+        );
+    }
 
     fn view<'a>(tags: &'a [TagState], client_name: &'a str) -> BarView<'a> {
         BarView {

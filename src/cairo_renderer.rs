@@ -217,6 +217,55 @@ impl CairoRenderer {
     }
 }
 
+/// Semantic pointer buttons shared by native window-system frontends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerButton {
+    Primary,
+    Secondary,
+}
+
+impl PointerButton {
+    #[must_use]
+    pub const fn action(self) -> PointerAction {
+        match self {
+            Self::Primary => PointerAction::Primary,
+            Self::Secondary => PointerAction::Secondary,
+        }
+    }
+}
+
+/// Framework-neutral pointer input accepted by [`CairoBar::handle_pointer`].
+/// Frontends only translate coordinates and their native button enum; hover,
+/// press/release matching, scroll direction, hit testing, and dispatch remain
+/// core-owned.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PointerInput {
+    Move(Point),
+    Leave,
+    Press { point: Point, button: PointerButton },
+    Release { point: Point, button: PointerButton },
+    Scroll { point: Point, delta_y: f64 },
+}
+
+/// Result of processing one [`PointerInput`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PointerUpdate {
+    pub runtime: RuntimeUpdate,
+    pub redraw: bool,
+}
+
+impl PointerUpdate {
+    #[must_use]
+    pub fn needs_redraw(&self) -> bool {
+        self.redraw || self.runtime.needs_redraw()
+    }
+
+    #[must_use]
+    pub fn into_runtime(self) -> RuntimeUpdate {
+        self.runtime
+    }
+}
+
 /// High-level Cairo bar facade for native frontends.
 ///
 /// `CairoBar` owns the semantic runtime, presentation configuration, pointer
@@ -228,6 +277,7 @@ pub struct CairoBar {
     config: crate::presentation::PresentationConfig,
     interaction: InteractionState,
     last_pointer: Option<Point>,
+    pressed_button: Option<PointerButton>,
     scene: Scene,
     renderer: CairoRenderer,
 }
@@ -244,6 +294,7 @@ impl CairoBar {
             config,
             interaction: InteractionState::default(),
             last_pointer: None,
+            pressed_button: None,
             scene: empty_scene(),
             renderer: CairoRenderer::new(font),
         }
@@ -324,6 +375,7 @@ impl CairoBar {
     /// Clear all pointer state. `true` means the visible hover state changed.
     pub fn pointer_leave(&mut self) -> bool {
         self.last_pointer = None;
+        self.pressed_button = None;
         self.interaction.clear_hover()
     }
 
@@ -335,6 +387,67 @@ impl CairoBar {
             .map_or_else(RuntimeUpdate::default, |action| {
                 self.runtime.dispatch(action)
             })
+    }
+
+    /// Process a complete pointer state transition.
+    ///
+    /// Button activation occurs only when press and release use the same
+    /// button and resolve to the same stable scene node. Scroll actions are
+    /// immediate and zero/non-finite deltas are ignored.
+    pub fn handle_pointer(&mut self, input: PointerInput) -> PointerUpdate {
+        match input {
+            PointerInput::Move(point) => PointerUpdate {
+                redraw: self.pointer_motion(point),
+                ..PointerUpdate::default()
+            },
+            PointerInput::Leave => PointerUpdate {
+                redraw: self.pointer_leave(),
+                ..PointerUpdate::default()
+            },
+            PointerInput::Press { point, button } => {
+                self.last_pointer = Some(point);
+                let hover_changed = self.interaction.update_hover(&self.scene, point);
+                let press_changed = self.interaction.press(&self.scene, point);
+                self.pressed_button = Some(button);
+                PointerUpdate {
+                    redraw: hover_changed || press_changed,
+                    ..PointerUpdate::default()
+                }
+            }
+            PointerInput::Release { point, button } => {
+                self.last_pointer = Some(point);
+                let hover_changed = self.interaction.update_hover(&self.scene, point);
+                let had_press = self.interaction.pressed().is_some();
+                let action = if self.pressed_button == Some(button) {
+                    self.interaction
+                        .release(&self.scene, point, button.action())
+                } else {
+                    self.interaction.cancel_press();
+                    None
+                };
+                self.pressed_button = None;
+                let runtime = action.map_or_else(RuntimeUpdate::default, |action| {
+                    self.runtime.dispatch(action)
+                });
+                PointerUpdate {
+                    redraw: hover_changed || had_press || runtime.needs_redraw(),
+                    runtime,
+                }
+            }
+            PointerInput::Scroll { point, delta_y } => {
+                self.last_pointer = Some(point);
+                let hover_changed = self.interaction.update_hover(&self.scene, point);
+                let runtime = PointerAction::from_vertical_delta(delta_y)
+                    .and_then(|action| self.scene.action_at(point, action))
+                    .map_or_else(RuntimeUpdate::default, |action| {
+                        self.runtime.dispatch(action)
+                    });
+                PointerUpdate {
+                    redraw: hover_changed || runtime.needs_redraw(),
+                    runtime,
+                }
+            }
+        }
     }
 
     pub fn tick(&mut self) -> RuntimeUpdate {
@@ -827,6 +940,59 @@ mod tests {
         let pixel = u32::from_ne_bytes(data[stride + 4..stride + 8].try_into().unwrap());
         assert_eq!((pixel >> 24) as u8, 255);
         assert!((pixel >> 16) as u8 > 240);
+    }
+
+    #[test]
+    fn cairo_bar_pointer_state_requires_matching_button_and_node() {
+        let mut bar = CairoBar::new(
+            BarRuntime::default(),
+            crate::presentation::PresentationConfig::default(),
+            FontDescription::from_string("Sans"),
+        );
+        let surface = ImageSurface::create(Format::ARgb32, 640, 38).unwrap();
+        let context = Context::new(&surface).unwrap();
+        bar.render(&context, Size::new(640.0, 38.0)).unwrap();
+
+        let bounds = bar
+            .scene()
+            .hits
+            .iter()
+            .find(|region| region.id == NodeId::Theme)
+            .unwrap()
+            .bounds;
+        let point = Point::new(
+            bounds.x + bounds.width * 0.5,
+            bounds.y + bounds.height * 0.5,
+        );
+
+        let press = bar.handle_pointer(PointerInput::Press {
+            point,
+            button: PointerButton::Primary,
+        });
+        assert!(press.needs_redraw());
+        let mismatch = bar.handle_pointer(PointerInput::Release {
+            point,
+            button: PointerButton::Secondary,
+        });
+        assert!(mismatch.runtime.is_empty());
+        assert_eq!(bar.snapshot().theme, ThemeMode::Dark);
+
+        let _ = bar.handle_pointer(PointerInput::Press {
+            point,
+            button: PointerButton::Primary,
+        });
+        let release = bar.handle_pointer(PointerInput::Release {
+            point,
+            button: PointerButton::Primary,
+        });
+        assert!(release.runtime.changes.contains(DirtyBits::THEME_CHANGED));
+        assert_eq!(bar.snapshot().theme, ThemeMode::Light);
+
+        let ignored = bar.handle_pointer(PointerInput::Scroll {
+            point,
+            delta_y: f64::NAN,
+        });
+        assert!(ignored.runtime.is_empty());
     }
 
     #[test]

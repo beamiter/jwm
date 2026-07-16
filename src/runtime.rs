@@ -205,6 +205,15 @@ impl RuntimeSchedule {
         self.service_at(runtime, Instant::now())
     }
 
+    /// Service the runtime and atomically capture the resulting owned frame.
+    ///
+    /// This is the preferred toolkit/web entry point: the returned frame
+    /// contains one coherent snapshot, revision, accumulated change set, and
+    /// the issues/platform work produced by this service turn.
+    pub fn service_frame(&mut self, runtime: &mut BarRuntime) -> RuntimeFrame {
+        self.service_frame_at(runtime, Instant::now())
+    }
+
     /// Deterministic variant of [`Self::service`] for event loops that already
     /// sampled their monotonic clock and for tests.
     pub fn service_at(&mut self, runtime: &mut BarRuntime, now: Instant) -> RuntimeUpdate {
@@ -214,6 +223,12 @@ impl RuntimeSchedule {
             self.next_tick = Some(runtime_deadline(now, self.tick_interval));
         }
         update
+    }
+
+    /// Deterministic variant of [`Self::service_frame`].
+    pub fn service_frame_at(&mut self, runtime: &mut BarRuntime, now: Instant) -> RuntimeFrame {
+        let update = self.service_at(runtime, now);
+        runtime.frame(update)
     }
 }
 
@@ -293,6 +308,99 @@ pub struct RuntimeUpdate {
     pub issues: Vec<RuntimeIssue>,
 }
 
+/// One coherent owned result for toolkit stores, cross-thread handoff, and
+/// frontend wire bridges.
+///
+/// `update.changes` includes all model changes accumulated since the previous
+/// frame capture, even if an intermediate [`RuntimeUpdate`] was discarded.
+/// Platform effects and issues belong to the operation that produced this
+/// frame and are never replayed implicitly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuntimeFrame {
+    pub revision: u64,
+    pub snapshot: BarSnapshot,
+    pub update: RuntimeUpdate,
+}
+
+/// Host implementation for platform work deliberately left by the runtime.
+/// A closure with the same signature implements this trait automatically.
+pub trait PlatformEffectHandler {
+    type Error;
+
+    fn handle(&mut self, effect: BarEffect) -> Result<(), Self::Error>;
+}
+
+impl<F, E> PlatformEffectHandler for F
+where
+    F: FnMut(BarEffect) -> Result<(), E>,
+{
+    type Error = E;
+
+    fn handle(&mut self, effect: BarEffect) -> Result<(), Self::Error> {
+        self(effect)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct PlatformEffectFailure<E> {
+    pub effect: BarEffect,
+    pub error: E,
+}
+
+/// Outcome of draining a [`RuntimeUpdate`]'s platform-effect queue.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PlatformEffectReport<E> {
+    pub handled: usize,
+    pub failures: Vec<PlatformEffectFailure<E>>,
+}
+
+impl<E> Default for PlatformEffectReport<E> {
+    fn default() -> Self {
+        Self {
+            handled: 0,
+            failures: Vec::new(),
+        }
+    }
+}
+
+impl<E> PlatformEffectReport<E> {
+    #[must_use]
+    pub fn is_success(&self) -> bool {
+        self.failures.is_empty()
+    }
+
+    pub fn failed_effects(&self) -> impl Iterator<Item = BarEffect> + '_ {
+        self.failures.iter().map(|failure| failure.effect)
+    }
+}
+
+impl RuntimeFrame {
+    #[must_use]
+    pub const fn changes(&self) -> DirtyBits {
+        self.update.changes
+    }
+
+    #[must_use]
+    pub fn needs_redraw(&self) -> bool {
+        self.update.needs_redraw()
+    }
+
+    #[must_use]
+    pub fn has_platform_work(&self) -> bool {
+        self.update.has_platform_work()
+    }
+
+    #[must_use]
+    pub fn has_issues(&self) -> bool {
+        self.update.has_issues()
+    }
+
+    #[must_use]
+    pub fn into_parts(self) -> (u64, BarSnapshot, RuntimeUpdate) {
+        (self.revision, self.snapshot, self.update)
+    }
+}
+
 impl RuntimeUpdate {
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -312,6 +420,26 @@ impl RuntimeUpdate {
     #[must_use]
     pub fn has_issues(&self) -> bool {
         !self.issues.is_empty()
+    }
+
+    /// Drain and route every pending platform effect through one host policy.
+    /// Failures retain both the effect and the host error so callers can log,
+    /// retry, or convert them to application-specific diagnostics.
+    pub fn handle_platform_effects<H>(&mut self, handler: &mut H) -> PlatformEffectReport<H::Error>
+    where
+        H: PlatformEffectHandler,
+    {
+        let effects = std::mem::take(&mut self.platform_effects);
+        let mut report = PlatformEffectReport::default();
+        for effect in effects {
+            match handler.handle(effect) {
+                Ok(()) => report.handled += 1,
+                Err(error) => report
+                    .failures
+                    .push(PlatformEffectFailure { effect, error }),
+            }
+        }
+        report
     }
 
     /// Whether any issue was produced by `adapter`.
@@ -363,6 +491,7 @@ impl RuntimeUpdate {
 pub struct BarRuntime {
     model: BarModel,
     pending_changes: DirtyBits,
+    revision: u64,
 
     #[cfg(feature = "transport-shared")]
     transport: Option<SharedTransport>,
@@ -391,6 +520,7 @@ impl BarRuntime {
         Ok(Self {
             model: BarModel::new(config)?,
             pending_changes: DirtyBits::all(),
+            revision: 0,
             #[cfg(feature = "transport-shared")]
             transport: None,
             #[cfg(feature = "transport-shared")]
@@ -522,6 +652,36 @@ impl BarRuntime {
         self.model.snapshot()
     }
 
+    /// Revision assigned to the most recently captured [`RuntimeFrame`].
+    /// It advances for every capture, including explicit state replay, so a
+    /// frontend can reject an older asynchronously delivered frame even when
+    /// two frames contain the same snapshot.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Capture an operation result and the current snapshot as one frame.
+    /// Any accumulated model changes are merged into `update.changes` and
+    /// cleared from the runtime.
+    #[must_use]
+    pub fn frame(&mut self, mut update: RuntimeUpdate) -> RuntimeFrame {
+        update.changes |= self.take_changes();
+        self.revision = self.revision.saturating_add(1);
+        RuntimeFrame {
+            revision: self.revision,
+            snapshot: self.snapshot(),
+            update,
+        }
+    }
+
+    /// Capture the current state without performing an operation. This is
+    /// useful for initial toolkit state and explicit frontend replay.
+    #[must_use]
+    pub fn current_frame(&mut self) -> RuntimeFrame {
+        self.frame(RuntimeUpdate::default())
+    }
+
     /// Reduce any semantic event and execute every effect supported by the
     /// currently enabled adapters.
     pub fn apply_event(&mut self, event: BarEvent) -> RuntimeUpdate {
@@ -535,6 +695,13 @@ impl BarRuntime {
     /// provider and window-manager events.
     pub fn dispatch(&mut self, action: UserAction) -> RuntimeUpdate {
         self.apply_event(BarEvent::User(action))
+    }
+
+    /// Dispatch one semantic action and capture the coherent resulting frame.
+    #[must_use]
+    pub fn dispatch_frame(&mut self, action: UserAction) -> RuntimeFrame {
+        let update = self.dispatch(action);
+        self.frame(update)
     }
 
     /// Refresh the clock and all enabled providers. Provider polling remains
@@ -1064,6 +1231,49 @@ mod tests {
     }
 
     #[test]
+    fn runtime_frames_capture_revision_snapshot_and_accumulated_changes() {
+        let mut runtime = BarRuntime::default();
+
+        let initial = runtime.current_frame();
+        assert_eq!(initial.revision, 1);
+        assert_eq!(initial.changes(), DirtyBits::all());
+        assert_eq!(initial.snapshot.theme, ThemeMode::Dark);
+
+        let empty = runtime.current_frame();
+        assert!(empty.update.is_empty());
+        assert_eq!(empty.revision, 2);
+
+        // Discarding an individual update does not lose its state damage.
+        let _ = runtime.dispatch(UserAction::ToggleTheme);
+        assert_eq!(runtime.revision(), 2);
+        let frame = runtime.current_frame();
+        assert_eq!(frame.revision, 3);
+        assert!(frame.changes().contains(DirtyBits::THEME_CHANGED));
+        assert_eq!(frame.snapshot.theme, ThemeMode::Light);
+        assert!(runtime.take_changes().is_empty());
+
+        // Platform-only work still receives an ordering revision without
+        // claiming model changes.
+        let frame = runtime.dispatch_frame(UserAction::Screenshot);
+        assert_eq!(frame.revision, 4);
+        assert!(frame.changes().is_empty());
+        assert_eq!(frame.update.platform_effects, vec![BarEffect::Screenshot]);
+    }
+
+    #[test]
+    fn scheduled_frame_is_an_initial_full_projection_then_a_delta() {
+        let now = Instant::now();
+        let mut runtime = BarRuntime::default();
+        let mut schedule = RuntimeSchedule::default();
+
+        let first = schedule.service_frame_at(&mut runtime, now);
+        assert_eq!(first.changes(), DirtyBits::all());
+
+        let second = schedule.service_frame_at(&mut runtime, now + Duration::from_millis(100));
+        assert!(second.changes().is_empty());
+    }
+
+    #[test]
     fn runtime_update_classifies_adapter_failures_without_false_disconnects() {
         let command = WmCommand::SetLayout {
             layout: LayoutId(1),
@@ -1085,6 +1295,43 @@ mod tests {
         assert_eq!(
             failed.issues[0].to_string(),
             "window-manager transport open failed: not found"
+        );
+    }
+
+    #[test]
+    fn platform_effect_handler_drains_all_work_and_preserves_failures() {
+        let mut update = RuntimeUpdate {
+            platform_effects: vec![
+                BarEffect::Screenshot,
+                BarEffect::OpenAudioControl,
+                BarEffect::ClearMonitorGeometry,
+            ],
+            ..RuntimeUpdate::default()
+        };
+        let mut seen = Vec::new();
+        let report = update.handle_platform_effects(&mut |effect| {
+            seen.push(effect);
+            if effect == BarEffect::OpenAudioControl {
+                Err("launcher unavailable")
+            } else {
+                Ok(())
+            }
+        });
+
+        assert_eq!(seen.len(), 3);
+        assert_eq!(report.handled, 2);
+        assert!(!report.is_success());
+        assert_eq!(
+            report.failures,
+            vec![PlatformEffectFailure {
+                effect: BarEffect::OpenAudioControl,
+                error: "launcher unavailable",
+            }]
+        );
+        assert!(update.platform_effects.is_empty());
+        assert_eq!(
+            report.failed_effects().collect::<Vec<_>>(),
+            vec![BarEffect::OpenAudioControl]
         );
     }
 

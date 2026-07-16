@@ -12,34 +12,44 @@ provider data ──> BarEvent ───────┘              │
 WM snapshot ─────────────────────────────────────┤
                                                  ├── RuntimeUpdate
                                                  ├── BarView
-                                                 └── BarSnapshot
+                                                 └── RuntimeFrame
                                                        │
-                    PresentationConfig + TextMeasurer ─┤
-                                                       ▼
-                                               retained Scene
-                                                │          │
-                                           HitRegion   damage_from
-                                                │          │
-                                       semantic action   repaint
+                                     ┌─────────────────┴────────────────┐
+                                     ▼                                  ▼
+                          FrontendEnvelope                 PresentationProjector
+                          + SnapshotCursor                    │             │
+                                     │                        ▼             ▼
+                               toolkit / web            widget tree   LayoutEngine
+                                                                            │
+                                                                  Scene + HitRegion
 ```
 
 ## Module ownership
 
 - `model`: checked values, state invariants, reducer, typed events/effects,
   borrowed view, and owned serializable snapshot.
+- `display`: validated metric/volume policies, explicit layout protocol IDs,
+  compact formatting, and configurable icon lookup. Missing provider values
+  remain unavailable rather than becoming zero or 100 percent.
+- `frontend`: the complete revisioned wire envelope, snapshot diff/cursor,
+  coarse store partitions, and one checked action request protocol. It has no
+  Tauri, webview, TypeScript, or UI-framework dependency.
 - `runtime`: optional provider/transport orchestration, managed reconnect
-  policy, transport lifecycle status/generation, and portable service cadence.
-  The embedded `BarModel` remains the only semantic state owner.
-- `presentation`: owned dynamic configuration, logical-coordinate layout,
-  stable scene nodes, interaction state, semantic hit regions, and old/new
-  scene damage.
+  policy, transport lifecycle status/generation, portable service cadence,
+  coherent runtime frames, and host-neutral platform-effect routing. The
+  embedded `BarModel` remains the only semantic state owner.
+- `controls`/`presentation`: a geometry-free control projection shared by
+  widget toolkits and the logical-coordinate layout; stable scene nodes,
+  interaction state, semantic hit regions, and old/new scene damage.
+- `placement`: pure monitor/scale-to-physical-bar and EWMH strut calculation.
 - `render::cairo`: Cairo/Pango scene renderer and the high-level `CairoBar`
   facade. It does not own window or transport resources.
 - provider modules: independently selected ALSA, sysinfo CPU/memory,
   brightnessctl, and battery-sysfs adapters.
 - `transport`: current JWM shared-memory adapter and queue outcome mapping.
-- `notifier` and `linux`: owned eventfd/timerfd primitives. No public API asks
-  callers to close a raw descriptor.
+- `notifier`, `wake`, and `linux`: reconnect-aware owned eventfd/timerfd and
+  event-loop wake primitives. No public API asks callers to close a raw
+  descriptor or join an unbounded worker manually.
 - `logging`: optional process-global logger setup.
 
 ## Frontend responsibilities
@@ -58,8 +68,11 @@ Core owns:
 - provider/WM snapshot reduction and suppression of semantically unchanged frames;
 - compact validated status plus rich provider projections (`SystemDetails`,
   `AudioDeviceInfo`) for toolkit and web frontends;
+- availability-aware display categories, canonical layout IDs, complete wire
+  snapshots, delta classification, and wire action validation;
 - semantic effects and explicit runtime failures/backpressure;
-- a single layout/hit-test result shared by every renderer;
+- a single control projection and layout/hit-test result shared by widget and
+  scene renderers;
 - correct damage as the union of previous and current component bounds.
 
 ## Feature rules

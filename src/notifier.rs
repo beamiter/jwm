@@ -13,6 +13,138 @@ use shared_structures::SharedRingBuffer;
 const WAIT_SLICE: Duration = Duration::from_millis(250);
 const LEVEL_RECHECK: Duration = Duration::from_millis(10);
 
+/// Observable result of synchronizing a [`TransportNotifierSlot`] with a
+/// [`crate::BarRuntime`].
+///
+/// `Replaced` borrows the newly installed descriptor from the slot. The
+/// descriptor remains valid until the slot is synchronized to another
+/// transport, synchronized after the transport is removed, or dropped.
+#[derive(Debug)]
+pub enum NotifierChange<'a> {
+    /// The slot already represents the runtime's current transport generation.
+    Unchanged,
+    /// The runtime no longer has a transport and any previous notifier was
+    /// removed.
+    Removed { generation: u64 },
+    /// A notifier for a new transport generation was installed.
+    Replaced { generation: u64, fd: BorrowedFd<'a> },
+}
+
+impl NotifierChange<'_> {
+    /// The newly observed transport generation, if synchronization changed
+    /// the slot.
+    #[must_use]
+    pub const fn generation(&self) -> Option<u64> {
+        match self {
+            Self::Unchanged => None,
+            Self::Removed { generation } | Self::Replaced { generation, .. } => Some(*generation),
+        }
+    }
+
+    /// The newly installed notifier descriptor, when one was created.
+    #[must_use]
+    pub const fn new_fd(&self) -> Option<BorrowedFd<'_>> {
+        match self {
+            Self::Replaced { fd, .. } => Some(*fd),
+            Self::Unchanged | Self::Removed { .. } => None,
+        }
+    }
+}
+
+/// Reconnect-aware owner for the notifier associated with a
+/// [`crate::BarRuntime`]'s current shared transport.
+///
+/// Call [`Self::sync`] after servicing the runtime. A changed transport
+/// generation replaces the notifier, while a disconnected runtime removes
+/// it. Notifier construction has strong failure semantics: if creating the
+/// replacement fails, the existing notifier and observed generation are left
+/// unchanged so a later call retries the same generation.
+#[derive(Debug)]
+pub struct TransportNotifierSlot {
+    generation: u64,
+    notifier: Option<SharedEventNotifier>,
+    non_blocking: bool,
+}
+
+impl TransportNotifierSlot {
+    /// Create an empty slot. `non_blocking` is applied to every notifier the
+    /// slot creates during its lifetime.
+    #[must_use]
+    pub const fn new(non_blocking: bool) -> Self {
+        Self {
+            generation: 0,
+            notifier: None,
+            non_blocking,
+        }
+    }
+
+    /// Synchronize the owned notifier with `runtime`.
+    ///
+    /// On `Replaced`, event loops should register the returned descriptor.
+    /// Dropping the previous notifier closes its descriptor, which removes
+    /// that descriptor from Linux epoll sets automatically. On `Removed`, no
+    /// notifier remains in the slot.
+    pub fn sync<'a>(&'a mut self, runtime: &crate::BarRuntime) -> io::Result<NotifierChange<'a>> {
+        self.sync_with(runtime, |transport, non_blocking| {
+            transport.notifier(non_blocking)
+        })
+    }
+
+    /// The transport generation represented by the current slot state.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The current notifier, if the last successful synchronization observed
+    /// a connected transport.
+    #[must_use]
+    pub const fn notifier(&self) -> Option<&SharedEventNotifier> {
+        self.notifier.as_ref()
+    }
+
+    #[must_use]
+    pub const fn non_blocking(&self) -> bool {
+        self.non_blocking
+    }
+
+    fn sync_with<'a, F>(
+        &'a mut self,
+        runtime: &crate::BarRuntime,
+        create: F,
+    ) -> io::Result<NotifierChange<'a>>
+    where
+        F: FnOnce(&crate::SharedTransport, bool) -> io::Result<SharedEventNotifier>,
+    {
+        let generation = runtime.transport_generation();
+        let transport = runtime.transport();
+        let state_matches =
+            generation == self.generation && transport.is_some() == self.notifier.is_some();
+        if state_matches {
+            return Ok(NotifierChange::Unchanged);
+        }
+
+        let Some(transport) = transport else {
+            self.notifier = None;
+            self.generation = generation;
+            return Ok(NotifierChange::Removed { generation });
+        };
+
+        // Construct before replacing so an eventfd/thread creation failure
+        // leaves both the old descriptor and generation intact. Since the
+        // generation remains stale, the next sync call retries this branch.
+        let replacement = create(transport, self.non_blocking)?;
+        self.notifier = Some(replacement);
+        self.generation = generation;
+        let fd = self
+            .notifier
+            .as_ref()
+            .expect("a notifier was installed above")
+            .as_fd();
+        Ok(NotifierChange::Replaced { generation, fd })
+    }
+}
+
 /// An owned eventfd plus its notification worker.
 ///
 /// The handle owns both the file descriptor and the worker lifetime. Dropping
@@ -324,5 +456,128 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         assert!(notifier.worker.as_ref().unwrap().is_finished());
+    }
+
+    #[test]
+    fn notifier_slot_tracks_disconnect_and_reconnect_generations() {
+        let sequence = NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed);
+        let path = format!(
+            "/tmp/xbar-core-notifier-slot-{}-{sequence}",
+            std::process::id()
+        );
+        let owner = SharedRingBuffer::create_aux(&path, Some(8), Some(0))
+            .expect("create isolated shared ring");
+        let mut runtime = crate::BarRuntime::default();
+        let mut slot = TransportNotifierSlot::new(true);
+
+        assert!(slot.non_blocking());
+        assert!(matches!(
+            slot.sync(&runtime).unwrap(),
+            NotifierChange::Unchanged
+        ));
+        assert_eq!(slot.generation(), 0);
+        assert!(slot.notifier().is_none());
+
+        runtime.set_transport(Some(crate::SharedTransport::open(&path).unwrap()));
+        let connected_generation = runtime.transport_generation();
+        let connected_fd = match slot.sync(&runtime).unwrap() {
+            NotifierChange::Replaced { generation, fd } => {
+                assert_eq!(generation, connected_generation);
+                fd.as_raw_fd()
+            }
+            change => panic!("expected a replacement, got {change:?}"),
+        };
+        assert_eq!(slot.generation(), connected_generation);
+        assert_eq!(slot.notifier().unwrap().as_raw_fd(), connected_fd);
+        assert!(matches!(
+            slot.sync(&runtime).unwrap(),
+            NotifierChange::Unchanged
+        ));
+
+        runtime.set_transport(None);
+        let disconnected_generation = runtime.transport_generation();
+        match slot.sync(&runtime).unwrap() {
+            NotifierChange::Removed { generation } => {
+                assert_eq!(generation, disconnected_generation);
+            }
+            change => panic!("expected notifier removal, got {change:?}"),
+        }
+        assert_eq!(slot.generation(), disconnected_generation);
+        assert!(slot.notifier().is_none());
+        assert!(matches!(
+            slot.sync(&runtime).unwrap(),
+            NotifierChange::Unchanged
+        ));
+
+        runtime.set_transport(Some(crate::SharedTransport::open(&path).unwrap()));
+        let reconnected_generation = runtime.transport_generation();
+        let change = slot.sync(&runtime).unwrap();
+        assert_eq!(change.generation(), Some(reconnected_generation));
+        assert!(change.new_fd().is_some());
+        assert!(matches!(change, NotifierChange::Replaced { .. }));
+        assert_eq!(slot.generation(), reconnected_generation);
+        assert!(slot.notifier().is_some());
+
+        drop(slot);
+        drop(runtime);
+        owner.destroy().unwrap();
+    }
+
+    #[test]
+    fn notifier_slot_retries_generation_after_creation_failure() {
+        let sequence = NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed);
+        let path = format!(
+            "/tmp/xbar-core-notifier-slot-failure-{}-{sequence}",
+            std::process::id()
+        );
+        let owner = SharedRingBuffer::create_aux(&path, Some(8), Some(0))
+            .expect("create isolated shared ring");
+        let initial = crate::SharedTransport::open(&path).unwrap();
+        let mut runtime =
+            crate::BarRuntime::with_transport(crate::ModelConfig::default(), Some(initial))
+                .unwrap();
+        let mut slot = TransportNotifierSlot::new(true);
+
+        let initial_generation = runtime.transport_generation();
+        let initial_fd = match slot.sync(&runtime).unwrap() {
+            NotifierChange::Replaced { fd, .. } => fd.as_raw_fd(),
+            change => panic!("expected initial replacement, got {change:?}"),
+        };
+
+        // Installing even another handle to the same owner is a distinct
+        // transport generation and therefore requires a fresh notifier.
+        runtime.set_transport(Some(crate::SharedTransport::open(&path).unwrap()));
+        let replacement_generation = runtime.transport_generation();
+        assert_ne!(replacement_generation, initial_generation);
+
+        let error = slot
+            .sync_with(&runtime, |_, _| {
+                Err(io::Error::other("injected notifier creation failure"))
+            })
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+
+        // Failure is atomic: the old registration remains valid, generation
+        // is not advanced, and the next ordinary sync retries the replacement.
+        assert_eq!(slot.generation(), initial_generation);
+        assert_eq!(slot.notifier().unwrap().as_raw_fd(), initial_fd);
+        assert!(!slot.notifier().unwrap().is_shutdown_requested());
+
+        let replacement_fd = match slot.sync(&runtime).unwrap() {
+            NotifierChange::Replaced { generation, fd } => {
+                assert_eq!(generation, replacement_generation);
+                fd.as_raw_fd()
+            }
+            change => panic!("expected retried replacement, got {change:?}"),
+        };
+        // The replacement is created while the previous notifier is still
+        // alive, so the kernel cannot recycle the old descriptor prematurely.
+        assert_ne!(replacement_fd, initial_fd);
+        assert_eq!(slot.generation(), replacement_generation);
+        assert_eq!(slot.notifier().unwrap().as_raw_fd(), replacement_fd);
+
+        drop(slot);
+        drop(runtime);
+        owner.destroy().unwrap();
     }
 }
