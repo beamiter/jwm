@@ -195,6 +195,29 @@ impl RuntimeSchedule {
         self.next_tick
     }
 
+    /// Return the earliest time at which a normal service turn is required.
+    ///
+    /// Before the first service turn this returns `now`. With managed shared
+    /// transport recovery enabled, a disconnected transport retry can make
+    /// the deadline earlier than the next provider tick. Event loops may
+    /// still service sooner in response to native input or transport wakes.
+    #[must_use]
+    pub fn next_service_deadline(&self, runtime: &BarRuntime, now: Instant) -> Instant {
+        let deadline = self.next_tick.unwrap_or(now);
+
+        #[cfg(feature = "transport-shared")]
+        if runtime.transport.is_none()
+            && let Some(recovery) = runtime.transport_recovery.as_ref()
+        {
+            return deadline.min(recovery.next_attempt.unwrap_or(now));
+        }
+
+        #[cfg(not(feature = "transport-shared"))]
+        let _ = runtime;
+
+        deadline
+    }
+
     /// Make the next service call refresh providers regardless of its time.
     pub fn reset(&mut self) {
         self.next_tick = None;
@@ -1215,8 +1238,14 @@ mod tests {
         let mut schedule = RuntimeSchedule::new(interval).unwrap();
         let mut runtime = BarRuntime::default();
 
+        assert_eq!(schedule.next_service_deadline(&runtime, start), start);
+
         let _ = schedule.service_at(&mut runtime, start);
         assert_eq!(schedule.next_tick(), start.checked_add(interval));
+        assert_eq!(
+            schedule.next_service_deadline(&runtime, start),
+            start + interval
+        );
         let deadline = schedule.next_tick();
 
         let _ = schedule.service_at(&mut runtime, start + Duration::from_millis(500));
@@ -1228,6 +1257,28 @@ mod tests {
 
         schedule.reset();
         assert_eq!(schedule.next_tick(), None);
+        assert_eq!(schedule.next_service_deadline(&runtime, delayed), delayed);
+    }
+
+    #[cfg(feature = "transport-shared")]
+    #[test]
+    fn service_deadline_includes_managed_transport_retry() {
+        let start = Instant::now();
+        let retry = Duration::from_secs(2);
+        let recovery =
+            TransportRecoveryConfig::new("/definitely/missing/xbar-core-deadline-test", retry)
+                .unwrap();
+        let mut runtime =
+            BarRuntime::with_managed_transport(ModelConfig::default(), recovery).unwrap();
+        let mut schedule = RuntimeSchedule::new(Duration::from_secs(10)).unwrap();
+
+        assert_eq!(schedule.next_service_deadline(&runtime, start), start);
+        let update = schedule.service_at(&mut runtime, start);
+        assert!(update.transport_failed());
+        assert_eq!(
+            schedule.next_service_deadline(&runtime, start),
+            start + retry
+        );
     }
 
     #[test]

@@ -5,14 +5,14 @@
 //! and [`BarSnapshot`] into one serializable [`FrontendEnvelope`], then use a
 //! [`SnapshotCursor`] to suppress duplicate or stale delivery.
 
-use std::fmt;
+use std::{fmt, time::Instant};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
     DirtyBits,
     model::{BarSnapshot, LayoutId, MAX_MODEL_TAGS, MonitorId, TagId, UserAction},
-    runtime::{BarRuntime, RuntimeFrame, RuntimeUpdate},
+    runtime::{BarRuntime, RuntimeFrame, RuntimeSchedule, RuntimeUpdate},
 };
 
 /// A complete, revisioned frontend state message.
@@ -157,6 +157,126 @@ impl<'de> Deserialize<'de> for FrontendPartitions {
 pub struct SnapshotCursor {
     revision: Option<u64>,
     previous_snapshot: Option<BarSnapshot>,
+}
+
+/// Result of one frontend session operation.
+///
+/// The coherent runtime frame always remains available for issue and platform
+/// effect handling. `envelope` is present only when frontend-observable state
+/// should be delivered, so hosts do not need a second emitted-state cache.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionOutput {
+    pub frame: RuntimeFrame,
+    pub envelope: Option<FrontendEnvelope>,
+}
+
+impl SessionOutput {
+    #[must_use]
+    pub fn into_parts(self) -> (RuntimeFrame, Option<FrontendEnvelope>) {
+        (self.frame, self.envelope)
+    }
+}
+
+/// Host-neutral owner of runtime cadence and frontend delivery state.
+///
+/// A host remains responsible for synchronization, threads, native wakeups,
+/// window operations, and platform effects. This type only ensures that
+/// service and action turns produce one coherent frame and at most one
+/// deduplicated wire envelope.
+pub struct FrontendSession {
+    runtime: BarRuntime,
+    schedule: RuntimeSchedule,
+    cursor: SnapshotCursor,
+}
+
+impl Default for FrontendSession {
+    fn default() -> Self {
+        Self::new(BarRuntime::default())
+    }
+}
+
+impl FrontendSession {
+    #[must_use]
+    pub fn new(runtime: BarRuntime) -> Self {
+        Self::with_schedule(runtime, RuntimeSchedule::default())
+    }
+
+    #[must_use]
+    pub const fn with_schedule(runtime: BarRuntime, schedule: RuntimeSchedule) -> Self {
+        Self {
+            runtime,
+            schedule,
+            cursor: SnapshotCursor::new(),
+        }
+    }
+
+    /// Service transport/providers now and project one optional wire update.
+    pub fn service(&mut self) -> SessionOutput {
+        let frame = self.schedule.service_frame(&mut self.runtime);
+        self.capture(frame)
+    }
+
+    /// Deterministic service variant for event loops and tests.
+    pub fn service_at(&mut self, now: Instant) -> SessionOutput {
+        let frame = self.schedule.service_frame_at(&mut self.runtime, now);
+        self.capture(frame)
+    }
+
+    /// Validate and dispatch one wire action, retaining all platform work and
+    /// issues on the returned frame.
+    pub fn dispatch(
+        &mut self,
+        request: ActionRequest,
+    ) -> Result<SessionOutput, ActionRequestError> {
+        let frame = request.dispatch_frame(&mut self.runtime)?;
+        Ok(self.capture(frame))
+    }
+
+    /// Replay the most recently accepted complete frontend state.
+    #[must_use]
+    pub fn replay(&self) -> Option<FrontendEnvelope> {
+        self.cursor.replay()
+    }
+
+    /// Make the next delivered state a complete initial envelope without
+    /// resetting runtime state or provider cadence.
+    pub fn reset_delivery(&mut self) {
+        self.cursor.reset();
+    }
+
+    /// Earliest required service time; native events may service sooner.
+    #[must_use]
+    pub fn next_service_deadline(&self, now: Instant) -> Instant {
+        self.schedule.next_service_deadline(&self.runtime, now)
+    }
+
+    #[must_use]
+    pub const fn runtime(&self) -> &BarRuntime {
+        &self.runtime
+    }
+
+    pub const fn runtime_mut(&mut self) -> &mut BarRuntime {
+        &mut self.runtime
+    }
+
+    #[must_use]
+    pub const fn schedule(&self) -> &RuntimeSchedule {
+        &self.schedule
+    }
+
+    pub const fn schedule_mut(&mut self) -> &mut RuntimeSchedule {
+        &mut self.schedule
+    }
+
+    #[must_use]
+    pub const fn cursor(&self) -> &SnapshotCursor {
+        &self.cursor
+    }
+
+    fn capture(&mut self, frame: RuntimeFrame) -> SessionOutput {
+        let envelope = self.cursor.update_frame(&frame);
+        SessionOutput { frame, envelope }
+    }
 }
 
 impl SnapshotCursor {
@@ -437,8 +557,8 @@ mod tests {
     use serde::de::value::{Error as ValueError, U8Deserializer};
 
     use super::{
-        ActionRequest, ActionRequestError, FrontendEnvelope, FrontendPartitions, SnapshotCursor,
-        snapshot_changes,
+        ActionRequest, ActionRequestError, FrontendEnvelope, FrontendPartitions, FrontendSession,
+        SnapshotCursor, snapshot_changes,
     };
     use crate::{
         AudioState, BarModel, BatteryState, BrightnessState, DirtyBits, LayoutId, MonitorGeometry,
@@ -776,5 +896,50 @@ mod tests {
 
         assert_eq!(frame.snapshot.theme, ThemeMode::Light);
         assert!(frame.changes().contains(DirtyBits::THEME_CHANGED));
+    }
+
+    #[test]
+    fn frontend_session_services_dispatches_deduplicates_and_replays() {
+        let now = std::time::Instant::now();
+        let mut session = FrontendSession::default();
+
+        let initial = session.service_at(now);
+        assert_eq!(initial.envelope.as_ref().unwrap().changes, DirtyBits::all());
+        assert_eq!(initial.frame.revision, 1);
+
+        let unchanged = session.service_at(now + std::time::Duration::from_millis(100));
+        assert!(unchanged.envelope.is_none());
+
+        let themed = session.dispatch(ActionRequest::ToggleTheme).unwrap();
+        assert_eq!(themed.frame.snapshot.theme, ThemeMode::Light);
+        assert!(
+            themed
+                .envelope
+                .as_ref()
+                .unwrap()
+                .changes
+                .contains(DirtyBits::THEME_CHANGED)
+        );
+
+        let platform_only = session.dispatch(ActionRequest::Screenshot).unwrap();
+        assert!(platform_only.envelope.is_none());
+        assert_eq!(
+            platform_only.frame.update.platform_effects,
+            vec![crate::BarEffect::Screenshot]
+        );
+        assert_eq!(
+            session.replay().unwrap().revision,
+            platform_only.frame.revision
+        );
+
+        session.reset_delivery();
+        assert!(session.replay().is_none());
+        assert!(
+            session
+                .dispatch(ActionRequest::ToggleSeconds)
+                .unwrap()
+                .envelope
+                .is_some()
+        );
     }
 }

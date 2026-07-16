@@ -32,8 +32,10 @@ WM snapshot ──────────────────────�
   compact formatting, and configurable icon lookup. Missing provider values
   remain unavailable rather than becoming zero or 100 percent.
 - `frontend`: the complete revisioned wire envelope, snapshot diff/cursor,
-  coarse store partitions, and one checked action request protocol. It has no
-  Tauri, webview, TypeScript, or UI-framework dependency.
+  coarse store partitions, one checked action request protocol, and the
+  optional `FrontendSession` composition of runtime cadence plus delivery
+  state. It has no Tauri, webview, TypeScript, thread, or UI-framework
+  dependency.
 - `runtime`: optional provider/transport orchestration, managed reconnect
   policy, transport lifecycle status/generation, portable service cadence,
   coherent runtime frames, and host-neutral platform-effect routing. The
@@ -80,6 +82,12 @@ Core owns:
 - `default = []`; a default build stays platform-neutral.
 - Every optional feature must compile independently.
 - No umbrella feature may silently enable unrelated platform capabilities.
+- Companion crates depend inward on `xbar_core`; `xbar_core` never depends on
+  a companion. A GUI/backend dependency belongs in its narrow adapter crate,
+  not behind an ever-growing core feature.
+- A companion handles one host boundary and must return unsupported effects
+  explicitly, allowing hosts to compose process, window, transport, and
+  renderer policies without a framework-wide facade.
 - Frontend manifests use `default-features = false` and list exact adapters.
 - Cairo/Pango and shared protocol concrete types are not re-exported from the
   crate root; adapters depend on their native libraries directly.

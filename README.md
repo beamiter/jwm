@@ -7,6 +7,12 @@ The default build has no window-system, Cairo, ALSA, sysfs, logging, or shared
 memory dependency. There is no compatibility umbrella and no `legacy-full`:
 every frontend selects only the adapters it actually uses.
 
+This repository is also a workspace for narrow companion adapters. Companion
+crates depend on `xbar_core`, never the reverse, so framework and platform
+dependencies cannot leak into the portable kernel. The first adapter,
+`xbar_linux_actions`, owns configurable screenshot/audio-control process
+launching and child reaping shared by native, toolkit, and webview hosts.
+
 ## Architecture
 
 ```text
@@ -32,6 +38,10 @@ native/provider input -> BarRuntime -> RuntimeFrame -> FrontendEnvelope
   and platform work coherently. `FrontendEnvelope`, `SnapshotCursor`, and
   `ActionRequest` provide one host-neutral wire contract without a Tauri
   dependency or framework-specific DTO copies.
+- `FrontendSession` combines a runtime, portable cadence, and delivery cursor
+  for hosts that want one `service`/`dispatch` API. Its `SessionOutput` always
+  retains the coherent frame for platform work while emitting an envelope only
+  when frontend-observable state changed.
 - `display` centralizes availability-aware metric tones, volume bands, byte
   formatting, Nerd Font symbols, monitor labels, and explicit JWM layout IDs.
   The geometry-free presentation projection gives widget toolkits the same
@@ -94,6 +104,10 @@ be drained through one `PlatformEffectHandler` policy.
 Toolkit and Tauri frontends use the same `BarRuntime` directly. A
 `RuntimeSchedule` replaces their local `last_tick`, reconnect deadline, and
 `tick + poll` merge logic; `service_frame` returns one coherent state handoff.
+Event loops can use `next_service_deadline` to sleep until either the next
+provider tick or an earlier managed-transport retry. Web bridges may instead
+own a `FrontendSession`, which applies that schedule and snapshot
+deduplication together without owning a thread or framework handle.
 Toolkits consume the geometry-free control projection, while web bridges send
 a complete `FrontendEnvelope` and dispatch a single `ActionRequest`. They do
 not depend on `shared_structures` or instantiate provider managers themselves.
@@ -137,19 +151,51 @@ if let Some(envelope) = cursor.update_frame(&frame) {
 | `runtime-linux` | `AlignedTimer`, reconnect-aware notifier ownership, and owned wake forwarding |
 | `render-cairo` | Scene-based `CairoRenderer`, text measurer, and `CairoBar` |
 
+## Companion crates
+
+```toml
+[dependencies]
+xbar_core = { git = "https://github.com/beamiter/xbar_core.git", default-features = false }
+xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git" }
+xbar_tauri = { git = "https://github.com/beamiter/xbar_core.git", features = [
+  "clock-chrono", "provider-alsa", "provider-battery-sysfs",
+  "provider-brightnessctl", "provider-system",
+] }
+```
+
+```rust
+use xbar_core::{BarEffect, PlatformEffectHandler};
+use xbar_linux_actions::ProcessActionHandler;
+
+let mut actions = ProcessActionHandler::default();
+actions.handle(BarEffect::Screenshot)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Executable policy is configurable through `ProcessActionConfig`; the defaults
+are `flameshot gui` and `pavucontrol`. Window placement, provider effects, and
+WM commands are rejected as unsupported so another host adapter can handle
+them explicitly.
+
+`xbar_tauri::configure` installs the shared runtime worker, managed transport,
+one `xbar-state` event, `dispatch_action`, `frontend_ready`, scale-aware window
+placement, and the process-action adapter onto a caller-supplied Tauri builder.
+Each application keeps its own generated context and optional plugins.
+
 ## Validation
 
 ```bash
 cargo fmt --all -- --check
 cargo test --no-default-features
 cargo test --no-default-features --features render-cairo
-cargo test --all-features
-cargo clippy --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo doc --no-default-features --no-deps
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for module ownership,
 [docs/CONSUMER-MATRIX.md](docs/CONSUMER-MATRIX.md) for every JWM bar family,
+[docs/COMPANION-CRATES.md](docs/COMPANION-CRATES.md) for adapter boundaries,
 and [docs/MIGRATION-0.4.md](docs/MIGRATION-0.4.md) for projection/bridge adoption
 ([0.3 lifecycle notes](docs/MIGRATION-0.3.md) remain relevant).
 

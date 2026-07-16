@@ -56,6 +56,32 @@ Replace multiple Tauri command functions with one internally tagged
 converts to `UserAction`, dispatches, and captures the result. The model still
 performs the authoritative configured-tag check.
 
+Hosts that always need the runtime, schedule, and delivery cursor together can
+use `FrontendSession`. Both `service` and `dispatch` return `SessionOutput`:
+the frame retains issues and platform effects, while its optional envelope is
+already ordered and deduplicated. `next_service_deadline` lets an event loop
+sleep until the earlier of its provider tick and managed transport retry.
+
+The workspace `xbar_tauri` companion applies this composition to all six Tauri
+consumers. A backend keeps its generated context and plugins but replaces its
+local DTOs, worker, retry cache, commands, and window-effect switch with:
+
+```rust,ignore
+let shared_path = std::env::args().nth(1).unwrap_or_default();
+let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+let builder = xbar_tauri::configure(
+    builder,
+    xbar_tauri::BridgeConfig::new(shared_path),
+)?;
+builder.run(tauri::generate_context!())?;
+```
+
+After registering its one `xbar-state` listener, the web frontend invokes
+`frontend_ready`. All user intent goes through `dispatch_action` with a
+`request` containing the internally tagged `ActionRequest`; for example
+`{"action":"adjust_volume","delta":5}`. Revision ordering lets the frontend
+discard a delayed older event without maintaining four backend DTO caches.
+
 ## Shared display and control semantics
 
 Use the `display` module instead of local threshold/icon/format helpers:

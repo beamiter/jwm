@@ -45,8 +45,8 @@ pub use display::{
     volume_level, volume_level_for_device,
 };
 pub use frontend::{
-    ActionRequest, ActionRequestError, FrontendEnvelope, FrontendPartitions, SnapshotCursor,
-    snapshot_changes,
+    ActionRequest, ActionRequestError, FrontendEnvelope, FrontendPartitions, FrontendSession,
+    SessionOutput, SnapshotCursor, snapshot_changes,
 };
 pub use model::{
     AudioDeviceInfo, AudioState, BarEffect, BarEvent, BarModel, BarSnapshot, BarView, BatteryState,
