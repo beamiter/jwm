@@ -1,9 +1,9 @@
 use egui::{Align, Button, Label, Layout, Stroke};
 use log::{info, warn};
-use std::process::{Child, Command};
 
 use anyhow::Result;
-use xbar_core::{BarEffect, MonitorGeometry, UserAction};
+use xbar_core::{BarEffect, MonitorGeometry, PlatformEffectHandler, UserAction};
+use xbar_linux_actions::ProcessActionHandler;
 
 use crate::modules::ModuleRegistry;
 use crate::state::AppState;
@@ -15,7 +15,7 @@ pub struct EguiBarApp {
     state: AppState,
     /// Module registry
     modules: ModuleRegistry,
-    platform_children: Vec<Child>,
+    process_actions: ProcessActionHandler,
     active_monitor_geometry: Option<MonitorGeometry>,
     last_pixels_per_point: f32,
 }
@@ -39,7 +39,7 @@ impl EguiBarApp {
         Ok(Self {
             state,
             modules,
-            platform_children: Vec::new(),
+            process_actions: ProcessActionHandler::default(),
             active_monitor_geometry: None,
             last_pixels_per_point: cc.egui_ctx.pixels_per_point(),
         })
@@ -129,8 +129,11 @@ impl EguiBarApp {
                         1080.0, 40.0,
                     )));
                 }
-                BarEffect::Screenshot => self.spawn_platform_helper("flameshot", &["gui"]),
-                BarEffect::OpenAudioControl => self.spawn_platform_helper("pavucontrol", &[]),
+                effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl) => {
+                    if let Err(error) = self.process_actions.handle(effect) {
+                        warn!("Failed to handle platform effect: {error}");
+                    }
+                }
                 BarEffect::WindowManager(command) => {
                     warn!("No WM transport available for command: {command:?}");
                 }
@@ -156,25 +159,6 @@ impl EguiBarApp {
             geometry.width as f32 / pixels_per_point,
             40.0,
         )));
-    }
-
-    fn spawn_platform_helper(&mut self, program: &str, args: &[&str]) {
-        match Command::new(program).args(args).spawn() {
-            Ok(child) => self.platform_children.push(child),
-            Err(err) => warn!("Failed to launch {program}: {err}"),
-        }
-    }
-
-    fn reap_platform_children(&mut self) {
-        self.platform_children
-            .retain_mut(|child| match child.try_wait() {
-                Ok(Some(_)) => false,
-                Ok(None) => true,
-                Err(err) => {
-                    warn!("Failed to reap platform helper: {err}");
-                    false
-                }
-            });
     }
 }
 
@@ -233,7 +217,6 @@ impl eframe::App for EguiBarApp {
             });
 
         self.handle_platform_effects(&ctx);
-        self.reap_platform_children();
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
 
         if self.state.ui_state.need_resize {

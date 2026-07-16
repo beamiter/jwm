@@ -1,9 +1,9 @@
 use std::time::{Duration, Instant};
 
-use log::{info, warn};
+use log::warn;
 use xbar_core::{
-    AudioDeviceInfo, BarEffect, BarRuntime, BarSnapshot, ModelConfig, RuntimeAdapter, RuntimeIssue,
-    RuntimeUpdate, SharedTransport, UserAction,
+    AudioDeviceInfo, BarEffect, BarRuntime, BarSnapshot, ModelConfig, RuntimeSchedule,
+    RuntimeUpdate, TransportRecoveryConfig, UserAction,
 };
 
 /// UI-specific state that is intentionally outside the semantic core model.
@@ -29,28 +29,29 @@ pub struct AppState {
     runtime: BarRuntime,
     pub snapshot: BarSnapshot,
     pub ui_state: UiState,
-    shared_path: String,
-    last_tick: Instant,
-    last_transport_attempt: Instant,
+    schedule: RuntimeSchedule,
     pending_platform_effects: Vec<BarEffect>,
 }
 
 impl AppState {
     pub fn new(shared_path: String) -> Self {
-        let transport = open_transport(&shared_path, true);
-        let mut runtime = BarRuntime::with_transport(ModelConfig::default(), transport)
-            .expect("default xbar_core model config is valid");
-        let mut initial_update = runtime.tick();
-        initial_update.merge(runtime.poll_transport());
+        let mut runtime = if shared_path.is_empty() {
+            BarRuntime::new(ModelConfig::default())
+        } else {
+            let recovery = TransportRecoveryConfig::new(shared_path, Duration::from_secs(2))
+                .expect("static transport recovery config is valid");
+            BarRuntime::with_managed_transport(ModelConfig::default(), recovery)
+        }
+        .expect("default xbar_core model config is valid");
+        let mut schedule = RuntimeSchedule::default();
+        let initial_update = schedule.service(&mut runtime);
         let snapshot = runtime.snapshot();
 
         let mut state = Self {
             runtime,
             snapshot,
             ui_state: UiState::new(),
-            shared_path,
-            last_tick: Instant::now(),
-            last_transport_attempt: Instant::now(),
+            schedule,
             pending_platform_effects: Vec::new(),
         };
         state.apply_runtime_update(initial_update);
@@ -59,12 +60,7 @@ impl AppState {
 
     /// Poll the non-blocking WM transport every frame and providers once a second.
     pub fn update(&mut self) {
-        let mut update = self.runtime.poll_transport();
-        if self.last_tick.elapsed() >= Duration::from_secs(1) {
-            self.ensure_transport();
-            update.merge(self.runtime.tick());
-            self.last_tick = Instant::now();
-        }
+        let update = self.schedule.service(&mut self.runtime);
         self.apply_runtime_update(update);
         self.ui_state.last_ui_update = Instant::now();
     }
@@ -90,56 +86,14 @@ impl AppState {
         )
     }
 
-    fn ensure_transport(&mut self) {
-        if self.shared_path.is_empty()
-            || self.runtime.transport().is_some()
-            || self.last_transport_attempt.elapsed() < Duration::from_secs(2)
-        {
-            return;
-        }
-        self.last_transport_attempt = Instant::now();
-        if let Some(transport) = open_transport(&self.shared_path, false) {
-            self.runtime.set_transport(Some(transport));
-            info!("Connected to WM transport at {}", self.shared_path);
-        }
-    }
-
     fn apply_runtime_update(&mut self, update: RuntimeUpdate) {
-        let transport_failed = update.issues.iter().any(|issue| {
-            matches!(
-                issue,
-                RuntimeIssue::AdapterFailed {
-                    adapter: RuntimeAdapter::Transport,
-                    ..
-                }
-            )
-        });
         for issue in &update.issues {
             warn!("xbar runtime issue: {issue:?}");
-        }
-        if transport_failed {
-            self.runtime.set_transport(None);
-            self.last_transport_attempt = Instant::now();
         }
         if update.needs_redraw() {
             self.snapshot = self.runtime.snapshot();
         }
         self.pending_platform_effects
             .extend(update.platform_effects);
-    }
-}
-
-fn open_transport(shared_path: &str, warn_on_error: bool) -> Option<SharedTransport> {
-    if shared_path.is_empty() {
-        return None;
-    }
-    match SharedTransport::open(shared_path) {
-        Ok(transport) => Some(transport),
-        Err(err) => {
-            if warn_on_error {
-                warn!("Failed to open WM transport at {shared_path}: {err}");
-            }
-            None
-        }
     }
 }
