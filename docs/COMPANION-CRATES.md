@@ -28,10 +28,13 @@ No edge may point from `xbar_core` to a companion.
 
 ## Current adapters
 
-`xbar_linux_actions` handles only `Screenshot` and `OpenAudioControl`. It owns
-configurable command specs, synchronous launch-error reporting, non-blocking
-child waiting, and zombie prevention. Other effects are returned as explicit
-errors rather than being silently ignored.
+`xbar_linux_actions::ProcessActionHandler` handles only `Screenshot` and
+`OpenAudioControl`. It owns configurable command specs, synchronous
+launch-error reporting, non-blocking child waiting, and zombie prevention.
+Other effects are returned as explicit errors rather than being silently
+ignored. The same crate's separate `CommandRunner` executes output-producing
+host probes directly (without a shell), accepts only successful exit status,
+and preserves stderr in structured failures.
 
 ### `xbar_tauri`
 

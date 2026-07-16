@@ -7,7 +7,7 @@
 use std::{
     ffi::{OsStr, OsString},
     fmt, io,
-    process::{Child, Command},
+    process::{Child, Command, ExitStatus, Output},
     sync::mpsc,
     thread,
 };
@@ -44,6 +44,82 @@ impl CommandSpec {
     {
         self.args.extend(args.into_iter().map(Into::into));
         self
+    }
+}
+
+/// Failure to run a command whose captured output is required by a host.
+#[derive(Debug)]
+pub enum CommandRunError {
+    Spawn {
+        program: OsString,
+        source: io::Error,
+    },
+    Exit {
+        program: OsString,
+        status: ExitStatus,
+        stderr: Vec<u8>,
+    },
+}
+
+impl fmt::Display for CommandRunError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Spawn { program, source } => {
+                write!(f, "failed to run {}: {source}", program.to_string_lossy())
+            }
+            Self::Exit {
+                program,
+                status,
+                stderr,
+            } => {
+                write!(f, "{} exited with {status}", program.to_string_lossy())?;
+                let stderr = String::from_utf8_lossy(stderr);
+                let stderr = stderr.trim();
+                if !stderr.is_empty() {
+                    write!(f, ": {stderr}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for CommandRunError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Spawn { source, .. } => Some(source),
+            Self::Exit { .. } => None,
+        }
+    }
+}
+
+/// Executes one [`CommandSpec`] and captures its complete output.
+///
+/// Unlike [`ProcessActionHandler`], this adapter waits for completion because
+/// callers need stdout before they can update status state. Non-zero exits are
+/// errors and retain stderr for diagnostics. Commands are executed directly,
+/// without a shell or string interpolation.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CommandRunner;
+
+impl CommandRunner {
+    pub fn output(command: &CommandSpec) -> Result<Output, CommandRunError> {
+        let output = Command::new(&command.program)
+            .args(&command.args)
+            .output()
+            .map_err(|source| CommandRunError::Spawn {
+                program: command.program.clone(),
+                source,
+            })?;
+        if output.status.success() {
+            Ok(output)
+        } else {
+            Err(CommandRunError::Exit {
+                program: command.program.clone(),
+                status: output.status,
+                stderr: output.stderr,
+            })
+        }
     }
 }
 
@@ -277,6 +353,36 @@ mod tests {
 
         assert!(matches!(error, ProcessActionError::Spawn { .. }));
         assert!(error.to_string().contains("failed to launch"));
+    }
+
+    #[test]
+    fn command_runner_captures_stdout_and_passes_arguments_without_a_shell() {
+        let output = CommandRunner::output(
+            &CommandSpec::new("/usr/bin/printf").with_args(["%s", "hello xbar"]),
+        )
+        .unwrap();
+
+        assert_eq!(output.stdout, b"hello xbar");
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn command_runner_reports_spawn_and_non_zero_exit_failures() {
+        let missing = CommandRunner::output(&CommandSpec::new(
+            "/definitely/missing/xbar-command-runner-test",
+        ))
+        .unwrap_err();
+        assert!(matches!(missing, CommandRunError::Spawn { .. }));
+
+        let failed = CommandRunner::output(
+            &CommandSpec::new("/bin/sh").with_args(["-c", "printf failure >&2; exit 7"]),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            &failed,
+            CommandRunError::Exit { status, .. } if status.code() == Some(7)
+        ));
+        assert!(failed.to_string().contains("failure"));
     }
 
     #[test]

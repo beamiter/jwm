@@ -11,7 +11,8 @@ This repository is also a workspace for narrow companion adapters. Companion
 crates depend on `xbar_core`, never the reverse, so framework and platform
 dependencies cannot leak into the portable kernel. The first adapter,
 `xbar_linux_actions`, owns configurable screenshot/audio-control process
-launching and child reaping shared by native, toolkit, and webview hosts.
+launching, child reaping, and checked output capture for host-side Linux
+command probes shared by native, toolkit, and webview hosts.
 
 ## Architecture
 
@@ -165,17 +166,23 @@ xbar_tauri = { git = "https://github.com/beamiter/xbar_core.git", features = [
 
 ```rust
 use xbar_core::{BarEffect, PlatformEffectHandler};
-use xbar_linux_actions::ProcessActionHandler;
+use xbar_linux_actions::{CommandRunner, CommandSpec, ProcessActionHandler};
 
 let mut actions = ProcessActionHandler::default();
 actions.handle(BarEffect::Screenshot)?;
+
+let output = CommandRunner::output(
+    &CommandSpec::new("ip").with_args(["-4", "-o", "addr"]),
+)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 Executable policy is configurable through `ProcessActionConfig`; the defaults
 are `flameshot gui` and `pavucontrol`. Window placement, provider effects, and
 WM commands are rejected as unsupported so another host adapter can handle
-them explicitly.
+them explicitly. `CommandRunner` reuses `CommandSpec` for output-producing
+host probes, rejects non-zero exits, retains stderr in its error, and never
+invokes a shell implicitly.
 
 `xbar_tauri::configure` installs the shared runtime worker, managed transport,
 one `xbar-state` event, `dispatch_action`, `frontend_ready`, scale-aware window
