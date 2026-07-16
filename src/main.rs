@@ -16,19 +16,18 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use log::{debug, info, warn};
+use log::{debug, warn};
 
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
-    BarEffect, BarRuntime, LayoutId, ModelConfig, MonitorGeometry, RuntimeAdapter, RuntimeIssue,
-    RuntimeUpdate, SharedTransport, TagId, ThemeMode, UserAction,
+    BarEffect, BarRuntime, LayoutId, ModelConfig, MonitorGeometry, PlatformEffectHandler,
+    RuntimeSchedule, RuntimeUpdate, TagId, ThemeMode, TransportRecoveryConfig, UserAction,
 };
+use xbar_linux_actions::ProcessActionHandler;
 
 use masonry::core::{ErasedAction, WidgetId};
 use masonry::kurbo::Axis;
@@ -262,7 +261,6 @@ fn pill_padding() -> Padding {
 #[derive(Debug, Default)]
 struct WorkerSignal {
     pending: AtomicBool,
-    tick_due: AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -273,8 +271,8 @@ enum WorkerEvent {
 struct XilemBar {
     tab_colors: [Color; 9],
     runtime: BarRuntime,
-    shared_path: String,
-    last_transport_retry: Instant,
+    schedule: RuntimeSchedule,
+    process_actions: ProcessActionHandler,
     geometry_bridge: Arc<GeometryBridge>,
     theme: Theme,
 }
@@ -285,25 +283,20 @@ impl XilemBar {
         let shared_path = args.iter().skip(1).last().cloned().unwrap_or_default();
 
         let theme_mode = load_theme_mode();
-        let transport = if shared_path.is_empty() {
-            None
-        } else {
-            match SharedTransport::open(&shared_path) {
-                Ok(transport) => Some(transport),
-                Err(error) => {
-                    warn!("failed to open WM transport at {shared_path:?}: {error}");
-                    None
-                }
-            }
-        };
         let config = ModelConfig {
             brightness_step: 10,
             initial_theme: theme_mode,
             show_seconds: true,
             ..ModelConfig::default()
         };
-        let runtime = BarRuntime::with_transport(config, transport)
-            .expect("xilem bar model configuration is valid");
+        let runtime = if shared_path.is_empty() {
+            BarRuntime::new(config)
+        } else {
+            let recovery = TransportRecoveryConfig::new(shared_path, TRANSPORT_RETRY_INTERVAL)
+                .expect("static transport recovery config is valid");
+            BarRuntime::with_managed_transport(config, recovery)
+        };
+        let runtime = runtime.expect("xilem bar model configuration is valid");
         Self {
             tab_colors: [
                 rgb(0xFF, 0x6B, 0x6B),
@@ -317,8 +310,8 @@ impl XilemBar {
                 rgb(0x00, 0xD2, 0xD3),
             ],
             runtime,
-            shared_path,
-            last_transport_retry: Instant::now(),
+            schedule: RuntimeSchedule::default(),
+            process_actions: ProcessActionHandler::default(),
             geometry_bridge,
             theme: Theme::from_mode(theme_mode),
         }
@@ -344,20 +337,15 @@ impl XilemBar {
     }
 
     fn handle_runtime_update(&mut self, update: RuntimeUpdate) {
-        if has_transport_failure(&update) {
-            self.runtime.set_transport(None);
-            self.last_transport_retry = Instant::now();
-        }
         for issue in update.issues {
             warn!("xbar runtime issue: {issue:?}");
         }
         for effect in update.platform_effects {
             match effect {
-                BarEffect::Screenshot => {
-                    spawn_program("flameshot", &["gui"]);
-                }
-                BarEffect::OpenAudioControl => {
-                    spawn_program("pavucontrol", &[]);
+                effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl) => {
+                    if let Err(error) = self.process_actions.handle(effect) {
+                        warn!("failed to handle platform effect: {error}");
+                    }
                 }
                 BarEffect::ApplyMonitorGeometry(geometry) => {
                     self.geometry_bridge.update_geometry(Some(geometry));
@@ -372,36 +360,9 @@ impl XilemBar {
     fn on_worker(&mut self, ev: WorkerEvent) {
         match ev {
             WorkerEvent::Drive(signal) => {
-                self.ensure_transport();
-                let mut update = self.runtime.poll_transport();
-                if signal.tick_due.swap(false, Ordering::AcqRel) {
-                    update.merge(self.runtime.tick());
-                }
+                let update = self.schedule.service(&mut self.runtime);
                 self.handle_runtime_update(update);
                 signal.pending.store(false, Ordering::Release);
-            }
-        }
-    }
-
-    fn ensure_transport(&mut self) {
-        if self.shared_path.is_empty()
-            || self.runtime.transport().is_some()
-            || self.last_transport_retry.elapsed() < TRANSPORT_RETRY_INTERVAL
-        {
-            return;
-        }
-
-        self.last_transport_retry = Instant::now();
-        match SharedTransport::open(&self.shared_path) {
-            Ok(transport) => {
-                self.runtime.set_transport(Some(transport));
-                info!("reconnected WM transport at {:?}", self.shared_path);
-            }
-            Err(error) => {
-                debug!(
-                    "WM transport at {:?} is still unavailable: {error}",
-                    self.shared_path
-                );
             }
         }
     }
@@ -982,14 +943,8 @@ fn driver_task() -> impl View<XilemBar, (), ViewCtx, Element = NoElement> + use<
             let signal = Arc::new(WorkerSignal::default());
             let mut iv = tokio::time::interval(TRANSPORT_POLL_INTERVAL);
             iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut poll_count = 9_u8;
             loop {
                 iv.tick().await;
-                poll_count += 1;
-                if poll_count >= 10 {
-                    poll_count = 0;
-                    signal.tick_due.store(true, Ordering::Release);
-                }
                 if signal
                     .pending
                     .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -1016,31 +971,6 @@ fn root(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
             .background(bar_bg),
         (driver_task(),),
     )
-}
-
-fn has_transport_failure(update: &RuntimeUpdate) -> bool {
-    update.issues.iter().any(|issue| {
-        matches!(
-            issue,
-            RuntimeIssue::AdapterFailed {
-                adapter: RuntimeAdapter::Transport,
-                ..
-            }
-        )
-    })
-}
-
-fn spawn_program(program: &str, args: &[&str]) {
-    let program = program.to_owned();
-    let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
-    let thread_name = format!("wait-{program}");
-    if let Err(error) = thread::Builder::new().name(thread_name).spawn(move || {
-        if let Err(error) = Command::new(&program).args(&args).status() {
-            warn!("failed to run {program}: {error}");
-        }
-    }) {
-        warn!("failed to start process waiter: {error}");
-    }
 }
 
 // -------- main ---------------------------------------------------------------
