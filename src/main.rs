@@ -1,7 +1,5 @@
 use std::env;
-use std::process::Command;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{
     App, Application, Bounds, Context, IntoElement, MouseButton, ParentElement, Pixels, Render,
@@ -17,12 +15,13 @@ use gpui_component::{
     button::{Button, ButtonCustomVariant, ButtonVariants},
     init as init_components,
 };
-use log::{debug, info, warn};
+use log::{debug, warn};
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
-    BarEffect, BarRuntime, LayoutId, ModelConfig, MonitorGeometry, RuntimeAdapter, RuntimeIssue,
-    RuntimeUpdate, SharedTransport, TagId, UserAction,
+    BarEffect, BarRuntime, LayoutId, ModelConfig, MonitorGeometry, PlatformEffectHandler,
+    RuntimeUpdate, TagId, TransportRecoveryConfig, UserAction,
 };
+use xbar_linux_actions::ProcessActionHandler;
 
 const NERD_FONT: &str = "JetBrainsMono Nerd Font";
 
@@ -61,8 +60,7 @@ const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 struct GpuiComponentBar {
     runtime: BarRuntime,
-    shared_path: String,
-    last_transport_retry: Instant,
+    process_actions: ProcessActionHandler,
     active_geometry: Option<MonitorGeometry>,
     default_size: Option<gpui::Size<Pixels>>,
     last_scale_factor: Option<f32>,
@@ -74,32 +72,24 @@ struct GpuiComponentBar {
 impl GpuiComponentBar {
     fn new(cx: &mut Context<Self>) -> Self {
         let shared_path = env::args().skip(1).last().unwrap_or_default();
-        let transport = if shared_path.is_empty() {
-            None
-        } else {
-            match SharedTransport::open(&shared_path) {
-                Ok(transport) => Some(transport),
-                Err(error) => {
-                    warn!("failed to open WM transport at {shared_path:?}: {error}");
-                    None
-                }
-            }
+        let config = ModelConfig {
+            show_seconds: true,
+            clock_minute_format: "%m-%d %H:%M".into(),
+            clock_second_format: "%m-%d %H:%M:%S".into(),
+            ..ModelConfig::default()
         };
-        let runtime = BarRuntime::with_transport(
-            ModelConfig {
-                show_seconds: true,
-                clock_minute_format: "%m-%d %H:%M".into(),
-                clock_second_format: "%m-%d %H:%M:%S".into(),
-                ..ModelConfig::default()
-            },
-            transport,
-        )
+        let runtime = if shared_path.is_empty() {
+            BarRuntime::new(config)
+        } else {
+            let recovery = TransportRecoveryConfig::new(shared_path, TRANSPORT_RETRY_INTERVAL)
+                .expect("static transport recovery config is valid");
+            BarRuntime::with_managed_transport(config, recovery)
+        }
         .expect("gpui component bar model configuration is valid");
 
         let mut this = Self {
             runtime,
-            shared_path,
-            last_transport_retry: Instant::now(),
+            process_actions: ProcessActionHandler::default(),
             active_geometry: None,
             default_size: None,
             last_scale_factor: None,
@@ -135,7 +125,6 @@ impl GpuiComponentBar {
                     .timer(TRANSPORT_POLL_INTERVAL)
                     .await;
                 let _ = this.update(cx, |this, cx| {
-                    this.ensure_transport();
                     let update = this.runtime.poll_transport();
                     this.handle_runtime_update(update);
                     cx.notify();
@@ -159,10 +148,6 @@ impl GpuiComponentBar {
     }
 
     fn handle_runtime_update(&mut self, update: RuntimeUpdate) {
-        if has_transport_failure(&update) {
-            self.runtime.set_transport(None);
-            self.last_transport_retry = Instant::now();
-        }
         for issue in update.issues {
             warn!("xbar runtime issue: {issue:?}");
         }
@@ -176,36 +161,12 @@ impl GpuiComponentBar {
                     self.active_geometry = None;
                     self.geometry_dirty = true;
                 }
-                BarEffect::Screenshot => {
-                    spawn_program("flameshot", &["gui"]);
-                }
-                BarEffect::OpenAudioControl => {
-                    spawn_program("pavucontrol", &[]);
+                effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl) => {
+                    if let Err(error) = self.process_actions.handle(effect) {
+                        warn!("failed to handle platform effect: {error}");
+                    }
                 }
                 unhandled => warn!("unhandled xbar platform effect: {unhandled:?}"),
-            }
-        }
-    }
-
-    fn ensure_transport(&mut self) {
-        if self.shared_path.is_empty()
-            || self.runtime.transport().is_some()
-            || self.last_transport_retry.elapsed() < TRANSPORT_RETRY_INTERVAL
-        {
-            return;
-        }
-
-        self.last_transport_retry = Instant::now();
-        match SharedTransport::open(&self.shared_path) {
-            Ok(transport) => {
-                self.runtime.set_transport(Some(transport));
-                info!("reconnected WM transport at {:?}", self.shared_path);
-            }
-            Err(error) => {
-                debug!(
-                    "WM transport at {:?} is still unavailable: {error}",
-                    self.shared_path
-                );
             }
         }
     }
@@ -527,31 +488,6 @@ impl GpuiComponentBar {
             .child(time_chip)
             .child(self.chip_tag(monitor, indigo_500(), white(), indigo_500()))
             .child(self.chip_tag("s: 1.00", slate_700(), slate_100(), slate_700()))
-    }
-}
-
-fn has_transport_failure(update: &RuntimeUpdate) -> bool {
-    update.issues.iter().any(|issue| {
-        matches!(
-            issue,
-            RuntimeIssue::AdapterFailed {
-                adapter: RuntimeAdapter::Transport,
-                ..
-            }
-        )
-    })
-}
-
-fn spawn_program(program: &str, args: &[&str]) {
-    let program = program.to_owned();
-    let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
-    let thread_name = format!("wait-{program}");
-    if let Err(error) = thread::Builder::new().name(thread_name).spawn(move || {
-        if let Err(error) = Command::new(&program).args(&args).status() {
-            warn!("failed to run {program}: {error}");
-        }
-    }) {
-        warn!("failed to start process waiter: {error}");
     }
 }
 
