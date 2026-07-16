@@ -5,18 +5,18 @@ use gtk4::{
     Application, ApplicationWindow, Builder, Button, EventControllerScroll,
     EventControllerScrollFlags, Label, Revealer, glib,
 };
-use log::{debug, info, warn};
+use log::{info, warn};
 use std::cell::{Cell, RefCell};
 use std::env;
-use std::process::{Child, Command};
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
-    BarEffect, BarRuntime, BarSnapshot, LayoutId, ModelConfig, RuntimeAdapter, RuntimeIssue,
-    RuntimeUpdate, SharedTransport, TagId, TagState, ThemeMode, UserAction,
+    BarEffect, BarRuntime, BarSnapshot, LayoutId, ModelConfig, PlatformEffectHandler,
+    RuntimeUpdate, TagId, TagState, ThemeMode, TransportRecoveryConfig, UserAction,
 };
+use xbar_linux_actions::ProcessActionHandler;
 
 use gtk4::glib::ControlFlow;
 use gtk4::glib::Propagation;
@@ -110,9 +110,7 @@ struct TabBarApp {
     // Shared state
     state: SharedAppState,
     runtime: RefCell<BarRuntime>,
-    shared_path: String,
-    last_transport_attempt: Cell<Instant>,
-    platform_children: RefCell<Vec<Child>>,
+    process_actions: RefCell<ProcessActionHandler>,
 
     // Cached UI-applied values for diff
     ui_last_monitor_num: Cell<i32>,
@@ -192,19 +190,15 @@ impl TabBarApp {
             .object("layout_option_monocle")
             .expect("Failed to get layout_option_monocle");
 
-        let transport = if shared_path.is_empty() {
-            None
+        let mut runtime = if shared_path.is_empty() {
+            BarRuntime::new(ModelConfig::default())
         } else {
-            match SharedTransport::open(&shared_path) {
-                Ok(transport) => Some(transport),
-                Err(err) => {
-                    warn!("Failed to open WM transport at {shared_path}: {err}");
-                    None
-                }
-            }
-        };
-        let mut runtime = BarRuntime::with_transport(ModelConfig::default(), transport)
-            .expect("default xbar_core model config is valid");
+            let recovery =
+                TransportRecoveryConfig::new(shared_path.clone(), Duration::from_secs(2))
+                    .expect("static transport recovery config is valid");
+            BarRuntime::with_managed_transport(ModelConfig::default(), recovery)
+        }
+        .expect("default xbar_core model config is valid");
         let mut initial_update = runtime.tick();
         initial_update.merge(runtime.poll_transport());
 
@@ -231,9 +225,7 @@ impl TabBarApp {
             layout_btn_monocle,
             state,
             runtime: RefCell::new(runtime),
-            shared_path,
-            last_transport_attempt: Cell::new(Instant::now()),
-            platform_children: RefCell::new(Vec::new()),
+            process_actions: RefCell::new(ProcessActionHandler::default()),
             ui_last_monitor_num: Cell::new(i32::MIN),
         });
 
@@ -252,10 +244,8 @@ impl TabBarApp {
         {
             let app_clone = app_instance.clone();
             glib::timeout_add_seconds_local(1, move || {
-                app_clone.ensure_transport();
                 let update = app_clone.runtime.borrow_mut().tick();
                 app_clone.handle_runtime_update(update);
-                app_clone.reap_platform_children();
                 ControlFlow::Continue
             });
         }
@@ -404,49 +394,18 @@ impl TabBarApp {
         app.dispatch(UserAction::ViewTagOn { tag, monitor });
     }
 
-    fn ensure_transport(&self) {
-        if self.shared_path.is_empty()
-            || self.runtime.borrow().transport().is_some()
-            || self.last_transport_attempt.get().elapsed() < Duration::from_secs(2)
-        {
-            return;
-        }
-        self.last_transport_attempt.set(Instant::now());
-        match SharedTransport::open(&self.shared_path) {
-            Ok(transport) => {
-                self.runtime.borrow_mut().set_transport(Some(transport));
-                info!("Connected to WM transport at {}", self.shared_path);
-            }
-            Err(err) => debug!("WM transport is still unavailable: {err}"),
-        }
-    }
-
     fn dispatch(&self, action: UserAction) {
         let update = self.runtime.borrow_mut().dispatch(action);
         self.handle_runtime_update(update);
     }
 
     fn handle_runtime_update(&self, update: RuntimeUpdate) {
-        let transport_failed = update.issues.iter().any(|issue| {
-            matches!(
-                issue,
-                RuntimeIssue::AdapterFailed {
-                    adapter: RuntimeAdapter::Transport,
-                    ..
-                }
-            )
-        });
         for issue in &update.issues {
             warn!("xbar runtime issue: {issue:?}");
         }
         let needs_redraw = update.needs_redraw();
         for effect in update.platform_effects {
             self.handle_platform_effect(effect);
-        }
-
-        if transport_failed {
-            let _ = self.runtime.borrow_mut().set_transport(None);
-            self.last_transport_attempt.set(Instant::now());
         }
 
         if needs_redraw {
@@ -465,8 +424,11 @@ impl TabBarApp {
                 geometry.height,
             ),
             BarEffect::ClearMonitorGeometry => self.window.set_default_size(1000, 40),
-            BarEffect::Screenshot => self.spawn_platform_helper("flameshot", &["gui"]),
-            BarEffect::OpenAudioControl => self.spawn_platform_helper("pavucontrol", &[]),
+            effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl) => {
+                if let Err(error) = self.process_actions.borrow_mut().handle(effect) {
+                    warn!("Failed to handle platform effect: {error}");
+                }
+            }
             BarEffect::WindowManager(command) => {
                 warn!("No WM transport available for command: {command:?}");
             }
@@ -477,26 +439,6 @@ impl TabBarApp {
                 warn!("No enabled runtime adapter handled effect: {effect:?}");
             }
         }
-    }
-
-    fn spawn_platform_helper(&self, program: &str, args: &[&str]) {
-        match Command::new(program).args(args).spawn() {
-            Ok(child) => self.platform_children.borrow_mut().push(child),
-            Err(err) => warn!("Failed to launch {program}: {err}"),
-        }
-    }
-
-    fn reap_platform_children(&self) {
-        self.platform_children
-            .borrow_mut()
-            .retain_mut(|child| match child.try_wait() {
-                Ok(Some(_)) => false,
-                Ok(None) => true,
-                Err(err) => {
-                    warn!("Failed to reap platform helper: {err}");
-                    false
-                }
-            });
     }
 
     fn update_all_views(&self) {
