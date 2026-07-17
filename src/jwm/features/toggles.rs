@@ -614,9 +614,16 @@ impl Jwm {
             | EventMaskBits::BUTTON_RELEASE
             | EventMaskBits::POINTER_MOTION)
             .bits();
-        if !backend.input_ops().grab_pointer(pointer_mask, crosshair)? {
-            let _ = backend.key_ops().ungrab_keyboard();
-            return Err("could not grab pointer for recording region selection".into());
+        match backend.input_ops().grab_pointer(pointer_mask, crosshair) {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = backend.key_ops().ungrab_keyboard();
+                return Err("could not grab pointer for recording region selection".into());
+            }
+            Err(error) => {
+                let _ = backend.key_ops().ungrab_keyboard();
+                return Err(error.into());
+            }
         }
         Ok(())
     }
