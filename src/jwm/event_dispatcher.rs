@@ -271,6 +271,22 @@ impl WMController for Jwm {
             return;
         }
 
+        if self.features.recording.selecting_region {
+            self.features.recording.end_region_drag();
+            if self.features.recording.adjusting_region {
+                if let Some(region) = self
+                    .features
+                    .recording
+                    .region
+                    .and_then(Self::recording_region_tuple)
+                {
+                    backend.compositor_set_recording_region(region);
+                }
+            }
+            self.sync_recording_region_overlay(backend);
+            return;
+        }
+
         // Screenshot region selection: on mouse release, commit the selection
         // and wait for the user to choose save action (Enter=file, c=clipboard).
         if self.features.screenshot.active && self.features.screenshot.drawing_annotation {
@@ -391,6 +407,23 @@ impl WMController for Jwm {
     ) {
         if self.features.system_ui.is_active() {
             self.last_mouse_root = (root_x, root_y);
+            return;
+        }
+        if self.features.recording.selecting_region {
+            self.last_mouse_root = (root_x, root_y);
+            backend.compositor_set_mouse_position(root_x as f32, root_y as f32);
+            let region = self.features.recording.update_region_drag(
+                root_x.round() as i32,
+                root_y.round() as i32,
+                self.s_w,
+                self.s_h,
+            );
+            if self.features.recording.adjusting_region {
+                if let Some(region) = region.and_then(Self::recording_region_tuple) {
+                    backend.compositor_set_recording_region(region);
+                }
+            }
+            self.sync_recording_region_overlay(backend);
             return;
         }
         // Screenshot region selection: update overlay rectangle while dragging

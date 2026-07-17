@@ -3130,6 +3130,27 @@ impl CompositorMedia for UdevBackend {
         }
     }
 
+    fn compositor_start_recording_region(&mut self, path: &str, region: (i32, i32, u32, u32)) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.start_recording_region(path, region);
+        }
+        self.request_render();
+    }
+
+    fn compositor_set_recording_region(&mut self, region: (i32, i32, u32, u32)) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_recording_region(region);
+        }
+        self.request_render();
+    }
+
+    fn compositor_set_recording_region_overlay(&mut self, region: Option<(i32, i32, u32, u32)>) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_recording_region_overlay(region);
+        }
+        self.request_render();
+    }
+
     fn compositor_stop_recording(&mut self) {
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.stop_recording();

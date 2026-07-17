@@ -502,7 +502,11 @@ impl<C: CompositorConnection> Compositor<C> {
         // Realtime post-processing cannot run while the X server presents a
         // fullscreen client directly. Restore redirection as soon as a pose is
         // visible, including the first packet received during unredirect.
-        if self.slime_state.is_visible() || self.system_ui.is_some() {
+        if self.slime_state.is_visible()
+            || self.system_ui.is_some()
+            || self.recording_active
+            || self.recording_region_overlay.is_some()
+        {
             if let Some(previous) = self.unredirected_window.take() {
                 let _ = self.conn.redirect_window_manual(previous);
                 let _ = self.conn.flush_x11();
@@ -691,7 +695,13 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // Phase 2.3: Direct scanout check - bypass compositor for eligible fullscreen windows
         // This provides -8-12ms latency reduction for fullscreen games/video
-        {
+        if self.recording_active || self.recording_region_overlay.is_some() {
+            // Recording and the local selection/adjustment overlay both need
+            // frames produced by the compositor. End a previously active
+            // bypass immediately so fullscreen clients cannot hide the
+            // selection border or leave the recorder reading a stale FBO.
+            let _ = self.direct_scanout_mgr.check_scene(&[], None);
+        } else {
             let mut scene_info = std::mem::take(&mut self.scratch_scene_info);
             scene_info.clear();
             scene_info.reserve(scene.len());
@@ -3103,6 +3113,12 @@ impl<C: CompositorConnection> Compositor<C> {
         // corrupted frames in both X11RB and XCB backends.
         if self.recording_active {
             self.capture_recording_frame();
+        }
+
+        // Recording crop controls are a local-only overlay. Rendering them
+        // after the PBO capture keeps the handles out of the encoded video.
+        if self.recording_region_overlay.is_some() {
+            self.render_recording_region_overlay(&proj);
         }
 
         // Swap the selected platform surface. EGL receives the original damage

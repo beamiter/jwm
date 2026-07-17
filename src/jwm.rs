@@ -351,6 +351,8 @@ impl Jwm {
             "toggle_expose"
         } else if eq!(Jwm::toggle_recording) {
             "toggle_recording"
+        } else if eq!(Jwm::adjust_recording_region) {
+            "adjust_recording_region"
         } else if eq!(Jwm::toggle_audio_recording) {
             "toggle_audio_recording"
         } else {

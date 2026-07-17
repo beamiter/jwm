@@ -856,8 +856,9 @@ pub(crate) struct WaylandCompositor {
     screenshot_readback: screenshot_readback::ScreenshotReadback,
 
     // --- Recording control ---
-    pending_recording_start: Option<String>,
+    pending_recording_start: Option<(String, (i32, i32, u32, u32))>,
     pending_recording_stop: bool,
+    recording_region_overlay: Option<(i32, i32, u32, u32)>,
 
     // --- Debug HUD extended ---
     debug_hud_extended: bool,
@@ -1669,6 +1670,7 @@ impl WaylandCompositor {
                 // Recording control
                 pending_recording_start: None,
                 pending_recording_stop: false,
+                recording_region_overlay: None,
 
                 // Debug HUD extended
                 debug_hud_extended: false,
@@ -1789,7 +1791,43 @@ impl WaylandCompositor {
 
     /// Request recording start — deferred until next render_frame when GL is active.
     pub(crate) fn start_recording(&mut self, path: &str) {
-        self.pending_recording_start = Some(path.to_string());
+        self.start_recording_region(path, (0, 0, self.screen_w, self.screen_h));
+    }
+
+    pub(crate) fn start_recording_region(&mut self, path: &str, region: (i32, i32, u32, u32)) {
+        let region = self.clamp_recording_region(region);
+        self.pending_recording_start = Some((path.to_string(), region));
+    }
+
+    pub(crate) fn set_recording_region(&mut self, region: (i32, i32, u32, u32)) {
+        let region = self.clamp_recording_region(region);
+        if let Some((_, pending_region)) = self.pending_recording_start.as_mut() {
+            *pending_region = region;
+        }
+        self.recording.set_region(region);
+        self.needs_render = true;
+    }
+
+    pub(crate) fn set_recording_region_overlay(&mut self, region: Option<(i32, i32, u32, u32)>) {
+        self.recording_region_overlay = region;
+        self.needs_render = true;
+        self.force_full_damage_next = true;
+    }
+
+    pub(crate) fn recording_requires_composition(&self) -> bool {
+        self.recording.is_active()
+            || self.pending_recording_start.is_some()
+            || self.pending_recording_stop
+            || self.recording_region_overlay.is_some()
+    }
+
+    fn clamp_recording_region(&self, region: (i32, i32, u32, u32)) -> (i32, i32, u32, u32) {
+        let (x, y, width, height) = region;
+        let x = x.clamp(0, self.screen_w.saturating_sub(1) as i32);
+        let y = y.clamp(0, self.screen_h.saturating_sub(1) as i32);
+        let width = width.max(1).min(self.screen_w.saturating_sub(x as u32));
+        let height = height.max(1).min(self.screen_h.saturating_sub(y as u32));
+        (x, y, width, height)
     }
 
     /// Request recording stop — deferred until next render_frame when GL is active.

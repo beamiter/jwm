@@ -1236,6 +1236,12 @@ pub trait CompositorMedia: Send {
     }
 
     fn compositor_start_recording(&mut self, _path: &str) {}
+    fn compositor_start_recording_region(&mut self, path: &str, region: (i32, i32, u32, u32)) {
+        self.compositor_set_recording_region(region);
+        self.compositor_start_recording(path);
+    }
+    fn compositor_set_recording_region(&mut self, _region: (i32, i32, u32, u32)) {}
+    fn compositor_set_recording_region_overlay(&mut self, _region: Option<(i32, i32, u32, u32)>) {}
     fn compositor_stop_recording(&mut self) {}
 
     fn compositor_notify_audio_timing(

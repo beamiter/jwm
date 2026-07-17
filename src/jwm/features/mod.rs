@@ -51,6 +51,7 @@ impl FeatureStates {
     /// 检查是否有任何特殊模式激活
     pub fn has_active_feature(&self) -> bool {
         self.screenshot.active
+            || self.recording.selecting_region
             || self.system_ui.is_active()
             || self.overview.active
             || self.recording.active

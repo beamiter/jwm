@@ -580,12 +580,29 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     pub(crate) fn start_recording(&mut self, output_path: &str) {
+        self.start_recording_region(output_path, (0, 0, self.screen_w, self.screen_h));
+    }
+
+    pub(crate) fn start_recording_region(
+        &mut self,
+        output_path: &str,
+        region: (i32, i32, u32, u32),
+    ) {
         if self.recording_active {
             return;
         }
-        let w = self.screen_w;
-        let h = self.screen_h;
+        self.set_recording_region(region);
+        let (_, _, w, h) = self.recording_region;
+        self.recording_output_size = (w, h);
         let fps = self.recording_fps.clamp(1, 240);
+
+        let recording_fbo = match unsafe { Self::create_scene_fbo(&self.gl, w, h) } {
+            Ok(fbo) => fbo,
+            Err(error) => {
+                log::warn!("compositor: failed to create recording framebuffer: {error}");
+                return;
+            }
+        };
 
         let stderr_file = std::fs::File::create("/tmp/jwm-ffmpeg.log")
             .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
@@ -689,6 +706,10 @@ impl<C: CompositorConnection> Compositor<C> {
             Ok(child) => child,
             Err(e) => {
                 log::warn!("compositor: failed to start ffmpeg: {e}");
+                unsafe {
+                    self.gl.delete_framebuffer(recording_fbo.0);
+                    self.gl.delete_texture(recording_fbo.1);
+                }
                 return;
             }
         };
@@ -709,11 +730,13 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         self.recording_process = Some(child);
+        self.recording_fbo = Some(recording_fbo);
         self.recording_active = true;
         self.recording_last_frame = None;
         self.recording_current_pbo = 0;
         self.recording_captured_frames = 0;
         self.recording_cursor = [None, None];
+        self.recording_frame_region = [self.recording_region; 2];
         log::info!(
             "compositor: recording started to {output_path} (microphone={})",
             if with_audio {
@@ -722,6 +745,21 @@ impl<C: CompositorConnection> Compositor<C> {
                 "off"
             }
         );
+    }
+
+    pub(crate) fn set_recording_region(&mut self, region: (i32, i32, u32, u32)) {
+        let (x, y, width, height) = region;
+        let x = x.clamp(0, self.screen_w.saturating_sub(1) as i32);
+        let y = y.clamp(0, self.screen_h.saturating_sub(1) as i32);
+        let width = width.max(1).min(self.screen_w.saturating_sub(x as u32));
+        let height = height.max(1).min(self.screen_h.saturating_sub(y as u32));
+        self.recording_region = (x, y, width, height);
+        self.needs_render = true;
+    }
+
+    pub(crate) fn set_recording_region_overlay(&mut self, region: Option<(i32, i32, u32, u32)>) {
+        self.recording_region_overlay = region;
+        self.force_full_redraw();
     }
 
     pub(crate) fn stop_recording(&mut self) {
@@ -749,6 +787,12 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
         self.recording_cursor = [None, None];
+        if let Some((fbo, texture)) = self.recording_fbo.take() {
+            unsafe {
+                self.gl.delete_framebuffer(fbo);
+                self.gl.delete_texture(texture);
+            }
+        }
 
         if let Some(mut child) = self.recording_process.take() {
             drop(child.stdin.take());
@@ -776,13 +820,34 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         self.recording_last_frame = Some(now);
 
-        let w = self.screen_w;
-        let h = self.screen_h;
+        let (w, h) = self.recording_output_size;
+        let Some((recording_fbo, _)) = self.recording_fbo else {
+            return;
+        };
         // Overlap the current GPU readback with sending the preceding PBO to
         // ffmpeg. This avoids a GPU/CPU round-trip on every frame.
         let written_pbo = self.recording_current_pbo;
         if let Some(pbo) = self.recording_pbo[written_pbo] {
             unsafe {
+                let (x, y, region_width, region_height) = self.recording_region;
+                let source_bottom = self.screen_h as i32 - (y + region_height as i32);
+                self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+                self.gl
+                    .bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(recording_fbo));
+                self.gl.blit_framebuffer(
+                    x,
+                    source_bottom,
+                    x + region_width as i32,
+                    source_bottom + region_height as i32,
+                    0,
+                    0,
+                    w as i32,
+                    h as i32,
+                    glow::COLOR_BUFFER_BIT,
+                    glow::LINEAR,
+                );
+                self.gl
+                    .bind_framebuffer(glow::FRAMEBUFFER, Some(recording_fbo));
                 self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
                 self.gl.read_pixels(
                     0,
@@ -797,8 +862,10 @@ impl<C: CompositorConnection> Compositor<C> {
                 // PBO is mapped one capture later, by which time a fast-moving
                 // cursor may already be at a different position.
                 self.recording_cursor[written_pbo] = self.graphics.capture_recording_cursor();
+                self.recording_frame_region[written_pbo] = self.recording_region;
 
                 self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+                self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             }
             self.recording_current_pbo ^= 1;
             if self.recording_captured_frames > 0 {
@@ -813,7 +880,8 @@ impl<C: CompositorConnection> Compositor<C> {
             return;
         };
         let cursor = self.recording_cursor[pbo_index].take();
-        let buf_size = (self.screen_w * self.screen_h * 4) as usize;
+        let (width, height) = self.recording_output_size;
+        let buf_size = (width * height * 4) as usize;
         unsafe {
             self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
             let ptr = self.gl.map_buffer_range(
@@ -827,7 +895,12 @@ impl<C: CompositorConnection> Compositor<C> {
             } else {
                 let pixels = std::slice::from_raw_parts_mut(ptr as *mut u8, buf_size);
                 if let Some(cursor) = cursor.as_ref() {
-                    cursor.composite_into(pixels, self.screen_w, self.screen_h);
+                    cursor.composite_into(
+                        pixels,
+                        width,
+                        height,
+                        self.recording_frame_region[pbo_index],
+                    );
                 }
                 if let Some(child) = self.recording_process.as_mut() {
                     if let Some(stdin) = child.stdin.as_mut() {

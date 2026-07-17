@@ -1429,6 +1429,16 @@ impl Config {
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
+                modifier: vec![
+                    "Mod1".to_string(),
+                    "Control".to_string(),
+                    "Shift".to_string(),
+                ],
+                key: "r".to_string(),
+                function: "adjust_recording_region".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Control".to_string()],
                 key: "m".to_string(),
                 function: "toggle_audio_recording".to_string(),
@@ -2280,6 +2290,7 @@ impl Config {
             "restore_session" => Some(Jwm::restore_session),
             "toggle_expose" => Some(Jwm::toggle_expose),
             "toggle_recording" => Some(Jwm::toggle_recording),
+            "adjust_recording_region" => Some(Jwm::adjust_recording_region),
             "toggle_audio_recording" => Some(Jwm::toggle_audio_recording),
 
             "scrolling_focus_column" => Some(Jwm::scrolling_focus_column),

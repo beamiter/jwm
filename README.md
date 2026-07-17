@@ -122,6 +122,8 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | Alt+Control+Escape | Lock screen |
 | Alt+Control+O | Display layout |
 | Alt+S / Alt+Shift+S | Region / full screenshot |
+| Alt+Control+R | Select a region and start/stop screen recording |
+| Alt+Control+Shift+R | Move or resize the active recording region |
 | Alt+Shift+C | Close focused client |
 | Alt+Control+C | Calculator scratchpad |
 | Alt+Control+S | Toggle sticky window |

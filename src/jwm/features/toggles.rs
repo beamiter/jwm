@@ -3,7 +3,7 @@
 //! 这个模块包含所有窗口管理器特性的切换函数（toggle* 系列）
 
 use crate::backend::api::Backend;
-use crate::backend::common_define::{EventMaskBits, WindowId};
+use crate::backend::common_define::{EventMaskBits, StdCursorKind, WindowId};
 use crate::config::CONFIG;
 use crate::core::animation::AnimationKind;
 use crate::core::models::ClientKey;
@@ -501,47 +501,202 @@ impl Jwm {
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if !self.features.recording.active {
-            let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-            let cfg_dir = CONFIG.load().behavior().recording_output_dir.clone();
-            let output_dir = if !cfg_dir.is_empty() {
-                std::path::PathBuf::from(cfg_dir)
-            } else {
-                std::env::var("XDG_VIDEOS_DIR")
-                    .ok()
-                    .filter(|path| !path.is_empty())
-                    .map(std::path::PathBuf::from)
-                    .or_else(dirs::video_dir)
-                    .or_else(|| {
-                        std::env::var_os("HOME")
-                            .filter(|home| !home.is_empty())
-                            .map(std::path::PathBuf::from)
-                            .map(|home| home.join("Videos"))
-                    })
-                    .ok_or_else(|| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::NotFound,
-                            "cannot resolve the Videos directory; set behavior.recording_output_dir",
-                        )
-                    })?
-            };
-            std::fs::create_dir_all(&output_dir).map_err(|error| {
-                std::io::Error::new(
-                    error.kind(),
-                    format!(
-                        "cannot create recording output directory '{}': {error}",
-                        output_dir.display()
-                    ),
-                )
-            })?;
-            let output_path = output_dir
-                .join(format!("recording-{}.mp4", timestamp))
-                .to_string_lossy()
-                .to_string();
-            self.start_recording(backend, &output_path)?;
+            if self.features.recording.selecting_region {
+                return Ok(());
+            }
+            let output_path = self.prepare_recording_output_path()?;
+            self.begin_recording_region_selection(backend, output_path)?;
         } else {
             self.stop_recording(backend)?;
         }
         Ok(())
+    }
+
+    /// Enter interactive move/resize mode while keeping the encoder running.
+    pub fn adjust_recording_region(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.features.recording.active {
+            return Err("recording region adjustment requires an active recording".into());
+        }
+        if !self.features.recording.begin_region_adjustment() {
+            return Ok(());
+        }
+        if let Err(error) = self.grab_recording_region_input(backend) {
+            self.features.recording.cancel_region_selection();
+            return Err(error);
+        }
+        self.sync_recording_region_overlay(backend);
+        info!("[recording] interactive region adjustment started");
+        Ok(())
+    }
+
+    fn prepare_recording_output_path(&self) -> Result<String, Box<dyn std::error::Error>> {
+        let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let cfg_dir = CONFIG.load().behavior().recording_output_dir.clone();
+        let output_dir = if !cfg_dir.is_empty() {
+            std::path::PathBuf::from(cfg_dir)
+        } else {
+            std::env::var("XDG_VIDEOS_DIR")
+                .ok()
+                .filter(|path| !path.is_empty())
+                .map(std::path::PathBuf::from)
+                .or_else(dirs::video_dir)
+                .or_else(|| {
+                    std::env::var_os("HOME")
+                        .filter(|home| !home.is_empty())
+                        .map(std::path::PathBuf::from)
+                        .map(|home| home.join("Videos"))
+                })
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "cannot resolve the Videos directory; set behavior.recording_output_dir",
+                    )
+                })?
+        };
+        std::fs::create_dir_all(&output_dir).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!(
+                    "cannot create recording output directory '{}': {error}",
+                    output_dir.display()
+                ),
+            )
+        })?;
+        Ok(output_dir
+            .join(format!("recording-{timestamp}.mp4"))
+            .to_string_lossy()
+            .to_string())
+    }
+
+    fn grab_recording_region_input(
+        &mut self,
+        backend: &mut dyn Backend,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(root) = backend.root_window() {
+            backend.key_ops().grab_keyboard(root)?;
+        }
+        let crosshair = backend
+            .cursor_provider()
+            .get(StdCursorKind::Crosshair)
+            .ok()
+            .map(|cursor| cursor.0);
+        let pointer_mask = (EventMaskBits::BUTTON_PRESS
+            | EventMaskBits::BUTTON_RELEASE
+            | EventMaskBits::POINTER_MOTION)
+            .bits();
+        if !backend.input_ops().grab_pointer(pointer_mask, crosshair)? {
+            let _ = backend.key_ops().ungrab_keyboard();
+            return Err("could not grab pointer for recording region selection".into());
+        }
+        Ok(())
+    }
+
+    fn release_recording_region_input(&mut self, backend: &mut dyn Backend) {
+        let _ = backend.key_ops().ungrab_keyboard();
+        let _ = backend.input_ops().ungrab_pointer();
+        if let Some(root) = backend.root_window() {
+            let _ = backend
+                .cursor_provider()
+                .apply(root, StdCursorKind::LeftPtr);
+        }
+    }
+
+    fn begin_recording_region_selection(
+        &mut self,
+        backend: &mut dyn Backend,
+        output_path: String,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if !backend.has_compositor() {
+            return Err("screen recording requires an active compositor".into());
+        }
+        self.features
+            .recording
+            .begin_initial_region_selection(output_path.clone());
+        if let Err(error) = self.grab_recording_region_input(backend) {
+            self.features.recording.cancel_region_selection();
+            return Err(error);
+        }
+        backend.compositor_set_recording_region_overlay(None);
+        backend.compositor_force_full_redraw();
+        info!("[recording] select a region, then press Enter to start → {output_path}");
+        Ok(())
+    }
+
+    pub(crate) fn sync_recording_region_overlay(&mut self, backend: &mut dyn Backend) {
+        let region = self
+            .features
+            .recording
+            .region
+            .and_then(Self::recording_region_tuple);
+        backend.compositor_set_recording_region_overlay(region);
+        backend.compositor_force_full_redraw();
+    }
+
+    pub(crate) fn finish_recording_region_interaction(
+        &mut self,
+        backend: &mut dyn Backend,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(region) = self.features.recording.region else {
+            return Ok(());
+        };
+        let Some(region_tuple) = Self::recording_region_tuple(region) else {
+            return Ok(());
+        };
+        let adjusting = self.features.recording.adjusting_region;
+        let pending_path = self.features.recording.pending_output_path.clone();
+        self.features.recording.finish_region_selection();
+        self.release_recording_region_input(backend);
+        backend.compositor_set_recording_region_overlay(None);
+
+        if adjusting {
+            backend.compositor_set_recording_region(region_tuple);
+            backend.compositor_force_full_redraw();
+            info!(
+                "[recording] region adjustment committed: {}x{}+{}+{}",
+                region.w, region.h, region.x, region.y
+            );
+            return Ok(());
+        }
+
+        let Some(output_path) = pending_path else {
+            return Err("recording selection lost its output path".into());
+        };
+        self.start_recording_region(backend, &output_path, region)?;
+        Ok(())
+    }
+
+    pub(crate) fn cancel_recording_region_interaction(&mut self, backend: &mut dyn Backend) {
+        let was_adjusting = self.features.recording.adjusting_region;
+        let restored = self.features.recording.cancel_region_selection();
+        self.release_recording_region_input(backend);
+        backend.compositor_set_recording_region_overlay(None);
+        if was_adjusting {
+            if let Some(region) = restored.and_then(Self::recording_region_tuple) {
+                backend.compositor_set_recording_region(region);
+            }
+        }
+        backend.compositor_force_full_redraw();
+        info!(
+            "[recording] region {} cancelled",
+            if was_adjusting {
+                "adjustment"
+            } else {
+                "selection"
+            }
+        );
+    }
+
+    pub(crate) fn recording_region_tuple(region: Rect) -> Option<(i32, i32, u32, u32)> {
+        Some((
+            region.x,
+            region.y,
+            u32::try_from(region.w).ok()?,
+            u32::try_from(region.h).ok()?,
+        ))
     }
 
     /// Toggle the built-in microphone recorder (Alt+Ctrl+M by default).
@@ -628,11 +783,14 @@ impl Jwm {
         Ok(())
     }
 
-    /// Start a recording with an explicit final output path.
-    pub(crate) fn start_recording(
+    /// Start a recording from a source rectangle. The encoded dimensions are
+    /// fixed from this initial rectangle while later region updates are scaled
+    /// into the same video canvas.
+    pub(crate) fn start_recording_region(
         &mut self,
         backend: &mut dyn Backend,
         output_path: &str,
+        region: Rect,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if self.features.recording.active {
             return Err("recording is already active".into());
@@ -653,6 +811,7 @@ impl Jwm {
         if output.exists() {
             return Err(format!("recording output already exists: {output_path}").into());
         }
+        let region = self.normalize_initial_recording_region(region)?;
 
         // A standalone WAV recording and the synchronized screen audio track
         // must not race for the same capture device. Finalize the standalone
@@ -664,12 +823,38 @@ impl Jwm {
         }
 
         self.features.recording.start(output_path.to_string());
+        self.features.recording.set_region(region);
+        self.features.recording.set_output_size_from_region();
         self.features
             .recording
             .start_segment(output_path.to_string());
-        info!("[recording] start → {output_path} (direct output)");
-        backend.compositor_start_recording(output_path);
+        let region_tuple = Self::recording_region_tuple(region)
+            .ok_or("recording region dimensions are invalid")?;
+        info!(
+            "[recording] start → {output_path} ({}x{}+{}+{})",
+            region.w, region.h, region.x, region.y
+        );
+        backend.compositor_start_recording_region(output_path, region_tuple);
         Ok(())
+    }
+
+    pub(crate) fn normalize_initial_recording_region(
+        &self,
+        region: Rect,
+    ) -> Result<Rect, Box<dyn std::error::Error>> {
+        if self.s_w < 16 || self.s_h < 16 {
+            return Err("screen is too small for region recording".into());
+        }
+        let x = region.x.clamp(0, self.s_w - 16);
+        let y = region.y.clamp(0, self.s_h - 16);
+        let max_width = self.s_w - x;
+        let max_height = self.s_h - y;
+        let width = region.w.clamp(16, max_width) & !1;
+        let height = region.h.clamp(16, max_height) & !1;
+        if width < 16 || height < 16 {
+            return Err("recording region must be at least 16x16".into());
+        }
+        Ok(Rect::new(x, y, width, height))
     }
 
     /// Stop the active recording. This operation is intentionally idempotent.
@@ -678,7 +863,13 @@ impl Jwm {
         backend: &mut dyn Backend,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if !self.features.recording.active {
+            if self.features.recording.selecting_region {
+                self.cancel_recording_region_interaction(backend);
+            }
             return Ok(());
+        }
+        if self.features.recording.selecting_region {
+            self.cancel_recording_region_interaction(backend);
         }
         backend.compositor_stop_recording();
         self.features.recording.stop();

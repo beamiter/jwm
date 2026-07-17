@@ -59,3 +59,24 @@ recording_audio_bitrate = "128k"
 如果 ALSA 设备不可用，或者当前 ffmpeg 没有 ALSA 输入支持，JWM 会在日志中给出
 警告并自动退回纯视频录制。录屏占用麦克风期间不能同时启动独立音频录制；若独立
 录音已经运行，开始录屏时会先安全停止并保存当前音频文件。
+
+## 动态录屏区域
+
+- `Alt+Ctrl+R`：框选区域，按 Enter 开始录制；录制中再次按下会停止。
+- `Alt+Ctrl+Shift+R`：录制中进入区域调整模式。
+- 调整模式中可以拖动区域内部来移动，或拖动边缘/控制点缩放；Enter 确认，
+  Escape 恢复调整前的区域。
+
+编码分辨率由首次选择的区域确定并保持不变。录制中改变区域大小时，X11 和
+Wayland 合成器会在 GPU 上将新区域缩放到固定视频画布，因此不会重启 ffmpeg，
+麦克风音轨也不会中断。红色调整边框只显示在本地桌面，不会写入视频。
+
+自动化可以在开始时指定区域，也可以在录制中动态更新：
+
+```bash
+jwm-tool msg start_recording \
+  --args '{"path":"/tmp/demo.mp4","x":100,"y":80,"width":1280,"height":720}'
+jwm-tool msg set_recording_region \
+  --args '{"x":320,"y":180,"width":960,"height":540}'
+jwm-tool msg get_recording_status
+```

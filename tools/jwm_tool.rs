@@ -246,7 +246,7 @@ enum Commands {
                       标签: view, tag, toggleview, toggletag, loopview\n  \
                       显示器: focusmon, tagmon\n  \
                       其他: spawn, quit, restart, reload_config, set_config, set_config_batch, command_batch\n  \
-                      录屏: start_recording, stop_recording, get_recording_status, toggle_recording\n  \
+                      录屏: start_recording, set_recording_region, stop_recording, get_recording_status, toggle_recording, adjust_recording_region\n  \
                       录音: start_audio_recording, stop_audio_recording, get_audio_recording_status, toggle_audio_recording\n\n\
                       \x1b[1m可用查询:\x1b[0m\n  \
                       get_status, get_capabilities, get_windows, get_workspaces, get_monitors, get_tree,\n  \

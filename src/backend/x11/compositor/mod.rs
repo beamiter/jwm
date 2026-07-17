@@ -596,6 +596,11 @@ where
     recording_last_frame: Option<std::time::Instant>,
     recording_pbo: [Option<glow::Buffer>; 2],
     recording_cursor: [Option<RecordingCursor>; 2],
+    recording_frame_region: [(i32, i32, u32, u32); 2],
+    recording_region: (i32, i32, u32, u32),
+    recording_output_size: (u32, u32),
+    recording_fbo: Option<(glow::Framebuffer, glow::Texture)>,
+    recording_region_overlay: Option<(i32, i32, u32, u32)>,
     recording_current_pbo: usize,
     recording_captured_frames: u64,
 
@@ -822,6 +827,10 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 if let Some(buf) = pbo.take() {
                     self.gl.delete_buffer(buf);
                 }
+            }
+            if let Some((fbo, texture)) = self.recording_fbo.take() {
+                self.gl.delete_framebuffer(fbo);
+                self.gl.delete_texture(texture);
             }
         }
         // Stop recording if active

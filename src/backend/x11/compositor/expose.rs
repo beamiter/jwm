@@ -341,6 +341,75 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
+    /// Draw the interactive recording crop outline after frame capture so the
+    /// controls remain visible locally without being baked into the video.
+    pub(super) fn render_recording_region_overlay(&self, proj: &[f32; 16]) {
+        let Some((x, y, width, height)) = self.recording_region_overlay else {
+            return;
+        };
+        let x = x as f32;
+        let y = y as f32;
+        let width = width as f32;
+        let height = height as f32;
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+
+        unsafe {
+            self.gl.use_program(Some(self.border_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.border_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+            self.gl.uniform_4_f32(
+                self.border_uniforms.border_color.as_ref(),
+                1.0,
+                0.2,
+                0.12,
+                0.95,
+            );
+            self.gl
+                .uniform_1_f32(self.border_uniforms.radius.as_ref(), 2.0);
+            self.gl
+                .uniform_2_f32(self.border_uniforms.size.as_ref(), width, height);
+            self.gl
+                .uniform_4_f32(self.border_uniforms.rect.as_ref(), x, y, width, height);
+            self.gl
+                .uniform_1_f32(self.border_uniforms.border_width.as_ref(), 3.0);
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+            let handle_size = 10.0;
+            for (handle_x, handle_y) in [
+                (x, y),
+                (x + width * 0.5, y),
+                (x + width, y),
+                (x, y + height * 0.5),
+                (x + width, y + height * 0.5),
+                (x, y + height),
+                (x + width * 0.5, y + height),
+                (x + width, y + height),
+            ] {
+                self.gl
+                    .uniform_2_f32(self.border_uniforms.size.as_ref(), handle_size, handle_size);
+                self.gl.uniform_4_f32(
+                    self.border_uniforms.rect.as_ref(),
+                    handle_x - handle_size * 0.5,
+                    handle_y - handle_size * 0.5,
+                    handle_size,
+                    handle_size,
+                );
+                self.gl
+                    .uniform_1_f32(self.border_uniforms.border_width.as_ref(), handle_size);
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
+
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+        }
+    }
+
     // =========================================================================
     // 5.3 Window Peek (Boss Key)
     // =========================================================================

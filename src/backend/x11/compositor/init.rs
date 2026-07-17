@@ -1022,6 +1022,11 @@ impl<C: CompositorConnection> Compositor<C> {
             recording_last_frame: None,
             recording_pbo: [None, None],
             recording_cursor: [None, None],
+            recording_frame_region: [(0, 0, screen_w, screen_h); 2],
+            recording_region: (0, 0, screen_w, screen_h),
+            recording_output_size: (screen_w, screen_h),
+            recording_fbo: None,
+            recording_region_overlay: None,
             recording_current_pbo: 0,
             recording_captured_frames: 0,
             // Phase 3.1: Motion trail

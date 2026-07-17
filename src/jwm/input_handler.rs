@@ -331,6 +331,16 @@ impl Jwm {
             return Ok(());
         }
 
+        // Recording region selection/adjustment mode.
+        if self.features.recording.selecting_region {
+            if keysym == keys::KEY_Escape {
+                self.cancel_recording_region_interaction(backend);
+            } else if keysym == keys::KEY_Return {
+                self.finish_recording_region_interaction(backend)?;
+            }
+            return Ok(());
+        }
+
         // Screenshot region selection mode
         if self.features.screenshot.active {
             if keysym == keys::KEY_Escape {
@@ -613,6 +623,20 @@ impl Jwm {
         detail_btn: u8,
         time: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // Recording region selection/adjustment intercept.
+        if self.features.recording.selecting_region {
+            let button = MouseButton::from_u8(detail_btn);
+            if button == MouseButton::Left {
+                let (x, y) = self.last_mouse_root;
+                self.features
+                    .recording
+                    .begin_region_drag(x.round() as i32, y.round() as i32);
+            } else {
+                self.cancel_recording_region_interaction(backend);
+            }
+            return Ok(());
+        }
+
         // Screenshot region selection intercept
         if self.features.screenshot.active {
             let btn = MouseButton::from_u8(detail_btn);

@@ -7,6 +7,7 @@ use crate::config::{ArgumentConfig, BackendFamily, CONFIG, get_backend_family};
 use crate::core::layout::LayoutEnum;
 use crate::core::models::{ClientKey, MonitorKey, WMClient, WMMonitor};
 use crate::core::state::WMState;
+use crate::core::types::Rect;
 use crate::ipc::{
     self, IpcEvent, IpcResponse, MonitorInfoIpc, RuntimeCounts, RuntimeFeatureStates,
     RuntimeHealth, RuntimeStatusV1, TreeNode, WindowInfo, WorkspaceInfo,
@@ -1012,14 +1013,43 @@ impl Jwm {
             let Some(path) = args.get("path").and_then(|value| value.as_str()) else {
                 return IpcResponse::err("start_recording: expected string field 'path'");
             };
-            return match self.start_recording(backend, path) {
+            let region_fields = (
+                args.get("x").and_then(|value| value.as_i64()),
+                args.get("y").and_then(|value| value.as_i64()),
+                args.get("width").and_then(|value| value.as_u64()),
+                args.get("height").and_then(|value| value.as_u64()),
+            );
+            let region = match region_fields {
+                (None, None, None, None) => Rect::new(0, 0, self.s_w, self.s_h),
+                (Some(x), Some(y), Some(width), Some(height)) => {
+                    let parsed = i32::try_from(x)
+                        .ok()
+                        .zip(i32::try_from(y).ok())
+                        .zip(i32::try_from(width).ok())
+                        .zip(i32::try_from(height).ok())
+                        .map(|(((x, y), width), height)| Rect::new(x, y, width, height));
+                    let Some(region) = parsed else {
+                        return IpcResponse::err(
+                            "start_recording: region values are outside supported ranges",
+                        );
+                    };
+                    region
+                }
+                _ => {
+                    return IpcResponse::err(
+                        "start_recording: x, y, width and height must be provided together",
+                    );
+                }
+            };
+            return match self.start_recording_region(backend, path, region) {
                 Ok(()) => {
+                    let region = self.features.recording.region;
                     self.broadcast_ipc_event(
                         "recording/started",
-                        serde_json::json!({"output_path": path}),
+                        serde_json::json!({"output_path": path, "region": region.map(|r| serde_json::json!({"x": r.x, "y": r.y, "width": r.w, "height": r.h}))}),
                     );
                     IpcResponse::ok(Some(
-                        serde_json::json!({"active": true, "output_path": path}),
+                        serde_json::json!({"active": true, "output_path": path, "region": region.map(|r| serde_json::json!({"x": r.x, "y": r.y, "width": r.w, "height": r.h}))}),
                     ))
                 }
                 Err(error) => {
@@ -1030,6 +1060,56 @@ impl Jwm {
                     IpcResponse::err(error.to_string())
                 }
             };
+        }
+
+        if name == "set_recording_region" {
+            if !self.features.recording.active {
+                return IpcResponse::err("set_recording_region: recording is not active");
+            }
+            let parsed = args
+                .get("x")
+                .and_then(|value| value.as_i64())
+                .and_then(|value| i32::try_from(value).ok())
+                .zip(
+                    args.get("y")
+                        .and_then(|value| value.as_i64())
+                        .and_then(|value| i32::try_from(value).ok()),
+                )
+                .zip(
+                    args.get("width")
+                        .and_then(|value| value.as_u64())
+                        .and_then(|value| i32::try_from(value).ok()),
+                )
+                .zip(
+                    args.get("height")
+                        .and_then(|value| value.as_u64())
+                        .and_then(|value| i32::try_from(value).ok()),
+                )
+                .map(|(((x, y), width), height)| Rect::new(x, y, width, height));
+            let Some(region) = parsed else {
+                return IpcResponse::err(
+                    "set_recording_region: expected integer x, y, width and height",
+                );
+            };
+            let region = match self.normalize_initial_recording_region(region) {
+                Ok(region) => region,
+                Err(error) => return IpcResponse::err(error.to_string()),
+            };
+            self.features.recording.set_region(region);
+            if let Some(region_tuple) = Self::recording_region_tuple(region) {
+                backend.compositor_set_recording_region(region_tuple);
+                backend.compositor_force_full_redraw();
+            }
+            self.broadcast_ipc_event(
+                "recording/region_changed",
+                serde_json::json!({"x": region.x, "y": region.y, "width": region.w, "height": region.h}),
+            );
+            return IpcResponse::ok(Some(serde_json::json!({
+                "x": region.x,
+                "y": region.y,
+                "width": region.w,
+                "height": region.h,
+            })));
         }
 
         if name == "stop_recording" {
@@ -1182,6 +1262,18 @@ impl Jwm {
                     "audio_enabled": cfg.behavior().recording_audio_enabled,
                     "audio_device": cfg.behavior().recording_audio_device,
                     "audio_bitrate": cfg.behavior().recording_audio_bitrate,
+                    "region": self.features.recording.region.map(|region| serde_json::json!({
+                        "x": region.x,
+                        "y": region.y,
+                        "width": region.w,
+                        "height": region.h,
+                    })),
+                    "output_size": self.features.recording.output_size.map(|(width, height)| serde_json::json!({
+                        "width": width,
+                        "height": height,
+                    })),
+                    "selecting_region": self.features.recording.selecting_region,
+                    "adjusting_region": self.features.recording.adjusting_region,
                 })))
             }
             "get_audio_recording_status" => {

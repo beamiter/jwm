@@ -118,6 +118,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "tag",
         "tagmon",
         "toggle_annotation",
+        "adjust_recording_region",
         "toggle_audio_recording",
         "toggle_dnd",
         "toggle_magnifier",
@@ -146,6 +147,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "set_config",
         "set_config_batch",
         "set_hdr_metadata",
+        "set_recording_region",
         "start_audio_recording",
         "start_recording",
         "stop_audio_recording",
@@ -435,6 +437,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "toggle_peek" => Ok((Jwm::toggle_peek, parse_int_arg(args, 0)?)),
         "toggle_annotation" => Ok((Jwm::toggle_annotation, parse_int_arg(args, 0)?)),
         "toggle_recording" => Ok((Jwm::toggle_recording, parse_int_arg(args, 0)?)),
+        "adjust_recording_region" => Ok((Jwm::adjust_recording_region, parse_int_arg(args, 0)?)),
         "toggle_audio_recording" => Ok((Jwm::toggle_audio_recording, parse_int_arg(args, 0)?)),
         "toggle_dnd" => Ok((Jwm::toggle_dnd, parse_int_arg(args, 0)?)),
 

@@ -224,6 +224,61 @@ impl WaylandCompositor {
         }
     }
 
+    /// Render local recording crop controls after the recorder has copied the
+    /// frame, keeping this overlay out of the encoded stream.
+    pub(crate) fn render_recording_region_overlay(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+        let Some((x, y, width, height)) = self.recording_region_overlay else {
+            return;
+        };
+        let x = x as f32;
+        let y = y as f32;
+        let width = width as f32;
+        let height = height as f32;
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+
+        unsafe {
+            self.bind_quad_vao(gl);
+            gl.UseProgram(self.border_program);
+            gl.UniformMatrix4fv(
+                self.border_uniforms.projection,
+                1,
+                ffi::FALSE as u8,
+                projection.as_ptr(),
+            );
+            gl.Uniform4f(self.border_uniforms.border_color, 1.0, 0.2, 0.12, 0.95);
+            gl.Uniform1f(self.border_uniforms.radius, 2.0);
+            gl.Uniform2f(self.border_uniforms.size, width, height);
+            gl.Uniform4f(self.border_uniforms.rect, x, y, width, height);
+            gl.Uniform1f(self.border_uniforms.border_width, 3.0);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+
+            let handle_size = 10.0;
+            for (handle_x, handle_y) in [
+                (x, y),
+                (x + width * 0.5, y),
+                (x + width, y),
+                (x, y + height * 0.5),
+                (x + width, y + height * 0.5),
+                (x, y + height),
+                (x + width * 0.5, y + height),
+                (x + width, y + height),
+            ] {
+                gl.Uniform2f(self.border_uniforms.size, handle_size, handle_size);
+                gl.Uniform4f(
+                    self.border_uniforms.rect,
+                    handle_x - handle_size * 0.5,
+                    handle_y - handle_size * 0.5,
+                    handle_size,
+                    handle_size,
+                );
+                gl.Uniform1f(self.border_uniforms.border_width, handle_size);
+                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            }
+        }
+    }
+
     /// Render peek mode ("boss key") overlay.
     /// Draws a dark overlay over everything, then redraws only the focused window
     /// at full opacity on top, creating a spotlight effect.

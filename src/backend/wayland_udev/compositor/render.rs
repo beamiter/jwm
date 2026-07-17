@@ -349,6 +349,7 @@ impl WaylandCompositor {
             && !self.overview_active
             && !self.expose_active
             && !self.postprocess_active
+            && !self.recording_requires_composition()
         {
             let mut scanout_windows = std::mem::take(&mut self.scratch_scanout);
             scanout_windows.clear();
@@ -1596,7 +1597,7 @@ impl WaylandCompositor {
         // =================================================================
         // 21. Recording capture (async PBO readback to ffmpeg)
         // =================================================================
-        if let Some(path) = self.pending_recording_start.take() {
+        if let Some((path, region)) = self.pending_recording_start.take() {
             unsafe {
                 let config = crate::config::CONFIG.load();
                 let recording = config.behavior();
@@ -1609,6 +1610,7 @@ impl WaylandCompositor {
                     &recording.recording_bitrate,
                     recording.recording_quality,
                     &recording.recording_encoder,
+                    region,
                 ) {
                     log::error!("[compositor] Failed to start recording: {}", e);
                 }
@@ -1616,13 +1618,24 @@ impl WaylandCompositor {
         }
         if self.recording.is_active() {
             unsafe {
-                self.recording.capture_frame(gl, self.output_fbo);
+                self.recording
+                    .capture_frame(gl, self.output_fbo, (self.mouse_x, self.mouse_y));
             }
         }
         if self.pending_recording_stop {
             self.pending_recording_stop = false;
             unsafe {
                 self.recording.stop(gl);
+            }
+        }
+
+        // The crop outline is deliberately rendered after recording readback:
+        // it is visible on the local output but never encoded into the video.
+        if self.recording_region_overlay.is_some() {
+            unsafe {
+                gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
+                self.render_recording_region_overlay(gl, &projection);
+                gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
             }
         }
 
