@@ -231,11 +231,11 @@ end
 function load_backend(device::Symbol)
     if device == :cuda
         cuda = Base.require(CUDA_ID)
-        cuda.functional() || error("CUDA loaded but is not functional")
+        Base.invokelatest(cuda.functional) || error("CUDA loaded but is not functional")
         return SelectedBackend(:cuda, cuda.CuArray)
     elseif device == :rocm
         amdgpu = Base.require(AMDGPU_ID)
-        amdgpu.functional() || error("AMDGPU loaded but is not functional")
+        Base.invokelatest(amdgpu.functional) || error("AMDGPU loaded but is not functional")
         return SelectedBackend(:rocm, amdgpu.ROCArray)
     elseif device == :cpu
         return SelectedBackend(:cpu, Array)
@@ -285,9 +285,7 @@ function prepare_runtime_parent(path::AbstractString)
     return parent
 end
 
-function run_worker(options::RunnerOptions)
-    prepare_runtime_parent(options.frame_path)
-    backend = select_backend(options.device)
+function run_worker_with_backend(options::RunnerOptions, backend::SelectedBackend)
     options.requested_size != options.simulation_size &&
         @info "normalized simulation size for WaterLily multigrid" requested =
             options.requested_size simulation = options.simulation_size
@@ -327,6 +325,15 @@ function run_worker(options::RunnerOptions)
         cleanup()
     end
     return nothing
+end
+
+function run_worker(options::RunnerOptions)
+    prepare_runtime_parent(options.frame_path)
+    backend = select_backend(options.device)
+
+    # Optional GPU packages are loaded dynamically. Enter the newest world age
+    # before constructing their arrays or invoking methods they just defined.
+    return Base.invokelatest(run_worker_with_backend, options, backend)
 end
 
 function main(args::AbstractVector{<:AbstractString}=ARGS)
