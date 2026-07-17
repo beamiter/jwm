@@ -1,3 +1,6 @@
+# This is a Julia package: resolve dependencies for the executing Julia version.
+# `waterlily/Manifest.toml` is intentionally untracked so the Julia 1.10 CI lane
+# validates the minimum supported runtime instead of reusing a newer lockfile.
 name = "JwmWaterLily"
 uuid = "a6d0ef76-54b0-4db5-a89d-c83ae2f6734b"
 authors = ["JWM contributors"]
