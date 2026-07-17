@@ -71,6 +71,8 @@ impl RecordingState {
         self.current_segment = None;
         self.finalized = false;
         self.finalization_reported = false;
+        self.region = None;
+        self.output_size = None;
         self.selecting_region = false;
         self.adjusting_region = false;
         self.pending_output_path = None;
@@ -440,5 +442,17 @@ mod tests {
 
         assert_eq!(state.cancel_region_selection(), Some(original));
         assert!(!state.selecting_region);
+    }
+
+    #[test]
+    fn starting_a_new_recording_drops_stale_capture_geometry() {
+        let mut state = RecordingState::new();
+        state.region = Some(Rect::new(10, 20, 640, 360));
+        state.output_size = Some((640, 360));
+
+        state.start("/tmp/new-output.mp4".to_string());
+
+        assert_eq!(state.region, None);
+        assert_eq!(state.output_size, None);
     }
 }

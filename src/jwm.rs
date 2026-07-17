@@ -261,7 +261,7 @@ impl Jwm {
     fn debug_drag_enabled() -> bool {
         std::env::var("JWM_DEBUG_DRAG")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(true)
+            .unwrap_or(false)
     }
 
     fn func_name(func: WMFuncType) -> &'static str {

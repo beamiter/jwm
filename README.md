@@ -123,14 +123,22 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | Alt+R | Application launcher |
 | Alt+Control+Escape | Lock screen |
 | Alt+Control+O | Display layout |
-| Alt+S / Alt+Shift+S | Region / full screenshot |
-| Alt+Control+R | Select a region and start/stop screen recording |
-| Alt+Control+Shift+R | Move or resize the active recording region |
+| Alt+S / Alt+Shift+S | Interactive / immediate desktop screenshot |
+| Alt+Control+R | Interactively choose a source and start/stop screen recording |
+| Alt+Control+Shift+R | Move, resize, or replace the active recording source |
 | Alt+Shift+C | Close focused client |
 | Alt+Control+C | Calculator scratchpad |
 | Alt+Control+S | Toggle sticky window |
 | Alt+Shift+F11 | Toggle the WaterLily simulation |
 | Alt+Shift+/ | Show all bindings |
+
+During interactive screenshot or recording selection, press `G`, `W`, `M`, or
+`D` to choose a dragged region, a window, the monitor under the pointer, or the
+entire desktop. `Tab` and `Shift+Tab` cycle the same choices. Window capture
+shows a hover preview and is confirmed with the left mouse button; `Enter`
+saves a screenshot or starts/commits recording. Arrow keys nudge a committed
+selection (`Shift` uses 10-pixel steps), while `Escape`, right-click, or the
+recording shortcut again cancels safely.
 
 ## Portal and diagnostics
 

@@ -1,7 +1,0 @@
-Traceback (most recent call last):
-  File "/home/runner/work/jwm/jwm/.github/jwm-capture-apply.py", line 63, in <module>
-    replace_once(data, old, new, path, index),
-    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/jwm/jwm/.github/jwm-capture-apply.py", line 50, in replace_once
-    raise RuntimeError(
-RuntimeError: src/jwm/features/screenshot.rs replacement #10: expected one match, candidates=[(0, 1), (4, 1), (8, 1), (12, 1)]

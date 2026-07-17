@@ -3,6 +3,7 @@
 use crate::backend::api::Backend;
 use crate::backend::common_define::{EventMaskBits, StdCursorKind};
 use crate::core::types::Rect;
+use crate::jwm::features::capture::CaptureTarget;
 use crate::jwm::types::WMArgEnum;
 use image::{Rgba, RgbaImage};
 use log::{error, info, warn};
@@ -57,6 +58,29 @@ pub enum ScreenshotAnnotation {
     },
 }
 
+impl ScreenshotAnnotation {
+    fn translate(&mut self, dx: f32, dy: f32) {
+        let translate_point = |point: &mut (f32, f32)| {
+            point.0 += dx;
+            point.1 += dy;
+        };
+        match self {
+            Self::Freehand { points, .. } => {
+                for point in points {
+                    translate_point(point);
+                }
+            }
+            Self::Line { from, to, .. }
+            | Self::Arrow { from, to, .. }
+            | Self::Rectangle { from, to, .. }
+            | Self::Ellipse { from, to, .. } => {
+                translate_point(from);
+                translate_point(to);
+            }
+        }
+    }
+}
+
 /// 截图选择状态
 #[derive(Debug, Default, Clone)]
 pub struct ScreenshotState {
@@ -108,6 +132,31 @@ impl ScreenshotState {
         self.annotations.clear();
         self.drawing_annotation = false;
         self.current_points.clear();
+    }
+
+    pub fn reset_selection(&mut self) {
+        self.dragging = false;
+        self.committed = false;
+        self.start = (0.0, 0.0);
+        self.end = (0.0, 0.0);
+        self.tool = ScreenshotTool::Select;
+        self.annotations.clear();
+        self.drawing_annotation = false;
+        self.current_points.clear();
+    }
+
+    pub fn select_rect(&mut self, rect: Rect) {
+        self.reset_selection();
+        if rect.w <= 0 || rect.h <= 0 {
+            return;
+        }
+        self.start = (rect.x as f64, rect.y as f64);
+        self.end = (
+            rect.x.saturating_add(rect.w) as f64,
+            rect.y.saturating_add(rect.h) as f64,
+        );
+        self.committed = true;
+        self.tool = ScreenshotTool::Pencil;
     }
 
     /// 开始拖动选择
@@ -165,14 +214,49 @@ impl ScreenshotState {
         self.line_width = self.line_width.saturating_sub(1).max(1);
     }
 
-    pub fn move_selection(&mut self, dx: f64, dy: f64) {
-        if !self.committed {
+    fn translate_selection(&mut self, dx: f64, dy: f64) {
+        if !self.committed || (dx == 0.0 && dy == 0.0) {
             return;
         }
         self.start.0 += dx;
         self.start.1 += dy;
         self.end.0 += dx;
         self.end.1 += dy;
+
+        let dx = dx as f32;
+        let dy = dy as f32;
+        for annotation in &mut self.annotations {
+            annotation.translate(dx, dy);
+        }
+        if self.drawing_annotation {
+            self.annotation_start.0 += dx;
+            self.annotation_start.1 += dy;
+            self.annotation_end.0 += dx;
+            self.annotation_end.1 += dy;
+        }
+        for point in &mut self.current_points {
+            point.0 += dx;
+            point.1 += dy;
+        }
+    }
+
+    pub fn move_selection(&mut self, dx: f64, dy: f64) {
+        self.translate_selection(dx, dy);
+    }
+
+    pub fn move_selection_within(&mut self, dx: f64, dy: f64, bounds: Rect) {
+        let Some(rect) = self.get_selection_rect() else {
+            return;
+        };
+        if bounds.w <= 0 || bounds.h <= 0 {
+            return;
+        }
+
+        let max_x = (bounds.x + bounds.w - rect.w).max(bounds.x);
+        let max_y = (bounds.y + bounds.h - rect.h).max(bounds.y);
+        let next_x = (f64::from(rect.x) + dx).clamp(f64::from(bounds.x), f64::from(max_x));
+        let next_y = (f64::from(rect.y) + dy).clamp(f64::from(bounds.y), f64::from(max_y));
+        self.translate_selection(next_x - f64::from(rect.x), next_y - f64::from(rect.y));
     }
 
     pub fn begin_annotation(&mut self, x: f32, y: f32) {
@@ -264,10 +348,18 @@ impl ScreenshotState {
         let (x1, y1) = self.start;
         let (x2, y2) = self.end;
 
-        let x = x1.min(x2) as i32;
-        let y = y1.min(y2) as i32;
-        let w = (x1 - x2).abs() as i32;
-        let h = (y1 - y2).abs() as i32;
+        if !x1.is_finite() || !y1.is_finite() || !x2.is_finite() || !y2.is_finite() {
+            return None;
+        }
+
+        let left = x1.min(x2).floor();
+        let top = y1.min(y2).floor();
+        let right = x1.max(x2).ceil();
+        let bottom = y1.max(y2).ceil();
+        let x = left as i32;
+        let y = top as i32;
+        let w = (right - left) as i32;
+        let h = (bottom - top) as i32;
 
         if w > 0 && h > 0 {
             Some(Rect { x, y, w, h })
@@ -306,18 +398,26 @@ use crate::jwm::Jwm;
 impl Jwm {
     /// 准备截图输出路径（交互式和全屏截图共用）
     fn prepare_screenshot_path() -> Option<String> {
-        let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-        let pictures_dir = std::env::var("XDG_PICTURES_DIR")
-            .or_else(|_| std::env::var("HOME").map(|h| format!("{}/Pictures", h)))
-            .unwrap_or_else(|_| "/tmp".to_string());
-        let mut output_dir = std::path::PathBuf::from(&pictures_dir);
+        let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%6f");
+        let pictures_dir = std::env::var_os("XDG_PICTURES_DIR")
+            .filter(|path| !path.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(dirs::picture_dir)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .filter(|home| !home.is_empty())
+                    .map(std::path::PathBuf::from)
+                    .map(|home| home.join("Pictures"))
+            })
+            .unwrap_or_else(std::env::temp_dir);
+        let mut output_dir = pictures_dir;
         if let Err(e) = std::fs::create_dir_all(&output_dir) {
             warn!(
                 "[take_screenshot] cannot create output dir '{}': {}, fallback to /tmp",
                 output_dir.display(),
                 e
             );
-            output_dir = std::path::PathBuf::from("/tmp");
+            output_dir = std::env::temp_dir();
             if let Err(e2) = std::fs::create_dir_all(&output_dir) {
                 error!(
                     "[take_screenshot] cannot create fallback dir '{}': {}",
@@ -352,18 +452,17 @@ impl Jwm {
             None => return Ok(()),
         };
 
-        info!(
-            "[take_screenshot] entering interactive region selection mode → {}",
-            screenshot_path
-        );
-        self.features.screenshot.start();
-        self.features.screenshot.set_output_path(screenshot_path);
-
-        // Grab keyboard (to intercept Escape)
-        if let Some(root) = backend.root_window() {
-            let _ = backend.key_ops().grab_keyboard(root);
+        if !backend.has_compositor() {
+            return Err("interactive screenshots require an active compositor".into());
         }
-        // Grab pointer with crosshair cursor
+
+        let keyboard_grabbed = if let Some(root) = backend.root_window() {
+            backend.key_ops().grab_keyboard(root)?;
+            true
+        } else {
+            false
+        };
+
         let crosshair_handle = backend
             .cursor_provider()
             .get(StdCursorKind::Crosshair)
@@ -373,10 +472,34 @@ impl Jwm {
             | EventMaskBits::BUTTON_RELEASE
             | EventMaskBits::POINTER_MOTION)
             .bits();
-        let _ = backend
+        match backend
             .input_ops()
-            .grab_pointer(pointer_mask, crosshair_handle);
+            .grab_pointer(pointer_mask, crosshair_handle)
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                if keyboard_grabbed {
+                    let _ = backend.key_ops().ungrab_keyboard();
+                }
+                return Err("could not grab pointer for screenshot selection".into());
+            }
+            Err(error) => {
+                if keyboard_grabbed {
+                    let _ = backend.key_ops().ungrab_keyboard();
+                }
+                return Err(error.into());
+            }
+        }
 
+        self.features.screenshot.start();
+        self.features.capture.screenshot = CaptureTarget::Region;
+        self.features
+            .screenshot
+            .set_output_path(screenshot_path.clone());
+        info!(
+            "[take_screenshot] interactive capture → {} (G/W/M/D or Tab selects source)",
+            screenshot_path
+        );
         Ok(())
     }
 
@@ -446,14 +569,14 @@ impl Jwm {
             }
         };
 
-        let (sx, sy) = self.features.screenshot.start;
-        let (ex, ey) = self.features.screenshot.end;
-
-        // Compute normalized rectangle
-        let x = sx.min(ex) as i32;
-        let y = sy.min(ey) as i32;
-        let w = (sx - ex).abs() as u32;
-        let h = (sy - ey).abs() as u32;
+        let Some(rect) = self.features.screenshot.get_selection_rect() else {
+            self.cancel_screenshot_select(backend);
+            return;
+        };
+        let x = rect.x;
+        let y = rect.y;
+        let w = rect.w as u32;
+        let h = rect.h as u32;
         let annotations = self.features.screenshot.annotations.clone();
 
         // Clear state before capturing
@@ -974,5 +1097,38 @@ mod tests {
         assert_eq!(rect.y, 110);
         assert_eq!(rect.w, 140);
         assert_eq!(rect.h, 140);
+    }
+
+    #[test]
+    fn moving_selection_keeps_annotations_attached() {
+        let mut state = ScreenshotState::new();
+        state.start();
+        state.select_rect(Rect::new(70, 20, 20, 30));
+        state.set_tool(ScreenshotTool::Arrow);
+        state.begin_annotation(72.0, 24.0);
+        state.update_annotation(86.0, 42.0);
+        state.commit_annotation();
+
+        state.move_selection_within(50.0, 0.0, Rect::new(0, 0, 100, 100));
+
+        assert_eq!(state.get_selection_rect(), Some(Rect::new(80, 20, 20, 30)));
+        match &state.annotations[0] {
+            ScreenshotAnnotation::Arrow { from, to, .. } => {
+                assert_eq!(*from, (82.0, 24.0));
+                assert_eq!(*to, (96.0, 42.0));
+            }
+            other => panic!("expected arrow annotation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fractional_selection_rounds_outward() {
+        let mut state = ScreenshotState::new();
+        state.start();
+        state.begin_drag(10.8, 12.2);
+        state.update_drag(20.2, 30.7);
+        state.commit();
+
+        assert_eq!(state.get_selection_rect(), Some(Rect::new(10, 12, 11, 19)));
     }
 }

@@ -13,6 +13,7 @@ use crate::config::{BackendFamily, CONFIG, get_backend_family};
 use crate::core::animation::AnimationKind;
 use crate::core::controller::WMController;
 use crate::jwm::Jwm;
+use crate::jwm::features::CaptureTarget;
 use log::{debug, error, info};
 use std::sync::atomic::Ordering;
 
@@ -28,8 +29,8 @@ fn sync_configured_client_geometry(
         return;
     };
 
-    let width_i = width as i32;
-    let height_i = height as i32;
+    let width_i = i32::try_from(width).unwrap_or(i32::MAX);
+    let height_i = i32::try_from(height).unwrap_or(i32::MAX);
 
     {
         let Some(client) = wm.state.clients.get_mut(client_key) else {
@@ -304,18 +305,20 @@ impl WMController for Jwm {
         }
 
         if self.features.screenshot.active && self.features.screenshot.dragging {
-            let (sx, sy) = self.features.screenshot.start;
-            let (ex, ey) = self.last_mouse_root;
-            let w = (sx - ex).abs();
-            let h = (sy - ey).abs();
-            if w < 3.0 || h < 3.0 {
+            self.features
+                .screenshot
+                .update_drag(self.last_mouse_root.0, self.last_mouse_root.1);
+            let Some(rect) = self.features.screenshot.get_selection_rect() else {
+                info!("[take_screenshot] selection too small, cancelling");
+                self.cancel_screenshot_select(backend);
+                return;
+            };
+            if rect.w < 3 || rect.h < 3 {
                 info!("[take_screenshot] selection too small, cancelling");
                 self.cancel_screenshot_select(backend);
                 return;
             }
-            self.features.screenshot.dragging = false;
-            self.features.screenshot.committed = true;
-            self.features.screenshot.end = self.last_mouse_root;
+            self.features.screenshot.commit();
             self.features
                 .screenshot
                 .set_tool(crate::jwm::features::screenshot::ScreenshotTool::Pencil);
@@ -323,6 +326,11 @@ impl WMController for Jwm {
             backend.compositor_set_annotation_mode(true);
             self.sync_screenshot_annotation_overlay(backend, false);
             // Keep the snap preview visible so the user can see the selection
+            return;
+        }
+
+        // Modal capture clicks must never leak through to the selected client.
+        if self.features.screenshot.active {
             return;
         }
 
@@ -412,32 +420,50 @@ impl WMController for Jwm {
         if self.features.recording.selecting_region {
             self.last_mouse_root = (root_x, root_y);
             backend.compositor_set_mouse_position(root_x as f32, root_y as f32);
-            let region = self.features.recording.update_region_drag(
-                root_x.round() as i32,
-                root_y.round() as i32,
-                self.s_w,
-                self.s_h,
-            );
-            if self.features.recording.adjusting_region {
-                if let Some(region) = region.and_then(Self::recording_region_tuple) {
-                    backend.compositor_set_recording_region(region);
+            if self.features.capture.recording == CaptureTarget::Region {
+                let region = self.features.recording.update_region_drag(
+                    root_x.round() as i32,
+                    root_y.round() as i32,
+                    self.s_w,
+                    self.s_h,
+                );
+                if self.features.recording.adjusting_region {
+                    if let Some(region) = region.and_then(Self::recording_region_tuple) {
+                        backend.compositor_set_recording_region(region);
+                    }
                 }
+                self.sync_recording_region_overlay(backend);
+            } else {
+                self.preview_recording_capture_target(backend, target, (root_x, root_y));
             }
-            self.sync_recording_region_overlay(backend);
             return;
         }
+        if self.features.screenshot.active
+            && !self.features.screenshot.committed
+            && !self.features.screenshot.dragging
+            && self.features.capture.screenshot != CaptureTarget::Region
+        {
+            self.last_mouse_root = (root_x, root_y);
+            backend.compositor_set_mouse_position(root_x as f32, root_y as f32);
+            self.preview_screenshot_capture_target(backend, target, (root_x, root_y));
+            return;
+        }
+
         // Screenshot region selection: update overlay rectangle while dragging
         if self.features.screenshot.active && self.features.screenshot.dragging {
             self.last_mouse_root = (root_x, root_y);
+            self.features.screenshot.update_drag(root_x, root_y);
             if backend.has_compositor() {
                 backend.compositor_set_mouse_position(root_x as f32, root_y as f32);
-                let (sx, sy) = self.features.screenshot.start;
-                let x = sx.min(root_x) as f32;
-                let y = sy.min(root_y) as f32;
-                let w = (sx - root_x).abs() as f32;
-                let h = (sy - root_y).abs() as f32;
-                // Always update preview, even for tiny movements
-                backend.compositor_set_snap_preview(Some((x, y, w.max(1.0), h.max(1.0))));
+                let preview = self.features.screenshot.get_selection_rect().map(|rect| {
+                    (
+                        rect.x as f32,
+                        rect.y as f32,
+                        rect.w.max(1) as f32,
+                        rect.h.max(1) as f32,
+                    )
+                });
+                backend.compositor_set_snap_preview(preview);
                 backend.compositor_force_full_redraw();
             }
             return;

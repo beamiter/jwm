@@ -9,6 +9,7 @@ use crate::core::animation::AnimationKind;
 use crate::core::models::ClientKey;
 use crate::core::types::Rect;
 use crate::jwm::Jwm;
+use crate::jwm::features::capture::CaptureTarget;
 use crate::jwm::types::WMArgEnum;
 use log::{error, info};
 use std::process::Command;
@@ -474,23 +475,46 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.features.annotation_active = !self.features.annotation_active;
-        backend.compositor_set_annotation_mode(self.features.annotation_active);
         if self.features.annotation_active {
-            // Grab keyboard (Escape to exit) and pointer (draw over all windows).
-            if let Some(root) = backend.root_window() {
-                let _ = backend.key_ops().grab_keyboard(root);
-            }
-            let pointer_mask = (EventMaskBits::BUTTON_PRESS
-                | EventMaskBits::BUTTON_RELEASE
-                | EventMaskBits::POINTER_MOTION)
-                .bits();
-            let _ = backend.input_ops().grab_pointer(pointer_mask, None);
-        } else {
+            self.features.annotation_active = false;
             self.features.annotation_drawing = false;
+            backend.compositor_set_annotation_mode(false);
             let _ = backend.key_ops().ungrab_keyboard();
             let _ = backend.input_ops().ungrab_pointer();
+            return Ok(());
         }
+        if !backend.has_compositor() {
+            return Err("screen annotation requires an active compositor".into());
+        }
+
+        let keyboard_grabbed = if let Some(root) = backend.root_window() {
+            backend.key_ops().grab_keyboard(root)?;
+            true
+        } else {
+            false
+        };
+        let pointer_mask = (EventMaskBits::BUTTON_PRESS
+            | EventMaskBits::BUTTON_RELEASE
+            | EventMaskBits::POINTER_MOTION)
+            .bits();
+        match backend.input_ops().grab_pointer(pointer_mask, None) {
+            Ok(true) => {}
+            Ok(false) => {
+                if keyboard_grabbed {
+                    let _ = backend.key_ops().ungrab_keyboard();
+                }
+                return Err("could not grab pointer for screen annotation".into());
+            }
+            Err(error) => {
+                if keyboard_grabbed {
+                    let _ = backend.key_ops().ungrab_keyboard();
+                }
+                return Err(error.into());
+            }
+        }
+
+        self.features.annotation_active = true;
+        backend.compositor_set_annotation_mode(true);
         Ok(())
     }
 
@@ -502,6 +526,7 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         if !self.features.recording.active {
             if self.features.recording.selecting_region {
+                self.cancel_recording_region_interaction(backend);
                 return Ok(());
             }
             let output_path = self.prepare_recording_output_path()?;
@@ -524,6 +549,7 @@ impl Jwm {
         if !self.features.recording.begin_region_adjustment() {
             return Ok(());
         }
+        self.features.capture.recording = CaptureTarget::Region;
         if let Err(error) = self.grab_recording_region_input(backend) {
             self.features.recording.cancel_region_selection();
             return Err(error);
@@ -534,7 +560,7 @@ impl Jwm {
     }
 
     fn prepare_recording_output_path(&self) -> Result<String, Box<dyn std::error::Error>> {
-        let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%6f");
         let cfg_dir = CONFIG.load().behavior().recording_output_dir.clone();
         let output_dir = if !cfg_dir.is_empty() {
             std::path::PathBuf::from(cfg_dir)
@@ -616,6 +642,7 @@ impl Jwm {
         self.features
             .recording
             .begin_initial_region_selection(output_path.clone());
+        self.features.capture.recording = CaptureTarget::Region;
         if let Err(error) = self.grab_recording_region_input(backend) {
             self.features.recording.cancel_region_selection();
             return Err(error);
@@ -665,7 +692,11 @@ impl Jwm {
         let Some(output_path) = pending_path else {
             return Err("recording selection lost its output path".into());
         };
-        self.start_recording_region(backend, &output_path, region)?;
+        if let Err(error) = self.start_recording_region(backend, &output_path, region) {
+            self.features.recording.cancel();
+            backend.compositor_force_full_redraw();
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -721,7 +752,7 @@ impl Jwm {
                     })
                     .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
             };
-            let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+            let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%6f");
             let format = behavior.audio_recording_format.as_str();
             if !matches!(format, "wav" | "flac" | "opus" | "mp3") {
                 return Err(format!("unsupported audio recording format: {format}").into());

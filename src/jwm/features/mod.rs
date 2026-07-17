@@ -9,6 +9,7 @@
 //! - toggles: 所有特性的切换函数
 
 pub mod audio_recording;
+pub mod capture;
 pub mod magnifier;
 pub mod overview;
 pub mod recording;
@@ -17,6 +18,7 @@ pub mod system_ui;
 pub mod toggles;
 
 pub use audio_recording::AudioRecordingState;
+pub use capture::{CaptureInteractionState, CaptureTarget};
 pub use magnifier::MagnifierState;
 pub use overview::OverviewState;
 pub use recording::RecordingState;
@@ -27,6 +29,7 @@ pub use system_ui::{MonitorDirection, MonitorLayoutEntry, SystemUiState};
 #[derive(Debug, Default)]
 pub struct FeatureStates {
     pub audio_recording: AudioRecordingState,
+    pub capture: CaptureInteractionState,
     pub screenshot: ScreenshotState,
     pub overview: OverviewState,
     pub recording: RecordingState,
@@ -65,6 +68,7 @@ impl FeatureStates {
     /// 禁用所有特性（紧急退出）
     pub fn disable_all(&mut self) {
         self.screenshot.cancel();
+        self.capture = CaptureInteractionState::default();
         self.system_ui.cancel();
         self.overview.deactivate();
         self.recording.cancel();
