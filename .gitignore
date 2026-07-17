@@ -3,6 +3,7 @@
 /video-demo/demo-client/target
 /video-demo/generated
 /video-demo/tmp
+/waterlily/Manifest.toml
 __pycache__/
 **/*.rs.bk
 *.pdb
