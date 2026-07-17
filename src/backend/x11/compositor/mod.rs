@@ -595,6 +595,7 @@ where
     recording_process: Option<std::process::Child>,
     recording_last_frame: Option<std::time::Instant>,
     recording_pbo: [Option<glow::Buffer>; 2],
+    recording_cursor: [Option<RecordingCursor>; 2],
     recording_current_pbo: usize,
     recording_captured_frames: u64,
 

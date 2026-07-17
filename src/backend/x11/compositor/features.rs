@@ -713,6 +713,7 @@ impl<C: CompositorConnection> Compositor<C> {
         self.recording_last_frame = None;
         self.recording_current_pbo = 0;
         self.recording_captured_frames = 0;
+        self.recording_cursor = [None, None];
         log::info!(
             "compositor: recording started to {output_path} (microphone={})",
             if with_audio {
@@ -747,6 +748,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             }
         }
+        self.recording_cursor = [None, None];
 
         if let Some(mut child) = self.recording_process.take() {
             drop(child.stdin.take());
@@ -791,6 +793,10 @@ impl<C: CompositorConnection> Compositor<C> {
                     glow::UNSIGNED_BYTE,
                     glow::PixelPackData::BufferOffset(0),
                 );
+                // Keep cursor metadata paired with this PBO. The asynchronous
+                // PBO is mapped one capture later, by which time a fast-moving
+                // cursor may already be at a different position.
+                self.recording_cursor[written_pbo] = self.graphics.capture_recording_cursor();
 
                 self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
             }
@@ -806,6 +812,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let Some(pbo) = self.recording_pbo[pbo_index] else {
             return;
         };
+        let cursor = self.recording_cursor[pbo_index].take();
         let buf_size = (self.screen_w * self.screen_h * 4) as usize;
         unsafe {
             self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
@@ -818,7 +825,10 @@ impl<C: CompositorConnection> Compositor<C> {
             if ptr.is_null() {
                 log::warn!("compositor: recording PBO map returned null");
             } else {
-                let pixels = std::slice::from_raw_parts(ptr as *const u8, buf_size);
+                let pixels = std::slice::from_raw_parts_mut(ptr as *mut u8, buf_size);
+                if let Some(cursor) = cursor.as_ref() {
+                    cursor.composite_into(pixels, self.screen_w, self.screen_h);
+                }
                 if let Some(child) = self.recording_process.as_mut() {
                     if let Some(stdin) = child.stdin.as_mut() {
                         use std::io::Write;

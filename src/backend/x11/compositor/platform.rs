@@ -41,6 +41,7 @@ impl GraphicsApiPreference {
 pub(super) struct GraphicsPlatform {
     xlib_display: *mut x11::xlib::Display,
     screen_num: i32,
+    cursor_capture_supported: bool,
     backend: PlatformBackend,
     closed: bool,
 }
@@ -48,6 +49,33 @@ pub(super) struct GraphicsPlatform {
 enum PlatformBackend {
     Glx(GlxPlatform),
     Egl(EglPlatform),
+}
+
+pub(super) struct RecordingCursor {
+    pixels: Vec<u32>,
+    width: u32,
+    height: u32,
+    hotspot_x: i32,
+    hotspot_y: i32,
+    xhot: i32,
+    yhot: i32,
+}
+
+impl RecordingCursor {
+    pub(super) fn composite_into(&self, rgba: &mut [u8], width: u32, height: u32) {
+        composite_premultiplied_argb_cursor(
+            rgba,
+            width,
+            height,
+            &self.pixels,
+            self.width,
+            self.height,
+            self.hotspot_x,
+            self.hotspot_y,
+            self.xhot,
+            self.yhot,
+        );
+    }
 }
 
 impl GraphicsPlatform {
@@ -68,6 +96,11 @@ impl GraphicsPlatform {
             x11::xlib::XSetErrorHandler(Some(super::ignore_x_error));
         }
         let screen_num = unsafe { x11::xlib::XDefaultScreen(xlib_display) };
+        let cursor_capture_supported = unsafe {
+            let mut event_base = 0;
+            let mut error_base = 0;
+            x11::xfixes::XFixesQueryExtension(xlib_display, &mut event_base, &mut error_base) != 0
+        };
 
         let backend_result = match preference {
             GraphicsApiPreference::Glx => GlxPlatform::new(
@@ -113,6 +146,7 @@ impl GraphicsPlatform {
         let platform = Self {
             xlib_display,
             screen_num,
+            cursor_capture_supported,
             backend,
             closed: false,
         };
@@ -213,6 +247,47 @@ impl GraphicsPlatform {
         Ok(())
     }
 
+    /// Composite the X server cursor into a bottom-up RGBA readback buffer.
+    ///
+    /// XComposite redirects windows, but the X server cursor is a separate
+    /// sprite and is consequently absent from `glReadPixels`.  XFixes exposes
+    /// the current premultiplied ARGB cursor image and its exact root position,
+    /// allowing recording to add it without affecting the on-screen back
+    /// buffer (where the server still draws the real cursor).
+    pub(super) fn capture_recording_cursor(&self) -> Option<RecordingCursor> {
+        if !self.cursor_capture_supported || self.xlib_display.is_null() {
+            return None;
+        }
+
+        unsafe {
+            let image = x11::xfixes::XFixesGetCursorImage(self.xlib_display);
+            if image.is_null() {
+                return None;
+            }
+
+            let image_ref = &*image;
+            let pixel_count =
+                usize::from(image_ref.width).checked_mul(usize::from(image_ref.height));
+            let snapshot = pixel_count
+                .filter(|_| !image_ref.pixels.is_null())
+                .map(|pixel_count| RecordingCursor {
+                    pixels: std::slice::from_raw_parts(image_ref.pixels, pixel_count)
+                        .iter()
+                        .map(|&pixel| pixel as u32)
+                        .collect(),
+                    width: u32::from(image_ref.width),
+                    height: u32::from(image_ref.height),
+                    hotspot_x: i32::from(image_ref.x),
+                    hotspot_y: i32::from(image_ref.y),
+                    xhot: i32::from(image_ref.xhot),
+                    yhot: i32::from(image_ref.yhot),
+                });
+
+            x11::xlib::XFree(image.cast());
+            snapshot
+        }
+    }
+
     pub(super) fn import_pixmap(
         &self,
         gl: &glow::Context,
@@ -287,6 +362,84 @@ impl GraphicsPlatform {
         }
         self.xlib_display = ptr::null_mut();
         self.closed = true;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn composite_premultiplied_argb_cursor(
+    frame: &mut [u8],
+    frame_width: u32,
+    frame_height: u32,
+    cursor: &[u32],
+    cursor_width: u32,
+    cursor_height: u32,
+    hotspot_x: i32,
+    hotspot_y: i32,
+    xhot: i32,
+    yhot: i32,
+) {
+    let Some(frame_len) = usize::try_from(frame_width)
+        .ok()
+        .and_then(|w| {
+            usize::try_from(frame_height)
+                .ok()
+                .and_then(|h| w.checked_mul(h))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+    else {
+        return;
+    };
+    if frame.len() < frame_len {
+        return;
+    }
+
+    let cursor_left = hotspot_x - xhot;
+    let cursor_top = hotspot_y - yhot;
+    for source_y in 0..cursor_height {
+        let screen_y = cursor_top + source_y as i32;
+        if screen_y < 0 || screen_y >= frame_height as i32 {
+            continue;
+        }
+        // glReadPixels stores row zero at the bottom while XFixes coordinates
+        // use the root window's top-left origin.
+        let frame_y = frame_height - 1 - screen_y as u32;
+
+        for source_x in 0..cursor_width {
+            let screen_x = cursor_left + source_x as i32;
+            if screen_x < 0 || screen_x >= frame_width as i32 {
+                continue;
+            }
+
+            let source_index = source_y as usize * cursor_width as usize + source_x as usize;
+            let Some(&argb) = cursor.get(source_index) else {
+                continue;
+            };
+            let alpha = (argb >> 24) as u8;
+            if alpha == 0 {
+                continue;
+            }
+
+            let destination_index =
+                ((frame_y as usize * frame_width as usize) + screen_x as usize) * 4;
+            let inverse_alpha = 255 - u32::from(alpha);
+            let source_channels = [
+                ((argb >> 16) & 0xff) as u8,
+                ((argb >> 8) & 0xff) as u8,
+                (argb & 0xff) as u8,
+            ];
+            for (offset, source) in source_channels.into_iter().enumerate() {
+                let destination = u32::from(frame[destination_index + offset]);
+                frame[destination_index + offset] = u8::try_from(
+                    (u32::from(source) + (destination * inverse_alpha + 127) / 255).min(255),
+                )
+                .unwrap_or(255);
+            }
+            let destination_alpha = u32::from(frame[destination_index + 3]);
+            frame[destination_index + 3] = u8::try_from(
+                (u32::from(alpha) + (destination_alpha * inverse_alpha + 127) / 255).min(255),
+            )
+            .unwrap_or(255);
+        }
     }
 }
 
@@ -1434,7 +1587,8 @@ fn egl_error(operation: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        GraphicsApiPreference, append_egl_damage_rect, egl_damage_rect_count, has_egl_extension,
+        GraphicsApiPreference, append_egl_damage_rect, composite_premultiplied_argb_cursor,
+        egl_damage_rect_count, has_egl_extension,
     };
     use crate::backend::x11::compositor::DirtyRect;
 
@@ -1489,5 +1643,32 @@ mod tests {
         assert!(has_egl_extension(extensions, "EGL_KHR_partial_update"));
         assert!(!has_egl_extension(extensions, "EGL_KHR_image"));
         assert!(!has_egl_extension(extensions, "EGL_EXT_buffer"));
+    }
+
+    #[test]
+    fn composites_xfixes_cursor_with_bottom_up_frame_coordinates() {
+        let mut frame = [10_u8, 20, 30, 255].repeat(3 * 3);
+        let cursor = [0xffff0000, 0x80008000];
+
+        composite_premultiplied_argb_cursor(&mut frame, 3, 3, &cursor, 2, 1, 1, 1, 0, 0);
+
+        // Screen y=1 maps to the middle row in this symmetric 3-row frame.
+        let opaque_red = (1 * 3 + 1) * 4;
+        assert_eq!(&frame[opaque_red..opaque_red + 4], &[255, 0, 0, 255]);
+        let half_green = (1 * 3 + 2) * 4;
+        assert_eq!(&frame[half_green..half_green + 4], &[5, 138, 15, 255]);
+    }
+
+    #[test]
+    fn clips_cursor_at_recording_edges() {
+        let mut frame = vec![0_u8; 2 * 2 * 4];
+        let cursor = [0xffffffff; 4];
+
+        composite_premultiplied_argb_cursor(&mut frame, 2, 2, &cursor, 2, 2, 0, 0, 1, 1);
+
+        // Only cursor source (1,1) lands on screen pixel (0,0), which is the
+        // second row in the bottom-up readback.
+        assert_eq!(&frame[8..12], &[255, 255, 255, 255]);
+        assert_eq!(frame.iter().filter(|&&channel| channel == 255).count(), 4);
     }
 }
