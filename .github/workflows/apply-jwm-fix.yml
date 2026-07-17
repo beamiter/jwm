@@ -1,0 +1,41 @@
+name: Apply JWM follow-up fix
+
+on:
+  push:
+    branches:
+      - agent/interactive-capture-ux
+    paths:
+      - .github/jwm-followup-fix.py
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          ref: agent/interactive-capture-ux
+          fetch-depth: 0
+
+      - name: Install Rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Apply, format, and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/jwm-followup-fix.py
+          cargo fmt --all
+          git rm .github/jwm-followup-fix.py .github/workflows/apply-jwm-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: rollback recording input grabs on backend errors"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
