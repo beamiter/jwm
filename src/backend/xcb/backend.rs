@@ -885,7 +885,7 @@ impl XcbBackend {
         *CACHE.get_or_init(|| {
             env::var("JWM_DEBUG_DRAG")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(true)
+                .unwrap_or(false)
         })
     }
 
@@ -3351,6 +3351,15 @@ impl InputOps for XcbInputOps {
     fn get_pointer_position(&self) -> XcbResult<(f64, f64)> {
         let (x, y, _, _) = self.query_pointer_root()?;
         Ok((x as f64, y as f64))
+    }
+
+    fn window_under_pointer(&self) -> XcbResult<Option<WindowId>> {
+        let cookie = self
+            .conn
+            .send_request(&x::QueryPointer { window: self.root });
+        let reply = self.conn.wait_for_reply(cookie).map_err(xcb_err)?;
+        let child = reply.child();
+        Ok((child != x::WINDOW_NONE).then(|| self.ids.intern(child)))
     }
 
     fn grab_pointer(&self, mask: u32, cursor: Option<u64>) -> XcbResult<bool> {

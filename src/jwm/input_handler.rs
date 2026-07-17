@@ -699,6 +699,7 @@ impl Jwm {
                     self.commit_recording_capture_target(backend, target);
                 }
             } else {
+                self.features.capture.swallow_next_button_release();
                 self.cancel_recording_region_interaction(backend);
             }
             return Ok(());
@@ -734,7 +735,8 @@ impl Jwm {
                     backend.compositor_force_full_redraw();
                 }
             } else {
-                // Right-click or other button → cancel
+                // Right-click or other button → cancel without leaking the release.
+                self.features.capture.swallow_next_button_release();
                 self.cancel_screenshot_select(backend);
             }
             return Ok(());

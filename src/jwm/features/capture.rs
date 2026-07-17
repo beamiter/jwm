@@ -55,6 +55,17 @@ impl CaptureTarget {
 pub struct CaptureInteractionState {
     pub screenshot: CaptureTarget,
     pub recording: CaptureTarget,
+    swallow_button_release: bool,
+}
+
+impl CaptureInteractionState {
+    pub(crate) fn swallow_next_button_release(&mut self) {
+        self.swallow_button_release = true;
+    }
+
+    pub(crate) fn take_swallowed_button_release(&mut self) -> bool {
+        std::mem::take(&mut self.swallow_button_release)
+    }
 }
 
 fn intersect_rect(rect: Rect, bounds: Rect) -> Option<Rect> {
@@ -109,9 +120,12 @@ impl Jwm {
     }
 
     fn window_capture_rect(&self, backend: &mut dyn Backend, hit: HitTarget) -> Option<Rect> {
-        let HitTarget::Surface(window) = hit else {
-            return None;
-        };
+        let window = match hit {
+            HitTarget::Surface(window) => Some(window),
+            HitTarget::Background { .. } => {
+                backend.input_ops().window_under_pointer().ok().flatten()
+            }
+        }?;
         if Some(window) == backend.root_window()
             || Some(window) == backend.compositor_overlay_window()
         {
@@ -400,6 +414,15 @@ mod tests {
         assert_eq!(CaptureTarget::Monitor.next(), CaptureTarget::Desktop);
         assert_eq!(CaptureTarget::Desktop.next(), CaptureTarget::Region);
         assert_eq!(CaptureTarget::Region.previous(), CaptureTarget::Desktop);
+    }
+
+    #[test]
+    fn swallowed_button_release_is_one_shot() {
+        let mut state = CaptureInteractionState::default();
+        assert!(!state.take_swallowed_button_release());
+        state.swallow_next_button_release();
+        assert!(state.take_swallowed_button_release());
+        assert!(!state.take_swallowed_button_release());
     }
 
     #[test]

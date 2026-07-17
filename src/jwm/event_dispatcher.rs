@@ -263,6 +263,9 @@ impl WMController for Jwm {
     }
 
     fn on_button_release(&mut self, backend: &mut dyn Backend, _target: HitTarget, _time: u32) {
+        if self.features.capture.take_swallowed_button_release() {
+            return;
+        }
         if self.features.system_ui.is_active() {
             return;
         }

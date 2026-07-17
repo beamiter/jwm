@@ -748,6 +748,15 @@ pub trait InputOps: Send {
 
     fn get_pointer_position(&self) -> Result<(f64, f64), BackendError>;
 
+    /// Return the top-level window directly under the pointer when the backend
+    /// can query it independently of the currently grabbed event target.
+    ///
+    /// X11 active grabs report the grab window as the event target, so modal
+    /// capture source selection uses this hook to recover the actual child.
+    fn window_under_pointer(&self) -> Result<Option<WindowId>, BackendError> {
+        Ok(None)
+    }
+
     fn grab_pointer(&self, mask: u32, cursor: Option<u64>) -> Result<bool, BackendError>;
 
     fn ungrab_pointer(&self) -> Result<(), BackendError>;
