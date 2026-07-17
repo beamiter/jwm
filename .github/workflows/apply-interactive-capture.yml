@@ -1,0 +1,63 @@
+name: Apply interactive capture changes
+
+on:
+  push:
+    branches:
+      - agent/interactive-capture-ux
+    paths:
+      - .github/jwm-capture-apply.py
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          ref: agent/interactive-capture-ux
+          fetch-depth: 0
+
+      - name: Install Rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Apply and format changes
+        shell: bash
+        run: |
+          set -uo pipefail
+          log_file="$(mktemp)"
+          if ! python3 .github/jwm-capture-apply.py >"$log_file" 2>&1; then
+            git reset --hard HEAD
+            cp "$log_file" .github/jwm-capture-error.txt
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .github/jwm-capture-error.txt
+            git commit -m "chore: record capture patch failure [capture-patch-applied]"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+            cat "$log_file"
+            exit 1
+          fi
+          if ! cargo fmt --all >"$log_file" 2>&1; then
+            git reset --hard HEAD
+            cp "$log_file" .github/jwm-capture-error.txt
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .github/jwm-capture-error.txt
+            git commit -m "chore: record rustfmt failure [capture-patch-applied]"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+            cat "$log_file"
+            exit 1
+          fi
+          rm -f .github/jwm-capture-error.txt
+          git rm .github/jwm-capture-apply.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: improve interactive screenshot and recording UX [capture-patch-applied]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
