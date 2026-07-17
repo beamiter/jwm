@@ -125,7 +125,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "toggle_overview",
         "toggle_peek",
         "toggle_recording",
-        "toggle_slime",
+        "toggle_waterlily",
         "togglebar",
         "togglecompositor",
         "togglefloating",
@@ -430,7 +430,12 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "restart" => Ok((Jwm::restart, parse_int_arg(args, 0)?)),
         "togglecompositor" => Ok((Jwm::togglecompositor, parse_int_arg(args, 0)?)),
         "togglepartialdamage" => Ok((Jwm::togglepartialdamage, parse_int_arg(args, 0)?)),
-        "toggle_slime" => Ok((Jwm::toggle_slime, parse_int_arg(args, 0)?)),
+        "toggle_waterlily" => Ok((Jwm::toggle_waterlily, parse_int_arg(args, 0)?)),
+        // Compatibility only: intentionally omitted from IPC capability discovery.
+        "toggle_slime" => {
+            log::warn!("IPC action `toggle_slime` is deprecated; use `toggle_waterlily` instead");
+            Ok((Jwm::toggle_waterlily, parse_int_arg(args, 0)?))
+        }
         "toggle_overview" => Ok((Jwm::toggle_overview, parse_int_arg(args, 0)?)),
         "cycle_overview" => Ok((Jwm::cycle_overview, parse_int_arg(args, 1)?)),
         "toggle_magnifier" => Ok((Jwm::toggle_magnifier, parse_int_arg(args, 0)?)),
@@ -685,6 +690,12 @@ mod tests {
         // display layout modal
         let (_, arg) = dispatch_command("monitor_layout", &args).unwrap();
         assert_eq!(arg, WMArgEnum::Int(0));
+
+        // The old name remains accepted only as a migration alias.
+        let (canonical, _) =
+            dispatch_command("toggle_waterlily", &serde_json::Value::Null).unwrap();
+        let (deprecated, _) = dispatch_command("toggle_slime", &serde_json::Value::Null).unwrap();
+        assert!(std::ptr::fn_addr_eq(canonical, deprecated));
     }
 
     #[test]
@@ -920,6 +931,19 @@ mod tests {
                 .commands
                 .iter()
                 .any(|name| name == "start_recording")
+        );
+        assert!(
+            capabilities
+                .commands
+                .iter()
+                .any(|name| name == "toggle_waterlily")
+        );
+        assert!(
+            !capabilities
+                .commands
+                .iter()
+                .any(|name| name == "toggle_slime"),
+            "deprecated aliases must not be advertised"
         );
         assert!(capabilities.queries.iter().any(|name| name == "get_status"));
         assert!(

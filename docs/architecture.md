@@ -114,7 +114,7 @@ src/backend/api.rs          platform boundary
   from commands that mutate backend state.
 - Compositor-wide visual mutations now live in `CompositorControl`: color
   temperature, saturation, brightness, contrast, inversion, grayscale, debug
-  HUD, transition mode, slime toggle and live config application no longer
+  HUD, transition mode, WaterLily toggle and live config application no longer
   expand the core `Backend` method set.
 - Capture and media workflows now live in `CompositorMedia`: full/region
   screenshots, static/live thumbnails, recording lifecycle and audio timing

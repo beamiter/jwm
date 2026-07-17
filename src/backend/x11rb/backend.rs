@@ -78,6 +78,7 @@ pub struct X11rbBackend {
     interaction: Option<X11Interaction>,
 
     compositor: Option<super::compositor::Compositor<RustConnection>>,
+    compositor_loop_signal: Option<calloop::LoopSignal>,
 
     systray: Option<super::systray::SystemTray<RustConnection>>,
 
@@ -347,6 +348,7 @@ impl X11rbBackend {
             _init_event_source: Some(event_source),
             interaction: None,
             compositor,
+            compositor_loop_signal: None,
             systray: None,
             benchmark_auto_exit: false,
             scratch_x11_scene: Vec::new(),
@@ -815,10 +817,10 @@ impl CompositorControl for X11rbBackend {
         }
     }
 
-    fn compositor_toggle_slime_effect(&mut self) -> Option<bool> {
+    fn compositor_toggle_waterlily_effect(&mut self) -> Option<bool> {
         self.compositor
             .as_mut()
-            .map(|compositor| compositor.toggle_slime_effect())
+            .map(|compositor| compositor.toggle_waterlily_effect())
     }
 
     fn compositor_set_transition_mode(&mut self, mode: &str) {
@@ -1263,6 +1265,9 @@ impl Backend for X11rbBackend {
                 primary_refresh_hz,
             ) {
                 Ok(mut compositor) => {
+                    if let Some(signal) = self.compositor_loop_signal.clone() {
+                        compositor.set_waterlily_loop_signal(signal);
+                    }
                     // Phase 1.3: Use batched geometry requests for all windows (single round-trip!)
                     let overlay = compositor.overlay_window();
                     let all_windows = self.ids.all_x11_windows();
@@ -1689,6 +1694,11 @@ impl Backend for X11rbBackend {
 
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError> {
         let mut event_loop: EventLoop<X11rbLoopData> = EventLoop::try_new()?;
+        let loop_signal = event_loop.get_signal();
+        self.compositor_loop_signal = Some(loop_signal.clone());
+        if let Some(compositor) = self.compositor.as_ref() {
+            compositor.set_waterlily_loop_signal(loop_signal);
+        }
         let handle = event_loop.handle();
 
         // 1. 注册 X11 事件源

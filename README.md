@@ -15,6 +15,8 @@ development backends.
 - Tags, per-monitor state, overview/expose, display layout UI, screenshots,
   screen/audio recording, session restore, gestures, accessibility filters,
   HDR/VRR/color-management plumbing, and direct-scanout diagnostics.
+- Full-screen WaterLily.jl simulation frames on the X11RB/XCB compositor,
+  produced externally on CPU, CUDA, or ROCm.
 - Live configuration reload and a newline-delimited JSON IPC API exposed through
   `jwm-tool`.
 - Read-only startup health checks, semantic configuration diagnostics, and
@@ -127,6 +129,7 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | Alt+Shift+C | Close focused client |
 | Alt+Control+C | Calculator scratchpad |
 | Alt+Control+S | Toggle sticky window |
+| Alt+Shift+F11 | Toggle the WaterLily simulation |
 | Alt+Shift+/ | Show all bindings |
 
 ## Portal and diagnostics
@@ -150,6 +153,8 @@ JWM_PIPEWIRE_PREFIX=/opt/pipewire-1.2 scripts/install-portal.sh
 ```
 
 Additional operational tools are documented in [tools/README.md](tools/README.md).
+The external Julia simulation worker and frame protocol are documented in
+[docs/waterlily.md](docs/waterlily.md).
 Architecture boundaries and the incremental migration plan are in
 [docs/architecture.md](docs/architecture.md). The delivery sequence for larger
 changes is tracked in [the evolution roadmap](docs/roadmap.md).

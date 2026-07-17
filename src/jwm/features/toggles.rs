@@ -249,15 +249,15 @@ impl Jwm {
         Ok(())
     }
 
-    /// Toggle the realtime fingertip-driven water/slime compositor effect.
-    pub fn toggle_slime(
+    /// Toggle the full-screen WaterLily simulation rendered by the compositor.
+    pub fn toggle_waterlily(
         &mut self,
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        match backend.compositor_toggle_slime_effect() {
-            Some(enabled) => log::info!("Slime effect {}", if enabled { "ON" } else { "OFF" }),
-            None => log::warn!("Slime effect is unavailable on this backend"),
+        match backend.compositor_toggle_waterlily_effect() {
+            Some(enabled) => log::info!("WaterLily effect {}", if enabled { "ON" } else { "OFF" }),
+            None => log::warn!("WaterLily effect is unavailable on this backend"),
         }
         Ok(())
     }

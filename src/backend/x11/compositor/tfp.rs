@@ -275,22 +275,6 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.postprocess_fbo = Self::create_scene_fbo(&self.gl, new_w, new_h).ok();
             }
         }
-        if let Some(simulation) = self.slime_wave_simulation.take() {
-            unsafe {
-                for fbo in simulation.fbos {
-                    self.gl.delete_framebuffer(fbo);
-                }
-                for texture in simulation.textures {
-                    self.gl.delete_texture(texture);
-                }
-                for fbo in simulation.pressure_fbos {
-                    self.gl.delete_framebuffer(fbo);
-                }
-                for texture in simulation.pressure_textures {
-                    self.gl.delete_texture(texture);
-                }
-            }
-        }
         // Cancel in-progress transition on resize (screen geometry changed)
         if let Some((fbo, tex)) = self.transition_fbo.take() {
             unsafe {

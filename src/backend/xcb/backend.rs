@@ -476,6 +476,7 @@ pub struct XcbBackend {
     interaction: Option<XcbInteraction>,
     shared_compositor_conn: Option<Arc<XcbSharedCompositorConnection>>,
     compositor: Option<XcbSharedCompositor>,
+    compositor_loop_signal: Option<calloop::LoopSignal>,
     systray: Option<XcbSystemTray>,
     benchmark_auto_exit: bool,
     scratch_x11_scene: Vec<(u32, i32, i32, u32, u32)>,
@@ -1040,6 +1041,7 @@ impl XcbBackend {
             interaction: None,
             shared_compositor_conn,
             compositor,
+            compositor_loop_signal: None,
             systray: None,
             benchmark_auto_exit: false,
             scratch_x11_scene: Vec::new(),
@@ -1917,10 +1919,10 @@ impl CompositorControl for XcbBackend {
         }
     }
 
-    fn compositor_toggle_slime_effect(&mut self) -> Option<bool> {
+    fn compositor_toggle_waterlily_effect(&mut self) -> Option<bool> {
         self.compositor
             .as_mut()
-            .map(|compositor| compositor.toggle_slime_effect())
+            .map(|compositor| compositor.toggle_waterlily_effect())
     }
 
     fn compositor_set_transition_mode(&mut self, mode: &str) {
@@ -2350,6 +2352,9 @@ impl Backend for XcbBackend {
         )
         .map_err(|e| BackendError::Message(format!("compositor init failed: {e}")))?;
         compositor.set_present_manager(load_xcb_present_manager(self.conn.clone()));
+        if let Some(signal) = self.compositor_loop_signal.clone() {
+            compositor.set_waterlily_loop_signal(signal);
+        }
         self.register_existing_windows_with_compositor(&mut compositor);
         self.compositor = Some(compositor);
         self.compositor_auto_configure_hdr();
@@ -2656,6 +2661,11 @@ impl Backend for XcbBackend {
 
     fn run(&mut self, handler: &mut dyn EventHandler) -> XcbResult<()> {
         let mut event_loop: EventLoop<XcbLoopData> = EventLoop::try_new()?;
+        let loop_signal = event_loop.get_signal();
+        self.compositor_loop_signal = Some(loop_signal.clone());
+        if let Some(compositor) = self.compositor.as_ref() {
+            compositor.set_waterlily_loop_signal(loop_signal);
+        }
         let handle = event_loop.handle();
 
         let fd = self.conn.as_raw_fd();

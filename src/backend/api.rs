@@ -1194,7 +1194,7 @@ pub trait CompositorControl: Send {
     fn compositor_set_debug_hud(&mut self, _enabled: bool) {}
     fn compositor_set_debug_hud_extended(&mut self, _enabled: bool) {}
 
-    fn compositor_toggle_slime_effect(&mut self) -> Option<bool> {
+    fn compositor_toggle_waterlily_effect(&mut self) -> Option<bool> {
         None
     }
 

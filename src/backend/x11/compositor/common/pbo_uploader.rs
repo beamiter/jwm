@@ -116,6 +116,33 @@ impl PBOUploader {
         }
     }
 
+    /// Grow the streaming buffers for a recurring upload without allowing an
+    /// untrusted producer to trigger unbounded GPU allocation.
+    pub fn ensure_capacity(
+        &mut self,
+        gl: &glow::Context,
+        required_size: usize,
+        maximum_size: usize,
+    ) -> bool {
+        if required_size <= self.pbo_size {
+            return true;
+        }
+        let Some(new_size) = required_size.checked_next_power_of_two() else {
+            return false;
+        };
+        if new_size > maximum_size {
+            return false;
+        }
+
+        self.clear(gl);
+        self.pbo_size = new_size;
+        log::info!(
+            "pbo_uploader: grew streaming buffer to {}MiB",
+            new_size / 1024 / 1024
+        );
+        true
+    }
+
     /// Upload texture data using PBO (async GPU transfer)
     ///
     /// Returns true if upload succeeded
@@ -231,12 +258,15 @@ impl PBOUploader {
     }
 
     /// Return PBO to pool
-    fn return_pbo(&mut self, gl: &glow::Context, pbo: StreamingPBO) {
+    fn return_pbo(&mut self, gl: &glow::Context, mut pbo: StreamingPBO) {
         if self.pool.len() < self.max_pool_size {
             self.pool.push_back(pbo);
         } else {
             // Pool full, drop oldest PBO
             unsafe {
+                if let Some(fence) = pbo.fence.take() {
+                    gl.delete_sync(fence);
+                }
                 gl.delete_buffer(pbo.pbo);
             }
         }
@@ -250,7 +280,10 @@ impl PBOUploader {
     /// Clear the pool (release all PBOs)
     pub fn clear(&mut self, gl: &glow::Context) {
         unsafe {
-            for pbo in self.pool.drain(..) {
+            for mut pbo in self.pool.drain(..) {
+                if let Some(fence) = pbo.fence.take() {
+                    gl.delete_sync(fence);
+                }
                 gl.delete_buffer(pbo.pbo);
             }
         }

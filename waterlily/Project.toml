@@ -1,0 +1,26 @@
+name = "JwmWaterLily"
+uuid = "a6d0ef76-54b0-4db5-a89d-c83ae2f6734b"
+authors = ["JWM contributors"]
+version = "0.1.0"
+
+[deps]
+Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+WaterLily = "ed894a53-35f9-47f1-b17f-85db9237eebd"
+
+[weakdeps]
+AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+
+[compat]
+AMDGPU = "1, 2"
+CUDA = "5"
+StaticArrays = "1"
+WaterLily = "1.8"
+julia = "1.10"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

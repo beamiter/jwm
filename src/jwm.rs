@@ -341,8 +341,8 @@ impl Jwm {
             "toggle_peek"
         } else if eq!(Jwm::toggle_annotation) {
             "toggle_annotation"
-        } else if eq!(Jwm::toggle_slime) {
-            "toggle_slime"
+        } else if eq!(Jwm::toggle_waterlily) {
+            "toggle_waterlily"
         } else if eq!(Jwm::save_session) {
             "save_session"
         } else if eq!(Jwm::restore_session) {

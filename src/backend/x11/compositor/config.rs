@@ -57,11 +57,12 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             }
         }
-        // A receiver thread raises `has_pending` even while fullscreen
-        // unredirect/direct-scanout has stopped regular XDamage rendering. Keep
-        // rendering through the fade and one final cleanup frame.
-        if self.slime_ipc.as_ref().is_some_and(SlimeIpc::has_pending)
-            || self.slime_state.render_active()
+        // The worker wake thread must be observable even while fullscreen
+        // unredirect/direct-scanout has stopped regular XDamage rendering.
+        if self
+            .waterlily_ipc
+            .as_ref()
+            .is_some_and(WaterlilyIpc::has_pending)
         {
             return true;
         }

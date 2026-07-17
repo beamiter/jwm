@@ -1,0 +1,366 @@
+module JwmWaterLily
+
+using Sockets
+using StaticArrays
+using WaterLily
+
+include("protocol.jl")
+include("cases/hover.jl")
+include("cases/registry.jl")
+
+const DEFAULT_FPS = 30.0
+const DEFAULT_SIZE = (320, 200)
+const MIN_SIM_DIMENSION = 64
+const MAX_SIM_DIMENSION = 4096
+const MULTIGRID_QUANTUM = 16
+
+struct RunnerOptions
+    case_name::String
+    device::Symbol
+    fps::Float64
+    socket_path::String
+    frame_path::String
+    requested_size::Tuple{Int,Int}
+    simulation_size::Tuple{Int,Int}
+end
+
+struct SelectedBackend
+    name::Symbol
+    memory::Any
+end
+
+function runtime_directory()
+    configured = get(ENV, "XDG_RUNTIME_DIR", "")
+    return isempty(configured) ? "/tmp/jwm-$(Base.Libc.getuid())" : configured
+end
+
+default_socket_path() = get(
+    ENV,
+    "JWM_WATERLILY_SOCKET",
+    joinpath(runtime_directory(), "jwm-waterlily.sock"),
+)
+default_frame_path() = get(
+    ENV,
+    "JWM_WATERLILY_FRAME_FILE",
+    joinpath(runtime_directory(), "jwm-waterlily.frame"),
+)
+
+function usage(io::IO=stdout)
+    cases = join(available_cases(), ", ")
+    print(
+        io,
+        """
+        usage: julia --project=waterlily waterlily/runner.jl [options]
+
+          --case NAME          registered case ($cases; default: hover)
+          --device DEVICE      auto, cpu, cuda, or rocm (default: auto)
+          --fps FPS            publication rate, 1..240 (default: 30)
+          --socket PATH        compositor wakeup Unix socket
+          --frame-file PATH    private double-buffer frame file
+          --sim-size SIZE      N or WxH; normalized to multiples of 16
+          --help               show this help
+        """,
+    )
+end
+
+function option_pairs(args::AbstractVector{<:AbstractString})
+    pairs = Pair{String,String}[]
+    index = 1
+    while index <= length(args)
+        argument = String(args[index])
+        argument in ("-h", "--help") && return nothing
+        startswith(argument, "--") ||
+            throw(ArgumentError("unexpected positional argument: $argument"))
+
+        if occursin('=', argument)
+            key, value = split(argument, '='; limit=2)
+            isempty(value) && throw(ArgumentError("$key requires a value"))
+            push!(pairs, key => value)
+        else
+            index == length(args) && throw(ArgumentError("$argument requires a value"))
+            value = String(args[index + 1])
+            startswith(value, "--") &&
+                throw(ArgumentError("$argument requires a value"))
+            push!(pairs, argument => value)
+            index += 1
+        end
+        index += 1
+    end
+    return pairs
+end
+
+function parse_size(value::AbstractString)
+    text = lowercase(strip(value))
+    parts = split(text, 'x')
+    if length(parts) == 1
+        side = tryparse(Int, parts[1])
+        side === nothing && throw(ArgumentError("invalid --sim-size: $value"))
+        requested = (side, side)
+    elseif length(parts) == 2
+        width, height = tryparse.(Int, parts)
+        (width === nothing || height === nothing) &&
+            throw(ArgumentError("invalid --sim-size: $value"))
+        requested = (width, height)
+    else
+        throw(ArgumentError("invalid --sim-size: $value"))
+    end
+
+    all(dimension -> MIN_SIM_DIMENSION <= dimension <= MAX_SIM_DIMENSION, requested) ||
+        throw(
+            ArgumentError(
+                "--sim-size dimensions must be between $MIN_SIM_DIMENSION and $MAX_SIM_DIMENSION",
+            ),
+        )
+    return requested
+end
+
+function normalize_dimension(value::Int)
+    lower = fld(value, MULTIGRID_QUANTUM) * MULTIGRID_QUANTUM
+    upper = cld(value, MULTIGRID_QUANTUM) * MULTIGRID_QUANTUM
+    lower = max(lower, MIN_SIM_DIMENSION)
+    upper = min(upper, MAX_SIM_DIMENSION)
+    return value - lower < upper - value ? lower : upper
+end
+
+normalize_size(size::Tuple{Int,Int}) = normalize_dimension.(size)
+
+function parse_cli(args::AbstractVector{<:AbstractString})
+    parsed = option_pairs(args)
+    parsed === nothing && return nothing
+
+    values = Dict(
+        "--case" => "hover",
+        "--device" => "auto",
+        "--fps" => string(DEFAULT_FPS),
+        "--socket" => default_socket_path(),
+        "--frame-file" => default_frame_path(),
+        "--sim-size" => "$(DEFAULT_SIZE[1])x$(DEFAULT_SIZE[2])",
+    )
+    for (key, value) in parsed
+        haskey(values, key) || throw(ArgumentError("unknown option: $key"))
+        values[key] = value
+    end
+
+    case_name = values["--case"]
+    case_name in available_cases() ||
+        throw(
+            ArgumentError(
+                "unknown case '$case_name'; available cases: $(join(available_cases(), ", "))",
+            ),
+        )
+
+    device_text = lowercase(values["--device"])
+    device_text in ("auto", "cpu", "cuda", "rocm") ||
+        throw(ArgumentError("--device must be auto, cpu, cuda, or rocm"))
+    device = Symbol(device_text)
+
+    fps = tryparse(Float64, values["--fps"])
+    (fps === nothing || !isfinite(fps) || !(1.0 <= fps <= 240.0)) &&
+        throw(ArgumentError("--fps must be a finite number between 1 and 240"))
+
+    socket_path = values["--socket"]
+    frame_path = values["--frame-file"]
+    isempty(socket_path) && throw(ArgumentError("--socket must not be empty"))
+    isempty(frame_path) && throw(ArgumentError("--frame-file must not be empty"))
+    socket_path == frame_path &&
+        throw(ArgumentError("--socket and --frame-file must be different paths"))
+
+    requested_size = parse_size(values["--sim-size"])
+    simulation_size = normalize_size(requested_size)
+    return RunnerOptions(
+        case_name,
+        device,
+        fps,
+        socket_path,
+        frame_path,
+        requested_size,
+        simulation_size,
+    )
+end
+
+const CUDA_ID = Base.PkgId(Base.UUID("052768ef-5323-5732-b1bb-66c8b64840ba"), "CUDA")
+const AMDGPU_ID =
+    Base.PkgId(Base.UUID("21141c5a-9bdb-4563-92ae-f87d6854732e"), "AMDGPU")
+
+function probe_source(device::Symbol)
+    if device == :cuda
+        return "import CUDA; exit(CUDA.functional() ? 0 : 1)"
+    elseif device == :rocm
+        return "import AMDGPU; exit(AMDGPU.functional() ? 0 : 1)"
+    end
+    throw(ArgumentError("cannot probe device $device"))
+end
+
+"""
+Probe a GPU in a disposable Julia process. In particular, `auto` never imports
+an optional GPU runtime into the long-lived worker until a probe has succeeded.
+"""
+function probe_backend(device::Symbol; timeout_seconds::Float64=30.0)
+    active_project = Base.active_project()
+    active_project === nothing && error("the WaterLily worker requires an active Julia project")
+    project = dirname(active_project)
+    command = `$(Base.julia_cmd()) --startup-file=no --history-file=no --compiled-modules=existing --pkgimages=existing --project=$project -e $(probe_source(device))`
+    process = try
+        run(pipeline(command; stdout=devnull, stderr=devnull); wait=false)
+    catch error
+        @debug "could not launch GPU probe" device exception = (error, catch_backtrace())
+        return false
+    end
+
+    try
+        deadline = time() + timeout_seconds
+        while process_running(process) && time() < deadline
+            sleep(0.05)
+        end
+        if process_running(process)
+            # A package import may be in native compilation and can defer
+            # SIGTERM indefinitely. The probe is disposable, so enforce the
+            # advertised timeout with SIGKILL.
+            kill(process, Base.SIGKILL)
+            wait(process)
+            return false
+        end
+        return success(process)
+    catch error
+        process_running(process) && kill(process, Base.SIGKILL)
+        @debug "GPU probe failed" device exception = (error, catch_backtrace())
+        return false
+    end
+end
+
+function load_backend(device::Symbol)
+    if device == :cuda
+        cuda = Base.require(CUDA_ID)
+        cuda.functional() || error("CUDA loaded but is not functional")
+        return SelectedBackend(:cuda, cuda.CuArray)
+    elseif device == :rocm
+        amdgpu = Base.require(AMDGPU_ID)
+        amdgpu.functional() || error("AMDGPU loaded but is not functional")
+        return SelectedBackend(:rocm, amdgpu.ROCArray)
+    elseif device == :cpu
+        return SelectedBackend(:cpu, Array)
+    end
+    throw(ArgumentError("unsupported device $device"))
+end
+
+function select_backend(requested::Symbol)
+    requested == :cpu && return load_backend(:cpu)
+
+    if requested in (:cuda, :rocm)
+        probe_backend(requested) ||
+            error("requested $(requested) backend is unavailable or not functional")
+        return load_backend(requested)
+    end
+
+    for candidate in (:cuda, :rocm)
+        probe_backend(candidate) || continue
+        try
+            return load_backend(candidate)
+        catch error
+            @warn(
+                "GPU backend passed its probe but failed to load; trying another backend",
+                candidate,
+                exception=(error, catch_backtrace()),
+            )
+        end
+    end
+    return load_backend(:cpu)
+end
+
+function prepare_runtime_parent(path::AbstractString)
+    parent = dirname(abspath(path))
+    if !isdir(parent)
+        mkpath(parent; mode=0o700)
+    end
+    metadata = stat(parent)
+    owned_by_user =
+        metadata.uid == Base.Libc.getuid() && (metadata.mode & 0o022) == 0
+    sticky_shared_directory = (metadata.mode & 0o1000) != 0
+    (owned_by_user || sticky_shared_directory) ||
+        throw(
+            ArgumentError(
+                "runtime directory must be private or a sticky shared directory: $parent",
+            ),
+        )
+    return parent
+end
+
+function run_worker(options::RunnerOptions)
+    prepare_runtime_parent(options.frame_path)
+    backend = select_backend(options.device)
+    options.requested_size != options.simulation_size &&
+        @info "normalized simulation size for WaterLily multigrid" requested =
+            options.requested_size simulation = options.simulation_size
+    @info "starting WaterLily worker" case = options.case_name device = backend.name size =
+        options.simulation_size fps = options.fps
+
+    simulation_case =
+        build_case(options.case_name, options.simulation_size; memory=backend.memory)
+    publisher = FramePublisher(options.frame_path, options.simulation_size...)
+    wakeups = WakeClient(options.socket_path)
+    cleaned = Ref(false)
+
+    function cleanup()
+        cleaned[] && return
+        cleaned[] = true
+        close(wakeups)
+        close(publisher)
+        remove_owned_frame_file!(publisher)
+    end
+    atexit(cleanup)
+
+    frame_period = 1.0 / options.fps
+    try
+        while true
+            started = time_ns()
+            advance!(simulation_case, frame_period)
+            rgba = render_rgba(simulation_case)
+            publish!(publisher, rgba, time_ns())
+            notify!(wakeups)
+
+            elapsed = Float64(time_ns() - started) / 1.0e9
+            elapsed < frame_period && sleep(frame_period - elapsed)
+        end
+    catch error
+        error isa InterruptException || rethrow()
+    finally
+        cleanup()
+    end
+    return nothing
+end
+
+function main(args::AbstractVector{<:AbstractString}=ARGS)
+    try
+        options = parse_cli(args)
+        if options === nothing
+            usage()
+            return 0
+        end
+        Base.exit_on_sigint(false)
+        run_worker(options)
+        return 0
+    catch error
+        if error isa ArgumentError
+            println(stderr, "waterlily: ", sprint(showerror, error))
+            usage(stderr)
+            return 2
+        end
+        showerror(stderr, error, catch_backtrace())
+        println(stderr)
+        return 1
+    end
+end
+
+export FramePublisher,
+    RunnerOptions,
+    available_cases,
+    build_case,
+    main,
+    normalize_size,
+    notify!,
+    parse_cli,
+    publish!,
+    render_rgba,
+    select_backend
+
+end

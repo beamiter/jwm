@@ -64,3 +64,11 @@ JWM_DIR=/path/to/jwm jwm-tool rebuild
 ```bash
 jwm-tool debug
 ```
+
+## WaterLily 着色器检查
+
+安装 `glslangValidator` 后，可独立编译检查 X11 WaterLily 后处理着色器：
+
+```bash
+python3 tools/validate_waterlily_shaders.py
+```

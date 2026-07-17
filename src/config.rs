@@ -1507,7 +1507,7 @@ impl Config {
             KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
                 key: "F11".to_string(),
-                function: "toggle_slime".to_string(),
+                function: "toggle_waterlily".to_string(),
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
@@ -2280,7 +2280,14 @@ impl Config {
             "togglecompositor" => Some(Jwm::togglecompositor),
             "togglepartialdamage" => Some(Jwm::togglepartialdamage),
             "toggle_debug_hud" => Some(Jwm::toggle_debug_hud),
-            "toggle_slime" => Some(Jwm::toggle_slime),
+            "toggle_waterlily" => Some(Jwm::toggle_waterlily),
+            // Compatibility only: new/default configuration must use the canonical name.
+            "toggle_slime" => {
+                log::warn!(
+                    "config action `toggle_slime` is deprecated; use `toggle_waterlily` instead"
+                );
+                Some(Jwm::toggle_waterlily)
+            }
             "toggle_overview" => Some(Jwm::toggle_overview),
             "cycle_overview" => Some(Jwm::cycle_overview),
             "toggle_magnifier" => Some(Jwm::toggle_magnifier),
@@ -2876,6 +2883,31 @@ mod tests {
     fn built_in_configuration_has_no_semantic_diagnostics() {
         let diagnostics = Config::default().diagnostics();
         assert!(diagnostics.is_empty(), "{diagnostics}");
+    }
+
+    #[test]
+    fn waterlily_binding_and_migration_alias_resolve_to_the_canonical_action() {
+        let config = Config::default();
+        assert!(
+            config
+                .inner
+                .keybindings
+                .keys
+                .iter()
+                .any(|key| key.function == "toggle_waterlily")
+        );
+        assert!(
+            !config
+                .inner
+                .keybindings
+                .keys
+                .iter()
+                .any(|key| key.function == "toggle_slime")
+        );
+
+        let canonical = config.parse_function("toggle_waterlily").unwrap();
+        let deprecated = config.parse_function("toggle_slime").unwrap();
+        assert!(std::ptr::fn_addr_eq(canonical, deprecated));
     }
 
     #[test]

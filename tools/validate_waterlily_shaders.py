@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile JWM's embedded slime fragment shaders with glslangValidator."""
+"""Compile JWM's embedded WaterLily postprocess shader with glslangValidator."""
 
 from __future__ import annotations
 
@@ -14,9 +14,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE = ROOT / "src/backend/x11/compositor/common/shaders.rs"
 SHADER_NAMES = (
-    "SLIME_WAVE_SIM_FRAGMENT_SHADER",
-    "SLIME_PRESSURE_FRAGMENT_SHADER",
-    "MAGNIFIER_POSTPROCESS_FRAGMENT_SHADER",
+    "WATERLILY_POSTPROCESS_FRAGMENT_SHADER",
 )
 
 
@@ -83,7 +81,7 @@ def main() -> int:
         print(exc, file=sys.stderr)
         return 2
 
-    with tempfile.TemporaryDirectory(prefix="jwm-slime-glsl-") as temp:
+    with tempfile.TemporaryDirectory(prefix="jwm-waterlily-glsl-") as temp:
         directory = Path(temp)
         valid = [
             compile_shader(args.validator, name, shader, directory)

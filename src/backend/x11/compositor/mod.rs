@@ -6,10 +6,10 @@ mod overview;
 mod pipeline;
 mod platform;
 mod postprocess;
-mod slime;
 mod tfp;
 mod transitions;
 mod types;
+mod waterlily;
 
 // Optimization modules
 
@@ -176,7 +176,6 @@ pub(crate) use rules_common::{
     parse_blur_quality_by_monitor, parse_blur_strength_by_hz,
 };
 pub use shader_cache::ShaderCache;
-use slime::{SlimeIpc, SlimeState};
 pub use subpixel_integration::{SubpixelCompositorIntegration, SubpixelRenderParams};
 pub use subpixel_render::{SubpixelMetrics, SubpixelMode, SubpixelRenderManager, WindowType};
 pub use texture_pool::TexturePool;
@@ -186,6 +185,7 @@ pub(crate) use wallpaper_common::{
     WallpaperImageData, WallpaperMode, compute_wallpaper_rect, parse_wallpaper_mode,
     resolve_wallpaper_for_tag,
 };
+use waterlily::{WaterlilyIpc, WaterlilyTexture};
 pub(crate) use wobbly::WobblyState;
 
 use crate::backend::x11::compositor_common::{
@@ -348,11 +348,6 @@ where
     // --- Feature 8: Color temperature / color management ---
     postprocess_program: glow::Program,
     postprocess_uniforms: PostprocessUniforms,
-    slime_wave_program: glow::Program,
-    slime_wave_uniforms: SlimeWaveUniforms,
-    slime_pressure_program: glow::Program,
-    slime_pressure_uniforms: SlimePressureUniforms,
-    slime_wave_simulation: Option<SlimeWaveSimulation>,
     /// FBO for post-process pass (captures the composited scene)
     postprocess_fbo: Option<(glow::Framebuffer, glow::Texture)>,
     color_temperature: f32,
@@ -461,10 +456,13 @@ where
     magnifier_zoom: f32,
     magnifier_uniforms: MagnifierUniforms,
 
-    // --- Realtime slime hand refraction ---
-    slime_ipc: Option<SlimeIpc>,
-    slime_state: SlimeState,
-    slime_effect_enabled: bool,
+    // --- WaterLily simulation layer ---
+    waterlily_ipc: Option<WaterlilyIpc>,
+    waterlily_frame_reader: crate::backend::compositor_common::waterlily::WaterlilyFrameReader,
+    waterlily_texture: Option<WaterlilyTexture>,
+    waterlily_effect_enabled: bool,
+    waterlily_active: bool,
+    waterlily_opacity: f32,
 
     // --- Window 3D tilt ---
     tilt_program: glow::Program,
@@ -755,8 +753,6 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
             self.gl.delete_program(self.temporal_blur_mix_program);
             self.gl.delete_program(self.border_program);
             self.gl.delete_program(self.postprocess_program);
-            self.gl.delete_program(self.slime_wave_program);
-            self.gl.delete_program(self.slime_pressure_program);
             self.gl.delete_program(self.hud_program);
             self.gl.delete_program(self.hud_text_program);
             self.gl.delete_program(self.annotation_line_program);
@@ -788,19 +784,8 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 self.gl.delete_framebuffer(fbo);
                 self.gl.delete_texture(tex);
             }
-            if let Some(simulation) = self.slime_wave_simulation.take() {
-                for fbo in simulation.fbos {
-                    self.gl.delete_framebuffer(fbo);
-                }
-                for texture in simulation.textures {
-                    self.gl.delete_texture(texture);
-                }
-                for fbo in simulation.pressure_fbos {
-                    self.gl.delete_framebuffer(fbo);
-                }
-                for texture in simulation.pressure_textures {
-                    self.gl.delete_texture(texture);
-                }
+            if let Some(frame) = self.waterlily_texture.take() {
+                self.gl.delete_texture(frame.texture);
             }
             if let Some((fbo, tex)) = self.transition_fbo.take() {
                 self.gl.delete_framebuffer(fbo);

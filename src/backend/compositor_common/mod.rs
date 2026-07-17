@@ -6,3 +6,4 @@ pub mod media;
 pub mod rules;
 pub mod screenshot;
 pub mod wallpaper;
+pub mod waterlily;

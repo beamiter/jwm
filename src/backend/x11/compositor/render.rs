@@ -499,10 +499,9 @@ impl<C: CompositorConnection> Compositor<C> {
         scene: &[(u32, i32, i32, u32, u32)],
         focused: Option<u32>,
     ) -> bool {
-        // Realtime post-processing cannot run while the X server presents a
-        // fullscreen client directly. Restore redirection as soon as a pose is
-        // visible, including the first packet received during unredirect.
-        if self.slime_state.is_visible()
+        // The simulation layer cannot run while the X server presents a
+        // fullscreen client directly. Restore redirection on its first frame.
+        if self.waterlily_visible()
             || self.system_ui.is_some()
             || self.recording_active
             || self.recording_region_overlay.is_some()
@@ -600,10 +599,23 @@ impl<C: CompositorConnection> Compositor<C> {
         // Phase 2: Begin frame profiling
         self.frame_profiler.begin_frame();
 
-        // Drain the lossy pose channel before deciding whether fullscreen can
-        // bypass the compositor. Only the newest inference result is retained.
-        let slime_updated = self.poll_slime_ipc();
-        let slime_active = self.slime_state.is_visible();
+        // Consume the newest completed simulation frame before deciding whether
+        // fullscreen may bypass the compositor.
+        if self
+            .waterlily_ipc
+            .as_ref()
+            .is_some_and(WaterlilyIpc::has_pending)
+            && !self.context_current
+        {
+            if let Err(error) = self.graphics.make_current() {
+                log::error!("compositor: failed to make context current: {error}");
+                self.needs_render = true;
+                return false;
+            }
+            self.context_current = true;
+        }
+        let waterlily_updated = self.poll_waterlily_frame();
+        let waterlily_active = self.waterlily_visible();
 
         // P6A: Process deferred X11 operations at start of render frame
         self.process_deferred_x11_ops();
@@ -717,7 +729,7 @@ impl<C: CompositorConnection> Compositor<C> {
                             height: h,
                             is_fullscreen: wt.is_fullscreen,
                             has_alpha: wt.has_rgba,
-                            has_blur: wt.is_frosted || slime_active,
+                            has_blur: wt.is_frosted || waterlily_active,
                             has_shadow: self.shadow_enabled,
                             has_corner_radius: corner_radius > 0.0,
                             opacity: wt.fade_opacity,
@@ -864,8 +876,7 @@ impl<C: CompositorConnection> Compositor<C> {
             || self.annotation_active
             || wallpaper_just_loaded
             || wobbly_active
-            || slime_updated
-            || slime_active
+            || waterlily_updated
             || explicit_render;
         let hash = Self::scene_hash(scene, focused);
         let scene_changed = hash != self.last_scene_hash;
@@ -2199,16 +2210,6 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // === Pass 4: Post-processing (features 8/9/10) ===
         if postprocess_active {
-            if self.slime_state.is_visible() {
-                self.run_slime_wave_simulation();
-            }
-            let slime_wave = self.slime_wave_simulation.as_ref().map(|simulation| {
-                (
-                    simulation.textures[simulation.front],
-                    simulation.width,
-                    simulation.height,
-                )
-            });
             let (_, pp_tex) = self.postprocess_fbo.as_ref().unwrap();
             let pp_tex = *pp_tex;
             unsafe {
@@ -2312,85 +2313,27 @@ impl<C: CompositorConnection> Compositor<C> {
                     );
                 }
 
-                // Slime hand refraction uniforms
-                let slime_opacity = self.slime_state.opacity();
-                let slime_enabled = self.slime_state.is_visible() && slime_wave.is_some();
+                // Full-screen WaterLily simulation layer.
+                let waterlily_enabled = self.waterlily_visible();
                 self.gl.uniform_1_i32(
-                    self.magnifier_uniforms.slime_enabled.as_ref(),
-                    if slime_enabled { 1 } else { 0 },
+                    self.magnifier_uniforms.waterlily_enabled.as_ref(),
+                    if waterlily_enabled { 1 } else { 0 },
                 );
                 self.gl.uniform_1_f32(
-                    self.magnifier_uniforms.slime_opacity.as_ref(),
-                    slime_opacity,
+                    self.magnifier_uniforms.waterlily_opacity.as_ref(),
+                    self.waterlily_opacity,
                 );
-                if slime_enabled {
-                    self.gl.uniform_2_f32_slice(
-                        self.magnifier_uniforms.slime_points.as_ref(),
-                        self.slime_state.points(),
-                    );
-                    self.gl.uniform_1_f32_slice(
-                        self.magnifier_uniforms.slime_depths.as_ref(),
-                        self.slime_state.depths(),
-                    );
-                    let [min_x, min_y, max_x, max_y] = self.slime_state.bbox();
-                    self.gl.uniform_4_f32(
-                        self.magnifier_uniforms.slime_bbox.as_ref(),
-                        min_x,
-                        min_y,
-                        max_x,
-                        max_y,
-                    );
-                    let [surface_min_x, surface_min_y, surface_max_x, surface_max_y] =
-                        self.slime_state.surface_rect();
-                    self.gl.uniform_4_f32(
-                        self.magnifier_uniforms.slime_surface_rect.as_ref(),
-                        surface_min_x,
-                        surface_min_y,
-                        surface_max_x,
-                        surface_max_y,
-                    );
-                    self.gl.uniform_2_f32(
-                        self.magnifier_uniforms.slime_screen_size.as_ref(),
-                        self.screen_w as f32,
-                        self.screen_h as f32,
-                    );
-                    self.gl.uniform_1_f32(
-                        self.magnifier_uniforms.slime_scale.as_ref(),
-                        self.slime_state.scale(),
-                    );
-                    self.gl.uniform_1_f32(
-                        self.magnifier_uniforms.slime_strength.as_ref(),
-                        self.slime_state.strength(),
-                    );
-                    self.gl.uniform_1_f32(
-                        self.magnifier_uniforms.slime_ocean_strength.as_ref(),
-                        self.slime_state.ocean_strength(),
-                    );
-                    self.gl.uniform_1_f32(
-                        self.magnifier_uniforms.slime_turbulence_strength.as_ref(),
-                        self.slime_state.turbulence_strength(),
-                    );
-                    self.gl.uniform_1_f32(
-                        self.magnifier_uniforms.slime_foam_strength.as_ref(),
-                        self.slime_state.foam_strength(),
-                    );
-                    self.gl.uniform_1_f32(
-                        self.magnifier_uniforms.slime_time.as_ref(),
-                        self.compositor_start_time.elapsed().as_secs_f32(),
-                    );
-                    let (wave_texture, wave_width, wave_height) = slime_wave.unwrap();
-                    self.gl
-                        .uniform_1_i32(self.magnifier_uniforms.slime_wave.as_ref(), 1);
-                    self.gl.uniform_2_f32(
-                        self.magnifier_uniforms.slime_wave_texel.as_ref(),
-                        1.0 / wave_width as f32,
-                        1.0 / wave_height as f32,
-                    );
+                self.gl
+                    .uniform_1_i32(self.magnifier_uniforms.waterlily_texture.as_ref(), 1);
+                if let Some(frame) = self
+                    .waterlily_texture
+                    .as_ref()
+                    .filter(|_| waterlily_enabled)
+                {
                     self.gl.active_texture(glow::TEXTURE1);
-                    self.gl.bind_texture(glow::TEXTURE_2D, Some(wave_texture));
+                    self.gl.bind_texture(glow::TEXTURE_2D, Some(frame.texture));
                     self.gl.active_texture(glow::TEXTURE0);
                 }
-
                 // Colorblind correction uniform
                 self.gl.uniform_1_i32(
                     self.magnifier_uniforms.colorblind_mode.as_ref(),

@@ -126,7 +126,6 @@ video-demo/generated/
 - Motion Trail。
 - Edge Glow。
 - Window Tilt。
-- Slime。
 - 屏幕标注。
 - 必须通过指针轨迹才能表现的交互。
 
@@ -948,7 +947,7 @@ blinds
 - Peek。
 - Zoom to Fit。
 - Magnifier。
-- Slime。
+- WaterLily 全屏流体模拟。
 - Annotation。
 
 不要同时打开多个重效果。每次只突出一个。
@@ -1072,7 +1071,7 @@ Edge Glow 使用移动到边缘并停留。
 
 Tilt 使用在屏幕四角之间移动。
 
-Slime 使用圆形或 8 字轨迹。
+WaterLily 由外部 Julia worker 自主演进，不再需要手势或鼠标轨迹。
 
 ### 11.3 录屏中显示按键
 

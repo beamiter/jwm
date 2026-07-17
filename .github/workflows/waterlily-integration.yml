@@ -1,0 +1,130 @@
+name: WaterLily compositor validation
+
+on:
+  push:
+    paths:
+      - src/backend/api.rs
+      - src/backend/compositor_common/waterlily.rs
+      - src/backend/x11/compositor/**
+      - src/backend/x11rb/backend.rs
+      - src/backend/xcb/backend.rs
+      - src/config.rs
+      - src/ipc.rs
+      - src/jwm.rs
+      - src/jwm/features/toggles.rs
+      - waterlily/**
+      - tools/validate_waterlily_shaders.py
+      - docs/waterlily.md
+      - .github/workflows/waterlily-integration.yml
+  pull_request:
+    branches:
+      - master
+    paths:
+      - src/backend/api.rs
+      - src/backend/compositor_common/waterlily.rs
+      - src/backend/x11/compositor/**
+      - src/backend/x11rb/backend.rs
+      - src/backend/xcb/backend.rs
+      - src/config.rs
+      - src/ipc.rs
+      - src/jwm.rs
+      - src/jwm/features/toggles.rs
+      - waterlily/**
+      - tools/validate_waterlily_shaders.py
+      - docs/waterlily.md
+      - .github/workflows/waterlily-integration.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: waterlily-validation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            glslang-tools \
+            libglib2.0-dev \
+            libcairo2-dev \
+            libpango1.0-dev \
+            libasound2-dev \
+            libdbus-1-dev \
+            libudev-dev \
+            libinput-dev \
+            libseat-dev \
+            libdrm-dev \
+            libgbm-dev \
+            libegl1-mesa-dev \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxext-dev \
+            libxxf86vm-dev \
+            libxcb1-dev \
+            libxcb-composite0-dev \
+            libxcb-damage0-dev \
+            libxcb-present-dev \
+            libxcb-randr0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcursor-dev \
+            libxfixes-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libxrender-dev
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Install minimum supported Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.10'
+
+      - name: Cache Julia packages
+        uses: julia-actions/cache@v2
+
+      - name: Check WaterLily integration formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check shader validator
+        run: python3 -m py_compile tools/validate_waterlily_shaders.py
+
+      - name: Compile embedded WaterLily postprocess shader
+        run: python3 tools/validate_waterlily_shaders.py
+
+      - name: Parse Julia worker sources
+        run: |
+          mapfile -t julia_sources < <(find waterlily -type f -name '*.jl' -print)
+          julia --startup-file=no -e \
+            'foreach(path -> Meta.parseall(read(path, String)), ARGS)' \
+            "${julia_sources[@]}"
+
+      - name: Test Julia WaterLily worker
+        env:
+          JULIA_NUM_THREADS: auto
+        run: |
+          julia --startup-file=no --project=waterlily -e \
+            'using Pkg; Pkg.instantiate(); Pkg.test()'
+
+      - name: Check all targets
+        run: cargo check --all-targets
+
+      - name: Run WaterLily state tests
+        run: cargo test --lib waterlily

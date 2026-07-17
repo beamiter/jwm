@@ -204,9 +204,9 @@ impl<C: CompositorConnection> Compositor<C> {
         // Compile post-process shader (features 8/9/10 + magnifier)
         let postprocess_program = shader_cache.get_or_compile(
             &gl,
-            "postprocess",
+            "waterlily_postprocess",
             shaders::BLUR_DOWN_VERTEX,
-            shaders::MAGNIFIER_POSTPROCESS_FRAGMENT_SHADER,
+            shaders::WATERLILY_POSTPROCESS_FRAGMENT_SHADER,
         )?;
         let postprocess_uniforms = unsafe {
             PostprocessUniforms {
@@ -229,48 +229,6 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         };
 
-        let slime_wave_program = shader_cache.get_or_compile(
-            &gl,
-            "slime_wave_sim",
-            shaders::BLUR_DOWN_VERTEX,
-            shaders::SLIME_WAVE_SIM_FRAGMENT_SHADER,
-        )?;
-        let slime_wave_uniforms = unsafe {
-            SlimeWaveUniforms {
-                projection: gl.get_uniform_location(slime_wave_program, "u_projection"),
-                rect: gl.get_uniform_location(slime_wave_program, "u_rect"),
-                state: gl.get_uniform_location(slime_wave_program, "u_state"),
-                texel: gl.get_uniform_location(slime_wave_program, "u_texel"),
-                aspect: gl.get_uniform_location(slime_wave_program, "u_aspect"),
-                turbulence: gl.get_uniform_location(slime_wave_program, "u_turbulence"),
-                foam: gl.get_uniform_location(slime_wave_program, "u_foam"),
-                injection_count: gl.get_uniform_location(slime_wave_program, "u_injection_count"),
-                injections: gl.get_uniform_location(slime_wave_program, "u_injections[0]"),
-                injection_params: gl
-                    .get_uniform_location(slime_wave_program, "u_injection_params[0]"),
-                time_step: gl.get_uniform_location(slime_wave_program, "u_time_step"),
-            }
-        };
-
-        let slime_pressure_program = shader_cache.get_or_compile(
-            &gl,
-            "slime_pressure",
-            shaders::BLUR_DOWN_VERTEX,
-            shaders::SLIME_PRESSURE_FRAGMENT_SHADER,
-        )?;
-        let slime_pressure_uniforms = unsafe {
-            SlimePressureUniforms {
-                projection: gl.get_uniform_location(slime_pressure_program, "u_projection"),
-                rect: gl.get_uniform_location(slime_pressure_program, "u_rect"),
-                state: gl.get_uniform_location(slime_pressure_program, "u_state"),
-                pressure: gl.get_uniform_location(slime_pressure_program, "u_pressure"),
-                texel: gl.get_uniform_location(slime_pressure_program, "u_texel"),
-                mode: gl.get_uniform_location(slime_pressure_program, "u_mode"),
-                projection_amount: gl
-                    .get_uniform_location(slime_pressure_program, "u_projection_amount"),
-            }
-        };
-
         let magnifier_uniforms = unsafe {
             MagnifierUniforms {
                 magnifier_enabled: gl
@@ -280,27 +238,12 @@ impl<C: CompositorConnection> Compositor<C> {
                 magnifier_radius: gl
                     .get_uniform_location(postprocess_program, "u_magnifier_radius"),
                 magnifier_zoom: gl.get_uniform_location(postprocess_program, "u_magnifier_zoom"),
-                slime_enabled: gl.get_uniform_location(postprocess_program, "u_slime_enabled"),
-                slime_points: gl.get_uniform_location(postprocess_program, "u_slime_points[0]"),
-                slime_depths: gl.get_uniform_location(postprocess_program, "u_slime_depths[0]"),
-                slime_bbox: gl.get_uniform_location(postprocess_program, "u_slime_bbox"),
-                slime_surface_rect: gl
-                    .get_uniform_location(postprocess_program, "u_slime_surface_rect"),
-                slime_screen_size: gl
-                    .get_uniform_location(postprocess_program, "u_slime_screen_size"),
-                slime_scale: gl.get_uniform_location(postprocess_program, "u_slime_scale"),
-                slime_strength: gl.get_uniform_location(postprocess_program, "u_slime_strength"),
-                slime_ocean_strength: gl
-                    .get_uniform_location(postprocess_program, "u_slime_ocean_strength"),
-                slime_turbulence_strength: gl
-                    .get_uniform_location(postprocess_program, "u_slime_turbulence_strength"),
-                slime_foam_strength: gl
-                    .get_uniform_location(postprocess_program, "u_slime_foam_strength"),
-                slime_opacity: gl.get_uniform_location(postprocess_program, "u_slime_opacity"),
-                slime_time: gl.get_uniform_location(postprocess_program, "u_slime_time"),
-                slime_wave: gl.get_uniform_location(postprocess_program, "u_slime_wave"),
-                slime_wave_texel: gl
-                    .get_uniform_location(postprocess_program, "u_slime_wave_texel"),
+                waterlily_enabled: gl
+                    .get_uniform_location(postprocess_program, "u_waterlily_enabled"),
+                waterlily_texture: gl
+                    .get_uniform_location(postprocess_program, "u_waterlily_texture"),
+                waterlily_opacity: gl
+                    .get_uniform_location(postprocess_program, "u_waterlily_opacity"),
                 colorblind_mode: gl.get_uniform_location(postprocess_program, "u_colorblind_mode"),
             }
         };
@@ -669,16 +612,19 @@ impl<C: CompositorConnection> Compositor<C> {
             None
         };
 
-        // The pose data plane is optional: compositor startup must not fail if
-        // the runtime directory is read-only or another experimental instance
-        // already owns the socket.
-        let slime_ipc = match SlimeIpc::bind_default() {
+        // The external simulation worker is optional: compositor startup must
+        // not fail when its private wake socket cannot be created.
+        let waterlily_ipc = match WaterlilyIpc::bind_default() {
             Ok(ipc) => Some(ipc),
             Err(err) => {
-                log::warn!("compositor: slime pose IPC disabled: {err}");
+                log::warn!("compositor: WaterLily frame IPC disabled: {err}");
                 None
             }
         };
+        let waterlily_frame_reader =
+            crate::backend::compositor_common::waterlily::WaterlilyFrameReader::new(
+                waterlily::default_frame_path(),
+            );
 
         // Parse P4: blur_strength_by_hz configuration
         let blur_strength_by_hz = parse_blur_strength_by_hz(&behavior.blur_strength_by_hz);
@@ -813,11 +759,6 @@ impl<C: CompositorConnection> Compositor<C> {
             // Feature 8: color management
             postprocess_program,
             postprocess_uniforms,
-            slime_wave_program,
-            slime_wave_uniforms,
-            slime_pressure_program,
-            slime_pressure_uniforms,
-            slime_wave_simulation: None,
             postprocess_fbo,
             color_temperature: behavior.color_temperature,
             saturation: behavior.saturation,
@@ -903,12 +844,20 @@ impl<C: CompositorConnection> Compositor<C> {
             magnifier_radius: behavior.magnifier_radius,
             magnifier_zoom: behavior.magnifier_zoom,
             magnifier_uniforms,
-            // Realtime slime hand refraction
-            slime_ipc,
-            slime_state: SlimeState::default(),
-            slime_effect_enabled: std::env::var("JWM_SLIME_ENABLED")
+            // External WaterLily simulation layer
+            waterlily_ipc,
+            waterlily_frame_reader,
+            waterlily_texture: None,
+            waterlily_effect_enabled: std::env::var("JWM_WATERLILY_ENABLED")
                 .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
-                .unwrap_or(true),
+                .unwrap_or(false),
+            waterlily_active: false,
+            waterlily_opacity: std::env::var("JWM_WATERLILY_OPACITY")
+                .ok()
+                .and_then(|value| value.parse::<f32>().ok())
+                .filter(|value| value.is_finite())
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0),
             // Window tilt
             tilt_program,
             tilt_uniforms,
