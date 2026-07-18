@@ -185,7 +185,7 @@ pub(crate) use wallpaper_common::{
     WallpaperImageData, WallpaperMode, compute_wallpaper_rect, parse_wallpaper_mode,
     resolve_wallpaper_for_tag,
 };
-use waterlily::{WaterlilyIpc, WaterlilyTexture};
+use waterlily::{WaterlilyIpc, WaterlilyMotion, WaterlilyTexture};
 pub(crate) use wobbly::WobblyState;
 
 use crate::backend::x11::compositor_common::{
@@ -459,9 +459,12 @@ where
     // --- WaterLily simulation layer ---
     waterlily_program: glow::Program,
     waterlily_uniforms: WaterlilyUniforms,
+    /// Private scene snapshot used only by the WaterLily frosted backdrop.
+    waterlily_scene_fbo: Option<(glow::Framebuffer, glow::Texture)>,
     waterlily_ipc: Option<WaterlilyIpc>,
     waterlily_frame_reader: crate::backend::compositor_common::waterlily::WaterlilyFrameReader,
     waterlily_texture: Option<WaterlilyTexture>,
+    waterlily_motion: WaterlilyMotion,
     waterlily_effect_enabled: bool,
     waterlily_active: bool,
     /// A WaterLily publication/visibility change that must reach the front
@@ -787,6 +790,10 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 self.gl.delete_texture(tex);
             }
             if let Some((fbo, tex)) = self.postprocess_fbo.take() {
+                self.gl.delete_framebuffer(fbo);
+                self.gl.delete_texture(tex);
+            }
+            if let Some((fbo, tex)) = self.waterlily_scene_fbo.take() {
                 self.gl.delete_framebuffer(fbo);
                 self.gl.delete_texture(tex);
             }

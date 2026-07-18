@@ -682,17 +682,57 @@ void main() {
 pub const WATERLILY_FRAGMENT_SHADER: &str = r#"#version 330 core
 
 uniform sampler2D u_texture;
+uniform sampler2D u_scene_texture;
+uniform int u_scene_available;
+uniform vec2 u_screen_size;
 uniform float u_opacity;
 in vec2 v_uv;
 out vec4 frag_color;
 
+vec3 blurred_scene(vec2 uv) {
+    vec2 step_uv = vec2(4.0) / u_screen_size;
+    // Separable 5x5 Gaussian weights, evaluated in one pass over the small
+    // WaterLily rectangle. The dedicated scene snapshot prevents feedback.
+    float weights[5] = float[](1.0, 4.0, 6.0, 4.0, 1.0);
+    vec3 sum = vec3(0.0);
+    for (int y = -2; y <= 2; ++y) {
+        for (int x = -2; x <= 2; ++x) {
+            float weight = weights[x + 2] * weights[y + 2];
+            sum += texture(u_scene_texture, uv + vec2(x, y) * step_uv).rgb * weight;
+        }
+    }
+    return sum / 256.0;
+}
+
 void main() {
     vec4 simulation = texture(u_texture, v_uv);
-    float alpha = simulation.a * clamp(u_opacity, 0.0, 1.0);
-    // The compositor uses premultiplied-alpha blending. The v1 frame protocol
-    // requires opaque pixels, but honoring alpha here keeps the layer isolated
-    // if a future protocol adds transparent visualizations.
-    frag_color = vec4(simulation.rgb * alpha, alpha);
+
+    // The v1 producer emits an opaque, nearly-white simulation background.
+    // Key only bright, low-chroma pixels so pale blue/red flow details remain.
+    float high = max(simulation.r, max(simulation.g, simulation.b));
+    float low = min(simulation.r, min(simulation.g, simulation.b));
+    float chroma = high - low;
+    float bright_white = smoothstep(0.82, 0.985, low);
+    float neutral = 1.0 - smoothstep(0.025, 0.12, chroma);
+    float backdrop_mix = clamp(bright_white * neutral, 0.0, 1.0);
+
+    vec3 backdrop = vec3(0.0);
+    float backdrop_alpha = 0.0;
+    if (u_scene_available == 1) {
+        // gl_FragCoord and the blitted scene texture both use bottom-left
+        // framebuffer coordinates, avoiding an extra orientation conversion.
+        vec2 screen_uv = gl_FragCoord.xy / u_screen_size;
+        backdrop = blurred_scene(screen_uv);
+        backdrop_alpha = backdrop_mix * 0.58;
+    }
+
+    float simulation_alpha = simulation.a * (1.0 - backdrop_mix);
+    vec3 premultiplied = simulation.rgb * simulation_alpha
+                       + backdrop * backdrop_alpha * (1.0 - simulation_alpha);
+    float alpha = simulation_alpha + backdrop_alpha * (1.0 - simulation_alpha);
+
+    float layer_opacity = clamp(u_opacity, 0.0, 1.0);
+    frag_color = vec4(premultiplied * layer_opacity, alpha * layer_opacity);
 }
 "#;
 

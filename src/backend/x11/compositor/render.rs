@@ -615,6 +615,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.context_current = true;
         }
         self.poll_waterlily_frame();
+        self.tick_waterlily_motion(std::time::Instant::now());
         let waterlily_active = self.waterlily_visible();
         let waterlily_layer_dirty = self.waterlily_layer_dirty;
 
@@ -2342,7 +2343,8 @@ impl<C: CompositorConnection> Compositor<C> {
         // client sampling, magnification, accessibility filters, or HDR state.
         // The Composite Overlay Window has an empty input shape, so the quad
         // remains click-through and cannot take keyboard focus.
-        self.render_waterlily_layer(&proj);
+        let waterlily_backdrop = self.prepare_waterlily_backdrop(use_scissor);
+        self.render_waterlily_layer(&proj, waterlily_backdrop);
 
         // Tick tilt after the render loop has set tilt_target from the focused window.
         // If no focused window set tilt_target this frame, it keeps 0 from the reset

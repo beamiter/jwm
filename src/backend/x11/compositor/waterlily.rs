@@ -9,12 +9,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const RECEIVE_TIMEOUT: Duration = Duration::from_millis(100);
 const ACCEPT_RETRY: Duration = Duration::from_millis(20);
 const PRODUCER_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_WATERLILY_PBO_BYTES: usize = 64 * 1024 * 1024;
+const WATERLILY_SPEED_PX_PER_SECOND: f32 = 96.0;
+const WATERLILY_DAMAGE_MARGIN: i32 = 10;
 
 pub(super) struct WaterlilyIpc {
     path: PathBuf,
@@ -204,6 +206,163 @@ pub(super) struct WaterlilyTexture {
     pub(super) timestamp_ns: u64,
 }
 
+pub(super) struct WaterlilyMotion {
+    position: [f32; 2],
+    velocity: [f32; 2],
+    target: [f32; 2],
+    bounds: [f32; 2],
+    last_tick: Instant,
+    random_state: u64,
+    initialized: bool,
+}
+
+impl WaterlilyMotion {
+    pub(super) fn new() -> Self {
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64
+            ^ u64::from(std::process::id()).rotate_left(17);
+        Self::with_seed(seed)
+    }
+
+    fn with_seed(seed: u64) -> Self {
+        Self {
+            position: [0.0, 0.0],
+            velocity: [0.0, 0.0],
+            target: [0.0, 0.0],
+            bounds: [0.0, 0.0],
+            last_tick: Instant::now(),
+            random_state: seed.max(1),
+            initialized: false,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.velocity = [0.0, 0.0];
+        self.initialized = false;
+        self.last_tick = Instant::now();
+    }
+
+    fn position(&self) -> [f32; 2] {
+        self.position
+    }
+
+    fn tick(
+        &mut self,
+        screen_width: u32,
+        screen_height: u32,
+        frame_width: u32,
+        frame_height: u32,
+        now: Instant,
+    ) -> bool {
+        let bounds = [
+            screen_width.saturating_sub(frame_width) as f32,
+            screen_height.saturating_sub(frame_height) as f32,
+        ];
+
+        if !self.initialized {
+            self.bounds = bounds;
+            self.position = [
+                self.next_random() * bounds[0],
+                self.next_random() * bounds[1],
+            ];
+            self.choose_target();
+            self.last_tick = now;
+            self.initialized = true;
+            return true;
+        }
+
+        if self.bounds != bounds {
+            self.bounds = bounds;
+            self.position[0] = self.position[0].clamp(0.0, bounds[0]);
+            self.position[1] = self.position[1].clamp(0.0, bounds[1]);
+            self.choose_target();
+        }
+
+        let delta_seconds = now
+            .saturating_duration_since(self.last_tick)
+            .as_secs_f32()
+            .min(0.05);
+        self.last_tick = now;
+        if delta_seconds <= f32::EPSILON {
+            return false;
+        }
+
+        let to_target = [
+            self.target[0] - self.position[0],
+            self.target[1] - self.position[1],
+        ];
+        let distance = to_target[0].hypot(to_target[1]);
+        if distance < 28.0 {
+            self.choose_target();
+        }
+
+        let to_target = [
+            self.target[0] - self.position[0],
+            self.target[1] - self.position[1],
+        ];
+        let distance = to_target[0].hypot(to_target[1]);
+        let desired_velocity = if distance > 0.001 {
+            [
+                to_target[0] / distance * WATERLILY_SPEED_PX_PER_SECOND,
+                to_target[1] / distance * WATERLILY_SPEED_PX_PER_SECOND,
+            ]
+        } else {
+            [0.0, 0.0]
+        };
+        // Exponential steering avoids direction discontinuities at waypoints.
+        let steering = 1.0 - (-3.5 * delta_seconds).exp();
+        for axis in 0..2 {
+            self.velocity[axis] += (desired_velocity[axis] - self.velocity[axis]) * steering;
+            self.position[axis] += self.velocity[axis] * delta_seconds;
+        }
+
+        let mut hit_edge = false;
+        for axis in 0..2 {
+            let clamped = self.position[axis].clamp(0.0, self.bounds[axis]);
+            if (clamped - self.position[axis]).abs() > f32::EPSILON {
+                self.position[axis] = clamped;
+                self.velocity[axis] = 0.0;
+                hit_edge = true;
+            }
+        }
+        if hit_edge {
+            self.choose_target();
+        }
+        true
+    }
+
+    fn choose_target(&mut self) {
+        let minimum_distance = (self.bounds[0].hypot(self.bounds[1]) * 0.2).min(160.0);
+        for _ in 0..4 {
+            let candidate = [
+                self.next_random() * self.bounds[0],
+                self.next_random() * self.bounds[1],
+            ];
+            if (candidate[0] - self.position[0]).hypot(candidate[1] - self.position[1])
+                >= minimum_distance
+            {
+                self.target = candidate;
+                return;
+            }
+            self.target = candidate;
+        }
+    }
+
+    fn next_random(&mut self) -> f32 {
+        // xorshift64*: compact deterministic state with sufficient quality for
+        // visual waypoint selection.
+        let mut value = self.random_state;
+        value ^= value >> 12;
+        value ^= value << 25;
+        value ^= value >> 27;
+        self.random_state = value;
+        let sample = value.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40;
+        sample as f32 / ((1u32 << 24) - 1) as f32
+    }
+}
+
 impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn set_waterlily_loop_signal(&self, signal: calloop::LoopSignal) {
         if let Some(ipc) = &self.waterlily_ipc {
@@ -215,6 +374,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let previous_damage = self.waterlily_damage_rect();
         self.waterlily_effect_enabled = !self.waterlily_effect_enabled;
         self.waterlily_active = false;
+        self.waterlily_motion.reset();
         self.waterlily_frame_reader.reset();
         if let Some(ipc) = &self.waterlily_ipc {
             ipc.request_poll();
@@ -255,6 +415,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // crashed/restarted worker cannot be wedged behind the old sequence.
         if new_connection {
             self.waterlily_frame_reader.reset();
+            self.waterlily_motion.reset();
         }
 
         let previous_damage = self.waterlily_damage_rect();
@@ -307,10 +468,93 @@ impl<C: CompositorConnection> Compositor<C> {
         self.waterlily_effect_enabled && self.waterlily_active && self.waterlily_texture.is_some()
     }
 
+    pub(super) fn tick_waterlily_motion(&mut self, now: Instant) -> bool {
+        if !self.waterlily_visible() {
+            return false;
+        }
+        let Some(frame) = self.waterlily_texture.as_ref() else {
+            return false;
+        };
+        let (frame_width, frame_height) = (frame.width, frame.height);
+        let previous_damage = self.waterlily_damage_rect();
+        if !self
+            .waterlily_motion
+            .tick(self.screen_w, self.screen_h, frame_width, frame_height, now)
+        {
+            return false;
+        }
+
+        if let Some(rect) = previous_damage {
+            self.mark_waterlily_damage(rect);
+        }
+        if let Some(rect) = self.waterlily_damage_rect() {
+            self.mark_waterlily_damage(rect);
+        }
+        self.waterlily_layer_dirty = true;
+        true
+    }
+
+    /// Copy only the moving layer's damage area into a private scene texture.
+    /// The WaterLily shader samples this snapshot for its frosted backdrop,
+    /// avoiding read/write feedback and leaving the regular client blur cache
+    /// untouched.
+    pub(super) fn prepare_waterlily_backdrop(
+        &mut self,
+        scissor_active: bool,
+    ) -> Option<glow::Texture> {
+        let damage = self.waterlily_damage_rect()?;
+        if self.waterlily_scene_fbo.is_none() {
+            match unsafe { Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h) } {
+                Ok(snapshot) => self.waterlily_scene_fbo = Some(snapshot),
+                Err(error) => {
+                    log::warn!("compositor: WaterLily backdrop allocation failed: {error}");
+                    return None;
+                }
+            }
+        }
+        let (framebuffer, texture) = *self.waterlily_scene_fbo.as_ref()?;
+        let x0 = damage.x;
+        let x1 = damage.x + damage.width as i32;
+        let y0 = self.screen_h as i32 - damage.y - damage.height as i32;
+        let y1 = y0 + damage.height as i32;
+
+        unsafe {
+            if scissor_active {
+                self.gl.disable(glow::SCISSOR_TEST);
+            }
+            self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            self.gl
+                .bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(framebuffer));
+            self.gl.blit_framebuffer(
+                x0,
+                y0,
+                x1,
+                y1,
+                x0,
+                y0,
+                x1,
+                y1,
+                glow::COLOR_BUFFER_BIT,
+                glow::NEAREST,
+            );
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.gl
+                .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            if scissor_active {
+                self.gl.enable(glow::SCISSOR_TEST);
+            }
+        }
+        Some(texture)
+    }
+
     /// Draw the latest worker frame as a one-device-pixel-per-frame-pixel
     /// compositor layer. The full-screen Composite Overlay Window remains input
     /// transparent; only this visual quad is added above clients.
-    pub(super) fn render_waterlily_layer(&mut self, projection: &[f32; 16]) {
+    pub(super) fn render_waterlily_layer(
+        &mut self,
+        projection: &[f32; 16],
+        backdrop_texture: Option<glow::Texture>,
+    ) {
         if !self.waterlily_visible() {
             return;
         }
@@ -318,6 +562,7 @@ impl<C: CompositorConnection> Compositor<C> {
             return;
         };
         let (texture, width, height) = (frame.texture, frame.width, frame.height);
+        let [x, y] = self.waterlily_motion.position();
 
         unsafe {
             self.gl_state_tracker
@@ -329,17 +574,30 @@ impl<C: CompositorConnection> Compositor<C> {
             );
             self.gl.uniform_4_f32(
                 self.waterlily_uniforms.rect.as_ref(),
-                0.0,
-                0.0,
+                x,
+                y,
                 width as f32,
                 height as f32,
             );
             self.gl
                 .uniform_1_i32(self.waterlily_uniforms.texture.as_ref(), 0);
+            self.gl
+                .uniform_1_i32(self.waterlily_uniforms.scene_texture.as_ref(), 1);
+            self.gl.uniform_1_i32(
+                self.waterlily_uniforms.scene_available.as_ref(),
+                i32::from(backdrop_texture.is_some()),
+            );
+            self.gl.uniform_2_f32(
+                self.waterlily_uniforms.screen_size.as_ref(),
+                self.screen_w as f32,
+                self.screen_h as f32,
+            );
             self.gl.uniform_1_f32(
                 self.waterlily_uniforms.opacity.as_ref(),
                 self.waterlily_opacity,
             );
+            self.gl.active_texture(glow::TEXTURE1);
+            self.gl.bind_texture(glow::TEXTURE_2D, backdrop_texture);
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             self.gl_state_tracker
@@ -347,6 +605,9 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             self.gl_state_tracker.bind_vertex_array(&self.gl, None);
             self.gl_state_tracker.use_program(&self.gl, None);
+            self.gl.active_texture(glow::TEXTURE1);
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
+            self.gl.active_texture(glow::TEXTURE0);
         }
     }
 
@@ -355,8 +616,22 @@ impl<C: CompositorConnection> Compositor<C> {
             return None;
         }
         let frame = self.waterlily_texture.as_ref()?;
-        visible_waterlily_size(self.screen_w, self.screen_h, frame.width, frame.height)
-            .map(|(width, height)| DirtyRect::new(0, 0, width, height))
+        let (visible_width, visible_height) =
+            visible_waterlily_size(self.screen_w, self.screen_h, frame.width, frame.height)?;
+        let [x, y] = self.waterlily_motion.position();
+        let x0 = x.floor().max(0.0) as i32;
+        let y0 = y.floor().max(0.0) as i32;
+        let right = (x + visible_width as f32).ceil().min(self.screen_w as f32) as i32;
+        let bottom = (y + visible_height as f32).ceil().min(self.screen_h as f32) as i32;
+        if right <= x0 || bottom <= y0 {
+            return None;
+        }
+        Some(expand_waterlily_damage(
+            DirtyRect::new(x0, y0, (right - x0) as u32, (bottom - y0) as u32),
+            WATERLILY_DAMAGE_MARGIN,
+            self.screen_w,
+            self.screen_h,
+        ))
     }
 
     fn mark_waterlily_damage(&mut self, rect: DirtyRect) {
@@ -482,6 +757,26 @@ fn visible_waterlily_size(
     (width > 0 && height > 0).then_some((width, height))
 }
 
+fn expand_waterlily_damage(
+    rect: DirtyRect,
+    margin: i32,
+    screen_width: u32,
+    screen_height: u32,
+) -> DirtyRect {
+    let x0 = (rect.x - margin).max(0);
+    let y0 = (rect.y - margin).max(0);
+    let right =
+        (rect.x + rect.width as i32 + margin).min(i32::try_from(screen_width).unwrap_or(i32::MAX));
+    let bottom = (rect.y + rect.height as i32 + margin)
+        .min(i32::try_from(screen_height).unwrap_or(i32::MAX));
+    DirtyRect::new(
+        x0,
+        y0,
+        right.saturating_sub(x0) as u32,
+        bottom.saturating_sub(y0) as u32,
+    )
+}
+
 fn mark_pending(pending: &AtomicBool, loop_signal: &Mutex<Option<calloop::LoopSignal>>) {
     pending.store(true, Ordering::Release);
     if let Ok(signal) = loop_signal.lock()
@@ -574,7 +869,8 @@ fn peer_is_current_user(stream: &UnixStream) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::visible_waterlily_size;
+    use super::{DirtyRect, WaterlilyMotion, expand_waterlily_damage, visible_waterlily_size};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn worker_frame_keeps_its_native_display_size() {
@@ -589,6 +885,58 @@ mod tests {
         assert_eq!(
             visible_waterlily_size(1920, 1080, 2560, 1440),
             Some((1920, 1080))
+        );
+    }
+
+    #[test]
+    fn moving_layer_stays_inside_screen_with_continuous_steps() {
+        let mut motion = WaterlilyMotion::with_seed(7);
+        let started = Instant::now();
+        assert!(motion.tick(1280, 720, 320, 200, started));
+        let mut previous = motion.position();
+        let mut travelled = 0.0;
+
+        for frame in 1..600 {
+            assert!(motion.tick(
+                1280,
+                720,
+                320,
+                200,
+                started + Duration::from_millis(frame * 16),
+            ));
+            let position = motion.position();
+            assert!((0.0..=960.0).contains(&position[0]));
+            assert!((0.0..=520.0).contains(&position[1]));
+            let step = (position[0] - previous[0]).hypot(position[1] - previous[1]);
+            assert!(step < 5.0, "motion jumped {step}px in one frame");
+            travelled += step;
+            previous = position;
+        }
+        assert!(travelled > 100.0);
+    }
+
+    #[test]
+    fn fullscreen_layer_has_no_motion_range() {
+        let mut motion = WaterlilyMotion::with_seed(9);
+        let started = Instant::now();
+        motion.tick(320, 200, 320, 200, started);
+        for frame in 1..30 {
+            motion.tick(
+                320,
+                200,
+                320,
+                200,
+                started + Duration::from_millis(frame * 16),
+            );
+            assert_eq!(motion.position(), [0.0, 0.0]);
+        }
+    }
+
+    #[test]
+    fn blur_damage_margin_is_clipped_to_screen() {
+        assert_eq!(
+            expand_waterlily_damage(DirtyRect::new(2, 3, 100, 50), 10, 120, 80),
+            DirtyRect::new(0, 0, 112, 63)
         );
     }
 }

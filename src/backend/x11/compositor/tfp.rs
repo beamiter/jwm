@@ -275,6 +275,17 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.postprocess_fbo = Self::create_scene_fbo(&self.gl, new_w, new_h).ok();
             }
         }
+        // Recreate the private WaterLily backdrop snapshot at the new output
+        // size. It stays independent from the regular client blur cache.
+        if self.waterlily_scene_fbo.is_some() {
+            unsafe {
+                if let Some((fbo, tex)) = self.waterlily_scene_fbo.take() {
+                    self.gl.delete_framebuffer(fbo);
+                    self.gl.delete_texture(tex);
+                }
+                self.waterlily_scene_fbo = Self::create_scene_fbo(&self.gl, new_w, new_h).ok();
+            }
+        }
         // Cancel in-progress transition on resize (screen geometry changed)
         if let Some((fbo, tex)) = self.transition_fbo.take() {
             unsafe {

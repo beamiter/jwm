@@ -256,6 +256,9 @@ impl<C: CompositorConnection> Compositor<C> {
                 projection: gl.get_uniform_location(waterlily_program, "u_projection"),
                 rect: gl.get_uniform_location(waterlily_program, "u_rect"),
                 texture: gl.get_uniform_location(waterlily_program, "u_texture"),
+                scene_texture: gl.get_uniform_location(waterlily_program, "u_scene_texture"),
+                scene_available: gl.get_uniform_location(waterlily_program, "u_scene_available"),
+                screen_size: gl.get_uniform_location(waterlily_program, "u_screen_size"),
                 opacity: gl.get_uniform_location(waterlily_program, "u_opacity"),
             }
         };
@@ -859,9 +862,11 @@ impl<C: CompositorConnection> Compositor<C> {
             // External WaterLily simulation layer
             waterlily_program,
             waterlily_uniforms,
+            waterlily_scene_fbo: None,
             waterlily_ipc,
             waterlily_frame_reader,
             waterlily_texture: None,
+            waterlily_motion: WaterlilyMotion::new(),
             waterlily_effect_enabled: std::env::var("JWM_WATERLILY_ENABLED")
                 .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
                 .unwrap_or(false),

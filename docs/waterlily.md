@@ -23,23 +23,27 @@ Julia WaterLily worker
               | RGBA8 double-buffer file + Unix socket wakeups
               v
 JWM X11 compositor
-  upload texture -> native-size, input-transparent layer
+  upload texture -> native-size, frosted, input-transparent moving layer
 ```
 
 This implementation is currently limited to the shared X11 compositor used by
 the `x11rb` and `xcb` backends. It is not available on the Wayland backends.
-The image is drawn one-to-one from the top-left compositor origin: a `320x200`
-worker frame occupies exactly `320x200` screen pixels. Frames larger than the
-screen are clipped, never scaled. There is no per-window target.
+The image is drawn one-to-one: a `320x200` worker frame occupies exactly
+`320x200` screen pixels. It follows continuously steered random waypoints while
+remaining inside the compositor area. Frames larger than the screen are
+clipped, never scaled. There is no per-window target.
 
 WaterLily is rendered in its own compositor pass after client post-processing,
 so it does not alter client texture sampling, blur, color/accessibility
-processing, or HDR processing. The X11 Composite Overlay Window keeps an empty
-input shape, making the layer click-through: pointer and keyboard control
-continue to target normal client windows. JWM-owned HUD, transition, and system
-UI layers remain above WaterLily. Direct scanout and fullscreen unredirect are
-suppressed while the layer is visible because both paths would bypass
-compositor-owned visuals.
+processing, or HDR processing. Bright low-chroma pixels from the worker's
+opaque background are replaced with a semi-transparent blurred snapshot of the
+client scene; colored flow details remain opaque. The blur uses a private
+WaterLily scene texture and does not reuse or invalidate client blur caches.
+The X11 Composite Overlay Window keeps an empty input shape, making the layer
+click-through: pointer and keyboard control continue to target normal client
+windows. JWM-owned HUD, transition, and system UI layers remain above
+WaterLily. Direct scanout and fullscreen unredirect are suppressed while the
+layer is visible because both paths would bypass compositor-owned visuals.
 
 There is no hand tracking in this design. It does not use a camera, MediaPipe,
 landmarks, a selected window, or pointer motion. The chosen WaterLily case

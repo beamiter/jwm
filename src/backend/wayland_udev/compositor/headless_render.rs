@@ -498,6 +498,106 @@ fn x11_shaders_compile() {
 }
 
 #[test]
+fn waterlily_shader_keys_white_to_translucent_scene_and_preserves_color() {
+    use crate::backend::x11::compositor::shaders as s;
+
+    let Some(h) = HeadlessGl::new(GlApi::GlCore33) else {
+        eprintln!(
+            "headless GL unavailable - skipping \
+             waterlily_shader_keys_white_to_translucent_scene_and_preserves_color"
+        );
+        return;
+    };
+    let gl = &h.gl;
+    const W: i32 = 16;
+    const H: i32 = 16;
+
+    unsafe {
+        let prog = link(gl, s::VERTEX_SHADER, s::WATERLILY_FRAGMENT_SHADER)
+            .expect("WaterLily shaders must link");
+        let scene_pixels: Vec<u8> = [40u8, 80, 120, 255]
+            .iter()
+            .copied()
+            .cycle()
+            .take(4 * 4)
+            .collect();
+        let scene_tex = gl.create_texture().unwrap();
+        gl.active_texture(glow::TEXTURE1);
+        gl.bind_texture(glow::TEXTURE_2D, Some(scene_tex));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA as i32,
+            2,
+            2,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(&scene_pixels)),
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::NEAREST as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::NEAREST as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_S,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_WRAP_T,
+            glow::CLAMP_TO_EDGE as i32,
+        );
+
+        let render = |simulation| {
+            render_quad(gl, prog, simulation, W, H, |gl| {
+                let u = |name: &str| gl.get_uniform_location(prog, name);
+                gl.uniform_4_f32(u("u_rect").as_ref(), 0.0, 0.0, W as f32, H as f32);
+                gl.uniform_matrix_4_f32_slice(
+                    u("u_projection").as_ref(),
+                    false,
+                    &ortho(W as f32, H as f32),
+                );
+                gl.uniform_1_i32(u("u_texture").as_ref(), 0);
+                gl.uniform_1_i32(u("u_scene_texture").as_ref(), 1);
+                gl.uniform_1_i32(u("u_scene_available").as_ref(), 1);
+                gl.uniform_2_f32(u("u_screen_size").as_ref(), W as f32, H as f32);
+                gl.uniform_1_f32(u("u_opacity").as_ref(), 1.0);
+                gl.active_texture(glow::TEXTURE1);
+                gl.bind_texture(glow::TEXTURE_2D, Some(scene_tex));
+                gl.active_texture(glow::TEXTURE0);
+            })
+        };
+
+        // Pure white becomes a 58%-opaque premultiplied sample of the blurred
+        // scene, ready for the compositor's ONE/ONE_MINUS_SRC_ALPHA blend.
+        assert_pixel(
+            render([255, 255, 255, 255]),
+            [23, 46, 70, 148],
+            1,
+            "WaterLily white backdrop",
+        );
+        // Saturated simulation details are not keyed or made translucent.
+        assert_pixel(
+            render([20, 80, 220, 255]),
+            [20, 80, 220, 255],
+            1,
+            "WaterLily colored flow",
+        );
+
+        gl.delete_texture(scene_tex);
+        gl.delete_program(prog);
+    }
+}
+
+#[test]
 fn main_window_shader_renders_opacity_and_dim() {
     let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
         eprintln!("headless GL unavailable - skipping main_window_shader_renders_opacity_and_dim");

@@ -66,6 +66,11 @@ impl<C: CompositorConnection> Compositor<C> {
         {
             return true;
         }
+        // The native-size WaterLily layer follows smooth random waypoints even
+        // when the worker publishes more slowly than the display refresh.
+        if self.waterlily_visible() {
+            return true;
+        }
         // Need render if magnifier is active (tracking mouse)
         if self.magnifier_enabled {
             return true;
