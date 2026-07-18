@@ -204,9 +204,9 @@ impl<C: CompositorConnection> Compositor<C> {
         // Compile post-process shader (features 8/9/10 + magnifier)
         let postprocess_program = shader_cache.get_or_compile(
             &gl,
-            "waterlily_postprocess",
+            "advanced_postprocess",
             shaders::BLUR_DOWN_VERTEX,
-            shaders::WATERLILY_POSTPROCESS_FRAGMENT_SHADER,
+            shaders::ADVANCED_POSTPROCESS_FRAGMENT_SHADER,
         )?;
         let postprocess_uniforms = unsafe {
             PostprocessUniforms {
@@ -238,13 +238,25 @@ impl<C: CompositorConnection> Compositor<C> {
                 magnifier_radius: gl
                     .get_uniform_location(postprocess_program, "u_magnifier_radius"),
                 magnifier_zoom: gl.get_uniform_location(postprocess_program, "u_magnifier_zoom"),
-                waterlily_enabled: gl
-                    .get_uniform_location(postprocess_program, "u_waterlily_enabled"),
-                waterlily_texture: gl
-                    .get_uniform_location(postprocess_program, "u_waterlily_texture"),
-                waterlily_opacity: gl
-                    .get_uniform_location(postprocess_program, "u_waterlily_opacity"),
                 colorblind_mode: gl.get_uniform_location(postprocess_program, "u_colorblind_mode"),
+            }
+        };
+
+        // WaterLily is a separate, input-transparent compositor layer. Keeping
+        // it out of the post-process shader prevents its dimensions and updates
+        // from changing how client windows are sampled or color processed.
+        let waterlily_program = shader_cache.get_or_compile(
+            &gl,
+            "waterlily_layer",
+            shaders::VERTEX_SHADER,
+            shaders::WATERLILY_FRAGMENT_SHADER,
+        )?;
+        let waterlily_uniforms = unsafe {
+            WaterlilyUniforms {
+                projection: gl.get_uniform_location(waterlily_program, "u_projection"),
+                rect: gl.get_uniform_location(waterlily_program, "u_rect"),
+                texture: gl.get_uniform_location(waterlily_program, "u_texture"),
+                opacity: gl.get_uniform_location(waterlily_program, "u_opacity"),
             }
         };
 
@@ -845,6 +857,8 @@ impl<C: CompositorConnection> Compositor<C> {
             magnifier_zoom: behavior.magnifier_zoom,
             magnifier_uniforms,
             // External WaterLily simulation layer
+            waterlily_program,
+            waterlily_uniforms,
             waterlily_ipc,
             waterlily_frame_reader,
             waterlily_texture: None,
@@ -852,6 +866,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
                 .unwrap_or(false),
             waterlily_active: false,
+            waterlily_layer_dirty: false,
             waterlily_opacity: std::env::var("JWM_WATERLILY_OPACITY")
                 .ok()
                 .and_then(|value| value.parse::<f32>().ok())

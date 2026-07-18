@@ -1,10 +1,10 @@
-# WaterLily full-screen simulation
+# WaterLily compositor layer
 
 JWM can composite colored frames produced by an external Julia
-[WaterLily.jl](https://github.com/WaterLily-jl/WaterLily.jl) worker across the
-complete screen. The Julia process owns the simulation and can run it on the
-CPU, an NVIDIA GPU, or an AMD GPU. JWM owns only the frame transport, texture
-upload, opacity, and final compositor rendering.
+[WaterLily.jl](https://github.com/WaterLily-jl/WaterLily.jl) worker as a
+native-size visual layer. The Julia process owns the simulation and can run it
+on the CPU, an NVIDIA GPU, or an AMD GPU. JWM owns only the frame transport,
+texture upload, opacity, and final compositor rendering.
 
 The initial adapter is an independently authored `hover` thin-plate simulation,
 visually aligned with upstream's
@@ -23,14 +23,23 @@ Julia WaterLily worker
               | RGBA8 double-buffer file + Unix socket wakeups
               v
 JWM X11 compositor
-  upload texture -> full-screen blend -> color/accessibility/HDR processing
+  upload texture -> native-size, input-transparent layer
 ```
 
 This implementation is currently limited to the shared X11 compositor used by
 the `x11rb` and `xcb` backends. It is not available on the Wayland backends.
-The image covers the whole X11 compositor area; there is no per-window target.
-Direct scanout and fullscreen unredirect are suppressed while the effect is
-active because both paths would bypass compositor rendering.
+The image is drawn one-to-one from the top-left compositor origin: a `320x200`
+worker frame occupies exactly `320x200` screen pixels. Frames larger than the
+screen are clipped, never scaled. There is no per-window target.
+
+WaterLily is rendered in its own compositor pass after client post-processing,
+so it does not alter client texture sampling, blur, color/accessibility
+processing, or HDR processing. The X11 Composite Overlay Window keeps an empty
+input shape, making the layer click-through: pointer and keyboard control
+continue to target normal client windows. JWM-owned HUD, transition, and system
+UI layers remain above WaterLily. Direct scanout and fullscreen unredirect are
+suppressed while the layer is visible because both paths would bypass
+compositor-owned visuals.
 
 There is no hand tracking in this design. It does not use a camera, MediaPipe,
 landmarks, a selected window, or pointer motion. The chosen WaterLily case
@@ -145,11 +154,11 @@ The following environment variables are read when the integration starts:
 | `JWM_WATERLILY_SOCKET` | Unix socket used for worker wakeup/control messages |
 | `JWM_WATERLILY_FRAME_FILE` | Shared double-buffer frame file |
 | `JWM_WATERLILY_ENABLED` | Initial enabled state (`1`/`true` enables it) |
-| `JWM_WATERLILY_OPACITY` | Full-screen blend opacity, clamped to `0..1` |
+| `JWM_WATERLILY_OPACITY` | Layer blend opacity, clamped to `0..1` |
 
 The socket and frame-file values supplied to JWM and the worker must match.
-Simulation resolution and display resolution may differ: JWM scales the
-published frame over the complete compositor area.
+The published simulation resolution is also its compositor display size; JWM
+does not stretch it to the display resolution.
 
 ## Version 1 frame-file protocol
 

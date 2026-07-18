@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile JWM's embedded WaterLily postprocess shader with glslangValidator."""
+"""Compile JWM's embedded WaterLily-related shaders with glslangValidator."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE = ROOT / "src/backend/x11/compositor/common/shaders.rs"
 SHADER_NAMES = (
-    "WATERLILY_POSTPROCESS_FRAGMENT_SHADER",
+    "WATERLILY_FRAGMENT_SHADER",
 )
 
 

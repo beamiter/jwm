@@ -228,10 +228,14 @@ pub(super) struct MagnifierUniforms {
     pub(super) magnifier_center: Option<glow::UniformLocation>,
     pub(super) magnifier_radius: Option<glow::UniformLocation>,
     pub(super) magnifier_zoom: Option<glow::UniformLocation>,
-    pub(super) waterlily_enabled: Option<glow::UniformLocation>,
-    pub(super) waterlily_texture: Option<glow::UniformLocation>,
-    pub(super) waterlily_opacity: Option<glow::UniformLocation>,
     pub(super) colorblind_mode: Option<glow::UniformLocation>,
+}
+
+pub(super) struct WaterlilyUniforms {
+    pub(super) projection: Option<glow::UniformLocation>,
+    pub(super) rect: Option<glow::UniformLocation>,
+    pub(super) texture: Option<glow::UniformLocation>,
+    pub(super) opacity: Option<glow::UniformLocation>,
 }
 
 pub(super) struct ParticleUniforms {

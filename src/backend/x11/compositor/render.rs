@@ -501,7 +501,7 @@ impl<C: CompositorConnection> Compositor<C> {
     ) -> bool {
         // The simulation layer cannot run while the X server presents a
         // fullscreen client directly. Restore redirection on its first frame.
-        if self.waterlily_visible()
+        if (self.waterlily_visible() || self.waterlily_layer_dirty)
             || self.system_ui.is_some()
             || self.recording_active
             || self.recording_region_overlay.is_some()
@@ -614,8 +614,9 @@ impl<C: CompositorConnection> Compositor<C> {
             }
             self.context_current = true;
         }
-        let waterlily_updated = self.poll_waterlily_frame();
+        self.poll_waterlily_frame();
         let waterlily_active = self.waterlily_visible();
+        let waterlily_layer_dirty = self.waterlily_layer_dirty;
 
         // P6A: Process deferred X11 operations at start of render frame
         self.process_deferred_x11_ops();
@@ -707,11 +708,15 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // Phase 2.3: Direct scanout check - bypass compositor for eligible fullscreen windows
         // This provides -8-12ms latency reduction for fullscreen games/video
-        if self.recording_active || self.recording_region_overlay.is_some() {
-            // Recording and the local selection/adjustment overlay both need
-            // frames produced by the compositor. End a previously active
-            // bypass immediately so fullscreen clients cannot hide the
-            // selection border or leave the recorder reading a stale FBO.
+        if self.recording_active
+            || self.recording_region_overlay.is_some()
+            || waterlily_active
+            || waterlily_layer_dirty
+        {
+            // Recording and compositor-owned visual layers need frames produced
+            // by the compositor. End a previously active bypass immediately so
+            // a fullscreen client cannot hide them. WaterLily is not window
+            // blur, so keep this overlay constraint separate from client flags.
             let _ = self.direct_scanout_mgr.check_scene(&[], None);
         } else {
             let mut scene_info = std::mem::take(&mut self.scratch_scene_info);
@@ -729,7 +734,7 @@ impl<C: CompositorConnection> Compositor<C> {
                             height: h,
                             is_fullscreen: wt.is_fullscreen,
                             has_alpha: wt.has_rgba,
-                            has_blur: wt.is_frosted || waterlily_active,
+                            has_blur: wt.is_frosted,
                             has_shadow: self.shadow_enabled,
                             has_corner_radius: corner_radius > 0.0,
                             opacity: wt.fade_opacity,
@@ -858,6 +863,10 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.dirty_region_tracker.mark_dirty(dirty_rect);
             }
         }
+        // A WaterLily publication changes only its native-size overlay region,
+        // but it is still sufficient reason to render when no client texture
+        // changed.
+        has_dirty |= waterlily_layer_dirty;
         let explicit_render = std::mem::replace(&mut self.needs_render, false);
         self.damage_render_pending = false;
         let force_render = self.screenshot_requests.has_pending()
@@ -876,7 +885,6 @@ impl<C: CompositorConnection> Compositor<C> {
             || self.annotation_active
             || wallpaper_just_loaded
             || wobbly_active
-            || waterlily_updated
             || explicit_render;
         let hash = Self::scene_hash(scene, focused);
         let scene_changed = hash != self.last_scene_hash;
@@ -2313,27 +2321,6 @@ impl<C: CompositorConnection> Compositor<C> {
                     );
                 }
 
-                // Full-screen WaterLily simulation layer.
-                let waterlily_enabled = self.waterlily_visible();
-                self.gl.uniform_1_i32(
-                    self.magnifier_uniforms.waterlily_enabled.as_ref(),
-                    if waterlily_enabled { 1 } else { 0 },
-                );
-                self.gl.uniform_1_f32(
-                    self.magnifier_uniforms.waterlily_opacity.as_ref(),
-                    self.waterlily_opacity,
-                );
-                self.gl
-                    .uniform_1_i32(self.magnifier_uniforms.waterlily_texture.as_ref(), 1);
-                if let Some(frame) = self
-                    .waterlily_texture
-                    .as_ref()
-                    .filter(|_| waterlily_enabled)
-                {
-                    self.gl.active_texture(glow::TEXTURE1);
-                    self.gl.bind_texture(glow::TEXTURE_2D, Some(frame.texture));
-                    self.gl.active_texture(glow::TEXTURE0);
-                }
                 // Colorblind correction uniform
                 self.gl.uniform_1_i32(
                     self.magnifier_uniforms.colorblind_mode.as_ref(),
@@ -2349,6 +2336,13 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.gl.use_program(None);
             }
         }
+
+        // === Pass 4b: WaterLily native-size compositor layer ===
+        // Draw after client post-processing so the simulation never changes
+        // client sampling, magnification, accessibility filters, or HDR state.
+        // The Composite Overlay Window has an empty input shape, so the quad
+        // remains click-through and cannot take keyboard focus.
+        self.render_waterlily_layer(&proj);
 
         // Tick tilt after the render loop has set tilt_target from the focused window.
         // If no focused window set tilt_target this frame, it keeps 0 from the reset
@@ -3096,6 +3090,7 @@ impl<C: CompositorConnection> Compositor<C> {
             return false;
         }
         self.buffer_age_damage_history.record(frame_damage);
+        self.waterlily_layer_dirty = false;
 
         // Schedule re-render if fades or transition are still in progress
         if fades_active

@@ -457,11 +457,16 @@ where
     magnifier_uniforms: MagnifierUniforms,
 
     // --- WaterLily simulation layer ---
+    waterlily_program: glow::Program,
+    waterlily_uniforms: WaterlilyUniforms,
     waterlily_ipc: Option<WaterlilyIpc>,
     waterlily_frame_reader: crate::backend::compositor_common::waterlily::WaterlilyFrameReader,
     waterlily_texture: Option<WaterlilyTexture>,
     waterlily_effect_enabled: bool,
     waterlily_active: bool,
+    /// A WaterLily publication/visibility change that must reach the front
+    /// buffer before fullscreen bypass paths may resume.
+    waterlily_layer_dirty: bool,
     waterlily_opacity: f32,
 
     // --- Window 3D tilt ---
@@ -753,6 +758,7 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
             self.gl.delete_program(self.temporal_blur_mix_program);
             self.gl.delete_program(self.border_program);
             self.gl.delete_program(self.postprocess_program);
+            self.gl.delete_program(self.waterlily_program);
             self.gl.delete_program(self.hud_program);
             self.gl.delete_program(self.hud_text_program);
             self.gl.delete_program(self.annotation_line_program);

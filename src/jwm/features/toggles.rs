@@ -250,7 +250,7 @@ impl Jwm {
         Ok(())
     }
 
-    /// Toggle the full-screen WaterLily simulation rendered by the compositor.
+    /// Toggle the native-size WaterLily simulation layer rendered by the compositor.
     pub fn toggle_waterlily(
         &mut self,
         backend: &mut dyn Backend,

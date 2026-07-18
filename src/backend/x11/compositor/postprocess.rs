@@ -22,7 +22,6 @@ impl<C: CompositorConnection> Compositor<C> {
             || self.invert_colors
             || self.grayscale
             || self.magnifier_enabled
-            || self.waterlily_visible()
             || self.colorblind_mode != 0
             || self.hdr_enabled
     }

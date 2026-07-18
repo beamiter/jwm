@@ -1,4 +1,4 @@
-use super::{Compositor, CompositorConnection};
+use super::{Compositor, CompositorConnection, DirtyRect};
 use crate::backend::compositor_common::waterlily::WaterlilyFrame;
 use glow::HasContext;
 use std::fs;
@@ -212,6 +212,7 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     pub(crate) fn toggle_waterlily_effect(&mut self) -> bool {
+        let previous_damage = self.waterlily_damage_rect();
         self.waterlily_effect_enabled = !self.waterlily_effect_enabled;
         self.waterlily_active = false;
         self.waterlily_frame_reader.reset();
@@ -219,8 +220,10 @@ impl<C: CompositorConnection> Compositor<C> {
             ipc.request_poll();
         }
         self.needs_render = true;
-        self.damage_tracker.mark_all_dirty();
-        self.dirty_region_tracker.mark_all_dirty();
+        if let Some(rect) = previous_damage {
+            self.mark_waterlily_damage(rect);
+            self.waterlily_layer_dirty = true;
+        }
         log::info!(
             "compositor: WaterLily effect {}",
             if self.waterlily_effect_enabled {
@@ -254,6 +257,8 @@ impl<C: CompositorConnection> Compositor<C> {
             self.waterlily_frame_reader.reset();
         }
 
+        let previous_damage = self.waterlily_damage_rect();
+        let previously_active = self.waterlily_active;
         let mut changed = false;
         match self.waterlily_frame_reader.read_latest() {
             Ok(Some(frame)) => {
@@ -284,18 +289,80 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             }
         }
+        changed |= self.waterlily_active != previously_active;
 
         if changed {
-            self.ensure_postprocess_fbo();
-            self.needs_render = true;
-            self.damage_tracker.mark_all_dirty();
-            self.dirty_region_tracker.mark_all_dirty();
+            self.waterlily_layer_dirty = true;
+            if let Some(rect) = previous_damage {
+                self.mark_waterlily_damage(rect);
+            }
+            if let Some(rect) = self.waterlily_damage_rect() {
+                self.mark_waterlily_damage(rect);
+            }
         }
         changed
     }
 
     pub(super) fn waterlily_visible(&self) -> bool {
         self.waterlily_effect_enabled && self.waterlily_active && self.waterlily_texture.is_some()
+    }
+
+    /// Draw the latest worker frame as a one-device-pixel-per-frame-pixel
+    /// compositor layer. The full-screen Composite Overlay Window remains input
+    /// transparent; only this visual quad is added above clients.
+    pub(super) fn render_waterlily_layer(&mut self, projection: &[f32; 16]) {
+        if !self.waterlily_visible() {
+            return;
+        }
+        let Some(frame) = self.waterlily_texture.as_ref() else {
+            return;
+        };
+        let (texture, width, height) = (frame.texture, frame.width, frame.height);
+
+        unsafe {
+            self.gl_state_tracker
+                .use_program(&self.gl, Some(self.waterlily_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.waterlily_uniforms.projection.as_ref(),
+                false,
+                projection,
+            );
+            self.gl.uniform_4_f32(
+                self.waterlily_uniforms.rect.as_ref(),
+                0.0,
+                0.0,
+                width as f32,
+                height as f32,
+            );
+            self.gl
+                .uniform_1_i32(self.waterlily_uniforms.texture.as_ref(), 0);
+            self.gl.uniform_1_f32(
+                self.waterlily_uniforms.opacity.as_ref(),
+                self.waterlily_opacity,
+            );
+            self.gl.active_texture(glow::TEXTURE0);
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.gl_state_tracker
+                .bind_vertex_array(&self.gl, Some(self.quad_vao));
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.gl_state_tracker.bind_vertex_array(&self.gl, None);
+            self.gl_state_tracker.use_program(&self.gl, None);
+        }
+    }
+
+    fn waterlily_damage_rect(&self) -> Option<DirtyRect> {
+        if !self.waterlily_visible() {
+            return None;
+        }
+        let frame = self.waterlily_texture.as_ref()?;
+        visible_waterlily_size(self.screen_w, self.screen_h, frame.width, frame.height)
+            .map(|(width, height)| DirtyRect::new(0, 0, width, height))
+    }
+
+    fn mark_waterlily_damage(&mut self, rect: DirtyRect) {
+        self.damage_tracker
+            .mark_region_dirty(rect.x, rect.y, rect.width, rect.height);
+        self.dirty_region_tracker.mark_dirty(rect);
     }
 
     fn upload_waterlily_frame(&mut self, frame: WaterlilyFrame) -> bool {
@@ -404,6 +471,17 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 }
 
+fn visible_waterlily_size(
+    screen_width: u32,
+    screen_height: u32,
+    frame_width: u32,
+    frame_height: u32,
+) -> Option<(u32, u32)> {
+    let width = screen_width.min(frame_width);
+    let height = screen_height.min(frame_height);
+    (width > 0 && height > 0).then_some((width, height))
+}
+
 fn mark_pending(pending: &AtomicBool, loop_signal: &Mutex<Option<calloop::LoopSignal>>) {
     pending.store(true, Ordering::Release);
     if let Ok(signal) = loop_signal.lock()
@@ -492,4 +570,25 @@ fn peer_is_current_user(stream: &UnixStream) -> bool {
         )
     };
     result == 0 && credentials.uid == unsafe { libc::getuid() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::visible_waterlily_size;
+
+    #[test]
+    fn worker_frame_keeps_its_native_display_size() {
+        assert_eq!(
+            visible_waterlily_size(1920, 1080, 320, 200),
+            Some((320, 200))
+        );
+    }
+
+    #[test]
+    fn oversized_worker_frame_is_clipped_not_scaled() {
+        assert_eq!(
+            visible_waterlily_size(1920, 1080, 2560, 1440),
+            Some((1920, 1080))
+        );
+    }
 }

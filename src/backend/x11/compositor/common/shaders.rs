@@ -489,10 +489,10 @@ void main() {
 "#;
 
 // ---------------------------------------------------------------------------
-// WaterLily-aware post-process shader (also retains magnifier/accessibility)
+// Advanced post-process shader (magnifier/accessibility/HDR)
 // ---------------------------------------------------------------------------
 
-pub const WATERLILY_POSTPROCESS_FRAGMENT_SHADER: &str = r#"#version 330 core
+pub const ADVANCED_POSTPROCESS_FRAGMENT_SHADER: &str = r#"#version 330 core
 
 uniform sampler2D u_texture;
 uniform float u_color_temp;
@@ -506,10 +506,6 @@ uniform int   u_magnifier_enabled;
 uniform vec2  u_magnifier_center;  // normalized [0,1] screen coords
 uniform float u_magnifier_radius;  // in normalized coords
 uniform float u_magnifier_zoom;    // zoom factor (e.g. 2.0)
-// Full-screen frame produced by the external WaterLily worker.
-uniform int   u_waterlily_enabled;
-uniform sampler2D u_waterlily_texture;
-uniform float u_waterlily_opacity;
 // Colorblind correction uniform
 uniform int   u_colorblind_mode;   // 0=none, 1=deuteranopia, 2=protanopia, 3=tritanopia
 // HDR tone mapping uniforms
@@ -538,13 +534,6 @@ void main() {
     }
 
     vec4 c = texture(u_texture, sample_uv);
-    // Worker rows are top-left first, while OpenGL assigns the first uploaded
-    // row to texture V=0. Undo the scene-FBO flip for this independent texture.
-    if (u_waterlily_enabled == 1) {
-        vec2 waterlily_uv = vec2(sample_uv.x, 1.0 - sample_uv.y);
-        vec4 simulation = texture(u_waterlily_texture, waterlily_uv);
-        c = mix(c, simulation, clamp(u_waterlily_opacity, 0.0, 1.0));
-    }
 
     // Colorblind correction (Daltonization) — applied before other color adjustments
     if (u_colorblind_mode > 0) {
@@ -683,6 +672,27 @@ void main() {
     }
 
     frag_color = c;
+}
+"#;
+
+// ---------------------------------------------------------------------------
+// WaterLily compositor layer
+// ---------------------------------------------------------------------------
+
+pub const WATERLILY_FRAGMENT_SHADER: &str = r#"#version 330 core
+
+uniform sampler2D u_texture;
+uniform float u_opacity;
+in vec2 v_uv;
+out vec4 frag_color;
+
+void main() {
+    vec4 simulation = texture(u_texture, v_uv);
+    float alpha = simulation.a * clamp(u_opacity, 0.0, 1.0);
+    // The compositor uses premultiplied-alpha blending. The v1 frame protocol
+    // requires opaque pixels, but honoring alpha here keeps the layer isolated
+    // if a future protocol adds transparent visualizations.
+    frag_color = vec4(simulation.rgb * alpha, alpha);
 }
 "#;
 
