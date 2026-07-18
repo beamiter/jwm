@@ -488,10 +488,9 @@ where
     // --- Frosted glass ---
     frosted_glass_rules: Vec<String>,
     frosted_glass_strength: u32,
-    /// Hash of the below-scene at the time of the last blur computation.
-    /// Used to skip expensive blur passes when only the frosted window itself
-    /// changed (e.g. fcitx popup updating while typing).
-    blur_cache_hash: u64,
+    /// Per-consumer backdrop cache. A single texture cannot represent the
+    /// different below-scenes seen by multiple translucent windows.
+    window_blur_caches: HashMap<u32, WindowBlurCache>,
 
     // --- Alt-Tab overview ---
     overview_active: bool,
@@ -672,10 +671,9 @@ where
     monitor_rects: Vec<(u32, i32, i32, u32, u32)>, // P5B: Real geometry for window->monitor mapping
     /// Monitor refresh rates: monitor_index -> Hz
     monitor_refresh_rates: HashMap<u32, u32>,
-    /// Temporal blur: previous frame blur FBO
-    prev_blur_fbo: Option<(glow::Framebuffer, glow::Texture)>,
-    /// Temporal blur: previous frame window positions hash (to detect movement)
-    prev_window_positions_hash: u64,
+    /// Temporal blur: shared render target used to avoid sampling from the
+    /// per-window history texture currently being updated.
+    temporal_blur_fbo: Option<(glow::Framebuffer, glow::Texture)>,
     /// Temporal blur: mix ratio (0.0 = all new, 1.0 = all previous)
     #[allow(dead_code)]
     temporal_blur_mix_ratio: f32,
@@ -739,6 +737,7 @@ where
     // hot render path runs without per-frame heap allocation.
     scratch_scene_info: Vec<(u32, WindowScanoutInfo)>,
     scratch_blur_dirty: Vec<u32>,
+    scratch_blur_damage: Vec<DirtyRect>,
     scratch_tfp_order: Vec<u32>,
     scratch_refresh_wins: Vec<u32>,
     scratch_new_pixmaps: Vec<(u32, u32)>,
@@ -786,6 +785,14 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 self.gl.delete_texture(level.texture);
             }
             if let Some((fbo, tex)) = self.scene_fbo.take() {
+                self.gl.delete_framebuffer(fbo);
+                self.gl.delete_texture(tex);
+            }
+            for (_, cache) in self.window_blur_caches.drain() {
+                self.gl.delete_framebuffer(cache.fbo);
+                self.gl.delete_texture(cache.texture);
+            }
+            if let Some((fbo, tex)) = self.temporal_blur_fbo.take() {
                 self.gl.delete_framebuffer(fbo);
                 self.gl.delete_texture(tex);
             }

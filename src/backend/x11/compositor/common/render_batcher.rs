@@ -265,6 +265,18 @@ impl<P: Copy + PartialEq, T: Copy + PartialEq, V: Copy + PartialEq, F: Copy + Pa
         self.scissor_enabled = false;
     }
 
+    /// Reset only the draw bindings after code outside the tracker has
+    /// explicitly unbound the current program and vertex array.
+    ///
+    /// Some compositor sub-passes use raw GL calls because they run through an
+    /// immutable `Compositor` reference.  Call this after those passes leave
+    /// both bindings at `None`, otherwise a later tracked restore may be
+    /// incorrectly skipped as redundant.
+    pub fn reset_draw_bindings(&mut self) {
+        self.current_program = None;
+        self.current_vao = None;
+    }
+
     /// Get redundant changes avoided count
     pub fn redundant_changes_avoided(&self) -> u32 {
         self.redundant_changes_avoided
@@ -404,5 +416,25 @@ mod tests {
         tracker.redundant_changes_avoided += 1;
 
         assert_eq!(tracker.redundant_changes_avoided(), 1);
+    }
+
+    #[test]
+    fn reset_draw_bindings_preserves_unrelated_tracked_state() {
+        let mut tracker: GLStateTracker<u32, u32, u32, u32> = GLStateTracker::new();
+        tracker.current_program = Some(1);
+        tracker.current_vao = Some(2);
+        tracker.current_texture = Some(3);
+        tracker.current_fbo = Some(4);
+        tracker.blend_enabled = true;
+        tracker.scissor_enabled = true;
+
+        tracker.reset_draw_bindings();
+
+        assert_eq!(tracker.current_program, None);
+        assert_eq!(tracker.current_vao, None);
+        assert_eq!(tracker.current_texture, Some(3));
+        assert_eq!(tracker.current_fbo, Some(4));
+        assert!(tracker.blend_enabled);
+        assert!(tracker.scissor_enabled);
     }
 }

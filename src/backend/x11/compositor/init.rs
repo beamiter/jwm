@@ -893,7 +893,6 @@ impl<C: CompositorConnection> Compositor<C> {
             // Frosted glass
             frosted_glass_rules: behavior.frosted_glass_rules.clone(),
             frosted_glass_strength: behavior.frosted_glass_strength,
-            blur_cache_hash: 0,
             // Overview
             overview_active: false,
             overview_windows: Vec::new(),
@@ -1042,8 +1041,8 @@ impl<C: CompositorConnection> Compositor<C> {
             blur_quality_by_monitor,
             monitor_rects,         // P5B Phase 1: Real monitor geometry
             monitor_refresh_rates, // P5B Phase 2: Per-monitor refresh rates
-            prev_blur_fbo: None,
-            prev_window_positions_hash: 0,
+            window_blur_caches: HashMap::new(),
+            temporal_blur_fbo: None,
             temporal_blur_mix_ratio: behavior.blur_temporal_mix_ratio,
             temporal_blur_enabled: behavior.blur_temporal_enabled,
             temporal_blur_reuse_count: 0,
@@ -1083,6 +1082,7 @@ impl<C: CompositorConnection> Compositor<C> {
             hdr_output_10bit,
             scratch_scene_info: Vec::new(),
             scratch_blur_dirty: Vec::new(),
+            scratch_blur_damage: Vec::new(),
             scratch_tfp_order: Vec::new(),
             scratch_refresh_wins: Vec::new(),
             scratch_new_pixmaps: Vec::new(),

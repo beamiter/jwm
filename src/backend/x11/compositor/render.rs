@@ -24,6 +24,82 @@ fn intersect_gl_scissors(a: GlScissor, b: GlScissor) -> Option<GlScissor> {
     (x1 > x0 && y1 > y0).then_some((x0, y0, x1 - x0, y1 - y0))
 }
 
+fn enclosing_dirty_rect(x: f32, y: f32, w: f32, h: f32) -> DirtyRect {
+    let left = x.floor() as i32;
+    let top = y.floor() as i32;
+    let right = (x + w.max(0.0)).ceil() as i32;
+    let bottom = (y + h.max(0.0)).ceil() as i32;
+    DirtyRect::new(
+        left,
+        top,
+        right.saturating_sub(left) as u32,
+        bottom.saturating_sub(top) as u32,
+    )
+}
+
+/// Conservative screen-space reach of the dual-Kawase filter.
+///
+/// Every extra level doubles the source-pixel footprint.  Keeping a slightly
+/// wider margin than the exact kernel avoids stale blur along adjoining window
+/// edges without coupling distant tiled clients.
+fn blur_sampling_margin(blur_levels: usize) -> i32 {
+    1i32 << (blur_levels.min(6) as u32 + 2)
+}
+
+fn blur_sampling_rect(backdrop: DirtyRect, blur_levels: usize) -> DirtyRect {
+    let margin = blur_sampling_margin(blur_levels);
+    DirtyRect::new(
+        backdrop.x.saturating_sub(margin),
+        backdrop.y.saturating_sub(margin),
+        backdrop
+            .width
+            .saturating_add((margin as u32).saturating_mul(2)),
+        backdrop
+            .height
+            .saturating_add((margin as u32).saturating_mul(2)),
+    )
+}
+
+fn dirty_below_affects_backdrop(
+    dirty_below: &[DirtyRect],
+    backdrop: DirtyRect,
+    blur_levels: usize,
+) -> bool {
+    let sampling_rect = blur_sampling_rect(backdrop, blur_levels);
+    dirty_below
+        .iter()
+        .any(|dirty| sampling_rect.intersects(dirty))
+}
+
+/// Return whether a damaged lower window can affect a later blur consumer.
+///
+/// `scene` is ordered bottom-to-top and `dirty_windows` must be sorted. Damage
+/// above a consumer is deliberately ignored because it is not part of that
+/// consumer's backdrop.
+fn dirty_below_requires_full_blur_redraw(
+    scene: &[(u32, i32, i32, u32, u32)],
+    dirty_windows: &[u32],
+    blur_levels: usize,
+    mut is_blur_consumer: impl FnMut(u32) -> bool,
+) -> bool {
+    scene
+        .iter()
+        .enumerate()
+        .any(|(consumer_index, &(win, x, y, w, h))| {
+            if !is_blur_consumer(win) {
+                return false;
+            }
+            let sampling_rect = blur_sampling_rect(DirtyRect::new(x, y, w, h), blur_levels);
+            scene[..consumer_index].iter().any(
+                |&(below_win, below_x, below_y, below_w, below_h)| {
+                    dirty_windows.binary_search(&below_win).is_ok()
+                        && sampling_rect
+                            .intersects(&DirtyRect::new(below_x, below_y, below_w, below_h))
+                },
+            )
+        })
+}
+
 impl<C: CompositorConnection> Compositor<C> {
     // =====================================================================
     // Tag-switch slide transition
@@ -622,10 +698,6 @@ impl<C: CompositorConnection> Compositor<C> {
         // P6A: Process deferred X11 operations at start of render frame
         self.process_deferred_x11_ops();
 
-        // P4: Ensure temporal-blur prev FBO exists before the windows loop, so
-        // the mix call inside the loop can run with &self while wt borrows are live.
-        self.ensure_prev_blur_fbo();
-
         // Update GPU load cache with hysteresis: update if delta > 5% or elapsed > 0.5s
         let current_gpu_load = {
             let target_frame_time_ms = 1000.0 / 60.0;
@@ -658,13 +730,6 @@ impl<C: CompositorConnection> Compositor<C> {
         if periodic_60_frame {
             self.update_vrr_state(focused);
         }
-
-        // P4: Temporal blur reuse detection
-        let current_window_hash = if self.temporal_blur_enabled {
-            self.compute_window_positions_hash()
-        } else {
-            0
-        };
 
         // Track render diagnostics only when info logging is enabled; default
         // runs avoid the atomic counters and realtime-clock read entirely.
@@ -906,11 +971,28 @@ impl<C: CompositorConnection> Compositor<C> {
             self.tilt_target_y = 0.0;
         }
 
-        // Invalidate blur cache when scene structure/focus changes or animations
-        // are active — these affect the rendered output of windows below the
-        // frosted window even though no individual texture is "dirty".
-        if scene_changed || fades_active || force_render {
-            self.blur_cache_hash = 0;
+        // Invalidate backdrop results only for changes that can alter pixels
+        // without producing client damage. `explicit_render` accompanies
+        // ordinary damage wakeups too, so treating every forced frame as a
+        // scene change defeated the cache for continuously-rendering clients.
+        let uncached_blur_source_changed = waterlily_layer_dirty
+            || self.transition_active()
+            || self.overview_active
+            || self.expose_active
+            || expose_animating
+            || snap_animating
+            || peek_animating
+            || genie_active
+            || ripples_active
+            || focus_highlight_active
+            || wallpaper_crossfade_active
+            || wallpaper_just_loaded
+            || wobbly_active;
+        // Scene structure, focus, and per-window animation state are encoded
+        // into each consumer's running below-scene hash. A topmost input-method
+        // popup therefore cannot invalidate unrelated clients underneath it.
+        if uncached_blur_source_changed {
+            self.invalidate_window_blur_caches();
         }
 
         // Ensure the selected graphics context is current.
@@ -1056,12 +1138,33 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
 
+        // A blur cache miss captures the complete framebuffer midway through
+        // the bottom-to-top window pass. On a scissored repair frame, pixels
+        // outside the repair region still contain the previous *final* scene,
+        // including consumers that have not been reached yet. Never promote
+        // that self-contaminated snapshot into a backdrop cache: reconstruct
+        // the full scene whenever dirty lower content can affect a blur window.
+        let blur_damage_requires_full_redraw = self.blur_enabled
+            && !self.blur_fbos.is_empty()
+            && dirty_below_requires_full_blur_redraw(
+                &scene[first_visible..],
+                &blur_dirty_wins,
+                self.blur_fbos.len(),
+                |win| {
+                    let Some(wt) = self.windows.get(&win) else {
+                        return false;
+                    };
+                    wt.fade_opacity > 0.0 && self.needs_backdrop_blur(wt, frame_status_bar_name)
+                },
+            );
+
         // Apply a scissor using the current scene changes plus any intervening
         // damage missing from a recycled EGL back buffer. Unknown/undefined
         // buffers safely fall back to a full redraw while still building useful
         // history for subsequent frames.
         let current_damage = self.dirty_region_tracker.merged();
-        let incremental_frame = !force_render && !scene_changed && !fades_active;
+        let incremental_frame =
+            !force_render && !scene_changed && !fades_active && !blur_damage_requires_full_redraw;
         let buffer_age =
             if self.partial_damage_enabled && incremental_frame && current_damage.is_some() {
                 self.graphics.partial_redraw_buffer_age()
@@ -1298,8 +1401,8 @@ impl<C: CompositorConnection> Compositor<C> {
         // overview monitor — they would be hidden behind the opaque overview
         // background anyway and their presence can visually compete with the
         // 3D prism thumbnails.
-        // Copy fields out so the closure does not borrow `self` (which
-        // prevents subsequent &mut self calls like apply_temporal_blur_mix).
+        // Copy fields out so the closure does not borrow `self` across cache
+        // allocation and the later render passes.
         let ov_active = self.overview_active;
         let ov_mx = self.overview_mon_x;
         let ov_my = self.overview_mon_y;
@@ -1313,6 +1416,15 @@ impl<C: CompositorConnection> Compositor<C> {
             let cy = y + h as i32 / 2;
             cx >= ov_mx && cx < ov_mx + ov_mw && cy >= ov_my && cy < ov_my + ov_mh
         };
+
+        // Wallpaper and later effect passes use raw GL bindings.  Normalize
+        // the actual draw state before entering tracker-managed passes so a
+        // stale cached VAO/program can never suppress a required bind.
+        unsafe {
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+        }
+        self.gl_state_tracker.reset_draw_bindings();
 
         // === Pass 1: Draw shadows (feature 14: improved shape) ===
         if self.shadow_enabled && self.shadow_radius > 0.0 {
@@ -1417,8 +1529,8 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 }
 
-                self.gl.bind_vertex_array(None);
-                self.gl.use_program(None);
+                self.gl_state_tracker.bind_vertex_array(&self.gl, None);
+                self.gl_state_tracker.use_program(&self.gl, None);
             }
         }
 
@@ -1436,6 +1548,21 @@ impl<C: CompositorConnection> Compositor<C> {
         // === Pass 1.5: Background blur (now computed per-window in Pass 2) ===
         let blur_available =
             self.blur_enabled && !self.blur_fbos.is_empty() && self.scene_fbo.is_some();
+        let mut blur_windows = Vec::new();
+        if blur_available {
+            blur_windows.extend(visible_scene.iter().filter_map(|&(win, x, y, w, h)| {
+                if overview_skip(x, y, w, h) {
+                    return None;
+                }
+                self.windows.get(&win).and_then(|wt| {
+                    (wt.fade_opacity > 0.0 && self.needs_backdrop_blur(wt, frame_status_bar_name))
+                        .then_some(win)
+                })
+            }));
+            blur_windows.sort_unstable();
+            blur_windows.dedup();
+        }
+        self.ensure_window_blur_caches(&blur_windows);
 
         // === Pass 2: Draw window textures ===
         let wm_border_px = frame_cfg.border_px() as f32;
@@ -1463,10 +1590,13 @@ impl<C: CompositorConnection> Compositor<C> {
             wm_border_px
         };
 
-        // Track the below-scene for blur caching: a running hash of (win, x, y, w, h)
-        // for all windows drawn so far, plus whether any was dirty this frame.
+        // Track the below-scene for blur caching. Geometry/visual state uses a
+        // running hash; client texture damage stays as screen-space rectangles
+        // so activity in one tiled client cannot invalidate distant clients.
         let mut blur_below_hash: u64 = 0u64;
-        let mut blur_below_dirty = false;
+        let mut blur_damage_below = std::mem::take(&mut self.scratch_blur_damage);
+        blur_damage_below.clear();
+        blur_damage_below.reserve(blur_dirty_wins.len());
 
         unsafe {
             // Phase 2: Use state tracker for main window rendering pass
@@ -1618,12 +1748,52 @@ impl<C: CompositorConnection> Compositor<C> {
                     // Blur is captured per-window so it includes all windows drawn below.
                     if blur_available {
                         if self.needs_backdrop_blur(wt, status_bar_name_main) {
-                            // Blur cache: if no window below this one was dirty and
-                            // the below-scene structure hasn't changed, the previous
-                            // blur result stored in blur_fbos[0] is still valid.
-                            let cache_hit = !blur_below_dirty
-                                && blur_below_hash != 0
-                                && blur_below_hash == self.blur_cache_hash;
+                            // Compute the effective filter depth before looking
+                            // up the cache: an automatic quality change must
+                            // not reuse a result produced at a different level.
+                            let base_levels = if wt.is_frosted {
+                                self.frosted_glass_strength as usize
+                            } else {
+                                let monitor_id = self.get_window_monitor_id(wt.x, wt.y, wt.w, wt.h);
+                                let monitor_hz = self.get_monitor_refresh_hz(monitor_id);
+                                self.get_blur_strength_for_hz(monitor_hz)
+                                    .unwrap_or(self.blur_strength)
+                                    as usize
+                            }
+                            .clamp(1, self.blur_fbos.len());
+                            let window_quality = self.compute_window_blur_quality(wt, focused);
+                            let blur_levels = match window_quality {
+                                BlurQuality::Full => base_levels,
+                                BlurQuality::Reduced => (base_levels / 2).max(1),
+                                BlurQuality::Minimal => 1,
+                            };
+
+                            // Feature 13: If blur_use_frame_extents, crop blur to client area.
+                            // RGBA windows always use the full rect so transparent areas show blur.
+                            let (bx, by, bw, bh) = if self.blur_use_frame_extents && !wt.has_rgba {
+                                let [fl, fr, ft, fb] = wt.frame_extents;
+                                let bx = draw_x + fl as f32;
+                                let by = draw_y + ft as f32;
+                                let bw = (draw_w - fl as f32 - fr as f32).max(1.0);
+                                let bh = (draw_h - ft as f32 - fb as f32).max(1.0);
+                                (bx, by, bw, bh)
+                            } else {
+                                (draw_x, draw_y, draw_w, draw_h)
+                            };
+                            let backdrop_dirty = dirty_below_affects_backdrop(
+                                &blur_damage_below,
+                                enclosing_dirty_rect(bx, by, bw, bh),
+                                blur_levels,
+                            );
+
+                            // Reuse this consumer's private result when its
+                            // actual backdrop sampling area is unchanged.
+                            let cache_hit = self.window_blur_cache_hit(
+                                win,
+                                blur_below_hash,
+                                blur_levels,
+                                backdrop_dirty,
+                            );
 
                             // Track blur cache statistics for diagnostics
                             if cache_hit {
@@ -1633,7 +1803,7 @@ impl<C: CompositorConnection> Compositor<C> {
                             }
 
                             let mut blur_tex = if cache_hit {
-                                Some(self.blur_fbos[0].texture)
+                                self.window_blur_cache_texture(win)
                             } else {
                                 let blur_bench_start = if self.benchmark.is_running() {
                                     Some(std::time::Instant::now())
@@ -1644,34 +1814,12 @@ impl<C: CompositorConnection> Compositor<C> {
                                 // Temporarily break out of the window shader to run blur passes.
                                 // Capture the current framebuffer (which includes all windows
                                 // drawn so far) and produce a blurred texture from it.
-                                self.gl.bind_vertex_array(None);
-                                self.gl.use_program(None);
+                                self.gl_state_tracker.bind_vertex_array(&self.gl, None);
+                                self.gl_state_tracker.use_program(&self.gl, None);
                                 if use_scissor {
                                     self.gl.disable(glow::SCISSOR_TEST);
                                 }
 
-                                // P5B Phase 3: Compute monitor-aware blur strength
-                                let base_levels = if wt.is_frosted {
-                                    self.frosted_glass_strength as usize
-                                } else {
-                                    // Get monitor-specific blur strength based on refresh rate
-                                    let monitor_id =
-                                        self.get_window_monitor_id(wt.x, wt.y, wt.w, wt.h);
-                                    let monitor_hz = self.get_monitor_refresh_hz(monitor_id);
-                                    let monitor_strength = self
-                                        .get_blur_strength_for_hz(monitor_hz)
-                                        .unwrap_or(self.blur_strength);
-
-                                    // Cap at available FBO levels (can't exceed pre-created fbos)
-                                    (monitor_strength as usize).min(self.blur_fbos.len())
-                                };
-                                // Phase 2.2: Apply blur quality cap (per-window adaptive)
-                                let window_quality = self.compute_window_blur_quality(wt, focused);
-                                let blur_levels = match window_quality {
-                                    BlurQuality::Full => base_levels,
-                                    BlurQuality::Reduced => (base_levels / 2).max(1),
-                                    BlurQuality::Minimal => 1,
-                                };
                                 let tex = self.run_blur_passes_from_fbo(
                                     if postprocess_active {
                                         self.postprocess_fbo.as_ref().map(|(fbo, _)| *fbo)
@@ -1727,21 +1875,29 @@ impl<C: CompositorConnection> Compositor<C> {
                                 self.gl
                                     .uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
 
-                                self.blur_cache_hash = blur_below_hash;
                                 tex
                             };
 
-                            // P4: Temporal blur mix — GLSL blend of current+previous blur on
-                            // stable frames. apply_temporal_blur_mix writes into prev_blur_fbo and
-                            // returns its texture, which we then composite as the backdrop blur.
-                            // On the first temporal frame the function blits a seed; subsequent
-                            // frames mix at temporal_blur_mix_ratio.
+                            // Copy the result into this window's private cache.
+                            // Temporal mixing, when enabled, only reads that
+                            // same window's previous result.
                             if let Some(blurred) = blur_tex {
-                                let final_blur = if !cache_hit
-                                    && self.temporal_blur_enabled
-                                    && self.prev_window_positions_hash != 0
-                                {
-                                    let mixed = self.apply_temporal_blur_mix(blurred);
+                                let final_blur = if !cache_hit {
+                                    let (cached, temporal_reused) = self.update_window_blur_cache(
+                                        win,
+                                        blurred,
+                                        blur_below_hash,
+                                        blur_levels,
+                                    );
+                                    if self.temporal_blur_enabled {
+                                        self.temporal_blur_total_count += 1;
+                                        if temporal_reused {
+                                            self.temporal_blur_reuse_count += 1;
+                                        }
+                                    }
+                                    // update_window_blur_cache deliberately
+                                    // leaves the raw program/VAO unbound.
+                                    self.gl_state_tracker.reset_draw_bindings();
                                     // Restore framebuffer + window-shader state for the
                                     // backdrop-quad draw that follows: the mix function
                                     // changes program/VAO/active framebuffer.
@@ -1776,7 +1932,7 @@ impl<C: CompositorConnection> Compositor<C> {
                                         .bind_vertex_array(&self.gl, Some(self.quad_vao));
                                     self.gl
                                         .uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
-                                    mixed
+                                    cached
                                 } else {
                                     blurred
                                 };
@@ -1784,19 +1940,6 @@ impl<C: CompositorConnection> Compositor<C> {
                             }
 
                             if let Some(blur_tex) = blur_tex {
-                                // Feature 13: If blur_use_frame_extents, crop blur to client area
-                                // For RGBA windows, always use full rect so transparent areas show blur
-                                let (bx, by, bw, bh) =
-                                    if self.blur_use_frame_extents && !wt.has_rgba {
-                                        let [fl, fr, ft, fb] = wt.frame_extents;
-                                        let bx = draw_x + fl as f32;
-                                        let by = draw_y + ft as f32;
-                                        let bw = (draw_w - fl as f32 - fr as f32).max(1.0);
-                                        let bh = (draw_h - ft as f32 - fb as f32).max(1.0);
-                                        (bx, by, bw, bh)
-                                    } else {
-                                        (draw_x, draw_y, draw_w, draw_h)
-                                    };
                                 self.gl.active_texture(glow::TEXTURE0);
                                 self.gl.bind_texture(glow::TEXTURE_2D, Some(blur_tex));
                                 let uv_x = (bx / self.screen_w as f32).clamp(0.0, 1.0);
@@ -2134,24 +2277,33 @@ impl<C: CompositorConnection> Compositor<C> {
                         }
                     }
 
-                    // Update blur below-scene tracking after drawing this window.
-                    // The hash encodes (win, x, y, w, h) so structural changes
-                    // (reorder, move, resize, add/remove) cause a cache miss.
-                    blur_below_hash = blur_below_hash
-                        .wrapping_mul(6364136223846793005)
-                        .wrapping_add(win as u64)
-                        .wrapping_mul(6364136223846793005)
-                        .wrapping_add(((x as u64) << 32) | (y as u32 as u64))
-                        .wrapping_mul(6364136223846793005)
-                        .wrapping_add(((w as u64) << 32) | (h as u64));
+                    // Update the dependency key seen by blur consumers above
+                    // this window. Besides stacking/geometry, include visual
+                    // state that can change without texture damage (focus
+                    // opacity, dimming, fades, scale and rounded clipping).
+                    for value in [
+                        win as u64,
+                        ((x as u64) << 32) | y as u32 as u64,
+                        ((w as u64) << 32) | h as u64,
+                        ((draw_x.to_bits() as u64) << 32) | draw_y.to_bits() as u64,
+                        ((draw_w.to_bits() as u64) << 32) | draw_h.to_bits() as u64,
+                        ((opacity.to_bits() as u64) << 32) | dim.to_bits() as u64,
+                        ((fade.to_bits() as u64) << 32) | radius.to_bits() as u64,
+                        u64::from(is_focused) | (u64::from(has_special_border) << 1),
+                    ] {
+                        blur_below_hash = blur_below_hash
+                            .wrapping_mul(6364136223846793005)
+                            .wrapping_add(value);
+                    }
                     if blur_dirty_wins.binary_search(&win).is_ok() {
-                        blur_below_dirty = true;
+                        blur_damage_below
+                            .push(enclosing_dirty_rect(draw_x, draw_y, draw_w, draw_h));
                     }
                 }
             }
 
-            self.gl.bind_vertex_array(None);
-            self.gl.use_program(None);
+            self.gl_state_tracker.bind_vertex_array(&self.gl, None);
+            self.gl_state_tracker.use_program(&self.gl, None);
         }
 
         // === Pass 2b: Genie minimize animations ===
@@ -3126,18 +3278,6 @@ impl<C: CompositorConnection> Compositor<C> {
             self.needs_render = true;
         }
 
-        // P4: Record temporal blur statistics (if blur happened)
-        if self.temporal_blur_enabled && current_window_hash != 0 {
-            self.temporal_blur_total_count += 1;
-            if current_window_hash == self.prev_window_positions_hash {
-                self.temporal_blur_reuse_count += 1;
-            }
-            self.prev_window_positions_hash = current_window_hash;
-        }
-
-        // P4: Finalize temporal blur state for next frame
-        self.finalize_temporal_blur();
-
         // Phase 2: End frame profiling
         let frame_time_ms = self.frame_profiler.end_frame();
 
@@ -3187,6 +3327,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // Return the per-frame scratch buffers to their fields for reuse.
         self.scratch_blur_dirty = blur_dirty_wins;
+        self.scratch_blur_damage = blur_damage_below;
         self.scratch_tfp_order = tfp_order;
 
         true
@@ -3199,7 +3340,10 @@ impl<C: CompositorConnection> Compositor<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::intersect_gl_scissors;
+    use super::{
+        DirtyRect, blur_sampling_margin, dirty_below_affects_backdrop,
+        dirty_below_requires_full_blur_redraw, intersect_gl_scissors,
+    };
 
     #[test]
     fn intersects_monitor_and_damage_scissors() {
@@ -3215,5 +3359,56 @@ mod tests {
             intersect_gl_scissors((0, 0, 1920, 1080), (100, 100, 50, 50)),
             Some((100, 100, 50, 50))
         );
+    }
+
+    #[test]
+    fn distant_client_damage_does_not_invalidate_backdrop() {
+        let backdrop = DirtyRect::new(1400, 100, 900, 600);
+        let dirty_below = [DirtyRect::new(100, 100, 900, 600)];
+        assert!(!dirty_below_affects_backdrop(&dirty_below, backdrop, 3));
+    }
+
+    #[test]
+    fn damage_inside_blur_sampling_margin_invalidates_backdrop() {
+        let margin = blur_sampling_margin(3);
+        let backdrop = DirtyRect::new(1000, 100, 500, 500);
+        let dirty_below = [DirtyRect::new(1000 - margin, 200, margin as u32, 100)];
+        assert!(dirty_below_affects_backdrop(&dirty_below, backdrop, 3));
+
+        let outside = [DirtyRect::new(900 - margin, 200, 100, 100)];
+        assert!(!dirty_below_affects_backdrop(&outside, backdrop, 3));
+    }
+
+    #[test]
+    fn current_client_damage_does_not_redraw_distant_blur_client() {
+        let scene = [(10, 100, 100, 900, 600), (20, 1400, 100, 900, 600)];
+        assert!(!dirty_below_requires_full_blur_redraw(
+            &scene,
+            &[10],
+            3,
+            |win| win == 20,
+        ));
+    }
+
+    #[test]
+    fn intersecting_lower_client_damage_forces_full_blur_redraw() {
+        let scene = [(10, 100, 100, 900, 600), (20, 1000, 100, 900, 600)];
+        assert!(dirty_below_requires_full_blur_redraw(
+            &scene,
+            &[10],
+            3,
+            |win| win == 20,
+        ));
+    }
+
+    #[test]
+    fn damage_above_blur_client_does_not_change_its_backdrop() {
+        let scene = [(20, 1000, 100, 900, 600), (10, 100, 100, 900, 600)];
+        assert!(!dirty_below_requires_full_blur_redraw(
+            &scene,
+            &[10],
+            3,
+            |win| win == 20,
+        ));
     }
 }

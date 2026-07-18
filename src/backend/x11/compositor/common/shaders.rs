@@ -1031,7 +1031,11 @@ out vec2 v_uv;
 
 void main() {
     vec2 pos = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1));
-    v_uv = pos;
+    // Both inputs use the final blur texture orientation: visual top at v=0.
+    // Rendering into a framebuffer would invert that orientation, so sample
+    // with a flipped v coordinate to keep the temporal result compatible with
+    // the regular window shader.
+    v_uv = vec2(pos.x, 1.0 - pos.y);
     vec2 pixel = u_rect.xy + pos * u_rect.zw;
     gl_Position = u_projection * vec4(pixel, 0.0, 1.0);
 }

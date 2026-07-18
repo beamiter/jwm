@@ -5,7 +5,22 @@ pub(super) use crate::backend::x11::compositor_common::effects::{
 pub(super) use crate::backend::x11::compositor_common::expose::{
     ExposeEntry, SnapPreview, WindowTab,
 };
+use std::cell::Cell;
 use std::collections::VecDeque;
+
+/// A backdrop-blur result owned by one X11 window.
+///
+/// Blur windows can appear more than once in the same scene. Sharing one cache
+/// (or one temporal history texture) between them makes each window consume the
+/// result produced for a different below-scene. Keep the result and its cache
+/// keys tied to the consumer window instead.
+pub(super) struct WindowBlurCache {
+    pub(super) fbo: glow::Framebuffer,
+    pub(super) texture: glow::Texture,
+    pub(super) below_hash: Cell<u64>,
+    pub(super) blur_levels: Cell<usize>,
+    pub(super) valid: Cell<bool>,
+}
 
 pub(super) enum PixmapBinding {
     Glx { drawable: x11::glx::GLXPixmap },

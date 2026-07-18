@@ -14,6 +14,27 @@ use std::sync::Arc;
 #[allow(unused_imports)]
 use std::sync::mpsc;
 
+fn blur_cache_matches(
+    valid: bool,
+    cached_hash: u64,
+    below_hash: u64,
+    cached_levels: usize,
+    blur_levels: usize,
+    backdrop_dirty: bool,
+) -> bool {
+    valid && !backdrop_dirty && cached_hash == below_hash && cached_levels == blur_levels
+}
+
+fn temporal_cache_matches(
+    valid: bool,
+    cached_hash: u64,
+    below_hash: u64,
+    cached_levels: usize,
+    blur_levels: usize,
+) -> bool {
+    valid && cached_hash == below_hash && cached_levels == blur_levels
+}
+
 impl<C: CompositorConnection> Compositor<C> {
     /// Look up per-window opacity from opacity_rules.
     pub(super) fn lookup_opacity_rule(&self, class_name: &str) -> Option<f32> {
@@ -350,97 +371,206 @@ impl<C: CompositorConnection> Compositor<C> {
         blur_strength_for_hz(&self.blur_strength_by_hz, hz)
     }
 
-    /// Compute a hash of all visible window positions (for temporal blur reuse detection).
-    /// If positions are stable (hash unchanged), we can reuse/blend previous frame's blur.
-    pub(super) fn compute_window_positions_hash(&self) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        use std::hash::{Hash, Hasher};
-
-        let mut sorted_windows: Vec<_> = self.windows.iter().collect();
-        sorted_windows.sort_by_key(|(id, _)| *id);
-
-        for (_, wt) in sorted_windows {
-            if wt.dirty || wt.fading_out {
-                continue; // Skip dirty/fading windows for stability
-            }
-            wt.x.hash(&mut hasher);
-            wt.y.hash(&mut hasher);
-            wt.w.hash(&mut hasher);
-            wt.h.hash(&mut hasher);
-            wt.fade_opacity.to_bits().hash(&mut hasher);
-        }
-        hasher.finish()
-    }
-
-    /// P4: Apply temporal blur mixing: blend current with previous frame if content is stable
-    /// When window positions are unchanged, we can mix current blur with previous blur for:
-    /// - Higher visual stability (less flicker from blur recomputation)
-    /// - Lower GPU cost (fewer blur samples needed for same quality)
-    /// Lazily create prev_blur_fbo. Must be called once per frame before
-    /// `apply_temporal_blur_mix` so that the mix path can run with `&self`
-    /// inside loops that hold immutable borrows of self.
-    pub(super) fn ensure_prev_blur_fbo(&mut self) {
-        if !self.temporal_blur_enabled {
+    /// Make sure every visible backdrop consumer owns an independent cached
+    /// blur result. The temporal scratch target can be shared because mix
+    /// passes are serialized.
+    pub(super) fn ensure_window_blur_caches(&mut self, blur_windows: &[u32]) {
+        if !self.blur_enabled || self.blur_fbos.is_empty() {
+            self.clear_window_blur_caches();
             return;
         }
-        if self.prev_blur_fbo.is_none() {
-            if let Ok((fbo, tex)) =
-                unsafe { Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h) }
+
+        let cache_w = self.blur_fbos[0].w;
+        let cache_h = self.blur_fbos[0].h;
+
+        let stale: Vec<u32> = self
+            .window_blur_caches
+            .keys()
+            .copied()
+            .filter(|win| !blur_windows.contains(win))
+            .collect();
+        unsafe {
+            for win in stale {
+                if let Some(cache) = self.window_blur_caches.remove(&win) {
+                    self.gl.delete_framebuffer(cache.fbo);
+                    self.gl.delete_texture(cache.texture);
+                }
+            }
+        }
+
+        for &win in blur_windows {
+            if self.window_blur_caches.contains_key(&win) {
+                continue;
+            }
+            if let Ok((fbo, texture)) =
+                unsafe { Self::create_scene_fbo(&self.gl, cache_w, cache_h) }
             {
-                self.prev_blur_fbo = Some((fbo, tex));
+                self.window_blur_caches.insert(
+                    win,
+                    WindowBlurCache {
+                        fbo,
+                        texture,
+                        below_hash: std::cell::Cell::new(0),
+                        blur_levels: std::cell::Cell::new(0),
+                        valid: std::cell::Cell::new(false),
+                    },
+                );
+            }
+        }
+
+        if self.temporal_blur_enabled && !blur_windows.is_empty() {
+            if self.temporal_blur_fbo.is_none() {
+                self.temporal_blur_fbo =
+                    unsafe { Self::create_scene_fbo(&self.gl, cache_w, cache_h).ok() };
+            }
+        } else {
+            unsafe {
+                if let Some((fbo, texture)) = self.temporal_blur_fbo.take() {
+                    self.gl.delete_framebuffer(fbo);
+                    self.gl.delete_texture(texture);
+                }
             }
         }
     }
 
-    pub(super) fn apply_temporal_blur_mix(&self, current_blur_tex: glow::Texture) -> glow::Texture {
-        if !self.temporal_blur_enabled {
-            return current_blur_tex;
+    pub(super) fn invalidate_window_blur_caches(&self) {
+        for cache in self.window_blur_caches.values() {
+            cache.valid.set(false);
+        }
+    }
+
+    pub(super) fn clear_window_blur_caches(&mut self) {
+        unsafe {
+            for (_, cache) in self.window_blur_caches.drain() {
+                self.gl.delete_framebuffer(cache.fbo);
+                self.gl.delete_texture(cache.texture);
+            }
+            if let Some((fbo, texture)) = self.temporal_blur_fbo.take() {
+                self.gl.delete_framebuffer(fbo);
+                self.gl.delete_texture(texture);
+            }
+        }
+    }
+
+    pub(super) fn window_blur_cache_hit(
+        &self,
+        win: u32,
+        below_hash: u64,
+        blur_levels: usize,
+        backdrop_dirty: bool,
+    ) -> bool {
+        self.window_blur_caches.get(&win).is_some_and(|cache| {
+            blur_cache_matches(
+                cache.valid.get(),
+                cache.below_hash.get(),
+                below_hash,
+                cache.blur_levels.get(),
+                blur_levels,
+                backdrop_dirty,
+            )
+        })
+    }
+
+    pub(super) fn window_blur_cache_texture(&self, win: u32) -> Option<glow::Texture> {
+        self.window_blur_caches.get(&win).map(|cache| cache.texture)
+    }
+
+    /// Store the freshly filtered result in this consumer's cache, optionally
+    /// mixing it with that same consumer's temporal history. The shared scratch
+    /// target keeps the history texture read-only for the whole shader pass.
+    ///
+    /// This method intentionally takes `&self` because it runs while the
+    /// window loop holds an immutable borrow of a `WindowTexture`.
+    pub(super) fn update_window_blur_cache(
+        &self,
+        win: u32,
+        current_blur_tex: glow::Texture,
+        below_hash: u64,
+        blur_levels: usize,
+    ) -> (glow::Texture, bool) {
+        // Leave a deterministic raw draw state for the tracked restore in
+        // render_frame, including all early-return paths below.
+        unsafe {
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
         }
 
-        let (prev_fbo, prev_tex) = match &self.prev_blur_fbo {
-            Some((fbo, tex)) => (*fbo, *tex),
-            None => return current_blur_tex,
+        let cache = match self.window_blur_caches.get(&win) {
+            Some(cache) => cache,
+            None => return (current_blur_tex, false),
         };
+        let current_level = match self
+            .blur_fbos
+            .iter()
+            .find(|level| level.texture == current_blur_tex)
+        {
+            Some(level) => level,
+            None => return (current_blur_tex, false),
+        };
+        let reuse_previous = self.temporal_blur_enabled
+            && temporal_cache_matches(
+                cache.valid.get(),
+                cache.below_hash.get(),
+                below_hash,
+                cache.blur_levels.get(),
+                blur_levels,
+            )
+            && self.temporal_blur_fbo.is_some();
 
-        // If we have a previous frame, blend current with previous
-        let has_prev = self.prev_window_positions_hash != 0;
-        if !has_prev {
-            // No previous frame yet - just save current for next frame
-            unsafe {
-                self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+        unsafe {
+            let blend_enabled = self.gl.is_enabled(glow::BLEND);
+            let scissor_enabled = self.gl.is_enabled(glow::SCISSOR_TEST);
+            if blend_enabled {
+                self.gl.disable(glow::BLEND);
+            }
+            if scissor_enabled {
+                self.gl.disable(glow::SCISSOR_TEST);
+            }
+
+            if !reuse_previous {
                 self.gl
-                    .bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(prev_fbo));
+                    .bind_framebuffer(glow::READ_FRAMEBUFFER, Some(current_level.fbo));
+                self.gl
+                    .bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(cache.fbo));
                 self.gl.blit_framebuffer(
                     0,
                     0,
-                    self.screen_w as i32,
-                    self.screen_h as i32,
+                    current_level.w as i32,
+                    current_level.h as i32,
                     0,
                     0,
-                    self.screen_w as i32,
-                    self.screen_h as i32,
+                    current_level.w as i32,
+                    current_level.h as i32,
                     glow::COLOR_BUFFER_BIT,
                     glow::NEAREST,
                 );
+                self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                if blend_enabled {
+                    self.gl.enable(glow::BLEND);
+                }
+                if scissor_enabled {
+                    self.gl.enable(glow::SCISSOR_TEST);
+                }
+                cache.below_hash.set(below_hash);
+                cache.blur_levels.set(blur_levels);
+                cache.valid.set(true);
+                return (cache.texture, false);
             }
-            return current_blur_tex;
-        }
 
-        // Perform temporal mix: blend current with previous
-        let proj = math::ortho(
-            0.0,
-            self.screen_w as f32,
-            self.screen_h as f32,
-            0.0,
-            -1.0,
-            1.0,
-        );
+            let (mix_fbo, _) = self.temporal_blur_fbo.unwrap();
+            let proj = math::ortho(
+                0.0,
+                current_level.w as f32,
+                current_level.h as f32,
+                0.0,
+                -1.0,
+                1.0,
+            );
 
-        unsafe {
-            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(prev_fbo));
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(mix_fbo));
             self.gl.use_program(Some(self.temporal_blur_mix_program));
             self.gl
-                .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+                .viewport(0, 0, current_level.w as i32, current_level.h as i32);
 
             // Bind current blur as input
             self.gl.active_texture(glow::TEXTURE0);
@@ -455,7 +585,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
             // Bind previous blur as input
             self.gl.active_texture(glow::TEXTURE1);
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(prev_tex));
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(cache.texture));
             self.gl.uniform_1_i32(
                 self.gl
                     .get_uniform_location(self.temporal_blur_mix_program, "u_previous_blur")
@@ -481,62 +611,53 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.temporal_blur_mix_uniforms.rect.as_ref(),
                 0.0,
                 0.0,
-                self.screen_w as f32,
-                self.screen_h as f32,
+                current_level.w as f32,
+                current_level.h as f32,
             );
 
             // Draw mix quad
             self.gl.bind_vertex_array(Some(self.quad_vao));
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
 
-            // Restore state
+            self.gl.active_texture(glow::TEXTURE1);
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
             self.gl.active_texture(glow::TEXTURE0);
-        }
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
 
-        // Return mixed texture (stored in prev_fbo now)
-        prev_tex
-    }
+            // Promote the completed scratch result to history only after the
+            // sampling pass has finished.
+            self.gl
+                .bind_framebuffer(glow::READ_FRAMEBUFFER, Some(mix_fbo));
+            self.gl
+                .bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(cache.fbo));
+            self.gl.blit_framebuffer(
+                0,
+                0,
+                current_level.w as i32,
+                current_level.h as i32,
+                0,
+                0,
+                current_level.w as i32,
+                current_level.h as i32,
+                glow::COLOR_BUFFER_BIT,
+                glow::NEAREST,
+            );
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
 
-    /// P4: Finalize temporal blur state at end of render_frame
-    /// Called after all blur computation to update prev_blur_fbo for next frame
-    pub(super) fn finalize_temporal_blur(&mut self) {
-        if !self.temporal_blur_enabled {
-            return;
-        }
-
-        // On first frame (no previous state), initialize prev_blur_fbo from scene_fbo
-        if self.prev_window_positions_hash == 0 {
-            if let Some((_, _scene_tex)) = &self.scene_fbo {
-                if self.prev_blur_fbo.is_none() {
-                    if let Ok((fbo, tex)) =
-                        unsafe { Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h) }
-                    {
-                        self.prev_blur_fbo = Some((fbo, tex));
-                    }
-                }
-
-                // Copy scene texture to prev_blur_fbo for next frame blending
-                if let Some((fbo, _)) = &self.prev_blur_fbo {
-                    unsafe {
-                        self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-                        self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(*fbo));
-                        self.gl.blit_framebuffer(
-                            0,
-                            0,
-                            self.screen_w as i32,
-                            self.screen_h as i32,
-                            0,
-                            0,
-                            self.screen_w as i32,
-                            self.screen_h as i32,
-                            glow::COLOR_BUFFER_BIT,
-                            glow::NEAREST,
-                        );
-                    }
-                }
+            if blend_enabled {
+                self.gl.enable(glow::BLEND);
+            }
+            if scissor_enabled {
+                self.gl.enable(glow::SCISSOR_TEST);
             }
         }
+
+        cache.below_hash.set(below_hash);
+        cache.blur_levels.set(blur_levels);
+        cache.valid.set(true);
+        (cache.texture, true)
     }
 
     /// Whether a window should receive per-frame backdrop blur compositing.
@@ -573,5 +694,31 @@ impl<C: CompositorConnection> Compositor<C> {
     /// Look up per-window scale (feature 4).
     pub(super) fn lookup_scale_rule(&self, class_name: &str) -> Option<f32> {
         scale_rule_for_class(&self.scale_rules, class_name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{blur_cache_matches, temporal_cache_matches};
+
+    #[test]
+    fn empty_below_scene_is_cacheable() {
+        assert!(blur_cache_matches(true, 0, 0, 3, 3, false));
+    }
+
+    #[test]
+    fn dirty_or_different_below_scene_misses_cache() {
+        assert!(!blur_cache_matches(true, 7, 7, 3, 3, true));
+        assert!(!blur_cache_matches(true, 7, 8, 3, 3, false));
+        assert!(!blur_cache_matches(true, 7, 7, 2, 3, false));
+        assert!(!blur_cache_matches(false, 7, 7, 3, 3, false));
+    }
+
+    #[test]
+    fn temporal_reuse_depends_only_on_this_consumers_below_scene() {
+        assert!(temporal_cache_matches(true, 41, 41, 3, 3));
+        assert!(!temporal_cache_matches(true, 41, 42, 3, 3));
+        assert!(!temporal_cache_matches(true, 41, 41, 2, 3));
+        assert!(!temporal_cache_matches(false, 41, 41, 3, 3));
     }
 }

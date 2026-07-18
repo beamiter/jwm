@@ -262,19 +262,26 @@ impl<C: CompositorConnection> Compositor<C> {
         self.blur_quality_auto = behavior.blur_quality_auto;
 
         // --- Blur (may need FBO rebuild) ---
-        if self.blur_enabled != behavior.blur_enabled
-            || self.blur_strength != behavior.blur_strength
-        {
+        let blur_changed = self.blur_enabled != behavior.blur_enabled
+            || self.blur_strength != behavior.blur_strength;
+        if blur_changed {
+            self.clear_window_blur_caches();
             // Tear down old blur FBOs
             unsafe {
                 for level in self.blur_fbos.drain(..) {
                     self.gl.delete_framebuffer(level.fbo);
                     self.gl.delete_texture(level.texture);
                 }
+                if let Some((fbo, tex)) = self.scene_fbo.take() {
+                    self.gl.delete_framebuffer(fbo);
+                    self.gl.delete_texture(tex);
+                }
             }
             self.blur_enabled = behavior.blur_enabled;
             self.blur_strength = behavior.blur_strength;
-            // Recreate if enabled
+            // Recreate both the filter chain and its full-size capture target.
+            // Previously a false -> true hot reload created only blur_fbos, so
+            // blur stayed unavailable until the compositor restarted.
             if self.blur_enabled {
                 self.blur_fbos = unsafe {
                     Self::create_blur_fbos(
@@ -284,6 +291,30 @@ impl<C: CompositorConnection> Compositor<C> {
                         self.blur_strength,
                     )
                 };
+                self.scene_fbo =
+                    unsafe { Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h).ok() };
+            }
+        } else if self.blur_enabled && self.scene_fbo.is_none() {
+            self.scene_fbo =
+                unsafe { Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h).ok() };
+        }
+
+        let temporal_changed = self.temporal_blur_enabled != behavior.blur_temporal_enabled
+            || (self.temporal_blur_mix_ratio - behavior.blur_temporal_mix_ratio).abs()
+                > f32::EPSILON;
+        self.temporal_blur_enabled = behavior.blur_temporal_enabled;
+        self.temporal_blur_mix_ratio = behavior.blur_temporal_mix_ratio.clamp(0.0, 1.0);
+        if temporal_changed {
+            self.invalidate_window_blur_caches();
+        }
+        if !self.blur_enabled {
+            self.clear_window_blur_caches();
+        } else if !self.temporal_blur_enabled {
+            unsafe {
+                if let Some((fbo, tex)) = self.temporal_blur_fbo.take() {
+                    self.gl.delete_framebuffer(fbo);
+                    self.gl.delete_texture(tex);
+                }
             }
         }
 

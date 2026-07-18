@@ -169,6 +169,14 @@ impl<C: CompositorConnection> Compositor<C> {
         let levels = max_levels.min(self.blur_fbos.len()).max(1);
 
         unsafe {
+            // Offscreen filter passes replace every destination pixel.  Leaving
+            // premultiplied-alpha blending enabled can retain stale FBO content
+            // when the captured scene contains transparency.
+            let blend_enabled = self.gl.is_enabled(glow::BLEND);
+            if blend_enabled {
+                self.gl.disable(glow::BLEND);
+            }
+
             // Copy current framebuffer to scene FBO
             self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, source_fbo);
             self.gl
@@ -278,6 +286,9 @@ impl<C: CompositorConnection> Compositor<C> {
                 .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
+            if blend_enabled {
+                self.gl.enable(glow::BLEND);
+            }
         }
 
         // Return the first (largest) blur level texture as the blurred result

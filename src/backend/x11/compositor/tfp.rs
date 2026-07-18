@@ -265,6 +265,10 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.scene_fbo = Self::create_scene_fbo(&self.gl, new_w, new_h).ok();
             }
         }
+        // Per-window blur caches and the temporal scratch target follow the
+        // largest blur level, so a RandR resize must recreate them lazily.
+        self.clear_window_blur_caches();
+
         // Recreate postprocess FBO
         if self.postprocess_fbo.is_some() {
             unsafe {
