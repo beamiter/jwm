@@ -8,8 +8,8 @@ use crate::backend::common_define::{ConfigWindowBits, Mods, MouseButton, WindowI
 use crate::config::CONFIG;
 use crate::core::models::ClientKey;
 use crate::core::types::Rect;
-use crate::jwm::features::MonitorDirection;
 use crate::jwm::features::screenshot::{ScreenshotAnnotation, ScreenshotTool};
+use crate::jwm::features::{CaptureTarget, MonitorDirection};
 use crate::jwm::types::{WMArgEnum, WMClickType};
 use log::{error, info};
 
@@ -333,10 +333,47 @@ impl Jwm {
 
         // Recording region selection/adjustment mode.
         if self.features.recording.selecting_region {
+            let ctrl = clean_state.contains(Mods::CONTROL);
+            let shift = clean_state.contains(Mods::SHIFT);
+            let capture_target = if !ctrl && keysym == keys::KEY_Tab {
+                self.cycle_recording_capture_target(backend, shift);
+                None
+            } else if !ctrl && keysym == keys::KEY_g {
+                Some(CaptureTarget::Region)
+            } else if !ctrl && keysym == keys::KEY_w {
+                Some(CaptureTarget::Window)
+            } else if !ctrl && keysym == keys::KEY_m {
+                Some(CaptureTarget::Monitor)
+            } else if !ctrl && keysym == keys::KEY_d {
+                Some(CaptureTarget::Desktop)
+            } else {
+                None
+            };
+            if let Some(target) = capture_target {
+                self.set_recording_capture_target(backend, target);
+                return Ok(());
+            }
+            if !ctrl && keysym == keys::KEY_Tab {
+                return Ok(());
+            }
+
             if keysym == keys::KEY_Escape {
                 self.cancel_recording_region_interaction(backend);
             } else if keysym == keys::KEY_Return {
                 self.finish_recording_region_interaction(backend)?;
+            } else if matches!(
+                keysym,
+                keys::KEY_Left | keys::KEY_Right | keys::KEY_Up | keys::KEY_Down
+            ) {
+                let distance = if shift { 10 } else { 1 };
+                let (dx, dy) = match keysym {
+                    keys::KEY_Left => (-distance, 0),
+                    keys::KEY_Right => (distance, 0),
+                    keys::KEY_Up => (0, -distance),
+                    keys::KEY_Down => (0, distance),
+                    _ => (0, 0),
+                };
+                self.nudge_recording_capture_region(backend, dx, dy);
             }
             return Ok(());
         }
@@ -350,6 +387,28 @@ impl Jwm {
 
             let ctrl = clean_state.contains(Mods::CONTROL);
             let shift = clean_state.contains(Mods::SHIFT);
+
+            let capture_target = if !ctrl && keysym == keys::KEY_Tab {
+                self.cycle_screenshot_capture_target(backend, shift);
+                None
+            } else if !ctrl && keysym == keys::KEY_g {
+                Some(CaptureTarget::Region)
+            } else if !ctrl && keysym == keys::KEY_w {
+                Some(CaptureTarget::Window)
+            } else if !ctrl && keysym == keys::KEY_m {
+                Some(CaptureTarget::Monitor)
+            } else if !ctrl && keysym == keys::KEY_d {
+                Some(CaptureTarget::Desktop)
+            } else {
+                None
+            };
+            if let Some(target) = capture_target {
+                self.set_screenshot_capture_target(backend, target);
+                return Ok(());
+            }
+            if !ctrl && keysym == keys::KEY_Tab {
+                return Ok(());
+            }
 
             let tool_changed = if !ctrl && (keysym == keys::KEY_p || keysym == keys::KEY_f) {
                 self.features.screenshot.set_tool(ScreenshotTool::Pencil);
@@ -421,7 +480,11 @@ impl Jwm {
                         keys::KEY_Down => (0.0, nudge),
                         _ => (0.0, 0.0),
                     };
-                    self.features.screenshot.move_selection(dx, dy);
+                    self.features.screenshot.move_selection_within(
+                        dx,
+                        dy,
+                        Rect::new(0, 0, self.s_w, self.s_h),
+                    );
                     if backend.has_compositor() {
                         backend.compositor_set_snap_preview(
                             self.features
@@ -623,15 +686,20 @@ impl Jwm {
         detail_btn: u8,
         time: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // Recording region selection/adjustment intercept.
+        // Recording source selection/adjustment intercept.
         if self.features.recording.selecting_region {
             let button = MouseButton::from_u8(detail_btn);
             if button == MouseButton::Left {
-                let (x, y) = self.last_mouse_root;
-                self.features
-                    .recording
-                    .begin_region_drag(x.round() as i32, y.round() as i32);
+                if self.features.capture.recording == CaptureTarget::Region {
+                    let (x, y) = self.last_mouse_root;
+                    self.features
+                        .recording
+                        .begin_region_drag(x.round() as i32, y.round() as i32);
+                } else {
+                    self.commit_recording_capture_target(backend, target);
+                }
             } else {
+                self.features.capture.swallow_next_button_release();
                 self.cancel_recording_region_interaction(backend);
             }
             return Ok(());
@@ -652,11 +720,14 @@ impl Jwm {
                     backend.compositor_annotation_add_point(x as f32, y as f32);
                     backend.compositor_force_full_redraw();
                 }
+            } else if btn == MouseButton::Left
+                && self.features.capture.screenshot != CaptureTarget::Region
+            {
+                self.commit_screenshot_capture_target(backend, target);
             } else if btn == MouseButton::Left {
-                // Start dragging
-                self.features.screenshot.dragging = true;
-                self.features.screenshot.start = self.last_mouse_root;
-                self.features.screenshot.end = self.last_mouse_root;
+                self.features
+                    .screenshot
+                    .begin_drag(self.last_mouse_root.0, self.last_mouse_root.1);
                 // Immediately show a 1x1 preview to avoid animation delay
                 if backend.has_compositor() {
                     let (x, y) = self.last_mouse_root;
@@ -664,7 +735,8 @@ impl Jwm {
                     backend.compositor_force_full_redraw();
                 }
             } else {
-                // Right-click or other button → cancel
+                // Right-click or other button → cancel without leaking the release.
+                self.features.capture.swallow_next_button_release();
                 self.cancel_screenshot_select(backend);
             }
             return Ok(());

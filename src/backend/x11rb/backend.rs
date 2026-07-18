@@ -110,7 +110,7 @@ impl X11rbBackend {
         *CACHE.get_or_init(|| {
             env::var("JWM_DEBUG_DRAG")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(true)
+                .unwrap_or(false)
         })
     }
 
@@ -2673,6 +2673,17 @@ mod event_source {
             }
         }
 
+        fn hit_target_from_pointer_event(&self, event_window: u32, child: u32) -> HitTarget {
+            if (event_window == self.root_x11 || self.overlay_x11 == Some(event_window))
+                && child != 0
+                && self.overlay_x11 != Some(child)
+            {
+                HitTarget::Surface(self.ids.intern(child))
+            } else {
+                self.hit_target_from_event_window(event_window)
+            }
+        }
+
         fn property_kind_atoms(&self) -> PropertyKindAtoms<u32> {
             PropertyKindAtoms {
                 wm_transient_for: self.atoms.WM_TRANSIENT_FOR,
@@ -2727,7 +2738,7 @@ mod event_source {
         fn map_event(&mut self, ev: XEvent) -> Option<BackendEvent> {
             match ev {
                 XEvent::ButtonPress(e) => {
-                    log::info!(
+                    log::debug!(
                         "[X11] ButtonPress: event=0x{:x} child=0x{:x} root=0x{:x} root_xy=({},{}) detail={}",
                         e.event,
                         e.child,
@@ -2737,7 +2748,7 @@ mod event_source {
                         e.detail
                     );
                     Some(BackendEvent::ButtonPress {
-                        target: self.hit_target_from_event_window(e.event),
+                        target: self.hit_target_from_pointer_event(e.event, e.child),
                         state: e.state.bits(),
                         detail: e.detail,
                         time: e.time,
@@ -2746,13 +2757,13 @@ mod event_source {
                     })
                 }
                 XEvent::MotionNotify(e) => Some(BackendEvent::MotionNotify {
-                    target: self.hit_target_from_event_window(e.event),
+                    target: self.hit_target_from_pointer_event(e.event, e.child),
                     root_x: e.root_x as f64,
                     root_y: e.root_y as f64,
                     time: e.time,
                 }),
                 XEvent::ButtonRelease(e) => Some(BackendEvent::ButtonRelease {
-                    target: self.hit_target_from_event_window(e.event),
+                    target: self.hit_target_from_pointer_event(e.event, e.child),
                     time: e.time,
                 }),
                 XEvent::RandrScreenChangeNotify(_) => Some(BackendEvent::ScreenLayoutChanged),
@@ -3435,6 +3446,11 @@ mod input_ops {
             let reply = self.query_pointer()?;
             // X11  f64
             Ok((reply.root_x as f64, reply.root_y as f64))
+        }
+
+        fn window_under_pointer(&self) -> Result<Option<WindowId>, BackendError> {
+            let reply = self.query_pointer()?;
+            Ok((reply.child != 0).then(|| self.ids.intern(reply.child)))
         }
 
         fn grab_pointer(&self, mask_bits: u32, cursor: Option<u64>) -> Result<bool, BackendError> {
