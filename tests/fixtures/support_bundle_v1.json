@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-19T00:00:00Z",
+  "generator": {
+    "name": "jwm-support",
+    "version": "0.2.0"
+  },
+  "requested_backend": "x11rb",
+  "system": {
+    "os": "linux",
+    "architecture": "x86_64",
+    "family": "unix",
+    "kernel_release": "6.0.0-example",
+    "distribution": {
+      "ID": "example",
+      "ID_LIKE": "example-like",
+      "NAME": "Example Linux",
+      "PRETTY_NAME": "Example Linux 42",
+      "VERSION": "42 (Reference)",
+      "VERSION_ID": "42"
+    }
+  },
+  "session_environment": {
+    "DISPLAY": ":0",
+    "XDG_SESSION_TYPE": "x11"
+  },
+  "doctor": {
+    "schema_version": 1,
+    "backend": "x11rb",
+    "status": "warning",
+    "summary": {
+      "passed": 3,
+      "warnings": 2,
+      "errors": 0
+    },
+    "checks": [
+      {
+        "status": "pass",
+        "id": "config.file",
+        "summary": "The selected backend configuration exists",
+        "detail": "<configuration path redacted>"
+      },
+      {
+        "status": "pass",
+        "id": "config.validation",
+        "summary": "Configuration syntax and semantics are valid"
+      },
+      {
+        "status": "warning",
+        "id": "command.status_bar",
+        "summary": "Configured status bar is not executable from PATH",
+        "hint": "Install the configured bar or update status_bar.name"
+      },
+      {
+        "status": "pass",
+        "id": "runtime.xdg_runtime_dir",
+        "summary": "XDG_RUNTIME_DIR is private and owned by the current user",
+        "detail": "<runtime directory details redacted>"
+      },
+      {
+        "status": "warning",
+        "id": "session.dbus",
+        "summary": "DBUS_SESSION_BUS_ADDRESS is not set",
+        "detail": "JWM will try the systemd user bus and then dbus-launch",
+        "hint": "Start JWM from a normal login session if application activation fails"
+      }
+    ],
+    "config_diagnostics_included": false
+  },
+  "privacy": {
+    "environment_policy": "allowlist-only; values are control-character stripped and length limited",
+    "omitted_categories": [
+      "HOME and user paths",
+      "PATH and executable search paths",
+      "D-Bus addresses and authentication material",
+      "process command lines",
+      "window titles and application content",
+      "unrecognized environment variables"
+    ]
+  }
+}
