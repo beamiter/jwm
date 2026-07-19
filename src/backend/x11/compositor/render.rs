@@ -1577,9 +1577,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let wallpaper_result = self.pending_wallpaper.as_ref().map(|rx| rx.try_recv());
         match wallpaper_result {
             Some(Ok(data)) => {
-                if let Some((tex, w, h)) =
-                    Self::upload_wallpaper_texture(&self.gl, &data, self.hdr_enabled)
-                {
+                if let Some((tex, w, h)) = Self::upload_wallpaper_texture(&self.gl, &data) {
                     unsafe {
                         if self.wallpaper_crossfade {
                             if let Some(stale) = self.old_wallpaper_texture.take() {
@@ -1629,8 +1627,7 @@ impl<C: CompositorConnection> Compositor<C> {
             match rx.try_recv() {
                 Ok(data) => {
                     if let Some(mw) = self.monitor_wallpapers.get_mut(*idx)
-                        && let Some((tex, w, h)) =
-                            Self::upload_wallpaper_texture(&self.gl, &data, self.hdr_enabled)
+                        && let Some((tex, w, h)) = Self::upload_wallpaper_texture(&self.gl, &data)
                     {
                         if let Some(previous) = mw.texture.replace(tex) {
                             unsafe {

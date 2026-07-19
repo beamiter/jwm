@@ -26,6 +26,26 @@ fn uses_global_wallpaper_fallback(
     resolved_path == global_path && resolved_mode == global_mode
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WallpaperUploadFormat {
+    internal: i32,
+    external: u32,
+    pixel_type: u32,
+}
+
+/// Decoded wallpapers are RGBA8 source images even when the compositor output
+/// is 10-bit. Keep their source texture RGBA8 and let the render target perform
+/// the normalized conversion. GLES 3 rejects RGB10_A2 + UNSIGNED_BYTE, while
+/// changing only the type would incorrectly reinterpret the unpacked byte data
+/// as packed 2:10:10:10 pixels.
+fn wallpaper_upload_format() -> WallpaperUploadFormat {
+    WallpaperUploadFormat {
+        internal: glow::RGBA8 as i32,
+        external: glow::RGBA,
+        pixel_type: glow::UNSIGNED_BYTE,
+    }
+}
+
 /// Process-wide gate bounding how many wallpaper images decode concurrently.
 /// Each decode does `image::open` + a Lanczos3 downscale (heavy CPU, transient
 /// full-image allocation); rapid wallpaper changes or per-monitor setup would
@@ -120,9 +140,29 @@ impl<C: CompositorConnection> Compositor<C> {
     pub(super) fn upload_wallpaper_texture(
         gl: &glow::Context,
         data: &WallpaperImageData,
-        hdr_enabled: bool,
     ) -> Option<(glow::Texture, u32, u32)> {
+        let expected_len = usize::try_from(data.width)
+            .ok()?
+            .checked_mul(usize::try_from(data.height).ok()?)?
+            .checked_mul(4)?;
+        if data.width == 0 || data.height == 0 || data.rgba.len() != expected_len {
+            log::warn!(
+                "compositor: invalid wallpaper image data ({}x{}, {} bytes)",
+                data.width,
+                data.height,
+                data.rgba.len()
+            );
+            return None;
+        }
+
         unsafe {
+            // Attribute the error check below to this upload rather than an
+            // unrelated, already-reported operation.
+            for _ in 0..8 {
+                if gl.get_error() == glow::NO_ERROR {
+                    break;
+                }
+            }
             let tex = match gl.create_texture() {
                 Ok(t) => t,
                 Err(e) => {
@@ -131,21 +171,16 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             };
             gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            const GL_RGB10_A2: u32 = 0x8059;
-            let internal_format = if hdr_enabled {
-                GL_RGB10_A2 as i32
-            } else {
-                glow::RGBA8 as i32
-            };
+            let upload = wallpaper_upload_format();
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
                 0,
-                internal_format,
+                upload.internal,
                 data.width as i32,
                 data.height as i32,
                 0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
+                upload.external,
+                upload.pixel_type,
                 glow::PixelUnpackData::Slice(Some(&data.rgba)),
             );
             gl.tex_parameter_i32(
@@ -169,6 +204,14 @@ impl<C: CompositorConnection> Compositor<C> {
                 glow::CLAMP_TO_EDGE as i32,
             );
             gl.bind_texture(glow::TEXTURE_2D, None);
+            let upload_error = gl.get_error();
+            if upload_error != glow::NO_ERROR {
+                gl.delete_texture(tex);
+                log::warn!(
+                    "compositor: wallpaper texture upload failed with GL error 0x{upload_error:x}"
+                );
+                return None;
+            }
             log::info!(
                 "compositor: uploaded wallpaper texture ({}x{})",
                 data.width,
@@ -292,8 +335,16 @@ impl<C: CompositorConnection> Compositor<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::uses_global_wallpaper_fallback;
+    use super::{uses_global_wallpaper_fallback, wallpaper_upload_format};
     use crate::backend::compositor_common::wallpaper::WallpaperMode;
+
+    #[test]
+    fn rgba8_wallpaper_source_format_is_valid_for_gles_and_hdr_outputs() {
+        let format = wallpaper_upload_format();
+        assert_eq!(format.internal, glow::RGBA8 as i32);
+        assert_eq!(format.external, glow::RGBA);
+        assert_eq!(format.pixel_type, glow::UNSIGNED_BYTE);
+    }
 
     #[test]
     fn identical_monitor_selection_reuses_global_texture() {
