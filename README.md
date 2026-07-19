@@ -26,6 +26,8 @@ development backends.
 
 JWM requires the normal Linux X11, Wayland, DRM/GBM, libinput, libseat, EGL/GL,
 ALSA, D-Bus, and font/rendering development packages for your distribution.
+The minimum supported Rust version with the committed `Cargo.lock` is 1.89;
+it is declared in `Cargo.toml` and checked in CI.
 
 ```bash
 cargo build --locked --release

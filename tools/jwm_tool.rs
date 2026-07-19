@@ -330,6 +330,44 @@ fn log_file() -> PathBuf {
     log_dir().join("jwm_daemon.log")
 }
 
+/// 单个日志代的大小上限。超过后当前日志重命名为 `<name>.1`（替换旧的
+/// 上一代），磁盘占用被限制在大约两代以内。长期运行建议改用 journald，
+/// 见 tools/README.md。
+const MAX_DAEMON_LOG_BYTES: u64 = 1024 * 1024;
+
+fn rotated_log_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().map_or_else(
+        || std::ffi::OsString::from("jwm_daemon.log"),
+        |n| n.to_os_string(),
+    );
+    name.push(".1");
+    path.with_file_name(name)
+}
+
+fn rotate_log_if_needed(path: &Path, max_bytes: u64) -> io::Result<()> {
+    let size = match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => metadata.len(),
+        _ => return Ok(()),
+    };
+    if size < max_bytes {
+        return Ok(());
+    }
+    fs::rename(path, rotated_log_path(path))
+}
+
+fn append_log_with_rotation(path: &Path, line: &str, max_bytes: u64) -> io::Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    rotate_log_if_needed(path, max_bytes)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(file, "{line}")?;
+    file.flush()
+}
+
 fn now_ts() -> String {
     Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
@@ -337,24 +375,10 @@ fn now_ts() -> String {
 fn log_line(msg: &str) {
     let timestamp = now_ts();
     let line = format!("[{timestamp}] {msg}");
-    let directory = log_dir();
-    let path = directory.join("jwm_daemon.log");
+    let path = log_file();
 
-    if let Err(error) = fs::create_dir_all(&directory) {
-        eprintln!(
-            "[{timestamp}] 无法创建日志目录 {}: {error}",
-            directory.display()
-        );
-    } else {
-        match OpenOptions::new().create(true).append(true).open(&path) {
-            Ok(mut file) => {
-                let _ = writeln!(file, "{line}");
-                let _ = file.flush();
-            }
-            Err(error) => {
-                eprintln!("[{timestamp}] 无法打开日志文件 {}: {error}", path.display());
-            }
-        }
+    if let Err(error) = append_log_with_rotation(&path, &line, MAX_DAEMON_LOG_BYTES) {
+        eprintln!("[{timestamp}] 无法写入日志文件 {}: {error}", path.display());
     }
     println!("{line}");
 }
@@ -2203,16 +2227,77 @@ fn run_ipc_msg(name: &str, args_str: &str, subscribe: Option<&str>, raw: bool) -
 mod tests {
     use super::{
         Cli, Commands, InstallPlanEntry, SmokeTarget, acquire_response_lock,
-        capabilities_output_lines, daemon_command_response, ensure_ipc_response_succeeded,
-        health_output_lines, ipc_request, jwm_install_plan, parse_msg_args,
-        parse_subscription_topics, response_lock_path, session_install_targets,
-        smoke_artifacts_json, smoke_ci_profile_json, smoke_manual_kms_checklist_json,
-        smoke_target_json, split_path_list, successful_query_data, validate_daemon_response,
-        validate_ipc_response,
+        append_log_with_rotation, capabilities_output_lines, daemon_command_response,
+        ensure_ipc_response_succeeded, health_output_lines, ipc_request, jwm_install_plan,
+        parse_msg_args, parse_subscription_topics, response_lock_path, rotated_log_path,
+        session_install_targets, smoke_artifacts_json, smoke_ci_profile_json,
+        smoke_manual_kms_checklist_json, smoke_target_json, split_path_list, successful_query_data,
+        validate_daemon_response, validate_ipc_response,
     };
     use clap::Parser;
     use std::collections::HashSet;
+    use std::fs;
     use std::path::{Path, PathBuf};
+
+    struct TempLogDir(PathBuf);
+
+    impl TempLogDir {
+        fn new(label: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("jwm-tool-log-{label}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempLogDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn daemon_log_rotates_at_the_bound_and_keeps_at_most_two_generations() {
+        let dir = TempLogDir::new("rotate");
+        let path = dir.0.join("jwm_daemon.log");
+        let rotated = rotated_log_path(&path);
+        assert_eq!(rotated.file_name().unwrap(), "jwm_daemon.log.1");
+
+        // 低于上限时只追加，不轮转。
+        append_log_with_rotation(&path, "first", 64).unwrap();
+        append_log_with_rotation(&path, "second", 64).unwrap();
+        assert!(!rotated.exists());
+
+        // 达到上限后当前文件成为上一代，新行进入新的当前文件。
+        let filler = "x".repeat(80);
+        append_log_with_rotation(&path, &filler, 64).unwrap();
+        append_log_with_rotation(&path, "after-rotation", 64).unwrap();
+        let previous = fs::read_to_string(&rotated).unwrap();
+        assert!(previous.contains("first") && previous.contains(&filler));
+        let current = fs::read_to_string(&path).unwrap();
+        assert!(current.contains("after-rotation") && !current.contains("first"));
+
+        // 再次轮转会替换上一代：总占用始终限制在两代以内。
+        let filler2 = "y".repeat(80);
+        append_log_with_rotation(&path, &filler2, 64).unwrap();
+        append_log_with_rotation(&path, "third-generation", 64).unwrap();
+        let previous = fs::read_to_string(&rotated).unwrap();
+        assert!(previous.contains(&filler2) && !previous.contains("first"));
+        assert_eq!(
+            fs::read_dir(&dir.0).unwrap().count(),
+            2,
+            "rotation must never accumulate more than two log files"
+        );
+    }
+
+    #[test]
+    fn daemon_log_append_creates_missing_directories() {
+        let dir = TempLogDir::new("mkdir");
+        let path = dir.0.join("nested").join("jwm_daemon.log");
+        append_log_with_rotation(&path, "hello", 1024).unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains("hello"));
+    }
 
     #[test]
     fn cli_accepts_health_and_capabilities_json_without_changing_status() {

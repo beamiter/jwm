@@ -6,6 +6,9 @@
 name = "jwm"
 version = "0.2.0"
 edition = "2024"
+# Tested minimum: the locked dependency graph requires 1.89 (smol_str), and
+# `cargo +1.89.0 check --all-targets` plus the test suite pass with Cargo.lock.
+rust-version = "1.89"
 description = "A multi-backend X11 and Wayland window manager and compositor"
 repository = "https://github.com/beamiter/jwm"
 readme = "README.md"

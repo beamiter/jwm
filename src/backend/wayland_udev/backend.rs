@@ -15,7 +15,7 @@ use crate::backend::api::{
     SystemUiOverlay, WindowOps, WindowType,
 };
 use crate::backend::common_define::{KeySym, Mods, OutputId, StdCursorKind, WindowId};
-use crate::backend::error::BackendError;
+use crate::backend::error::{BackendContextExt, BackendError, ErrorBoundary};
 use crate::config::CONFIG;
 
 use std::any::Any;
@@ -1358,7 +1358,11 @@ impl UdevBackend {
             }
         }
 
-        let (mut session, notifier) = open_active_libseat_session()?;
+        let (mut session, notifier) = open_active_libseat_session().backend_context(
+            "wayland-udev",
+            ErrorBoundary::Device,
+            "open libseat session",
+        )?;
         let seat_name = session.seat();
         let session_active_at_start = true;
         shared.lock_safe().session_active = session_active_at_start;
@@ -1479,22 +1483,35 @@ impl UdevBackend {
                 })?;
         }
 
-        let udev_backend = SmithayUdevBackend::new(&seat_name).map_err(|e| {
-            BackendError::Other(Box::new(io::Error::new(
-                io::ErrorKind::Other,
-                format!("udev init failed: {e:?}"),
-            )))
-        })?;
+        let udev_backend = SmithayUdevBackend::new(&seat_name)
+            .map_err(|e| {
+                BackendError::Other(Box::new(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("udev init failed: {e:?}"),
+                )))
+            })
+            .backend_context(
+                "wayland-udev",
+                ErrorBoundary::Device,
+                "enumerate udev seat devices",
+            )?;
 
         let mut libinput_context = Libinput::new_with_udev::<
             LibinputSessionInterface<LibSeatSession>,
         >(session.clone().into());
-        libinput_context.udev_assign_seat(&seat_name).map_err(|e| {
-            BackendError::Other(Box::new(io::Error::new(
-                io::ErrorKind::Other,
-                format!("libinput udev_assign_seat failed: {e:?}"),
-            )))
-        })?;
+        libinput_context
+            .udev_assign_seat(&seat_name)
+            .map_err(|e| {
+                BackendError::Other(Box::new(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("libinput udev_assign_seat failed: {e:?}"),
+                )))
+            })
+            .backend_context(
+                "wayland-udev",
+                ErrorBoundary::Device,
+                "assign libinput seat",
+            )?;
         let libinput_backend = LibinputInputBackend::new(libinput_context.clone());
         if !session_active_at_start {
             log::debug!(
@@ -1512,7 +1529,11 @@ impl UdevBackend {
         }
         refresh_preferred_device_id(&shared, &seat_name);
         if session_active_at_start {
-            rebuild_outputs(&shared, &pending_events)?;
+            rebuild_outputs(&shared, &pending_events).backend_context(
+                "wayland-udev",
+                ErrorBoundary::Device,
+                "scan DRM/KMS outputs",
+            )?;
         } else {
             log::debug!("[udev] session inactive at startup; delaying output scan");
         }

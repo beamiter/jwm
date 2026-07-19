@@ -554,107 +554,113 @@ impl Jwm {
 
     /// 完成交互式截图选择：捕获选中的区域
     ///
-    /// 如果 `to_clipboard` 为 true，图片会复制到系统剪贴板而不是保存到文件
+    /// 如果 `to_clipboard` 为 true，图片会复制到系统剪贴板而不是保存到文件。
+    /// "做什么"由 `capture_plan` 中的纯策略决定，这里负责状态清理并把
+    /// 计划执行到平台能力上。
     pub(crate) fn finish_screenshot_select(
         &mut self,
         backend: &mut dyn Backend,
         to_clipboard: bool,
     ) {
+        use crate::jwm::features::capture_plan::{
+            CaptureCompletion, CaptureExecution, clipboard_staging_path, execute_capture_plan,
+            plan_capture_completion,
+        };
+
         self.features.screenshot.commit_annotation();
-        let path_str = match self.features.screenshot.output_path.take() {
-            Some(p) => p,
-            None => {
+        let annotations = self.features.screenshot.annotations.clone();
+        let completion = plan_capture_completion(
+            self.features.screenshot.output_path.take(),
+            self.features.screenshot.get_selection_rect(),
+            annotations.len(),
+            to_clipboard,
+            || {
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_micros())
+                    .unwrap_or_default();
+                clipboard_staging_path(std::process::id(), stamp)
+            },
+        );
+
+        let plan = match completion {
+            CaptureCompletion::Cancel => {
                 self.cancel_screenshot_select(backend);
                 return;
             }
+            other => {
+                // Clear state before capturing
+                self.features.screenshot.cancel();
+                backend.compositor_set_annotation_mode(false);
+                if backend.has_compositor() {
+                    backend.compositor_clear_snap_preview_immediate();
+                }
+                let _ = backend.key_ops().ungrab_keyboard();
+                let _ = backend.input_ops().ungrab_pointer();
+                if let Some(root) = backend.root_window() {
+                    let _ = backend
+                        .cursor_provider()
+                        .apply(root, StdCursorKind::LeftPtr);
+                }
+
+                match other {
+                    CaptureCompletion::TooSmall { width, height } => {
+                        info!("[take_screenshot] selection too small ({width}x{height}), ignoring");
+                        return;
+                    }
+                    CaptureCompletion::Capture(plan) => plan,
+                    CaptureCompletion::Cancel => unreachable!("cancel is handled above"),
+                }
+            }
         };
 
-        let Some(rect) = self.features.screenshot.get_selection_rect() else {
-            self.cancel_screenshot_select(backend);
-            return;
-        };
-        let x = rect.x;
-        let y = rect.y;
-        let w = rect.w as u32;
-        let h = rect.h as u32;
-        let annotations = self.features.screenshot.annotations.clone();
-
-        // Clear state before capturing
-        self.features.screenshot.cancel();
-        backend.compositor_set_annotation_mode(false);
-        if backend.has_compositor() {
-            backend.compositor_clear_snap_preview_immediate();
-        }
-        let _ = backend.key_ops().ungrab_keyboard();
-        let _ = backend.input_ops().ungrab_pointer();
-        if let Some(root) = backend.root_window() {
-            let _ = backend
-                .cursor_provider()
-                .apply(root, StdCursorKind::LeftPtr);
-        }
-
-        if w < 3 || h < 3 {
-            info!(
-                "[take_screenshot] selection too small ({}x{}), ignoring",
-                w, h
-            );
-            return;
-        }
-
-        // When copying to clipboard, use a temp file as an intermediate
-        let save_path = if to_clipboard {
-            let stamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_micros())
-                .unwrap_or_default();
-            format!(
-                "/tmp/.jwm-screenshot-clipboard-{}-{}.png",
-                std::process::id(),
-                stamp
-            )
-        } else {
-            path_str
-        };
-
-        let path = std::path::PathBuf::from(&save_path);
-        let captured = match backend.take_screenshot_region_to_file(&path, x, y, w, h) {
-            Ok(true) => {
+        let (x, y, width, height) = plan.region;
+        let captured = match execute_capture_plan(backend, &plan) {
+            CaptureExecution::CapturedRegion => {
                 info!(
-                    "[take_screenshot] region screenshot → {} ({}x{} at {},{})",
-                    path.display(),
-                    w,
-                    h,
-                    x,
-                    y
+                    "[take_screenshot] region screenshot → {} ({width}x{height} at {x},{y})",
+                    plan.save_path
                 );
                 true
             }
-            Ok(false) => {
+            CaptureExecution::CapturedFullFallback => {
                 info!(
                     "[take_screenshot] backend doesn't support region screenshots, falling back to full"
                 );
-                backend.take_screenshot_to_file(&path).unwrap_or(false)
+                true
             }
-            Err(e) => {
+            CaptureExecution::Unavailable => {
+                info!(
+                    "[take_screenshot] backend doesn't support region screenshots, falling back to full"
+                );
+                false
+            }
+            CaptureExecution::Failed(e) => {
                 error!("[take_screenshot] region screenshot failed: {e}");
                 false
             }
         };
 
-        if to_clipboard && captured {
-            if annotations.is_empty() {
-                Self::copy_image_to_clipboard(backend, &save_path);
-            } else {
+        if plan.to_clipboard && captured {
+            if plan.bake_annotations {
                 Self::bake_annotations_then_maybe_copy(
                     backend,
-                    save_path,
+                    plan.save_path,
                     (x, y),
                     annotations,
                     true,
                 );
+            } else {
+                Self::copy_image_to_clipboard(backend, &plan.save_path);
             }
-        } else if captured && !annotations.is_empty() {
-            Self::bake_annotations_then_maybe_copy(backend, save_path, (x, y), annotations, false);
+        } else if captured && plan.bake_annotations {
+            Self::bake_annotations_then_maybe_copy(
+                backend,
+                plan.save_path,
+                (x, y),
+                annotations,
+                false,
+            );
         }
     }
 

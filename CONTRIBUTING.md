@@ -21,6 +21,12 @@ libseat, EGL/GL, ALSA, D-Bus, font, and rendering development packages. The
 repository toolchain file installs the expected Rust channel, Rustfmt, and
 Clippy components when Rustup is used.
 
+The minimum supported Rust version is declared as `rust-version` in
+`Cargo.toml` (currently 1.89) and is enforced with the committed `Cargo.lock`
+by a dedicated CI job. Raising it is a reviewable change: update `Cargo.toml`,
+the CI `msrv` job, and this note together, and state the dependency that
+forced the increase.
+
 ```bash
 cargo build --locked
 cargo fmt --all -- --check

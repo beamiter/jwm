@@ -21,7 +21,7 @@ use crate::backend::common_define::{
     ArgbColor, ColorScheme, CursorHandle, EventMaskBits, KeySym, Mods, OutputId, Pixel, SchemeType,
     StdCursorKind, WindowId,
 };
-use crate::backend::error::BackendError;
+use crate::backend::error::{BackendContextExt, BackendError};
 use crate::backend::x11::wm::{
     AllowedActionAtoms, ClientMessageAtoms, ClientMessageKind, DEFAULT_OUTPUT_REFRESH_MHZ,
     EwmhFeatureAtoms, NetWmStateAtoms, PropertyKindAtoms, SUPPORTED_EWMH_FEATURES, WindowTypeAtoms,
@@ -1009,9 +1009,14 @@ impl XcbBackend {
                         Some(c)
                     }
                     Err(e) => {
-                        log::warn!(
-                            "XCB backend: compositor init failed, falling back to non-composited mode: {e}"
+                        let error = BackendError::Message(e).with_context(
+                            crate::backend::error::BackendErrorContext::new(
+                                "xcb",
+                                crate::backend::error::ErrorBoundary::Renderer,
+                                "initialize GPU compositor",
+                            ),
                         );
+                        log::warn!("XCB backend: falling back to non-composited mode: {error}");
                         None
                     }
                 },
@@ -2396,7 +2401,12 @@ impl Backend for XcbBackend {
             screen.height as u32,
             self.get_primary_monitor_refresh_rate(),
         )
-        .map_err(|e| BackendError::Message(format!("compositor init failed: {e}")))?;
+        .map_err(BackendError::Message)
+        .backend_context(
+            "xcb",
+            crate::backend::error::ErrorBoundary::Renderer,
+            "initialize GPU compositor",
+        )?;
         compositor.set_present_manager(load_xcb_present_manager(self.conn.clone()));
         if let Some(signal) = self.compositor_loop_signal.clone() {
             compositor.set_waterlily_loop_signal(signal);

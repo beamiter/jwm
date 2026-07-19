@@ -25,17 +25,40 @@ not authorize a rewrite or a release-profile change without measurements.
 - [x] Commit and enforce `Cargo.lock` for reproducible application builds.
 - [x] Pin git dependencies to reviewed revisions or release tags.
 - [ ] Select and add the project license before publishing releases or crates.
-- [ ] Establish a documented minimum supported Rust version after testing it.
+- [x] Establish a documented minimum supported Rust version after testing it.
+      Rust 1.89 is the floor imposed by the locked dependency graph, verified
+      by `cargo +1.89.0 check --all-targets` and the full test suite, declared
+      as `rust-version` in `Cargo.toml`, and enforced by the CI `msrv` job.
 
 ## Phase 1 — reliability and supportability
 
-- Add backend-tagged structured error contexts at display, device, renderer, and
-  IPC boundaries.
-- Add a deterministic nested-backend smoke matrix covering startup, IPC health,
-  config reload, basic window lifecycle, screenshot capture, and clean shutdown.
-- Add bounded log rotation or journald guidance for the optional supervisor.
-- Record support-bundle fixtures and schema compatibility tests.
-- Add crash-safe state migrations before changing the session schema.
+- [ ] Add backend-tagged structured error contexts at display, device, renderer,
+      and IPC boundaries. Started: `BackendError` carries an optional
+      `[backend/boundary] operation` context with the original error preserved
+      through `source()`. Tagged so far: backend construction and
+      window-manager selection (display), control-socket binding (ipc),
+      libseat/udev/libinput/KMS-output startup in the udev backend (device),
+      and GPU-compositor initialization in both X11 transports (renderer).
+      Remaining: per-operation adoption inside frame production, capture, and
+      hotplug paths.
+- [ ] Add a deterministic nested-backend smoke matrix covering startup, IPC
+      health, config reload, basic window lifecycle, screenshot capture, and
+      clean shutdown.
+- [x] Add bounded log rotation or journald guidance for the optional supervisor.
+      The daemon log is rotated at a 1 MiB bound into a single previous
+      generation (at most two files), and tools/README.md documents the
+      journald alternative via a systemd user unit.
+- [x] Record support-bundle fixtures and schema compatibility tests. The
+      version-1 contract is frozen by `tests/support_bundle_schema.rs`: a
+      generated offline bundle and the recorded fixture in
+      `tests/fixtures/support_bundle_v1.json` must both satisfy the same
+      checker, and sentinel values verify the documented privacy guarantees.
+- [x] Add crash-safe state migrations before changing the session schema.
+      `migrate_session_json` version-probes a snapshot, migrates version 1
+      through a tolerant representation with normalization instead of
+      rejection, refuses unknown versions without partial state, and never
+      rewrites the on-disk file during load; recorded v1/v2 fixtures in
+      `tests/fixtures/` freeze both generations for the future v3 migration.
 
 Exit criteria: a failed startup or smoke test produces one actionable report
 without requiring an unbounded debug log or a reproduction on direct DRM/KMS.
@@ -55,14 +78,35 @@ Move feature-owned state from `Jwm` into explicit services, beginning with
 screenshot/recording, overview/expose, magnifier, and session persistence. Keep
 transport-specific IDs behind adapters and pass typed events across boundaries.
 
+Started: interactive screenshot completion is the first extracted policy
+service (`jwm::features::capture_plan`). The completion decision is a pure
+function, capture execution depends only on the `CompositorMedia` capability,
+and its tests exercise the exit criteria below with a small fake instead of a
+full-backend mock. Screen-recording policy followed in
+`jwm::features::recording_plan`: region normalization (encoder-aligned even
+dimensions), output-path validation, the output-directory fallback chain, and
+segment finalization planning are pure and tested; `toggles.rs` and the IPC
+handler only execute the returned plans. Overview navigation followed in
+`jwm::features::overview_plan`: the prism sliding-window rule — previously
+implemented three times with one drifting copy — has a single tested
+implementation, and cycling returns a plan (rotate versus refresh-subset)
+that the orchestration executes. Expose and the magnifier remain.
+
 Exit criteria: a core policy test can use small fake capabilities instead of a
-mock implementing the complete backend surface.
+mock implementing the complete backend surface. (First met by
+`capture_plan::tests::execution_prefers_region_capture` and neighbors.)
 
 ## Phase 3 — backend consolidation
 
 - Extract protocol-free X11 behavior shared by X11RB and XCB.
 - Move platform-neutral dirty-region, frame-timing, animation, color, and effect
-  algorithms into compositor-common modules.
+  algorithms into compositor-common modules. Started: the event coalescer,
+  workspace-transition timing, and wobbly-window simulation — std-only
+  algorithms previously homed in the X11 tree and imported from policy and
+  Wayland code — now live in `backend::compositor_common`, with the X11
+  namespace keeping compatibility re-exports for its own tree. Architecture
+  boundary tests now reject new policy or Wayland imports of
+  `x11::compositor_common`.
 - Keep GLX and EGL/GLES resource ownership in explicit platform adapters.
 - Add differential tests that feed identical policy events to both X11
   transports and compare observable state.

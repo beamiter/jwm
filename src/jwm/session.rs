@@ -48,6 +48,98 @@ pub struct SessionSnapshot {
     pub clients: Vec<SessionEntry>,
 }
 
+/// 版本探测：只读取 `version` 字段，用来选择迁移入口。
+#[derive(Deserialize)]
+struct SessionVersionProbe {
+    version: u32,
+}
+
+/// 版本 1 条目的宽容表示。
+///
+/// 除匹配所需的 class/instance 外全部可缺省：历史 v1 构建可能缺少后来
+/// 加入的字段，而迁移的职责是尽量保留可用状态，而不是拒绝整个快照。
+#[derive(Deserialize)]
+struct SessionEntryV1 {
+    class: String,
+    instance: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    tags: u32,
+    #[serde(default)]
+    is_floating: bool,
+    #[serde(default)]
+    monitor_num: u32,
+    #[serde(default)]
+    floating: Option<(i32, i32, i32, i32)>,
+}
+
+#[derive(Deserialize)]
+struct SessionSnapshotV1 {
+    #[allow(dead_code)]
+    version: u32,
+    #[serde(default)]
+    clients: Vec<SessionEntryV1>,
+}
+
+/// 把任一受支持版本的会话 JSON 迁移为当前版本的快照。
+///
+/// 崩溃安全约定：迁移是纯内存操作，绝不改写磁盘上的旧快照；升级后的
+/// 状态只有在下一次 `save_session` 原子写成功时才落盘。不认识的版本
+/// 返回错误而不产生部分状态，磁盘文件保持原样以便回滚到旧版本 JWM。
+///
+/// # Errors
+///
+/// JSON 无法解析、版本不受支持、或迁移结果未通过快照校验时返回错误。
+pub fn migrate_session_json(json: &str) -> Result<SessionSnapshot, String> {
+    let probe: SessionVersionProbe = serde_json::from_str(json)
+        .map_err(|error| format!("session snapshot has no readable version: {error}"))?;
+    let snapshot = match probe.version {
+        1 => {
+            let v1: SessionSnapshotV1 = serde_json::from_str(json)
+                .map_err(|error| format!("cannot parse version 1 session snapshot: {error}"))?;
+            migrate_snapshot_v1(v1)
+        }
+        SESSION_VERSION => SessionSnapshot::from_json(json)
+            .map_err(|error| format!("cannot parse session snapshot: {error}"))?,
+        other => {
+            return Err(format!(
+                "unsupported session version {other}; supported versions are \
+                 {MIN_SUPPORTED_SESSION_VERSION}..={SESSION_VERSION}"
+            ));
+        }
+    };
+    snapshot.validate()?;
+    Ok(snapshot)
+}
+
+/// v1 -> v2：磁盘字段相同，但 v1 从未校验浮动几何。归一化不合法的
+/// 浮动状态（非浮动窗口或非正尺寸），而不是拒绝整个快照。
+fn migrate_snapshot_v1(v1: SessionSnapshotV1) -> SessionSnapshot {
+    let clients = v1
+        .clients
+        .into_iter()
+        .map(|entry| {
+            let floating = entry
+                .floating
+                .filter(|&(_, _, width, height)| entry.is_floating && width > 0 && height > 0);
+            SessionEntry {
+                class: entry.class,
+                instance: entry.instance,
+                name: entry.name,
+                tags: entry.tags,
+                is_floating: entry.is_floating,
+                monitor_num: entry.monitor_num,
+                floating,
+            }
+        })
+        .collect();
+    SessionSnapshot {
+        version: SESSION_VERSION,
+        clients,
+    }
+}
+
 /// 恢复时套用到某个客户端的计划（纯数据，便于单元测试）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct RestorePlan {
@@ -269,9 +361,7 @@ fn load_session_snapshot(path: &Path) -> Result<SessionSnapshot, Box<dyn std::er
         return Err(format!("session file exceeds the 4 MiB limit: {}", path.display()).into());
     }
     let json = fs::read_to_string(path)?;
-    let snapshot = SessionSnapshot::from_json(&json)?;
-    snapshot
-        .validate()
+    let snapshot = migrate_session_json(&json)
         .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
     Ok(snapshot)
 }
@@ -758,6 +848,70 @@ mod tests {
         let plans = plan_restore(&snap, vec![(k[0], "Term", "kitty")]);
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].1.tags, 0b1000, "should pick exact-instance entry");
+    }
+
+    const SESSION_V1_FIXTURE: &str = include_str!("../../tests/fixtures/session_v1.json");
+    const SESSION_V2_FIXTURE: &str = include_str!("../../tests/fixtures/session_v2.json");
+
+    #[test]
+    fn recorded_v1_snapshot_migrates_tolerantly_and_normalizes_floating_state() {
+        let snapshot = migrate_session_json(SESSION_V1_FIXTURE).unwrap();
+
+        assert_eq!(snapshot.version, SESSION_VERSION);
+        assert_eq!(snapshot.clients.len(), 3);
+
+        // 完整的 v1 条目原样保留。
+        assert_eq!(snapshot.clients[0].floating, Some((40, 60, 1024, 768)));
+        assert_eq!(snapshot.clients[0].monitor_num, 1);
+
+        // 缺失的 name / monitor_num 使用缺省值；非浮动条目上的浮动几何
+        // （v1 从未拒绝过这种文件）被归一化掉，而不是让恢复整体失败。
+        assert_eq!(snapshot.clients[1].name, "");
+        assert_eq!(snapshot.clients[1].monitor_num, 0);
+        assert_eq!(snapshot.clients[1].floating, None);
+
+        // 浮动但尺寸非法的条目保留浮动标志、丢弃几何。
+        assert!(snapshot.clients[2].is_floating);
+        assert_eq!(snapshot.clients[2].floating, None);
+    }
+
+    #[test]
+    fn recorded_v2_snapshot_loads_unchanged() {
+        let snapshot = migrate_session_json(SESSION_V2_FIXTURE).unwrap();
+        assert_eq!(snapshot.version, SESSION_VERSION);
+        assert_eq!(snapshot.clients.len(), 2);
+        assert_eq!(snapshot.clients[0].floating, Some((40, 60, 1024, 768)));
+        assert_eq!(snapshot.clients[1].floating, None);
+    }
+
+    #[test]
+    fn migration_refuses_future_versions_and_unreadable_documents() {
+        let error = migrate_session_json(r#"{"version":3,"clients":[]}"#).unwrap_err();
+        assert!(error.contains("unsupported session version 3"));
+
+        let error = migrate_session_json("not JSON").unwrap_err();
+        assert!(error.contains("no readable version"));
+
+        // v2 保持严格：当前版本缺字段说明写入方出了问题，不做静默补全。
+        let error =
+            migrate_session_json(r#"{"version":2,"clients":[{"class":"A","instance":"a"}]}"#)
+                .unwrap_err();
+        assert!(error.contains("cannot parse session snapshot"));
+    }
+
+    #[test]
+    fn loading_an_old_snapshot_never_rewrites_the_on_disk_file() {
+        let root = TestDir::new("migrate");
+        let path = root.0.join("state").join("session.json");
+        let v1_bytes = SESSION_V1_FIXTURE.as_bytes();
+        atomic_write_session(&path, v1_bytes).unwrap();
+
+        let snapshot = load_session_snapshot(&path).unwrap();
+        assert_eq!(snapshot.version, SESSION_VERSION);
+
+        // 迁移必须是纯内存升级：旧文件逐字节保持原样，直到下一次
+        // save_session 原子写成功，崩溃或降级安装随时可以回滚。
+        assert_eq!(fs::read(&path).unwrap(), v1_bytes);
     }
 
     #[test]

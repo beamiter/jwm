@@ -310,7 +310,14 @@ impl X11rbBackend {
                     Some(c)
                 }
                 Err(e) => {
-                    log::warn!("Compositor init failed, falling back to non-composited mode: {e}");
+                    let error = BackendError::Message(e).with_context(
+                        crate::backend::error::BackendErrorContext::new(
+                            "x11rb",
+                            crate::backend::error::ErrorBoundary::Renderer,
+                            "initialize GPU compositor",
+                        ),
+                    );
+                    log::warn!("falling back to non-composited mode: {error}");
                     None
                 }
             }

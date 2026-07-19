@@ -179,7 +179,7 @@ pub struct Jwm {
     pub features: FeatureStates,
 
     /// Event coalescer for reducing high-frequency updates
-    pub event_coalescer: crate::backend::x11::compositor_common::event_coalescer::EventCoalescer,
+    pub event_coalescer: crate::backend::compositor_common::event_coalescer::EventCoalescer,
 
     /// _NET_WM_PING: pending pings awaiting pong response
     pub pending_pings: HashMap<WindowId, std::time::Instant>,
@@ -515,9 +515,25 @@ impl Jwm {
         info!("[new] JWM initialization completed successfully");
         let outputs = backend.output_ops().enumerate_outputs();
         let config_revision = crate::config::Config::get_config_modified_time().ok();
+        let runtime_backend: String = runtime_backend.into();
+        // IPC 失败不阻止启动，但日志必须带上后端 / 边界标记以便支持诊断。
+        let ipc_server = match IpcServer::new() {
+            Ok(s) => Some(s),
+            Err(e) => {
+                let error = crate::backend::error::BackendError::from(e).with_context(
+                    crate::backend::error::BackendErrorContext::new(
+                        runtime_backend.clone(),
+                        crate::backend::error::ErrorBoundary::Ipc,
+                        "bind control socket",
+                    ),
+                );
+                warn!("failed to start IPC server: {error}");
+                None
+            }
+        };
         let mut jwm = Jwm {
             state: WMState::new(),
-            runtime_backend: runtime_backend.into(),
+            runtime_backend,
             started_at: std::time::Instant::now(),
 
             s_w,
@@ -549,13 +565,7 @@ impl Jwm {
             external_struts: HashMap::new(),
             last_mouse_root: (0.0, 0.0),
 
-            ipc_server: match IpcServer::new() {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    warn!("[ipc] failed to start IPC server: {e}");
-                    None
-                }
-            },
+            ipc_server,
             config_reload_tracker: lifecycle::ConfigReloadTracker::new(config_revision),
             config_last_modified: config_revision,
             config_reload_debounce: None,
@@ -569,7 +579,7 @@ impl Jwm {
             last_night_light_update: None,
             features: FeatureStates::new(),
             event_coalescer:
-                crate::backend::x11::compositor_common::event_coalescer::EventCoalescer::new(),
+                crate::backend::compositor_common::event_coalescer::EventCoalescer::new(),
             pending_pings: HashMap::new(),
             unresponsive_windows: HashSet::new(),
             last_ping_time: None,

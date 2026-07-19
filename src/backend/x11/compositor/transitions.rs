@@ -2,8 +2,7 @@ use super::Compositor;
 use super::CompositorConnection;
 use super::compute_wallpaper_rect;
 use super::math::{
-    mat4_mul, perspective_matrix, rotate_x_matrix, rotate_y_matrix, scale_matrix,
-    translate_matrix,
+    mat4_mul, perspective_matrix, rotate_x_matrix, rotate_y_matrix, scale_matrix, translate_matrix,
 };
 use crate::backend::x11::compositor_common::transitions::normalized_transition_progress;
 use glow::HasContext;
@@ -70,12 +69,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 mon_w as f32,
                 workspace_h as f32,
             ],
-            uv_rect: [
-                0.0,
-                0.0,
-                1.0,
-                workspace_h as f32 / mon_h as f32,
-            ],
+            uv_rect: [0.0, 0.0, 1.0, workspace_h as f32 / mon_h as f32],
         })
     }
 
@@ -98,7 +92,8 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.use_program(Some(self.cube_program));
             self.gl
                 .uniform_1_f32(self.cube_uniforms.aspect.as_ref(), workspace.aspect);
-            self.gl.uniform_1_i32(self.cube_uniforms.texture.as_ref(), 0);
+            self.gl
+                .uniform_1_i32(self.cube_uniforms.texture.as_ref(), 0);
             self.gl.uniform_4_f32(
                 self.cube_uniforms.uv_rect.as_ref(),
                 workspace.uv_rect[0],
@@ -111,12 +106,7 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
-    fn draw_3d_transition_face(
-        &self,
-        texture: glow::Texture,
-        mvp: &[f32; 16],
-        brightness: f32,
-    ) {
+    fn draw_3d_transition_face(&self, texture: glow::Texture, mvp: &[f32; 16], brightness: f32) {
         unsafe {
             self.gl
                 .uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, mvp);
@@ -254,7 +244,8 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.bind_vertex_array(Some(self.quad_vao));
             self.gl
                 .uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
-            self.gl.uniform_1_f32(self.win_uniforms.radius.as_ref(), 0.0);
+            self.gl
+                .uniform_1_f32(self.win_uniforms.radius.as_ref(), 0.0);
             self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
             self.gl
                 .uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
@@ -362,10 +353,10 @@ impl<C: CompositorConnection> Compositor<C> {
             let delay = wave_index as f32 / (STRIP_COUNT - 1) as f32 * STAGGER;
             let local = ((t - delay) / (1.0 - STAGGER)).clamp(0.0, 1.0);
 
-            let left_px = (u64::from(strip) * u64::from(workspace.mon_w)
-                / u64::from(STRIP_COUNT)) as u32;
-            let right_px = (u64::from(strip + 1) * u64::from(workspace.mon_w)
-                / u64::from(STRIP_COUNT)) as u32;
+            let left_px =
+                (u64::from(strip) * u64::from(workspace.mon_w) / u64::from(STRIP_COUNT)) as u32;
+            let right_px =
+                (u64::from(strip + 1) * u64::from(workspace.mon_w) / u64::from(STRIP_COUNT)) as u32;
             let source_w = right_px.saturating_sub(left_px);
             if source_w == 0 {
                 continue;
@@ -404,11 +395,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
     /// Move the old workspace into a tilted side-card position, exposing the
     /// new workspace with a CoverFlow-like depth cue.
-    pub(crate) fn render_coverflow_transition(
-        &mut self,
-        progress: f32,
-        _ortho_proj: &[f32; 16],
-    ) {
+    pub(crate) fn render_coverflow_transition(&mut self, progress: f32, _ortho_proj: &[f32; 16]) {
         let Some(texture) = self.old_transition_texture() else {
             return;
         };
@@ -423,19 +410,12 @@ impl<C: CompositorConnection> Compositor<C> {
         let x = -direction * t * workspace.aspect * 0.92;
         let y = -0.06 * (t * std::f32::consts::PI).sin();
         let z = -0.48 * t;
-        let perspective = perspective_matrix(
-            std::f32::consts::FRAC_PI_2,
-            workspace.aspect,
-            0.1,
-            8.0,
-        );
+        let perspective =
+            perspective_matrix(std::f32::consts::FRAC_PI_2, workspace.aspect, 0.1, 8.0);
         let view = translate_matrix(0.0, 0.0, -1.0);
         let model = mat4_mul(
             &translate_matrix(x, y, z),
-            &mat4_mul(
-                &rotate_y_matrix(angle),
-                &scale_matrix(scale, scale, 1.0),
-            ),
+            &mat4_mul(&rotate_y_matrix(angle), &scale_matrix(scale, scale, 1.0)),
         );
         let mvp = mat4_mul(&perspective, &mat4_mul(&view, &model));
         let brightness = (1.0 - 0.58 * t).max(0.28);
@@ -463,12 +443,8 @@ impl<C: CompositorConnection> Compositor<C> {
         let y = -0.34 * t + 0.08 * (t * std::f32::consts::PI * 2.0).sin();
         let z = -radius * (1.0 - theta.cos().abs()) - 0.22 * t;
         let scale = (1.0 - 0.44 * t).max(0.5);
-        let perspective = perspective_matrix(
-            std::f32::consts::FRAC_PI_2,
-            workspace.aspect,
-            0.1,
-            10.0,
-        );
+        let perspective =
+            perspective_matrix(std::f32::consts::FRAC_PI_2, workspace.aspect, 0.1, 10.0);
         let view = translate_matrix(0.0, 0.0, -1.0);
         let model = mat4_mul(
             &translate_matrix(x, y, z),
@@ -527,7 +503,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 workspace.draw_rect[2],
                 workspace.draw_rect[3],
             );
-            self.gl.uniform_1_i32(self.portal_uniforms.texture.as_ref(), 0);
+            self.gl
+                .uniform_1_i32(self.portal_uniforms.texture.as_ref(), 0);
             self.gl
                 .uniform_1_f32(self.portal_uniforms.progress.as_ref(), t);
             self.gl

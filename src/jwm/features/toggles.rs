@@ -304,7 +304,7 @@ impl Jwm {
                     self.focus(backend, Some(client_key))?;
                 }
             }
-            self.features.overview.active = false;
+            self.features.overview.deactivate();
             backend.compositor_set_overview_mode(false, &[]);
             let _ = backend.key_ops().ungrab_keyboard();
         } else {
@@ -359,10 +359,7 @@ impl Jwm {
             // Build simple client list; the compositor handles all 3D positioning.
             let layout = self.build_overview_layout(&visible);
 
-            self.features.overview.active = true;
-            self.features.overview.index = 0;
-            self.features.overview.slide_offset = 0;
-            self.features.overview.clients = visible;
+            self.features.overview.activate(visible);
             backend.compositor_set_overview_mode(true, &layout);
             if let Some(root) = backend.root_window() {
                 let _ = backend.key_ops().grab_keyboard(root);
@@ -386,63 +383,35 @@ impl Jwm {
             _ => 1,
         };
 
-        let len = self.features.overview.clients.len();
-        if direction > 0 {
-            self.features.overview.index = (self.features.overview.index + 1) % len;
-        } else {
-            self.features.overview.index = (self.features.overview.index + len - 1) % len;
+        // 导航决策（新索引、窗口偏移、是否需要刷新棱镜子集）由纯策略给出。
+        let Some(plan) = crate::jwm::features::overview_plan::plan_cycle(
+            self.features.overview.index,
+            self.features.overview.slide_offset,
+            self.features.overview.clients.len(),
+            direction > 0,
+        ) else {
+            return Ok(());
+        };
+        self.features.overview.index = plan.index;
+        self.features.overview.slide_offset = plan.slide_offset;
+
+        if let Some((window_start, window_end, selected_in_window)) = plan.refresh_window {
+            // Window shifted: refresh prism with new 6-client subset.
+            let subset: Vec<ClientKey> =
+                self.features.overview.clients[window_start..window_end].to_vec();
+            let mut layout = self.build_overview_layout(&subset);
+            // Mark the correct entry as selected.
+            for (i, entry) in layout.iter_mut().enumerate() {
+                entry.5 = i == selected_in_window;
+            }
+            backend.compositor_set_overview_mode(true, &layout);
         }
 
-        if len <= 6 {
-            // All clients fit on the prism; just rotate to selection.
-            if let Some(&ck) = self
-                .features
-                .overview
-                .clients
-                .get(self.features.overview.index)
-            {
-                if let Some(client) = self.state.clients.get(ck) {
-                    backend.compositor_set_overview_selection(client.win);
-                }
-            }
-        } else {
-            // Sliding window: keep selected index near center of 6-window view.
-            let half = 3usize;
-            let new_start = if self.features.overview.index < half {
-                0
-            } else if self.features.overview.index + half >= len {
-                len.saturating_sub(6)
-            } else {
-                self.features.overview.index - half
-            };
-            let window_end = (new_start + 6).min(len);
-
-            if new_start != self.features.overview.slide_offset {
-                // Window shifted: refresh prism with new 6-client subset.
-                self.features.overview.slide_offset = new_start;
-                let subset: Vec<ClientKey> =
-                    self.features.overview.clients[new_start..window_end].to_vec();
-                let mut layout = self.build_overview_layout(&subset);
-                // Mark the correct entry as selected.
-                let sel_in_window = self.features.overview.index - new_start;
-                for (i, entry) in layout.iter_mut().enumerate() {
-                    entry.5 = i == sel_in_window;
-                }
-                backend.compositor_set_overview_mode(true, &layout);
-            }
-            // Set selection (rotation) to the face within the current window.
-            let sel_in_window = self.features.overview.index - new_start;
-            if let Some(&ck) = self
-                .features
-                .overview
-                .clients
-                .get(self.features.overview.index)
-            {
-                if let Some(client) = self.state.clients.get(ck) {
-                    backend.compositor_set_overview_selection(client.win);
-                }
-            }
-            let _ = sel_in_window; // used implicitly via set_overview_selection face_index
+        // Set selection (rotation) to the newly selected client.
+        if let Some(&ck) = self.features.overview.clients.get(plan.index)
+            && let Some(client) = self.state.clients.get(ck)
+        {
+            backend.compositor_set_overview_selection(client.win);
         }
         Ok(())
     }
@@ -560,29 +529,20 @@ impl Jwm {
     }
 
     fn prepare_recording_output_path(&self) -> Result<String, Box<dyn std::error::Error>> {
+        use crate::jwm::features::recording_plan::{output_file_name, resolve_output_directory};
+
         let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%6f");
-        let cfg_dir = CONFIG.load().behavior().recording_output_dir.clone();
-        let output_dir = if !cfg_dir.is_empty() {
-            std::path::PathBuf::from(cfg_dir)
-        } else {
+        let output_dir = resolve_output_directory(
+            &CONFIG.load().behavior().recording_output_dir,
             std::env::var("XDG_VIDEOS_DIR")
                 .ok()
                 .filter(|path| !path.is_empty())
-                .map(std::path::PathBuf::from)
-                .or_else(dirs::video_dir)
-                .or_else(|| {
-                    std::env::var_os("HOME")
-                        .filter(|home| !home.is_empty())
-                        .map(std::path::PathBuf::from)
-                        .map(|home| home.join("Videos"))
-                })
-                .ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        "cannot resolve the Videos directory; set behavior.recording_output_dir",
-                    )
-                })?
-        };
+                .map(std::path::PathBuf::from),
+            dirs::video_dir(),
+            std::env::var_os("HOME")
+                .filter(|home| !home.is_empty())
+                .map(std::path::PathBuf::from),
+        )?;
         std::fs::create_dir_all(&output_dir).map_err(|error| {
             std::io::Error::new(
                 error.kind(),
@@ -593,7 +553,7 @@ impl Jwm {
             )
         })?;
         Ok(output_dir
-            .join(format!("recording-{timestamp}.mp4"))
+            .join(output_file_name(&timestamp.to_string()))
             .to_string_lossy()
             .to_string())
     }
@@ -837,12 +797,7 @@ impl Jwm {
             return Err("screen recording requires an active compositor".into());
         }
         let output = std::path::Path::new(output_path);
-        if !output.is_absolute() {
-            return Err("recording output path must be absolute".into());
-        }
-        if output.extension().and_then(|v| v.to_str()) != Some("mp4") {
-            return Err("recording output path must end in .mp4".into());
-        }
+        crate::jwm::features::recording_plan::validate_output_path(output)?;
         if let Some(parent) = output.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -880,19 +835,8 @@ impl Jwm {
         &self,
         region: Rect,
     ) -> Result<Rect, Box<dyn std::error::Error>> {
-        if self.s_w < 16 || self.s_h < 16 {
-            return Err("screen is too small for region recording".into());
-        }
-        let x = region.x.clamp(0, self.s_w - 16);
-        let y = region.y.clamp(0, self.s_h - 16);
-        let max_width = self.s_w - x;
-        let max_height = self.s_h - y;
-        let width = region.w.clamp(16, max_width) & !1;
-        let height = region.h.clamp(16, max_height) & !1;
-        if width < 16 || height < 16 {
-            return Err("recording region must be at least 16x16".into());
-        }
-        Ok(Rect::new(x, y, width, height))
+        crate::jwm::features::recording_plan::normalize_initial_region(region, self.s_w, self.s_h)
+            .map_err(Into::into)
     }
 
     /// Stop the active recording. This operation is intentionally idempotent.
@@ -927,71 +871,76 @@ impl Jwm {
     }
 
     /// Validate direct output, or concatenate legacy multi-segment recordings.
+    ///
+    /// "做什么"由 `recording_plan::plan_finalization` 决定；这里只在后台
+    /// 线程里执行 ffprobe 轮询、文件搬移和 ffmpeg concat。
     fn finalize_recording(segments: Vec<String>, output_path: String) {
+        use crate::jwm::features::recording_plan::{FinalizationPlan, plan_finalization};
+
+        let plan = plan_finalization(&segments, &output_path);
         std::thread::spawn(move || {
-            if segments.is_empty() {
-                return;
-            }
-            if segments.len() == 1 {
-                // The Wayland compositor closes ffmpeg on its next GL frame.
-                // Do not move its MP4 before ffmpeg has written the moov atom,
-                // otherwise the final path can point at an unplayable file.
-                let segment = &segments[0];
-                let ready = (0..100).any(|_| {
-                    let status = std::process::Command::new("ffprobe")
-                        .args([
-                            "-v",
-                            "error",
-                            "-show_entries",
-                            "format=duration",
-                            "-of",
-                            "default=nw=1",
-                            segment,
-                        ])
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status()
-                        .is_ok_and(|status| status.success());
-                    if !status {
-                        std::thread::sleep(std::time::Duration::from_millis(50));
+            match plan {
+                FinalizationPlan::Nothing => return,
+                FinalizationPlan::ValidateSingle { segment, move_to } => {
+                    // The Wayland compositor closes ffmpeg on its next GL frame.
+                    // Do not move its MP4 before ffmpeg has written the moov atom,
+                    // otherwise the final path can point at an unplayable file.
+                    let ready = (0..100).any(|_| {
+                        let status = std::process::Command::new("ffprobe")
+                            .args([
+                                "-v",
+                                "error",
+                                "-show_entries",
+                                "format=duration",
+                                "-of",
+                                "default=nw=1",
+                                &segment,
+                            ])
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status()
+                            .is_ok_and(|status| status.success());
+                        if !status {
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
+                        status
+                    });
+                    if !ready {
+                        log::error!(
+                            "[recording] output was not finalized within 5s; leaving it at {segment}"
+                        );
+                        return;
                     }
-                    status
-                });
-                if !ready {
-                    log::error!(
-                        "[recording] output was not finalized within 5s; leaving it at {segment}"
-                    );
-                    return;
-                }
-                // New recordings are encoded directly at output_path. Keep the
-                // move for old callers that may still pass a separate segment.
-                if segment != &output_path && std::fs::rename(segment, &output_path).is_err() {
-                    if std::fs::copy(segment, &output_path).is_ok() {
-                        let _ = std::fs::remove_file(segment);
+                    // New recordings are encoded directly at output_path. Keep the
+                    // move for old callers that may still pass a separate segment.
+                    if let Some(target) = move_to
+                        && std::fs::rename(&segment, &target).is_err()
+                        && std::fs::copy(&segment, &target).is_ok()
+                    {
+                        let _ = std::fs::remove_file(&segment);
                     }
                 }
-            } else {
-                // Multiple segments: concat with ffmpeg -c copy
-                let list_path = std::path::Path::new(&output_path).with_extension("concat.txt");
-                let list_content: String = segments
-                    .iter()
-                    .map(|s| format!("file '{}'", s))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if std::fs::write(&list_path, &list_content).is_ok() {
-                    let _ = std::process::Command::new("ffmpeg")
-                        .args(["-f", "concat", "-safe", "0", "-i"])
-                        .arg(&list_path)
-                        .args(["-c", "copy", "-y", &output_path])
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
-                    let _ = std::fs::remove_file(&list_path);
-                }
-                for seg in &segments {
-                    let _ = std::fs::remove_file(seg);
+                FinalizationPlan::ConcatSegments {
+                    list_path,
+                    list_content,
+                    output_path: concat_output,
+                } => {
+                    // Multiple segments: concat with ffmpeg -c copy
+                    if std::fs::write(&list_path, &list_content).is_ok() {
+                        let _ = std::process::Command::new("ffmpeg")
+                            .args(["-f", "concat", "-safe", "0", "-i"])
+                            .arg(&list_path)
+                            .args(["-c", "copy", "-y", &concat_output])
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status();
+                        let _ = std::fs::remove_file(&list_path);
+                    }
+                    for seg in &segments {
+                        let _ = std::fs::remove_file(seg);
+                    }
                 }
             }
             log::info!("[recording] finalized → {output_path}");

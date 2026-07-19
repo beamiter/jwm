@@ -135,6 +135,51 @@ src/backend/api.rs          platform boundary
 - Lightweight render scheduling now lives in `RenderScheduler`: render requests,
   compositor presence, pending-render state and overlay identity are separated
   from frame production and compositor resource initialization.
+- `BackendError` supports backend-tagged structured contexts
+  (`[backend/boundary] operation`, boundary ∈ display/device/renderer/ipc)
+  while preserving the original error through the `source()` chain. The
+  application composition root tags backend construction and window-manager
+  selection at the display boundary, and IPC socket-bind failures are tagged
+  at the IPC boundary. Inside the backends, udev startup tags libseat, udev
+  enumeration, libinput seat assignment and the initial KMS output scan at the
+  device boundary, and both X11 transports tag GPU-compositor initialization
+  at the renderer boundary. New failure paths that cross the platform boundary
+  should attach a context instead of stringifying the underlying error.
+- Interactive screenshot completion is extracted into the
+  `jwm::features::capture_plan` policy service: the completion decision
+  (cancel / too-small / capture, clipboard staging, annotation baking) is a
+  pure function, and capture execution depends only on the `CompositorMedia`
+  capability so tests use a small fake instead of mocking the full backend.
+  `Jwm::finish_screenshot_select` now only tears down interaction state and
+  routes the plan's outcome to logging, clipboard, and annotation baking.
+- Screen-recording policy lives in `jwm::features::recording_plan`: initial
+  region normalization (clamping plus even encoder alignment), output-path
+  validation, the output-directory fallback chain, and the segment
+  finalization plan (validate-in-place, move for legacy callers, or ffmpeg
+  concat) are pure functions shared by the key-binding and IPC entry points.
+  The orchestration keeps only filesystem side effects, ffprobe/ffmpeg
+  execution, and compositor calls.
+- The event coalescer, workspace-transition timing, and wobbly-window
+  simulation moved from the X11 namespace into `backend::compositor_common`,
+  their platform-neutral home. `x11::compositor_common` re-exports them so
+  the X11 tree keeps its paths, while the policy layer and the Wayland
+  backends import the canonical location; `tests/architecture_boundaries.rs`
+  now enforces both directions (no `x11::compositor_common` outside the X11
+  tree, and no `backend::x11::` imports from the policy layer at all).
+- Overview navigation policy lives in `jwm::features::overview_plan`. The
+  prism sliding-window rule (`window_start`) is the single canonical
+  implementation used by `OverviewState` and by cycling, replacing three
+  divergent copies; `plan_cycle` decides whether a navigation step only
+  rotates the prism or must refresh it with a new client subset. All close
+  paths now go through `OverviewState::deactivate`, which also resets the
+  slide offset the inline Escape path used to leave stale.
+- Session snapshots load through an explicit version-probed migration
+  (`session::migrate_session_json`): version 1 parses through a tolerant
+  representation whose invalid floating state is normalized rather than
+  rejected, unknown versions fail without partial state, and loading never
+  rewrites the on-disk snapshot, so a crash mid-restore or a downgrade always
+  finds the previous file intact. Recorded v1/v2 fixtures freeze both
+  generations before any future schema change.
 
 Each step should be behavior-preserving and land independently. Avoid moving a
 module and changing its behavior in the same change unless tests cover it.

@@ -65,6 +65,21 @@ JWM_DIR=/path/to/jwm jwm-tool rebuild
 jwm-tool debug
 ```
 
+### 守护进程日志
+
+守护进程日志写入 `~/.local/share/jwm/jwm_daemon.log`，并做有界轮转：
+单代上限 1 MiB，超限后当前文件重命名为 `jwm_daemon.log.1`（替换旧的
+上一代）。因此磁盘占用始终限制在约两代以内，长时间运行不会无限增长。
+
+长期部署建议改用 journald 管理日志——由 systemd 用户服务或
+`systemd-run` 启动守护进程即可，标准输出会进入 journal，并由
+journald 统一负责持久化、限额与清理：
+
+```bash
+systemd-run --user --unit=jwm-daemon jwm-tool daemon
+journalctl --user -u jwm-daemon -f
+```
+
 ## WaterLily 着色器检查
 
 安装 `glslangValidator` 后，可独立编译检查 X11 WaterLily 后处理着色器：

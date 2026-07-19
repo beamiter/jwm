@@ -1,9 +1,8 @@
 use super::*;
 use crate::backend::compositor_common::math::{
-    mat4_mul, perspective_matrix, rotate_x_matrix, rotate_y_matrix, scale_matrix,
-    translate_matrix,
+    mat4_mul, perspective_matrix, rotate_x_matrix, rotate_y_matrix, scale_matrix, translate_matrix,
 };
-use crate::backend::x11::compositor_common::transitions::normalized_transition_progress;
+use crate::backend::compositor_common::transitions::normalized_transition_progress;
 use smithay::backend::renderer::gles::ffi;
 
 /// Geometry shared by every workspace-transition mode.
@@ -188,10 +187,7 @@ impl WaylandCompositor {
                 self.cube_uniforms.aspect,
                 layout.draw_rect[2] / layout.draw_rect[3],
             );
-            gl.Uniform1f(
-                self.cube_uniforms.brightness,
-                brightness.clamp(0.0, 1.0),
-            );
+            gl.Uniform1f(self.cube_uniforms.brightness, brightness.clamp(0.0, 1.0));
             gl.Uniform4f(
                 self.cube_uniforms.uv_rect,
                 layout.uv_rect[0],
@@ -454,10 +450,7 @@ impl WaylandCompositor {
         let view = translate_matrix(0.0, 0.0, -1.0);
         let model = mat4_mul(
             &translate_matrix(x, y, z),
-            &mat4_mul(
-                &rotate_y_matrix(angle),
-                &scale_matrix(scale, scale, 1.0),
-            ),
+            &mat4_mul(&rotate_y_matrix(angle), &scale_matrix(scale, scale, 1.0)),
         );
         let mvp = mat4_mul(&perspective, &mat4_mul(&view, &model));
         let brightness = (1.0 - 0.58 * t).max(0.28);

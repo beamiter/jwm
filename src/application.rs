@@ -6,6 +6,7 @@
 
 use crate::Jwm;
 use crate::backend::api::{Backend, CompositorBenchmark};
+use crate::backend::error::{BackendContextExt, BackendError, ErrorBoundary};
 use crate::backend::wayland_udev::backend::UdevBackend;
 use crate::backend::wayland_winit::backend::WaylandWinitBackend;
 use crate::backend::wayland_x11::backend::WaylandX11Backend;
@@ -219,13 +220,22 @@ fn create_backend(choice: BackendChoice) -> Result<Box<dyn Backend>, Box<dyn std
         choice.config_name()
     );
 
-    match choice {
-        BackendChoice::X11rb => Ok(Box::new(X11rbBackend::new()?)),
-        BackendChoice::Xcb => Ok(Box::new(XcbBackend::new()?)),
-        BackendChoice::WaylandUdev => Ok(Box::new(UdevBackend::new()?)),
-        BackendChoice::WaylandX11 => Ok(Box::new(WaylandX11Backend::new()?)),
-        BackendChoice::WaylandWinit => Ok(Box::new(WaylandWinitBackend::new()?)),
-    }
+    let backend: Result<Box<dyn Backend>, BackendError> = match choice {
+        BackendChoice::X11rb => X11rbBackend::new().map(|b| Box::new(b) as Box<dyn Backend>),
+        BackendChoice::Xcb => XcbBackend::new().map(|b| Box::new(b) as Box<dyn Backend>),
+        BackendChoice::WaylandUdev => UdevBackend::new().map(|b| Box::new(b) as Box<dyn Backend>),
+        BackendChoice::WaylandX11 => {
+            WaylandX11Backend::new().map(|b| Box::new(b) as Box<dyn Backend>)
+        }
+        BackendChoice::WaylandWinit => {
+            WaylandWinitBackend::new().map(|b| Box::new(b) as Box<dyn Backend>)
+        }
+    };
+    Ok(backend.backend_context(
+        choice.as_str(),
+        ErrorBoundary::Display,
+        "initialize display backend",
+    )?)
 }
 
 #[derive(Debug)]
@@ -269,7 +279,11 @@ pub fn run_with_options(options: ApplicationOptions) -> Result<(), Box<dyn std::
         );
         let mut backend = create_backend(options.backend)?;
 
-        backend.check_existing_wm()?;
+        backend.check_existing_wm().backend_context(
+            options.backend.as_str(),
+            ErrorBoundary::Display,
+            "acquire window-manager selection",
+        )?;
 
         let mut jwm = Jwm::new_with_runtime_backend(&mut *backend, options.backend.as_str())?;
         jwm.setup(&mut *backend)?;

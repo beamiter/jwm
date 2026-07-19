@@ -5,7 +5,8 @@ use crate::core::types::Rect;
 use crate::jwm::Jwm;
 use log::{info, warn};
 
-const MIN_SCREENSHOT_SIZE: i32 = 3;
+use crate::jwm::features::capture_plan::MIN_SCREENSHOT_SIZE;
+
 const MIN_RECORDING_SIZE: i32 = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
