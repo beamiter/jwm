@@ -304,7 +304,7 @@ impl Jwm {
                     self.focus(backend, Some(client_key))?;
                 }
             }
-            self.features.overview.active = false;
+            self.features.overview.deactivate();
             backend.compositor_set_overview_mode(false, &[]);
             let _ = backend.key_ops().ungrab_keyboard();
         } else {
@@ -359,10 +359,7 @@ impl Jwm {
             // Build simple client list; the compositor handles all 3D positioning.
             let layout = self.build_overview_layout(&visible);
 
-            self.features.overview.active = true;
-            self.features.overview.index = 0;
-            self.features.overview.slide_offset = 0;
-            self.features.overview.clients = visible;
+            self.features.overview.activate(visible);
             backend.compositor_set_overview_mode(true, &layout);
             if let Some(root) = backend.root_window() {
                 let _ = backend.key_ops().grab_keyboard(root);
@@ -386,63 +383,35 @@ impl Jwm {
             _ => 1,
         };
 
-        let len = self.features.overview.clients.len();
-        if direction > 0 {
-            self.features.overview.index = (self.features.overview.index + 1) % len;
-        } else {
-            self.features.overview.index = (self.features.overview.index + len - 1) % len;
+        // 导航决策（新索引、窗口偏移、是否需要刷新棱镜子集）由纯策略给出。
+        let Some(plan) = crate::jwm::features::overview_plan::plan_cycle(
+            self.features.overview.index,
+            self.features.overview.slide_offset,
+            self.features.overview.clients.len(),
+            direction > 0,
+        ) else {
+            return Ok(());
+        };
+        self.features.overview.index = plan.index;
+        self.features.overview.slide_offset = plan.slide_offset;
+
+        if let Some((window_start, window_end, selected_in_window)) = plan.refresh_window {
+            // Window shifted: refresh prism with new 6-client subset.
+            let subset: Vec<ClientKey> =
+                self.features.overview.clients[window_start..window_end].to_vec();
+            let mut layout = self.build_overview_layout(&subset);
+            // Mark the correct entry as selected.
+            for (i, entry) in layout.iter_mut().enumerate() {
+                entry.5 = i == selected_in_window;
+            }
+            backend.compositor_set_overview_mode(true, &layout);
         }
 
-        if len <= 6 {
-            // All clients fit on the prism; just rotate to selection.
-            if let Some(&ck) = self
-                .features
-                .overview
-                .clients
-                .get(self.features.overview.index)
-            {
-                if let Some(client) = self.state.clients.get(ck) {
-                    backend.compositor_set_overview_selection(client.win);
-                }
-            }
-        } else {
-            // Sliding window: keep selected index near center of 6-window view.
-            let half = 3usize;
-            let new_start = if self.features.overview.index < half {
-                0
-            } else if self.features.overview.index + half >= len {
-                len.saturating_sub(6)
-            } else {
-                self.features.overview.index - half
-            };
-            let window_end = (new_start + 6).min(len);
-
-            if new_start != self.features.overview.slide_offset {
-                // Window shifted: refresh prism with new 6-client subset.
-                self.features.overview.slide_offset = new_start;
-                let subset: Vec<ClientKey> =
-                    self.features.overview.clients[new_start..window_end].to_vec();
-                let mut layout = self.build_overview_layout(&subset);
-                // Mark the correct entry as selected.
-                let sel_in_window = self.features.overview.index - new_start;
-                for (i, entry) in layout.iter_mut().enumerate() {
-                    entry.5 = i == sel_in_window;
-                }
-                backend.compositor_set_overview_mode(true, &layout);
-            }
-            // Set selection (rotation) to the face within the current window.
-            let sel_in_window = self.features.overview.index - new_start;
-            if let Some(&ck) = self
-                .features
-                .overview
-                .clients
-                .get(self.features.overview.index)
-            {
-                if let Some(client) = self.state.clients.get(ck) {
-                    backend.compositor_set_overview_selection(client.win);
-                }
-            }
-            let _ = sel_in_window; // used implicitly via set_overview_selection face_index
+        // Set selection (rotation) to the newly selected client.
+        if let Some(&ck) = self.features.overview.clients.get(plan.index)
+            && let Some(client) = self.state.clients.get(ck)
+        {
+            backend.compositor_set_overview_selection(client.win);
         }
         Ok(())
     }

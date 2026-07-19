@@ -13,6 +13,7 @@ pub mod capture;
 pub mod capture_plan;
 pub mod magnifier;
 pub mod overview;
+pub mod overview_plan;
 pub mod recording;
 pub mod recording_plan;
 pub mod screenshot;
@@ -26,6 +27,7 @@ pub use capture_plan::{
 };
 pub use magnifier::MagnifierState;
 pub use overview::OverviewState;
+pub use overview_plan::CyclePlan;
 pub use recording::RecordingState;
 pub use recording_plan::FinalizationPlan;
 pub use screenshot::ScreenshotState;

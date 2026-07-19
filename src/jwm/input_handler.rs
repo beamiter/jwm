@@ -570,9 +570,7 @@ impl Jwm {
             }
             // Escape → cancel (close overview, no focus change)
             if keysym == keys::KEY_Escape {
-                self.features.overview.active = false;
-                self.features.overview.clients.clear();
-                self.features.overview.index = 0;
+                self.features.overview.deactivate();
                 backend.compositor_set_overview_mode(false, &[]);
                 let _ = backend.key_ops().ungrab_keyboard();
                 return Ok(());

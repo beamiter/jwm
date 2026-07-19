@@ -159,6 +159,13 @@ src/backend/api.rs          platform boundary
   concat) are pure functions shared by the key-binding and IPC entry points.
   The orchestration keeps only filesystem side effects, ffprobe/ffmpeg
   execution, and compositor calls.
+- Overview navigation policy lives in `jwm::features::overview_plan`. The
+  prism sliding-window rule (`window_start`) is the single canonical
+  implementation used by `OverviewState` and by cycling, replacing three
+  divergent copies; `plan_cycle` decides whether a navigation step only
+  rotates the prism or must refresh it with a new client subset. All close
+  paths now go through `OverviewState::deactivate`, which also resets the
+  slide offset the inline Escape path used to leave stale.
 - Session snapshots load through an explicit version-probed migration
   (`session::migrate_session_json`): version 1 parses through a tolerant
   representation whose invalid floating state is normalized rather than

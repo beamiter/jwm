@@ -86,7 +86,11 @@ full-backend mock. Screen-recording policy followed in
 `jwm::features::recording_plan`: region normalization (encoder-aligned even
 dimensions), output-path validation, the output-directory fallback chain, and
 segment finalization planning are pure and tested; `toggles.rs` and the IPC
-handler only execute the returned plans. Overview/expose is next.
+handler only execute the returned plans. Overview navigation followed in
+`jwm::features::overview_plan`: the prism sliding-window rule — previously
+implemented three times with one drifting copy — has a single tested
+implementation, and cycling returns a plan (rotate versus refresh-subset)
+that the orchestration executes. Expose and the magnifier remain.
 
 Exit criteria: a core policy test can use small fake capabilities instead of a
 mock implementing the complete backend surface. (First met by

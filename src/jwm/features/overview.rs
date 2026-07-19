@@ -73,43 +73,17 @@ impl OverviewState {
     /// 获取可见窗口范围（用于棱镜渲染）
     /// 最多显示 6 个窗口，当前选中的在中间
     pub fn get_visible_range(&self) -> (usize, usize) {
-        const MAX_VISIBLE: usize = 6;
+        use crate::jwm::features::overview_plan::{MAX_VISIBLE, window_start};
+
         let count = self.clients.len();
-
-        if count <= MAX_VISIBLE {
-            (0, count)
-        } else {
-            let half = MAX_VISIBLE / 2;
-            let mut start = self.index.saturating_sub(half);
-            let end = (start + MAX_VISIBLE).min(count);
-
-            // 调整边界
-            if end == count {
-                start = count.saturating_sub(MAX_VISIBLE);
-            }
-
-            (start, end)
-        }
+        let start = window_start(self.index, count);
+        (start, (start + MAX_VISIBLE).min(count))
     }
 
     /// 调整滑动偏移以保持当前选中窗口可见
     fn adjust_slide_offset(&mut self) {
-        const MAX_VISIBLE: usize = 6;
-        let count = self.clients.len();
-
-        if count <= MAX_VISIBLE {
-            self.slide_offset = 0;
-            return;
-        }
-
-        let half = MAX_VISIBLE / 2;
-
-        // 确保当前索引在可见范围内
-        if self.index < self.slide_offset + half {
-            self.slide_offset = self.index.saturating_sub(half);
-        } else if self.index >= self.slide_offset + half {
-            self.slide_offset = (self.index - half).min(count - MAX_VISIBLE);
-        }
+        self.slide_offset =
+            crate::jwm::features::overview_plan::window_start(self.index, self.clients.len());
     }
 
     /// 跳转到指定索引
