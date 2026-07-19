@@ -160,7 +160,10 @@ mod tests {
     #[test]
     fn transition_mode_from_name_defaults_to_slide() {
         assert_eq!(TransitionMode::from_name("cube"), TransitionMode::Cube);
-        assert_eq!(TransitionMode::from_name(" Portal "), TransitionMode::Portal);
+        assert_eq!(
+            TransitionMode::from_name(" Portal "),
+            TransitionMode::Portal
+        );
         assert_eq!(TransitionMode::from_name("NONE"), TransitionMode::None);
         assert_eq!(TransitionMode::from_name("unknown"), TransitionMode::Slide);
         assert_eq!(
@@ -175,7 +178,10 @@ mod tests {
             TransitionMode::from_name_or_none("none"),
             TransitionMode::None
         );
-        assert_eq!(TransitionMode::from_name_or_none("  "), TransitionMode::None);
+        assert_eq!(
+            TransitionMode::from_name_or_none("  "),
+            TransitionMode::None
+        );
     }
 
     #[test]
