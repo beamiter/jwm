@@ -135,6 +135,13 @@ src/backend/api.rs          platform boundary
 - Lightweight render scheduling now lives in `RenderScheduler`: render requests,
   compositor presence, pending-render state and overlay identity are separated
   from frame production and compositor resource initialization.
+- `BackendError` supports backend-tagged structured contexts
+  (`[backend/boundary] operation`, boundary ∈ display/device/renderer/ipc)
+  while preserving the original error through the `source()` chain. The
+  application composition root tags backend construction and window-manager
+  selection at the display boundary, and IPC socket-bind failures are tagged
+  at the IPC boundary. New failure paths that cross the platform boundary
+  should attach a context instead of stringifying the underlying error.
 
 Each step should be behavior-preserving and land independently. Avoid moving a
 module and changing its behavior in the same change unless tests cover it.
