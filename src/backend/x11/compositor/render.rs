@@ -185,6 +185,41 @@ fn wallpaper_blend_plan(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FocusHighlightStyle {
+    color: [f32; 4],
+    width: f32,
+}
+
+/// Blend the transient focus indication into the ordinary focused border.
+///
+/// Keeping both endpoints identical to the stable border avoids a transparent
+/// first/last animation frame.  The client texture itself is deliberately not
+/// transformed: scaling terminal content made text and the insertion cursor
+/// appear to flash every time focus changed.
+fn focus_highlight_style(
+    focused_color: [f32; 4],
+    highlight_color: [f32; 4],
+    focused_width: f32,
+    progress: f32,
+) -> FocusHighlightStyle {
+    let progress = progress
+        .is_finite()
+        .then_some(progress)
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0);
+    let pulse = (progress * std::f32::consts::PI).sin().max(0.0);
+    let mut color = focused_color;
+    for (channel, highlight) in color.iter_mut().zip(highlight_color) {
+        *channel += (highlight - *channel) * pulse;
+    }
+    let highlight_width = (focused_width + 2.0).max(3.0);
+    FocusHighlightStyle {
+        color,
+        width: focused_width + (highlight_width - focused_width) * pulse,
+    }
+}
+
 fn enclosing_dirty_rect(x: f32, y: f32, w: f32, h: f32) -> DirtyRect {
     let left = x.floor() as i32;
     let top = y.floor() as i32;
@@ -1630,14 +1665,17 @@ impl<C: CompositorConnection> Compositor<C> {
         // dirty, we can skip the entire GL render (unless screenshot pending or HUD active).
         // While scanning, also feed the precise dirty-rect tracker so we do not
         // walk the scene a second time later in the frame.
-        let is_gles = self.graphics.is_gles();
         let mut has_dirty = false;
         let mut needs_native_texture_sync = false;
         for &(win, _, _, _, _) in scene {
             let Some(wt) = self.windows.get(&win) else {
                 continue;
             };
-            if is_gles && ((wt.dirty && wt.binding.is_some()) || wt.needs_pixmap_refresh) {
+            // Both EGLImage and GLX texture-from-pixmap imports need native X
+            // rendering to complete before sampling. The GLX extension has no
+            // implicit X/GL synchronization; omitting this on NVIDIA can show
+            // an older client frame (most visibly terminal cursor/text damage).
+            if (wt.dirty && wt.binding.is_some()) || wt.needs_pixmap_refresh {
                 needs_native_texture_sync = true;
             }
             if wt.dirty || wt.needs_pixmap_refresh {
@@ -1860,17 +1898,8 @@ impl<C: CompositorConnection> Compositor<C> {
                         self.corner_radius
                     }
                 });
-                let focus_bounce_active = !is_statusbar && self.focus_highlight && is_focused && {
-                    self.focus_highlight_start
-                        .is_some_and(|(highlighted, start)| {
-                            highlighted == win
-                                && start.elapsed().as_millis()
-                                    < self.focus_highlight_duration_ms as u128
-                        })
-                };
                 let geometry_deformation_active = (self.wobbly_windows && wt.wobbly.is_some())
-                    || (self.window_tilt && is_focused && !is_statusbar)
-                    || focus_bounce_active;
+                    || (self.window_tilt && is_focused && !is_statusbar);
 
                 if rect_covers_output(x, y, w, h, self.screen_w, self.screen_h)
                     && is_opaque_occluder(
@@ -1919,7 +1948,7 @@ impl<C: CompositorConnection> Compositor<C> {
             );
 
         // Apply a scissor using the current scene changes plus any intervening
-        // damage missing from a recycled EGL back buffer. Unknown/undefined
+        // damage missing from a recycled GLX/EGL back buffer. Unknown/undefined
         // buffers safely fall back to a full redraw while still building useful
         // history for subsequent frames.
         let current_damage = self.dirty_region_tracker.merged();
@@ -2484,27 +2513,11 @@ impl<C: CompositorConnection> Compositor<C> {
                     } else {
                         layer_opacity
                     };
-                    // Feature 4: Apply per-window scale + Phase 3.4 focus bounce
-                    let focus_bounce =
-                        if !is_statusbar && self.focus_highlight && focused == Some(win) {
-                            if let Some((hw, start)) = self.focus_highlight_start {
-                                if hw == win
-                                    && start.elapsed().as_millis()
-                                        < self.focus_highlight_duration_ms as u128
-                                {
-                                    let t = start.elapsed().as_millis() as f32
-                                        / self.focus_highlight_duration_ms as f32;
-                                    1.0 + 0.02 * (1.0 - t) * ((t * std::f32::consts::PI).sin())
-                                } else {
-                                    1.0
-                                }
-                            } else {
-                                1.0
-                            }
-                        } else {
-                            1.0
-                        };
-                    let scale = wt.scale * wt.anim_scale * focus_bounce;
+                    // Feature 4: Apply configured/per-animation scale only.
+                    // Focus highlighting must not resample client content:
+                    // terminal text and its insertion cursor otherwise appear
+                    // to flicker on every focus transition.
+                    let scale = wt.scale * wt.anim_scale;
                     let (draw_x, draw_y, draw_w, draw_h) = if (scale - 1.0).abs() > f32::EPSILON {
                         let cw = w as f32 * scale;
                         let ch = h as f32 * scale;
@@ -2993,13 +3006,19 @@ impl<C: CompositorConnection> Compositor<C> {
                         && ((effective_border_enabled && base_border_width > 0.0)
                             || has_special_border)
                     {
-                        let color = if focus_highlight_active_for_win {
+                        let focus_style = focus_highlight_active_for_win.then(|| {
                             let elapsed_ms =
                                 self.focus_highlight_start.unwrap().1.elapsed().as_millis() as f32;
                             let dur = self.focus_highlight_duration_ms as f32;
-                            let pulse = ((elapsed_ms / dur * std::f32::consts::PI).sin()).abs();
-                            let [r, g, b, a] = self.focus_highlight_color;
-                            [r, g, b, a * pulse]
+                            focus_highlight_style(
+                                self.border_color_focused,
+                                self.focus_highlight_color,
+                                base_border_width,
+                                elapsed_ms / dur,
+                            )
+                        });
+                        let color = if let Some(style) = focus_style {
+                            style.color
                         } else if attention_active_for_win {
                             let elapsed = self.compositor_start_time.elapsed().as_secs_f32();
                             let pulse = (elapsed * 4.0).sin() * 0.5 + 0.5;
@@ -3013,8 +3032,8 @@ impl<C: CompositorConnection> Compositor<C> {
                             self.border_color_unfocused
                         };
 
-                        let bw = if focus_highlight_active_for_win {
-                            (base_border_width + 2.0).max(3.0)
+                        let bw = if let Some(style) = focus_style {
+                            style.width
                         } else if attention_active_for_win {
                             if effective_border_enabled {
                                 base_border_width.max(2.0)
@@ -4160,8 +4179,9 @@ mod tests {
     use super::{
         DirtyRect, PresentedSceneCopyPlan, PresentedSceneStatus, TransitionCapturePlan,
         blur_sampling_margin, dirty_below_affects_backdrop, dirty_below_requires_full_blur_redraw,
-        intersect_gl_scissors, is_opaque_occluder, presented_scene_copy_plan, rect_covers_output,
-        transformed_overlays_require_full_redraw, transition_capture_plan, wallpaper_blend_plan,
+        focus_highlight_style, intersect_gl_scissors, is_opaque_occluder,
+        presented_scene_copy_plan, rect_covers_output, transformed_overlays_require_full_redraw,
+        transition_capture_plan, wallpaper_blend_plan,
     };
 
     #[test]
@@ -4275,6 +4295,28 @@ mod tests {
             u32::MAX - 1,
             u32::MAX - 1,
         ));
+    }
+
+    #[test]
+    fn focus_highlight_returns_to_the_stable_border_at_both_ends() {
+        let focused = [0.1, 0.2, 0.3, 0.8];
+        let highlight = [0.4, 0.7, 1.0, 0.9];
+
+        let start = focus_highlight_style(focused, highlight, 1.0, 0.0);
+        let end = focus_highlight_style(focused, highlight, 1.0, 1.0);
+        assert_eq!(start.color, focused);
+        assert_eq!(start.width, 1.0);
+        assert_eq!(end.color, focused);
+        assert_eq!(end.width, 1.0);
+    }
+
+    #[test]
+    fn focus_highlight_smoothly_reaches_the_configured_peak() {
+        let highlight = [0.4, 0.7, 1.0, 0.9];
+        let peak = focus_highlight_style([0.1, 0.2, 0.3, 0.8], highlight, 1.0, 0.5);
+
+        assert_eq!(peak.color, highlight);
+        assert_eq!(peak.width, 3.0);
     }
 
     #[test]

@@ -593,7 +593,7 @@ pub struct BehaviorConfig {
     pub ripple_amplitude: f32,
 
     // --- Focus switch highlight ---
-    /// Enable border flash + scale bounce on focus change.
+    /// Enable a smooth border highlight on focus change.
     #[serde(default)]
     pub focus_highlight: bool,
     /// Focus highlight border color [r, g, b, a].

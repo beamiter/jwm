@@ -192,8 +192,7 @@ impl GraphicsPlatform {
     /// Zero means its contents cannot be reused and requires a full redraw.
     pub(super) fn partial_redraw_buffer_age(&self) -> u32 {
         match &self.backend {
-            // Preserve the established GLX behavior. EGL explicitly verifies it.
-            PlatformBackend::Glx(_) => 1,
+            PlatformBackend::Glx(glx) => glx.buffer_age(self.xlib_display),
             PlatformBackend::Egl(egl) => egl.buffer_age(),
         }
     }
@@ -242,14 +241,22 @@ impl GraphicsPlatform {
         }
     }
 
-    /// Synchronize the secondary Xlib connection with the protocol backend and,
-    /// on EGL, wait for native X rendering before GLES samples imported pixmaps.
+    /// Synchronize native X rendering before GLX/EGL samples imported pixmaps.
+    ///
+    /// GLX_EXT_texture_from_pixmap does not provide implicit synchronization
+    /// with X rendering. EGL additionally requires eglWaitNative after XSync.
     pub(super) fn sync_x11(&self) -> Result<(), String> {
         unsafe {
             x11::xlib::XSync(self.xlib_display, 0);
         }
-        if let PlatformBackend::Egl(egl) = &self.backend {
-            egl.wait_native()?;
+        match &self.backend {
+            PlatformBackend::Glx(_) => unsafe {
+                // Order completed X rendering before subsequent GL texture
+                // sampling. GLX_EXT_texture_from_pixmap deliberately leaves
+                // this producer/consumer synchronization to the application.
+                x11::glx::glXWaitX();
+            },
+            PlatformBackend::Egl(egl) => egl.wait_native()?,
         }
         Ok(())
     }
@@ -500,10 +507,22 @@ const GLX_TEXTURE_2D_EXT: i32 = 0x20DC;
 const GLX_TEXTURE_FORMAT_RGBA_EXT: i32 = 0x20DA;
 const GLX_TEXTURE_FORMAT_RGB_EXT: i32 = 0x20D9;
 const GLX_FRONT_LEFT_EXT: i32 = 0x20DE;
+const GLX_BACK_BUFFER_AGE_EXT: i32 = 0x20F4;
+
+fn has_glx_extension(extensions: &str, expected: &str) -> bool {
+    extensions
+        .split_ascii_whitespace()
+        .any(|extension| extension == expected)
+}
+
+fn validated_glx_buffer_age(supported: bool, queried_age: u32) -> u32 {
+    supported.then_some(queried_age).unwrap_or(0)
+}
 
 struct GlxPlatform {
     context: x11::glx::GLXContext,
     drawable: x11::glx::GLXDrawable,
+    buffer_age_supported: bool,
     tfp: TfpFunctions,
     fbconfig_rgba: x11::glx::GLXFBConfig,
     fbconfig_rgb: x11::glx::GLXFBConfig,
@@ -528,10 +547,12 @@ impl GlxPlatform {
                 CStr::from_ptr(raw).to_str().unwrap_or("")
             }
         };
-        if !ext_str.contains("GLX_EXT_texture_from_pixmap") {
+        if !has_glx_extension(ext_str, "GLX_EXT_texture_from_pixmap") {
             return Err("GLX_EXT_texture_from_pixmap not available".into());
         }
+        let buffer_age_supported = has_glx_extension(ext_str, "GLX_EXT_buffer_age");
         log::info!("compositor: GLX extensions: {ext_str}");
+        log::info!("compositor: GLX partial redraw buffer_age={buffer_age_supported}");
 
         let (ctx_fbconfig, output_is_10bit) =
             choose_glx_context_config(display, screen_num, overlay_visual_id, hdr_enabled)?;
@@ -614,6 +635,7 @@ impl GlxPlatform {
         Ok(Self {
             context,
             drawable,
+            buffer_age_supported,
             tfp,
             fbconfig_rgba,
             fbconfig_rgb,
@@ -632,6 +654,18 @@ impl GlxPlatform {
         } else {
             Ok(())
         }
+    }
+
+    fn buffer_age(&self, display: *mut x11::xlib::Display) -> u32 {
+        if !self.buffer_age_supported || display.is_null() {
+            return 0;
+        }
+
+        let mut age = 0;
+        unsafe {
+            x11::glx::glXQueryDrawable(display, self.drawable, GLX_BACK_BUFFER_AGE_EXT, &mut age);
+        }
+        validated_glx_buffer_age(self.buffer_age_supported, age)
     }
 
     fn swap_buffers(&self, display: *mut x11::xlib::Display) -> Result<(), String> {
@@ -1617,7 +1651,7 @@ fn egl_error(operation: &str) -> String {
 mod tests {
     use super::{
         GraphicsApiPreference, append_egl_damage_rect, composite_premultiplied_argb_cursor,
-        egl_damage_rect_count, has_egl_extension,
+        egl_damage_rect_count, has_egl_extension, has_glx_extension, validated_glx_buffer_age,
     };
     use crate::backend::x11::compositor::DirtyRect;
 
@@ -1672,6 +1706,18 @@ mod tests {
         assert!(has_egl_extension(extensions, "EGL_KHR_partial_update"));
         assert!(!has_egl_extension(extensions, "EGL_KHR_image"));
         assert!(!has_egl_extension(extensions, "EGL_EXT_buffer"));
+    }
+
+    #[test]
+    fn glx_buffer_age_requires_the_extension_and_preserves_real_age() {
+        let extensions = "GLX_ARB_create_context GLX_EXT_buffer_age GLX_EXT_texture_from_pixmap";
+
+        assert!(has_glx_extension(extensions, "GLX_EXT_buffer_age"));
+        assert!(!has_glx_extension(extensions, "GLX_EXT_buffer"));
+        assert_eq!(validated_glx_buffer_age(false, 1), 0);
+        assert_eq!(validated_glx_buffer_age(true, 0), 0);
+        assert_eq!(validated_glx_buffer_age(true, 2), 2);
+        assert_eq!(validated_glx_buffer_age(true, 3), 3);
     }
 
     #[test]

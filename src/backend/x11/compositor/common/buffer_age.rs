@@ -1,4 +1,4 @@
-//! Damage history used to repair recycled EGL back buffers.
+//! Damage history used to repair recycled GLX/EGL back buffers.
 
 use super::dirty_region::DirtyRect;
 use std::collections::VecDeque;
