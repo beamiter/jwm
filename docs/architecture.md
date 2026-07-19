@@ -152,6 +152,13 @@ src/backend/api.rs          platform boundary
   capability so tests use a small fake instead of mocking the full backend.
   `Jwm::finish_screenshot_select` now only tears down interaction state and
   routes the plan's outcome to logging, clipboard, and annotation baking.
+- Screen-recording policy lives in `jwm::features::recording_plan`: initial
+  region normalization (clamping plus even encoder alignment), output-path
+  validation, the output-directory fallback chain, and the segment
+  finalization plan (validate-in-place, move for legacy callers, or ffmpeg
+  concat) are pure functions shared by the key-binding and IPC entry points.
+  The orchestration keeps only filesystem side effects, ffprobe/ffmpeg
+  execution, and compositor calls.
 - Session snapshots load through an explicit version-probed migration
   (`session::migrate_session_json`): version 1 parses through a tolerant
   representation whose invalid floating state is normalized rather than

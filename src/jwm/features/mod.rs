@@ -14,6 +14,7 @@ pub mod capture_plan;
 pub mod magnifier;
 pub mod overview;
 pub mod recording;
+pub mod recording_plan;
 pub mod screenshot;
 pub mod system_ui;
 pub mod toggles;
@@ -26,6 +27,7 @@ pub use capture_plan::{
 pub use magnifier::MagnifierState;
 pub use overview::OverviewState;
 pub use recording::RecordingState;
+pub use recording_plan::FinalizationPlan;
 pub use screenshot::ScreenshotState;
 pub use system_ui::{MonitorDirection, MonitorLayoutEntry, SystemUiState};
 

@@ -82,7 +82,11 @@ Started: interactive screenshot completion is the first extracted policy
 service (`jwm::features::capture_plan`). The completion decision is a pure
 function, capture execution depends only on the `CompositorMedia` capability,
 and its tests exercise the exit criteria below with a small fake instead of a
-full-backend mock. Recording completion and overview/expose are next.
+full-backend mock. Screen-recording policy followed in
+`jwm::features::recording_plan`: region normalization (encoder-aligned even
+dimensions), output-path validation, the output-directory fallback chain, and
+segment finalization planning are pure and tested; `toggles.rs` and the IPC
+handler only execute the returned plans. Overview/expose is next.
 
 Exit criteria: a core policy test can use small fake capabilities instead of a
 mock implementing the complete backend surface. (First met by
