@@ -35,19 +35,30 @@ not authorize a rewrite or a release-profile change without measurements.
 - [ ] Add backend-tagged structured error contexts at display, device, renderer,
       and IPC boundaries. Started: `BackendError` carries an optional
       `[backend/boundary] operation` context with the original error preserved
-      through `source()`; backend construction, window-manager selection, and
-      control-socket binding are tagged. Interior device and renderer paths
-      still need adoption.
+      through `source()`. Tagged so far: backend construction and
+      window-manager selection (display), control-socket binding (ipc),
+      libseat/udev/libinput/KMS-output startup in the udev backend (device),
+      and GPU-compositor initialization in both X11 transports (renderer).
+      Remaining: per-operation adoption inside frame production, capture, and
+      hotplug paths.
 - [ ] Add a deterministic nested-backend smoke matrix covering startup, IPC
       health, config reload, basic window lifecycle, screenshot capture, and
       clean shutdown.
-- [ ] Add bounded log rotation or journald guidance for the optional supervisor.
+- [x] Add bounded log rotation or journald guidance for the optional supervisor.
+      The daemon log is rotated at a 1 MiB bound into a single previous
+      generation (at most two files), and tools/README.md documents the
+      journald alternative via a systemd user unit.
 - [x] Record support-bundle fixtures and schema compatibility tests. The
       version-1 contract is frozen by `tests/support_bundle_schema.rs`: a
       generated offline bundle and the recorded fixture in
       `tests/fixtures/support_bundle_v1.json` must both satisfy the same
       checker, and sentinel values verify the documented privacy guarantees.
-- [ ] Add crash-safe state migrations before changing the session schema.
+- [x] Add crash-safe state migrations before changing the session schema.
+      `migrate_session_json` version-probes a snapshot, migrates version 1
+      through a tolerant representation with normalization instead of
+      rejection, refuses unknown versions without partial state, and never
+      rewrites the on-disk file during load; recorded v1/v2 fixtures in
+      `tests/fixtures/` freeze both generations for the future v3 migration.
 
 Exit criteria: a failed startup or smoke test produces one actionable report
 without requiring an unbounded debug log or a reproduction on direct DRM/KMS.

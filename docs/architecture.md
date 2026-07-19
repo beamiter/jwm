@@ -140,8 +140,18 @@ src/backend/api.rs          platform boundary
   while preserving the original error through the `source()` chain. The
   application composition root tags backend construction and window-manager
   selection at the display boundary, and IPC socket-bind failures are tagged
-  at the IPC boundary. New failure paths that cross the platform boundary
+  at the IPC boundary. Inside the backends, udev startup tags libseat, udev
+  enumeration, libinput seat assignment and the initial KMS output scan at the
+  device boundary, and both X11 transports tag GPU-compositor initialization
+  at the renderer boundary. New failure paths that cross the platform boundary
   should attach a context instead of stringifying the underlying error.
+- Session snapshots load through an explicit version-probed migration
+  (`session::migrate_session_json`): version 1 parses through a tolerant
+  representation whose invalid floating state is normalized rather than
+  rejected, unknown versions fail without partial state, and loading never
+  rewrites the on-disk snapshot, so a crash mid-restore or a downgrade always
+  finds the previous file intact. Recorded v1/v2 fixtures freeze both
+  generations before any future schema change.
 
 Each step should be behavior-preserving and land independently. Avoid moving a
 module and changing its behavior in the same change unless tests cover it.
