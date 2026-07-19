@@ -62,6 +62,12 @@ function unlock_file(io::Base.Filesystem.File)
         systemerror("flock unlock", true)
 end
 
+function truncate_file(io::Base.Filesystem.File, size::Integer)
+    size >= 0 || throw(ArgumentError("file size must not be negative"))
+    ccall(:ftruncate, Cint, (Cint, Int64), Base.fd(io), Int64(size)) == 0 ||
+        systemerror("ftruncate", true)
+end
+
 function flush_file(io::Base.Filesystem.File)
     flush(io)
 end
@@ -93,7 +99,7 @@ function FramePublisher(path::AbstractString, width::Integer, height::Integer)
     io = Base.Filesystem.open(temporary_path, flags, 0o600)
     try
         chmod(temporary_path, 0o600)
-        truncate(io, total_bytes)
+        truncate_file(io, total_bytes)
         lock_file(io)
         try
             seekstart(io)

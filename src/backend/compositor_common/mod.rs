@@ -8,3 +8,4 @@ pub mod rules;
 pub mod screenshot;
 pub mod wallpaper;
 pub mod waterlily;
+pub(crate) mod window_glow;

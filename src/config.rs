@@ -132,7 +132,7 @@ pub fn get_backend_family() -> BackendFamily {
 
 /// Matches the bar installed by `scripts/install_jwm_scripts.sh` when the user
 /// does not select another implementation explicitly.
-pub const STATUS_BAR_NAME: &str = "x11rb_bar";
+pub const STATUS_BAR_NAME: &str = "gpui_component_bar";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TomlConfig {
@@ -332,6 +332,29 @@ pub struct BehaviorConfig {
     /// Border color for unfocused windows [r, g, b, a].
     #[serde(default = "default_border_color_unfocused")]
     pub border_color_unfocused: [f32; 4],
+
+    // --- Client window border glow ---
+    /// Enable the compositor-drawn directional outer glow around client windows.
+    #[serde(default)]
+    pub border_glow_enabled: bool,
+    /// Restrict the glow to the focused client window.
+    #[serde(default = "default_true")]
+    pub border_glow_focused_only: bool,
+    /// Maximum glow reach outside the client rectangle, in pixels.
+    #[serde(default = "default_border_glow_radius")]
+    pub border_glow_radius: f32,
+    /// Multiplier applied to the configured glow alpha.
+    #[serde(default = "default_border_glow_intensity")]
+    pub border_glow_intensity: f32,
+    /// Glow color as [r, g, b, a] in the 0.0..1.0 range.
+    #[serde(default = "default_border_glow_color")]
+    pub border_glow_color: [f32; 4],
+    /// Case-insensitive class/app-id substrings allowed to glow. Empty means all clients.
+    #[serde(default)]
+    pub border_glow_include: Vec<String>,
+    /// Case-insensitive class/app-id substrings excluded from glow; takes precedence.
+    #[serde(default)]
+    pub border_glow_exclude: Vec<String>,
 
     // --- Feature 3: Per-window corner radius ---
     /// Per-window corner radius rules, e.g. ["0:Alacritty", "20:firefox"].
@@ -820,6 +843,15 @@ fn default_border_color_focused() -> [f32; 4] {
 fn default_border_color_unfocused() -> [f32; 4] {
     [0.3, 0.3, 0.3, 0.6]
 }
+fn default_border_glow_radius() -> f32 {
+    28.0
+}
+fn default_border_glow_intensity() -> f32 {
+    1.0
+}
+fn default_border_glow_color() -> [f32; 4] {
+    [0.0, 0.55, 1.0, 0.38]
+}
 fn default_one() -> f32 {
     1.0
 }
@@ -1246,6 +1278,13 @@ impl Default for Config {
                     border_width: default_border_width(),
                     border_color_focused: default_border_color_focused(),
                     border_color_unfocused: default_border_color_unfocused(),
+                    border_glow_enabled: false,
+                    border_glow_focused_only: true,
+                    border_glow_radius: default_border_glow_radius(),
+                    border_glow_intensity: default_border_glow_intensity(),
+                    border_glow_color: default_border_glow_color(),
+                    border_glow_include: Vec::new(),
+                    border_glow_exclude: Vec::new(),
                     corner_radius_rules: Vec::new(),
                     scale_rules: Vec::new(),
                     color_temperature: 0.0,

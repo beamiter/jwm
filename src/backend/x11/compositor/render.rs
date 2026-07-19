@@ -3,6 +3,9 @@
 use super::math::ortho;
 #[allow(unused_imports)]
 use super::*;
+use crate::backend::compositor_common::window_glow::{
+    WindowGlowSettings, WindowGlowStyle, WindowGlowTarget,
+};
 #[allow(unused_imports)]
 use glow::HasContext;
 #[allow(unused_imports)]
@@ -2357,6 +2360,95 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
 
+        // === Pass 1.25: Directional client-window glow underlay ===
+        let glow_settings = WindowGlowSettings::from_behavior(frame_cfg.behavior());
+        if glow_settings.damage_margin() > 0 {
+            unsafe {
+                self.gl_state_tracker
+                    .use_program(&self.gl, Some(self.border_program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.border_uniforms.projection.as_ref(),
+                    false,
+                    &proj,
+                );
+                self.gl_state_tracker
+                    .bind_vertex_array(&self.gl, Some(self.quad_vao));
+
+                for &(win, x, y, w, h) in visible_scene {
+                    if overview_skip(x, y, w, h) {
+                        continue;
+                    }
+                    let Some(wt) = self.windows.get(&win) else {
+                        continue;
+                    };
+                    let is_statusbar = wt.class_name == frame_status_bar_name
+                        || wt.class_name.contains(frame_status_bar_name);
+                    if is_statusbar {
+                        continue;
+                    }
+
+                    let fade = wt.fade_opacity * self.peek_opacity_for(&wt.class_name);
+                    let Some(style) = glow_settings.style_for(WindowGlowTarget {
+                        focused: focused == Some(win),
+                        fullscreen: wt.is_fullscreen,
+                        override_redirect: wt.is_override_redirect,
+                        shaped: wt.is_shaped,
+                        class_name: &wt.class_name,
+                        fade,
+                    }) else {
+                        continue;
+                    };
+
+                    let radius = wt.corner_radius_override.unwrap_or_else(|| {
+                        if class_matches_exclude(&wt.class_name, &self.rounded_corners_exclude) {
+                            0.0
+                        } else {
+                            self.corner_radius
+                        }
+                    });
+                    let scale = wt.scale * wt.anim_scale;
+                    let draw_w = w as f32 * scale;
+                    let draw_h = h as f32 * scale;
+                    let draw_x = x as f32 + (w as f32 - draw_w) * 0.5;
+                    let draw_y = y as f32 + (h as f32 - draw_h) * 0.5;
+                    if draw_w <= 0.0 || draw_h <= 0.0 {
+                        continue;
+                    }
+
+                    self.gl
+                        .uniform_1_f32(self.border_uniforms.border_width.as_ref(), -style.radius);
+                    self.gl.uniform_4_f32(
+                        self.border_uniforms.border_color.as_ref(),
+                        style.color[0],
+                        style.color[1],
+                        style.color[2],
+                        style.color[3],
+                    );
+                    self.gl
+                        .uniform_1_f32(self.border_uniforms.radius.as_ref(), radius.max(0.0));
+                    // Negative border width switches the shared shader to glow
+                    // mode, where u_size is the unexpanded client rectangle.
+                    self.gl
+                        .uniform_2_f32(self.border_uniforms.size.as_ref(), draw_w, draw_h);
+                    self.gl.uniform_4_f32(
+                        self.border_uniforms.rect.as_ref(),
+                        draw_x - style.radius,
+                        draw_y - style.radius,
+                        draw_w + 2.0 * style.radius,
+                        draw_h + 2.0 * style.radius,
+                    );
+                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                }
+
+                // Avoid leaking the negative glow-mode sentinel into later
+                // border-program users that do not otherwise need an outline.
+                self.gl
+                    .uniform_1_f32(self.border_uniforms.border_width.as_ref(), 0.0);
+                self.gl_state_tracker.bind_vertex_array(&self.gl, None);
+                self.gl_state_tracker.use_program(&self.gl, None);
+            }
+        }
+
         // Phase 2.2: Auto blur quality downgrade during animations/transitions
         if self.blur_quality_auto {
             self.blur_quality = if self.transition_active() || self.overview_active {
@@ -3101,8 +3193,23 @@ impl<C: CompositorConnection> Compositor<C> {
 
                     // Update the dependency key seen by blur consumers above
                     // this window. Besides stacking/geometry, include visual
-                    // state that can change without texture damage (focus
-                    // opacity, dimming, fades, scale and rounded clipping).
+                    // state that can change without texture damage (focus,
+                    // opacity, dimming, fades, scale, rounded clipping and glow).
+                    let glow_style = if is_statusbar {
+                        None
+                    } else {
+                        glow_settings.style_for(WindowGlowTarget {
+                            focused: is_focused,
+                            fullscreen: wt.is_fullscreen,
+                            override_redirect: wt.is_override_redirect,
+                            shaped: wt.is_shaped,
+                            class_name: &wt.class_name,
+                            fade: fade * peek_mul,
+                        })
+                    };
+                    let glow_hash = glow_style
+                        .map(WindowGlowStyle::hash_words)
+                        .unwrap_or([0; 3]);
                     for value in [
                         win as u64,
                         ((x as u64) << 32) | y as u32 as u64,
@@ -3112,6 +3219,9 @@ impl<C: CompositorConnection> Compositor<C> {
                         ((opacity.to_bits() as u64) << 32) | dim.to_bits() as u64,
                         ((fade.to_bits() as u64) << 32) | radius.to_bits() as u64,
                         u64::from(is_focused) | (u64::from(has_special_border) << 1),
+                        glow_hash[0],
+                        glow_hash[1],
+                        glow_hash[2],
                     ] {
                         blur_below_hash = blur_below_hash
                             .wrapping_mul(6364136223846793005)

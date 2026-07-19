@@ -332,10 +332,10 @@ void main() {
 pub const BORDER_FRAGMENT_SHADER: &str = r#"#version 300 es
 precision highp float;
 
-uniform vec4  u_border_color;  // border RGBA
-uniform vec2  u_size;          // window size in pixels
+uniform vec4  u_border_color;  // border/glow RGBA
+uniform vec2  u_size;          // outline quad size, or inner window size in glow mode
 uniform float u_radius;        // corner radius (0 = sharp)
-uniform float u_border_width;  // border width in pixels
+uniform float u_border_width;  // >=0: border width, <0: directional glow radius
 uniform int   u_scene_linear;
 in vec2 v_uv;
 out vec4 frag_color;
@@ -352,6 +352,45 @@ vec3 srgb_inverse(vec3 c) {
 }
 
 void main() {
+    vec3 rgb = u_scene_linear == 1
+        ? srgb_inverse(u_border_color.rgb)
+        : u_border_color.rgb;
+
+    if (u_border_width < 0.0) {
+        float spread = max(-u_border_width, 0.001);
+        vec2 expanded = u_size + vec2(2.0 * spread);
+        vec2 pixel_pos = v_uv * expanded;
+        vec2 center = expanded * 0.5;
+        float dist = rounded_rect_sdf(pixel_pos - center, u_size * 0.5, u_radius);
+        float aa = max(fwidth(dist), 0.75);
+        float outside = max(dist, 0.0);
+        float normalized = outside / spread;
+        float outside_mask = smoothstep(-aa, aa, dist);
+
+        float halo = exp2(-4.0 * normalized * normalized) * outside_mask;
+        halo *= 1.0 - smoothstep(0.72, 1.0, normalized);
+        float core = 1.0 - smoothstep(0.0, aa * 1.75, abs(dist));
+        core *= outside_mask;
+
+        float directional = 0.42 + 0.36 * v_uv.x + 0.22 * (1.0 - v_uv.y);
+        vec2 top_right_delta =
+            (v_uv - vec2(0.82, 0.08)) / vec2(0.24, 0.18);
+        vec2 lower_left_delta =
+            (v_uv - vec2(0.08, 0.82)) / vec2(0.30, 0.26);
+        float top_right = exp(-dot(top_right_delta, top_right_delta));
+        float lower_left = exp(-dot(lower_left_delta, lower_left_delta));
+        float energy = clamp(
+            directional + 0.68 * top_right + 0.24 * lower_left,
+            0.25,
+            1.65
+        );
+
+        float glow_mask = max(halo, core * 0.85);
+        float a = clamp(u_border_color.a * glow_mask * energy, 0.0, 1.0);
+        frag_color = vec4(rgb * a, a);
+        return;
+    }
+
     vec2 pixel_pos = v_uv * u_size;
     vec2 center = u_size * 0.5;
     float dist = rounded_rect_sdf(pixel_pos - center, center, u_radius);
@@ -360,9 +399,6 @@ void main() {
     float inner = 1.0 - smoothstep(-1.0, 1.0, dist + u_border_width);
     float border_mask = outer - inner;
     float a = u_border_color.a * border_mask;
-    vec3 rgb = u_scene_linear == 1
-        ? srgb_inverse(u_border_color.rgb)
-        : u_border_color.rgb;
     frag_color = vec4(rgb * a, a);  // premultiplied alpha
 }
 "#;
