@@ -168,7 +168,7 @@ pub struct BehaviorConfig {
     pub lock_fullscreen: bool,
     #[serde(default)]
     pub compositor: bool,
-    /// X11 compositor graphics API: "glx" (legacy/default), "egl" (GLES 3),
+    /// X11 compositor graphics API: "egl" (GLES 3, default), "glx" (legacy),
     /// or "auto" (prefer EGL/GLES and fall back to GLX).
     #[serde(default = "default_compositor_api")]
     pub compositor_api: String,
@@ -830,9 +830,7 @@ fn default_transition_mode() -> String {
     "none".to_string()
 }
 fn default_compositor_api() -> String {
-    // Preserve the established GLX path unless users explicitly opt into EGL
-    // or choose automatic probing.
-    "glx".to_string()
+    "egl".to_string()
 }
 fn default_vsync_method() -> String {
     "global".to_string()
@@ -2883,6 +2881,23 @@ mod tests {
     fn built_in_configuration_has_no_semantic_diagnostics() {
         let diagnostics = Config::default().diagnostics();
         assert!(diagnostics.is_empty(), "{diagnostics}");
+    }
+
+    #[test]
+    fn compositor_api_defaults_to_egl() {
+        let config = Config::default();
+        assert_eq!(config.behavior().compositor_api, "egl");
+
+        // Existing configs created before compositor_api was introduced use
+        // the same serde default when the field is absent.
+        let serialized = toml::to_string(&config.inner).unwrap();
+        let without_api = serialized
+            .lines()
+            .filter(|line| !line.starts_with("compositor_api ="))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed: TomlConfig = toml::from_str(&without_api).unwrap();
+        assert_eq!(parsed.behavior.compositor_api, "egl");
     }
 
     #[test]
