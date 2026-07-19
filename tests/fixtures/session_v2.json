@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "clients": [
+    {
+      "class": "Firefox",
+      "instance": "Navigator",
+      "name": "Reference page",
+      "tags": 5,
+      "is_floating": true,
+      "monitor_num": 1,
+      "floating": [40, 60, 1024, 768]
+    },
+    {
+      "class": "Alacritty",
+      "instance": "alacritty",
+      "name": "shell",
+      "tags": 1,
+      "is_floating": false,
+      "monitor_num": 0,
+      "floating": null
+    }
+  ]
+}

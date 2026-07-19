@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "clients": [
+    {
+      "class": "Firefox",
+      "instance": "Navigator",
+      "name": "Reference page",
+      "tags": 5,
+      "is_floating": true,
+      "monitor_num": 1,
+      "floating": [40, 60, 1024, 768]
+    },
+    {
+      "class": "Alacritty",
+      "instance": "alacritty",
+      "tags": 1,
+      "is_floating": false,
+      "floating": [0, 0, 640, 480]
+    },
+    {
+      "class": "Gimp",
+      "instance": "gimp",
+      "name": "toolbox",
+      "tags": 2,
+      "is_floating": true,
+      "monitor_num": 0,
+      "floating": [10, 10, -1, 0]
+    }
+  ]
+}
