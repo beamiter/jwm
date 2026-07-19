@@ -1,4 +1,9 @@
 use super::*;
+use crate::backend::compositor_common::math::{
+    mat4_mul, perspective_matrix, rotate_x_matrix, rotate_y_matrix, scale_matrix,
+    translate_matrix,
+};
+use crate::backend::x11::compositor_common::transitions::normalized_transition_progress;
 use smithay::backend::renderer::gles::ffi;
 
 /// Geometry shared by every workspace-transition mode.
@@ -35,8 +40,6 @@ pub(super) fn transition_layout(
     let workspace_left = i64::from(mon_x);
     let workspace_right = i64::from(mon_x) + i64::from(mon_w);
 
-    // A malformed or completely off-screen monitor must never produce a
-    // negative/overflowing GL scissor rectangle.
     let x0 = workspace_left.clamp(0, i64::from(screen_w));
     let x1 = workspace_right.clamp(0, i64::from(screen_w));
     let y0 = workspace_top.clamp(0, i64::from(screen_h));
@@ -102,39 +105,125 @@ fn blinds_strip_layout(
 }
 
 impl WaylandCompositor {
+    fn finish_transition(&mut self) {
+        self.transition_active = false;
+        self.transition_start = None;
+        self.transition_mon = None;
+    }
+
+    fn prepare_flat_transition(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        layout: TransitionLayout,
+    ) {
+        unsafe {
+            gl.UseProgram(self.transition_program);
+            gl.UniformMatrix4fv(
+                self.transition_uniforms.projection,
+                1,
+                ffi::FALSE as u8,
+                projection.as_ptr(),
+            );
+            gl.Uniform4f(
+                self.transition_uniforms.uv_rect,
+                layout.uv_rect[0],
+                layout.uv_rect[1],
+                layout.uv_rect[2],
+                layout.uv_rect[3],
+            );
+            // Samplers are initialized to texture unit zero when a program is
+            // linked. This program never changes that binding, so avoid a
+            // GetUniformLocation round trip on every animation frame.
+            gl.ActiveTexture(ffi::TEXTURE0);
+            gl.BindTexture(ffi::TEXTURE_2D, self.transition_texture);
+            gl.BindVertexArray(self.quad_vao);
+        }
+    }
+
+    fn draw_flat_transition_rect(
+        &self,
+        gl: &ffi::Gles2,
+        rect: [f32; 4],
+        uv_rect: [f32; 4],
+        opacity: f32,
+    ) {
+        unsafe {
+            gl.Uniform4f(
+                self.transition_uniforms.rect,
+                rect[0],
+                rect[1],
+                rect[2],
+                rect[3],
+            );
+            gl.Uniform4f(
+                self.transition_uniforms.uv_rect,
+                uv_rect[0],
+                uv_rect[1],
+                uv_rect[2],
+                uv_rect[3],
+            );
+            gl.Uniform1f(self.transition_uniforms.opacity, opacity.clamp(0.0, 1.0));
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+        }
+    }
+
+    fn draw_3d_transition_face(
+        &self,
+        gl: &ffi::Gles2,
+        layout: TransitionLayout,
+        mvp: &[f32; 16],
+        brightness: f32,
+    ) {
+        unsafe {
+            gl.Viewport(
+                layout.scissor[0],
+                layout.scissor[1],
+                layout.scissor[2],
+                layout.scissor[3],
+            );
+            gl.UseProgram(self.cube_program);
+            gl.UniformMatrix4fv(self.cube_uniforms.mvp, 1, ffi::FALSE as u8, mvp.as_ptr());
+            gl.Uniform1f(
+                self.cube_uniforms.aspect,
+                layout.draw_rect[2] / layout.draw_rect[3],
+            );
+            gl.Uniform1f(
+                self.cube_uniforms.brightness,
+                brightness.clamp(0.0, 1.0),
+            );
+            gl.Uniform4f(
+                self.cube_uniforms.uv_rect,
+                layout.uv_rect[0],
+                layout.uv_rect[1],
+                layout.uv_rect[2],
+                layout.uv_rect[3],
+            );
+            gl.ActiveTexture(ffi::TEXTURE0);
+            gl.BindTexture(ffi::TEXTURE_2D, self.transition_texture);
+            gl.Uniform1i(self.cube_uniforms.texture, 0);
+            gl.BindVertexArray(self.quad_vao);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+        }
+    }
+
     /// Render the workspace transition overlay.
     /// Called from render_frame when transition_active is true.
     pub(crate) fn render_transition(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
-        let start = match self.transition_start {
-            Some(s) => s,
-            None => {
-                self.transition_active = false;
-                return;
-            }
+        let Some(start) = self.transition_start else {
+            self.finish_transition();
+            return;
         };
-
-        let elapsed = start.elapsed();
-        let duration = self.transition_duration.as_secs_f32();
-        if !duration.is_finite() || duration <= f32::EPSILON {
-            self.transition_active = false;
-            self.transition_start = None;
+        let Some(progress) = normalized_transition_progress(
+            start,
+            std::time::Instant::now(),
+            self.transition_duration,
+        ) else {
+            self.finish_transition();
             return;
-        }
-        let progress = (elapsed.as_secs_f32() / duration).min(1.0);
-
-        // Ease-out cubic
-        let t = 1.0 - (1.0 - progress).powi(3);
-
-        if progress >= 1.0 {
-            self.transition_active = false;
-            self.transition_start = None;
-            self.transition_mon = None;
-            return;
-        }
-
+        };
         let Some(mon_rect) = self.transition_mon else {
-            self.transition_active = false;
-            self.transition_start = None;
+            self.finish_transition();
             return;
         };
         let Some(layout) = transition_layout(
@@ -143,11 +232,10 @@ impl WaylandCompositor {
             mon_rect,
             self.transition_exclude_top,
         ) else {
-            self.transition_active = false;
-            self.transition_start = None;
-            self.transition_mon = None;
+            self.finish_transition();
             return;
         };
+        let t = self.transition_mode.eased_progress(progress);
 
         unsafe {
             gl.Enable(ffi::SCISSOR_TEST);
@@ -162,7 +250,7 @@ impl WaylandCompositor {
         match self.transition_mode {
             TransitionMode::Slide => self.render_slide_transition(gl, projection, layout, t),
             TransitionMode::Cube => self.render_cube_transition(gl, layout, t),
-            TransitionMode::Flip => self.render_flip_transition(gl, projection, layout, t),
+            TransitionMode::Flip => self.render_flip_transition(gl, layout, t),
             TransitionMode::Fade => self.render_fade_transition(gl, projection, layout, t),
             TransitionMode::Zoom => self.render_zoom_transition(gl, projection, layout, t),
             TransitionMode::Portal => self.render_portal_transition(gl, projection, layout, t),
@@ -173,10 +261,9 @@ impl WaylandCompositor {
             TransitionMode::None => {}
         }
 
-        // 3D modes temporarily render into the selected monitor viewport, and
-        // blinds replaces the outer workspace scissor with per-strip scissors.
-        // Return the shared GL state to the full-output contract expected by
-        // all overlays rendered after workspace transitions.
+        // 3D modes select a monitor viewport, and blinds replaces the outer
+        // scissor with per-strip rectangles. Restore the full-output contract
+        // expected by overlays rendered after the workspace transition.
         unsafe {
             gl.BindVertexArray(0);
             gl.BindTexture(ffi::TEXTURE_2D, 0);
@@ -195,175 +282,17 @@ impl WaylandCompositor {
         layout: TransitionLayout,
         t: f32,
     ) {
-        unsafe {
-            gl.UseProgram(self.transition_program);
-            gl.UniformMatrix4fv(
-                self.transition_uniforms.projection,
-                1,
-                ffi::FALSE as u8,
-                projection.as_ptr(),
-            );
-            gl.Uniform4f(
-                self.transition_uniforms.uv_rect,
-                layout.uv_rect[0],
-                layout.uv_rect[1],
-                layout.uv_rect[2],
-                layout.uv_rect[3],
-            );
+        let direction = self.transition_direction as f32;
+        let offset_x = -direction * t * layout.draw_rect[2];
+        let rect = [
+            layout.draw_rect[0] + offset_x,
+            layout.draw_rect[1],
+            layout.draw_rect[2],
+            layout.draw_rect[3],
+        ];
 
-            // Old scene slides out
-            let dir = self.transition_direction as f32;
-            let offset_x = -dir * t * layout.draw_rect[2];
-            gl.Uniform4f(
-                self.transition_uniforms.rect,
-                layout.draw_rect[0] + offset_x,
-                layout.draw_rect[1],
-                layout.draw_rect[2],
-                layout.draw_rect[3],
-            );
-            gl.Uniform1f(self.transition_uniforms.opacity, 1.0 - t);
-
-            gl.ActiveTexture(ffi::TEXTURE0);
-            gl.BindTexture(ffi::TEXTURE_2D, self.transition_texture);
-            gl.Uniform1i(
-                gl.GetUniformLocation(self.transition_program, b"u_texture\0".as_ptr() as *const _),
-                0,
-            );
-
-            gl.BindVertexArray(self.quad_vao);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
-        }
-    }
-
-    fn render_cube_transition(&self, gl: &ffi::Gles2, layout: TransitionLayout, t: f32) {
-        unsafe {
-            gl.Viewport(
-                layout.scissor[0],
-                layout.scissor[1],
-                layout.scissor[2],
-                layout.scissor[3],
-            );
-            gl.UseProgram(self.cube_program);
-
-            let dir = self.transition_direction as f32;
-            let angle = dir * t * std::f32::consts::FRAC_PI_2; // 0 to 90 degrees
-
-            let aspect = layout.draw_rect[2] / layout.draw_rect[3];
-            gl.Uniform1f(self.cube_uniforms.aspect, aspect);
-
-            // Perspective matrix
-            let fov = 1.0f32; // ~57 degrees
-            let near = 0.1f32;
-            let far = 100.0f32;
-            let f = 1.0 / fov.tan();
-            let mut persp = [0.0f32; 16];
-            persp[0] = f / aspect;
-            persp[5] = f;
-            persp[10] = (far + near) / (near - far);
-            persp[11] = -1.0;
-            persp[14] = (2.0 * far * near) / (near - far);
-
-            // Rotation matrix (around Y axis)
-            let cos_a = angle.cos();
-            let sin_a = angle.sin();
-            let mut rot = [0.0f32; 16];
-            rot[0] = cos_a;
-            rot[2] = sin_a;
-            rot[5] = 1.0;
-            rot[8] = -sin_a;
-            rot[10] = cos_a;
-            rot[15] = 1.0;
-
-            // Translation (push back)
-            let mut trans = [0.0f32; 16];
-            trans[0] = 1.0;
-            trans[5] = 1.0;
-            trans[10] = 1.0;
-            trans[15] = 1.0;
-            trans[14] = -2.5; // z offset
-
-            // MVP = persp * trans * rot
-            let view = mat4_mul(&trans, &rot);
-            let mvp = mat4_mul(&persp, &view);
-
-            gl.UniformMatrix4fv(self.cube_uniforms.mvp, 1, ffi::FALSE as u8, mvp.as_ptr());
-            gl.Uniform4f(
-                self.cube_uniforms.uv_rect,
-                layout.uv_rect[0],
-                layout.uv_rect[1],
-                layout.uv_rect[2],
-                layout.uv_rect[3],
-            );
-
-            // Old face (brighter when facing camera)
-            let brightness = cos_a.max(0.3);
-            gl.Uniform1f(self.cube_uniforms.brightness, brightness);
-
-            gl.ActiveTexture(ffi::TEXTURE0);
-            gl.BindTexture(ffi::TEXTURE_2D, self.transition_texture);
-            gl.Uniform1i(
-                gl.GetUniformLocation(self.cube_program, b"u_texture\0".as_ptr() as *const _),
-                0,
-            );
-
-            gl.BindVertexArray(self.quad_vao);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
-        }
-    }
-
-    fn render_flip_transition(
-        &self,
-        gl: &ffi::Gles2,
-        projection: &[f32; 16],
-        layout: TransitionLayout,
-        t: f32,
-    ) {
-        // Card flip: scale X from 1 to 0 (first half) then 0 to 1 (second half showing new)
-        // We only render the old scene (first half of flip)
-        unsafe {
-            if t < 0.5 {
-                let scale_x = 1.0 - t * 2.0;
-                let center_x = layout.draw_rect[0] + layout.draw_rect[2] * 0.5;
-                let w = layout.draw_rect[2] * scale_x;
-                let x = center_x - w * 0.5;
-
-                gl.UseProgram(self.transition_program);
-                gl.UniformMatrix4fv(
-                    self.transition_uniforms.projection,
-                    1,
-                    ffi::FALSE as u8,
-                    projection.as_ptr(),
-                );
-                gl.Uniform4f(
-                    self.transition_uniforms.rect,
-                    x,
-                    layout.draw_rect[1],
-                    w,
-                    layout.draw_rect[3],
-                );
-                gl.Uniform4f(
-                    self.transition_uniforms.uv_rect,
-                    layout.uv_rect[0],
-                    layout.uv_rect[1],
-                    layout.uv_rect[2],
-                    layout.uv_rect[3],
-                );
-                gl.Uniform1f(self.transition_uniforms.opacity, 1.0);
-
-                gl.ActiveTexture(ffi::TEXTURE0);
-                gl.BindTexture(ffi::TEXTURE_2D, self.transition_texture);
-                gl.Uniform1i(
-                    gl.GetUniformLocation(
-                        self.transition_program,
-                        b"u_texture\0".as_ptr() as *const _,
-                    ),
-                    0,
-                );
-
-                gl.BindVertexArray(self.quad_vao);
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
-            }
-        }
+        self.prepare_flat_transition(gl, projection, layout);
+        self.draw_flat_transition_rect(gl, rect, layout.uv_rect, 1.0 - 0.1 * t);
     }
 
     fn render_fade_transition(
@@ -373,40 +302,8 @@ impl WaylandCompositor {
         layout: TransitionLayout,
         t: f32,
     ) {
-        unsafe {
-            gl.UseProgram(self.transition_program);
-            gl.UniformMatrix4fv(
-                self.transition_uniforms.projection,
-                1,
-                ffi::FALSE as u8,
-                projection.as_ptr(),
-            );
-            gl.Uniform4f(
-                self.transition_uniforms.rect,
-                layout.draw_rect[0],
-                layout.draw_rect[1],
-                layout.draw_rect[2],
-                layout.draw_rect[3],
-            );
-            gl.Uniform4f(
-                self.transition_uniforms.uv_rect,
-                layout.uv_rect[0],
-                layout.uv_rect[1],
-                layout.uv_rect[2],
-                layout.uv_rect[3],
-            );
-            gl.Uniform1f(self.transition_uniforms.opacity, 1.0 - t);
-
-            gl.ActiveTexture(ffi::TEXTURE0);
-            gl.BindTexture(ffi::TEXTURE_2D, self.transition_texture);
-            gl.Uniform1i(
-                gl.GetUniformLocation(self.transition_program, b"u_texture\0".as_ptr() as *const _),
-                0,
-            );
-
-            gl.BindVertexArray(self.quad_vao);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
-        }
+        self.prepare_flat_transition(gl, projection, layout);
+        self.draw_flat_transition_rect(gl, layout.draw_rect, layout.uv_rect, 1.0 - t);
     }
 
     fn render_zoom_transition(
@@ -416,40 +313,183 @@ impl WaylandCompositor {
         layout: TransitionLayout,
         t: f32,
     ) {
-        unsafe {
-            let scale = 1.0 + t * 0.3; // zoom out slightly
-            let w = layout.draw_rect[2] * scale;
-            let h = layout.draw_rect[3] * scale;
-            let x = layout.draw_rect[0] + (layout.draw_rect[2] - w) * 0.5;
-            let y = layout.draw_rect[1] + (layout.draw_rect[3] - h) * 0.5;
+        let scale = 1.0 + 0.24 * t;
+        let width = layout.draw_rect[2] * scale;
+        let height = layout.draw_rect[3] * scale;
+        let rect = [
+            layout.draw_rect[0] + (layout.draw_rect[2] - width) * 0.5,
+            layout.draw_rect[1] + (layout.draw_rect[3] - height) * 0.5,
+            width,
+            height,
+        ];
 
-            gl.UseProgram(self.transition_program);
-            gl.UniformMatrix4fv(
-                self.transition_uniforms.projection,
-                1,
-                ffi::FALSE as u8,
-                projection.as_ptr(),
-            );
-            gl.Uniform4f(self.transition_uniforms.rect, x, y, w, h);
-            gl.Uniform4f(
-                self.transition_uniforms.uv_rect,
-                layout.uv_rect[0],
-                layout.uv_rect[1],
-                layout.uv_rect[2],
-                layout.uv_rect[3],
-            );
-            gl.Uniform1f(self.transition_uniforms.opacity, 1.0 - t);
+        self.prepare_flat_transition(gl, projection, layout);
+        self.draw_flat_transition_rect(gl, rect, layout.uv_rect, 1.0 - t);
+    }
 
-            gl.ActiveTexture(ffi::TEXTURE0);
-            gl.BindTexture(ffi::TEXTURE_2D, self.transition_texture);
-            gl.Uniform1i(
-                gl.GetUniformLocation(self.transition_program, b"u_texture\0".as_ptr() as *const _),
-                0,
-            );
+    fn render_stack_transition(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        layout: TransitionLayout,
+        t: f32,
+    ) {
+        let direction = self.transition_direction as f32;
+        let scale = 1.0 - 0.16 * t;
+        let width = layout.draw_rect[2] * scale;
+        let height = layout.draw_rect[3] * scale;
+        let rect = [
+            layout.draw_rect[0]
+                + (layout.draw_rect[2] - width) * 0.5
+                + direction * t * layout.draw_rect[2] * 0.07,
+            layout.draw_rect[1] + (layout.draw_rect[3] - height) * 0.5,
+            width,
+            height,
+        ];
 
-            gl.BindVertexArray(self.quad_vao);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+        self.prepare_flat_transition(gl, projection, layout);
+        self.draw_flat_transition_rect(gl, rect, layout.uv_rect, 1.0 - t);
+    }
+
+    fn render_cube_transition(&self, gl: &ffi::Gles2, layout: TransitionLayout, t: f32) {
+        let aspect = layout.draw_rect[2] / layout.draw_rect[3];
+        let direction = self.transition_direction as f32;
+        let half_pi = std::f32::consts::FRAC_PI_2;
+        let depth = aspect;
+        let zoom = 1.0 + 0.22 * (t * std::f32::consts::PI).sin();
+        let camera_z = (1.0 + depth) * zoom;
+        let perspective = perspective_matrix(half_pi, aspect, 0.1, camera_z * 4.0);
+        let view = translate_matrix(0.0, 0.0, -camera_z);
+        let angle = direction * t * half_pi;
+        let tilt = rotate_x_matrix(-0.055 * (t * std::f32::consts::PI).sin());
+        let model = mat4_mul(
+            &rotate_y_matrix(angle),
+            &mat4_mul(&tilt, &translate_matrix(0.0, 0.0, depth)),
+        );
+        let mvp = mat4_mul(&perspective, &mat4_mul(&view, &model));
+        let brightness = 0.22 + 0.78 * angle.cos().abs();
+
+        self.draw_3d_transition_face(gl, layout, &mvp, brightness);
+    }
+
+    fn render_flip_transition(&self, gl: &ffi::Gles2, layout: TransitionLayout, t: f32) {
+        let aspect = layout.draw_rect[2] / layout.draw_rect[3];
+        let direction = self.transition_direction as f32;
+        let pulse = (t * std::f32::consts::PI).sin();
+        let camera_z = 1.0 + 0.16 * pulse;
+        let perspective = perspective_matrix(std::f32::consts::FRAC_PI_2, aspect, 0.1, 6.0);
+        let view = translate_matrix(0.0, 0.0, -camera_z);
+        let angle = direction * t * std::f32::consts::FRAC_PI_2;
+        let model = mat4_mul(
+            &rotate_y_matrix(angle),
+            &mat4_mul(
+                &rotate_x_matrix(-0.08 * pulse),
+                &scale_matrix(1.0 - 0.06 * pulse, 1.0 - 0.06 * pulse, 1.0),
+            ),
+        );
+        let mvp = mat4_mul(&perspective, &mat4_mul(&view, &model));
+        let brightness = 0.18 + 0.82 * angle.cos().abs();
+
+        self.draw_3d_transition_face(gl, layout, &mvp, brightness);
+    }
+
+    fn render_blinds_transition(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        layout: TransitionLayout,
+        t: f32,
+    ) {
+        const STRIP_COUNT: u32 = 8;
+        const STAGGER: f32 = 0.32;
+        let reverse = self.transition_direction < 0;
+
+        self.prepare_flat_transition(gl, projection, layout);
+        for strip in 0..STRIP_COUNT {
+            let wave_index = if reverse {
+                STRIP_COUNT - 1 - strip
+            } else {
+                strip
+            };
+            let delay = wave_index as f32 / (STRIP_COUNT - 1) as f32 * STAGGER;
+            let local = ((t - delay) / (1.0 - STAGGER)).clamp(0.0, 1.0);
+            let Some((strip_x, strip_w, strip_uv, strip_scissor)) =
+                blinds_strip_layout(layout, strip, STRIP_COUNT)
+            else {
+                continue;
+            };
+
+            let width = strip_w * (1.0 - local);
+            if width < 0.5 {
+                continue;
+            }
+            let rect = [
+                strip_x + (strip_w - width) * 0.5,
+                layout.draw_rect[1],
+                width,
+                layout.draw_rect[3],
+            ];
+
+            unsafe {
+                gl.Scissor(
+                    strip_scissor[0],
+                    strip_scissor[1],
+                    strip_scissor[2],
+                    strip_scissor[3],
+                );
+            }
+            self.draw_flat_transition_rect(gl, rect, strip_uv, 1.0 - local * 0.12);
         }
+    }
+
+    fn render_coverflow_transition(&self, gl: &ffi::Gles2, layout: TransitionLayout, t: f32) {
+        let aspect = layout.draw_rect[2] / layout.draw_rect[3];
+        let direction = self.transition_direction as f32;
+        let angle = direction * t * 72.0f32.to_radians();
+        let scale = 1.0 - 0.2 * t;
+        let x = -direction * t * aspect * 0.92;
+        let y = -0.06 * (t * std::f32::consts::PI).sin();
+        let z = -0.48 * t;
+        let perspective = perspective_matrix(std::f32::consts::FRAC_PI_2, aspect, 0.1, 8.0);
+        let view = translate_matrix(0.0, 0.0, -1.0);
+        let model = mat4_mul(
+            &translate_matrix(x, y, z),
+            &mat4_mul(
+                &rotate_y_matrix(angle),
+                &scale_matrix(scale, scale, 1.0),
+            ),
+        );
+        let mvp = mat4_mul(&perspective, &mat4_mul(&view, &model));
+        let brightness = (1.0 - 0.58 * t).max(0.28);
+
+        self.draw_3d_transition_face(gl, layout, &mvp, brightness);
+    }
+
+    fn render_helix_transition(&self, gl: &ffi::Gles2, layout: TransitionLayout, t: f32) {
+        let aspect = layout.draw_rect[2] / layout.draw_rect[3];
+        let direction = self.transition_direction as f32;
+        let theta = direction * t * std::f32::consts::PI * 1.25;
+        let radius = aspect * 0.58;
+        let x = radius * theta.sin();
+        let y = -0.34 * t + 0.08 * (t * std::f32::consts::PI * 2.0).sin();
+        let z = -radius * (1.0 - theta.cos().abs()) - 0.22 * t;
+        let scale = (1.0 - 0.44 * t).max(0.5);
+        let perspective = perspective_matrix(std::f32::consts::FRAC_PI_2, aspect, 0.1, 10.0);
+        let view = translate_matrix(0.0, 0.0, -1.0);
+        let model = mat4_mul(
+            &translate_matrix(x, y, z),
+            &mat4_mul(
+                &rotate_y_matrix(theta),
+                &mat4_mul(
+                    &rotate_x_matrix(-0.18 * t),
+                    &scale_matrix(scale, scale, 1.0),
+                ),
+            ),
+        );
+        let mvp = mat4_mul(&perspective, &mat4_mul(&view, &model));
+        let brightness = (1.0 - 0.68 * t).max(0.2);
+
+        self.draw_3d_transition_face(gl, layout, &mvp, brightness);
     }
 
     fn render_portal_transition(
@@ -459,6 +499,10 @@ impl WaylandCompositor {
         layout: TransitionLayout,
         t: f32,
     ) {
+        let glow = (t * std::f32::consts::PI).sin().max(0.0) * 1.65;
+        let center_x = 0.5 + 0.07 * self.transition_direction as f32;
+        let center_y = 0.5 - 0.035 * (t * std::f32::consts::PI).sin();
+
         unsafe {
             gl.UseProgram(self.portal_program);
             gl.UniformMatrix4fv(
@@ -482,321 +526,17 @@ impl WaylandCompositor {
                 layout.uv_rect[3],
             );
             gl.Uniform1f(self.portal_uniforms.progress, t);
-            gl.Uniform1f(self.portal_uniforms.glow, 1.0 - t);
-            gl.Uniform2f(self.portal_uniforms.center, 0.5, 0.5);
-
+            gl.Uniform1f(self.portal_uniforms.glow, glow);
+            gl.Uniform2f(self.portal_uniforms.center, center_x, center_y);
             gl.ActiveTexture(ffi::TEXTURE0);
             gl.BindTexture(ffi::TEXTURE_2D, self.transition_texture);
-            gl.Uniform1i(
-                gl.GetUniformLocation(self.portal_program, b"u_texture\0".as_ptr() as *const _),
-                0,
-            );
-
+            gl.Uniform1i(self.portal_uniforms.texture, 0);
             gl.BindVertexArray(self.quad_vao);
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
         }
     }
 
-    fn render_stack_transition(
-        &self,
-        gl: &ffi::Gles2,
-        projection: &[f32; 16],
-        layout: TransitionLayout,
-        t: f32,
-    ) {
-        unsafe {
-            let dir = self.transition_direction as f32;
-            let scale = 1.0 - t * 0.15; // scale from 1.0 to 0.85
-            let opacity = 1.0 - t;
-
-            let w = layout.draw_rect[2] * scale;
-            let h = layout.draw_rect[3] * scale;
-            let x = layout.draw_rect[0]
-                + (layout.draw_rect[2] - w) * 0.5
-                + dir * t * layout.draw_rect[2] * 0.05;
-            let y = layout.draw_rect[1] + (layout.draw_rect[3] - h) * 0.5;
-
-            gl.UseProgram(self.transition_program);
-            gl.UniformMatrix4fv(
-                self.transition_uniforms.projection,
-                1,
-                ffi::FALSE as u8,
-                projection.as_ptr(),
-            );
-            gl.Uniform4f(self.transition_uniforms.rect, x, y, w, h);
-            gl.Uniform4f(
-                self.transition_uniforms.uv_rect,
-                layout.uv_rect[0],
-                layout.uv_rect[1],
-                layout.uv_rect[2],
-                layout.uv_rect[3],
-            );
-            gl.Uniform1f(self.transition_uniforms.opacity, opacity);
-
-            gl.ActiveTexture(ffi::TEXTURE0);
-            gl.BindTexture(ffi::TEXTURE_2D, self.transition_texture);
-            gl.Uniform1i(
-                gl.GetUniformLocation(self.transition_program, b"u_texture\0".as_ptr() as *const _),
-                0,
-            );
-
-            gl.BindVertexArray(self.quad_vao);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
-        }
-    }
-
-    fn render_blinds_transition(
-        &self,
-        gl: &ffi::Gles2,
-        projection: &[f32; 16],
-        layout: TransitionLayout,
-        t: f32,
-    ) {
-        unsafe {
-            gl.UseProgram(self.transition_program);
-            gl.UniformMatrix4fv(
-                self.transition_uniforms.projection,
-                1,
-                ffi::FALSE as u8,
-                projection.as_ptr(),
-            );
-            gl.Uniform1f(self.transition_uniforms.opacity, 1.0);
-
-            gl.ActiveTexture(ffi::TEXTURE0);
-            gl.BindTexture(ffi::TEXTURE_2D, self.transition_texture);
-            gl.Uniform1i(
-                gl.GetUniformLocation(self.transition_program, b"u_texture\0".as_ptr() as *const _),
-                0,
-            );
-
-            let num_strips: u32 = 8;
-            let stagger = 0.3f32;
-
-            for i in 0..num_strips {
-                let strip_delay = (i as f32 / (num_strips - 1).max(1) as f32) * stagger;
-                let strip_progress = ((t - strip_delay) / (1.0 - stagger)).clamp(0.0, 1.0);
-
-                if strip_progress >= 0.5 {
-                    // Second half: new scene shows through, don't draw old
-                    continue;
-                }
-
-                // First half: old scene strip squeezes horizontally toward center of strip
-                let squeeze = strip_progress * 2.0; // 0.0 to 1.0
-                let Some((strip_x, strip_w, strip_uv, strip_scissor)) =
-                    blinds_strip_layout(layout, i, num_strips)
-                else {
-                    continue;
-                };
-                gl.Scissor(
-                    strip_scissor[0],
-                    strip_scissor[1],
-                    strip_scissor[2],
-                    strip_scissor[3],
-                );
-
-                let center_x = strip_x + strip_w * 0.5;
-                let w = strip_w * (1.0 - squeeze);
-                let x = center_x - w * 0.5;
-
-                // Draw old scene with UV covering only this strip
-                gl.Uniform4f(
-                    self.transition_uniforms.uv_rect,
-                    strip_uv[0],
-                    strip_uv[1],
-                    strip_uv[2],
-                    strip_uv[3],
-                );
-                gl.Uniform4f(
-                    self.transition_uniforms.rect,
-                    x,
-                    layout.draw_rect[1],
-                    w,
-                    layout.draw_rect[3],
-                );
-
-                gl.BindVertexArray(self.quad_vao);
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
-            }
-        }
-    }
-
-    fn render_coverflow_transition(&self, gl: &ffi::Gles2, layout: TransitionLayout, t: f32) {
-        unsafe {
-            gl.Viewport(
-                layout.scissor[0],
-                layout.scissor[1],
-                layout.scissor[2],
-                layout.scissor[3],
-            );
-            gl.UseProgram(self.cube_program);
-
-            let dir = self.transition_direction as f32;
-            let max_rotation = 70.0_f32.to_radians();
-            let angle = t * max_rotation * dir;
-
-            let aspect = layout.draw_rect[2] / layout.draw_rect[3];
-            gl.Uniform1f(self.cube_uniforms.aspect, aspect);
-
-            // Perspective matrix
-            let fov = 1.0f32;
-            let near = 0.1f32;
-            let far = 100.0f32;
-            let f = 1.0 / fov.tan();
-            let mut persp = [0.0f32; 16];
-            persp[0] = f / aspect;
-            persp[5] = f;
-            persp[10] = (far + near) / (near - far);
-            persp[11] = -1.0;
-            persp[14] = (2.0 * far * near) / (near - far);
-
-            // Translation (push back in Z)
-            let mut trans = [0.0f32; 16];
-            trans[0] = 1.0;
-            trans[5] = 1.0;
-            trans[10] = 1.0;
-            trans[15] = 1.0;
-            trans[14] = -2.5;
-
-            // Rotation around Y axis
-            let cos_a = angle.cos();
-            let sin_a = angle.sin();
-            let mut rot = [0.0f32; 16];
-            rot[0] = cos_a;
-            rot[2] = sin_a;
-            rot[5] = 1.0;
-            rot[8] = -sin_a;
-            rot[10] = cos_a;
-            rot[15] = 1.0;
-
-            // Lateral offset translation
-            let mut lateral = [0.0f32; 16];
-            lateral[0] = 1.0;
-            lateral[5] = 1.0;
-            lateral[10] = 1.0;
-            lateral[15] = 1.0;
-            lateral[12] = t * 1.5 * dir;
-
-            // MVP = persp * trans * rot * lateral
-            let model = mat4_mul(&rot, &lateral);
-            let view = mat4_mul(&trans, &model);
-            let mvp = mat4_mul(&persp, &view);
-
-            gl.UniformMatrix4fv(self.cube_uniforms.mvp, 1, ffi::FALSE as u8, mvp.as_ptr());
-            gl.Uniform4f(
-                self.cube_uniforms.uv_rect,
-                layout.uv_rect[0],
-                layout.uv_rect[1],
-                layout.uv_rect[2],
-                layout.uv_rect[3],
-            );
-
-            let brightness = (1.0 - t * 0.7).max(0.3);
-            gl.Uniform1f(self.cube_uniforms.brightness, brightness);
-
-            gl.ActiveTexture(ffi::TEXTURE0);
-            gl.BindTexture(ffi::TEXTURE_2D, self.transition_texture);
-            gl.Uniform1i(
-                gl.GetUniformLocation(self.cube_program, b"u_texture\0".as_ptr() as *const _),
-                0,
-            );
-
-            gl.BindVertexArray(self.quad_vao);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
-        }
-    }
-
-    fn render_helix_transition(&self, gl: &ffi::Gles2, layout: TransitionLayout, t: f32) {
-        unsafe {
-            gl.Viewport(
-                layout.scissor[0],
-                layout.scissor[1],
-                layout.scissor[2],
-                layout.scissor[3],
-            );
-            gl.UseProgram(self.cube_program);
-
-            let dir = self.transition_direction as f32;
-            let theta = t * std::f32::consts::PI;
-            let r = 0.8f32;
-
-            let x = r * theta.sin() * dir;
-            let z = -r * (1.0 - theta.cos());
-            let s = 1.0 - t * 0.3;
-
-            let aspect = layout.draw_rect[2] / layout.draw_rect[3];
-            gl.Uniform1f(self.cube_uniforms.aspect, aspect);
-
-            // Perspective matrix
-            let fov = 1.0f32;
-            let near = 0.1f32;
-            let far = 100.0f32;
-            let f = 1.0 / fov.tan();
-            let mut persp = [0.0f32; 16];
-            persp[0] = f / aspect;
-            persp[5] = f;
-            persp[10] = (far + near) / (near - far);
-            persp[11] = -1.0;
-            persp[14] = (2.0 * far * near) / (near - far);
-
-            // Translation (push back + helix Z offset)
-            let mut trans = [0.0f32; 16];
-            trans[0] = 1.0;
-            trans[5] = 1.0;
-            trans[10] = 1.0;
-            trans[15] = 1.0;
-            trans[12] = x;
-            trans[14] = -2.5 + z;
-
-            // Rotation around Y axis (theta * direction)
-            let rot_angle = theta * dir;
-            let cos_a = rot_angle.cos();
-            let sin_a = rot_angle.sin();
-            let mut rot = [0.0f32; 16];
-            rot[0] = cos_a;
-            rot[2] = sin_a;
-            rot[5] = 1.0;
-            rot[8] = -sin_a;
-            rot[10] = cos_a;
-            rot[15] = 1.0;
-
-            // Scale matrix
-            let mut scale = [0.0f32; 16];
-            scale[0] = s;
-            scale[5] = s;
-            scale[10] = 1.0;
-            scale[15] = 1.0;
-
-            // MVP = persp * trans * rot * scale
-            let model = mat4_mul(&rot, &scale);
-            let view = mat4_mul(&trans, &model);
-            let mvp = mat4_mul(&persp, &view);
-
-            gl.UniformMatrix4fv(self.cube_uniforms.mvp, 1, ffi::FALSE as u8, mvp.as_ptr());
-            gl.Uniform4f(
-                self.cube_uniforms.uv_rect,
-                layout.uv_rect[0],
-                layout.uv_rect[1],
-                layout.uv_rect[2],
-                layout.uv_rect[3],
-            );
-
-            let brightness = (1.0 - t * 0.6).max(0.3);
-            gl.Uniform1f(self.cube_uniforms.brightness, brightness);
-
-            gl.ActiveTexture(ffi::TEXTURE0);
-            gl.BindTexture(ffi::TEXTURE_2D, self.transition_texture);
-            gl.Uniform1i(
-                gl.GetUniformLocation(self.cube_program, b"u_texture\0".as_ptr() as *const _),
-                0,
-            );
-
-            gl.BindVertexArray(self.quad_vao);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
-        }
-    }
-
-    /// Capture current frame to transition FBO (called before tag switch)
+    /// Capture current frame to transition FBO (called before tag switch).
     #[allow(dead_code)]
     pub(crate) fn capture_transition_snapshot(&self, gl: &ffi::Gles2) {
         unsafe {
@@ -817,20 +557,6 @@ impl WaylandCompositor {
             gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
         }
     }
-}
-
-/// 4x4 matrix multiplication
-fn mat4_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
-    let mut r = [0.0f32; 16];
-    for i in 0..4 {
-        for j in 0..4 {
-            r[i * 4 + j] = a[i * 4 + 0] * b[0 * 4 + j]
-                + a[i * 4 + 1] * b[1 * 4 + j]
-                + a[i * 4 + 2] * b[2 * 4 + j]
-                + a[i * 4 + 3] * b[3 * 4 + j];
-        }
-    }
-    r
 }
 
 #[cfg(test)]
