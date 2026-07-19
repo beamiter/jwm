@@ -4,6 +4,16 @@ use glow::HasContext;
 
 use super::CompositorConnection;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowRetirement {
+    Closed,
+    ExplicitlyMinimized,
+}
+
+fn retirement_uses_genie(reason: WindowRetirement, genie_enabled: bool) -> bool {
+    genie_enabled && reason == WindowRetirement::ExplicitlyMinimized
+}
+
 impl<C: CompositorConnection> Compositor<C> {
     // =====================================================================
     // Feature 13: Set frame extents for blur mask
@@ -42,8 +52,51 @@ impl<C: CompositorConnection> Compositor<C> {
     // ----- Window management -----
 
     pub(crate) fn add_window(&mut self, x11_win: u32, x: i32, y: i32, w: u32, h: u32) {
-        if self.windows.contains_key(&x11_win) || w == 0 || h == 0 {
+        if w == 0 || h == 0 {
             return;
+        }
+        if let Some(wt) = self.windows.get_mut(&x11_win) {
+            if wt.fading_out {
+                // A client can remap the same XID before its unmap fade has
+                // completed. Reuse the tracked resources, cancel retirement,
+                // and refresh the named pixmap instead of letting the closing
+                // tick delete a live window.
+                wt.fading_out = false;
+                wt.x = x;
+                wt.y = y;
+                wt.w = w;
+                wt.h = h;
+                wt.anim_scale_target = 1.0;
+                wt.needs_pixmap_refresh = true;
+                wt.dirty = true;
+                self.effect_tick_clock.reset();
+                self.ripple_active.retain(|r| r.x11_win != x11_win);
+                if self.ripple_on_open {
+                    self.ripple_active.push(RippleState {
+                        x11_win,
+                        start: std::time::Instant::now(),
+                    });
+                }
+                self.needs_render = true;
+            }
+            return;
+        }
+
+        // A minimize animation owns the old pixmap independently. If the
+        // client remaps before it reaches the dock, retire that stale copy so
+        // the newly mapped live window is not drawn twice.
+        if let Some(index) = self
+            .genie_active
+            .iter()
+            .position(|animation| animation.x11_win == x11_win)
+        {
+            let animation = self.genie_active.remove(index);
+            self.free_texture_resources(
+                animation.gl_texture,
+                animation.binding,
+                animation.pixmap,
+                animation.damage,
+            );
         }
         log::debug!(
             "compositor: add_window START 0x{:x} {}x{} at ({},{})",
@@ -167,6 +220,9 @@ impl<C: CompositorConnection> Compositor<C> {
         };
 
         let initial_fade = if self.fading { 0.0 } else { 1.0 };
+        if self.fading || self.window_animation {
+            self.effect_tick_clock.reset();
+        }
         self.windows.insert(
             x11_win,
             WindowTexture {
@@ -205,6 +261,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 is_override_redirect: false,
                 wobbly: None,
                 motion_trail: std::collections::VecDeque::new(),
+                motion_trail_cursor: None,
                 audio_sync_target: None,
             },
         );
@@ -249,6 +306,10 @@ impl<C: CompositorConnection> Compositor<C> {
         self.damage_tracker.resize(new_w, new_h);
         self.dirty_region_tracker.resize(new_w, new_h);
         self.buffer_age_damage_history.clear();
+        // The persistent last-presented texture is full-output sized. It is
+        // recreated lazily from the first complete frame at the new geometry;
+        // tag switches before then intentionally fall back to no animation.
+        self.retire_presented_scene_snapshot();
 
         // Recreate blur FBOs for new screen size
         if self.blur_enabled {
@@ -290,34 +351,76 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.waterlily_scene_fbo = Self::create_scene_fbo(&self.gl, new_w, new_h).ok();
             }
         }
-        // Cancel in-progress transition on resize (screen geometry changed)
+        // Cancel in-progress transition on resize (screen geometry changed).
+        // Some transition modes keep both the old- and new-scene targets alive;
+        // retire the pair together so the second target cannot retain stale
+        // dimensions (or leak VRAM) until the next transition.
         if let Some((fbo, tex)) = self.transition_fbo.take() {
             unsafe {
                 self.gl.delete_framebuffer(fbo);
                 self.gl.delete_texture(tex);
             }
-            self.transition_start = None;
         }
+        if let Some((fbo, tex)) = self.transition_new_fbo.take() {
+            unsafe {
+                self.gl.delete_framebuffer(fbo);
+                self.gl.delete_texture(tex);
+            }
+        }
+        self.transition_start = None;
     }
 
+    /// Retire a window after an ordinary UnmapNotify/DestroyNotify.
+    ///
+    /// Client retirement is a close, not a minimize request. It may use the
+    /// close fade (and close particles), but must never target the Dock with a
+    /// genie animation merely because that effect is configured.
     pub(crate) fn remove_window(&mut self, x11_win: u32) {
-        // Spawn particles for closing window
-        if self.particle_effects {
+        self.retire_window(x11_win, WindowRetirement::Closed);
+    }
+
+    /// Retire a window after an explicit WM minimize request.
+    ///
+    /// This is the only X11 path allowed to transfer the live texture and
+    /// native pixmap resources into a genie animation. Restoring the same XID
+    /// through `add_window` cancels that detached animation safely.
+    pub(crate) fn minimize_window(&mut self, x11_win: u32) {
+        self.retire_window(x11_win, WindowRetirement::ExplicitlyMinimized);
+    }
+
+    fn retire_window(&mut self, x11_win: u32, reason: WindowRetirement) {
+        // X11 commonly reports UnmapNotify followed by DestroyNotify. The
+        // first event already owns the closing animation; treating the second
+        // as a fresh removal would spawn duplicate particles and immediately
+        // tear down the texture underneath the fade.
+        if self.windows.get(&x11_win).is_some_and(|wt| wt.fading_out) {
+            return;
+        }
+
+        // Particles describe a close/destruction. Explicit minimization has
+        // its own visual language and must not look like the client exploded.
+        if reason == WindowRetirement::Closed && self.particle_effects {
             if let Some(wt) = self.windows.get(&x11_win) {
                 self.spawn_particles_for_window(wt.x, wt.y, wt.w, wt.h);
             }
         }
 
-        // Phase 3.2: Start genie minimize animation. This takes ownership of the
-        // window's GPU/X resources and frees them when the animation completes,
-        // so we must NOT fall through to remove_window_immediate (which would
-        // delete the texture the genie pass is still sampling — a UAF).
-        if self.genie_minimize {
+        // A genie is reserved for an explicit minimize request. It takes
+        // ownership of the window's GPU/X resources and frees them when the
+        // animation completes, so do not fall through to the close cleanup.
+        if retirement_uses_genie(reason, self.genie_minimize) {
             if let Some(wt) = self.windows.get(&x11_win) {
                 let (gx, gy, gw, gh) = (wt.x as f32, wt.y as f32, wt.w as f32, wt.h as f32);
                 self.start_genie_animation(x11_win, gx, gy, gw, gh);
                 return;
             }
+        }
+        if reason == WindowRetirement::ExplicitlyMinimized {
+            // With the genie disabled there is no detached minimize visual to
+            // keep alive. A close fade would race the subsequent off-screen
+            // arrange and either disappear or animate at the hidden geometry.
+            self.remove_window_immediate(x11_win);
+            return;
         }
 
         // If fading is enabled and the window exists, start fade-out instead of immediate remove
@@ -326,6 +429,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 if !wt.fading_out && wt.fade_opacity > 0.0 {
                     wt.fading_out = true;
                     wt.anim_scale_target = self.window_animation_scale;
+                    self.effect_tick_clock.reset();
                     self.needs_render = true;
                     return;
                 }
@@ -628,5 +732,23 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.needs_render = true;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WindowRetirement, retirement_uses_genie};
+
+    #[test]
+    fn genie_is_reserved_for_explicit_minimize() {
+        assert!(!retirement_uses_genie(WindowRetirement::Closed, true));
+        assert!(!retirement_uses_genie(
+            WindowRetirement::ExplicitlyMinimized,
+            false,
+        ));
+        assert!(retirement_uses_genie(
+            WindowRetirement::ExplicitlyMinimized,
+            true,
+        ));
     }
 }

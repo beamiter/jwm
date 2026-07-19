@@ -16,12 +16,173 @@ use std::sync::mpsc;
 
 type GlScissor = (i32, i32, i32, i32);
 
+fn transformed_overlays_require_full_redraw(
+    overview_active: bool,
+    overview_closing: bool,
+    expose_active: bool,
+    has_expose_entries: bool,
+) -> bool {
+    overview_active || overview_closing || expose_active || has_expose_entries
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TransitionCapturePlan {
+    src: (i32, i32, i32, i32),
+    dst: (i32, i32, i32, i32),
+}
+
+/// Plan an unscaled GL blit from a full-output snapshot into a monitor-sized
+/// transition target. Coordinates outside the root output are clipped without
+/// stretching the visible portion.
+fn transition_capture_plan(
+    screen_w: u32,
+    screen_h: u32,
+    mon_x: i32,
+    mon_y: i32,
+    mon_w: u32,
+    mon_h: u32,
+    exclude_top: u32,
+) -> Option<TransitionCapturePlan> {
+    let screen_w = i32::try_from(screen_w).ok()?;
+    let screen_h = i32::try_from(screen_h).ok()?;
+    let mon_w = i32::try_from(mon_w).ok()?;
+    let mon_h = i32::try_from(mon_h).ok()?;
+    let exclude_top = i32::try_from(exclude_top.min(mon_h as u32)).ok()?;
+    let workspace_h = mon_h.checked_sub(exclude_top)?;
+    if screen_w <= 0 || screen_h <= 0 || mon_w <= 0 || workspace_h <= 0 {
+        return None;
+    }
+
+    // GL's origin is at the bottom-left. Excluding a top bar therefore keeps
+    // the lower `workspace_h` rows starting at the monitor's GL-space bottom.
+    let source_x0 = mon_x;
+    let source_y0 =
+        i64::from(screen_h).checked_sub(i64::from(mon_y).checked_add(i64::from(mon_h))?)?;
+    let source_x1 = i64::from(mon_x).checked_add(i64::from(mon_w))?;
+    let source_y1 = source_y0.checked_add(i64::from(workspace_h))?;
+
+    let clipped_x0 = i64::from(source_x0).clamp(0, i64::from(screen_w));
+    let clipped_y0 = source_y0.clamp(0, i64::from(screen_h));
+    let clipped_x1 = source_x1.clamp(0, i64::from(screen_w));
+    let clipped_y1 = source_y1.clamp(0, i64::from(screen_h));
+    if clipped_x1 <= clipped_x0 || clipped_y1 <= clipped_y0 {
+        return None;
+    }
+
+    let dst_x0 = clipped_x0.checked_sub(i64::from(source_x0))?;
+    let dst_y0 = clipped_y0.checked_sub(source_y0)?;
+    let width = clipped_x1.checked_sub(clipped_x0)?;
+    let height = clipped_y1.checked_sub(clipped_y0)?;
+
+    Some(TransitionCapturePlan {
+        src: (
+            i32::try_from(clipped_x0).ok()?,
+            i32::try_from(clipped_y0).ok()?,
+            i32::try_from(clipped_x1).ok()?,
+            i32::try_from(clipped_y1).ok()?,
+        ),
+        dst: (
+            i32::try_from(dst_x0).ok()?,
+            i32::try_from(dst_y0).ok()?,
+            i32::try_from(dst_x0.checked_add(width)?).ok()?,
+            i32::try_from(dst_y0.checked_add(height)?).ok()?,
+        ),
+    })
+}
+
+fn full_output_copy_extent(width: u32, height: u32) -> Option<(i32, i32)> {
+    let width = i32::try_from(width).ok()?;
+    let height = i32::try_from(height).ok()?;
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PresentedSceneCopyPlan {
+    Disabled,
+    Full,
+    Region(GlScissor),
+}
+
+/// Choose how much of the persistent scene texture must be synchronized.
+///
+/// An absent/invalid snapshot needs one full copy. Once valid, a repaired
+/// partial-damage frame only changes pixels inside the GL-space repair box, so
+/// updating that same rectangle keeps a complete snapshot without a full 4K
+/// blit on every frame.
+fn presented_scene_copy_plan(
+    transitions_enabled: bool,
+    snapshot_usable: bool,
+    repair_scissor: Option<GlScissor>,
+    width: u32,
+    height: u32,
+) -> PresentedSceneCopyPlan {
+    if !transitions_enabled {
+        return PresentedSceneCopyPlan::Disabled;
+    }
+    let Some((width, height)) = full_output_copy_extent(width, height) else {
+        return PresentedSceneCopyPlan::Disabled;
+    };
+    if !snapshot_usable {
+        return PresentedSceneCopyPlan::Full;
+    }
+    let Some(repair) = repair_scissor else {
+        return PresentedSceneCopyPlan::Full;
+    };
+    let output = (0, 0, width, height);
+    match intersect_gl_scissors(output, repair) {
+        Some(region) if region != output => PresentedSceneCopyPlan::Region(region),
+        _ => PresentedSceneCopyPlan::Full,
+    }
+}
+
 fn intersect_gl_scissors(a: GlScissor, b: GlScissor) -> Option<GlScissor> {
     let x0 = a.0.max(b.0);
     let y0 = a.1.max(b.1);
     let x1 = a.0.saturating_add(a.2).min(b.0.saturating_add(b.2));
     let y1 = a.1.saturating_add(a.3).min(b.1.saturating_add(b.3));
     (x1 > x0 && y1 > y0).then_some((x0, y0, x1 - x0, y1 - y0))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WallpaperBlendPlan {
+    old_global_opacity: Option<f32>,
+    current_opacity: Option<f32>,
+}
+
+/// Select the layers for one output.
+///
+/// An output with a monitor override never participates in the global
+/// transition. Global fallbacks draw the old image opaque and the new image
+/// over it at `progress`; this is the correct interpolation for ordinary
+/// source-over alpha blending and avoids dimming halfway through the fade.
+fn wallpaper_blend_plan(
+    has_monitor_override: bool,
+    has_current_global: bool,
+    has_old_global: bool,
+    transition_progress: Option<f32>,
+) -> WallpaperBlendPlan {
+    if has_monitor_override {
+        return WallpaperBlendPlan {
+            old_global_opacity: None,
+            current_opacity: Some(1.0),
+        };
+    }
+
+    if has_old_global && transition_progress.is_some() {
+        let progress = transition_progress
+            .filter(|progress| progress.is_finite())
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+        WallpaperBlendPlan {
+            old_global_opacity: Some(1.0),
+            current_opacity: has_current_global.then_some(progress),
+        }
+    } else {
+        WallpaperBlendPlan {
+            old_global_opacity: None,
+            current_opacity: has_current_global.then_some(1.0),
+        }
+    }
 }
 
 fn enclosing_dirty_rect(x: f32, y: f32, w: f32, h: f32) -> DirtyRect {
@@ -35,6 +196,40 @@ fn enclosing_dirty_rect(x: f32, y: f32, w: f32, h: f32) -> DirtyRect {
         right.saturating_sub(left) as u32,
         bottom.saturating_sub(top) as u32,
     )
+}
+
+fn rect_covers_output(x: i32, y: i32, width: u32, height: u32, sw: u32, sh: u32) -> bool {
+    x <= 0
+        && y <= 0
+        && i64::from(x) + i64::from(width) >= i64::from(sw)
+        && i64::from(y) + i64::from(height) >= i64::from(sh)
+}
+
+/// Whether a window can safely hide every lower layer.
+///
+/// This is intentionally conservative. A fullscreen source rectangle is not
+/// an occluder when its final draw can expose even one destination pixel via
+/// alpha, rounded/shaped edges, scaling, or a deformation shader.
+fn is_opaque_occluder(
+    has_rgba: bool,
+    layer_opacity: f32,
+    corner_radius: f32,
+    is_shaped: bool,
+    window_scale: f32,
+    animation_scale: f32,
+    geometry_deformation_active: bool,
+) -> bool {
+    let identity_scale = |scale: f32| scale.is_finite() && (scale - 1.0).abs() <= f32::EPSILON;
+
+    !has_rgba
+        && layer_opacity.is_finite()
+        && layer_opacity >= 1.0
+        && corner_radius.is_finite()
+        && corner_radius <= 0.0
+        && !is_shaped
+        && identity_scale(window_scale)
+        && identity_scale(animation_scale)
+        && !geometry_deformation_active
 }
 
 /// Conservative screen-space reach of the dual-Kawase filter.
@@ -105,8 +300,13 @@ impl<C: CompositorConnection> Compositor<C> {
     // Tag-switch slide transition
     // =====================================================================
 
-    /// Called just before a tag switch. Captures the current back-buffer into
-    /// a snapshot texture so `render_frame` can slide the old scene out.
+    /// Called just before a tag switch. Crops the compositor-owned copy of the
+    /// last successfully presented scene into a monitor-sized transition
+    /// texture so `render_frame` can animate the old scene out.
+    ///
+    /// A platform back buffer is deliberately never read here: after
+    /// SwapBuffers its contents are undefined, while waiting for the next
+    /// render would capture the already-switched tag.
     /// `mon_rect` is (x, y, w, h) of the monitor where the switch happens.
     pub(crate) fn notify_tag_switch(
         &mut self,
@@ -127,6 +327,32 @@ impl<C: CompositorConnection> Compositor<C> {
         let (mon_x, mon_y, mon_w, mon_h) = mon_rect;
         let mon_w = mon_w.max(1);
         let mon_h = mon_h.max(1);
+        if full_output_copy_extent(mon_w, mon_h).is_none() {
+            self.transition_start = None;
+            self.retire_transition_targets();
+            self.force_full_redraw();
+            log::warn!(
+                "compositor: tag-switch transition skipped (monitor dimensions overflow GL)"
+            );
+            return;
+        }
+
+        let Some(source_fbo) = self.presented_scene_fbo.as_ref().and_then(|(fbo, _)| {
+            self.presented_scene_status
+                .is_usable(self.screen_w, self.screen_h)
+                .then_some(*fbo)
+        }) else {
+            // This is expected before the compositor's first successful
+            // frame, after a resize, or after a failed swap. Switch tags
+            // immediately instead of animating undefined/stale pixels.
+            self.transition_start = None;
+            self.retire_transition_targets();
+            self.force_full_redraw();
+            log::debug!(
+                "compositor: tag-switch transition skipped (no stable presented-scene snapshot)"
+            );
+            return;
+        };
 
         // Recreate FBOs if monitor size changed
         let size_changed = self.transition_fbo.as_ref().map_or(true, |_| {
@@ -149,14 +375,35 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // Create snapshot FBO at monitor size
         if self.transition_fbo.is_none() {
-            self.transition_fbo = unsafe { Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok() };
+            match unsafe { Self::create_scene_fbo(&self.gl, mon_w, mon_h) } {
+                Ok(target) => self.transition_fbo = Some(target),
+                Err(error) => {
+                    self.transition_start = None;
+                    self.retire_transition_targets();
+                    self.force_full_redraw();
+                    log::warn!(
+                        "compositor: tag-switch transition target allocation failed: {error}"
+                    );
+                    return;
+                }
+            }
         }
 
         // Create new-scene FBO for modes that need both old and new textures
         let needs_new_fbo = self.transition_mode.needs_new_scene_fbo();
         if needs_new_fbo && self.transition_new_fbo.is_none() {
-            self.transition_new_fbo =
-                unsafe { Self::create_scene_fbo(&self.gl, mon_w, mon_h).ok() };
+            match unsafe { Self::create_scene_fbo(&self.gl, mon_w, mon_h) } {
+                Ok(target) => self.transition_new_fbo = Some(target),
+                Err(error) => {
+                    self.transition_start = None;
+                    self.retire_transition_targets();
+                    self.force_full_redraw();
+                    log::warn!(
+                        "compositor: secondary tag-switch target allocation failed: {error}"
+                    );
+                    return;
+                }
+            }
         }
 
         // Store monitor rect for rendering
@@ -166,8 +413,24 @@ impl<C: CompositorConnection> Compositor<C> {
         self.transition_mon_h = mon_h;
 
         if let Some((snap_fbo, _)) = &self.transition_fbo {
+            let snap_fbo = *snap_fbo;
             self.transition_exclude_top = exclude_top.min(mon_h.saturating_sub(1));
-            self.capture_transition_scene(*snap_fbo, mon_x, mon_y, mon_w, mon_h);
+            if !self.capture_transition_scene_from(
+                Some(source_fbo),
+                snap_fbo,
+                mon_x,
+                mon_y,
+                mon_w,
+                mon_h,
+            ) {
+                self.transition_start = None;
+                self.retire_transition_targets();
+                self.force_full_redraw();
+                log::warn!(
+                    "compositor: tag-switch transition skipped (monitor outside stable snapshot)"
+                );
+                return;
+            }
             self.transition_start = Some(std::time::Instant::now());
             self.transition_duration = duration;
             self.transition_direction = if direction >= 0 { 1.0 } else { -1.0 };
@@ -195,40 +458,201 @@ impl<C: CompositorConnection> Compositor<C> {
         mon_y: i32,
         mon_w: u32,
         mon_h: u32,
-    ) {
+    ) -> bool {
+        self.capture_transition_scene_from(None, dst_fbo, mon_x, mon_y, mon_w, mon_h)
+    }
+
+    fn capture_transition_scene_from(
+        &self,
+        source_fbo: Option<glow::Framebuffer>,
+        dst_fbo: glow::Framebuffer,
+        mon_x: i32,
+        mon_y: i32,
+        mon_w: u32,
+        mon_h: u32,
+    ) -> bool {
         let exclude_top = self.transition_exclude_top.min(mon_h);
-        let workspace_h = mon_h.saturating_sub(exclude_top);
-        let gl_y = self.screen_h as i32 - (mon_y + mon_h as i32);
+        let Some(plan) = transition_capture_plan(
+            self.screen_w,
+            self.screen_h,
+            mon_x,
+            mon_y,
+            mon_w,
+            mon_h,
+            exclude_top,
+        ) else {
+            return false;
+        };
 
         unsafe {
+            let scissor_enabled = self.gl.is_enabled(glow::SCISSOR_TEST);
+            if scissor_enabled {
+                self.gl.disable(glow::SCISSOR_TEST);
+            }
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(dst_fbo));
             self.gl.viewport(0, 0, mon_w as i32, mon_h as i32);
             self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
             self.gl.clear(glow::COLOR_BUFFER_BIT);
             self.gl.clear_color(0.0, 0.0, 0.0, 1.0);
 
-            if workspace_h > 0 {
-                self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-                self.gl
-                    .bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(dst_fbo));
-                self.gl.blit_framebuffer(
-                    mon_x,
-                    gl_y,
-                    mon_x + mon_w as i32,
-                    gl_y + workspace_h as i32,
-                    0,
-                    0,
-                    mon_w as i32,
-                    workspace_h as i32,
-                    glow::COLOR_BUFFER_BIT,
-                    glow::NEAREST,
-                );
-            }
+            self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, source_fbo);
+            self.gl
+                .bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(dst_fbo));
+            self.gl.blit_framebuffer(
+                plan.src.0,
+                plan.src.1,
+                plan.src.2,
+                plan.src.3,
+                plan.dst.0,
+                plan.dst.1,
+                plan.dst.2,
+                plan.dst.3,
+                glow::COLOR_BUFFER_BIT,
+                glow::NEAREST,
+            );
 
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             self.gl
                 .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            if scissor_enabled {
+                self.gl.enable(glow::SCISSOR_TEST);
+            }
         }
+        true
+    }
+
+    fn retire_transition_targets(&mut self) {
+        if let Some((fbo, texture)) = self.transition_fbo.take() {
+            unsafe {
+                self.gl.delete_framebuffer(fbo);
+                self.gl.delete_texture(texture);
+            }
+        }
+        if let Some((fbo, texture)) = self.transition_new_fbo.take() {
+            unsafe {
+                self.gl.delete_framebuffer(fbo);
+                self.gl.delete_texture(texture);
+            }
+        }
+    }
+
+    /// Delete the persistent last-presented target and invalidate its metadata.
+    /// Used on output resize and compositor teardown.
+    pub(super) fn retire_presented_scene_snapshot(&mut self) {
+        if let Some((fbo, texture)) = self.presented_scene_fbo.take() {
+            unsafe {
+                self.gl.delete_framebuffer(fbo);
+                self.gl.delete_texture(texture);
+            }
+        }
+        self.presented_scene_status.reset();
+    }
+
+    /// Synchronize the final default framebuffer into a stable compositor
+    /// texture. The first/invalid frame copies the complete repaired output;
+    /// subsequent partial-damage frames only copy their repair rectangle.
+    ///
+    /// The caller only commits validity after the following buffer swap
+    /// succeeds. A failed swap must invalidate the overwritten candidate.
+    fn capture_presented_scene_candidate(&mut self, repair_scissor: Option<GlScissor>) -> bool {
+        if self.transition_mode == TransitionMode::None {
+            self.retire_presented_scene_snapshot();
+            return false;
+        }
+        let Some((width, height)) = full_output_copy_extent(self.screen_w, self.screen_h) else {
+            self.presented_scene_status.invalidate();
+            return false;
+        };
+
+        let snapshot_usable = self.presented_scene_fbo.is_some()
+            && self
+                .presented_scene_status
+                .is_usable(self.screen_w, self.screen_h);
+        let copy_plan = presented_scene_copy_plan(
+            true,
+            snapshot_usable,
+            repair_scissor,
+            self.screen_w,
+            self.screen_h,
+        );
+        if copy_plan == PresentedSceneCopyPlan::Disabled {
+            self.retire_presented_scene_snapshot();
+            return false;
+        }
+
+        if self.presented_scene_fbo.is_some()
+            && !self
+                .presented_scene_status
+                .has_dimensions(self.screen_w, self.screen_h)
+        {
+            self.retire_presented_scene_snapshot();
+        }
+
+        if self.presented_scene_fbo.is_none() {
+            // RGB10_A2 support does not change between frames. After one
+            // allocation failure, use the no-transition fallback until the
+            // effect is disabled or the output is resized instead of
+            // allocating and logging at refresh rate.
+            if self
+                .presented_scene_status
+                .allocation_failed_for(self.screen_w, self.screen_h)
+            {
+                return false;
+            }
+            match unsafe { Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h) } {
+                Ok(target) => {
+                    self.presented_scene_fbo = Some(target);
+                    self.presented_scene_status
+                        .record_allocation(self.screen_w, self.screen_h);
+                }
+                Err(error) => {
+                    self.presented_scene_status
+                        .record_allocation_failure(self.screen_w, self.screen_h);
+                    log::warn!(
+                        "compositor: last-presented scene target allocation failed: {error}"
+                    );
+                    return false;
+                }
+            }
+        }
+
+        let Some((dst_fbo, _)) = self.presented_scene_fbo else {
+            self.presented_scene_status.invalidate();
+            return false;
+        };
+        let copy_rect = match copy_plan {
+            PresentedSceneCopyPlan::Disabled => unreachable!(),
+            PresentedSceneCopyPlan::Full => (0, 0, width, height),
+            PresentedSceneCopyPlan::Region(region) => region,
+        };
+
+        unsafe {
+            let scissor_enabled = self.gl.is_enabled(glow::SCISSOR_TEST);
+            if scissor_enabled {
+                self.gl.disable(glow::SCISSOR_TEST);
+            }
+            self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            self.gl
+                .bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(dst_fbo));
+            self.gl.blit_framebuffer(
+                copy_rect.0,
+                copy_rect.1,
+                copy_rect.0 + copy_rect.2,
+                copy_rect.1 + copy_rect.3,
+                copy_rect.0,
+                copy_rect.1,
+                copy_rect.0 + copy_rect.2,
+                copy_rect.1 + copy_rect.3,
+                glow::COLOR_BUFFER_BIT,
+                glow::NEAREST,
+            );
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.gl.viewport(0, 0, width, height);
+            if scissor_enabled {
+                self.gl.enable(glow::SCISSOR_TEST);
+            }
+        }
+        true
     }
 
     pub(crate) fn force_full_redraw(&mut self) {
@@ -269,7 +693,34 @@ impl<C: CompositorConnection> Compositor<C> {
     // Feature 11: Debug HUD toggle
     // =====================================================================
     pub(crate) fn set_transition_mode(&mut self, mode: &str) {
-        self.transition_mode = TransitionMode::from_name(mode);
+        let mode = TransitionMode::from_name_or_none(mode);
+        if self.transition_mode != mode {
+            self.transition_mode = mode;
+            if mode == TransitionMode::None {
+                self.transition_start = None;
+            }
+            if mode == TransitionMode::None
+                && (self.presented_scene_fbo.is_some()
+                    || self.transition_fbo.is_some()
+                    || self.transition_new_fbo.is_some())
+            {
+                if !self.context_current {
+                    match self.graphics.make_current() {
+                        Ok(()) => self.context_current = true,
+                        Err(error) => log::warn!(
+                            "compositor: deferring disabled transition snapshot cleanup: {error}"
+                        ),
+                    }
+                }
+                if self.context_current {
+                    self.retire_presented_scene_snapshot();
+                    self.retire_transition_targets();
+                } else {
+                    self.presented_scene_status.invalidate();
+                }
+            }
+            self.needs_render = true;
+        }
     }
 
     pub(crate) fn set_debug_hud(&mut self, enabled: bool) {
@@ -570,6 +1021,119 @@ impl<C: CompositorConnection> Compositor<C> {
 
     /// Check if there's a single fullscreen opaque window covering the screen.
     /// If so, and fullscreen_unredirect is enabled, we can skip compositing.
+    fn scene_requires_composition(
+        &self,
+        scene: &[(u32, i32, i32, u32, u32)],
+        focused: Option<u32>,
+    ) -> bool {
+        if self.needs_postprocess()
+            || self.screenshot_requests.has_pending()
+            || self.system_ui.is_some()
+            || self.debug_hud
+            || self.recording_active
+            || self.recording_region_overlay.is_some()
+            || self.waterlily_visible()
+            || self.waterlily_layer_dirty
+            || self.transition_start.is_some()
+            || self.overview_active
+            || self.overview_closing
+            || self.expose_active
+            || !self.expose_entries.is_empty()
+            || self.snap_target.is_some()
+            || self.peek_active
+            || self.annotation_active
+            || !self.annotation_strokes.is_empty()
+            || self.edge_glow_active
+            || self.zoom_to_fit_window.is_some()
+            || !self.particle_systems.is_empty()
+            || !self.genie_active.is_empty()
+            || !self.ripple_active.is_empty()
+            || self.tickless_focus_or_wallpaper_animation_active()
+            || self.pending_wallpaper.is_some()
+            || !self.pending_monitor_wallpapers.is_empty()
+            || (self.window_tabs_enabled && self.window_groups.values().any(|tabs| tabs.len() > 1))
+        {
+            return true;
+        }
+
+        // Tilt can react to the next pointer event even while its current
+        // target is neutral. Keeping composition enabled avoids a one-frame
+        // hole where a fullscreen client remains unredirected as tilt starts.
+        if self.window_tilt {
+            return true;
+        }
+
+        // A fullscreen top-level window completely occludes the clients below
+        // it, so only the candidate at the top of the stack can require
+        // per-window composition here.  Looking at every scene entry made an
+        // unrelated translucent window underneath a game permanently disable
+        // fullscreen unredirect.
+        scene.last().is_some_and(|&(win, _, _, _, _)| {
+            self.windows.get(&win).is_some_and(|wt| {
+                let radius = wt.corner_radius_override.unwrap_or(self.corner_radius);
+                let base_opacity = if focused == Some(win) {
+                    self.active_opacity
+                } else {
+                    self.inactive_opacity
+                };
+                let opacity = wt.opacity_override.unwrap_or(base_opacity)
+                    * wt.fade_opacity
+                    * self.peek_opacity_for(&wt.class_name);
+                wt.has_rgba
+                    || wt.is_frosted
+                    || (self.shadow_enabled && !wt.is_fullscreen)
+                    || (self.border_enabled && self.border_width > 0.0)
+                    || radius > 0.0
+                    || opacity < 1.0
+                    || (wt.scale - 1.0).abs() > 0.001
+                    || (wt.anim_scale - 1.0).abs() > 0.001
+                    || wt.wobbly.is_some()
+                    || !wt.motion_trail.is_empty()
+                    || (self.attention_animation && wt.is_urgent)
+            })
+        })
+    }
+
+    /// Restore compositor ownership of a manually-unredirected window.
+    ///
+    /// On failure the window is still being presented by X directly, so keep
+    /// the state and tell the caller to continue bypassing this frame. Drawing
+    /// into the overlay while the server still owns the client would otherwise
+    /// produce a blank/frozen frame and lose the only handle needed to retry.
+    fn restore_unredirected_window(&mut self, window: u32, reason: &str) -> bool {
+        let result = self
+            .conn
+            .redirect_window_manual(window)
+            .and_then(|_| self.conn.flush_x11());
+        match result {
+            Ok(()) => {
+                if let Some(wt) = self.windows.get_mut(&window) {
+                    // The server allocated a new backing pixmap while the
+                    // window was unredirected; the old TFP binding is stale.
+                    wt.needs_pixmap_refresh = true;
+                }
+                self.needs_render = true;
+                log::info!(
+                    "compositor: re-redirected window 0x{:x} ({})",
+                    window,
+                    reason
+                );
+                true
+            }
+            Err(error) => {
+                self.unredirected_window = Some(window);
+                self.needs_render = true;
+                log::warn!(
+                    "compositor: failed to re-redirect window 0x{:x} ({}): {}",
+                    window,
+                    reason,
+                    error
+                );
+                false
+            }
+        }
+    }
+
     pub(super) fn check_fullscreen_unredirect(
         &mut self,
         scene: &[(u32, i32, i32, u32, u32)],
@@ -577,52 +1141,88 @@ impl<C: CompositorConnection> Compositor<C> {
     ) -> bool {
         // The simulation layer cannot run while the X server presents a
         // fullscreen client directly. Restore redirection on its first frame.
-        if (self.waterlily_visible() || self.waterlily_layer_dirty)
-            || self.system_ui.is_some()
-            || self.recording_active
-            || self.recording_region_overlay.is_some()
-        {
+        if self.scene_requires_composition(scene, focused) {
             if let Some(previous) = self.unredirected_window.take() {
-                let _ = self.conn.redirect_window_manual(previous);
-                let _ = self.conn.flush_x11();
-                if let Some(wt) = self.windows.get_mut(&previous) {
-                    wt.needs_pixmap_refresh = true;
+                if !self.restore_unredirected_window(previous, "compositor effect became active") {
+                    return true;
                 }
-                self.needs_render = true;
-                log::info!(
-                    "compositor: re-redirected fullscreen window 0x{:x} for overlay",
-                    previous
-                );
             }
             return false;
         }
         if !self.fullscreen_unredirect {
+            if let Some(previous) = self.unredirected_window.take() {
+                if !self.restore_unredirected_window(previous, "feature disabled") {
+                    return true;
+                }
+            }
             return false;
         }
         // Only unredirect if the top (focused) window is fullscreen and opaque
         if let Some(focused_win) = focused {
             if let Some(wt) = self.windows.get(&focused_win) {
-                if wt.is_fullscreen && !wt.has_rgba {
+                if wt.is_fullscreen
+                    && !wt.has_rgba
+                    && scene.last().is_some_and(|entry| entry.0 == focused_win)
+                {
                     // Check if it covers the full screen
                     if let Some(&(_, x, y, w, h)) =
                         scene.iter().rfind(|&&(win, _, _, _, _)| win == focused_win)
                     {
-                        if x <= 0
-                            && y <= 0
-                            && (x + w as i32) >= self.screen_w as i32
-                            && (y + h as i32) >= self.screen_h as i32
+                        if i64::from(x) <= 0
+                            && i64::from(y) <= 0
+                            && i64::from(x) + i64::from(w) >= i64::from(self.screen_w)
+                            && i64::from(y) + i64::from(h) >= i64::from(self.screen_h)
                         {
                             // Unredirect: the X server draws directly
-                            if self.unredirected_window != Some(focused_win) {
-                                let _ = self.conn.unredirect_window_manual(focused_win);
-                                let _ = self.conn.flush_x11();
-                                self.unredirected_window = Some(focused_win);
-                                log::info!(
-                                    "compositor: unredirected fullscreen window 0x{:x}",
-                                    focused_win
-                                );
+                            if self.unredirected_window == Some(focused_win) {
+                                if let Err(error) = self.conn.flush_x11() {
+                                    self.needs_render = true;
+                                    log::warn!(
+                                        "compositor: retrying fullscreen unredirect flush for 0x{:x}: {}",
+                                        focused_win,
+                                        error
+                                    );
+                                }
+                                return true;
                             }
-                            return true;
+                            match self.conn.unredirect_window_manual(focused_win) {
+                                Ok(()) => {
+                                    // Once accepted by the connection, treat
+                                    // the request as authoritative even if the
+                                    // flush reports a transient error. Drawing
+                                    // concurrently would be unsafe; the next
+                                    // frame retries the flush above.
+                                    self.unredirected_window = Some(focused_win);
+                                    // Frames presented directly by X bypass the
+                                    // compositor-owned snapshot. Retaining the
+                                    // previous composited frame here would
+                                    // mislabel stale pixels as the last scene.
+                                    self.presented_scene_status.invalidate();
+                                    if let Err(error) = self.conn.flush_x11() {
+                                        self.needs_render = true;
+                                        log::warn!(
+                                            "compositor: fullscreen unredirect flush failed for 0x{:x}: {}",
+                                            focused_win,
+                                            error
+                                        );
+                                    } else {
+                                        log::info!(
+                                            "compositor: unredirected fullscreen window 0x{:x}",
+                                            focused_win
+                                        );
+                                    }
+                                    return true;
+                                }
+                                Err(error) => {
+                                    self.needs_render = true;
+                                    log::warn!(
+                                        "compositor: failed to unredirect fullscreen window 0x{:x}: {}",
+                                        focused_win,
+                                        error
+                                    );
+                                    return false;
+                                }
+                            }
                         }
                     }
                 }
@@ -630,16 +1230,9 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         // Re-redirect if we had an unredirected window that's no longer fullscreen
         if let Some(prev) = self.unredirected_window.take() {
-            let _ = self.conn.redirect_window_manual(prev);
-            let _ = self.conn.flush_x11();
-            // The X server allocated a fresh backing pixmap while the window was
-            // unredirected; the old NameWindowPixmap binding is now stale. Force
-            // a rebind or the window renders frozen content until its next resize.
-            if let Some(wt) = self.windows.get_mut(&prev) {
-                wt.needs_pixmap_refresh = true;
+            if !self.restore_unredirected_window(prev, "window no longer eligible") {
+                return true;
             }
-            log::info!("compositor: re-redirected window 0x{:x}", prev);
-            self.needs_render = true;
         }
         false
     }
@@ -655,6 +1248,31 @@ impl<C: CompositorConnection> Compositor<C> {
         hasher.finish()
     }
 
+    fn draw_wallpaper_layer(
+        &self,
+        texture: glow::Texture,
+        mode: WallpaperMode,
+        img_w: u32,
+        img_h: u32,
+        area: (f32, f32, f32, f32),
+        opacity: f32,
+    ) {
+        if opacity <= 0.0 {
+            return;
+        }
+        let (rx, ry, rw, rh) = compute_wallpaper_rect(mode, area, img_w, img_h);
+        unsafe {
+            self.gl
+                .uniform_1_f32(self.win_uniforms.opacity.as_ref(), opacity);
+            self.gl
+                .uniform_4_f32(self.win_uniforms.rect.as_ref(), rx, ry, rw, rh);
+            self.gl
+                .uniform_2_f32(self.win_uniforms.size.as_ref(), rw, rh);
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        }
+    }
+
     /// Render a composited frame.
     ///
     /// `scene` is an ordered list of (x11_win, x, y, w, h) from bottom to top.
@@ -666,6 +1284,37 @@ impl<C: CompositorConnection> Compositor<C> {
         focused: Option<u32>,
     ) -> bool {
         let bench_frame_start = std::time::Instant::now();
+
+        // The WM removes an unmapped client from its live stacking list before
+        // the compositor's fade-out finishes. Keep such compositor-owned
+        // textures in a small closing layer so the fade is actually visible
+        // instead of ticking an off-screen state until it is freed.
+        let mut closing_scene = Vec::new();
+        let has_detached_fade = self.fading
+            && self.windows.iter().any(|(&id, wt)| {
+                wt.fading_out && !scene.iter().any(|&(scene_id, ..)| scene_id == id)
+            });
+        let scene = if has_detached_fade {
+            closing_scene.extend_from_slice(scene);
+            closing_scene.extend(self.windows.iter().filter_map(|(&id, wt)| {
+                (wt.fading_out
+                    && wt.w > 0
+                    && wt.h > 0
+                    && !scene.iter().any(|&(scene_id, ..)| scene_id == id))
+                .then_some((id, wt.x, wt.y, wt.w, wt.h))
+            }));
+            closing_scene.as_slice()
+        } else {
+            scene
+        };
+
+        // Consume the wakeup that brought us here before any fullscreen bypass
+        // can return early. Otherwise a direct-scanout/unredirected client
+        // leaves this flag permanently armed and both X11 loops poll at 1 ms.
+        // Requests generated while preparing this frame are folded in again at
+        // the unchanged-frame gate below.
+        let mut explicit_render = std::mem::take(&mut self.needs_render);
+        let mut damage_wakeup = std::mem::take(&mut self.damage_render_pending);
 
         // Auto-enable profiler when benchmark is running
         if self.benchmark.is_running() && !self.frame_profiler.is_enabled() {
@@ -692,7 +1341,6 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         self.poll_waterlily_frame();
         self.tick_waterlily_motion(std::time::Instant::now());
-        let waterlily_active = self.waterlily_visible();
         let waterlily_layer_dirty = self.waterlily_layer_dirty;
 
         // P6A: Process deferred X11 operations at start of render frame
@@ -772,13 +1420,21 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
 
+        // Arm focus highlighting before either fullscreen bypass decision.
+        // Otherwise the first focus change can enter unredirect before the
+        // highlight exists, so no later frame ever starts the animation.
+        if self.focus_highlight {
+            if let Some(fw) = focused
+                && self.last_focused_window != Some(fw)
+            {
+                self.focus_highlight_start = Some((fw, std::time::Instant::now()));
+            }
+            self.last_focused_window = focused;
+        }
+
         // Phase 2.3: Direct scanout check - bypass compositor for eligible fullscreen windows
         // This provides -8-12ms latency reduction for fullscreen games/video
-        if self.recording_active
-            || self.recording_region_overlay.is_some()
-            || waterlily_active
-            || waterlily_layer_dirty
-        {
+        if self.scene_requires_composition(scene, focused) {
             // Recording and compositor-owned visual layers need frames produced
             // by the compositor. End a previously active bypass immediately so
             // a fullscreen client cannot hide them. WaterLily is not window
@@ -809,13 +1465,11 @@ impl<C: CompositorConnection> Compositor<C> {
                 })
             }));
 
-            let (should_scanout, _scanout_win) =
-                self.direct_scanout_mgr.check_scene(&scene_info, focused);
+            // X11 has no KMS plane commit here; this manager is eligibility
+            // telemetry only. The real bypass below is Composite unredirect.
+            // Returning on this in-memory result would freeze the last frame.
+            let _ = self.direct_scanout_mgr.check_scene(&scene_info, focused);
             self.scratch_scene_info = scene_info;
-            if should_scanout {
-                // Direct scanout active - bypass compositor rendering
-                return false;
-            }
         }
 
         // Fullscreen unredirect check
@@ -823,11 +1477,33 @@ impl<C: CompositorConnection> Compositor<C> {
             return false;
         }
 
+        // Delta-driven effects use a clock that only runs across consecutive
+        // active frames. `frame_stats.last_frame_time` can predate a newly
+        // spawned effect by minutes after compositor idle, which would make a
+        // fresh fade or particle burst finish before its first draw.
+        let incremental_effects_active = self.incremental_effects_active();
+        let effect_dt = self
+            .effect_tick_clock
+            .delta(std::time::Instant::now(), incremental_effects_active);
+
         // Tick fade animations
-        let fades_active = self.tick_fades();
+        let fades_active = self.tick_fades(effect_dt);
 
         // Tick wobbly spring physics
         let wobbly_active = self.tick_wobbly();
+
+        // Tick particle and motion-trail lifetimes before the unchanged-frame
+        // gate so their state cannot get stuck behind that optimization.
+        let particles_active = self.tick_particles(effect_dt);
+        self.effect_tick_clock
+            .finish_frame(fades_active || particles_active);
+        let motion_trails_active = self.tick_motion_trails();
+        let tilt_pending = self.window_tilt
+            && ((self.tilt_current_x - self.tilt_target_x).abs() > 0.0001
+                || (self.tilt_current_y - self.tilt_target_y).abs() > 0.0001);
+        let attention_active =
+            self.attention_animation && self.windows.values().any(|wt| wt.is_urgent);
+        let overview_animating = self.overview_animation_pending();
 
         // Tick Phase 5 animations
         let expose_animating = self.tick_expose();
@@ -843,33 +1519,58 @@ impl<C: CompositorConnection> Compositor<C> {
         // Update damage tracker scene state for dynamic thresholds
         let any_animating = fades_active
             || wobbly_active
+            || particles_active
+            || motion_trails_active
+            || tilt_pending
+            || overview_animating
             || expose_animating
             || snap_animating
             || peek_animating
             || genie_active
             || ripples_active
             || focus_highlight_active
-            || wallpaper_crossfade_active;
+            || wallpaper_crossfade_active
+            || attention_active;
         self.damage_tracker
             .update_state(self.windows.len(), any_animating);
 
-        // Phase 3.4: Detect focus change
-        if self.focus_highlight {
-            if let Some(fw) = focused {
-                if self.last_focused_window != Some(fw) {
-                    self.focus_highlight_start = Some((fw, std::time::Instant::now()));
-                }
-            }
-            self.last_focused_window = focused;
-        }
-
         // Poll for async wallpaper decode results and upload to GPU if ready.
         let mut wallpaper_just_loaded = false;
-        if let Some(rx) = &self.pending_wallpaper {
-            if let Ok(data) = rx.try_recv() {
+        let wallpaper_result = self.pending_wallpaper.as_ref().map(|rx| rx.try_recv());
+        match wallpaper_result {
+            Some(Ok(data)) => {
                 if let Some((tex, w, h)) =
                     Self::upload_wallpaper_texture(&self.gl, &data, self.hdr_enabled)
                 {
+                    unsafe {
+                        if self.wallpaper_crossfade {
+                            if let Some(stale) = self.old_wallpaper_texture.take() {
+                                self.gl.delete_texture(stale);
+                            }
+                            if self.wallpaper_texture.is_some() {
+                                self.old_wallpaper_mode = self.wallpaper_mode;
+                                self.old_wallpaper_img_w = self.wallpaper_img_w;
+                                self.old_wallpaper_img_h = self.wallpaper_img_h;
+                            } else {
+                                self.old_wallpaper_img_w = 0;
+                                self.old_wallpaper_img_h = 0;
+                            }
+                            self.old_wallpaper_texture = self.wallpaper_texture.take();
+                            self.wallpaper_transition_start = self
+                                .old_wallpaper_texture
+                                .map(|_| std::time::Instant::now());
+                        } else {
+                            if let Some(previous) = self.wallpaper_texture.take() {
+                                self.gl.delete_texture(previous);
+                            }
+                            if let Some(stale) = self.old_wallpaper_texture.take() {
+                                self.gl.delete_texture(stale);
+                            }
+                            self.old_wallpaper_img_w = 0;
+                            self.old_wallpaper_img_h = 0;
+                            self.wallpaper_transition_start = None;
+                        }
+                    }
                     self.wallpaper_texture = Some(tex);
                     self.wallpaper_img_w = w;
                     self.wallpaper_img_h = h;
@@ -879,15 +1580,25 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
                 self.pending_wallpaper = None;
             }
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                log::warn!("compositor: async wallpaper loader disconnected");
+                self.pending_wallpaper = None;
+            }
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => {}
         }
         // Poll per-monitor wallpaper results
         self.pending_monitor_wallpapers.retain_mut(|(idx, rx)| {
-            if let Ok(data) = rx.try_recv() {
-                if let Some(mw) = self.monitor_wallpapers.get_mut(*idx) {
-                    if let Some((tex, w, h)) =
-                        Self::upload_wallpaper_texture(&self.gl, &data, self.hdr_enabled)
+            match rx.try_recv() {
+                Ok(data) => {
+                    if let Some(mw) = self.monitor_wallpapers.get_mut(*idx)
+                        && let Some((tex, w, h)) =
+                            Self::upload_wallpaper_texture(&self.gl, &data, self.hdr_enabled)
                     {
-                        mw.texture = Some(tex);
+                        if let Some(previous) = mw.texture.replace(tex) {
+                            unsafe {
+                                self.gl.delete_texture(previous);
+                            }
+                        }
                         mw.img_w = w;
                         mw.img_h = h;
                         mw.mode = data.mode;
@@ -899,10 +1610,16 @@ impl<C: CompositorConnection> Compositor<C> {
                             h
                         );
                     }
+                    false // remove from pending list
                 }
-                false // remove from pending list
-            } else {
-                true // keep waiting
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    log::warn!(
+                        "compositor: async monitor wallpaper loader [{}] disconnected",
+                        idx
+                    );
+                    false
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => true,
             }
         });
         if wallpaper_just_loaded {
@@ -933,13 +1650,17 @@ impl<C: CompositorConnection> Compositor<C> {
         // but it is still sufficient reason to render when no client texture
         // changed.
         has_dirty |= waterlily_layer_dirty;
-        let explicit_render = std::mem::replace(&mut self.needs_render, false);
-        self.damage_render_pending = false;
+        explicit_render |= std::mem::take(&mut self.needs_render);
+        damage_wakeup |= std::mem::take(&mut self.damage_render_pending);
+        // XDamage is a reason to enter the frame, but not a request to redraw
+        // every pixel. Visible dirty windows populated the precise region
+        // above; keeping the wakeup separate from `explicit_render` lets the
+        // buffer-age repair path remain incremental.
+        has_dirty |= damage_wakeup;
         let force_render = self.screenshot_requests.has_pending()
             || self.debug_hud
             || self.transition_active()
-            || self.overview_active
-            || self.expose_active
+            || overview_animating
             || expose_animating
             || snap_animating
             || peek_animating
@@ -951,6 +1672,10 @@ impl<C: CompositorConnection> Compositor<C> {
             || self.annotation_active
             || wallpaper_just_loaded
             || wobbly_active
+            || particles_active
+            || motion_trails_active
+            || tilt_pending
+            || attention_active
             || explicit_render;
         let hash = Self::scene_hash(scene, focused);
         let scene_changed = hash != self.last_scene_hash;
@@ -972,9 +1697,9 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         // Invalidate backdrop results only for changes that can alter pixels
-        // without producing client damage. `explicit_render` accompanies
-        // ordinary damage wakeups too, so treating every forced frame as a
-        // scene change defeated the cache for continuously-rendering clients.
+        // without producing client damage. Ordinary XDamage wakeups are kept
+        // out of `explicit_render`, so continuously-rendering clients can use
+        // both the blur cache and partial framebuffer repair.
         let uncached_blur_source_changed = waterlily_layer_dirty
             || self.transition_active()
             || self.overview_active
@@ -987,7 +1712,10 @@ impl<C: CompositorConnection> Compositor<C> {
             || focus_highlight_active
             || wallpaper_crossfade_active
             || wallpaper_just_loaded
-            || wobbly_active;
+            || wobbly_active
+            || motion_trails_active
+            || tilt_pending
+            || attention_active;
         // Scene structure, focus, and per-window animation state are encoded
         // into each consumer's running below-scene hash. A topmost input-method
         // popup therefore cannot invalidate unrelated clients underneath it.
@@ -1107,21 +1835,53 @@ impl<C: CompositorConnection> Compositor<C> {
         // --- Occlusion culling ---
         let mut first_visible = 0usize;
         {
-            let sw = self.screen_w as i32;
-            let sh = self.screen_h as i32;
             for i in (0..scene.len()).rev() {
                 let (win, x, y, w, h) = scene[i];
-                let is_rgba = self.windows.get(&win).map_or(false, |wt| wt.has_rgba);
-                let has_fade = self
-                    .windows
-                    .get(&win)
-                    .map_or(false, |wt| wt.fade_opacity < 1.0);
-                if !is_rgba
-                    && !has_fade
-                    && x <= 0
-                    && y <= 0
-                    && (x + w as i32) >= sw
-                    && (y + h as i32) >= sh
+                let Some(wt) = self.windows.get(&win) else {
+                    continue;
+                };
+                let is_focused = focused == Some(win);
+                let is_statusbar = wt.class_name == frame_status_bar_name
+                    || wt.class_name.contains(frame_status_bar_name);
+                let base_opacity = if is_statusbar {
+                    1.0
+                } else if is_focused {
+                    self.active_opacity
+                } else {
+                    self.inactive_opacity
+                };
+                let layer_opacity = wt.opacity_override.unwrap_or(base_opacity)
+                    * wt.fade_opacity
+                    * self.peek_opacity_for(&wt.class_name);
+                let corner_radius = wt.corner_radius_override.unwrap_or_else(|| {
+                    if class_matches_exclude(&wt.class_name, &self.rounded_corners_exclude) {
+                        0.0
+                    } else {
+                        self.corner_radius
+                    }
+                });
+                let focus_bounce_active = !is_statusbar && self.focus_highlight && is_focused && {
+                    self.focus_highlight_start
+                        .is_some_and(|(highlighted, start)| {
+                            highlighted == win
+                                && start.elapsed().as_millis()
+                                    < self.focus_highlight_duration_ms as u128
+                        })
+                };
+                let geometry_deformation_active = (self.wobbly_windows && wt.wobbly.is_some())
+                    || (self.window_tilt && is_focused && !is_statusbar)
+                    || focus_bounce_active;
+
+                if rect_covers_output(x, y, w, h, self.screen_w, self.screen_h)
+                    && is_opaque_occluder(
+                        wt.has_rgba,
+                        layer_opacity,
+                        corner_radius,
+                        wt.is_shaped,
+                        wt.scale,
+                        wt.anim_scale,
+                        geometry_deformation_active,
+                    )
                 {
                     first_visible = i;
                     break;
@@ -1163,8 +1923,17 @@ impl<C: CompositorConnection> Compositor<C> {
         // buffers safely fall back to a full redraw while still building useful
         // history for subsequent frames.
         let current_damage = self.dirty_region_tracker.merged();
-        let incremental_frame =
-            !force_render && !scene_changed && !fades_active && !blur_damage_requires_full_redraw;
+        let transformed_overlay_active = transformed_overlays_require_full_redraw(
+            self.overview_active,
+            self.overview_closing,
+            self.expose_active,
+            !self.expose_entries.is_empty(),
+        );
+        let incremental_frame = !force_render
+            && !scene_changed
+            && !fades_active
+            && !blur_damage_requires_full_redraw
+            && !transformed_overlay_active;
         let buffer_age =
             if self.partial_damage_enabled && incremental_frame && current_damage.is_some() {
                 self.graphics.partial_redraw_buffer_age()
@@ -1263,8 +2032,16 @@ impl<C: CompositorConnection> Compositor<C> {
         // Skip if a fully-opaque window already covers the entire screen (occluded).
         {
             let wallpaper_occluded = first_visible > 0;
+            let global_transition_progress = self.wallpaper_transition_start.map(|start| {
+                let elapsed = start.elapsed().as_millis() as f32;
+                let duration = self.wallpaper_crossfade_duration_ms.max(1) as f32;
+                (elapsed / duration).clamp(0.0, 1.0)
+            });
             let has_wallpaper = !wallpaper_occluded
-                && (!self.monitor_wallpapers.is_empty() || self.wallpaper_texture.is_some());
+                && (!self.monitor_wallpapers.is_empty()
+                    || self.wallpaper_texture.is_some()
+                    || (self.old_wallpaper_texture.is_some()
+                        && global_transition_progress.is_some()));
             if has_wallpaper {
                 unsafe {
                     self.gl.use_program(Some(self.program));
@@ -1290,19 +2067,17 @@ impl<C: CompositorConnection> Compositor<C> {
                         // this disabled damage scissoring and redrew every monitor
                         // for even a tiny window update.
                         for mw in &self.monitor_wallpapers {
-                            // Resolve texture: per-monitor override or global default
-                            let (tex, mode, iw, ih) = if let Some(t) = mw.texture {
-                                (t, mw.mode, mw.img_w, mw.img_h)
-                            } else if let Some(t) = self.wallpaper_texture {
-                                (
-                                    t,
-                                    self.wallpaper_mode,
-                                    self.wallpaper_img_w,
-                                    self.wallpaper_img_h,
-                                )
-                            } else {
+                            let has_monitor_override = mw.texture.is_some();
+                            let blend = wallpaper_blend_plan(
+                                has_monitor_override,
+                                self.wallpaper_texture.is_some(),
+                                self.old_wallpaper_texture.is_some(),
+                                global_transition_progress,
+                            );
+                            if blend.old_global_opacity.is_none() && blend.current_opacity.is_none()
+                            {
                                 continue;
-                            };
+                            }
 
                             // Scissor to this monitor's portion of the repair area.
                             let gl_y = self.screen_h as i32 - (mw.mon_y + mw.mon_h as i32);
@@ -1324,13 +2099,39 @@ impl<C: CompositorConnection> Compositor<C> {
                                 mw.mon_w as f32,
                                 mw.mon_h as f32,
                             );
-                            let (rx, ry, rw, rh) = compute_wallpaper_rect(mode, area, iw, ih);
-                            self.gl
-                                .uniform_4_f32(self.win_uniforms.rect.as_ref(), rx, ry, rw, rh);
-                            self.gl
-                                .uniform_2_f32(self.win_uniforms.size.as_ref(), rw, rh);
-                            self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+                            // A monitor override is independent of the global
+                            // transition. Fallback outputs draw the old global
+                            // image first, clipped to this monitor, then blend
+                            // the new image over it.
+                            if let Some(opacity) = blend.old_global_opacity
+                                && let Some(texture) = self.old_wallpaper_texture
+                            {
+                                self.draw_wallpaper_layer(
+                                    texture,
+                                    self.old_wallpaper_mode,
+                                    self.old_wallpaper_img_w,
+                                    self.old_wallpaper_img_h,
+                                    area,
+                                    opacity,
+                                );
+                            }
+                            if let Some(opacity) = blend.current_opacity {
+                                if let Some(texture) = mw.texture {
+                                    self.draw_wallpaper_layer(
+                                        texture, mw.mode, mw.img_w, mw.img_h, area, opacity,
+                                    );
+                                } else if let Some(texture) = self.wallpaper_texture {
+                                    self.draw_wallpaper_layer(
+                                        texture,
+                                        self.wallpaper_mode,
+                                        self.wallpaper_img_w,
+                                        self.wallpaper_img_h,
+                                        area,
+                                        opacity,
+                                    );
+                                }
+                            }
                         }
                         if use_scissor {
                             self.gl.scissor(
@@ -1342,52 +2143,45 @@ impl<C: CompositorConnection> Compositor<C> {
                         } else {
                             self.gl.disable(glow::SCISSOR_TEST);
                         }
-                    } else if let Some(wp_tex) = self.wallpaper_texture {
+                    } else {
                         // Single global wallpaper (no monitors set yet)
                         let area = (0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
-                        let (rx, ry, rw, rh) = compute_wallpaper_rect(
-                            self.wallpaper_mode,
-                            area,
-                            self.wallpaper_img_w,
-                            self.wallpaper_img_h,
+                        let blend = wallpaper_blend_plan(
+                            false,
+                            self.wallpaper_texture.is_some(),
+                            self.old_wallpaper_texture.is_some(),
+                            global_transition_progress,
                         );
-                        self.gl
-                            .uniform_4_f32(self.win_uniforms.rect.as_ref(), rx, ry, rw, rh);
-                        self.gl
-                            .uniform_2_f32(self.win_uniforms.size.as_ref(), rw, rh);
-                        self.gl.bind_texture(glow::TEXTURE_2D, Some(wp_tex));
-                        self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                    }
-
-                    // Phase 3.5: Draw old wallpaper for crossfade
-                    if let (Some(old_tex), Some(start)) =
-                        (self.old_wallpaper_texture, self.wallpaper_transition_start)
-                    {
-                        let elapsed = start.elapsed().as_millis() as f32;
-                        let duration = self.wallpaper_crossfade_duration_ms as f32;
-                        let old_opacity = (1.0 - elapsed / duration).max(0.0);
-                        if old_opacity > 0.0 {
-                            let area = (0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
-                            let (rx, ry, rw, rh) = compute_wallpaper_rect(
-                                self.wallpaper_mode,
+                        if let Some(opacity) = blend.old_global_opacity
+                            && let Some(texture) = self.old_wallpaper_texture
+                        {
+                            self.draw_wallpaper_layer(
+                                texture,
+                                self.old_wallpaper_mode,
+                                self.old_wallpaper_img_w,
+                                self.old_wallpaper_img_h,
                                 area,
+                                opacity,
+                            );
+                        }
+                        if let Some(opacity) = blend.current_opacity
+                            && let Some(texture) = self.wallpaper_texture
+                        {
+                            self.draw_wallpaper_layer(
+                                texture,
+                                self.wallpaper_mode,
                                 self.wallpaper_img_w,
                                 self.wallpaper_img_h,
+                                area,
+                                opacity,
                             );
-                            self.gl
-                                .uniform_1_f32(self.win_uniforms.opacity.as_ref(), old_opacity);
-                            self.gl
-                                .uniform_4_f32(self.win_uniforms.rect.as_ref(), rx, ry, rw, rh);
-                            self.gl
-                                .uniform_2_f32(self.win_uniforms.size.as_ref(), rw, rh);
-                            self.gl.bind_texture(glow::TEXTURE_2D, Some(old_tex));
-                            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                            // Restore opacity for subsequent draws
-                            self.gl
-                                .uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
                         }
                     }
 
+                    // Restore the shared window program state for subsequent
+                    // scene draws.
+                    self.gl
+                        .uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
                     self.gl.bind_texture(glow::TEXTURE_2D, None);
                     self.gl.bind_vertex_array(None);
                     self.gl.use_program(None);
@@ -1668,50 +2462,27 @@ impl<C: CompositorConnection> Compositor<C> {
                         self.inactive_opacity
                     };
                     let rule_opacity = wt.opacity_override.unwrap_or(base_opacity);
-                    let has_explicit_transparency = wt.opacity_override.map_or(false, |o| o < 1.0);
                     let inactive_dim_factor =
                         if is_statusbar || is_focused || wt.is_override_redirect {
                             1.0
                         } else {
                             self.inactive_dim
                         };
-                    let dim = if wt.has_rgba {
-                        rule_opacity * fade * inactive_dim_factor
-                    } else {
-                        inactive_dim_factor
-                    };
+                    let dim = inactive_dim_factor;
+                    let layer_opacity = (rule_opacity * fade * peek_mul).clamp(0.0, 1.0);
 
                     // detect_client_opacity: if window manages its own alpha, don't force opacity.
-                    // For RGB windows, keep fully opaque by default, but allow explicit
-                    // per-window opacity overrides (and fade animations) to output real
-                    // alpha so translucent windows can reveal realtime blurred backdrop.
+                    // The sign selects texture-alpha vs forced-opaque sampling;
+                    // the magnitude always carries the complete layer opacity.
+                    // This keeps premultiplied RGB and alpha on the same fade.
                     // Override-redirect RGBA windows (popups, menus, tooltips) always
                     // use their own alpha — they render their own shadows/borders.
-                    let opacity = if wt.has_rgba {
-                        if self.detect_client_opacity || wt.is_override_redirect {
-                            -dim
-                        } else if has_explicit_transparency || fade < 1.0 {
-                            (rule_opacity * fade).clamp(0.0, 1.0)
-                        } else {
-                            1.0f32
-                        }
+                    let use_texture_alpha =
+                        wt.has_rgba && (self.detect_client_opacity || wt.is_override_redirect);
+                    let opacity = if use_texture_alpha {
+                        -layer_opacity
                     } else {
-                        if has_explicit_transparency || fade < 1.0 {
-                            (rule_opacity * fade).clamp(0.0, 1.0)
-                        } else {
-                            1.0f32
-                        }
-                    };
-
-                    // Phase 5.3: Apply peek opacity
-                    let opacity = if peek_mul < 1.0 {
-                        if opacity < 0.0 {
-                            opacity * peek_mul
-                        } else {
-                            (opacity * peek_mul).clamp(0.0, 1.0)
-                        }
-                    } else {
-                        opacity
+                        layer_opacity
                     };
                     // Feature 4: Apply per-window scale + Phase 3.4 focus bounce
                     let focus_bounce =
@@ -1981,16 +2752,33 @@ impl<C: CompositorConnection> Compositor<C> {
                     // Phase 3.1: Motion trail ghost copies at historical positions
                     if self.motion_trail_enabled && !wt.motion_trail.is_empty() {
                         let trail_len = wt.motion_trail.len();
-                        for (i, &(tx, ty)) in wt.motion_trail.iter().enumerate() {
-                            let trail_opacity =
-                                self.motion_trail_opacity * (i as f32 + 1.0) / trail_len as f32;
-                            self.gl
-                                .uniform_1_f32(self.win_uniforms.opacity.as_ref(), trail_opacity);
+                        let trail_now = std::time::Instant::now();
+                        let trail_lifetime =
+                            crate::backend::compositor_common::effects::motion_trail_lifetime(
+                                self.motion_trail_frames,
+                            );
+                        for (i, sample) in wt.motion_trail.iter().enumerate() {
+                            let age_opacity = sample.opacity_at(trail_now, trail_lifetime);
+                            let trail_opacity = self.motion_trail_opacity * (i as f32 + 1.0)
+                                / trail_len as f32
+                                * age_opacity;
+                            if trail_opacity <= 0.001 {
+                                continue;
+                            }
+                            let trail_layer = (trail_opacity * layer_opacity).clamp(0.0, 1.0);
+                            self.gl.uniform_1_f32(
+                                self.win_uniforms.opacity.as_ref(),
+                                if use_texture_alpha {
+                                    -trail_layer
+                                } else {
+                                    trail_layer
+                                },
+                            );
                             self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 0.7);
                             self.gl.uniform_4_f32(
                                 self.win_uniforms.rect.as_ref(),
-                                tx as f32,
-                                ty as f32,
+                                sample.x as f32,
+                                sample.y as f32,
                                 draw_w,
                                 draw_h,
                             );
@@ -2005,8 +2793,21 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.gl.active_texture(glow::TEXTURE0);
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
 
+                    // The regular window shader owns the ripple distortion.
+                    // Prefer it for the short open animation rather than
+                    // silently advancing an invisible ripple behind the
+                    // mutually-exclusive wobbly/tilt geometry passes.
+                    let ripple_prog =
+                        self.ripple_active
+                            .iter()
+                            .find(|r| r.x11_win == win)
+                            .map(|r| {
+                                let elapsed = r.start.elapsed().as_secs_f32();
+                                (elapsed / self.ripple_duration.max(f32::EPSILON)).min(1.0)
+                            });
+
                     // Wobbly windows: use grid spring-mass deformation shader
-                    if self.wobbly_windows && wt.wobbly.is_some() {
+                    if self.wobbly_windows && wt.wobbly.is_some() && ripple_prog.is_none() {
                         let wobbly = wt.wobbly.as_ref().unwrap();
                         self.gl.use_program(Some(self.wobbly_program));
                         self.gl.uniform_matrix_4_f32_slice(
@@ -2039,10 +2840,16 @@ impl<C: CompositorConnection> Compositor<C> {
                             1.0,
                         );
                         // Upload grid offsets as flat vec2 array
-                        let flat: Vec<f32> =
-                            wobbly.offsets.iter().flat_map(|o| [o[0], o[1]]).collect();
-                        self.gl
-                            .uniform_2_f32_slice(self.wobbly_uniforms.grid_offsets.as_ref(), &flat);
+                        self.scratch_wobbly_flat.clear();
+                        self.scratch_wobbly_flat.reserve(wobbly.offsets.len() * 2);
+                        for offset in &wobbly.offsets {
+                            self.scratch_wobbly_flat.push(offset[0]);
+                            self.scratch_wobbly_flat.push(offset[1]);
+                        }
+                        self.gl.uniform_2_f32_slice(
+                            self.wobbly_uniforms.grid_offsets.as_ref(),
+                            &self.scratch_wobbly_flat,
+                        );
                         let grid_n = wobbly.grid_n as i32;
                         self.gl
                             .uniform_1_i32(self.wobbly_uniforms.grid_n.as_ref(), grid_n);
@@ -2067,7 +2874,11 @@ impl<C: CompositorConnection> Compositor<C> {
                         );
                         self.gl
                             .uniform_1_f32(self.win_uniforms.radius.as_ref(), radius);
-                    } else if self.window_tilt && is_focused && !is_statusbar {
+                    } else if self.window_tilt
+                        && is_focused
+                        && !is_statusbar
+                        && ripple_prog.is_none()
+                    {
                         // Update tilt target from mouse position (clamped)
                         let cx = draw_x + draw_w * 0.5;
                         let cy = draw_y + draw_h * 0.5;
@@ -2154,14 +2965,6 @@ impl<C: CompositorConnection> Compositor<C> {
                         );
 
                         // Window-open ripple: set per-window distortion uniforms
-                        let ripple_prog =
-                            self.ripple_active
-                                .iter()
-                                .find(|r| r.x11_win == win)
-                                .map(|r| {
-                                    let elapsed = r.start.elapsed().as_secs_f32();
-                                    (elapsed / self.ripple_duration).min(1.0)
-                                });
                         if let Some(progress) = ripple_prog {
                             self.gl.uniform_1_f32(
                                 self.win_uniforms.ripple_progress.as_ref(),
@@ -2308,7 +3111,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // === Pass 2b: Genie minimize animations ===
         if !self.genie_active.is_empty() {
-            let genie_duration_ms = self.genie_duration_ms;
+            let genie_duration_ms = self.genie_duration_ms.max(1);
             unsafe {
                 self.gl.use_program(Some(self.genie_program));
                 self.gl.uniform_matrix_4_f32_slice(
@@ -2466,7 +3269,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     );
                     self.gl.uniform_1_f32(
                         self.magnifier_uniforms.magnifier_radius.as_ref(),
-                        self.magnifier_radius / self.screen_w as f32,
+                        self.magnifier_radius,
                     );
                     self.gl.uniform_1_f32(
                         self.magnifier_uniforms.magnifier_zoom.as_ref(),
@@ -2502,8 +3305,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // If no focused window set tilt_target this frame, it keeps 0 from the reset
         // at the start of the loop (see the tilt branch which sets tilt_target_x/y).
         {
-            let dt = self.frame_stats.last_frame_time.elapsed().as_secs_f32();
-            let tilt_animating = self.tick_tilt(dt);
+            let tilt_animating = self.tick_tilt(effect_dt);
             if tilt_animating {
                 self.needs_render = true;
             }
@@ -2760,7 +3562,6 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // === Pass 5c: Particle effects ===
         if !self.particle_systems.is_empty() {
-            self.tick_particles();
             self.render_particles(&proj);
         }
 
@@ -3212,6 +4013,13 @@ impl<C: CompositorConnection> Compositor<C> {
             self.render_recording_region_overlay(&proj);
         }
 
+        // Preserve the exact final composited image while the default back
+        // buffer is still defined. A valid persistent texture follows partial
+        // repair damage incrementally; first/invalid snapshots copy the full
+        // output so they never depend on EGL/GLX buffer-age history.
+        let presented_scene_copied =
+            self.capture_presented_scene_candidate(use_scissor.then_some(damage_scissor));
+
         // Swap the selected platform surface. EGL receives the original damage
         // rectangles converted to its bottom-left coordinate convention.
         let swap_damage = (!swap_damage_rects.is_empty()).then_some(swap_damage_rects.as_slice());
@@ -3234,6 +4042,9 @@ impl<C: CompositorConnection> Compositor<C> {
         };
         self.scratch_swap_damage = swap_damage_rects;
         if let Err(error) = swap_result {
+            // The candidate overwrote the previous stable texture, but this
+            // frame was not presented. Never expose it as an "old scene".
+            self.presented_scene_status.invalidate();
             log::error!(
                 "compositor: {} buffer swap failed: {error}",
                 self.graphics.api_name()
@@ -3243,6 +4054,12 @@ impl<C: CompositorConnection> Compositor<C> {
             self.needs_render = true;
             return false;
         }
+        if presented_scene_copied {
+            self.presented_scene_status
+                .record_capture(self.screen_w, self.screen_h);
+        } else {
+            self.presented_scene_status.invalidate();
+        }
         self.buffer_age_damage_history.record(frame_damage);
         self.waterlily_layer_dirty = false;
 
@@ -3250,8 +4067,9 @@ impl<C: CompositorConnection> Compositor<C> {
         if fades_active
             || transition_still_active
             || wobbly_active
-            || !self.particle_systems.is_empty()
-            || self.overview_active
+            || particles_active
+            || motion_trails_active
+            || self.overview_animation_pending()
             || genie_active
             || ripples_active
             || focus_highlight_active
@@ -3259,7 +4077,6 @@ impl<C: CompositorConnection> Compositor<C> {
             || expose_animating
             || snap_animating
             || peek_animating
-            || self.expose_active
         {
             self.needs_render = true;
         }
@@ -3341,9 +4158,143 @@ impl<C: CompositorConnection> Compositor<C> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DirtyRect, blur_sampling_margin, dirty_below_affects_backdrop,
-        dirty_below_requires_full_blur_redraw, intersect_gl_scissors,
+        DirtyRect, PresentedSceneCopyPlan, PresentedSceneStatus, TransitionCapturePlan,
+        blur_sampling_margin, dirty_below_affects_backdrop, dirty_below_requires_full_blur_redraw,
+        intersect_gl_scissors, is_opaque_occluder, presented_scene_copy_plan, rect_covers_output,
+        transformed_overlays_require_full_redraw, transition_capture_plan, wallpaper_blend_plan,
     };
+
+    #[test]
+    fn presented_scene_only_becomes_usable_after_a_successful_capture() {
+        let mut status = PresentedSceneStatus::default();
+        assert!(!status.is_usable(3840, 2160));
+
+        status.record_allocation(3840, 2160);
+        assert!(!status.is_usable(3840, 2160));
+
+        status.record_capture(3840, 2160);
+        assert!(status.is_usable(3840, 2160));
+        assert!(!status.is_usable(1920, 1080));
+
+        // A failed swap invalidates the overwritten candidate without losing
+        // its allocation dimensions, so the next frame can reuse the FBO.
+        status.invalidate();
+        assert!(!status.is_usable(3840, 2160));
+        assert!(status.has_dimensions(3840, 2160));
+
+        status.record_allocation_failure(3840, 2160);
+        assert!(status.allocation_failed_for(3840, 2160));
+        assert!(!status.allocation_failed_for(1920, 1080));
+
+        status.reset();
+        assert_eq!(status, PresentedSceneStatus::default());
+    }
+
+    #[test]
+    fn presented_scene_copy_is_disabled_with_no_transition_effect() {
+        assert_eq!(
+            presented_scene_copy_plan(false, true, Some((10, 20, 30, 40)), 3840, 2160),
+            PresentedSceneCopyPlan::Disabled
+        );
+    }
+
+    #[test]
+    fn presented_scene_copy_is_full_first_then_incremental() {
+        assert_eq!(
+            presented_scene_copy_plan(true, false, Some((10, 20, 30, 40)), 3840, 2160),
+            PresentedSceneCopyPlan::Full
+        );
+        assert_eq!(
+            presented_scene_copy_plan(true, true, Some((10, 20, 30, 40)), 3840, 2160),
+            PresentedSceneCopyPlan::Region((10, 20, 30, 40))
+        );
+        assert_eq!(
+            presented_scene_copy_plan(true, true, None, 3840, 2160),
+            PresentedSceneCopyPlan::Full
+        );
+    }
+
+    #[test]
+    fn transition_capture_crops_workspace_from_stable_full_output() {
+        assert_eq!(
+            transition_capture_plan(3840, 1080, 1920, 0, 1920, 1080, 30),
+            Some(TransitionCapturePlan {
+                src: (1920, 0, 3840, 1050),
+                dst: (0, 0, 1920, 1050),
+            })
+        );
+
+        // A monitor rectangle partly outside the root is clipped, preserving
+        // its offset in the monitor-sized destination instead of stretching.
+        assert_eq!(
+            transition_capture_plan(1920, 1080, -100, 0, 1920, 1080, 0),
+            Some(TransitionCapturePlan {
+                src: (0, 0, 1820, 1080),
+                dst: (100, 0, 1920, 1080),
+            })
+        );
+    }
+
+    #[test]
+    fn fullscreen_occlusion_requires_an_opaque_untransformed_draw() {
+        assert!(is_opaque_occluder(false, 1.0, 0.0, false, 1.0, 1.0, false,));
+
+        assert!(!is_opaque_occluder(true, 1.0, 0.0, false, 1.0, 1.0, false,));
+        assert!(!is_opaque_occluder(
+            false, 0.99, 0.0, false, 1.0, 1.0, false,
+        ));
+        assert!(!is_opaque_occluder(
+            false,
+            f32::NAN,
+            0.0,
+            false,
+            1.0,
+            1.0,
+            false,
+        ));
+        assert!(!is_opaque_occluder(false, 1.0, 8.0, false, 1.0, 1.0, false,));
+        assert!(!is_opaque_occluder(false, 1.0, 0.0, true, 1.0, 1.0, false,));
+        assert!(!is_opaque_occluder(
+            false, 1.0, 0.0, false, 0.98, 1.0, false,
+        ));
+        assert!(!is_opaque_occluder(
+            false, 1.0, 0.0, false, 1.0, 0.98, false,
+        ));
+        assert!(!is_opaque_occluder(false, 1.0, 0.0, false, 1.0, 1.0, true,));
+    }
+
+    #[test]
+    fn fullscreen_coverage_uses_wide_coordinate_arithmetic() {
+        assert!(rect_covers_output(0, 0, 1920, 1080, 1920, 1080));
+        assert!(!rect_covers_output(0, 0, 1919, 1080, 1920, 1080));
+        assert!(rect_covers_output(
+            -1,
+            -1,
+            u32::MAX,
+            u32::MAX,
+            u32::MAX - 1,
+            u32::MAX - 1,
+        ));
+    }
+
+    #[test]
+    fn transformed_overlays_turn_damage_frames_into_full_redraws() {
+        assert!(!transformed_overlays_require_full_redraw(
+            false, false, false, false,
+        ));
+        assert!(transformed_overlays_require_full_redraw(
+            true, false, false, false,
+        ));
+        assert!(transformed_overlays_require_full_redraw(
+            false, true, false, false,
+        ));
+        assert!(transformed_overlays_require_full_redraw(
+            false, false, true, true,
+        ));
+        assert!(transformed_overlays_require_full_redraw(
+            false, false, false, true,
+        ));
+    }
 
     #[test]
     fn intersects_monitor_and_damage_scissors() {
@@ -3359,6 +4310,33 @@ mod tests {
             intersect_gl_scissors((0, 0, 1920, 1080), (100, 100, 50, 50)),
             Some((100, 100, 50, 50))
         );
+    }
+
+    #[test]
+    fn monitor_override_is_not_covered_by_global_crossfade() {
+        let plan = wallpaper_blend_plan(true, true, true, Some(0.4));
+        assert_eq!(plan.old_global_opacity, None);
+        assert_eq!(plan.current_opacity, Some(1.0));
+    }
+
+    #[test]
+    fn global_fallback_draws_opaque_old_then_progressive_new() {
+        let plan = wallpaper_blend_plan(false, true, true, Some(0.4));
+        assert_eq!(plan.old_global_opacity, Some(1.0));
+        assert_eq!(plan.current_opacity, Some(0.4));
+
+        // This is also the plan for the global-only path when no monitor
+        // wallpaper entries have been installed yet.
+        let global_only = wallpaper_blend_plan(false, true, true, Some(0.0));
+        assert_eq!(global_only.old_global_opacity, Some(1.0));
+        assert_eq!(global_only.current_opacity, Some(0.0));
+    }
+
+    #[test]
+    fn stable_global_wallpaper_is_drawn_once_at_full_opacity() {
+        let plan = wallpaper_blend_plan(false, true, false, None);
+        assert_eq!(plan.old_global_opacity, None);
+        assert_eq!(plan.current_opacity, Some(1.0));
     }
 
     #[test]

@@ -2975,6 +2975,69 @@ mod tests {
     }
 
     #[test]
+    fn semantic_validation_bounds_compositor_effect_work_and_durations() {
+        let mut config = Config::default();
+        config.inner.behavior.fading = true;
+        config.inner.behavior.ripple_on_open = true;
+        config.inner.behavior.particle_effects = true;
+        config.inner.behavior.genie_minimize = true;
+        config.inner.behavior.fade_in_step = 0.0;
+        config.inner.behavior.fade_out_step = 0.0;
+        config.inner.behavior.ripple_duration = 0.0;
+        config.inner.behavior.particle_lifetime = f32::NAN;
+        config.inner.behavior.genie_duration_ms = 0;
+        config.inner.behavior.wobbly_grid_size = u32::MAX;
+        config.inner.behavior.motion_trail_frames = u32::MAX;
+        config.inner.behavior.particle_count = u32::MAX;
+
+        let diagnostics = config.diagnostics();
+        for path in [
+            "behavior.fade_in_step",
+            "behavior.fade_out_step",
+            "behavior.ripple_duration",
+            "behavior.particle_lifetime",
+            "behavior.genie_duration_ms",
+        ] {
+            assert!(
+                diagnostics.issues().iter().any(|issue| {
+                    issue.level == ConfigDiagnosticLevel::Error && issue.path == path
+                }),
+                "missing error for {path}: {diagnostics}"
+            );
+        }
+        for path in [
+            "behavior.wobbly_grid_size",
+            "behavior.motion_trail_frames",
+            "behavior.particle_count",
+        ] {
+            assert!(
+                diagnostics.issues().iter().any(|issue| {
+                    issue.level == ConfigDiagnosticLevel::Warning && issue.path == path
+                }),
+                "missing clamp warning for {path}: {diagnostics}"
+            );
+        }
+    }
+
+    #[test]
+    fn disabled_compositor_effects_accept_zero_durations() {
+        let mut config = Config::default();
+        config.inner.behavior.particle_effects = false;
+        config.inner.behavior.particle_lifetime = 0.0;
+        config.inner.behavior.ripple_on_open = false;
+        config.inner.behavior.ripple_duration = 0.0;
+        config.inner.behavior.genie_minimize = false;
+        config.inner.behavior.genie_duration_ms = 0;
+        config.inner.behavior.focus_highlight = false;
+        config.inner.behavior.focus_highlight_duration_ms = 0;
+        config.inner.behavior.wallpaper_crossfade = false;
+        config.inner.behavior.wallpaper_crossfade_duration_ms = 0;
+
+        let diagnostics = config.diagnostics();
+        assert!(!diagnostics.has_errors(), "{diagnostics}");
+    }
+
+    #[test]
     fn semantic_validation_matches_case_insensitive_runtime_choices() {
         let mut config = Config::default();
         config.inner.behavior.wallpaper_mode = "Fill".into();

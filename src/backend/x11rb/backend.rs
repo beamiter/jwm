@@ -1070,6 +1070,52 @@ impl CompositorWindowEffects for X11rbBackend {
         }
     }
 
+    fn compositor_set_window_minimized(&mut self, window: WindowId, minimized: bool) {
+        let Ok(x11_window) = self.ids.x11(window) else {
+            return;
+        };
+        if self.compositor.is_none() {
+            return;
+        }
+
+        if minimized {
+            if let Some(compositor) = self.compositor.as_mut() {
+                compositor.minimize_window(x11_window);
+            }
+            return;
+        }
+
+        // Restoration runs after arrange/show_client, so this synchronous
+        // geometry query observes the final on-screen position rather than the
+        // temporary off-screen minimize location.
+        let Ok(geometry) = self.window_ops.get_geometry(window) else {
+            return;
+        };
+        let (_, class_name) = self.property_ops.get_class(window);
+        let override_redirect = self
+            .window_ops
+            .get_window_attributes(window)
+            .is_ok_and(|attributes| attributes.override_redirect);
+        let shaped = self.window_ops.get_window_shaped(window);
+        let frame_extents = self.property_ops.get_gtk_frame_extents(window);
+
+        if let Some(compositor) = self.compositor.as_mut() {
+            // add_window cancels and frees a detached genie copy for this XID,
+            // or cancels an in-flight fallback fade. update_geometry also
+            // refreshes an already tracked window when the effect was disabled.
+            compositor.add_window(x11_window, geometry.x, geometry.y, geometry.w, geometry.h);
+            compositor.update_geometry(x11_window, geometry.x, geometry.y, geometry.w, geometry.h);
+            if !class_name.is_empty() {
+                compositor.set_window_class(x11_window, &class_name);
+            }
+            compositor.set_window_override_redirect(x11_window, override_redirect);
+            compositor.set_window_shaped(x11_window, shaped);
+            if let Some([left, right, top, bottom]) = frame_extents {
+                compositor.set_frame_extents(x11_window, left, right, top, bottom);
+            }
+        }
+    }
+
     fn compositor_force_full_redraw(&mut self) {
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.force_full_redraw();
@@ -1373,7 +1419,6 @@ impl Backend for X11rbBackend {
 
         let _ = self.conn.flush();
         let rendered = compositor.render_frame(&x11_scene, focused_x11);
-        compositor.clear_needs_render();
         // Return the buffer to its home for reuse next frame.
         self.scratch_x11_scene = x11_scene;
         Ok(rendered)

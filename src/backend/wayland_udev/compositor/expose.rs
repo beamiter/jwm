@@ -1,6 +1,57 @@
 use super::*;
 use smithay::backend::renderer::gles::ffi;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TabBarLayout {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    tab_count: usize,
+}
+
+impl TabBarLayout {
+    fn tab_rect(self, index: usize) -> Option<[f32; 4]> {
+        if index >= self.tab_count {
+            return None;
+        }
+
+        // Derive both edges from the full window width. This keeps every tab
+        // equal-width while guaranteeing that floating-point accumulation can
+        // never extend the final tab past the window's right edge.
+        let count = self.tab_count as f32;
+        let left = self.x + self.width * index as f32 / count;
+        let right = self.x + self.width * (index + 1) as f32 / count;
+        Some([left, self.y, (right - left).max(0.0), self.height])
+    }
+}
+
+fn tab_bar_layout(
+    scene: &[(u64, i32, i32, u32, u32)],
+    active_window: u64,
+    tab_count: usize,
+    height: f32,
+) -> Option<TabBarLayout> {
+    if tab_count == 0 || !height.is_finite() || height <= 0.0 {
+        return None;
+    }
+
+    let &(_, x, y, width, _) = scene
+        .iter()
+        .find(|&&(window, _, _, _, _)| window == active_window)?;
+    if width == 0 {
+        return None;
+    }
+
+    Some(TabBarLayout {
+        x: x as f32,
+        y: (y as f32 - height).max(0.0),
+        width: width as f32,
+        height,
+        tab_count,
+    })
+}
+
 impl WaylandCompositor {
     /// Render the expose (mission control) mode overlay.
     /// Shows all windows arranged in a grid layout with animation.
@@ -383,14 +434,15 @@ impl WaylandCompositor {
 
     /// Render tab bars above grouped windows.
     /// Each tab group shows a horizontal bar with tab labels; the active tab is highlighted.
-    pub(crate) fn render_tab_bar(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+    pub(crate) fn render_tab_bar(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        scene: &[(u64, i32, i32, u32, u32)],
+    ) {
         if self.window_groups.is_empty() {
             return;
         }
-
-        const TAB_BAR_HEIGHT: f32 = 24.0;
-        const CHAR_WIDTH: f32 = 8.0;
-        const TAB_PADDING: f32 = 16.0;
 
         unsafe {
             gl.BindVertexArray(self.quad_vao);
@@ -407,25 +459,15 @@ impl WaylandCompositor {
                     .map(|(id, _, _)| *id as u64)
                     .unwrap_or(tabs[0].0 as u64);
 
-                let win = match self.windows.get(&active_win_id) {
-                    Some(w) => w,
-                    None => continue,
-                };
+                // A tab bar belongs to the normal desktop scene. If its active
+                // window was culled or is otherwise absent this frame, skip it
+                // instead of inventing a (0, 0) fallback position.
+                let layout =
+                    match tab_bar_layout(scene, active_win_id, tabs.len(), self.tab_bar_height) {
+                        Some(layout) => layout,
+                        None => continue,
+                    };
 
-                // The tab bar sits above the window; we need window geometry.
-                // Use the window's width and infer position from scene context.
-                let bar_w = win.width as f32;
-                // We position the bar at y = 0 relative to the window top.
-                // Since we don't have absolute coords here, we look for the window
-                // in expose_entries or fallback to (0, 0).
-                let (bar_x, bar_y) = self
-                    .expose_entries
-                    .iter()
-                    .find(|e| e.window_id == active_win_id)
-                    .map(|e| (e.current_x, e.current_y - TAB_BAR_HEIGHT))
-                    .unwrap_or((0.0, 0.0));
-
-                // Draw tab bar background
                 gl.UseProgram(self.border_program);
                 gl.UniformMatrix4fv(
                     self.border_uniforms.projection,
@@ -433,58 +475,35 @@ impl WaylandCompositor {
                     ffi::FALSE as u8,
                     projection.as_ptr(),
                 );
-                gl.Uniform4f(
-                    self.border_uniforms.rect,
-                    bar_x,
-                    bar_y,
-                    bar_w,
-                    TAB_BAR_HEIGHT,
-                );
-                gl.Uniform4f(self.border_uniforms.border_color, 0.1, 0.1, 0.15, 0.9);
-                gl.Uniform2f(self.border_uniforms.size, bar_w, TAB_BAR_HEIGHT);
-                gl.Uniform1f(self.border_uniforms.radius, 4.0);
-                gl.Uniform1f(self.border_uniforms.border_width, bar_w.max(TAB_BAR_HEIGHT));
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
 
-                // Draw individual tabs
-                let mut tab_x = bar_x;
-                for (i, (_, title, is_active)) in tabs.iter().enumerate() {
-                    let tab_w = (title.len() as f32 * CHAR_WIDTH) + TAB_PADDING * 2.0;
+                for (index, (_, _, is_active)) in tabs.iter().enumerate() {
+                    let Some([tab_x, tab_y, tab_width, tab_height]) = layout.tab_rect(index) else {
+                        continue;
+                    };
+                    let color = if *is_active {
+                        self.tab_active_color
+                    } else {
+                        self.tab_bar_color
+                    };
 
-                    if *is_active {
-                        // Highlighted active tab
-                        gl.Uniform4f(
-                            self.border_uniforms.rect,
-                            tab_x,
-                            bar_y,
-                            tab_w,
-                            TAB_BAR_HEIGHT,
-                        );
-                        gl.Uniform4f(self.border_uniforms.border_color, 0.2, 0.3, 0.5, 0.9);
-                        gl.Uniform2f(self.border_uniforms.size, tab_w, TAB_BAR_HEIGHT);
-                        gl.Uniform1f(self.border_uniforms.radius, 4.0);
-                        gl.Uniform1f(self.border_uniforms.border_width, tab_w.max(TAB_BAR_HEIGHT));
-                        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
-                    }
-
-                    // Draw separator between tabs (1px line on the right edge)
-                    if i < tabs.len() - 1 {
-                        let sep_x = tab_x + tab_w - 0.5;
-                        gl.Uniform4f(
-                            self.border_uniforms.rect,
-                            sep_x,
-                            bar_y + 4.0,
-                            1.0,
-                            TAB_BAR_HEIGHT - 8.0,
-                        );
-                        gl.Uniform4f(self.border_uniforms.border_color, 0.4, 0.4, 0.5, 0.6);
-                        gl.Uniform2f(self.border_uniforms.size, 1.0, TAB_BAR_HEIGHT - 8.0);
-                        gl.Uniform1f(self.border_uniforms.radius, 0.0);
-                        gl.Uniform1f(self.border_uniforms.border_width, 1.0);
-                        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
-                    }
-
-                    tab_x += tab_w;
+                    gl.Uniform4f(
+                        self.border_uniforms.rect,
+                        tab_x,
+                        tab_y,
+                        tab_width,
+                        tab_height,
+                    );
+                    gl.Uniform4f(
+                        self.border_uniforms.border_color,
+                        color[0],
+                        color[1],
+                        color[2],
+                        color[3],
+                    );
+                    gl.Uniform2f(self.border_uniforms.size, tab_width, tab_height);
+                    gl.Uniform1f(self.border_uniforms.radius, 0.0);
+                    gl.Uniform1f(self.border_uniforms.border_width, tab_width.max(tab_height));
+                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
                 }
             }
         }
@@ -504,7 +523,6 @@ impl WaylandCompositor {
         None
     }
 
-    #[allow(dead_code)]
     pub(crate) fn set_expose_hover(&mut self, x: f32, y: f32) {
         let hit_id = self.expose_hit_test(x, y);
         let mut changed = false;
@@ -520,5 +538,68 @@ impl WaylandCompositor {
         if changed {
             self.needs_render = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tab_bar_layout;
+
+    #[test]
+    fn tab_bar_layout_uses_active_window_scene_geometry() {
+        let scene = [
+            (10, -20, 15, 640, 480),
+            (20, 180, 90, 303, 220),
+            (30, 700, 40, 100, 100),
+        ];
+
+        let layout = tab_bar_layout(&scene, 20, 3, 30.0).expect("active window is in scene");
+        assert_eq!(
+            [layout.x, layout.y, layout.width, layout.height],
+            [180.0, 60.0, 303.0, 30.0]
+        );
+
+        assert_eq!(layout.tab_rect(0), Some([180.0, 60.0, 101.0, 30.0]));
+        assert_eq!(layout.tab_rect(1), Some([281.0, 60.0, 101.0, 30.0]));
+        assert_eq!(layout.tab_rect(2), Some([382.0, 60.0, 101.0, 30.0]));
+    }
+
+    #[test]
+    fn tab_rects_are_equal_and_never_exceed_window_width() {
+        let scene = [(42, 11, 70, 100, 60)];
+        let layout = tab_bar_layout(&scene, 42, 3, 18.0).expect("valid layout");
+        let rects = [
+            layout.tab_rect(0).unwrap(),
+            layout.tab_rect(1).unwrap(),
+            layout.tab_rect(2).unwrap(),
+        ];
+
+        let expected_width = 100.0 / 3.0;
+        for rect in rects {
+            assert!((rect[2] - expected_width).abs() < 0.000_01);
+            assert!(rect[0] >= layout.x);
+            assert!(rect[0] + rect[2] <= layout.x + layout.width);
+        }
+        let last = rects[2];
+        assert!((last[0] + last[2] - (layout.x + layout.width)).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn tab_bar_layout_has_no_missing_scene_fallback() {
+        let scene = [(7, 300, 200, 500, 400)];
+
+        assert!(tab_bar_layout(&scene, 99, 2, 24.0).is_none());
+        assert!(tab_bar_layout(&scene, 7, 0, 24.0).is_none());
+        assert!(tab_bar_layout(&scene, 7, 2, 0.0).is_none());
+    }
+
+    #[test]
+    fn tab_bar_layout_clamps_to_output_top_edge() {
+        let scene = [(42, 120, 12, 320, 200)];
+        let layout = tab_bar_layout(&scene, 42, 2, 30.0).expect("valid layout");
+
+        assert_eq!(layout.y, 0.0);
+        assert_eq!(layout.tab_rect(0).unwrap()[1], 0.0);
+        assert_eq!(layout.tab_rect(1).unwrap()[1], 0.0);
     }
 }

@@ -17,6 +17,18 @@ use crate::jwm::features::CaptureTarget;
 use log::{debug, error, info};
 use std::sync::atomic::Ordering;
 
+fn minimized_window_relinquishes_focus(minimized: bool, is_selected: bool) -> bool {
+    minimized && is_selected
+}
+
+fn requested_hidden_state(action: NetWmAction, currently_hidden: bool) -> bool {
+    match action {
+        NetWmAction::Add => true,
+        NetWmAction::Remove => false,
+        NetWmAction::Toggle => !currently_hidden,
+    }
+}
+
 fn sync_configured_client_geometry(
     wm: &mut Jwm,
     win: WindowId,
@@ -880,18 +892,41 @@ impl WMController for Jwm {
                     }
                 }
                 NetWmState::Hidden => {
-                    if let Some(c) = self.state.clients.get_mut(ck) {
-                        let on = match action {
-                            NetWmAction::Add => true,
-                            NetWmAction::Remove => false,
-                            NetWmAction::Toggle => !c.state.is_hidden,
-                        };
-                        c.state.is_hidden = on;
+                    let was_hidden = self
+                        .state
+                        .clients
+                        .get(ck)
+                        .map(|client| client.state.is_hidden)
+                        .unwrap_or(false);
+                    let on = requested_hidden_state(action, was_hidden);
+
+                    if on != was_hidden {
+                        let was_selected = self.is_client_selected(ck);
+                        let monitor = self.state.clients.get(ck).and_then(|client| client.mon);
+                        if let Some(c) = self.state.clients.get_mut(ck) {
+                            c.state.is_hidden = on;
+                        }
                         let _ = backend.property_ops().set_net_wm_state_flag(
                             win,
                             NetWmState::Hidden,
                             on,
                         );
+
+                        // The minimize side must detach the still-visible
+                        // compositor texture before arrange moves the X window
+                        // off-screen. Restoration is the inverse: arrange first
+                        // establishes the live geometry, then the backend
+                        // rebuilds/cancels the detached compositor entry.
+                        if on {
+                            backend.compositor_set_window_minimized(win, true);
+                        }
+                        if minimized_window_relinquishes_focus(on, was_selected) {
+                            let _ = self.focus(backend, None);
+                        }
+                        let _ = self.arrange(backend, monitor);
+                        if !on {
+                            backend.compositor_set_window_minimized(win, false);
+                        }
                     }
                 }
                 NetWmState::MaximizedVert | NetWmState::MaximizedHorz => {
@@ -1193,6 +1228,23 @@ mod tests {
 
         assert_eq!(backend.rendered_frames, 1);
     }
+
+    #[test]
+    fn only_selected_minimized_window_relinquishes_focus() {
+        assert!(minimized_window_relinquishes_focus(true, true));
+        assert!(!minimized_window_relinquishes_focus(true, false));
+        assert!(!minimized_window_relinquishes_focus(false, true));
+    }
+
+    #[test]
+    fn hidden_state_requests_are_idempotent_and_toggle_current_state() {
+        assert!(requested_hidden_state(NetWmAction::Add, false));
+        assert!(requested_hidden_state(NetWmAction::Add, true));
+        assert!(!requested_hidden_state(NetWmAction::Remove, true));
+        assert!(!requested_hidden_state(NetWmAction::Remove, false));
+        assert!(requested_hidden_state(NetWmAction::Toggle, false));
+        assert!(!requested_hidden_state(NetWmAction::Toggle, true));
+    }
 }
 
 // =================================================================================
@@ -1374,7 +1426,31 @@ impl EventHandler for Jwm {
                     );
                 }
             }
-            BackendEvent::ForeignToplevelSetMinimized(_win, _minimized) => {}
+            BackendEvent::ForeignToplevelSetMinimized(win, minimized) => {
+                if let Some(ck) = self.wintoclient(win) {
+                    let was_selected = self.is_client_selected(ck);
+                    let monitor = self.state.clients.get(ck).and_then(|client| client.mon);
+                    if let Some(client) = self.state.clients.get_mut(ck) {
+                        client.state.is_hidden = minimized;
+                    }
+                    let _ = backend.property_ops().set_net_wm_state_flag(
+                        win,
+                        NetWmState::Hidden,
+                        minimized,
+                    );
+                    if minimized {
+                        backend.compositor_set_window_minimized(win, true);
+                    }
+                    if minimized_window_relinquishes_focus(minimized, was_selected) {
+                        let _ = self.focus(backend, None);
+                    }
+                    let _ = self.arrange(backend, monitor);
+                    if !minimized {
+                        backend.compositor_set_window_minimized(win, false);
+                        let _ = self.focusin(backend, win);
+                    }
+                }
+            }
             BackendEvent::ForeignToplevelSetFullscreen(win, fullscreen) => {
                 if let Some(ck) = self.wintoclient(win) {
                     let _ = self.setfullscreen(backend, ck, fullscreen);

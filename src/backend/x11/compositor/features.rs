@@ -247,10 +247,17 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     pub(crate) fn notify_window_move_start(&mut self, x11_win: u32) {
+        if self.motion_trail_enabled {
+            self.clear_motion_trail(x11_win);
+            if let Some(wt) = self.windows.get_mut(&x11_win) {
+                wt.motion_trail_cursor = Some((wt.x as f32, wt.y as f32));
+            }
+        }
         if !self.wobbly_windows {
             return;
         }
-        let grid_n = (self.wobbly_grid_size as usize + 1).min(17);
+        let grid_n =
+            crate::backend::compositor_common::effects::wobbly_node_count(self.wobbly_grid_size);
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             // Determine anchor node: closest grid node to mouse position
             let rel_x = ((self.mouse_x - wt.x as f32).max(0.0)).min(wt.w as f32);
@@ -270,10 +277,15 @@ impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn notify_window_move_delta(&mut self, x11_win: u32, dx: f32, dy: f32) {
         // Phase 3.1: Record position for motion trail
         if self.motion_trail_enabled {
-            if let Some(wt) = self.windows.get(&x11_win) {
-                let cur_x = wt.x;
-                let cur_y = wt.y;
-                self.update_motion_trail(x11_win, cur_x, cur_y);
+            let previous = self.windows.get_mut(&x11_win).map(|wt| {
+                let (previous_x, previous_y) = wt
+                    .motion_trail_cursor
+                    .unwrap_or((wt.x as f32 - dx, wt.y as f32 - dy));
+                wt.motion_trail_cursor = Some((previous_x + dx, previous_y + dy));
+                (previous_x.round() as i32, previous_y.round() as i32)
+            });
+            if let Some((previous_x, previous_y)) = previous {
+                self.update_motion_trail(x11_win, previous_x, previous_y);
             }
         }
 
@@ -306,15 +318,16 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     pub(crate) fn notify_window_move_end(&mut self, x11_win: u32) {
-        // Phase 3.1: Clear motion trail
-        self.clear_motion_trail(x11_win);
-
         // Release anchor — let all nodes spring back via tick_wobbly
         if let Some(wt) = self.windows.get_mut(&x11_win) {
+            wt.motion_trail_cursor = None;
             if let Some(ref mut w) = wt.wobbly {
                 w.end_drag();
             }
         }
+        // Keep the trail alive briefly after release and let wall-clock expiry
+        // fade it out instead of making it disappear on the button-up frame.
+        self.needs_render = true;
     }
 
     #[allow(dead_code)]
@@ -382,6 +395,16 @@ impl<C: CompositorConnection> Compositor<C> {
         name: &str,
         path: &std::path::Path,
     ) -> Result<(), String> {
+        // Box blur is an optimization mode implemented with the regular blur
+        // programs, not a standalone GL program. Compiling a replacement for
+        // it would leave the new program unowned and leak it.
+        if name == "box_blur" {
+            return Err(
+                "box_blur has no standalone shader program; reload blur_down or blur_up instead"
+                    .to_string(),
+            );
+        }
+
         let file_content =
             std::fs::read_to_string(path).map_err(|e| format!("read shader file: {e}"))?;
 
@@ -391,7 +414,6 @@ impl<C: CompositorConnection> Compositor<C> {
             "border" => (shaders::VERTEX_SHADER, file_content.as_str()),
             "blur_down" => (shaders::BLUR_DOWN_VERTEX, file_content.as_str()),
             "blur_up" => (shaders::BLUR_DOWN_VERTEX, file_content.as_str()),
-            "box_blur" => (shaders::BLUR_DOWN_VERTEX, file_content.as_str()),
             "postprocess" => (shaders::BLUR_DOWN_VERTEX, file_content.as_str()),
             "hud" => (shaders::VERTEX_SHADER, file_content.as_str()),
             "hud_text" => (shaders::VERTEX_SHADER, file_content.as_str()),
@@ -421,76 +443,348 @@ impl<C: CompositorConnection> Compositor<C> {
                 unsafe {
                     match name {
                         "window" => {
-                            self.gl.delete_program(self.program);
-                            self.program = new_program;
+                            let uniforms = WindowUniforms {
+                                projection: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_projection"),
+                                rect: self.gl.get_uniform_location(new_program, "u_rect"),
+                                texture: self.gl.get_uniform_location(new_program, "u_texture"),
+                                opacity: self.gl.get_uniform_location(new_program, "u_opacity"),
+                                radius: self.gl.get_uniform_location(new_program, "u_radius"),
+                                size: self.gl.get_uniform_location(new_program, "u_size"),
+                                dim: self.gl.get_uniform_location(new_program, "u_dim"),
+                                uv_rect: self.gl.get_uniform_location(new_program, "u_uv_rect"),
+                                ripple_progress: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_ripple_progress"),
+                                ripple_amplitude: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_ripple_amplitude"),
+                            };
+                            let old_program = std::mem::replace(&mut self.program, new_program);
+                            self.win_uniforms = uniforms;
+                            self.gl.delete_program(old_program);
                         }
                         "shadow" => {
-                            self.gl.delete_program(self.shadow_program);
-                            self.shadow_program = new_program;
+                            let uniforms = ShadowUniforms {
+                                projection: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_projection"),
+                                rect: self.gl.get_uniform_location(new_program, "u_rect"),
+                                shadow_color: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_shadow_color"),
+                                size: self.gl.get_uniform_location(new_program, "u_size"),
+                                radius: self.gl.get_uniform_location(new_program, "u_radius"),
+                                spread: self.gl.get_uniform_location(new_program, "u_spread"),
+                            };
+                            let old_program =
+                                std::mem::replace(&mut self.shadow_program, new_program);
+                            self.shadow_uniforms = uniforms;
+                            self.gl.delete_program(old_program);
                         }
                         "border" => {
-                            self.gl.delete_program(self.border_program);
-                            self.border_program = new_program;
+                            let uniforms = BorderUniforms {
+                                projection: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_projection"),
+                                rect: self.gl.get_uniform_location(new_program, "u_rect"),
+                                border_color: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_border_color"),
+                                size: self.gl.get_uniform_location(new_program, "u_size"),
+                                radius: self.gl.get_uniform_location(new_program, "u_radius"),
+                                border_width: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_border_width"),
+                            };
+                            let old_program =
+                                std::mem::replace(&mut self.border_program, new_program);
+                            self.border_uniforms = uniforms;
+                            self.gl.delete_program(old_program);
                         }
                         "blur_down" => {
-                            self.gl.delete_program(self.blur_down_program);
-                            self.blur_down_program = new_program;
+                            let uniforms = BlurUniforms {
+                                projection: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_projection"),
+                                rect: self.gl.get_uniform_location(new_program, "u_rect"),
+                                texture: self.gl.get_uniform_location(new_program, "u_texture"),
+                                halfpixel: self.gl.get_uniform_location(new_program, "u_halfpixel"),
+                            };
+                            let old_program =
+                                std::mem::replace(&mut self.blur_down_program, new_program);
+                            self.blur_down_uniforms = uniforms;
+                            self.gl.delete_program(old_program);
                         }
                         "blur_up" => {
-                            self.gl.delete_program(self.blur_up_program);
-                            self.blur_up_program = new_program;
+                            let uniforms = BlurUniforms {
+                                projection: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_projection"),
+                                rect: self.gl.get_uniform_location(new_program, "u_rect"),
+                                texture: self.gl.get_uniform_location(new_program, "u_texture"),
+                                halfpixel: self.gl.get_uniform_location(new_program, "u_halfpixel"),
+                            };
+                            let old_program =
+                                std::mem::replace(&mut self.blur_up_program, new_program);
+                            self.blur_up_uniforms = uniforms;
+                            self.gl.delete_program(old_program);
                         }
-                        "box_blur" => { /* no separate program, used in blur_optimize */ }
                         "postprocess" => {
-                            self.gl.delete_program(self.postprocess_program);
-                            self.postprocess_program = new_program;
+                            let uniforms = PostprocessUniforms {
+                                projection: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_projection"),
+                                rect: self.gl.get_uniform_location(new_program, "u_rect"),
+                                texture: self.gl.get_uniform_location(new_program, "u_texture"),
+                                color_temp: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_color_temp"),
+                                saturation: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_saturation"),
+                                brightness: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_brightness"),
+                                contrast: self.gl.get_uniform_location(new_program, "u_contrast"),
+                                invert: self.gl.get_uniform_location(new_program, "u_invert"),
+                                grayscale: self.gl.get_uniform_location(new_program, "u_grayscale"),
+                                hdr_enabled: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_hdr_enabled"),
+                                hdr_peak_nits: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_hdr_peak_nits"),
+                                tone_mapping_method: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_tone_mapping_method"),
+                                eotf_mode: self.gl.get_uniform_location(new_program, "u_eotf_mode"),
+                                output_colorspace: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_output_colorspace"),
+                            };
+                            let magnifier_uniforms = MagnifierUniforms {
+                                magnifier_enabled: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_magnifier_enabled"),
+                                magnifier_center: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_magnifier_center"),
+                                magnifier_radius: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_magnifier_radius"),
+                                magnifier_zoom: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_magnifier_zoom"),
+                                colorblind_mode: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_colorblind_mode"),
+                            };
+                            let old_program =
+                                std::mem::replace(&mut self.postprocess_program, new_program);
+                            self.postprocess_uniforms = uniforms;
+                            self.magnifier_uniforms = magnifier_uniforms;
+                            self.gl.delete_program(old_program);
                         }
                         "hud" => {
-                            self.gl.delete_program(self.hud_program);
-                            self.hud_program = new_program;
+                            let uniforms = HudUniforms {
+                                projection: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_projection"),
+                                rect: self.gl.get_uniform_location(new_program, "u_rect"),
+                                bg_color: self.gl.get_uniform_location(new_program, "u_bg_color"),
+                                fg_color: self.gl.get_uniform_location(new_program, "u_fg_color"),
+                                size: self.gl.get_uniform_location(new_program, "u_size"),
+                            };
+                            let old_program = std::mem::replace(&mut self.hud_program, new_program);
+                            self.hud_uniforms = uniforms;
+                            self.gl.delete_program(old_program);
                         }
                         "hud_text" => {
-                            self.gl.delete_program(self.hud_text_program);
-                            self.hud_text_program = new_program;
+                            let uniforms = HudTextUniforms {
+                                projection: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_projection"),
+                                rect: self.gl.get_uniform_location(new_program, "u_rect"),
+                                texture: self.gl.get_uniform_location(new_program, "u_texture"),
+                            };
+                            let old_program =
+                                std::mem::replace(&mut self.hud_text_program, new_program);
+                            self.hud_text_uniforms = uniforms;
+                            self.gl.delete_program(old_program);
                         }
                         "transition" => {
-                            self.gl.delete_program(self.transition_program);
-                            self.transition_program = new_program;
+                            let uniforms = TransitionUniforms {
+                                projection: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_projection"),
+                                rect: self.gl.get_uniform_location(new_program, "u_rect"),
+                                texture: self.gl.get_uniform_location(new_program, "u_texture"),
+                                opacity: self.gl.get_uniform_location(new_program, "u_opacity"),
+                                uv_rect: self.gl.get_uniform_location(new_program, "u_uv_rect"),
+                            };
+                            let old_program =
+                                std::mem::replace(&mut self.transition_program, new_program);
+                            self.transition_uniforms = uniforms;
+                            self.gl.delete_program(old_program);
                         }
                         "cube" => {
-                            self.gl.delete_program(self.cube_program);
-                            self.cube_program = new_program;
+                            let uniforms = CubeUniforms {
+                                mvp: self.gl.get_uniform_location(new_program, "u_mvp"),
+                                aspect: self.gl.get_uniform_location(new_program, "u_aspect"),
+                                texture: self.gl.get_uniform_location(new_program, "u_texture"),
+                                brightness: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_brightness"),
+                                uv_rect: self.gl.get_uniform_location(new_program, "u_uv_rect"),
+                            };
+                            let old_program =
+                                std::mem::replace(&mut self.cube_program, new_program);
+                            self.cube_uniforms = uniforms;
+                            self.gl.delete_program(old_program);
                         }
                         "portal" => {
-                            self.gl.delete_program(self.portal_program);
-                            self.portal_program = new_program;
+                            let uniforms = PortalUniforms {
+                                projection: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_projection"),
+                                rect: self.gl.get_uniform_location(new_program, "u_rect"),
+                                texture: self.gl.get_uniform_location(new_program, "u_texture"),
+                                progress: self.gl.get_uniform_location(new_program, "u_progress"),
+                                glow: self.gl.get_uniform_location(new_program, "u_glow"),
+                                center: self.gl.get_uniform_location(new_program, "u_center"),
+                                uv_rect: self.gl.get_uniform_location(new_program, "u_uv_rect"),
+                            };
+                            let old_program =
+                                std::mem::replace(&mut self.portal_program, new_program);
+                            self.portal_uniforms = uniforms;
+                            self.gl.delete_program(old_program);
                         }
                         "edge_glow" => {
-                            self.gl.delete_program(self.edge_glow_program);
-                            self.edge_glow_program = new_program;
+                            let uniforms = EdgeGlowUniforms {
+                                projection: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_projection"),
+                                rect: self.gl.get_uniform_location(new_program, "u_rect"),
+                                glow_color: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_glow_color"),
+                                glow_width: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_glow_width"),
+                                mouse: self.gl.get_uniform_location(new_program, "u_mouse"),
+                                screen_size: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_screen_size"),
+                                time: self.gl.get_uniform_location(new_program, "u_time"),
+                            };
+                            let old_program =
+                                std::mem::replace(&mut self.edge_glow_program, new_program);
+                            self.edge_glow_uniforms = uniforms;
+                            self.gl.delete_program(old_program);
                         }
                         "tilt" => {
-                            self.gl.delete_program(self.tilt_program);
-                            self.tilt_program = new_program;
+                            let uniforms = TiltUniforms {
+                                projection: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_projection"),
+                                rect: self.gl.get_uniform_location(new_program, "u_rect"),
+                                texture: self.gl.get_uniform_location(new_program, "u_texture"),
+                                opacity: self.gl.get_uniform_location(new_program, "u_opacity"),
+                                radius: self.gl.get_uniform_location(new_program, "u_radius"),
+                                size: self.gl.get_uniform_location(new_program, "u_size"),
+                                dim: self.gl.get_uniform_location(new_program, "u_dim"),
+                                uv_rect: self.gl.get_uniform_location(new_program, "u_uv_rect"),
+                                tilt: self.gl.get_uniform_location(new_program, "u_tilt"),
+                                perspective: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_perspective"),
+                                grid_size: self.gl.get_uniform_location(new_program, "u_grid_size"),
+                                light_dir: self.gl.get_uniform_location(new_program, "u_light_dir"),
+                            };
+                            let old_program =
+                                std::mem::replace(&mut self.tilt_program, new_program);
+                            self.tilt_uniforms = uniforms;
+                            self.gl.delete_program(old_program);
                         }
                         "wobbly" => {
-                            self.gl.delete_program(self.wobbly_program);
-                            self.wobbly_program = new_program;
+                            let uniforms = WobblyUniforms {
+                                projection: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_projection"),
+                                rect: self.gl.get_uniform_location(new_program, "u_rect"),
+                                texture: self.gl.get_uniform_location(new_program, "u_texture"),
+                                opacity: self.gl.get_uniform_location(new_program, "u_opacity"),
+                                radius: self.gl.get_uniform_location(new_program, "u_radius"),
+                                size: self.gl.get_uniform_location(new_program, "u_size"),
+                                dim: self.gl.get_uniform_location(new_program, "u_dim"),
+                                uv_rect: self.gl.get_uniform_location(new_program, "u_uv_rect"),
+                                grid_offsets: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_grid_offsets"),
+                                grid_n: self.gl.get_uniform_location(new_program, "u_grid_n"),
+                            };
+                            let old_program =
+                                std::mem::replace(&mut self.wobbly_program, new_program);
+                            self.wobbly_uniforms = uniforms;
+                            self.gl.delete_program(old_program);
                         }
                         "particle" => {
-                            self.gl.delete_program(self.particle_program);
-                            self.particle_program = new_program;
+                            let uniforms = ParticleUniforms {
+                                projection: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_projection"),
+                                point_size: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_point_size"),
+                            };
+                            let old_program =
+                                std::mem::replace(&mut self.particle_program, new_program);
+                            self.particle_uniforms = uniforms;
+                            self.gl.delete_program(old_program);
                         }
                         "genie" => {
-                            self.gl.delete_program(self.genie_program);
-                            self.genie_program = new_program;
+                            let uniforms = GenieUniforms {
+                                projection: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_projection"),
+                                rect: self.gl.get_uniform_location(new_program, "u_rect"),
+                                texture: self.gl.get_uniform_location(new_program, "u_texture"),
+                                opacity: self.gl.get_uniform_location(new_program, "u_opacity"),
+                                radius: self.gl.get_uniform_location(new_program, "u_radius"),
+                                size: self.gl.get_uniform_location(new_program, "u_size"),
+                                dim: self.gl.get_uniform_location(new_program, "u_dim"),
+                                uv_rect: self.gl.get_uniform_location(new_program, "u_uv_rect"),
+                                progress: self.gl.get_uniform_location(new_program, "u_progress"),
+                                dock_pos: self.gl.get_uniform_location(new_program, "u_dock_pos"),
+                                grid_size: self.gl.get_uniform_location(new_program, "u_grid_size"),
+                            };
+                            let old_program =
+                                std::mem::replace(&mut self.genie_program, new_program);
+                            self.genie_uniforms = uniforms;
+                            self.gl.delete_program(old_program);
                         }
                         "overview_bg" => {
-                            self.gl.delete_program(self.overview_bg_program);
-                            self.overview_bg_program = new_program;
+                            let uniforms = OverviewBgUniforms {
+                                projection: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_projection"),
+                                rect: self.gl.get_uniform_location(new_program, "u_rect"),
+                                opacity: self.gl.get_uniform_location(new_program, "u_opacity"),
+                            };
+                            let old_program =
+                                std::mem::replace(&mut self.overview_bg_program, new_program);
+                            self.overview_bg_uniforms = uniforms;
+                            self.gl.delete_program(old_program);
                         }
                         _ => {
+                            // Keep this defensive arm leak-free if a new name
+                            // is added above without a swap implementation.
                             self.gl.delete_program(new_program);
+                            return Err(format!(
+                                "shader reload is not implemented for program: {name}"
+                            ));
                         }
                     }
                 }
@@ -534,7 +828,6 @@ impl<C: CompositorConnection> Compositor<C> {
             "border",
             "blur_down",
             "blur_up",
-            "box_blur",
             "postprocess",
             "hud",
             "hud_text",

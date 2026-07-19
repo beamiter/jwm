@@ -74,6 +74,15 @@ mod tests {
     }
 
     #[test]
+    fn explicit_none_disables_transitions() {
+        assert_eq!(
+            TransitionMode::from_name_or_none("none"),
+            TransitionMode::None
+        );
+        assert_eq!(TransitionMode::from_name_or_none(""), TransitionMode::None);
+    }
+
+    #[test]
     fn transition_mode_new_scene_fbo_requirement() {
         assert!(TransitionMode::Cube.needs_new_scene_fbo());
         assert!(TransitionMode::Portal.needs_new_scene_fbo());

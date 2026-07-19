@@ -37,21 +37,32 @@ void main() {
 
     // Window-open ripple: radial UV distortion expanding from center
     if (u_ripple_amplitude > 0.0) {
-        vec2 center = u_uv_rect.xy + u_uv_rect.zw * 0.5;
-        vec2 delta = uv - center;
-        float dist = length(delta);
-        float t = u_ripple_progress;
-        float wave_front = t * 0.8;
-        float ring = sin((dist - wave_front) * 30.0)
+        float t = clamp(u_ripple_progress, 0.0, 1.0);
+        vec2 local = v_uv - vec2(0.5);
+        vec2 pixel_delta = local * max(u_size, vec2(1.0));
+        float extent = max(max(u_size.x, u_size.y), 1.0);
+        float pixel_dist = length(pixel_delta);
+        float dist = pixel_dist / extent;
+        float wave_front = t * 0.72;
+        float distance_to_wave = abs(dist - wave_front);
+        float wave_envelope = 1.0 - smoothstep(0.0, 0.16, distance_to_wave);
+        float time_envelope = sin(t * 3.14159265);
+        float ring = sin((dist - wave_front) * 55.0)
                    * u_ripple_amplitude
-                   * (1.0 - t)                                     // fade over time
-                   * smoothstep(0.0, 0.05, dist)                   // calm at center
-                   * (1.0 - smoothstep(wave_front, wave_front + 0.15, dist)); // only near wave front
-        uv += normalize(delta + vec2(0.001)) * ring;
+                   * wave_envelope
+                   * time_envelope;
+        vec2 pixel_dir = pixel_dist > 0.001 ? pixel_delta / pixel_dist : vec2(0.0);
+        vec2 uv_dir = pixel_dir * extent / max(u_size, vec2(1.0));
+        uv += uv_dir * ring * u_uv_rect.zw;
+        vec2 uv0 = u_uv_rect.xy;
+        vec2 uv1 = uv0 + u_uv_rect.zw;
+        uv = clamp(uv, min(uv0, uv1), max(uv0, uv1));
     }
 
     vec4 texel = texture(u_texture, uv);
-    float a = u_opacity >= 0.0 ? u_opacity : texel.a;
+    float layer_opacity = clamp(abs(u_opacity), 0.0, 1.0);
+    float a = (u_opacity >= 0.0 ? 1.0 : texel.a) * layer_opacity;
+    texel.rgb *= layer_opacity;
 
     // Rounded corners – must mask both alpha AND rgb for premultiplied-alpha
     // blending (GL_ONE, GL_ONE_MINUS_SRC_ALPHA), otherwise rgb bleeds through
@@ -65,12 +76,9 @@ void main() {
         texel.rgb *= aa;
     }
 
-    // Dim inactive windows: darken RGB, keep alpha unchanged for opaque
-    // windows (u_opacity >= 0) so they remain fully opaque and don't
-    // flicker on multi-monitor setups with unsynchronized vblank.
-    // For RGBA windows (u_opacity < 0), dim alpha too for translucency.
-    float out_a = u_opacity >= 0.0 ? a : a * u_dim;
-    frag_color = vec4(texel.rgb * u_dim, out_a);
+    // The compositor uses premultiplied-alpha blending. Layer opacity must
+    // therefore scale RGB and alpha together for both opaque and RGBA clients.
+    frag_color = vec4(texel.rgb * u_dim, a);
 }
 "#;
 
@@ -100,7 +108,8 @@ void main() {
     // Smooth falloff: fully opaque at dist<=0, fades out over u_spread
     float alpha = 1.0 - smoothstep(0.0, u_spread, dist);
     alpha = alpha * alpha; // softer falloff
-    frag_color = vec4(u_shadow_color.rgb, u_shadow_color.a * alpha);
+    float final_alpha = u_shadow_color.a * alpha;
+    frag_color = vec4(u_shadow_color.rgb * final_alpha, final_alpha);
 }
 "#;
 
@@ -292,7 +301,8 @@ void main() {
     vec2 d = abs(pixel_pos - center) - center + vec2(4.0);
     float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - 4.0;
     float mask = 1.0 - smoothstep(-1.0, 1.0, dist);
-    frag_color = vec4(u_bg_color.rgb, alpha * mask);
+    float final_alpha = alpha * mask;
+    frag_color = vec4(u_bg_color.rgb * final_alpha, final_alpha);
 }
 "#;
 
@@ -323,7 +333,7 @@ uniform vec4 u_color;
 out vec4 frag_color;
 
 void main() {
-    frag_color = u_color;
+    frag_color = vec4(u_color.rgb * u_color.a, u_color.a);
 }
 "#;
 
@@ -390,6 +400,7 @@ uniform float u_progress;    // 0.0 to 1.0
 uniform float u_glow;        // glow intensity at edge
 uniform vec2 u_center;       // center of portal in UV space (0.5, 0.5)
 uniform vec4 u_uv_rect;
+uniform vec4 u_rect;         // target rectangle in pixels
 in vec2 v_uv;
 out vec4 frag_color;
 
@@ -399,19 +410,20 @@ void main() {
     uv.y = u_uv_rect.y + (1.0 - v_uv.y) * u_uv_rect.w;
     vec4 texel = texture(u_texture, uv);
 
-    // Distance from center in normalized coords
+    // Measure in pixels, then normalize by the farthest corner. This keeps the
+    // iris circular on ultrawide and portrait outputs.
     vec2 diff = v_uv - u_center;
-    float dist = length(diff);
+    float max_dist = max(length(u_rect.zw) * 0.5, 1.0);
+    float dist = length(diff * u_rect.zw) / max_dist;
 
-    // Portal radius grows from 0 to sqrt(2) (full diagonal)
-    float radius = u_progress * 1.42; // sqrt(2)
+    float radius = clamp(u_progress, 0.0, 1.0);
 
     // Smooth edge
-    float edge_width = 0.02 + 0.03 * (1.0 - u_progress);
-    float mask = smoothstep(radius, radius - edge_width, dist);
+    float edge_width = max(2.0 / max_dist, 0.015 + 0.02 * (1.0 - radius));
+    float mask = smoothstep(radius - edge_width, radius, dist);
 
     // Glow ring at the edge
-    float ring = smoothstep(radius + edge_width, radius, dist) *
+    float ring = (1.0 - smoothstep(radius, radius + edge_width, dist)) *
                  smoothstep(radius - edge_width * 2.0, radius - edge_width, dist);
     vec3 glow_color = vec3(0.4, 0.6, 1.0) * u_glow * ring * 2.0;
 
@@ -504,8 +516,9 @@ uniform int   u_grayscale;
 // Magnifier uniforms
 uniform int   u_magnifier_enabled;
 uniform vec2  u_magnifier_center;  // normalized [0,1] screen coords
-uniform float u_magnifier_radius;  // in normalized coords
+uniform float u_magnifier_radius;  // radius in physical pixels
 uniform float u_magnifier_zoom;    // zoom factor (e.g. 2.0)
+uniform vec4  u_rect;              // fullscreen target; zw = pixel dimensions
 // Colorblind correction uniform
 uniform int   u_colorblind_mode;   // 0=none, 1=deuteranopia, 2=protanopia, 3=tritanopia
 // HDR tone mapping uniforms
@@ -526,7 +539,7 @@ void main() {
     // Magnifier effect
     if (u_magnifier_enabled == 1) {
         vec2 diff = uv - u_magnifier_center;
-        float dist = length(diff);
+        float dist = length(diff * u_rect.zw);
         if (dist < u_magnifier_radius) {
             // Zoom into the area around the center
             sample_uv = u_magnifier_center + diff / u_magnifier_zoom;
@@ -664,9 +677,9 @@ void main() {
     // Magnifier border ring
     if (u_magnifier_enabled == 1) {
         vec2 diff = uv - u_magnifier_center;
-        float dist = length(diff);
+        float dist = length(diff * u_rect.zw);
         float ring = abs(dist - u_magnifier_radius);
-        float ring_width = 0.002;
+        float ring_width = 2.0;
         float ring_alpha = 1.0 - smoothstep(0.0, ring_width, ring);
         c.rgb = mix(c.rgb, vec3(0.8, 0.8, 0.8), ring_alpha * 0.8);
     }
@@ -792,11 +805,15 @@ void main() {
 
     // Perspective projection
     float d = u_perspective;
-    float scale = d / (d - p.z);
+    float scale = clamp(
+        d / max(d - p.z, max(d * 0.1, 1.0)),
+        0.4,
+        2.5
+    );
     vec2 projected = center + p.xy * scale;
 
     // Rotated normal (original face normal is [0,0,1])
-    v_normal = vec3(sy * cx, -sx, cx * cy);
+    v_normal = vec3(-sy * cx, -sx, cx * cy);
 
     gl_Position = u_projection * vec4(projected, 0.0, 1.0);
 }
@@ -824,7 +841,9 @@ float rounded_rect_sdf(vec2 p, vec2 half_size, float r) {
 void main() {
     vec2 uv = u_uv_rect.xy + v_uv * u_uv_rect.zw;
     vec4 texel = texture(u_texture, uv);
-    float a = u_opacity >= 0.0 ? u_opacity : texel.a;
+    float layer_opacity = clamp(abs(u_opacity), 0.0, 1.0);
+    float a = (u_opacity >= 0.0 ? 1.0 : texel.a) * layer_opacity;
+    texel.rgb *= layer_opacity;
 
     // Rounded corners
     if (u_radius > 0.0) {
@@ -847,9 +866,8 @@ void main() {
     float facing = max(dot(N, V), 0.0);
     float edge_darken = mix(0.82, 1.0, facing);
 
-    float out_a = u_opacity >= 0.0 ? a : a * u_dim;
     vec3 color = texel.rgb * u_dim * edge_darken + vec3(spec * a);
-    frag_color = vec4(color, out_a);
+    frag_color = vec4(color, a);
 }
 "#;
 
@@ -861,7 +879,7 @@ pub const WOBBLY_VERTEX_SHADER: &str = r#"#version 330 core
 
 uniform vec4 u_rect;               // x, y, w, h in pixels
 uniform mat4 u_projection;
-uniform vec2 u_grid_offsets[289];  // up to 17x17 grid node offsets
+uniform vec2 u_grid_offsets[225];  // up to 15x15 grid node offsets
 uniform int  u_grid_n;             // nodes per axis (grid_size + 1)
 
 out vec2 v_uv;
@@ -935,7 +953,7 @@ void main() {
     if (dist > 0.5) discard;
 
     float alpha = v_color.a * v_life * (1.0 - smoothstep(0.3, 0.5, dist));
-    frag_color = vec4(v_color.rgb, alpha);
+    frag_color = vec4(v_color.rgb * alpha, alpha);
 }
 "#;
 
@@ -960,7 +978,7 @@ void main() {
     // Windows on this monitor are already skipped during overview, so we
     // only need enough opacity to give the 3D prism a clean dark backdrop.
     float alpha = (0.78 + vignette * 0.12) * u_opacity;
-    frag_color = vec4(color, alpha);
+    frag_color = vec4(color * alpha, alpha);
 }
 "#;
 
@@ -996,20 +1014,17 @@ void main() {
     float fy = float(row + dy) / float(grid);
     v_uv = vec2(fx, fy);
 
-    // Bezier-like genie deformation
-    float t = u_progress;
-
-    // Bottom rows converge to dock position, top rows follow more slowly
-    float row_t = fy; // 0 = top, 1 = bottom
-
-    // Horizontal squeeze: width narrows toward dock
+    // Bottom rows lead the deformation, but every row reaches the dock at
+    // progress=1. The previous row-weighted formula left the top edge behind.
+    float t = smoothstep(0.0, 1.0, clamp(u_progress, 0.0, 1.0));
+    float delay = (1.0 - fy) * 0.22;
+    float collapse = smoothstep(0.0, 1.0, clamp((t - delay) / (1.0 - delay), 0.0, 1.0));
     float center_x = u_rect.x + u_rect.z * 0.5;
-    float target_x = mix(center_x, u_dock_pos.x, t * row_t);
-    float half_w = u_rect.z * 0.5 * mix(1.0, 0.02, t * row_t);
+    float target_x = mix(center_x, u_dock_pos.x, collapse);
+    float half_w = u_rect.z * 0.5 * mix(1.0, 0.015, collapse);
     float px = target_x + (fx - 0.5) * half_w * 2.0;
-
-    // Vertical: bottom converges to dock_y, top stays then follows
-    float py = mix(u_rect.y + fy * u_rect.w, u_dock_pos.y, t * row_t * row_t);
+    float original_y = u_rect.y + fy * u_rect.w;
+    float py = mix(original_y, u_dock_pos.y, collapse);
 
     gl_Position = u_projection * vec4(px, py, 0.0, 1.0);
 }

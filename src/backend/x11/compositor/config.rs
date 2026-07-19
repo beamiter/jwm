@@ -3,6 +3,7 @@
 use super::math::ortho;
 #[allow(unused_imports)]
 use super::*;
+use crate::backend::compositor_common::effects::finite_clamp;
 #[allow(unused_imports)]
 use glow::HasContext;
 #[allow(unused_imports)]
@@ -14,7 +15,91 @@ use std::sync::Arc;
 #[allow(unused_imports)]
 use std::sync::mpsc;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WallpaperConfigUpdate {
+    Unchanged,
+    Clear,
+    Reload,
+}
+
+fn wallpaper_config_update(
+    current_path: &str,
+    current_requested_mode: WallpaperMode,
+    new_path: &str,
+    new_mode: WallpaperMode,
+) -> WallpaperConfigUpdate {
+    if current_path == new_path && current_requested_mode == new_mode {
+        WallpaperConfigUpdate::Unchanged
+    } else if new_path.is_empty() {
+        WallpaperConfigUpdate::Clear
+    } else {
+        WallpaperConfigUpdate::Reload
+    }
+}
+
+fn overview_animation_pending_state(
+    active: bool,
+    closing: bool,
+    entry_progress: f32,
+    opacity: f32,
+    current_angle: f32,
+    target_angle: f32,
+) -> bool {
+    closing
+        || (active
+            && (entry_progress < 1.0
+                || opacity < 1.0
+                || (target_angle - current_angle).abs() >= 0.001))
+}
+
+fn expose_rect_pending(current: (f32, f32, f32, f32), target: (f32, f32, f32, f32)) -> bool {
+    (target.0 - current.0).abs() > 0.5
+        || (target.1 - current.1).abs() > 0.5
+        || (target.2 - current.2).abs() > 0.5
+        || (target.3 - current.3).abs() > 0.5
+}
+
 impl<C: CompositorConnection> Compositor<C> {
+    pub(super) fn overview_animation_pending(&self) -> bool {
+        overview_animation_pending_state(
+            self.overview_active,
+            self.overview_closing,
+            self.overview_entry_progress,
+            self.overview_opacity,
+            self.overview_prism_current_angle,
+            self.overview_prism_target_angle,
+        )
+    }
+
+    pub(super) fn expose_animation_pending(&self) -> bool {
+        if self.expose_entries.is_empty() {
+            return false;
+        }
+        if !self.expose_active {
+            // Exit entries remain live until tick_expose has returned them to
+            // their source rectangles, faded the overlay, and cleared them.
+            return true;
+        }
+
+        self.expose_opacity < 1.0
+            || self.expose_entries.iter().any(|entry| {
+                expose_rect_pending(
+                    (
+                        entry.current_x,
+                        entry.current_y,
+                        entry.current_w,
+                        entry.current_h,
+                    ),
+                    (
+                        entry.target_x,
+                        entry.target_y,
+                        entry.target_w,
+                        entry.target_h,
+                    ),
+                )
+            })
+    }
+
     pub(crate) fn needs_render(&self) -> bool {
         if self.needs_render || self.damage_render_pending || self.recording_active {
             return true;
@@ -27,12 +112,20 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             }
         }
-        // Need render if overview or expose is active (or expose exit animation in progress)
-        if self.overview_active || self.expose_active || !self.expose_entries.is_empty() {
+        // A steady overview/expose remains composited, but it does not need a
+        // fresh frame until client damage or input changes it.
+        if self.overview_animation_pending() || self.expose_animation_pending() {
             return true;
         }
         // Need render if particles are active
         if !self.particle_systems.is_empty() {
+            return true;
+        }
+        if !self.genie_active.is_empty() || !self.ripple_active.is_empty() {
+            return true;
+        }
+        if self.motion_trail_enabled && self.windows.values().any(|wt| !wt.motion_trail.is_empty())
+        {
             return true;
         }
         // Need render if any window has active wobbly
@@ -43,6 +136,9 @@ impl<C: CompositorConnection> Compositor<C> {
                         || w.offsets
                             .iter()
                             .any(|o| o[0].abs() > 0.1 || o[1].abs() > 0.1)
+                        || w.velocities
+                            .iter()
+                            .any(|v| v[0].abs() > 0.1 || v[1].abs() > 0.1)
                     {
                         return true;
                     }
@@ -71,21 +167,15 @@ impl<C: CompositorConnection> Compositor<C> {
         if self.waterlily_visible() {
             return true;
         }
-        // Need render if magnifier is active (tracking mouse)
-        if self.magnifier_enabled {
-            return true;
-        }
-        // Need render if edge glow is active (mouse near screen edge)
-        if self.edge_glow && self.edge_glow_active {
-            return true;
-        }
+        // Magnifier and edge glow are pointer-driven. Their setters arm one
+        // frame whenever coordinates or active state change; keeping the loop
+        // alive while their pixels are otherwise static wastes a full redraw
+        // every refresh.
         // Need render if window tilt is animating
         if self.window_tilt {
             let epsilon = 0.0001;
             if (self.tilt_current_x - self.tilt_target_x).abs() > epsilon
                 || (self.tilt_current_y - self.tilt_target_y).abs() > epsilon
-                || self.tilt_current_x.abs() > epsilon
-                || self.tilt_current_y.abs() > epsilon
             {
                 return true;
             }
@@ -98,11 +188,22 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             }
         }
+        if self.tickless_focus_or_wallpaper_animation_active() {
+            return true;
+        }
         // Need render to poll async wallpaper loading
         if self.pending_wallpaper.is_some() || !self.pending_monitor_wallpapers.is_empty() {
             return true;
         }
         false
+    }
+
+    pub(super) fn tickless_focus_or_wallpaper_animation_active(&self) -> bool {
+        let focus_active = self.focus_highlight
+            && self.focus_highlight_start.is_some_and(|(_, start)| {
+                start.elapsed().as_millis() < self.focus_highlight_duration_ms as u128
+            });
+        focus_active || self.wallpaper_transition_start.is_some()
     }
 
     pub(crate) fn overlay_window(&self) -> u32 {
@@ -142,15 +243,11 @@ impl<C: CompositorConnection> Compositor<C> {
         self.present_mgr = present_mgr;
     }
 
-    pub(crate) fn clear_needs_render(&mut self) {
-        self.needs_render = false;
-        self.damage_render_pending = false;
-    }
-
     // =====================================================================
     // Feature 8/9/10: Runtime post-processing toggles
     // =====================================================================
     pub(crate) fn set_color_temperature(&mut self, temp: f32) {
+        let temp = finite_clamp(temp, -10.0, 10.0, 0.0);
         if (self.color_temperature - temp).abs() > f32::EPSILON {
             self.color_temperature = temp;
             self.ensure_postprocess_fbo();
@@ -159,6 +256,7 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     pub(crate) fn set_saturation(&mut self, sat: f32) {
+        let sat = finite_clamp(sat, 0.0, 10.0, 1.0);
         if (self.saturation - sat).abs() > f32::EPSILON {
             self.saturation = sat;
             self.ensure_postprocess_fbo();
@@ -167,6 +265,7 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     pub(crate) fn set_brightness(&mut self, val: f32) {
+        let val = finite_clamp(val, 0.0, 10.0, 1.0);
         if (self.brightness - val).abs() > f32::EPSILON {
             self.brightness = val;
             self.ensure_postprocess_fbo();
@@ -175,6 +274,7 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     pub(crate) fn set_contrast(&mut self, val: f32) {
+        let val = finite_clamp(val, 0.0, 10.0, 1.0);
         if (self.contrast - val).abs() > f32::EPSILON {
             self.contrast = val;
             self.ensure_postprocess_fbo();
@@ -208,6 +308,21 @@ impl<C: CompositorConnection> Compositor<C> {
         let cfg = crate::config::CONFIG.load();
         let behavior = cfg.behavior();
         let anim_speed = cfg.animation_speed();
+        let disabling_fading = self.fading && !behavior.fading;
+        let disabling_window_animation = self.window_animation && !behavior.window_animation;
+        let disabling_wobbly = self.wobbly_windows && !behavior.wobbly_windows;
+        let disabling_particles = self.particle_effects && !behavior.particle_effects;
+        let disabling_motion_trail = self.motion_trail_enabled && !behavior.motion_trail;
+        let disabling_genie = self.genie_minimize && !behavior.genie_minimize;
+        let disabling_ripple = self.ripple_on_open && !behavior.ripple_on_open;
+        let disabling_tilt = self.window_tilt && !behavior.window_tilt;
+        let disabling_focus_highlight = self.focus_highlight && !behavior.focus_highlight;
+        let disabling_wallpaper_crossfade =
+            self.wallpaper_crossfade && !behavior.wallpaper_crossfade;
+        let disabling_edge_glow = self.edge_glow && !behavior.edge_glow;
+        let disabling_expose = self.expose_enabled && !behavior.expose_enabled;
+        let disabling_snap_preview = self.snap_preview_enabled && !behavior.snap_preview;
+        let disabling_peek = self.peek_enabled && !behavior.peek_enabled;
 
         // --- Core visual settings ---
         self.corner_radius = behavior.corner_radius;
@@ -219,10 +334,22 @@ impl<C: CompositorConnection> Compositor<C> {
         self.inactive_opacity = behavior.inactive_opacity;
         self.active_opacity = behavior.active_opacity;
         self.fading = behavior.fading;
-        self.fade_in_step = anim_speed.apply_fade_step(behavior.fade_in_step);
-        self.fade_out_step = anim_speed.apply_fade_step(behavior.fade_out_step);
+        self.fade_in_step = finite_clamp(
+            anim_speed.apply_fade_step(behavior.fade_in_step),
+            0.0001,
+            1.0,
+            0.03,
+        );
+        self.fade_out_step = finite_clamp(
+            anim_speed.apply_fade_step(behavior.fade_out_step),
+            0.0001,
+            1.0,
+            0.03,
+        );
         self.detect_client_opacity = behavior.detect_client_opacity;
         self.fullscreen_unredirect = behavior.fullscreen_unredirect;
+        self.direct_scanout_mgr
+            .set_enabled(behavior.direct_scanout_enabled);
 
         // --- VSync method (runtime change support) ---
         let new_vsync_method = match behavior.vsync_method.as_str() {
@@ -353,15 +480,15 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // --- Window animation ---
         self.window_animation = behavior.window_animation;
-        self.window_animation_scale = behavior.window_animation_scale;
+        self.window_animation_scale = finite_clamp(behavior.window_animation_scale, 0.1, 2.0, 0.92);
 
         // --- Dim inactive ---
-        self.inactive_dim = behavior.inactive_dim;
+        self.inactive_dim = finite_clamp(behavior.inactive_dim, 0.0, 1.0, 1.0);
 
         // --- Edge glow ---
         self.edge_glow = behavior.edge_glow;
         self.edge_glow_color = behavior.edge_glow_color;
-        self.edge_glow_width = behavior.edge_glow_width;
+        self.edge_glow_width = finite_clamp(behavior.edge_glow_width, 0.0, 512.0, 8.0);
 
         // --- Attention animation ---
         self.attention_animation = behavior.attention_animation;
@@ -373,15 +500,15 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // --- Magnifier ---
         self.magnifier_enabled = behavior.magnifier_enabled;
-        self.magnifier_radius = behavior.magnifier_radius;
-        self.magnifier_zoom = behavior.magnifier_zoom;
+        self.magnifier_radius = finite_clamp(behavior.magnifier_radius, 1.0, 4096.0, 200.0);
+        self.magnifier_zoom = finite_clamp(behavior.magnifier_zoom, 1.0, 32.0, 2.0);
 
         // --- Window tilt ---
         self.window_tilt = behavior.window_tilt;
-        self.tilt_amount = behavior.tilt_amount;
-        self.tilt_perspective = behavior.tilt_perspective;
-        self.tilt_speed = behavior.tilt_speed;
-        self.tilt_grid = behavior.tilt_grid.max(1);
+        self.tilt_amount = finite_clamp(behavior.tilt_amount, 0.0, 0.35, 0.08);
+        self.tilt_perspective = finite_clamp(behavior.tilt_perspective, 100.0, 10_000.0, 1_000.0);
+        self.tilt_speed = finite_clamp(behavior.tilt_speed, 0.1, 100.0, 8.0);
+        self.tilt_grid = behavior.tilt_grid.clamp(1, 64);
 
         // --- Frosted glass ---
         self.frosted_glass_rules
@@ -390,14 +517,17 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // --- Wobbly windows ---
         self.wobbly_windows = behavior.wobbly_windows;
-        self.wobbly_stiffness = behavior.wobbly_stiffness;
-        self.wobbly_damping = behavior.wobbly_damping;
-        self.wobbly_restore_stiffness = behavior.wobbly_restore_stiffness;
-        self.wobbly_grid_size = behavior.wobbly_grid_size;
+        self.wobbly_stiffness = finite_clamp(behavior.wobbly_stiffness, 0.1, 10_000.0, 600.0);
+        self.wobbly_damping = finite_clamp(behavior.wobbly_damping, 0.1, 1_000.0, 30.0);
+        self.wobbly_restore_stiffness =
+            finite_clamp(behavior.wobbly_restore_stiffness, 0.1, 10_000.0, 200.0);
+        self.wobbly_grid_size = behavior
+            .wobbly_grid_size
+            .min(crate::backend::compositor_common::effects::MAX_WOBBLY_SUBDIVISIONS);
 
         // --- Expose ---
         self.expose_enabled = behavior.expose_enabled;
-        self.expose_gap = behavior.expose_gap;
+        self.expose_gap = finite_clamp(behavior.expose_gap, 0.0, 512.0, 20.0);
 
         // --- Snap preview ---
         self.snap_preview_enabled = behavior.snap_preview;
@@ -410,38 +540,43 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // --- Window tabs ---
         self.window_tabs_enabled = behavior.window_tabs;
-        self.tab_bar_height = behavior.tab_bar_height;
+        self.tab_bar_height = finite_clamp(behavior.tab_bar_height, 1.0, 256.0, 24.0);
         self.tab_bar_color = behavior.tab_bar_color;
         self.tab_active_color = behavior.tab_active_color;
 
         // --- Particle effects ---
         self.particle_effects = behavior.particle_effects;
-        self.particle_count = behavior.particle_count;
-        self.particle_lifetime = behavior.particle_lifetime;
-        self.particle_gravity = behavior.particle_gravity;
+        self.particle_count = behavior
+            .particle_count
+            .min(crate::backend::compositor_common::effects::MAX_PARTICLES_PER_BURST);
+        self.particle_lifetime = finite_clamp(behavior.particle_lifetime, 0.001, 30.0, 1.0);
+        self.particle_gravity = finite_clamp(behavior.particle_gravity, -10_000.0, 10_000.0, 300.0);
 
         // --- Motion trail ---
         self.motion_trail_enabled = behavior.motion_trail;
-        self.motion_trail_frames = behavior.motion_trail_frames;
-        self.motion_trail_opacity = behavior.motion_trail_opacity;
+        self.motion_trail_frames = behavior
+            .motion_trail_frames
+            .min(crate::backend::compositor_common::effects::MAX_MOTION_TRAIL_SAMPLES);
+        self.motion_trail_opacity = finite_clamp(behavior.motion_trail_opacity, 0.0, 1.0, 0.3);
 
         // --- Genie minimize ---
         self.genie_minimize = behavior.genie_minimize;
-        self.genie_duration_ms = behavior.genie_duration_ms;
+        self.genie_duration_ms = behavior.genie_duration_ms.clamp(1, 30_000);
 
         // --- Ripple on open ---
         self.ripple_on_open = behavior.ripple_on_open;
-        self.ripple_duration = behavior.ripple_duration;
-        self.ripple_amplitude = behavior.ripple_amplitude;
+        self.ripple_duration = finite_clamp(behavior.ripple_duration, 0.001, 30.0, 0.4);
+        self.ripple_amplitude = finite_clamp(behavior.ripple_amplitude, 0.0, 0.1, 0.015);
 
         // --- Focus highlight ---
         self.focus_highlight = behavior.focus_highlight;
         self.focus_highlight_color = behavior.focus_highlight_color;
-        self.focus_highlight_duration_ms = behavior.focus_highlight_duration_ms;
+        self.focus_highlight_duration_ms = behavior.focus_highlight_duration_ms.clamp(1, 30_000);
 
         // --- Wallpaper crossfade ---
         self.wallpaper_crossfade = behavior.wallpaper_crossfade;
-        self.wallpaper_crossfade_duration_ms = behavior.wallpaper_crossfade_duration_ms;
+        self.wallpaper_crossfade_duration_ms =
+            behavior.wallpaper_crossfade_duration_ms.clamp(1, 30_000);
 
         // --- Annotations ---
         self.annotation_color = behavior.annotation_color;
@@ -459,16 +594,48 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // --- Wallpaper (trigger async reload if path or mode changed) ---
         let new_mode = parse_wallpaper_mode(&behavior.wallpaper_mode);
-        if behavior.wallpaper != self.wallpaper_path || new_mode != self.wallpaper_mode {
-            self.wallpaper_mode = new_mode;
-            self.wallpaper_path.clone_from(&behavior.wallpaper);
-            if !self.wallpaper_path.is_empty() {
+        match wallpaper_config_update(
+            &self.wallpaper_path,
+            self.wallpaper_requested_mode,
+            &behavior.wallpaper,
+            new_mode,
+        ) {
+            WallpaperConfigUpdate::Unchanged => {}
+            WallpaperConfigUpdate::Reload => {
+                // Dropping the receiver invalidates any older decode. Its
+                // worker may finish, but can no longer publish into this
+                // compositor after a path or mode change.
+                self.pending_wallpaper = None;
+                self.wallpaper_path.clone_from(&behavior.wallpaper);
+                self.wallpaper_requested_mode = new_mode;
                 self.pending_wallpaper = Some(Self::load_wallpaper_async(
                     &self.wallpaper_path,
                     self.screen_w,
                     self.screen_h,
-                    self.wallpaper_mode,
+                    self.wallpaper_requested_mode,
                 ));
+            }
+            WallpaperConfigUpdate::Clear => {
+                // Clearing the path is an immediate state transition: cancel
+                // the decode and retire both sides of any active crossfade.
+                self.pending_wallpaper = None;
+                self.wallpaper_path.clear();
+                self.wallpaper_requested_mode = new_mode;
+                self.wallpaper_mode = new_mode;
+                self.wallpaper_transition_start = None;
+                unsafe {
+                    if let Some(texture) = self.wallpaper_texture.take() {
+                        self.gl.delete_texture(texture);
+                    }
+                    if let Some(texture) = self.old_wallpaper_texture.take() {
+                        self.gl.delete_texture(texture);
+                    }
+                }
+                self.wallpaper_img_w = 0;
+                self.wallpaper_img_h = 0;
+                self.old_wallpaper_img_w = 0;
+                self.old_wallpaper_img_h = 0;
+                self.old_wallpaper_mode = new_mode;
             }
         }
 
@@ -486,6 +653,95 @@ impl<C: CompositorConnection> Compositor<C> {
         } else if !behavior.shader_hot_reload && self.shader_hot_reload_enabled {
             self.shader_hot_reload_enabled = false;
             self.shader_file_mtimes.clear();
+        }
+
+        // Hot-disable is a state transition, not just a boolean assignment.
+        // Normalize or retire in-flight state so re-enabling an effect cannot
+        // resurrect stale meshes/trails and disabled fades cannot retain dead
+        // windows indefinitely.
+        if disabling_fading {
+            let fading_out: Vec<u32> = self
+                .windows
+                .iter()
+                .filter_map(|(&win, wt)| wt.fading_out.then_some(win))
+                .collect();
+            for wt in self.windows.values_mut() {
+                wt.fade_opacity = 1.0;
+            }
+            for win in fading_out {
+                self.remove_window_immediate(win);
+            }
+        }
+        if disabling_window_animation {
+            for wt in self.windows.values_mut() {
+                wt.anim_scale = 1.0;
+                wt.anim_scale_target = 1.0;
+            }
+        }
+        if disabling_wobbly {
+            for wt in self.windows.values_mut() {
+                wt.wobbly = None;
+            }
+        }
+        if disabling_particles {
+            self.particle_systems.clear();
+        }
+        if disabling_motion_trail {
+            for wt in self.windows.values_mut() {
+                wt.motion_trail.clear();
+                wt.motion_trail_cursor = None;
+            }
+        }
+        if disabling_genie {
+            let animations = std::mem::take(&mut self.genie_active);
+            for animation in animations {
+                self.free_texture_resources(
+                    animation.gl_texture,
+                    animation.binding,
+                    animation.pixmap,
+                    animation.damage,
+                );
+            }
+        }
+        if disabling_ripple {
+            self.ripple_active.clear();
+        }
+        if disabling_tilt {
+            self.tilt_current_x = 0.0;
+            self.tilt_current_y = 0.0;
+            self.tilt_target_x = 0.0;
+            self.tilt_target_y = 0.0;
+        }
+        if disabling_focus_highlight {
+            self.focus_highlight_start = None;
+        }
+        if disabling_wallpaper_crossfade {
+            self.wallpaper_transition_start = None;
+            if let Some(texture) = self.old_wallpaper_texture.take() {
+                unsafe {
+                    self.gl.delete_texture(texture);
+                }
+            }
+            self.old_wallpaper_img_w = 0;
+            self.old_wallpaper_img_h = 0;
+        }
+        if disabling_edge_glow {
+            self.edge_glow_active = false;
+            self.edge_glow_suppressed = false;
+        }
+        if disabling_expose {
+            self.expose_active = false;
+            self.expose_entries.clear();
+            self.expose_opacity = 0.0;
+            self.expose_start = None;
+        }
+        if disabling_snap_preview {
+            self.snap_target = None;
+        }
+        if disabling_peek {
+            self.peek_active = false;
+            self.peek_opacity = 1.0;
+            self.peek_start = None;
         }
 
         self.needs_render = true;
@@ -549,5 +805,79 @@ impl<C: CompositorConnection> Compositor<C> {
 
     pub(crate) fn set_hdr_output_10bit(&mut self, enabled: bool) {
         self.hdr_output_10bit = enabled;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        WallpaperConfigUpdate, expose_rect_pending, overview_animation_pending_state,
+        wallpaper_config_update,
+    };
+    use crate::backend::compositor_common::wallpaper::WallpaperMode;
+
+    #[test]
+    fn wallpaper_request_change_reloads_for_path_or_mode() {
+        assert_eq!(
+            wallpaper_config_update(
+                "old.png",
+                WallpaperMode::Fill,
+                "new.png",
+                WallpaperMode::Fill
+            ),
+            WallpaperConfigUpdate::Reload
+        );
+        assert_eq!(
+            wallpaper_config_update(
+                "same.png",
+                WallpaperMode::Fill,
+                "same.png",
+                WallpaperMode::Fit
+            ),
+            WallpaperConfigUpdate::Reload
+        );
+    }
+
+    #[test]
+    fn empty_wallpaper_path_is_an_explicit_clear() {
+        assert_eq!(
+            wallpaper_config_update("old.png", WallpaperMode::Center, "", WallpaperMode::Stretch),
+            WallpaperConfigUpdate::Clear
+        );
+        assert_eq!(
+            wallpaper_config_update("", WallpaperMode::Fit, "", WallpaperMode::Fit),
+            WallpaperConfigUpdate::Unchanged
+        );
+    }
+
+    #[test]
+    fn steady_overview_does_not_request_continuous_frames() {
+        assert!(!overview_animation_pending_state(
+            true, false, 1.0, 1.0, 0.0, 0.0,
+        ));
+        assert!(overview_animation_pending_state(
+            true, false, 0.8, 0.8, 0.0, 0.0,
+        ));
+        assert!(overview_animation_pending_state(
+            true, false, 1.0, 1.0, 0.0, 0.2,
+        ));
+        assert!(overview_animation_pending_state(
+            true, true, 1.0, 1.0, 0.0, 0.0,
+        ));
+        assert!(overview_animation_pending_state(
+            true, false, 1.0, 0.8, 0.0, 0.0,
+        ));
+    }
+
+    #[test]
+    fn expose_geometry_only_ticks_until_it_converges() {
+        assert!(!expose_rect_pending(
+            (10.0, 20.0, 300.0, 200.0),
+            (10.0, 20.0, 300.0, 200.0),
+        ));
+        assert!(expose_rect_pending(
+            (10.0, 20.0, 300.0, 200.0),
+            (10.6, 20.0, 300.0, 200.0),
+        ));
     }
 }

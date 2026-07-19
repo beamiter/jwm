@@ -3,6 +3,7 @@
 use super::math::ortho;
 #[allow(unused_imports)]
 use super::*;
+use crate::backend::compositor_common::effects::finite_clamp;
 use crate::backend::x11::compositor_common::BootstrapState;
 #[allow(unused_imports)]
 use glow::HasContext;
@@ -738,8 +739,19 @@ impl<C: CompositorConnection> Compositor<C> {
             blur_fbos,
             scene_fbo,
             fading: behavior.fading,
-            fade_in_step: anim_speed.apply_fade_step(behavior.fade_in_step),
-            fade_out_step: anim_speed.apply_fade_step(behavior.fade_out_step),
+            fade_in_step: finite_clamp(
+                anim_speed.apply_fade_step(behavior.fade_in_step),
+                0.0001,
+                1.0,
+                0.03,
+            ),
+            fade_out_step: finite_clamp(
+                anim_speed.apply_fade_step(behavior.fade_out_step),
+                0.0001,
+                1.0,
+                0.03,
+            ),
+            effect_tick_clock: effects::EffectTickClock::default(),
             shadow_exclude: behavior.shadow_exclude.clone(),
             opacity_rules,
             blur_exclude: behavior.blur_exclude.clone(),
@@ -815,6 +827,11 @@ impl<C: CompositorConnection> Compositor<C> {
             transition_program,
             transition_uniforms,
             transition_fbo: None,
+            // Allocated lazily after the first complete frame. Until a swap
+            // succeeds there is deliberately no scene eligible for a
+            // workspace-transition snapshot.
+            presented_scene_fbo: None,
+            presented_scene_status: PresentedSceneStatus::default(),
             transition_start: None,
             transition_duration: std::time::Duration::from_millis(anim_speed.apply_duration(150)),
             transition_direction: 1.0,
@@ -823,7 +840,7 @@ impl<C: CompositorConnection> Compositor<C> {
             transition_mon_y: 0,
             transition_mon_w: screen_w,
             transition_mon_h: screen_h,
-            transition_mode: TransitionMode::from_name(behavior.transition_mode.as_str()),
+            transition_mode: TransitionMode::from_name_or_none(behavior.transition_mode.as_str()),
             // Cube transition
             cube_program,
             cube_uniforms,
@@ -833,9 +850,9 @@ impl<C: CompositorConnection> Compositor<C> {
             portal_uniforms,
             // Window scale animation
             window_animation: behavior.window_animation,
-            window_animation_scale: behavior.window_animation_scale,
+            window_animation_scale: finite_clamp(behavior.window_animation_scale, 0.1, 2.0, 0.92),
             // Dim inactive
-            inactive_dim: behavior.inactive_dim,
+            inactive_dim: finite_clamp(behavior.inactive_dim, 0.0, 1.0, 1.0),
             // Mouse position
             mouse_x: 0.0,
             mouse_y: 0.0,
@@ -846,7 +863,7 @@ impl<C: CompositorConnection> Compositor<C> {
             edge_glow_active: false,
             edge_glow_suppressed: false,
             edge_glow_color: behavior.edge_glow_color,
-            edge_glow_width: behavior.edge_glow_width,
+            edge_glow_width: finite_clamp(behavior.edge_glow_width, 0.0, 512.0, 8.0),
             // Attention animation
             attention_animation: behavior.attention_animation,
             attention_color: behavior.attention_color,
@@ -856,8 +873,8 @@ impl<C: CompositorConnection> Compositor<C> {
             pip_border_width: behavior.pip_border_width,
             // Magnifier
             magnifier_enabled: behavior.magnifier_enabled,
-            magnifier_radius: behavior.magnifier_radius,
-            magnifier_zoom: behavior.magnifier_zoom,
+            magnifier_radius: finite_clamp(behavior.magnifier_radius, 1.0, 4096.0, 200.0),
+            magnifier_zoom: finite_clamp(behavior.magnifier_zoom, 1.0, 32.0, 2.0),
             magnifier_uniforms,
             // External WaterLily simulation layer
             waterlily_program,
@@ -882,10 +899,10 @@ impl<C: CompositorConnection> Compositor<C> {
             tilt_program,
             tilt_uniforms,
             window_tilt: behavior.window_tilt,
-            tilt_amount: behavior.tilt_amount,
-            tilt_perspective: behavior.tilt_perspective,
-            tilt_speed: behavior.tilt_speed,
-            tilt_grid: behavior.tilt_grid.max(1),
+            tilt_amount: finite_clamp(behavior.tilt_amount, 0.0, 0.35, 0.08),
+            tilt_perspective: finite_clamp(behavior.tilt_perspective, 100.0, 10_000.0, 1_000.0),
+            tilt_speed: finite_clamp(behavior.tilt_speed, 0.1, 100.0, 8.0),
+            tilt_grid: behavior.tilt_grid.clamp(1, 64),
             tilt_current_x: 0.0,
             tilt_current_y: 0.0,
             tilt_target_x: 0.0,
@@ -916,14 +933,21 @@ impl<C: CompositorConnection> Compositor<C> {
             wobbly_program,
             wobbly_uniforms,
             wobbly_windows: behavior.wobbly_windows,
-            wobbly_stiffness: behavior.wobbly_stiffness,
-            wobbly_damping: behavior.wobbly_damping,
-            wobbly_restore_stiffness: behavior.wobbly_restore_stiffness,
-            wobbly_grid_size: behavior.wobbly_grid_size,
+            wobbly_stiffness: finite_clamp(behavior.wobbly_stiffness, 0.1, 10_000.0, 600.0),
+            wobbly_damping: finite_clamp(behavior.wobbly_damping, 0.1, 1_000.0, 30.0),
+            wobbly_restore_stiffness: finite_clamp(
+                behavior.wobbly_restore_stiffness,
+                0.1,
+                10_000.0,
+                200.0,
+            ),
+            wobbly_grid_size: behavior
+                .wobbly_grid_size
+                .min(crate::backend::compositor_common::effects::MAX_WOBBLY_SUBDIVISIONS),
             // Phase 5: Expose/Mission Control
             expose_active: false,
             expose_enabled: behavior.expose_enabled,
-            expose_gap: behavior.expose_gap,
+            expose_gap: finite_clamp(behavior.expose_gap, 0.0, 512.0, 20.0),
             expose_entries: Vec::new(),
             expose_opacity: 0.0,
             expose_start: None,
@@ -940,7 +964,7 @@ impl<C: CompositorConnection> Compositor<C> {
             peek_start: None,
             // Phase 5: Window Tabs
             window_tabs_enabled: behavior.window_tabs,
-            tab_bar_height: behavior.tab_bar_height,
+            tab_bar_height: finite_clamp(behavior.tab_bar_height, 1.0, 256.0, 24.0),
             tab_bar_color: behavior.tab_bar_color,
             tab_active_color: behavior.tab_active_color,
             window_groups: HashMap::new(),
@@ -948,15 +972,20 @@ impl<C: CompositorConnection> Compositor<C> {
             particle_program,
             particle_uniforms,
             particle_effects: behavior.particle_effects,
-            particle_count: behavior.particle_count,
-            particle_lifetime: behavior.particle_lifetime,
-            particle_gravity: behavior.particle_gravity,
+            particle_count: behavior
+                .particle_count
+                .min(crate::backend::compositor_common::effects::MAX_PARTICLES_PER_BURST),
+            particle_lifetime: finite_clamp(behavior.particle_lifetime, 0.001, 30.0, 1.0),
+            particle_gravity: finite_clamp(behavior.particle_gravity, -10_000.0, 10_000.0, 300.0),
             particle_systems: Vec::new(),
             particle_vao,
             particle_vbo,
+            scratch_particle_data: Vec::new(),
+            scratch_wobbly_flat: Vec::new(),
             // Wallpaper (texture loaded asynchronously)
             wallpaper_texture: None,
             wallpaper_mode,
+            wallpaper_requested_mode: wallpaper_mode,
             wallpaper_path: behavior.wallpaper.clone(),
             wallpaper_img_w: 0,
             wallpaper_img_h: 0,
@@ -999,30 +1028,37 @@ impl<C: CompositorConnection> Compositor<C> {
             recording_captured_frames: 0,
             // Phase 3.1: Motion trail
             motion_trail_enabled: behavior.motion_trail,
-            motion_trail_frames: behavior.motion_trail_frames,
-            motion_trail_opacity: behavior.motion_trail_opacity,
+            motion_trail_frames: behavior
+                .motion_trail_frames
+                .min(crate::backend::compositor_common::effects::MAX_MOTION_TRAIL_SAMPLES),
+            motion_trail_opacity: finite_clamp(behavior.motion_trail_opacity, 0.0, 1.0, 0.3),
             // Phase 3.2: Genie minimize
             genie_program,
             genie_uniforms,
             genie_minimize: behavior.genie_minimize,
-            genie_duration_ms: behavior.genie_duration_ms,
+            genie_duration_ms: behavior.genie_duration_ms.clamp(1, 30_000),
             genie_active: Vec::new(),
             dock_position: (0.5 * screen_w as f32, screen_h as f32),
             // Phase 3.3: Ripple on open
             ripple_on_open: behavior.ripple_on_open,
-            ripple_duration: behavior.ripple_duration,
-            ripple_amplitude: behavior.ripple_amplitude,
+            ripple_duration: finite_clamp(behavior.ripple_duration, 0.001, 30.0, 0.4),
+            ripple_amplitude: finite_clamp(behavior.ripple_amplitude, 0.0, 0.1, 0.015),
             ripple_active: Vec::new(),
             // Phase 3.4: Focus highlight
             focus_highlight: behavior.focus_highlight,
             focus_highlight_color: behavior.focus_highlight_color,
-            focus_highlight_duration_ms: behavior.focus_highlight_duration_ms,
+            focus_highlight_duration_ms: behavior.focus_highlight_duration_ms.clamp(1, 30_000),
             focus_highlight_start: None,
             last_focused_window: None,
             // Phase 3.5: Wallpaper crossfade
             wallpaper_crossfade: behavior.wallpaper_crossfade,
-            wallpaper_crossfade_duration_ms: behavior.wallpaper_crossfade_duration_ms,
+            wallpaper_crossfade_duration_ms: behavior
+                .wallpaper_crossfade_duration_ms
+                .clamp(1, 30_000),
             old_wallpaper_texture: None,
+            old_wallpaper_mode: wallpaper_mode,
+            old_wallpaper_img_w: 0,
+            old_wallpaper_img_h: 0,
             wallpaper_transition_start: None,
             // Async wallpaper loading
             pending_wallpaper,

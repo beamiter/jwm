@@ -61,17 +61,37 @@ mod texture_pool;
 mod transitions;
 mod wallpaper;
 
-use smithay::backend::renderer::gles::ffi;
+use smithay::backend::renderer::gles::{GlesTexture, ffi};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::ffi::CString;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::backend::compositor_common::effects::MotionTrailSample;
 use crate::backend::compositor_common::math;
 use crate::backend::compositor_common::rules::{CornerRadiusRule, OpacityRule, ScaleRule};
 use crate::backend::compositor_common::wallpaper::{WallpaperImageData, WallpaperMode};
+
+static NEXT_OUTPUT_TEXTURE_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn next_output_texture_generation() -> u64 {
+    NEXT_OUTPUT_TEXTURE_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
+
+pub(crate) const XDG_POPUP_WINDOW_ID_PREFIX: u64 = 0xFE00_0000_0000_0000;
+pub(crate) const IME_POPUP_WINDOW_ID_PREFIX: u64 = 0xFF00_0000_0000_0000;
+const AUXILIARY_WINDOW_ID_MASK: u64 = 0xFF00_0000_0000_0000;
+
+pub(crate) fn is_auxiliary_window_id(window_id: u64) -> bool {
+    matches!(
+        window_id & AUXILIARY_WINDOW_ID_MASK,
+        XDG_POPUP_WINDOW_ID_PREFIX | IME_POPUP_WINDOW_ID_PREFIX
+    )
+}
+
 use crate::backend::x11::compositor_common::transitions::TransitionMode;
 use crate::backend::x11::compositor_common::wobbly::WobblyState;
 
@@ -228,9 +248,12 @@ pub(crate) struct BorderUniforms {
     pub size: i32,
     pub radius: i32,
     pub border_width: i32,
+    pub scene_linear: i32,
 }
 
 pub(crate) struct PostprocessUniforms {
+    pub rect: i32,
+    pub projection: i32,
     pub texture: i32,
     pub color_temp: i32,
     pub saturation: i32,
@@ -248,7 +271,6 @@ pub(crate) struct PostprocessUniforms {
     pub tone_mapping_method: i32,
 }
 
-#[allow(dead_code)]
 #[allow(dead_code)]
 pub(crate) struct SceneLinearEncodeUniforms {
     pub rect: i32,
@@ -306,6 +328,7 @@ pub(crate) struct TiltUniforms {
     pub perspective: i32,
     pub grid_size: i32,
     pub light_dir: i32,
+    pub scene_linear: i32,
 }
 
 pub(crate) struct WobblyUniforms {
@@ -319,6 +342,8 @@ pub(crate) struct WobblyUniforms {
     pub uv_rect: i32,
     pub grid_offsets: i32,
     pub grid_n: i32,
+    pub color_managed: i32,
+    pub scene_linear: i32,
 }
 
 #[allow(dead_code)]
@@ -334,6 +359,10 @@ pub(crate) struct GenieUniforms {
     pub progress: i32,
     pub dock_pos: i32,
     pub grid_size: i32,
+    pub ripple_progress: i32,
+    pub ripple_amplitude: i32,
+    pub color_managed: i32,
+    pub scene_linear: i32,
 }
 
 pub(crate) struct EdgeGlowUniforms {
@@ -393,8 +422,17 @@ pub(crate) struct AnnotationStroke {
 
 #[allow(dead_code)]
 pub(crate) struct WindowState {
-    /// Raw GL texture imported from the Wayland surface.
+    /// Raw GL texture imported from the Wayland surface. Kept alongside
+    /// `texture_owner` so the hot render paths do not need to unwrap the
+    /// Smithay handle for every draw.
     pub gl_texture: Option<u32>,
+    /// Strong Smithay owner for `gl_texture`.
+    ///
+    /// Surface renderer state and the backend offscreen cache may disappear
+    /// before a close/genie animation finishes. Keeping this Arc-backed handle
+    /// prevents Smithay from scheduling deletion of the GL texture while the
+    /// compositor still samples it.
+    pub texture_owner: Option<GlesTexture>,
     pub width: u32,
     pub height: u32,
     pub has_alpha: bool,
@@ -404,7 +442,8 @@ pub(crate) struct WindowState {
     pub anim_scale: f32,
     pub anim_scale_target: f32,
     pub wobbly: Option<WobblyState>,
-    pub motion_trail: VecDeque<(i32, i32)>,
+    pub motion_trail: VecDeque<MotionTrailSample>,
+    pub last_motion_position: Option<(i32, i32)>,
     pub opacity_override: Option<f32>,
     pub corner_radius_override: Option<f32>,
     pub frame_extents: [u32; 4],
@@ -425,9 +464,13 @@ pub(crate) struct WindowState {
     /// Accounts for CSD geometry offset (shadows/decorations outside window geometry).
     /// Default [0,0,1,1] means full texture = content.
     pub content_uv: [f32; 4],
-    /// Set when remove_window started a genie minimize animation; the
-    /// WindowState is kept alive so the genie pass can sample its
-    /// gl_texture, then removed by tick_genie when the animation completes.
+    /// Last on-screen rectangle captured when the window left the live scene.
+    /// Close fades render from this geometry because retired windows are no
+    /// longer present in the backend-provided `visible_scene`.
+    pub closing_rect: Option<(f32, f32, f32, f32)>,
+    /// Set when the explicit minimize path starts a genie animation. The
+    /// WindowState and GenieAnimation both retain strong texture owners until
+    /// `tick_genie` removes them.
     pub is_genie_minimizing: bool,
     /// wp-color-management transform to apply in the window fragment shader
     /// for this frame. `None` = identity / bypass. Refreshed each frame in
@@ -439,10 +482,10 @@ pub(crate) struct WindowState {
 
 /// Active genie minimize animation for one window (Wayland).
 ///
-/// Unlike X11 we don't transfer ownership of the GL texture — the WindowState
-/// stays in `self.windows` (with `is_genie_minimizing=true`) so its
-/// EGL-imported `gl_texture` remains valid. `tick_genie` removes both the
-/// animation entry and the WindowState when the animation completes.
+/// Both this animation and its matching WindowState hold a strong Smithay
+/// texture handle. The duplicate handles are cheap Arc clones and make the
+/// animation independently safe if the backend surface/offscreen owner is
+/// released as soon as the window leaves the live scene.
 #[allow(dead_code)]
 pub(crate) struct GenieAnimation {
     pub window_id: u64,
@@ -451,8 +494,10 @@ pub(crate) struct GenieAnimation {
     pub y: f32,
     pub w: f32,
     pub h: f32,
-    pub gl_texture: u32,
+    pub texture_owner: GlesTexture,
     pub has_alpha: bool,
+    pub y_inverted: bool,
+    pub content_uv: [f32; 4],
 }
 
 // ---------------------------------------------------------------------------
@@ -506,7 +551,8 @@ pub(crate) struct Particle {
     pub vx: f32,
     pub vy: f32,
     pub color: [f32; 4],
-    pub life: f32,
+    pub lifetime: f32,
+    pub max_lifetime: f32,
 }
 
 pub(crate) struct ParticleSystem {
@@ -573,6 +619,13 @@ pub(crate) struct WaylandCompositor {
     quad_vbo: u32,
     output_fbo: u32,
     output_texture: u32,
+    /// Actual storage format chosen when the output FBO was allocated. This is
+    /// a hardware property and must not be inferred from the runtime HDR
+    /// post-processing toggle.
+    output_internal_format: u32,
+    /// Changes whenever the output texture is recreated, even if GL recycles
+    /// the numeric texture id.
+    output_texture_generation: u64,
     /// SOTA #2 Phase 2.1: FP16 (RGBA16F) intermediate target used when
     /// `behavior.scene_linear_compositing` is on. Allocated alongside
     /// output_fbo with the same dimensions and torn down/resized in
@@ -580,6 +633,7 @@ pub(crate) struct WaylandCompositor {
     /// this sentinel and falls back to the encoded-space pipeline.
     /// Phase 2.2 will wire the window-shader linear-output path and the
     /// final encode pass that reads from this texture.
+    scene_linear_requested: bool,
     #[allow(dead_code)]
     linear_fbo: u32,
     #[allow(dead_code)]
@@ -638,6 +692,9 @@ pub(crate) struct WaylandCompositor {
 
     // Animation state
     transition_active: bool,
+    /// Capture the last completed output frame before drawing the new
+    /// workspace. Set by the workspace notification, consumed at frame start.
+    transition_snapshot_pending: bool,
     transition_start: Option<Instant>,
     transition_duration: Duration,
     transition_mode: TransitionMode,
@@ -681,6 +738,8 @@ pub(crate) struct WaylandCompositor {
     tilt_y: f32,
     tilt_target_x: f32,
     tilt_target_y: f32,
+    tilt_amount: f32,
+    tilt_perspective: f32,
 
     // Post-processing state
     postprocess_active: bool,
@@ -705,6 +764,10 @@ pub(crate) struct WaylandCompositor {
     // Optimization
     needs_render: bool,
     last_frame_time: Instant,
+    /// Tracks whether compositor-owned effects were already active on the
+    /// previous frame. A newly-created effect receives a zero-length first
+    /// tick, so an idle gap before creation cannot consume its lifetime.
+    effect_clock_active: bool,
     frame_count: u64,
     fps: f32,
 
@@ -717,6 +780,8 @@ pub(crate) struct WaylandCompositor {
     scratch_prev_geom: HashMap<u64, (i32, i32, u32, u32)>,
     scratch_scanout: Vec<(u64, direct_scanout::WindowScanoutInfo)>,
     scratch_wobbly_flat: Vec<f32>,
+    scratch_particle_data: Vec<f32>,
+    scratch_retired_aux_ids: Vec<u64>,
 
     // Dock position (for genie)
     dock_x: f32,
@@ -777,6 +842,9 @@ pub(crate) struct WaylandCompositor {
     monitor_wallpapers: Vec<MonitorWallpaper>,
     pending_wallpaper: Option<std::sync::mpsc::Receiver<WallpaperImageData>>,
     pending_monitor_wallpapers: Vec<(usize, std::sync::mpsc::Receiver<WallpaperImageData>)>,
+    /// Raw wallpaper textures detached while no GL context is available.
+    /// They are deleted at the beginning of the next rendered frame.
+    retired_wallpaper_textures: Vec<u32>,
     wallpaper_crossfade: bool,
     wallpaper_crossfade_duration_ms: u64,
     old_wallpaper_texture: Option<u32>,
@@ -905,6 +973,7 @@ pub(crate) struct WaylandCompositor {
 
     // --- Transition per-monitor ---
     transition_mon: Option<(i32, i32, u32, u32)>,
+    transition_exclude_top: u32,
 
     // --- Render stats ---
     render_stats: render_stats::RenderStats,
@@ -932,18 +1001,26 @@ const GL_RGBA16F: u32 = 0x881A;
 const GL_HALF_FLOAT: u32 = 0x140B;
 
 unsafe fn create_fbo_texture(gl: &ffi::Gles2, w: u32, h: u32) -> (u32, u32) {
-    unsafe { create_fbo_texture_fmt(gl, w, h, ffi::RGBA8) }
+    unsafe {
+        create_fbo_texture_fmt(gl, w, h, ffi::RGBA8).unwrap_or_else(|status| {
+            panic!("failed to create required RGBA8 framebuffer ({w}x{h}, status=0x{status:x})")
+        })
+    }
 }
 
 unsafe fn create_fbo_texture_10bit(gl: &ffi::Gles2, w: u32, h: u32) -> (u32, u32) {
-    unsafe { create_fbo_texture_fmt(gl, w, h, GL_RGB10_A2) }
+    unsafe {
+        create_fbo_texture_fmt(gl, w, h, GL_RGB10_A2).unwrap_or_else(|status| {
+            panic!("failed to create required RGB10_A2 framebuffer ({w}x{h}, status=0x{status:x})")
+        })
+    }
 }
 
 /// Allocate a half-float RGBA FBO for scene-linear compositing. Linear
 /// values can exceed [0, 1] (e.g. PQ peak-luminance scaling), so an 8-bit
 /// or 10-bit unsigned-normalized format would clamp them. RGBA16F is the
 /// GLES 3.0-portable storage with enough range and precision.
-unsafe fn create_fbo_texture_fp16(gl: &ffi::Gles2, w: u32, h: u32) -> (u32, u32) {
+unsafe fn create_fbo_texture_fp16(gl: &ffi::Gles2, w: u32, h: u32) -> Result<(u32, u32), u32> {
     unsafe { create_fbo_texture_fmt(gl, w, h, GL_RGBA16F) }
 }
 
@@ -952,7 +1029,7 @@ unsafe fn create_fbo_texture_fmt(
     w: u32,
     h: u32,
     internal_format: u32,
-) -> (u32, u32) {
+) -> Result<(u32, u32), u32> {
     unsafe {
         let mut tex = 0u32;
         gl.GenTextures(1, &mut tex);
@@ -1002,11 +1079,19 @@ unsafe fn create_fbo_texture_fmt(
         let status = gl.CheckFramebufferStatus(ffi::FRAMEBUFFER);
         if status != ffi::FRAMEBUFFER_COMPLETE {
             log::warn!(
-                "[udev/compositor] incomplete FBO (status=0x{status:x}) for {w}x{h} internal_format=0x{internal_format:x}; rendering to it will be blank"
+                "[udev/compositor] rejecting incomplete FBO (status=0x{status:x}) for {w}x{h} internal_format=0x{internal_format:x}"
             );
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+            if fbo != 0 {
+                gl.DeleteFramebuffers(1, &fbo);
+            }
+            if tex != 0 {
+                gl.DeleteTextures(1, &tex);
+            }
+            return Err(status);
         }
 
-        (fbo, tex)
+        Ok((fbo, tex))
     }
 }
 
@@ -1034,7 +1119,7 @@ impl WaylandCompositor {
             let postprocess_program = create_program(
                 gl,
                 shaders::VERTEX_SHADER,
-                shaders::POSTPROCESS_FRAGMENT_SHADER,
+                shaders::MAGNIFIER_POSTPROCESS_FRAGMENT_SHADER,
             )?;
             let scene_linear_encode_program = create_program(
                 gl,
@@ -1148,9 +1233,12 @@ impl WaylandCompositor {
                 size: get_uniform_loc(gl, border_program, "u_size"),
                 radius: get_uniform_loc(gl, border_program, "u_radius"),
                 border_width: get_uniform_loc(gl, border_program, "u_border_width"),
+                scene_linear: get_uniform_loc(gl, border_program, "u_scene_linear"),
             };
 
             let postprocess_uniforms = PostprocessUniforms {
+                rect: get_uniform_loc(gl, postprocess_program, "u_rect"),
+                projection: get_uniform_loc(gl, postprocess_program, "u_projection"),
                 texture: get_uniform_loc(gl, postprocess_program, "u_texture"),
                 color_temp: get_uniform_loc(gl, postprocess_program, "u_color_temp"),
                 saturation: get_uniform_loc(gl, postprocess_program, "u_saturation"),
@@ -1224,6 +1312,7 @@ impl WaylandCompositor {
                 perspective: get_uniform_loc(gl, tilt_program, "u_perspective"),
                 grid_size: get_uniform_loc(gl, tilt_program, "u_grid_size"),
                 light_dir: get_uniform_loc(gl, tilt_program, "u_light_dir"),
+                scene_linear: get_uniform_loc(gl, tilt_program, "u_scene_linear"),
             };
 
             let wobbly_uniforms = WobblyUniforms {
@@ -1237,6 +1326,8 @@ impl WaylandCompositor {
                 uv_rect: get_uniform_loc(gl, wobbly_program, "u_uv_rect"),
                 grid_offsets: get_uniform_loc(gl, wobbly_program, "u_grid_offsets"),
                 grid_n: get_uniform_loc(gl, wobbly_program, "u_grid_n"),
+                color_managed: get_uniform_loc(gl, wobbly_program, "u_color_managed"),
+                scene_linear: get_uniform_loc(gl, wobbly_program, "u_scene_linear"),
             };
 
             let genie_uniforms = GenieUniforms {
@@ -1251,6 +1342,10 @@ impl WaylandCompositor {
                 progress: get_uniform_loc(gl, genie_program, "u_progress"),
                 dock_pos: get_uniform_loc(gl, genie_program, "u_dock_pos"),
                 grid_size: get_uniform_loc(gl, genie_program, "u_grid_size"),
+                ripple_progress: get_uniform_loc(gl, genie_program, "u_ripple_progress"),
+                ripple_amplitude: get_uniform_loc(gl, genie_program, "u_ripple_amplitude"),
+                color_managed: get_uniform_loc(gl, genie_program, "u_color_managed"),
+                scene_linear: get_uniform_loc(gl, genie_program, "u_scene_linear"),
             };
 
             let edge_glow_uniforms = EdgeGlowUniforms {
@@ -1307,7 +1402,16 @@ impl WaylandCompositor {
                 .behavior()
                 .scene_linear_compositing;
             let (linear_fbo, linear_texture) = if scene_linear_enabled {
-                create_fbo_texture_fp16(gl, screen_w, screen_h)
+                match create_fbo_texture_fp16(gl, screen_w, screen_h) {
+                    Ok(resources) => resources,
+                    Err(status) => {
+                        log::warn!(
+                            "[udev/compositor] RGBA16F scene-linear target is unavailable \
+                             (status=0x{status:x}); falling back to encoded-space compositing"
+                        );
+                        (0, 0)
+                    }
+                }
             } else {
                 (0, 0)
             };
@@ -1409,6 +1513,13 @@ impl WaylandCompositor {
                 quad_vbo,
                 output_fbo,
                 output_texture,
+                output_internal_format: if hdr_10bit { GL_RGB10_A2 } else { ffi::RGBA8 },
+                output_texture_generation: next_output_texture_generation(),
+                // Treat a failed FP16 allocation as disabled. In particular,
+                // never advertise the scene-linear path to damage/KMS-offload
+                // code when there is no complete render target behind it.
+                // A later config toggle or compositor recreation can retry.
+                scene_linear_requested: scene_linear_enabled && linear_fbo != 0,
                 linear_fbo,
                 linear_texture,
                 scene_fbo,
@@ -1459,6 +1570,7 @@ impl WaylandCompositor {
 
                 // Animation state
                 transition_active: false,
+                transition_snapshot_pending: false,
                 transition_start: None,
                 transition_duration: Duration::from_millis(300),
                 transition_mode: TransitionMode::None,
@@ -1502,6 +1614,8 @@ impl WaylandCompositor {
                 tilt_y: 0.0,
                 tilt_target_x: 0.0,
                 tilt_target_y: 0.0,
+                tilt_amount: 0.26,
+                tilt_perspective: 800.0,
 
                 // Post-processing
                 postprocess_active: false,
@@ -1526,6 +1640,7 @@ impl WaylandCompositor {
                 // Optimization
                 needs_render: true,
                 last_frame_time: now,
+                effect_clock_active: false,
                 frame_count: 0,
                 fps: 0.0,
                 prev_scene: Vec::new(),
@@ -1533,6 +1648,8 @@ impl WaylandCompositor {
                 scratch_prev_geom: HashMap::new(),
                 scratch_scanout: Vec::new(),
                 scratch_wobbly_flat: Vec::new(),
+                scratch_particle_data: Vec::new(),
+                scratch_retired_aux_ids: Vec::new(),
 
                 // Dock position
                 dock_x: 0.0,
@@ -1595,6 +1712,7 @@ impl WaylandCompositor {
                 monitor_wallpapers: Vec::new(),
                 pending_wallpaper: None,
                 pending_monitor_wallpapers: Vec::new(),
+                retired_wallpaper_textures: Vec::new(),
                 wallpaper_crossfade: true,
                 wallpaper_crossfade_duration_ms: 500,
                 old_wallpaper_texture: None,
@@ -1717,6 +1835,7 @@ impl WaylandCompositor {
 
                 // Transition per-monitor
                 transition_mon: None,
+                transition_exclude_top: 0,
 
                 // Render stats & texture pool
                 render_stats: render_stats::RenderStats::new(),
@@ -1761,6 +1880,15 @@ impl WaylandCompositor {
     /// Raw GL texture ID of the composited output (color attachment of output_fbo).
     pub(crate) fn output_texture_id(&self) -> u32 {
         self.output_texture
+    }
+
+    /// Internal GL format of the compositor-owned output texture.
+    pub(crate) fn output_texture_internal_format(&self) -> u32 {
+        self.output_internal_format
+    }
+
+    pub(crate) fn output_texture_generation(&self) -> u64 {
+        self.output_texture_generation
     }
 
     /// Current screen dimensions.
@@ -2095,30 +2223,43 @@ impl WaylandCompositor {
                 gl.DeleteTextures(1, &level.texture);
             }
 
-            let (output_fbo, output_texture) = if self.hdr_enabled {
+            let (output_fbo, output_texture) = if self.output_internal_format == GL_RGB10_A2 {
                 create_fbo_texture_10bit(gl, w, h)
             } else {
                 create_fbo_texture(gl, w, h)
             };
             self.output_fbo = output_fbo;
             self.output_texture = output_texture;
+            self.output_texture_generation = next_output_texture_generation();
 
-            // Mirror the linear-scene FBO if it was active. Zero means the
-            // gate was off at construction; we don't dynamically enable it
-            // mid-session (that needs a backend re-init for shader-program
-            // recompilation in Phase 2.2 anyway).
+            // Mirror the requested runtime state. Programs are always built,
+            // so resize can also complete a hot enable.
             if self.linear_fbo != 0 {
                 gl.DeleteFramebuffers(1, &self.linear_fbo);
                 gl.DeleteTextures(1, &self.linear_texture);
-                let (lf, lt) = create_fbo_texture_fp16(gl, w, h);
-                self.linear_fbo = lf;
-                self.linear_texture = lt;
+                self.linear_fbo = 0;
+                self.linear_texture = 0;
+            }
+            if self.scene_linear_requested {
+                match create_fbo_texture_fp16(gl, w, h) {
+                    Ok((lf, lt)) => {
+                        self.linear_fbo = lf;
+                        self.linear_texture = lt;
+                    }
+                    Err(status) => {
+                        log::warn!(
+                            "[udev/compositor] disabling scene-linear compositing after \
+                             RGBA16F resize allocation failed (status=0x{status:x})"
+                        );
+                        self.scene_linear_requested = false;
+                    }
+                }
             }
 
             // Keep the offscreen chain at the same bit depth as on construction
             // (see new()): 10-bit when the output is 10-bit, else 8-bit. Without
             // this the chain silently reverts to 8-bit after any resize.
-            let hdr_10bit = self.hdr_enabled;
+            let hdr_10bit = self.output_internal_format == GL_RGB10_A2;
             let mk_fbo = |w: u32, h: u32| {
                 if hdr_10bit {
                     create_fbo_texture_10bit(gl, w, h)
@@ -2159,6 +2300,10 @@ impl WaylandCompositor {
             let (transition_fbo, transition_texture) = mk_fbo(w, h);
             self.transition_fbo = transition_fbo;
             self.transition_texture = transition_texture;
+            self.transition_active = false;
+            self.transition_snapshot_pending = false;
+            self.transition_start = None;
+            self.transition_mon = None;
 
             // Temporal-blur scratch buffers are half-res and lazily allocated;
             // drop them so they are recreated at the new size on next use.

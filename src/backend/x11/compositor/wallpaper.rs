@@ -17,6 +17,15 @@ use std::sync::{Condvar, Mutex, OnceLock};
 
 use crate::backend::x11::compositor_common::wallpaper::parse_wallpaper_mode;
 
+fn uses_global_wallpaper_fallback(
+    resolved_path: &str,
+    resolved_mode: WallpaperMode,
+    global_path: &str,
+    global_mode: WallpaperMode,
+) -> bool {
+    resolved_path == global_path && resolved_mode == global_mode
+}
+
 /// Process-wide gate bounding how many wallpaper images decode concurrently.
 /// Each decode does `image::open` + a Lanczos3 downscale (heavy CPU, transient
 /// full-image allocation); rapid wallpaper changes or per-monitor setup would
@@ -186,17 +195,6 @@ impl<C: CompositorConnection> Compositor<C> {
                 .any(|(mw, b)| (mw.mon_x, mw.mon_y, mw.mon_w, mw.mon_h) != (b.1, b.2, b.3, b.4));
 
         if geometry_changed {
-            // Phase 3.5: Save old wallpaper texture for crossfade
-            if self.wallpaper_crossfade && self.wallpaper_texture.is_some() {
-                if let Some(old) = self.old_wallpaper_texture.take() {
-                    unsafe {
-                        self.gl.delete_texture(old);
-                    }
-                }
-                self.old_wallpaper_texture = self.wallpaper_texture;
-                self.wallpaper_transition_start = Some(std::time::Instant::now());
-            }
-
             // Clean up old per-monitor textures
             unsafe {
                 for mw in self.monitor_wallpapers.drain(..) {
@@ -212,14 +210,33 @@ impl<C: CompositorConnection> Compositor<C> {
         let behavior = cfg.behavior();
 
         for &(idx, x, y, w, h, active_tags) in monitors {
-            let (path, mode_str) = resolve_wallpaper_for_tag(behavior, idx, active_tags);
-            let path = path.to_string();
+            let (resolved_path, mode_str) = resolve_wallpaper_for_tag(behavior, idx, active_tags);
             let mode = parse_wallpaper_mode(mode_str);
+            let uses_global_fallback = uses_global_wallpaper_fallback(
+                resolved_path,
+                mode,
+                &behavior.wallpaper,
+                parse_wallpaper_mode(&behavior.wallpaper_mode),
+            );
+            // `mw.texture` is reserved for an actual monitor/tag override.
+            // Outputs whose resolved configuration equals the global default
+            // share `wallpaper_texture`, which also makes global crossfades
+            // apply consistently without duplicate decodes.
+            let override_path = if uses_global_fallback {
+                String::new()
+            } else {
+                resolved_path.to_string()
+            };
 
             if geometry_changed {
                 let mon_idx = self.monitor_wallpapers.len();
-                if !path.is_empty() {
-                    let rx = Self::load_wallpaper_async(&path, self.screen_w, self.screen_h, mode);
+                if !override_path.is_empty() {
+                    let rx = Self::load_wallpaper_async(
+                        &override_path,
+                        self.screen_w,
+                        self.screen_h,
+                        mode,
+                    );
                     self.pending_monitor_wallpapers.push((mon_idx, rx));
                 }
                 self.monitor_wallpapers.push(MonitorWallpaper {
@@ -231,16 +248,31 @@ impl<C: CompositorConnection> Compositor<C> {
                     mode,
                     img_w: 0,
                     img_h: 0,
-                    current_path: path,
+                    current_path: override_path,
                 });
             } else if let Some(mw) = self.monitor_wallpapers.get_mut(idx as usize) {
-                if mw.current_path != path || mw.mode != mode {
+                if mw.current_path != override_path || mw.mode != mode {
                     mw.mode = mode;
-                    mw.current_path = path.clone();
-                    if !path.is_empty() {
-                        let rx =
-                            Self::load_wallpaper_async(&path, self.screen_w, self.screen_h, mode);
+                    mw.current_path.clone_from(&override_path);
+                    // Only the newest request for a monitor may publish. A
+                    // slower decode of the previous tag's wallpaper must not
+                    // race in afterward and overwrite the current selection.
+                    self.pending_monitor_wallpapers
+                        .retain(|(pending_idx, _)| *pending_idx != idx as usize);
+                    if !override_path.is_empty() {
+                        let rx = Self::load_wallpaper_async(
+                            &override_path,
+                            self.screen_w,
+                            self.screen_h,
+                            mode,
+                        );
                         self.pending_monitor_wallpapers.push((idx as usize, rx));
+                    } else if let Some(texture) = mw.texture.take() {
+                        unsafe {
+                            self.gl.delete_texture(texture);
+                        }
+                        mw.img_w = 0;
+                        mw.img_h = 0;
                     }
                 }
             }
@@ -255,5 +287,37 @@ impl<C: CompositorConnection> Compositor<C> {
                 behavior.wallpaper_tags.len(),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uses_global_wallpaper_fallback;
+    use crate::backend::compositor_common::wallpaper::WallpaperMode;
+
+    #[test]
+    fn identical_monitor_selection_reuses_global_texture() {
+        assert!(uses_global_wallpaper_fallback(
+            "global.png",
+            WallpaperMode::Fill,
+            "global.png",
+            WallpaperMode::Fill,
+        ));
+    }
+
+    #[test]
+    fn monitor_path_or_layout_difference_is_an_override() {
+        assert!(!uses_global_wallpaper_fallback(
+            "monitor.png",
+            WallpaperMode::Fill,
+            "global.png",
+            WallpaperMode::Fill,
+        ));
+        assert!(!uses_global_wallpaper_fallback(
+            "global.png",
+            WallpaperMode::Fit,
+            "global.png",
+            WallpaperMode::Fill,
+        ));
     }
 }

@@ -30,7 +30,6 @@ use smithay::backend::renderer::element::surface::{
 use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::{AsRenderElements, Id, Kind};
 use smithay::backend::renderer::gles::GlesRenderbuffer;
-use smithay::backend::renderer::gles::ffi as gl_ffi;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
 use smithay::backend::renderer::{Bind, ExportMem, Offscreen, Renderer};
@@ -171,13 +170,12 @@ pub(super) struct KmsState {
     renderer: GlesRenderer,
 
     pub(super) needs_render: bool,
-    compositor_texture_cache: Option<(u32, GlesTexture)>,
-    // Strong refs to every distinct compositor output-FBO texture we've wrapped.
+    compositor_texture_cache: Option<(u32, u32, u32, u32, u64, GlesTexture)>,
+    // Strong refs to every compositor output-FBO texture generation we've wrapped.
     // The GL texture is owned/deleted by the compositor, so smithay's GlesTexture
     // Drop must never fire on it (double-glDeleteTextures / recycled-id risk).
-    // Holding a ref keeps Drop suppressed; deduping by id bounds growth across
-    // FBO swaps (replaces an unrecoverable mem::forget that leaked per swap).
-    compositor_texture_keepalive: Vec<(u32, GlesTexture)>,
+    // Holding a ref keeps Drop suppressed until the renderer/context is torn down.
+    compositor_texture_keepalive: Vec<GlesTexture>,
     background_id: Id,
 
     cursor_theme: CursorTheme,
@@ -1070,17 +1068,19 @@ impl KmsState {
     pub(super) fn refresh_color_pipeline_offload(
         &mut self,
         state: &crate::backend::wayland::state::JwmWaylandState,
+        compositor_offload_safe: bool,
     ) -> ColorPipelineDecision {
         use crate::backend::wayland_udev::color_pipeline::TransferKind;
 
         let behavior = crate::config::CONFIG.load();
-        let gate_on = behavior.behavior().kms_color_pipeline_offload;
-        // CTM (3.3c) transforms linear-RGB values, so it requires the FBO to
-        // hold linear data — i.e. scene-linear compositing on. With it off
-        // the FBO is OETF-encoded and a per-output gamut matrix would scramble
-        // the data. GAMMA_LUT (3.2) is independent: it just applies the
-        // output OETF to whatever is in the FBO.
-        let ctm_gate_on = gate_on && behavior.behavior().scene_linear_compositing;
+        let gate_on = behavior.behavior().kms_color_pipeline_offload
+            && behavior.behavior().scene_linear_compositing
+            && compositor_offload_safe;
+        // CTM transforms linear RGB, and the installed GAMMA_LUT contains the
+        // output OETF. Both therefore require an actually allocated linear
+        // scene target. `compositor_offload_safe` also rejects frames with
+        // encoded-space overlays, which the LUT would otherwise encode twice.
+        let ctm_gate_on = gate_on;
         drop(behavior);
         let n = self.outputs.len();
 
@@ -3000,16 +3000,24 @@ impl KmsState {
             // Direct scanout detection: if there's a single fullscreen window and no
             // top/overlay layer surfaces, bypass the compositor FBO and let DRM attempt
             // direct scanout via the primary plane (zero-copy, no GPU composition).
-            // Respects the `fullscreen_unredirect` config flag, mirroring the X11
-            // backend's check_fullscreen_unredirect (which gates XComposite unredirect).
-            let fullscreen_unredirect = crate::config::CONFIG
-                .load()
-                .behavior()
-                .fullscreen_unredirect;
+            // Respect both direct-scanout controls. `fullscreen_unredirect`
+            // keeps parity with the X11 fullscreen bypass, while
+            // `direct_scanout_enabled` is the explicit KMS fast-path gate.
+            let (fullscreen_unredirect, direct_scanout_enabled) = {
+                let cfg = crate::config::CONFIG.load();
+                let behavior = cfg.behavior();
+                (
+                    behavior.fullscreen_unredirect,
+                    behavior.direct_scanout_enabled,
+                )
+            };
             let system_ui_active = compositor.as_ref().is_some_and(|c| c.has_system_ui());
             let recording_requires_composition = compositor
                 .as_ref()
                 .is_some_and(|c| c.recording_requires_composition());
+            let compositor_effect_reason = compositor
+                .as_ref()
+                .and_then(|c| c.direct_scanout_block_reason());
             let (direct_scanout_eligible, direct_scanout_reason) = if compositor.is_none() {
                 (false, "compositor disabled".to_string())
             } else if recording_requires_composition {
@@ -3019,8 +3027,12 @@ impl KmsState {
                 )
             } else if system_ui_active {
                 (false, "JWM system UI requires composition".to_string())
+            } else if !direct_scanout_enabled {
+                (false, "direct_scanout_enabled disabled".to_string())
             } else if !fullscreen_unredirect {
                 (false, "fullscreen_unredirect disabled".to_string())
+            } else if let Some(reason) = compositor_effect_reason {
+                (false, reason.to_string())
             } else if !elements.is_empty() {
                 (
                     false,
@@ -3136,31 +3148,42 @@ impl KmsState {
                 // Wrap the compositor's output FBO texture as a full-screen render element.
                 let (sw, sh) = comp.screen_size();
                 let tex_id = comp.output_texture_id();
+                let tex_format = comp.output_texture_internal_format();
+                let tex_generation = comp.output_texture_generation();
                 let output_tex = match &self.compositor_texture_cache {
-                    Some((cached_id, cached_tex)) if *cached_id == tex_id => cached_tex.clone(),
+                    Some((
+                        cached_id,
+                        cached_w,
+                        cached_h,
+                        cached_format,
+                        cached_generation,
+                        cached_tex,
+                    )) if *cached_id == tex_id
+                        && *cached_w == sw
+                        && *cached_h == sh
+                        && *cached_format == tex_format
+                        && *cached_generation == tex_generation =>
+                    {
+                        cached_tex.clone()
+                    }
                     _ => {
                         let size: Size<i32, BufferCoord> = (sw as i32, sh as i32).into();
                         let tex = unsafe {
                             GlesTexture::from_raw(
                                 &self.renderer,
-                                Some(gl_ffi::RGBA8),
+                                Some(tex_format),
                                 false,
                                 tex_id,
                                 size,
                             )
                         };
-                        // Retain a strong ref so Smithay's Drop never calls
-                        // glDeleteTextures on the compositor-owned FBO texture.
-                        // Dedupe by id so recycled ids don't accumulate.
-                        if !self
-                            .compositor_texture_keepalive
-                            .iter()
-                            .any(|(id, _)| *id == tex_id)
-                        {
-                            self.compositor_texture_keepalive
-                                .push((tex_id, tex.clone()));
-                        }
-                        self.compositor_texture_cache = Some((tex_id, tex.clone()));
+                        // Retain every wrapper generation. The compositor owns
+                        // and may explicitly recreate/delete the raw GL name;
+                        // letting Smithay later drop an older wrapper could
+                        // delete a recycled id belonging to a newer texture.
+                        self.compositor_texture_keepalive.push(tex.clone());
+                        self.compositor_texture_cache =
+                            Some((tex_id, sw, sh, tex_format, tex_generation, tex.clone()));
                         tex
                     }
                 };
@@ -3184,11 +3207,7 @@ impl KmsState {
             } else {
                 // smithay's try_assign_overlay_plane only considers Kind::ScanoutCandidate
                 // elements; the kernel atomic test still has final say.
-                let overlay_candidate_window = if crate::config::CONFIG
-                    .load()
-                    .behavior()
-                    .fullscreen_unredirect
-                {
+                let overlay_candidate_window = if fullscreen_unredirect && direct_scanout_enabled {
                     let mut fs = None;
                     for w in &state.window_stack {
                         if state.mapped_windows.contains(w)

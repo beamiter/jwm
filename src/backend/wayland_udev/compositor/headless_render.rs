@@ -616,8 +616,8 @@ fn main_window_shader_renders_opacity_and_dim() {
         const W: i32 = 16;
         const H: i32 = 16;
 
-        // Input: solid 2x2 texture, RGBA (200,100,50,255).
-        let texel = [200u8, 100, 50, 255];
+        // Input: solid premultiplied-style 2x2 texture with partial alpha.
+        let texel = [100u8, 50, 25, 128];
         let mut input_pixels = Vec::with_capacity(4 * 4);
         for _ in 0..4 {
             input_pixels.extend_from_slice(&texel);
@@ -725,7 +725,7 @@ fn main_window_shader_renders_opacity_and_dim() {
         gl.finish();
         assert_pixel(
             read_center(gl, W, H),
-            [200, 100, 50, 255],
+            [100, 50, 25, 255],
             2,
             "opaque/no-dim",
         );
@@ -735,7 +735,21 @@ fn main_window_shader_renders_opacity_and_dim() {
         gl.clear(glow::COLOR_BUFFER_BIT);
         gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         gl.finish();
-        assert_pixel(read_center(gl, W, H), [100, 50, 25, 255], 2, "dim-0.5");
+        assert_pixel(read_center(gl, W, H), [50, 25, 13, 255], 2, "dim-0.5");
+
+        // Case 3: negative opacity selects texture alpha; its magnitude is the
+        // layer fade and must scale premultiplied RGB and alpha exactly once.
+        gl.uniform_1_f32(u("u_opacity").as_ref(), -0.5);
+        gl.uniform_1_f32(u("u_dim").as_ref(), 1.0);
+        gl.clear(glow::COLOR_BUFFER_BIT);
+        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        gl.finish();
+        assert_pixel(
+            read_center(gl, W, H),
+            [50, 25, 13, 64],
+            2,
+            "texture-alpha/layer-0.5",
+        );
 
         gl.bind_vertex_array(None);
         gl.delete_buffer(vbo);

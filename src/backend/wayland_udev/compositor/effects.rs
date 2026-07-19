@@ -1,9 +1,14 @@
 use super::*;
+use crate::backend::compositor_common::effects::{
+    MAX_PARTICLE_SYSTEMS, advance_progress, clamp_effect_dt, effect_noise, motion_trail_lifetime,
+    particle_burst_count, sanitize_animation_dt, smoothing_alpha,
+};
 use smithay::backend::renderer::gles::ffi;
 
 impl WaylandCompositor {
     /// Tick fade animations (fade-in on map, fade-out on unmap)
     pub(crate) fn tick_fades(&mut self, dt: f32) {
+        let dt = sanitize_animation_dt(dt);
         for (_id, win) in self.windows.iter_mut() {
             if self.fading_enabled {
                 if win.fading_out {
@@ -24,8 +29,8 @@ impl WaylandCompositor {
 
             // Scale animation
             if self.window_animation_enabled && win.anim_scale != win.anim_scale_target {
-                let speed = 8.0 * dt;
-                win.anim_scale += (win.anim_scale_target - win.anim_scale) * speed;
+                let alpha = smoothing_alpha(8.0, dt);
+                win.anim_scale += (win.anim_scale_target - win.anim_scale) * alpha;
                 if (win.anim_scale - win.anim_scale_target).abs() < 0.001 {
                     win.anim_scale = win.anim_scale_target;
                 }
@@ -36,7 +41,8 @@ impl WaylandCompositor {
 
             // Ripple
             if self.ripple_on_open_enabled && win.ripple_active {
-                win.ripple_progress += dt * 2.0;
+                win.ripple_progress =
+                    advance_progress(win.ripple_progress, dt, self.ripple_duration);
                 if win.ripple_progress >= 1.0 {
                     win.ripple_active = false;
                     win.ripple_progress = 0.0;
@@ -60,7 +66,7 @@ impl WaylandCompositor {
         if self.genie_active.is_empty() {
             return false;
         }
-        let duration = std::time::Duration::from_millis(self.genie_duration_ms);
+        let duration = std::time::Duration::from_millis(self.genie_duration_ms.max(1));
         let now = std::time::Instant::now();
         let mut i = 0;
         while i < self.genie_active.len() {
@@ -83,9 +89,9 @@ impl WaylandCompositor {
             }
             return;
         }
-        let spring_k = 800.0f32;
-        let damping = 12.0f32;
-        let restore_k = 200.0f32;
+        let spring_k = self.wobbly_stiffness;
+        let damping = self.wobbly_damping;
+        let restore_k = self.wobbly_restore_stiffness;
 
         for (_id, win) in self.windows.iter_mut() {
             let wobbly = match win.wobbly.as_mut() {
@@ -104,18 +110,36 @@ impl WaylandCompositor {
             self.particle_systems.clear();
             return;
         }
-        let gravity = 500.0f32;
+        let simulation_dt = clamp_effect_dt(dt);
+        let lifetime_dt = sanitize_animation_dt(dt);
+        let gravity = self.particle_gravity;
         for system in self.particle_systems.iter_mut() {
-            system.age += dt;
+            system.age += lifetime_dt;
             for p in system.particles.iter_mut() {
-                p.vy += gravity * dt;
-                p.x += p.vx * dt;
-                p.y += p.vy * dt;
-                p.life -= dt * 0.8;
+                p.vy += gravity * simulation_dt;
+                p.x += p.vx * simulation_dt;
+                p.y += p.vy * simulation_dt;
+                p.lifetime -= lifetime_dt;
             }
-            system.particles.retain(|p| p.life > 0.0);
+            system.particles.retain(|p| p.lifetime > 0.0);
         }
         self.particle_systems.retain(|s| !s.particles.is_empty());
+    }
+
+    /// Retire expired motion-trail samples using wall-clock time.
+    pub(crate) fn tick_motion_trails(&mut self) {
+        if !self.motion_trail_enabled || self.motion_trail_frames == 0 {
+            for win in self.windows.values_mut() {
+                win.motion_trail.clear();
+            }
+            return;
+        }
+        let now = std::time::Instant::now();
+        let lifetime = motion_trail_lifetime(self.motion_trail_frames);
+        for win in self.windows.values_mut() {
+            win.motion_trail
+                .retain(|sample| sample.opacity_at(now, lifetime) > 0.0);
+        }
     }
 
     /// Tick snap preview opacity animation
@@ -157,23 +181,40 @@ impl WaylandCompositor {
             self.tilt_target_y = 0.0;
             return;
         }
-        let speed = 8.0 * dt;
-        self.tilt_x += (self.tilt_target_x - self.tilt_x) * speed;
-        self.tilt_y += (self.tilt_target_y - self.tilt_y) * speed;
+        let alpha = smoothing_alpha(self.tilt_speed, dt);
+        self.tilt_x += (self.tilt_target_x - self.tilt_x) * alpha;
+        self.tilt_y += (self.tilt_target_y - self.tilt_y) * alpha;
+        if (self.tilt_x - self.tilt_target_x).abs() < 0.0001 {
+            self.tilt_x = self.tilt_target_x;
+        }
+        if (self.tilt_y - self.tilt_target_y).abs() < 0.0001 {
+            self.tilt_y = self.tilt_target_y;
+        }
     }
 
     /// Spawn particles for a closing window
-    #[allow(dead_code)]
     pub(crate) fn spawn_particles_for_window(&mut self, x: i32, y: i32, w: u32, h: u32) {
-        let mut particles = Vec::with_capacity(60);
+        if !self.particle_effects_enabled || w == 0 || h == 0 {
+            return;
+        }
+        let count = particle_burst_count(self.particle_count);
+        if count == 0 {
+            return;
+        }
+        let lifetime = self.particle_lifetime.max(0.001);
+        let mut particles = Vec::with_capacity(count);
         let cx = x as f32 + w as f32 * 0.5;
         let cy = y as f32 + h as f32 * 0.5;
-        for i in 0..60 {
-            let angle = (i as f32 / 60.0) * std::f32::consts::TAU;
-            let speed = 100.0 + (i as f32 * 7.0) % 200.0;
+        for i in 0..count {
+            let seed = (i as u32)
+                .wrapping_mul(0x9e37_79b9)
+                .wrapping_add((x as u32).rotate_left(11))
+                .wrapping_add((y as u32).rotate_left(21));
+            let angle = effect_noise(seed) * std::f32::consts::TAU;
+            let speed = 100.0 + effect_noise(seed ^ 0xa5a5_5a5a) * 220.0;
             particles.push(Particle {
-                x: cx + (i as f32 * 3.7).sin() * w as f32 * 0.3,
-                y: cy + (i as f32 * 2.3).cos() * h as f32 * 0.3,
+                x: cx + (effect_noise(seed ^ 0x1357_9bdf) - 0.5) * w as f32 * 0.8,
+                y: cy + (effect_noise(seed ^ 0x2468_ace0) - 0.5) * h as f32 * 0.8,
                 vx: angle.cos() * speed,
                 vy: angle.sin() * speed - 150.0,
                 color: [
@@ -182,8 +223,12 @@ impl WaylandCompositor {
                     0.8,
                     1.0,
                 ],
-                life: 1.0,
+                lifetime,
+                max_lifetime: lifetime,
             });
+        }
+        if self.particle_systems.len() >= MAX_PARTICLE_SYSTEMS {
+            self.particle_systems.remove(0);
         }
         self.particle_systems.push(ParticleSystem {
             particles,
@@ -192,7 +237,7 @@ impl WaylandCompositor {
     }
 
     /// Render particle systems
-    pub(crate) fn render_particles(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+    pub(crate) fn render_particles(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
         if self.particle_systems.is_empty() {
             return;
         }
@@ -215,21 +260,28 @@ impl WaylandCompositor {
                 8.0,
             );
 
-            // Build vertex data: [x, y, r, g, b, a, life] per particle
-            let mut data: Vec<f32> = Vec::new();
+            // Build vertex data: [x, y, r, g, b, a, normalized life].
+            self.scratch_particle_data.clear();
+            let expected_floats = self
+                .particle_systems
+                .iter()
+                .map(|system| system.particles.len() * 7)
+                .sum();
+            self.scratch_particle_data.reserve(expected_floats);
             for system in &self.particle_systems {
                 for p in &system.particles {
-                    data.push(p.x);
-                    data.push(p.y);
-                    data.push(p.color[0]);
-                    data.push(p.color[1]);
-                    data.push(p.color[2]);
-                    data.push(p.color[3]);
-                    data.push(p.life);
+                    self.scratch_particle_data.push(p.x);
+                    self.scratch_particle_data.push(p.y);
+                    self.scratch_particle_data.push(p.color[0]);
+                    self.scratch_particle_data.push(p.color[1]);
+                    self.scratch_particle_data.push(p.color[2]);
+                    self.scratch_particle_data.push(p.color[3]);
+                    self.scratch_particle_data
+                        .push((p.lifetime / p.max_lifetime).clamp(0.0, 1.0));
                 }
             }
 
-            if data.is_empty() {
+            if self.scratch_particle_data.is_empty() {
                 return;
             }
 
@@ -237,8 +289,8 @@ impl WaylandCompositor {
             gl.BindBuffer(ffi::ARRAY_BUFFER, self.particle_vbo);
             gl.BufferData(
                 ffi::ARRAY_BUFFER,
-                (data.len() * 4) as isize,
-                data.as_ptr() as *const _,
+                (self.scratch_particle_data.len() * std::mem::size_of::<f32>()) as isize,
+                self.scratch_particle_data.as_ptr() as *const _,
                 ffi::STREAM_DRAW,
             );
 
@@ -252,7 +304,7 @@ impl WaylandCompositor {
             gl.EnableVertexAttribArray(2);
             gl.VertexAttribPointer(2, 1, ffi::FLOAT, ffi::FALSE as u8, 28, (6 * 4) as *const _);
 
-            let count = data.len() / 7;
+            let count = self.scratch_particle_data.len() / 7;
             gl.DrawArrays(ffi::POINTS, 0, count as i32);
 
             gl.DisableVertexAttribArray(0);

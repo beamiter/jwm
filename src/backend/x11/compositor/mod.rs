@@ -214,6 +214,61 @@ pub(crate) use crate::renderer::types::BlurQuality;
 // Compositor
 // ---------------------------------------------------------------------------
 
+/// Bookkeeping for the compositor-owned copy of the last successfully
+/// presented scene.  The GL handles live on `Compositor`; keeping validity
+/// separate makes it impossible to treat a newly allocated (but not yet
+/// presented) texture as transition input.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PresentedSceneStatus {
+    width: u32,
+    height: u32,
+    valid: bool,
+    allocation_failed: bool,
+}
+
+impl PresentedSceneStatus {
+    fn record_allocation(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+        self.valid = false;
+        self.allocation_failed = false;
+    }
+
+    fn record_capture(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+        self.valid = width > 0 && height > 0;
+        self.allocation_failed = false;
+    }
+
+    fn record_allocation_failure(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+        self.valid = false;
+        self.allocation_failed = true;
+    }
+
+    fn invalidate(&mut self) {
+        self.valid = false;
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn is_usable(&self, width: u32, height: u32) -> bool {
+        self.valid && self.width == width && self.height == height
+    }
+
+    fn has_dimensions(&self, width: u32, height: u32) -> bool {
+        self.width == width && self.height == height
+    }
+
+    fn allocation_failed_for(&self, width: u32, height: u32) -> bool {
+        self.allocation_failed && self.has_dimensions(width, height)
+    }
+}
+
 pub(crate) trait CompositorConnection:
     X11BootstrapOps
     + X11ConnectionOps
@@ -299,6 +354,10 @@ where
     fading: bool,
     fade_in_step: f32,
     fade_out_step: f32,
+    /// Timeline for delta-driven fades, scale animation, and particles.
+    /// It is deliberately independent from frame statistics so compositor
+    /// idle time cannot age an effect that was only just created.
+    effect_tick_clock: effects::EffectTickClock,
     // Per-window rule settings
     shadow_exclude: Vec<String>,
     opacity_rules: Vec<OpacityRule>,
@@ -394,6 +453,11 @@ where
     transition_uniforms: TransitionUniforms,
     /// FBO + texture holding a snapshot of the old scene before tag switch.
     transition_fbo: Option<(glow::Framebuffer, glow::Texture)>,
+    /// Full-output RGB10_A2 copy of the last frame whose buffer swap
+    /// succeeded.  Unlike a platform back buffer, this remains defined after
+    /// SwapBuffers and is therefore safe to use from `notify_tag_switch`.
+    presented_scene_fbo: Option<(glow::Framebuffer, glow::Texture)>,
+    presented_scene_status: PresentedSceneStatus,
     /// When Some, a slide transition is in progress.
     transition_start: Option<std::time::Instant>,
     /// Duration of the slide transition.
@@ -560,11 +624,18 @@ where
     particle_systems: Vec<ParticleSystem>,
     particle_vao: glow::VertexArray,
     particle_vbo: glow::Buffer,
+    scratch_particle_data: Vec<f32>,
+    scratch_wobbly_flat: Vec<f32>,
 
     // --- Wallpaper ---
     /// Default wallpaper texture (used for monitors without a per-monitor override).
     wallpaper_texture: Option<glow::Texture>,
+    /// Layout mode of the texture currently stored in `wallpaper_texture`.
     wallpaper_mode: WallpaperMode,
+    /// Layout mode of the newest requested wallpaper. Kept separate from the
+    /// current texture so a mode-only reload cannot publish duplicate decodes
+    /// or relayout the old image before its replacement is ready.
+    wallpaper_requested_mode: WallpaperMode,
     /// Stored wallpaper path for change detection during hot-reload.
     wallpaper_path: String,
     wallpaper_img_w: u32,
@@ -639,6 +710,9 @@ where
     wallpaper_crossfade: bool,
     wallpaper_crossfade_duration_ms: u64,
     old_wallpaper_texture: Option<glow::Texture>,
+    old_wallpaper_mode: WallpaperMode,
+    old_wallpaper_img_w: u32,
+    old_wallpaper_img_h: u32,
     wallpaper_transition_start: Option<std::time::Instant>,
 
     // --- Async wallpaper loading ---
@@ -804,6 +878,10 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 self.gl.delete_framebuffer(fbo);
                 self.gl.delete_texture(tex);
             }
+            if let Some((fbo, tex)) = self.presented_scene_fbo.take() {
+                self.gl.delete_framebuffer(fbo);
+                self.gl.delete_texture(tex);
+            }
             if let Some(frame) = self.waterlily_texture.take() {
                 self.gl.delete_texture(frame.texture);
             }
@@ -846,7 +924,7 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 let _ = child.wait();
             }
         }
-        // Tear down synchronously: remove_window() would start a fade-out / genie
+        // Tear down synchronously: remove_window() could start a fade-out
         // animation that never ticks again during Drop. Free imported pixmaps,
         // textures, X pixmaps, and Damage objects immediately instead.
         let animations = std::mem::take(&mut self.genie_active);

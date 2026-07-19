@@ -73,7 +73,14 @@ impl RecordingState {
         unsafe {
             const GL_RGBA8: u32 = 0x8058;
             let (capture_fbo, capture_texture) =
-                super::create_fbo_texture_fmt(gl, self.width, self.height, GL_RGBA8);
+                super::create_fbo_texture_fmt(gl, self.width, self.height, GL_RGBA8).map_err(
+                    |status| {
+                        format!(
+                            "failed to create recording framebuffer ({}x{}, status=0x{status:x})",
+                            self.width, self.height
+                        )
+                    },
+                )?;
             self.capture_fbo = capture_fbo;
             self.capture_texture = capture_texture;
             gl.GenBuffers(2, self.pbo.as_mut_ptr());

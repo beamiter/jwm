@@ -138,9 +138,14 @@ impl<C: CompositorConnection> Compositor<C> {
                 glow::CLAMP_TO_EDGE as i32,
             );
 
-            let fbo = gl
-                .create_framebuffer()
-                .map_err(|e| format!("scene_fbo: {e}"))?;
+            let fbo = match gl.create_framebuffer() {
+                Ok(fbo) => fbo,
+                Err(error) => {
+                    gl.bind_texture(glow::TEXTURE_2D, None);
+                    gl.delete_texture(tex);
+                    return Err(format!("scene_fbo: {error}"));
+                }
+            };
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
             gl.framebuffer_texture_2d(
                 glow::FRAMEBUFFER,
@@ -149,6 +154,16 @@ impl<C: CompositorConnection> Compositor<C> {
                 Some(tex),
                 0,
             );
+            let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+            if status != glow::FRAMEBUFFER_COMPLETE {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                gl.bind_texture(glow::TEXTURE_2D, None);
+                gl.delete_framebuffer(fbo);
+                gl.delete_texture(tex);
+                return Err(format!(
+                    "scene_fbo incomplete (RGB10_A2, status=0x{status:04x})"
+                ));
+            }
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             gl.bind_texture(glow::TEXTURE_2D, None);
             Ok((fbo, tex))

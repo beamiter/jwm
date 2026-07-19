@@ -132,6 +132,27 @@ fn handler_wakeup_timeout(can_present: bool, next_wakeup: Option<Duration>) -> O
     if can_present { next_wakeup } else { None }
 }
 
+fn should_run_handler_update(
+    can_present: bool,
+    handled_any: bool,
+    handler_needs_tick: bool,
+    state_needs_redraw: bool,
+    compositor_pending: bool,
+) -> bool {
+    can_present && (handled_any || handler_needs_tick || state_needs_redraw || compositor_pending)
+}
+
+fn render_work_is_pending(
+    session_active: bool,
+    handler_needs_tick: bool,
+    kms_pending: bool,
+    state_needs_redraw: bool,
+    compositor_pending: bool,
+) -> bool {
+    session_active
+        && (handler_needs_tick || kms_pending || state_needs_redraw || compositor_pending)
+}
+
 #[derive(Clone, Copy, Debug)]
 struct RepeatState {
     keycode: u8,
@@ -775,7 +796,7 @@ pub struct UdevBackend {
 
     // Reusable per-frame scratch buffers (cleared+refilled each frame) to avoid
     // two heap allocations per frame in compositor_render_frame.
-    scratch_tex_updates: Vec<(u64, u32, u32, u32, bool, bool, [f32; 4])>,
+    scratch_tex_updates: Vec<(u64, GlesTexture, u32, u32, bool, bool, [f32; 4])>,
     scratch_full_scene: Vec<(u64, i32, i32, u32, u32)>,
 
     // Per-window offscreen textures used to composite subsurface-based clients
@@ -3350,6 +3371,19 @@ impl CompositorWindowEffects for UdevBackend {
         }
     }
 
+    fn compositor_set_window_minimized(&mut self, window: WindowId, minimized: bool) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            if minimized {
+                compositor.minimize_window(window.raw());
+            } else {
+                // The next live texture update cancels an in-flight minimize
+                // retirement for this id.
+                compositor.force_full_redraw();
+            }
+        }
+        self.request_render();
+    }
+
     fn compositor_force_full_redraw(&mut self) {
         if let Some(c) = self.compositor.as_mut() {
             c.force_full_redraw();
@@ -3751,7 +3785,12 @@ impl Backend for UdevBackend {
                 match kms_ref
                     .with_renderer(|gl| unsafe { WaylandCompositor::new(gl, w, h, hdr_10bit) })
                 {
-                    Ok(Ok(compositor)) => {
+                    Ok(Ok(mut compositor)) => {
+                        // `new` deliberately constructs a conservative all-off
+                        // baseline. Apply the live snapshot before publishing
+                        // the compositor so startup honors the same effect
+                        // settings as hot reload and KMS recreation.
+                        compositor.apply_config();
                         self.compositor = Some(compositor);
                         return Ok(true);
                     }
@@ -3788,6 +3827,9 @@ impl Backend for UdevBackend {
         if !self.state.compositor_dead_windows.is_empty() {
             if let Some(compositor) = self.compositor.as_mut() {
                 for dead in self.state.compositor_dead_windows.drain(..) {
+                    // Retire first: WaylandCompositor retains the strong
+                    // GlesTexture owner needed by close-fade rendering.
+                    // Only then may the backend release its offscreen owner.
                     compositor.remove_window(dead);
                     self.offscreen_window_textures.remove(&dead);
                 }
@@ -3957,12 +3999,13 @@ impl Backend for UdevBackend {
                                 return None;
                             }
                             drop(target);
-                            Some(tex.tex_id())
+                            Some(tex.clone())
                         });
-                        if let Some(tid) = composited {
+                        if let Some(texture) = composited {
                             if crf_log_this {
                                 log::debug!(
-                                    "[crf] win={win_id:#x} composited surface tree -> tex={tid} {target_w}x{target_h}"
+                                    "[crf] win={win_id:#x} composited surface tree -> tex={} {target_w}x{target_h}",
+                                    texture.tex_id()
                                 );
                             }
                             let opaque_target = Rectangle::<i32, Logical>::new(
@@ -3975,7 +4018,7 @@ impl Backend for UdevBackend {
                             // Content is already cropped to geometry => full UV.
                             tex_updates.push((
                                 win_id,
-                                tid,
+                                texture,
                                 target_w as u32,
                                 target_h as u32,
                                 has_alpha,
@@ -3997,14 +4040,15 @@ impl Backend for UdevBackend {
                             let (tex_info, log_buf) = match rsd {
                                 Some(d) => {
                                     let locked = d.lock_safe();
-                                    let tex_info = locked.texture::<GlesTexture>(ctx_id).map(|t| {
-                                        let has_alpha = locked
-                                            .buffer()
-                                            .and_then(|b| buffer_has_alpha(&**b))
-                                            .unwrap_or(true);
-                                        let tex_size = t.size();
-                                        (t.tex_id(), t.is_y_inverted(), has_alpha, tex_size)
-                                    });
+                                    let tex_info =
+                                        locked.texture::<GlesTexture>(ctx_id).map(|t| {
+                                            let has_alpha = locked
+                                                .buffer()
+                                                .and_then(|b| buffer_has_alpha(&**b))
+                                                .unwrap_or(true);
+                                            let tex_size = t.size();
+                                            (t.clone(), t.is_y_inverted(), has_alpha, tex_size)
+                                        });
                                     let log_buf = if crf_log_this {
                                         let buf = locked.buffer();
                                         let has_buf = buf.is_some();
@@ -4030,15 +4074,15 @@ impl Backend for UdevBackend {
                                 let (has_buf, buf_type_str) = log_buf.unwrap_or((false, "no_rsd"));
                                 log::debug!("[crf] win={win_id:#x} import_ok={} has_buf={has_buf} buf={buf_type_str} tex={:?} y_inv={:?} alpha={:?}",
                                     import_result.is_ok(),
-                                    tex_info.map(|(id, _, _, _)| id),
-                                    tex_info.map(|(_, yi, _, _)| yi),
-                                    tex_info.map(|(_, _, alpha, _)| alpha));
+                                    tex_info.as_ref().map(|(texture, _, _, _)| texture.tex_id()),
+                                    tex_info.as_ref().map(|(_, yi, _, _)| *yi),
+                                    tex_info.as_ref().map(|(_, _, alpha, _)| *alpha));
                             }
                             tex_info
                         });
                         tex
                     });
-                    if let Some((tid, y_inverted, has_alpha, tex_size)) = tid {
+                    if let Some((texture, y_inverted, has_alpha, tex_size)) = tid {
                         // Compute content UV sub-rect from xdg geometry offset and texture size
                         let geo_offset = with_states(&surface, |states| {
                             let mut cached = states.cached_state.get::<SurfaceCachedState>();
@@ -4077,7 +4121,7 @@ impl Backend for UdevBackend {
                         }
                         tex_updates.push((
                             win_id,
-                            tid,
+                            texture,
                             tex_size.w.max(1) as u32,
                             tex_size.h.max(1) as u32,
                             has_alpha,
@@ -4108,7 +4152,8 @@ impl Backend for UdevBackend {
             let mut kms_ref = kms.borrow_mut();
             for (popup_surface, abs_x, abs_y, pw, ph) in &xdg_popups {
                 let popup_win_id =
-                    0xFE00_0000_0000_0000u64 | (popup_surface.id().protocol_id() as u64);
+                    crate::backend::wayland_udev::compositor::XDG_POPUP_WINDOW_ID_PREFIX
+                        | (popup_surface.id().protocol_id() as u64);
                 let tid = kms_ref.with_gles_renderer(|renderer| {
                     let _ = import_surface_tree(renderer, popup_surface);
                     let ctx_id = renderer.context_id();
@@ -4122,12 +4167,12 @@ impl Backend for UdevBackend {
                                     .and_then(|b| buffer_has_alpha(&**b))
                                     .unwrap_or(true);
                                 let tex_size = t.size();
-                                (t.tex_id(), t.is_y_inverted(), has_alpha, tex_size)
+                                (t.clone(), t.is_y_inverted(), has_alpha, tex_size)
                             })
                         })
                     })
                 });
-                if let Some((tid, y_inverted, has_alpha, tex_size)) = tid {
+                if let Some((texture, y_inverted, has_alpha, tex_size)) = tid {
                     let w = tex_size.w as u32;
                     let h = tex_size.h as u32;
                     if w > 0 && h > 0 {
@@ -4162,7 +4207,7 @@ impl Backend for UdevBackend {
                         }
                         tex_updates.push((
                             popup_win_id,
-                            tid,
+                            texture,
                             w,
                             h,
                             has_alpha,
@@ -4200,7 +4245,8 @@ impl Backend for UdevBackend {
             let mut kms_ref = kms.borrow_mut();
             for anchor in &im_popups {
                 let im_surface = &anchor.surface;
-                let im_win_id = 0xFF00_0000_0000_0000u64 | (im_surface.id().protocol_id() as u64);
+                let im_win_id = crate::backend::wayland_udev::compositor::IME_POPUP_WINDOW_ID_PREFIX
+                    | (im_surface.id().protocol_id() as u64);
 
                 // fcitx5 (and other IMEs) draw the candidate list into wl_subsurfaces
                 // of the input-popup surface; the root surface only carries a tiny
@@ -4265,20 +4311,21 @@ impl Backend for UdevBackend {
                             return None;
                         }
                         drop(target);
-                        Some(tex.tex_id())
+                        Some(tex.clone())
                     });
-                    if let Some(tid) = composited {
+                    if let Some(texture) = composited {
                         // bbox.loc shifts the tree origin relative to the root surface;
                         // fold it into the anchor so subsurfaces land correctly, then
                         // clamp so the candidate box stays on the parent's monitor.
                         let (sx, sy) = place_popup(anchor, cw, ch, bbox.loc.x, bbox.loc.y);
                         log::info!(
-                            "[ime] popup composited tex={tid} {cw}x{ch} children={} abs=({sx},{sy})",
+                            "[ime] popup composited tex={} {cw}x{ch} children={} abs=({sx},{sy})",
+                            texture.tex_id(),
                             get_children(im_surface).len()
                         );
                         tex_updates.push((
                             im_win_id,
-                            tid,
+                            texture,
                             cw as u32,
                             ch as u32,
                             true,
@@ -4303,21 +4350,24 @@ impl Backend for UdevBackend {
                                     .and_then(|b| buffer_has_alpha(&**b))
                                     .unwrap_or(true);
                                 let tex_size = t.size();
-                                (t.tex_id(), t.is_y_inverted(), has_alpha, tex_size)
+                                (t.clone(), t.is_y_inverted(), has_alpha, tex_size)
                             })
                         })
                     })
                 });
                 match tid {
-                    Some((tid, y_inverted, has_alpha, tex_size)) => {
+                    Some((texture, y_inverted, has_alpha, tex_size)) => {
                         let w = tex_size.w as u32;
                         let h = tex_size.h as u32;
                         let (px, py) = place_popup(anchor, w as i32, h as i32, 0, 0);
-                        log::info!("[ime] popup texture tex={tid} size={w}x{h} abs=({px},{py})");
+                        log::info!(
+                            "[ime] popup texture tex={} size={w}x{h} abs=({px},{py})",
+                            texture.tex_id()
+                        );
                         if w > 0 && h > 0 {
                             tex_updates.push((
                                 im_win_id,
-                                tid,
+                                texture,
                                 w,
                                 h,
                                 has_alpha,
@@ -4339,10 +4389,28 @@ impl Backend for UdevBackend {
 
         // Phase 2: Update compositor window textures then render into FBO.
         let result = if let (Some(compositor), Some(kms)) = (&mut self.compositor, &self.kms) {
-            for &(win_id, tid, w, h, has_alpha, y_inverted, content_uv) in &tex_updates {
-                compositor
-                    .update_window_texture(win_id, tid, w, h, has_alpha, y_inverted, content_uv);
+            // Synthetic popup ids are not represented in
+            // `state.compositor_dead_windows`. Retire any that disappeared from
+            // this frame before releasing their backend offscreen owner, so
+            // close-fade rendering can keep a safe GlesTexture clone.
+            compositor.retire_absent_auxiliary_windows(&full_scene);
+            for (win_id, texture, w, h, has_alpha, y_inverted, content_uv) in &tex_updates {
+                compositor.update_window_texture(
+                    *win_id,
+                    texture.clone(),
+                    *w,
+                    *h,
+                    *has_alpha,
+                    *y_inverted,
+                    *content_uv,
+                );
             }
+            offscreen.retain(|window_id, _| {
+                !crate::backend::wayland_udev::compositor::is_auxiliary_window_id(*window_id)
+                    || full_scene
+                        .iter()
+                        .any(|(live_id, _, _, _, _)| live_id == window_id)
+            });
             // Sync window class/app_id for per-class rules (frosted glass strength, etc.)
             for &(win_id, _, _, _, _) in &full_scene {
                 let wid = WindowId::from_raw(win_id);
@@ -4351,6 +4419,9 @@ impl Backend for UdevBackend {
                         compositor.set_window_class(win_id, app_id);
                     }
                 }
+                if let Some(&fullscreen) = self.state.window_is_fullscreen.get(&wid) {
+                    compositor.set_window_fullscreen(win_id, fullscreen);
+                }
             }
             // Decide once per frame whether the per-output CRTC GAMMA_LUT
             // will do the OETF at scanout and whether each CRTC's CTM will do
@@ -4358,11 +4429,18 @@ impl Backend for UdevBackend {
             // ColorTransform pass below reads `decision.hw_ctm_active` to
             // choose its target params (sRGB when true, the overlapping
             // output's primaries otherwise), so this must run first.
-            let decision = kms.borrow_mut().refresh_color_pipeline_offload(&self.state);
+            let compositor_offload_safe = compositor.kms_color_pipeline_offload_safe();
+            let decision = kms
+                .borrow_mut()
+                .refresh_color_pipeline_offload(&self.state, compositor_offload_safe);
             let cm_render_gate = crate::config::CONFIG
                 .load()
                 .behavior()
                 .color_management_render_path;
+            // Color transforms describe this frame's scene. Clear the previous
+            // snapshot first so windows that left the scene cannot retain a
+            // stale transform (and stale direct-scanout blocker).
+            compositor.clear_all_color_transforms();
             if cm_render_gate {
                 use crate::backend::edid::EdidHdrCapabilities;
                 use crate::backend::wayland_udev::color_management::{
@@ -4439,8 +4517,6 @@ impl Backend for UdevBackend {
                     };
                     compositor.set_window_color_transform(win_id, xform);
                 }
-            } else {
-                compositor.clear_all_color_transforms();
             }
             // Feed vblank presentation time for frame pacing
             if let Some(presented_at) = kms.borrow_mut().take_presentation_time() {
@@ -4687,7 +4763,17 @@ impl Backend for UdevBackend {
             }
 
             let handler_needs_tick = handler.needs_tick();
-            if (handled_any || handler_needs_tick || needs_redraw) && can_present {
+            let compositor_pending = self
+                .compositor
+                .as_ref()
+                .is_some_and(|compositor| compositor.needs_render());
+            if should_run_handler_update(
+                can_present,
+                handled_any,
+                handler_needs_tick,
+                needs_redraw,
+                compositor_pending,
+            ) {
                 handler.update(self)?;
             }
 
@@ -4717,8 +4803,17 @@ impl Backend for UdevBackend {
             let has_pending_events = !self.pending_events.lock_safe().is_empty();
             let needs_tick = handler.needs_tick();
             let kms_pending = self.kms.as_ref().map_or(false, |k| k.borrow().needs_render);
-            let render_work_pending =
-                session_active && (needs_tick || kms_pending || self.state.needs_redraw);
+            let compositor_pending = self
+                .compositor
+                .as_ref()
+                .is_some_and(|compositor| compositor.needs_render());
+            let render_work_pending = render_work_is_pending(
+                session_active,
+                needs_tick,
+                kms_pending,
+                self.state.needs_redraw,
+                compositor_pending,
+            );
             let poll_session_activation = !session_active && self.kms.is_none();
             // Jwm::update can apply compositor settings, so do not route its
             // deadline through the loop while presentation is unavailable.
@@ -4937,6 +5032,18 @@ mod udev_backend_selection_tests {
             handler_wakeup_timeout(true, Some(Duration::ZERO)),
             Some(Duration::ZERO)
         );
+    }
+
+    #[test]
+    fn compositor_only_animation_runs_update_when_presentation_is_available() {
+        assert!(should_run_handler_update(true, false, false, false, true));
+        assert!(!should_run_handler_update(false, false, false, false, true));
+    }
+
+    #[test]
+    fn compositor_only_animation_keeps_the_frame_wakeup_armed() {
+        assert!(render_work_is_pending(true, false, false, false, true));
+        assert!(!render_work_is_pending(false, false, false, false, true));
     }
 
     fn test_output(id: OutputId, name: &str) -> OutputInfo {

@@ -261,10 +261,9 @@ pub struct JwmWaylandState {
     pub loop_handle: smithay::reexports::calloop::LoopHandle<'static, JwmWaylandState>,
     pub pending_events: Arc<Mutex<std::collections::VecDeque<BackendEvent>>>,
 
-    /// Window ids whose client surface has been destroyed. Drained each frame by
-    /// the udev backend to evict the matching `WaylandCompositor::windows` entry;
-    /// without this the compositor window map (and its predictive/game-detection
-    /// side maps) grows unbounded for the life of the process.
+    /// Window ids that left the live compositor scene through unmap or surface
+    /// destruction. Drained each frame by the udev backend to start a safe
+    /// close/genie retirement and evict side-map state.
     pub compositor_dead_windows: Vec<u64>,
 
     pub pointer_location: Point<f64, Logical>,
@@ -1203,6 +1202,7 @@ impl XwmHandler for JwmWaylandState {
             self.needs_redraw = true;
 
             if was_mapped {
+                self.compositor_dead_windows.push(win_id.raw());
                 self.push_event(BackendEvent::WindowUnmapped(win_id));
             }
         }
@@ -2863,6 +2863,7 @@ impl CompositorHandler for JwmWaylandState {
                 BufferState::Removed => {
                     if self.mapped_windows.remove(&win) {
                         info!("[udev/wayland] window unmapped win={win:?}");
+                        self.compositor_dead_windows.push(win.raw());
                         self.push_event(BackendEvent::WindowUnmapped(win));
                     }
                     self.needs_redraw = true;

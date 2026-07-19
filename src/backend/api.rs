@@ -1323,6 +1323,7 @@ pub trait CompositorWindowEffects: Send {
     fn compositor_notify_window_move_start(&mut self, _window: WindowId) {}
     fn compositor_notify_window_move_delta(&mut self, _window: WindowId, _dx: f32, _dy: f32) {}
     fn compositor_notify_window_move_end(&mut self, _window: WindowId) {}
+    fn compositor_set_window_minimized(&mut self, _window: WindowId, _minimized: bool) {}
     fn compositor_set_dock_position(&mut self, _x: f32, _y: f32) {}
     fn compositor_set_peek_mode(&mut self, _active: bool) {}
     fn compositor_set_window_groups(&mut self, _groups: Vec<(u32, Vec<(u32, String, bool)>)>) {}

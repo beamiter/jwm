@@ -524,8 +524,7 @@ impl WaylandCompositor {
         let strip_segments = overview_strip_segments(&self.overview_entries);
 
         unsafe {
-            gl.Enable(ffi::BLEND);
-            gl.BlendFunc(ffi::SRC_ALPHA, ffi::ONE_MINUS_SRC_ALPHA);
+            self.enable_premultiplied_blend(gl);
 
             // ------------------------------------------------------------------
             // 1. Dark vignette backdrop

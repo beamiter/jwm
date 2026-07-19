@@ -1,6 +1,7 @@
 use super::{Compositor, SnapPreview, WindowTab, class_matches_exclude};
 use crate::backend::x11::compositor_common::expose::{build_expose_entries, tick_expose_entries};
 use glow::HasContext;
+use std::collections::HashMap;
 
 use super::CompositorConnection;
 
@@ -273,17 +274,16 @@ impl<C: CompositorConnection> Compositor<C> {
         let duration_ms = self.snap_animation_duration_ms.max(1) as f32;
         if let Some(ref mut sp) = self.snap_target {
             let elapsed = sp.start.elapsed().as_millis() as f32;
-            let t = (elapsed / duration_ms).min(1.0);
+            let (opacity, still_animating) =
+                snap_preview_animation_state(elapsed, duration_ms, sp.fading_out);
+            sp.opacity = opacity;
             if sp.fading_out {
-                sp.opacity = (1.0 - t).max(0.0);
-                if sp.opacity <= 0.0 {
+                if !still_animating {
                     self.snap_target = None;
                     return false;
                 }
-            } else {
-                sp.opacity = t.min(1.0);
             }
-            true
+            still_animating
         } else {
             false
         }
@@ -473,7 +473,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
     /// Set window tab groups from the WM.
     pub(crate) fn set_window_groups(&mut self, groups: Vec<(u32, Vec<(u32, String, bool)>)>) {
-        self.window_groups.clear();
+        let mut new_groups = HashMap::with_capacity(groups.len());
         for (group_id, tabs) in groups {
             let tab_entries: Vec<WindowTab> = tabs
                 .into_iter()
@@ -483,8 +483,12 @@ impl<C: CompositorConnection> Compositor<C> {
                     is_active: active,
                 })
                 .collect();
-            self.window_groups.insert(group_id, tab_entries);
+            new_groups.insert(group_id, tab_entries);
         }
+        if self.window_groups == new_groups {
+            return;
+        }
+        self.window_groups = new_groups;
         self.needs_render = true;
     }
 
@@ -704,5 +708,45 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
         None
+    }
+}
+
+fn snap_preview_animation_state(
+    elapsed_ms: f32,
+    duration_ms: f32,
+    fading_out: bool,
+) -> (f32, bool) {
+    let t = (elapsed_ms / duration_ms.max(1.0)).clamp(0.0, 1.0);
+    let opacity = if fading_out { 1.0 - t } else { t };
+    (opacity, t < 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::snap_preview_animation_state;
+
+    #[test]
+    fn snap_preview_stops_animating_at_steady_state() {
+        assert_eq!(
+            snap_preview_animation_state(50.0, 100.0, false),
+            (0.5, true)
+        );
+        assert_eq!(
+            snap_preview_animation_state(100.0, 100.0, false),
+            (1.0, false)
+        );
+        assert_eq!(
+            snap_preview_animation_state(150.0, 100.0, false),
+            (1.0, false)
+        );
+    }
+
+    #[test]
+    fn snap_preview_fade_out_finishes_transparent() {
+        assert_eq!(snap_preview_animation_state(50.0, 100.0, true), (0.5, true));
+        assert_eq!(
+            snap_preview_animation_state(100.0, 100.0, true),
+            (0.0, false)
+        );
     }
 }

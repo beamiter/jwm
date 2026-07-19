@@ -4,6 +4,221 @@ use super::*;
 use crate::backend::compositor_common::capture::clip_region;
 use smithay::backend::renderer::gles::ffi;
 
+fn oriented_content_uv(content_uv: [f32; 4], y_inverted: bool) -> [f32; 4] {
+    let [u, v, w, h] = content_uv;
+    if y_inverted {
+        [u, v + h, w, -h]
+    } else {
+        content_uv
+    }
+}
+
+fn premultiplied_blend_factors() -> (u32, u32) {
+    (ffi::ONE, ffi::ONE_MINUS_SRC_ALPHA)
+}
+
+fn overlay_output_is_scene_linear(scene_linear_active: bool, hw_encode_active: bool) -> bool {
+    scene_linear_active && hw_encode_active
+}
+
+fn postprocess_requires_continuous_frames(
+    postprocess_active: bool,
+    has_time_varying_input: bool,
+) -> bool {
+    postprocess_active && has_time_varying_input
+}
+
+pub(super) fn edge_glow_requires_continuous_frames(
+    enabled: bool,
+    width: f32,
+    active: bool,
+    suppressed: bool,
+) -> bool {
+    enabled && width > 0.0 && active && !suppressed
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OcclusionCandidate {
+    rect: (i32, i32, u32, u32),
+    screen_size: (u32, u32),
+    has_alpha: bool,
+    fade_opacity: f32,
+    effective_opacity: f32,
+    anim_scale: f32,
+    window_scale: f32,
+    corner_radius: f32,
+    is_shaped: bool,
+    has_wobbly_deformation: bool,
+    ripple_active: bool,
+    focused_tilt_active: bool,
+    samples_background: bool,
+}
+
+/// Occlusion culling is valid only when the candidate provably overwrites
+/// every output pixel with alpha one. Any deformation or rounded/shaped mask
+/// can expose the scene below even when the undeformed window rectangle covers
+/// the output.
+fn is_opaque_output_occluder(candidate: OcclusionCandidate) -> bool {
+    let (x, y, width, height) = candidate.rect;
+    let (screen_width, screen_height) = candidate.screen_size;
+
+    !candidate.has_alpha
+        && candidate.fade_opacity >= 1.0
+        && candidate.effective_opacity >= 1.0
+        && (candidate.anim_scale - 1.0).abs() <= f32::EPSILON
+        && (candidate.window_scale - 1.0).abs() <= f32::EPSILON
+        && candidate.corner_radius.is_finite()
+        && candidate.corner_radius <= 0.0
+        && !candidate.is_shaped
+        && !candidate.has_wobbly_deformation
+        && !candidate.ripple_active
+        && !candidate.focused_tilt_active
+        && !candidate.samples_background
+        && x <= 0
+        && y <= 0
+        && i64::from(x) + i64::from(width) >= i64::from(screen_width)
+        && i64::from(y) + i64::from(height) >= i64::from(screen_height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        OcclusionCandidate, edge_glow_requires_continuous_frames, is_opaque_output_occluder,
+        oriented_content_uv, overlay_output_is_scene_linear,
+        postprocess_requires_continuous_frames, premultiplied_blend_factors,
+    };
+    use smithay::backend::renderer::gles::ffi;
+
+    #[test]
+    fn content_uv_preserves_non_inverted_subrect() {
+        assert_eq!(
+            oriented_content_uv([0.1, 0.2, 0.6, 0.5], false),
+            [0.1, 0.2, 0.6, 0.5]
+        );
+    }
+
+    #[test]
+    fn content_uv_flips_only_the_selected_subrect() {
+        assert_eq!(
+            oriented_content_uv([0.1, 0.2, 0.6, 0.5], true),
+            [0.1, 0.7, 0.6, -0.5]
+        );
+    }
+
+    #[test]
+    fn premultiplied_passes_use_one_source_blending() {
+        assert_eq!(
+            premultiplied_blend_factors(),
+            (ffi::ONE, ffi::ONE_MINUS_SRC_ALPHA)
+        );
+        assert_ne!(premultiplied_blend_factors().0, ffi::SRC_ALPHA);
+    }
+
+    #[test]
+    fn overlay_domain_is_linear_only_with_hardware_output_encoding() {
+        assert!(!overlay_output_is_scene_linear(false, false));
+        assert!(!overlay_output_is_scene_linear(false, true));
+        assert!(!overlay_output_is_scene_linear(true, false));
+        assert!(overlay_output_is_scene_linear(true, true));
+    }
+
+    #[test]
+    fn static_postprocess_does_not_request_continuous_frames() {
+        assert!(!postprocess_requires_continuous_frames(false, false));
+        assert!(!postprocess_requires_continuous_frames(true, false));
+        assert!(!postprocess_requires_continuous_frames(false, true));
+        assert!(postprocess_requires_continuous_frames(true, true));
+    }
+
+    #[test]
+    fn edge_glow_ticks_only_while_it_is_actually_drawn() {
+        assert!(edge_glow_requires_continuous_frames(true, 8.0, true, false));
+        assert!(!edge_glow_requires_continuous_frames(
+            false, 8.0, true, false
+        ));
+        assert!(!edge_glow_requires_continuous_frames(
+            true, 0.0, true, false
+        ));
+        assert!(!edge_glow_requires_continuous_frames(
+            true, 8.0, false, false
+        ));
+        assert!(!edge_glow_requires_continuous_frames(true, 8.0, true, true));
+        assert!(!edge_glow_requires_continuous_frames(
+            true,
+            f32::NAN,
+            true,
+            false
+        ));
+    }
+
+    fn opaque_fullscreen_candidate() -> OcclusionCandidate {
+        OcclusionCandidate {
+            rect: (0, 0, 1920, 1080),
+            screen_size: (1920, 1080),
+            has_alpha: false,
+            fade_opacity: 1.0,
+            effective_opacity: 1.0,
+            anim_scale: 1.0,
+            window_scale: 1.0,
+            corner_radius: 0.0,
+            is_shaped: false,
+            has_wobbly_deformation: false,
+            ripple_active: false,
+            focused_tilt_active: false,
+            samples_background: false,
+        }
+    }
+
+    #[test]
+    fn only_provably_opaque_fullscreen_window_culls_lower_layers() {
+        assert!(is_opaque_output_occluder(opaque_fullscreen_candidate()));
+
+        for mutate in [
+            |c: &mut OcclusionCandidate| c.has_alpha = true,
+            |c: &mut OcclusionCandidate| c.fade_opacity = 0.9,
+            |c: &mut OcclusionCandidate| c.effective_opacity = 0.9,
+            |c: &mut OcclusionCandidate| c.anim_scale = 0.95,
+            |c: &mut OcclusionCandidate| c.window_scale = 0.9,
+            |c: &mut OcclusionCandidate| c.corner_radius = 8.0,
+            |c: &mut OcclusionCandidate| c.is_shaped = true,
+            |c: &mut OcclusionCandidate| c.has_wobbly_deformation = true,
+            |c: &mut OcclusionCandidate| c.ripple_active = true,
+            |c: &mut OcclusionCandidate| c.focused_tilt_active = true,
+            |c: &mut OcclusionCandidate| c.samples_background = true,
+        ] {
+            let mut candidate = opaque_fullscreen_candidate();
+            mutate(&mut candidate);
+            assert!(!is_opaque_output_occluder(candidate));
+        }
+    }
+
+    #[test]
+    fn occluder_must_cover_the_entire_output() {
+        let mut candidate = opaque_fullscreen_candidate();
+        candidate.rect = (1, 0, 1920, 1080);
+        assert!(!is_opaque_output_occluder(candidate));
+
+        candidate = opaque_fullscreen_candidate();
+        candidate.rect = (0, 0, 1919, 1080);
+        assert!(!is_opaque_output_occluder(candidate));
+    }
+
+    #[test]
+    fn non_finite_occluder_properties_never_cull_lower_layers() {
+        for mutate in [
+            |c: &mut OcclusionCandidate| c.fade_opacity = f32::NAN,
+            |c: &mut OcclusionCandidate| c.effective_opacity = f32::NAN,
+            |c: &mut OcclusionCandidate| c.anim_scale = f32::NAN,
+            |c: &mut OcclusionCandidate| c.window_scale = f32::NAN,
+            |c: &mut OcclusionCandidate| c.corner_radius = f32::NAN,
+        ] {
+            let mut candidate = opaque_fullscreen_candidate();
+            mutate(&mut candidate);
+            assert!(!is_opaque_output_occluder(candidate));
+        }
+    }
+}
+
 impl WaylandCompositor {
     // =========================================================================
     // Helper: draw a fullscreen quad
@@ -16,6 +231,47 @@ impl WaylandCompositor {
             gl.EnableVertexAttribArray(0);
             gl.VertexAttribPointer(0, 2, ffi::FLOAT, ffi::FALSE as u8, 8, std::ptr::null());
             gl.BindBuffer(ffi::ARRAY_BUFFER, 0);
+        }
+    }
+
+    /// Restore the compositor's canonical premultiplied-alpha blend state.
+    ///
+    /// Every overlay shader that emits RGB multiplied by alpha shares this
+    /// contract. Keeping the state identical across passes also prevents an
+    /// overlay from silently changing how the following pass is composited.
+    pub(crate) unsafe fn enable_premultiplied_blend(&self, gl: &ffi::Gles2) {
+        let (src, dst) = premultiplied_blend_factors();
+        unsafe {
+            gl.Enable(ffi::BLEND);
+            gl.BlendFunc(src, dst);
+        }
+    }
+
+    /// Set the persistent window/border shader uniforms for passes rendered
+    /// after the scene-linear FBO has been copied or encoded into output_fbo.
+    ///
+    /// The output remains linear only when KMS performs the final OETF. In all
+    /// other cases output_fbo is already encoded and legacy overlay textures
+    /// must not be decoded a second time.
+    unsafe fn sync_overlay_color_domain(&self, gl: &ffi::Gles2, scene_linear_output: bool) {
+        unsafe {
+            gl.UseProgram(self.program);
+            gl.Uniform1i(self.win_uniforms.color_managed, 0);
+            gl.Uniform1i(
+                self.win_uniforms.scene_linear,
+                i32::from(scene_linear_output),
+            );
+            gl.Uniform1f(self.win_uniforms.ripple_progress, 0.0);
+            gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
+
+            // Snap, expose, overview and recording overlays reuse the border
+            // program even when ordinary window borders are disabled.
+            gl.UseProgram(self.border_program);
+            gl.Uniform1i(
+                self.border_uniforms.scene_linear,
+                i32::from(scene_linear_output),
+            );
+            gl.UseProgram(0);
         }
     }
 
@@ -74,6 +330,96 @@ impl WaylandCompositor {
     fn set_projection_uniform(&self, gl: &ffi::Gles2, loc: i32, proj: &[f32; 16]) {
         unsafe {
             gl.UniformMatrix4fv(loc, 1, ffi::FALSE as u8, proj.as_ptr());
+        }
+    }
+
+    /// Draw windows that have left the live scene but are still fading out.
+    ///
+    /// Their `WindowState` owns a strong `GlesTexture`, so sampling remains
+    /// valid after the Wayland surface and backend offscreen cache are gone.
+    /// This is deliberately a separate overlay pass: retired windows no longer
+    /// occur in `visible_scene` and therefore cannot use the main window loop.
+    fn render_close_fades(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        scene_linear_output: bool,
+    ) {
+        unsafe {
+            gl.UseProgram(self.program);
+            self.set_projection_uniform(gl, self.win_uniforms.projection, projection);
+            gl.Uniform1i(self.win_uniforms.texture, 0);
+            gl.Uniform1i(self.win_uniforms.color_managed, 0);
+            // This pass runs after the optional scene-linear encode/blit. When
+            // hardware will encode at scanout the output FBO is still linear,
+            // so decode legacy sRGB texture data before blending into it.
+            gl.Uniform1i(
+                self.win_uniforms.scene_linear,
+                if scene_linear_output { 1 } else { 0 },
+            );
+            gl.Uniform1f(self.win_uniforms.ripple_progress, 0.0);
+            gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
+            gl.BindVertexArray(self.quad_vao);
+
+            for win in self.windows.values() {
+                if !win.fading_out || win.is_genie_minimizing || win.fade_opacity <= 0.0 {
+                    continue;
+                }
+                let Some(texture_owner) = win.texture_owner.as_ref() else {
+                    continue;
+                };
+                let Some((x, y, w, h)) = win.closing_rect else {
+                    continue;
+                };
+                if w <= 0.0 || h <= 0.0 {
+                    continue;
+                }
+
+                let layer_opacity = win
+                    .opacity_override
+                    .or_else(|| self.lookup_opacity_rule(&win.class_name))
+                    .unwrap_or(self.active_opacity)
+                    * win.fade_opacity;
+                let layer_opacity = layer_opacity.clamp(0.0, 1.0);
+                if layer_opacity <= 0.0 {
+                    continue;
+                }
+                // Negative opacity tells the shared fragment shader to honor
+                // texture alpha. RGB and alpha are both scaled by layer
+                // opacity, matching GL_ONE/ONE_MINUS_SRC_ALPHA blending.
+                let opacity = if win.has_alpha {
+                    -layer_opacity
+                } else {
+                    layer_opacity
+                };
+
+                let scale = win.anim_scale.max(0.01);
+                let draw_w = w * scale;
+                let draw_h = h * scale;
+                let draw_x = x + (w - draw_w) * 0.5;
+                let draw_y = y + (h - draw_h) * 0.5;
+                let radius = if win.is_shaped || win.is_fullscreen {
+                    0.0
+                } else {
+                    win.corner_radius_override
+                        .or_else(|| self.lookup_corner_radius_rule(&win.class_name))
+                        .unwrap_or(self.corner_radius)
+                };
+                let [uv_x, uv_y, uv_w, uv_h] = oriented_content_uv(win.content_uv, win.y_inverted);
+
+                self.set_rect_uniform(gl, self.win_uniforms.rect, draw_x, draw_y, draw_w, draw_h);
+                gl.Uniform2f(self.win_uniforms.size, draw_w, draw_h);
+                gl.Uniform1f(self.win_uniforms.opacity, opacity);
+                gl.Uniform1f(self.win_uniforms.dim, 1.0);
+                gl.Uniform1f(self.win_uniforms.radius, radius);
+                gl.Uniform4f(self.win_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
+                gl.ActiveTexture(ffi::TEXTURE0);
+                self.bind_window_texture(gl, texture_owner.tex_id());
+                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            }
+
+            gl.BindVertexArray(0);
+            gl.UseProgram(0);
         }
     }
 
@@ -266,6 +612,43 @@ impl WaylandCompositor {
         Some(clamped)
     }
 
+    fn sync_scene_linear_target(&mut self, gl: &ffi::Gles2) {
+        let allocated = self.linear_fbo != 0;
+        if allocated == self.scene_linear_requested {
+            return;
+        }
+
+        unsafe {
+            if allocated {
+                gl.DeleteFramebuffers(1, &self.linear_fbo);
+                gl.DeleteTextures(1, &self.linear_texture);
+                self.linear_fbo = 0;
+                self.linear_texture = 0;
+            } else {
+                match create_fbo_texture_fp16(gl, self.screen_w.max(1), self.screen_h.max(1)) {
+                    Ok((fbo, texture)) => {
+                        self.linear_fbo = fbo;
+                        self.linear_texture = texture;
+                    }
+                    Err(status) => {
+                        // Do not retry every frame, and more importantly do not
+                        // let damage/KMS color-offload code mistake an
+                        // incomplete target for an active linear pipeline.
+                        self.scene_linear_requested = false;
+                        log::warn!(
+                            "[udev/compositor] scene-linear hot-enable failed \
+                             (RGBA16F FBO status=0x{status:x}); keeping encoded-space pipeline"
+                        );
+                    }
+                }
+            }
+        }
+        // The storage and color domain changed, so no previous partial-damage
+        // contents can be reused across this boundary.
+        self.force_full_damage_next = true;
+        self.needs_render = true;
+    }
+
     /// Main rendering function. Composites the entire scene into the output FBO.
     /// `scene` is a list of (window_id, x, y, w, h) in bottom-to-top order.
     /// `focused` is the currently focused window.
@@ -291,14 +674,40 @@ impl WaylandCompositor {
         // separate caller to keep `needs_render` armed.
         let recording_transition_pending =
             self.pending_recording_start.is_some() || self.pending_recording_stop;
+        // Static post-processing is damage-driven. Magnifier pointer changes
+        // explicitly dirty the compositor in set_mouse_position, so no current
+        // post-process input advances merely because time passes.
+        let postprocess_continuous =
+            postprocess_requires_continuous_frames(self.postprocess_active, false);
+        // Edge glow is genuinely time-based (`u_time`) and therefore keeps
+        // ticking, but only while the draw pass can produce visible pixels.
+        let edge_glow_continuous = edge_glow_requires_continuous_frames(
+            self.edge_glow_enabled,
+            self.edge_glow_width,
+            self.edge_glow_active,
+            self.edge_glow_suppressed,
+        );
         if !self.needs_render
             && !self.screenshot_requests.has_pending()
             && !self.screenshot_readback.has_pending()
             && !self.recording.is_active()
             && !recording_transition_pending
+            && !postprocess_continuous
+            && !edge_glow_continuous
             && !self.has_active_animations()
         {
             return false;
+        }
+
+        self.sync_scene_linear_target(gl);
+
+        // output_fbo still contains the previous workspace at this point. Take
+        // the transition snapshot before any clear or scene pass overwrites it;
+        // deferring this to the transition overlay would capture the new
+        // workspace and make every transition sample an uninitialized/stale FBO.
+        if self.transition_snapshot_pending {
+            self.capture_transition_snapshot(gl);
+            self.transition_snapshot_pending = false;
         }
 
         // =================================================================
@@ -384,6 +793,10 @@ impl WaylandCompositor {
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame_time).as_secs_f32();
         self.last_frame_time = now;
+        let effect_dt = crate::backend::compositor_common::effects::continuing_effect_dt(
+            self.effect_clock_active,
+            dt,
+        );
 
         // Update FPS counter and perf metrics
         self.frame_count += 1;
@@ -471,15 +884,38 @@ impl WaylandCompositor {
         // =================================================================
         // 2. Animation ticks
         // =================================================================
-        self.tick_fades(dt);
+        self.tick_fades(effect_dt);
         self.tick_genie();
-        self.tick_wobbly(dt);
-        self.tick_particles(dt);
-        self.tick_snap_preview(dt);
-        self.tick_overview(dt);
-        self.tick_overview_prism(dt);
-        self.tick_tilt(dt);
-        self.tick_expose(dt);
+        self.tick_wobbly(effect_dt);
+        self.tick_particles(effect_dt);
+        self.tick_motion_trails();
+        self.tick_snap_preview(effect_dt);
+        self.tick_overview(effect_dt);
+        self.tick_overview_prism(effect_dt);
+        self.tilt_target_x = 0.0;
+        self.tilt_target_y = 0.0;
+        if self.window_tilt_enabled
+            && let Some(focused_id) = focused
+            && let Some(&(_, x, y, w, h)) = scene.iter().find(|&&(id, _, _, _, _)| id == focused_id)
+        {
+            let draw_w = w.max(1) as f32;
+            let draw_h = h.max(1) as f32;
+            let inside = self.mouse_x >= x as f32
+                && self.mouse_x <= x as f32 + draw_w
+                && self.mouse_y >= y as f32
+                && self.mouse_y <= y as f32 + draw_h;
+            if inside {
+                let cx = x as f32 + draw_w * 0.5;
+                let cy = y as f32 + draw_h * 0.5;
+                let rel_x = ((self.mouse_x - cx) / (draw_w * 0.5)).clamp(-1.0, 1.0);
+                let rel_y = ((self.mouse_y - cy) / (draw_h * 0.5)).clamp(-1.0, 1.0);
+                self.tilt_target_x = (-rel_y * self.tilt_amount).clamp(-0.35, 0.35);
+                self.tilt_target_y = (rel_x * self.tilt_amount).clamp(-0.35, 0.35);
+            }
+        }
+        self.tick_tilt(effect_dt);
+        self.tick_expose(effect_dt);
+        self.effect_clock_active = self.has_active_animations();
 
         // Focus highlight: arm a one-shot pulse on the new focus.
         // Done before any_animating so the highlight keeps the loop ticking
@@ -504,9 +940,6 @@ impl WaylandCompositor {
         // Determine if anything needs rendering
         let any_animating = self.has_active_animations()
             || self.transition_active
-            || self.expose_active
-            || !self.expose_entries.is_empty()
-            || self.overview_active
             || focus_highlight_active
             || motion_trail_active
             || !self.genie_active.is_empty();
@@ -519,9 +952,9 @@ impl WaylandCompositor {
         let recording_active = self.recording.is_active();
 
         let force_render = any_animating
-            || self.postprocess_active
+            || postprocess_continuous
             || self.debug_hud_enabled
-            || (self.edge_glow_enabled && self.edge_glow_active)
+            || edge_glow_continuous
             || screenshot_pending
             || recording_active;
 
@@ -539,6 +972,8 @@ impl WaylandCompositor {
         // tick_animations call re-invokes compositor_render_frame automatically.
         self.needs_render = any_animating
             || self.has_active_animations()
+            || postprocess_continuous
+            || edge_glow_continuous
             || recording_active
             || self.screenshot_readback.has_pending();
 
@@ -594,6 +1029,10 @@ impl WaylandCompositor {
             && !any_animating
             && !force_render
             && !self.peek_active
+            && !self.postprocess_active
+            && self.overview_opacity <= 0.0001
+            && self.expose_opacity <= 0.0001
+            && self.expose_entries.is_empty()
             && (!self.window_tabs_enabled || self.window_groups.is_empty())
             && !self.annotation_active
             && self.tilt_x.abs() <= 0.001
@@ -618,21 +1057,23 @@ impl WaylandCompositor {
         unsafe {
             gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
             gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
-            gl.Enable(ffi::BLEND);
-            gl.BlendFunc(ffi::ONE, ffi::ONE_MINUS_SRC_ALPHA);
+            self.enable_premultiplied_blend(gl);
         }
 
         // Restrict all output_fbo passes (clear, wallpaper, shadows, windows,
         // borders) to the damage box. Regions outside persist from prior frames.
         // GL scissor uses a bottom-left origin; our draw coords are top-left.
-        let scissor_active = if let Some(b) = partial_box {
+        let damage_scissor = partial_box.map(|b| {
             let sx = b.x.floor().max(0.0) as i32;
             let sw = b.width.ceil() as i32;
             let sh = b.height.ceil() as i32;
             let sy = ((self.screen_h as i32) - (b.y.floor() as i32) - sh).max(0);
+            [sx, sy, sw.max(0), sh.max(0)]
+        });
+        let scissor_active = if let Some(scissor) = damage_scissor {
             unsafe {
                 gl.Enable(ffi::SCISSOR_TEST);
-                gl.Scissor(sx, sy, sw.max(0), sh.max(0));
+                gl.Scissor(scissor[0], scissor[1], scissor[2], scissor[3]);
             }
             true
         } else {
@@ -653,7 +1094,7 @@ impl WaylandCompositor {
         }
         if self.wallpaper_texture.is_some() || !self.monitor_wallpapers.is_empty() {
             unsafe {
-                self.render_wallpaper(gl, &projection);
+                self.render_wallpaper(gl, &projection, damage_scissor);
             }
         }
 
@@ -665,22 +1106,53 @@ impl WaylandCompositor {
         // =================================================================
         let mut first_visible = 0usize;
         {
-            let sw = self.screen_w as i32;
-            let sh = self.screen_h as i32;
             for i in (0..scene.len()).rev() {
                 let (win_id, x, y, w, h) = scene[i];
-                let is_alpha = self.windows.get(&win_id).map_or(true, |ws| ws.has_alpha);
-                let has_fade = self
-                    .windows
-                    .get(&win_id)
-                    .map_or(false, |ws| ws.fade_opacity < 1.0);
-                if !is_alpha
-                    && !has_fade
-                    && x <= 0
-                    && y <= 0
-                    && (x + w as i32) >= sw
-                    && (y + h as i32) >= sh
+                let Some(ws) = self.windows.get(&win_id) else {
+                    continue;
+                };
+                let is_focused = focused == Some(win_id);
+                let base_opacity = if is_focused {
+                    self.active_opacity
+                } else {
+                    self.inactive_opacity
+                };
+                let effective_opacity = ws
+                    .opacity_override
+                    .or_else(|| self.lookup_opacity_rule(&ws.class_name))
+                    .unwrap_or(base_opacity)
+                    * ws.fade_opacity;
+                let corner_radius = if ws.is_shaped || ws.is_fullscreen {
+                    0.0
+                } else if !ws.class_name.is_empty()
+                    && Self::class_matches_exclude(&ws.class_name, &self.rounded_corners_exclude)
                 {
+                    0.0
+                } else {
+                    ws.corner_radius_override
+                        .or_else(|| self.lookup_corner_radius_rule(&ws.class_name))
+                        .unwrap_or(self.corner_radius)
+                };
+                let focused_tilt_active =
+                    is_focused && (self.tilt_x.abs() > 0.001 || self.tilt_y.abs() > 0.001);
+
+                if is_opaque_output_occluder(OcclusionCandidate {
+                    rect: (x, y, w, h),
+                    screen_size: (self.screen_w, self.screen_h),
+                    has_alpha: ws.has_alpha,
+                    fade_opacity: ws.fade_opacity,
+                    effective_opacity,
+                    anim_scale: ws.anim_scale,
+                    window_scale: ws.scale,
+                    corner_radius,
+                    is_shaped: ws.is_shaped,
+                    has_wobbly_deformation: ws.wobbly.is_some(),
+                    ripple_active: ws.ripple_active,
+                    focused_tilt_active,
+                    // Frosted windows require the complete lower scene as
+                    // their blur source even if their own output is opaque.
+                    samples_background: self.blur_enabled && ws.is_frosted,
+                }) {
                     first_visible = i;
                     break;
                 }
@@ -845,18 +1317,26 @@ impl WaylandCompositor {
         // (mirroring X11 effects.rs::update_motion_trail semantics — only there
         // it relies on geometry-sync side effects, here we do it inline).
         if self.motion_trail_enabled && self.motion_trail_frames > 0 {
-            let cap = self.motion_trail_frames as usize;
+            let cap = crate::backend::compositor_common::effects::motion_trail_capacity(
+                self.motion_trail_frames,
+            );
             for &(win_id, x, y, _, _) in visible_scene {
                 if let Some(wt) = self.windows.get_mut(&win_id) {
-                    let last = wt.motion_trail.back().copied();
-                    if last.map_or(true, |(lx, ly)| lx != x || ly != y) {
-                        wt.motion_trail.push_back((x, y));
+                    let current = (x, y);
+                    if wt.is_moving
+                        && let Some((previous_x, previous_y)) = wt.last_motion_position
+                        && (previous_x, previous_y) != current
+                    {
+                        wt.motion_trail.push_back(
+                            crate::backend::compositor_common::effects::MotionTrailSample::new(
+                                previous_x, previous_y,
+                            ),
+                        );
                         while wt.motion_trail.len() > cap {
                             wt.motion_trail.pop_front();
                         }
-                    } else if !wt.motion_trail.is_empty() {
-                        wt.motion_trail.pop_front();
                     }
+                    wt.last_motion_position = Some(current);
                 }
             }
         }
@@ -928,17 +1408,12 @@ impl WaylandCompositor {
 
                 // --- Compute dim factor ---
                 let inactive_dim_factor = if is_focused { 1.0 } else { self.inactive_dim };
-                let dim = if use_texture_alpha {
-                    (rule_opacity * fade * inactive_dim_factor).clamp(0.0, 1.0)
-                } else {
-                    inactive_dim_factor
-                };
+                let dim = inactive_dim_factor;
+                let layer_opacity = (rule_opacity * fade).clamp(0.0, 1.0);
                 let opacity = if use_texture_alpha {
-                    -1.0
-                } else if has_explicit_transparency || fade < 1.0 {
-                    (rule_opacity * fade).clamp(0.0, 1.0)
+                    -layer_opacity
                 } else {
-                    1.0
+                    layer_opacity
                 };
 
                 // --- Compute corner radius (per-window rules override) ---
@@ -967,12 +1442,7 @@ impl WaylandCompositor {
                 };
 
                 // --- UV rect: use content_uv (accounts for CSD geometry offset) ---
-                let [cu, cv, cw, ch] = wt.content_uv;
-                let (uv_x, uv_y, uv_w, uv_h) = if wt.y_inverted {
-                    (cu, cv + ch, cw, -ch)
-                } else {
-                    (cu, cv, cw, ch)
-                };
+                let [uv_x, uv_y, uv_w, uv_h] = oriented_content_uv(wt.content_uv, wt.y_inverted);
 
                 // --- Draw blur behind frosted window ---
                 if wt.is_frosted && self.blur_enabled && blur_result_tex.is_some() {
@@ -1016,21 +1486,38 @@ impl WaylandCompositor {
                 // common case and visually consistent with X11.
                 if self.motion_trail_enabled && !wt.motion_trail.is_empty() && wt.wobbly.is_none() {
                     let trail_len = wt.motion_trail.len();
+                    let trail_now = std::time::Instant::now();
+                    let trail_lifetime =
+                        crate::backend::compositor_common::effects::motion_trail_lifetime(
+                            self.motion_trail_frames,
+                        );
                     gl.Uniform4f(self.win_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
                     gl.ActiveTexture(ffi::TEXTURE0);
                     gl.BindTexture(ffi::TEXTURE_2D, texture);
                     gl.Uniform1f(self.win_uniforms.radius, radius);
                     gl.Uniform2f(self.win_uniforms.size, draw_w, draw_h);
-                    for (i, &(tx, ty)) in wt.motion_trail.iter().enumerate() {
-                        let ghost_opacity =
-                            self.motion_trail_opacity * (i as f32 + 1.0) / trail_len as f32;
-                        gl.Uniform1f(self.win_uniforms.opacity, ghost_opacity * fade);
+                    for (i, sample) in wt.motion_trail.iter().enumerate() {
+                        let ghost_opacity = self.motion_trail_opacity * (i as f32 + 1.0)
+                            / trail_len as f32
+                            * sample.opacity_at(trail_now, trail_lifetime);
+                        if ghost_opacity <= 0.001 {
+                            continue;
+                        }
+                        let ghost_layer = (ghost_opacity * layer_opacity).clamp(0.0, 1.0);
+                        gl.Uniform1f(
+                            self.win_uniforms.opacity,
+                            if use_texture_alpha {
+                                -ghost_layer
+                            } else {
+                                ghost_layer
+                            },
+                        );
                         gl.Uniform1f(self.win_uniforms.dim, 0.7);
                         self.set_rect_uniform(
                             gl,
                             self.win_uniforms.rect,
-                            tx as f32,
-                            ty as f32,
+                            sample.x as f32,
+                            sample.y as f32,
                             draw_w,
                             draw_h,
                         );
@@ -1041,7 +1528,7 @@ impl WaylandCompositor {
                 }
 
                 // --- Choose shader: wobbly, tilt, or standard ---
-                if wt.wobbly.is_some() {
+                if wt.wobbly.is_some() && !wt.ripple_active && wt.color_transform.is_none() {
                     // Wobbly windows: switch to wobbly program
                     let wobbly = wt.wobbly.as_ref().unwrap();
                     gl.UseProgram(self.wobbly_program);
@@ -1060,6 +1547,11 @@ impl WaylandCompositor {
                     gl.Uniform2f(self.wobbly_uniforms.size, draw_w, draw_h);
                     gl.Uniform1f(self.wobbly_uniforms.dim, dim);
                     gl.Uniform4f(self.wobbly_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
+                    gl.Uniform1i(self.wobbly_uniforms.color_managed, 0);
+                    gl.Uniform1i(
+                        self.wobbly_uniforms.scene_linear,
+                        if scene_linear_active { 1 } else { 0 },
+                    );
 
                     // Upload grid offsets as flat vec2 array, reusing a
                     // persistent scratch buffer instead of allocating per frame.
@@ -1090,7 +1582,11 @@ impl WaylandCompositor {
                     gl.Uniform1i(self.win_uniforms.texture, 0);
                     gl.Uniform4f(self.win_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
                     gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
-                } else if is_focused && (self.tilt_x.abs() > 0.001 || self.tilt_y.abs() > 0.001) {
+                } else if is_focused
+                    && !wt.ripple_active
+                    && wt.color_transform.is_none()
+                    && (self.tilt_x.abs() > 0.001 || self.tilt_y.abs() > 0.001)
+                {
                     // Tilt: switch to tilt program for focused window
                     gl.UseProgram(self.tilt_program);
                     self.set_projection_uniform(gl, self.tilt_uniforms.projection, &projection);
@@ -1109,10 +1605,14 @@ impl WaylandCompositor {
                     gl.Uniform1f(self.tilt_uniforms.dim, dim);
                     gl.Uniform4f(self.tilt_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
                     gl.Uniform2f(self.tilt_uniforms.tilt, self.tilt_x, self.tilt_y);
-                    gl.Uniform1f(self.tilt_uniforms.perspective, 800.0);
-                    let grid = 12i32;
+                    gl.Uniform1f(self.tilt_uniforms.perspective, self.tilt_perspective);
+                    let grid = self.tilt_grid.clamp(1, 64) as i32;
                     gl.Uniform1i(self.tilt_uniforms.grid_size, grid);
                     gl.Uniform2f(self.tilt_uniforms.light_dir, 0.0, -1.0);
+                    gl.Uniform1i(
+                        self.tilt_uniforms.scene_linear,
+                        if scene_linear_active { 1 } else { 0 },
+                    );
 
                     gl.ActiveTexture(ffi::TEXTURE0);
                     self.bind_window_texture(gl, texture);
@@ -1144,7 +1644,7 @@ impl WaylandCompositor {
                     // Ripple animation
                     if wt.ripple_active {
                         gl.Uniform1f(self.win_uniforms.ripple_progress, wt.ripple_progress);
-                        gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.03);
+                        gl.Uniform1f(self.win_uniforms.ripple_amplitude, self.ripple_amplitude);
                     }
 
                     // wp-color-management transform for this surface, if any.
@@ -1191,34 +1691,87 @@ impl WaylandCompositor {
             gl.UseProgram(0);
         }
 
-        if scene_linear_active && !hw_encode_active {
-            // Encode linear_fbo → output_fbo using the uniform participating
-            // TF (sRGB fallback when outputs are mixed). Skipped when the CRTC
-            // GAMMA_LUT will OETF at scanout — linear values then flow straight
-            // through smithay's per-output composite into the 10-bit GBM FB.
-            self.dispatch_scene_linear_encode_pass(
-                gl,
-                &projection,
-                shader_encode_tf,
-                shader_encode_gamma,
-            );
+        if scene_linear_active {
+            if hw_encode_active {
+                // The CRTC LUT expects linear input, but KMS always consumes
+                // output_texture. Copy the completed linear window pass into
+                // output_fbo before encoded-space overlays are drawn. Without
+                // this copy output_texture remains the previous frame and every
+                // genie/border/particle pass is accidentally left bound to the
+                // private linear FBO.
+                self.blit_fbo(
+                    gl,
+                    self.linear_fbo,
+                    self.output_fbo,
+                    self.screen_w,
+                    self.screen_h,
+                );
+                unsafe {
+                    gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
+                    gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+                }
+            } else {
+                // Encode linear_fbo → output_fbo using the uniform participating
+                // TF (sRGB fallback when outputs are mixed).
+                self.dispatch_scene_linear_encode_pass(
+                    gl,
+                    &projection,
+                    shader_encode_tf,
+                    shader_encode_gamma,
+                );
+            }
+        }
+
+        // Every remaining window-program draw is an overlay on output_fbo.
+        // Synchronize the domain once at that boundary so expose, peek,
+        // overview labels, debug HUD and system UI cannot inherit the main
+        // scene's u_scene_linear=1 after a shader encode pass.
+        let overlay_scene_linear =
+            overlay_output_is_scene_linear(scene_linear_active, hw_encode_active);
+        unsafe {
+            self.sync_overlay_color_domain(gl, overlay_scene_linear);
         }
 
         self.frame_profiler.zone_end();
 
         // =================================================================
-        // 9b. Genie minimize animations (mirror X11 pass 2b)
+        // 9b. Close fade overlay for windows retired from visible_scene
+        // =================================================================
+        if self.windows.values().any(|win| {
+            win.fading_out
+                && !win.is_genie_minimizing
+                && win.fade_opacity > 0.0
+                && win.closing_rect.is_some()
+                && win.texture_owner.is_some()
+        }) {
+            self.frame_profiler.zone_start("close_fade");
+            self.render_close_fades(gl, &projection, scene_linear_active && hw_encode_active);
+            self.frame_profiler.zone_end();
+        }
+
+        // =================================================================
+        // 9c. Genie minimize animations (mirror X11 pass 2b)
         // =================================================================
         if !self.genie_active.is_empty() {
             self.frame_profiler.zone_start("genie");
-            let genie_duration_ms = self.genie_duration_ms;
+            let genie_duration_ms = self.genie_duration_ms.max(1);
             let dock = (self.dock_x, self.dock_y);
             unsafe {
                 gl.UseProgram(self.genie_program);
                 self.set_projection_uniform(gl, self.genie_uniforms.projection, &projection);
                 gl.Uniform1i(self.genie_uniforms.texture, 0);
-                gl.Uniform4f(self.genie_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
                 gl.Uniform1f(self.genie_uniforms.radius, 0.0);
+                gl.Uniform1i(self.genie_uniforms.color_managed, 0);
+                gl.Uniform1i(
+                    self.genie_uniforms.scene_linear,
+                    if scene_linear_active && hw_encode_active {
+                        1
+                    } else {
+                        0
+                    },
+                );
+                gl.Uniform1f(self.genie_uniforms.ripple_progress, 0.0);
+                gl.Uniform1f(self.genie_uniforms.ripple_amplitude, 0.0);
                 let grid = 12i32;
                 gl.Uniform1i(self.genie_uniforms.grid_size, grid);
                 gl.BindVertexArray(self.quad_vao);
@@ -1231,6 +1784,9 @@ impl WaylandCompositor {
                     gl.Uniform2f(self.genie_uniforms.size, ga.w, ga.h);
                     gl.Uniform1f(self.genie_uniforms.progress, progress);
                     gl.Uniform2f(self.genie_uniforms.dock_pos, dock.0, dock.1);
+                    let [uv_x, uv_y, uv_w, uv_h] =
+                        oriented_content_uv(ga.content_uv, ga.y_inverted);
+                    gl.Uniform4f(self.genie_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
                     // Sign of opacity encodes "premultiplied alpha" path in shader
                     // (matches X11 convention: negative for RGBA buffers).
                     gl.Uniform1f(
@@ -1239,7 +1795,7 @@ impl WaylandCompositor {
                     );
                     gl.Uniform1f(self.genie_uniforms.dim, 1.0);
                     gl.ActiveTexture(ffi::TEXTURE0);
-                    gl.BindTexture(ffi::TEXTURE_2D, ga.gl_texture);
+                    self.bind_window_texture(gl, ga.texture_owner.tex_id());
                     gl.DrawArrays(ffi::TRIANGLES, 0, grid * grid * 6);
                 }
 
@@ -1257,6 +1813,14 @@ impl WaylandCompositor {
             unsafe {
                 gl.UseProgram(self.border_program);
                 self.set_projection_uniform(gl, self.border_uniforms.projection, &projection);
+                gl.Uniform1i(
+                    self.border_uniforms.scene_linear,
+                    if scene_linear_active && hw_encode_active {
+                        1
+                    } else {
+                        0
+                    },
+                );
                 gl.BindVertexArray(self.quad_vao);
 
                 for &(win_id, x, y, w, h) in visible_scene {
@@ -1409,7 +1973,7 @@ impl WaylandCompositor {
         // 15c. Tab bar for window groups
         // =================================================================
         if self.window_tabs_enabled && !self.window_groups.is_empty() {
-            self.render_tab_bar(gl, &projection);
+            self.render_tab_bar(gl, &projection, visible_scene);
         }
 
         // =================================================================
@@ -1422,7 +1986,7 @@ impl WaylandCompositor {
         // =================================================================
         // 17. Edge glow
         // =================================================================
-        if self.edge_glow_enabled && self.edge_glow_active && !self.edge_glow_suppressed {
+        if edge_glow_continuous {
             unsafe {
                 gl.UseProgram(self.edge_glow_program);
                 self.set_projection_uniform(gl, self.edge_glow_uniforms.projection, &projection);
@@ -1478,6 +2042,15 @@ impl WaylandCompositor {
                 gl.Clear(ffi::COLOR_BUFFER_BIT);
 
                 gl.UseProgram(self.postprocess_program);
+                self.set_projection_uniform(gl, self.postprocess_uniforms.projection, &projection);
+                self.set_rect_uniform(
+                    gl,
+                    self.postprocess_uniforms.rect,
+                    0.0,
+                    0.0,
+                    self.screen_w as f32,
+                    self.screen_h as f32,
+                );
                 gl.Uniform1i(self.postprocess_uniforms.texture, 0);
                 gl.Uniform1f(self.postprocess_uniforms.color_temp, self.color_temperature);
                 gl.Uniform1f(self.postprocess_uniforms.saturation, self.saturation);
@@ -1501,7 +2074,7 @@ impl WaylandCompositor {
                     gl.Uniform2f(self.postprocess_uniforms.magnifier_center, cx, 1.0 - cy);
                     gl.Uniform1f(
                         self.postprocess_uniforms.magnifier_radius,
-                        self.magnifier_radius / self.screen_w as f32,
+                        self.magnifier_radius,
                     );
                     gl.Uniform1f(
                         self.postprocess_uniforms.magnifier_zoom,
@@ -1667,8 +2240,10 @@ impl WaylandCompositor {
         // Predictive render: update scene activity periodically
         self.predictive_render_mgr.update_scene_activity();
 
-        // Schedule next render if animations are still active
-        if any_animating {
+        // Schedule the next render for genuinely time-varying work. This is
+        // repeated at frame end because screenshot readback may update the
+        // needs_render flag while draining its queue.
+        if any_animating || postprocess_continuous || edge_glow_continuous {
             self.needs_render = true;
         }
 
@@ -1960,8 +2535,7 @@ impl WaylandCompositor {
                 ffi::FALSE as u8,
                 projection.as_ptr(),
             );
-            gl.Enable(ffi::BLEND);
-            gl.BlendFunc(ffi::SRC_ALPHA, ffi::ONE_MINUS_SRC_ALPHA);
+            self.enable_premultiplied_blend(gl);
 
             for stroke in &self.annotation_strokes {
                 if stroke.points.len() < 2 {

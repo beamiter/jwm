@@ -1,3 +1,4 @@
+use crate::backend::compositor_common::effects::MotionTrailSample;
 use crate::backend::x11::compositor::{WallpaperMode, WobblyState};
 pub(super) use crate::backend::x11::compositor_common::effects::{
     Particle, ParticleSystem, RippleState,
@@ -60,7 +61,11 @@ pub(super) struct WindowTexture {
     pub(super) is_frosted: bool,
     pub(super) is_override_redirect: bool,
     pub(super) wobbly: Option<WobblyState>,
-    pub(super) motion_trail: VecDeque<(i32, i32)>,
+    pub(super) motion_trail: VecDeque<MotionTrailSample>,
+    /// Logical drag position advanced by move deltas. X ConfigureNotify can
+    /// arrive before or after the move hook, so deriving a previous position
+    /// from `x/y` would intermittently duplicate or skip trail samples.
+    pub(super) motion_trail_cursor: Option<(f32, f32)>,
     pub(super) audio_sync_target: Option<f32>,
 }
 
@@ -276,6 +281,7 @@ pub(super) struct GenieUniforms {
 }
 
 pub(super) struct GenieAnimation {
+    pub(super) x11_win: u32,
     pub(super) start: std::time::Instant,
     pub(super) x: f32,
     pub(super) y: f32,

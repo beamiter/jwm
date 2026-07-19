@@ -728,7 +728,7 @@ impl Jwm {
             self.state.clients.get(client_key),
             self.state.monitors.get(mon_key),
         ) {
-            if client.state.is_swallowed {
+            if client.state.is_swallowed || client.state.is_hidden {
                 return false;
             }
             client.state.is_sticky || (client.state.tags & monitor.get_active_tags()) > 0
@@ -739,7 +739,7 @@ impl Jwm {
 
     fn is_client_visible_by_key(&self, client_key: ClientKey) -> bool {
         if let Some(client) = self.state.clients.get(client_key) {
-            if client.state.is_swallowed {
+            if client.state.is_swallowed || client.state.is_hidden {
                 return false;
             }
             if let Some(mon_key) = client.mon {

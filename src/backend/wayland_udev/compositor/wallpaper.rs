@@ -9,6 +9,76 @@ use std::sync::mpsc;
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Instant;
 
+type GlScissor = [i32; 4];
+
+/// Intersect two OpenGL scissor rectangles (`x`, `y`, `width`, `height`).
+/// Calculations use i64 so malformed or extreme output coordinates cannot
+/// overflow before the result is clamped back to the framebuffer range.
+fn intersect_gl_scissors(a: GlScissor, b: GlScissor) -> Option<GlScissor> {
+    let ax1 = i64::from(a[0]);
+    let ay1 = i64::from(a[1]);
+    let ax2 = ax1 + i64::from(a[2].max(0));
+    let ay2 = ay1 + i64::from(a[3].max(0));
+    let bx1 = i64::from(b[0]);
+    let by1 = i64::from(b[1]);
+    let bx2 = bx1 + i64::from(b[2].max(0));
+    let by2 = by1 + i64::from(b[3].max(0));
+
+    let x1 = ax1.max(bx1);
+    let y1 = ay1.max(by1);
+    let x2 = ax2.min(bx2);
+    let y2 = ay2.min(by2);
+    if x2 <= x1 || y2 <= y1 {
+        return None;
+    }
+
+    Some([
+        x1.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+        y1.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+        (x2 - x1).min(i64::from(i32::MAX)) as i32,
+        (y2 - y1).min(i64::from(i32::MAX)) as i32,
+    ])
+}
+
+/// Convert a top-left-origin monitor rectangle to a framebuffer-bounded GL
+/// scissor, optionally intersecting the compositor's outer damage scissor.
+fn monitor_gl_scissor(
+    screen_w: u32,
+    screen_h: u32,
+    mon_x: i32,
+    mon_y: i32,
+    mon_w: u32,
+    mon_h: u32,
+    outer_scissor: Option<GlScissor>,
+) -> Option<GlScissor> {
+    let screen_w = screen_w.min(i32::MAX as u32) as i32;
+    let screen_h = screen_h.min(i32::MAX as u32) as i32;
+    let mon_w = mon_w.min(i32::MAX as u32) as i32;
+    let mon_h = mon_h.min(i32::MAX as u32) as i32;
+    let monitor = [
+        mon_x,
+        screen_h.saturating_sub(mon_y).saturating_sub(mon_h),
+        mon_w,
+        mon_h,
+    ];
+    let monitor = intersect_gl_scissors(monitor, [0, 0, screen_w, screen_h])?;
+    match outer_scissor {
+        Some(outer) => intersect_gl_scissors(monitor, outer),
+        None => Some(monitor),
+    }
+}
+
+/// Crossfade only applies when the monitor uses the global wallpaper. A
+/// per-monitor override is independent and must remain fully opaque.
+fn monitor_crossfade_layers(
+    has_monitor_override: bool,
+    has_old_global: bool,
+    crossfade_alpha: f32,
+) -> (bool, f32) {
+    let active = !has_monitor_override && has_old_global && crossfade_alpha < 1.0;
+    (active, if active { crossfade_alpha } else { 1.0 })
+}
+
 /// Process-wide gate bounding how many wallpaper images decode concurrently.
 /// Each decode does `image::open` + a Lanczos3 downscale, which is heavy on CPU
 /// and transiently holds a full decoded image in memory. Rapid wallpaper changes
@@ -178,35 +248,46 @@ impl WaylandCompositor {
     /// On success, uploads the texture to the GPU, optionally setting up
     /// crossfade state if `wallpaper_crossfade` is enabled.
     pub(crate) unsafe fn poll_pending_wallpapers(&mut self, gl: &ffi::Gles2) {
+        for texture in self.retired_wallpaper_textures.drain(..) {
+            unsafe {
+                gl.DeleteTextures(1, &texture);
+            }
+        }
+
         // --- Global wallpaper ---
         if let Some(ref rx) = self.pending_wallpaper {
             match rx.try_recv() {
                 Ok(data) => {
-                    // Crossfade: save old texture and its geometry before replacing
-                    if self.wallpaper_crossfade && self.wallpaper_texture.is_some() {
-                        if let Some(old) = self.old_wallpaper_texture.take() {
-                            unsafe {
-                                gl.DeleteTextures(1, &old);
-                            }
-                        }
-                        self.old_wallpaper_texture = self.wallpaper_texture.take();
-                        self.old_wallpaper_img_w = self.wallpaper_img_w;
-                        self.old_wallpaper_img_h = self.wallpaper_img_h;
-                        self.old_wallpaper_mode = self.wallpaper_mode;
-                        self.wallpaper_transition_start = Some(Instant::now());
-                    } else {
-                        // No crossfade: just delete old texture
-                        if let Some(old) = self.wallpaper_texture.take() {
-                            unsafe {
-                                gl.DeleteTextures(1, &old);
-                            }
-                        }
-                    }
-
-                    // Upload new texture
+                    // Keep the currently visible texture alive unless the new
+                    // upload succeeds.
                     if let Some((tex, w, h)) =
                         unsafe { Self::upload_wallpaper_texture_gles(gl, &data) }
                     {
+                        if self.wallpaper_crossfade && self.wallpaper_texture.is_some() {
+                            if let Some(old) = self.old_wallpaper_texture.take() {
+                                unsafe {
+                                    gl.DeleteTextures(1, &old);
+                                }
+                            }
+                            self.old_wallpaper_texture = self.wallpaper_texture.take();
+                            self.old_wallpaper_img_w = self.wallpaper_img_w;
+                            self.old_wallpaper_img_h = self.wallpaper_img_h;
+                            self.old_wallpaper_mode = self.wallpaper_mode;
+                            self.wallpaper_transition_start = Some(Instant::now());
+                        } else {
+                            if let Some(old) = self.wallpaper_texture.take() {
+                                unsafe {
+                                    gl.DeleteTextures(1, &old);
+                                }
+                            }
+                            if let Some(old) = self.old_wallpaper_texture.take() {
+                                unsafe {
+                                    gl.DeleteTextures(1, &old);
+                                }
+                            }
+                            self.wallpaper_transition_start = None;
+                        }
+
                         self.wallpaper_texture = Some(tex);
                         self.wallpaper_img_w = w;
                         self.wallpaper_img_h = h;
@@ -231,22 +312,24 @@ impl WaylandCompositor {
         for (i, (mon_idx, rx)) in self.pending_monitor_wallpapers.iter().enumerate() {
             match rx.try_recv() {
                 Ok(data) => {
-                    if let Some(mw) = self.monitor_wallpapers.get_mut(*mon_idx) {
-                        // Delete old per-monitor texture if any
-                        if let Some(old) = mw.texture.take() {
-                            unsafe {
-                                gl.DeleteTextures(1, &old);
+                    if let Some((tex, w, h)) =
+                        unsafe { Self::upload_wallpaper_texture_gles(gl, &data) }
+                    {
+                        if let Some(mw) = self.monitor_wallpapers.get_mut(*mon_idx) {
+                            if let Some(old) = mw.texture.replace(tex) {
+                                unsafe {
+                                    gl.DeleteTextures(1, &old);
+                                }
                             }
-                        }
-
-                        // Upload new texture
-                        if let Some((tex, w, h)) =
-                            unsafe { Self::upload_wallpaper_texture_gles(gl, &data) }
-                        {
-                            mw.texture = Some(tex);
                             mw.img_w = w;
                             mw.img_h = h;
                             mw.mode = data.mode;
+                        } else {
+                            // The monitor disappeared while the decode was in
+                            // flight; the uploaded texture has no owner.
+                            unsafe {
+                                gl.DeleteTextures(1, &tex);
+                            }
                         }
                     }
                     completed.push(i);
@@ -274,8 +357,15 @@ impl WaylandCompositor {
     /// opacity=1.0, no corner radius, no dim.
     ///
     /// If crossfade is active (transition_start is set), draws the old wallpaper
-    /// first at decreasing alpha, then the new wallpaper at increasing alpha.
-    pub(crate) unsafe fn render_wallpaper(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+    /// opaque first, then blends the new wallpaper over it at increasing alpha.
+    /// Fading both layers independently over the cleared framebuffer would
+    /// darken the midpoint rather than produce a linear crossfade.
+    pub(crate) unsafe fn render_wallpaper(
+        &mut self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        outer_scissor: Option<GlScissor>,
+    ) {
         // Determine crossfade progress (0.0 = just started, 1.0 = complete)
         let crossfade_alpha = if let Some(start) = self.wallpaper_transition_start {
             let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -328,6 +418,7 @@ impl WaylandCompositor {
                 );
 
                 // Determine which texture and dimensions to use for this monitor
+                let has_monitor_override = mw.texture.is_some();
                 let (tex, img_w, img_h, mode) = if let Some(t) = mw.texture {
                     (t, mw.img_w, mw.img_h, mw.mode)
                 } else if let Some(t) = self.wallpaper_texture {
@@ -346,13 +437,35 @@ impl WaylandCompositor {
                     continue;
                 }
 
+                // Fill/center modes can extend beyond their target output.
+                // Constrain every monitor wallpaper to that monitor and retain
+                // the caller's partial-damage restriction.
+                let Some(scissor) = monitor_gl_scissor(
+                    self.screen_w,
+                    self.screen_h,
+                    mw.mon_x,
+                    mw.mon_y,
+                    mw.mon_w,
+                    mw.mon_h,
+                    outer_scissor,
+                ) else {
+                    continue;
+                };
+                gl.Enable(ffi::SCISSOR_TEST);
+                gl.Scissor(scissor[0], scissor[1], scissor[2], scissor[3]);
+
                 let (rx, ry, rw, rh) = compute_wallpaper_rect(mode, area, img_w, img_h);
+                let (draw_old_global, current_opacity) = monitor_crossfade_layers(
+                    has_monitor_override,
+                    self.old_wallpaper_texture.is_some(),
+                    crossfade_alpha,
+                );
 
                 // Set size uniform for the shader
                 gl.Uniform2f(self.win_uniforms.size, rw, rh);
 
                 // --- Draw old wallpaper (crossfade out) ---
-                if crossfade_alpha < 1.0 {
+                if draw_old_global {
                     if let Some(old_tex) = self.old_wallpaper_texture {
                         let (orx, ory, orw, orh) = compute_wallpaper_rect(
                             self.old_wallpaper_mode,
@@ -362,7 +475,7 @@ impl WaylandCompositor {
                         );
                         gl.Uniform4f(self.win_uniforms.rect, orx, ory, orw, orh);
                         gl.Uniform2f(self.win_uniforms.size, orw, orh);
-                        gl.Uniform1f(self.win_uniforms.opacity, 1.0 - crossfade_alpha);
+                        gl.Uniform1f(self.win_uniforms.opacity, 1.0);
                         gl.BindTexture(ffi::TEXTURE_2D, old_tex);
                         gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
                     }
@@ -371,14 +484,7 @@ impl WaylandCompositor {
                 // --- Draw current wallpaper ---
                 gl.Uniform4f(self.win_uniforms.rect, rx, ry, rw, rh);
                 gl.Uniform2f(self.win_uniforms.size, rw, rh);
-                gl.Uniform1f(
-                    self.win_uniforms.opacity,
-                    if crossfade_alpha < 1.0 {
-                        crossfade_alpha
-                    } else {
-                        1.0
-                    },
-                );
+                gl.Uniform1f(self.win_uniforms.opacity, current_opacity);
                 gl.BindTexture(ffi::TEXTURE_2D, tex);
                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
             }
@@ -397,9 +503,14 @@ impl WaylandCompositor {
                         );
 
                         gl.Uniform2f(self.win_uniforms.size, rw, rh);
+                        let (draw_old_global, current_opacity) = monitor_crossfade_layers(
+                            false,
+                            self.old_wallpaper_texture.is_some(),
+                            crossfade_alpha,
+                        );
 
                         // Old wallpaper crossfade
-                        if crossfade_alpha < 1.0 {
+                        if draw_old_global {
                             if let Some(old_tex) = self.old_wallpaper_texture {
                                 let (orx, ory, orw, orh) = compute_wallpaper_rect(
                                     self.old_wallpaper_mode,
@@ -409,7 +520,7 @@ impl WaylandCompositor {
                                 );
                                 gl.Uniform4f(self.win_uniforms.rect, orx, ory, orw, orh);
                                 gl.Uniform2f(self.win_uniforms.size, orw, orh);
-                                gl.Uniform1f(self.win_uniforms.opacity, 1.0 - crossfade_alpha);
+                                gl.Uniform1f(self.win_uniforms.opacity, 1.0);
                                 gl.BindTexture(ffi::TEXTURE_2D, old_tex);
                                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
                             }
@@ -417,18 +528,20 @@ impl WaylandCompositor {
 
                         gl.Uniform4f(self.win_uniforms.rect, rx, ry, rw, rh);
                         gl.Uniform2f(self.win_uniforms.size, rw, rh);
-                        gl.Uniform1f(
-                            self.win_uniforms.opacity,
-                            if crossfade_alpha < 1.0 {
-                                crossfade_alpha
-                            } else {
-                                1.0
-                            },
-                        );
+                        gl.Uniform1f(self.win_uniforms.opacity, current_opacity);
                         gl.BindTexture(ffi::TEXTURE_2D, tex);
                         gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
                     }
                 }
+            }
+
+            // Per-monitor drawing temporarily narrows the GL scissor. Restore
+            // the exact outer damage state expected by the remaining passes.
+            if let Some(scissor) = outer_scissor {
+                gl.Enable(ffi::SCISSOR_TEST);
+                gl.Scissor(scissor[0], scissor[1], scissor[2], scissor[3]);
+            } else {
+                gl.Disable(ffi::SCISSOR_TEST);
             }
 
             gl.BindTexture(ffi::TEXTURE_2D, 0);
@@ -453,6 +566,19 @@ impl WaylandCompositor {
             path,
             wp_mode
         );
+
+        if path.is_empty() {
+            self.pending_wallpaper = None;
+            self.retired_wallpaper_textures
+                .extend(self.wallpaper_texture.take());
+            self.retired_wallpaper_textures
+                .extend(self.old_wallpaper_texture.take());
+            self.wallpaper_img_w = 0;
+            self.wallpaper_img_h = 0;
+            self.wallpaper_transition_start = None;
+            self.needs_render = true;
+            return;
+        }
 
         // Determine max decode size from screen dimensions
         let max_w = self.screen_w;
@@ -578,5 +704,36 @@ mod tests {
         assert!((y - 0.0).abs() < 0.01);
         assert!((w - 1920.0).abs() < 0.01);
         assert!((h - 1080.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn monitor_scissor_is_bounded_and_intersects_outer_damage() {
+        // The second monitor starts at x=1920 and its Fill image may overflow,
+        // but drawing remains within the monitor and the damaged strip.
+        assert_eq!(
+            monitor_gl_scissor(3840, 1080, 1920, 0, 1920, 1080, Some([1800, 200, 400, 300]),),
+            Some([1920, 200, 280, 300])
+        );
+    }
+
+    #[test]
+    fn monitor_scissor_handles_offset_outputs_and_empty_damage() {
+        assert_eq!(
+            monitor_gl_scissor(3000, 1200, -100, 100, 800, 600, None),
+            Some([0, 500, 700, 600])
+        );
+        assert_eq!(
+            monitor_gl_scissor(3000, 1200, 1000, 100, 800, 600, Some([0, 0, 500, 500])),
+            None
+        );
+    }
+
+    #[test]
+    fn monitor_override_never_uses_global_crossfade() {
+        assert_eq!(monitor_crossfade_layers(true, true, 0.25), (false, 1.0));
+        assert_eq!(monitor_crossfade_layers(false, true, 0.25), (true, 0.25));
+        // Without an old layer, dimming the new wallpaper would expose the
+        // clear color instead of producing a crossfade.
+        assert_eq!(monitor_crossfade_layers(false, false, 0.25), (false, 1.0));
     }
 }

@@ -467,6 +467,20 @@ impl Config {
         ] {
             validate_f32_range(&mut diagnostics, path, value, min, max);
         }
+        if behavior.fading {
+            for (path, value) in [
+                ("behavior.fade_in_step", behavior.fade_in_step),
+                ("behavior.fade_out_step", behavior.fade_out_step),
+            ] {
+                if value.is_finite() && value <= 0.0 {
+                    diagnostics.error(
+                        path,
+                        "fade step must be greater than zero while fading is enabled",
+                        Some("disable behavior.fading or use a positive step".into()),
+                    );
+                }
+            }
+        }
 
         for (path, value) in [
             ("behavior.shadow_radius", behavior.shadow_radius),
@@ -512,6 +526,175 @@ impl Config {
                 &mut diagnostics,
                 "behavior.magnifier_zoom",
                 behavior.magnifier_zoom,
+            );
+        }
+
+        // Time-based effects must never receive zero, negative, or non-finite
+        // durations.  Those values otherwise lead to divisions by zero or an
+        // invalid `Duration::from_secs_f32` in a render loop.
+        for (path, value, enabled) in [
+            (
+                "behavior.particle_lifetime",
+                behavior.particle_lifetime,
+                behavior.particle_effects,
+            ),
+            (
+                "behavior.ripple_duration",
+                behavior.ripple_duration,
+                behavior.ripple_on_open,
+            ),
+        ] {
+            if enabled {
+                validate_positive_f32(&mut diagnostics, path, value);
+            } else {
+                validate_nonnegative_f32(&mut diagnostics, path, value);
+            }
+            if value.is_finite() && value > 30.0 {
+                diagnostics.warning(
+                    path,
+                    format!("{value}s exceeds the supported maximum 30s and will be clamped"),
+                    Some("use at most 30 seconds".into()),
+                );
+            }
+        }
+        for (path, value, enabled) in [
+            (
+                "behavior.genie_duration_ms",
+                behavior.genie_duration_ms,
+                behavior.genie_minimize,
+            ),
+            (
+                "behavior.focus_highlight_duration_ms",
+                behavior.focus_highlight_duration_ms,
+                behavior.focus_highlight,
+            ),
+            (
+                "behavior.wallpaper_crossfade_duration_ms",
+                behavior.wallpaper_crossfade_duration_ms,
+                behavior.wallpaper_crossfade,
+            ),
+        ] {
+            if enabled && value == 0 {
+                diagnostics.error(path, "duration must be greater than zero", None);
+            } else if value > 30_000 {
+                diagnostics.warning(
+                    path,
+                    format!("{value}ms exceeds the supported maximum 30000ms and will be clamped"),
+                    Some("use at most 30000 milliseconds".into()),
+                );
+            }
+        }
+
+        for (path, value, enabled, min, max) in [
+            (
+                "behavior.tilt_perspective",
+                behavior.tilt_perspective,
+                behavior.window_tilt,
+                100.0,
+                10_000.0,
+            ),
+            (
+                "behavior.tilt_speed",
+                behavior.tilt_speed,
+                behavior.window_tilt,
+                0.1,
+                100.0,
+            ),
+            (
+                "behavior.wobbly_stiffness",
+                behavior.wobbly_stiffness,
+                behavior.wobbly_windows,
+                0.1,
+                10_000.0,
+            ),
+            (
+                "behavior.wobbly_damping",
+                behavior.wobbly_damping,
+                behavior.wobbly_windows,
+                0.1,
+                1_000.0,
+            ),
+            (
+                "behavior.wobbly_restore_stiffness",
+                behavior.wobbly_restore_stiffness,
+                behavior.wobbly_windows,
+                0.1,
+                10_000.0,
+            ),
+        ] {
+            if enabled {
+                validate_positive_f32(&mut diagnostics, path, value);
+            } else {
+                validate_nonnegative_f32(&mut diagnostics, path, value);
+            }
+            validate_f32_range(&mut diagnostics, path, value, min, max);
+        }
+        for (path, value, min, max) in [
+            ("behavior.tilt_amount", behavior.tilt_amount, 0.0, 0.35),
+            (
+                "behavior.ripple_amplitude",
+                behavior.ripple_amplitude,
+                0.0,
+                0.1,
+            ),
+            (
+                "behavior.particle_gravity",
+                behavior.particle_gravity,
+                -10_000.0,
+                10_000.0,
+            ),
+            (
+                "behavior.window_animation_scale",
+                behavior.window_animation_scale,
+                0.1,
+                2.0,
+            ),
+            (
+                "behavior.tab_bar_height",
+                behavior.tab_bar_height,
+                1.0,
+                256.0,
+            ),
+        ] {
+            validate_f32_range(&mut diagnostics, path, value, min, max);
+        }
+
+        for (path, value, supported_max) in [
+            ("behavior.tilt_grid", behavior.tilt_grid, 64),
+            (
+                "behavior.wobbly_grid_size",
+                behavior.wobbly_grid_size,
+                crate::backend::compositor_common::effects::MAX_WOBBLY_SUBDIVISIONS,
+            ),
+            (
+                "behavior.motion_trail_frames",
+                behavior.motion_trail_frames,
+                64,
+            ),
+            ("behavior.particle_count", behavior.particle_count, 4096),
+        ] {
+            if value > supported_max {
+                diagnostics.warning(
+                    path,
+                    format!(
+                        "{value} exceeds the supported maximum {supported_max} and will be clamped"
+                    ),
+                    Some(format!("use at most {supported_max}")),
+                );
+            }
+        }
+        if behavior.tilt_grid == 0 {
+            diagnostics.warning(
+                "behavior.tilt_grid",
+                "zero subdivisions will be clamped to one",
+                Some("use at least 1".into()),
+            );
+        }
+        if behavior.wobbly_grid_size == 0 {
+            diagnostics.warning(
+                "behavior.wobbly_grid_size",
+                "zero subdivisions will be clamped to one",
+                Some("use at least 1".into()),
             );
         }
         if !behavior.gesture_swipe.is_empty() {
