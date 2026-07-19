@@ -10,6 +10,7 @@
 
 pub mod audio_recording;
 pub mod capture;
+pub mod capture_plan;
 pub mod magnifier;
 pub mod overview;
 pub mod recording;
@@ -19,6 +20,9 @@ pub mod toggles;
 
 pub use audio_recording::AudioRecordingState;
 pub use capture::{CaptureInteractionState, CaptureTarget};
+pub use capture_plan::{
+    CaptureCompletion, CaptureExecution, CapturePlan, execute_capture_plan, plan_capture_completion,
+};
 pub use magnifier::MagnifierState;
 pub use overview::OverviewState;
 pub use recording::RecordingState;

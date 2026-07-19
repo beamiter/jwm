@@ -78,8 +78,15 @@ Move feature-owned state from `Jwm` into explicit services, beginning with
 screenshot/recording, overview/expose, magnifier, and session persistence. Keep
 transport-specific IDs behind adapters and pass typed events across boundaries.
 
+Started: interactive screenshot completion is the first extracted policy
+service (`jwm::features::capture_plan`). The completion decision is a pure
+function, capture execution depends only on the `CompositorMedia` capability,
+and its tests exercise the exit criteria below with a small fake instead of a
+full-backend mock. Recording completion and overview/expose are next.
+
 Exit criteria: a core policy test can use small fake capabilities instead of a
-mock implementing the complete backend surface.
+mock implementing the complete backend surface. (First met by
+`capture_plan::tests::execution_prefers_region_capture` and neighbors.)
 
 ## Phase 3 — backend consolidation
 

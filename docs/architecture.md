@@ -145,6 +145,13 @@ src/backend/api.rs          platform boundary
   device boundary, and both X11 transports tag GPU-compositor initialization
   at the renderer boundary. New failure paths that cross the platform boundary
   should attach a context instead of stringifying the underlying error.
+- Interactive screenshot completion is extracted into the
+  `jwm::features::capture_plan` policy service: the completion decision
+  (cancel / too-small / capture, clipboard staging, annotation baking) is a
+  pure function, and capture execution depends only on the `CompositorMedia`
+  capability so tests use a small fake instead of mocking the full backend.
+  `Jwm::finish_screenshot_select` now only tears down interaction state and
+  routes the plan's outcome to logging, clipboard, and annotation baking.
 - Session snapshots load through an explicit version-probed migration
   (`session::migrate_session_json`): version 1 parses through a tolerant
   representation whose invalid floating state is normalized rather than
