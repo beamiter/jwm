@@ -98,3 +98,62 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked --lib --bins --tests
+
+  msrv:
+    name: Minimum supported Rust version
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libglib2.0-dev \
+            libcairo2-dev \
+            libpango1.0-dev \
+            libasound2-dev \
+            libdbus-1-dev \
+            libudev-dev \
+            libinput-dev \
+            libseat-dev \
+            libdrm-dev \
+            libgbm-dev \
+            libegl1-mesa-dev \
+            libgl1-mesa-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxext-dev \
+            libxxf86vm-dev \
+            libxcb1-dev \
+            libxcb-composite0-dev \
+            libxcb-damage0-dev \
+            libxcb-present-dev \
+            libxcb-randr0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcursor-dev \
+            libxfixes-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libxrender-dev
+
+      # The MSRV documented in Cargo.toml (rust-version). rust-toolchain.toml
+      # pins the developer channel to stable, so the explicit `+1.89.0`
+      # override is required here.
+      - name: Install minimum supported Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89.0"
+
+      - name: Cache Cargo build data
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check all targets on the MSRV
+        run: cargo +1.89.0 check --locked --all-targets

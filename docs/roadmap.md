@@ -25,17 +25,29 @@ not authorize a rewrite or a release-profile change without measurements.
 - [x] Commit and enforce `Cargo.lock` for reproducible application builds.
 - [x] Pin git dependencies to reviewed revisions or release tags.
 - [ ] Select and add the project license before publishing releases or crates.
-- [ ] Establish a documented minimum supported Rust version after testing it.
+- [x] Establish a documented minimum supported Rust version after testing it.
+      Rust 1.89 is the floor imposed by the locked dependency graph, verified
+      by `cargo +1.89.0 check --all-targets` and the full test suite, declared
+      as `rust-version` in `Cargo.toml`, and enforced by the CI `msrv` job.
 
 ## Phase 1 — reliability and supportability
 
-- Add backend-tagged structured error contexts at display, device, renderer, and
-  IPC boundaries.
-- Add a deterministic nested-backend smoke matrix covering startup, IPC health,
-  config reload, basic window lifecycle, screenshot capture, and clean shutdown.
-- Add bounded log rotation or journald guidance for the optional supervisor.
-- Record support-bundle fixtures and schema compatibility tests.
-- Add crash-safe state migrations before changing the session schema.
+- [ ] Add backend-tagged structured error contexts at display, device, renderer,
+      and IPC boundaries. Started: `BackendError` carries an optional
+      `[backend/boundary] operation` context with the original error preserved
+      through `source()`; backend construction, window-manager selection, and
+      control-socket binding are tagged. Interior device and renderer paths
+      still need adoption.
+- [ ] Add a deterministic nested-backend smoke matrix covering startup, IPC
+      health, config reload, basic window lifecycle, screenshot capture, and
+      clean shutdown.
+- [ ] Add bounded log rotation or journald guidance for the optional supervisor.
+- [x] Record support-bundle fixtures and schema compatibility tests. The
+      version-1 contract is frozen by `tests/support_bundle_schema.rs`: a
+      generated offline bundle and the recorded fixture in
+      `tests/fixtures/support_bundle_v1.json` must both satisfy the same
+      checker, and sentinel values verify the documented privacy guarantees.
+- [ ] Add crash-safe state migrations before changing the session schema.
 
 Exit criteria: a failed startup or smoke test produces one actionable report
 without requiring an unbounded debug log or a reproduction on direct DRM/KMS.
