@@ -2,6 +2,7 @@
 #[allow(unused_imports)]
 use super::*;
 use crate::backend::compositor_common::capture::clip_region;
+use crate::backend::compositor_common::window_glow::{WindowGlowSettings, WindowGlowTarget};
 use smithay::backend::renderer::gles::ffi;
 
 fn oriented_content_uv(content_uv: [f32; 4], y_inverted: bool) -> [f32; 4] {
@@ -538,8 +539,8 @@ impl WaylandCompositor {
     ) -> Option<dirty_region::DirtyRect> {
         use dirty_region::DirtyRect;
 
-        // Expand each window rect to cover its border and shadow footprint.
-        let margin = self.border_width
+        // Expand each window rect to cover every compositor decoration.
+        let border_and_shadow_margin = self.border_width
             + if self.shadow_enabled && self.shadow_radius > 0.0 {
                 self.shadow_spread
                     + self.shadow_radius
@@ -547,6 +548,11 @@ impl WaylandCompositor {
             } else {
                 0.0
             };
+        let glow_margin = {
+            let config = crate::config::CONFIG.load();
+            WindowGlowSettings::from_behavior(config.behavior()).damage_margin() as f32
+        };
+        let margin = border_and_shadow_margin.max(glow_margin);
 
         fn fold(acc: &mut Option<DirtyRect>, r: DirtyRect) {
             *acc = Some(match *acc {
@@ -1160,6 +1166,8 @@ impl WaylandCompositor {
         }
 
         let visible_scene = &scene[first_visible..];
+        let frame_config = crate::config::CONFIG.load();
+        let glow_settings = WindowGlowSettings::from_behavior(frame_config.behavior());
 
         // =================================================================
         // 7. Draw shadows
@@ -1228,6 +1236,88 @@ impl WaylandCompositor {
         self.frame_profiler.zone_end();
 
         // =================================================================
+        // 7b. Directional client-window glow underlay
+        // =================================================================
+        self.frame_profiler.zone_start("window_glow");
+        if glow_settings.damage_margin() > 0 {
+            unsafe {
+                gl.UseProgram(self.border_program);
+                self.set_projection_uniform(gl, self.border_uniforms.projection, &projection);
+                // This pass is written into the encoded output FBO before the
+                // optional scene-linear decode, matching wallpaper and shadows.
+                gl.Uniform1i(self.border_uniforms.scene_linear, 0);
+                gl.BindVertexArray(self.quad_vao);
+
+                for &(win_id, x, y, w, h) in visible_scene {
+                    let Some(wt) = self.windows.get(&win_id) else {
+                        continue;
+                    };
+                    if wt.gl_texture.is_none() {
+                        continue;
+                    }
+                    let Some(style) = glow_settings.style_for(WindowGlowTarget {
+                        focused: focused == Some(win_id),
+                        fullscreen: wt.is_fullscreen,
+                        override_redirect: false,
+                        shaped: wt.is_shaped,
+                        class_name: &wt.class_name,
+                        fade: wt.fade_opacity,
+                    }) else {
+                        continue;
+                    };
+
+                    let radius = if !wt.class_name.is_empty()
+                        && Self::class_matches_exclude(
+                            &wt.class_name,
+                            &self.rounded_corners_exclude,
+                        ) {
+                        0.0
+                    } else {
+                        wt.corner_radius_override
+                            .or_else(|| self.lookup_corner_radius_rule(&wt.class_name))
+                            .unwrap_or(self.corner_radius)
+                    };
+                    let scale = wt.anim_scale;
+                    let draw_w = w as f32 * scale;
+                    let draw_h = h as f32 * scale;
+                    let draw_x = x as f32 + (w as f32 - draw_w) * 0.5;
+                    let draw_y = y as f32 + (h as f32 - draw_h) * 0.5;
+                    if draw_w <= 0.0 || draw_h <= 0.0 {
+                        continue;
+                    }
+
+                    gl.Uniform4f(
+                        self.border_uniforms.border_color,
+                        style.color[0],
+                        style.color[1],
+                        style.color[2],
+                        style.color[3],
+                    );
+                    gl.Uniform1f(self.border_uniforms.border_width, -style.radius);
+                    gl.Uniform1f(self.border_uniforms.radius, radius.max(0.0));
+                    // In glow mode u_size is the unexpanded client rectangle.
+                    gl.Uniform2f(self.border_uniforms.size, draw_w, draw_h);
+                    self.set_rect_uniform(
+                        gl,
+                        self.border_uniforms.rect,
+                        draw_x - style.radius,
+                        draw_y - style.radius,
+                        draw_w + 2.0 * style.radius,
+                        draw_h + 2.0 * style.radius,
+                    );
+                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                }
+
+                // Avoid leaking the negative glow-mode sentinel into later
+                // border-program users that do not otherwise need an outline.
+                gl.Uniform1f(self.border_uniforms.border_width, 0.0);
+                gl.BindVertexArray(0);
+                gl.UseProgram(0);
+            }
+        }
+        self.frame_profiler.zone_end();
+
+        // =================================================================
         // 8. Blur pass (for frosted/translucent windows)
         // =================================================================
         self.frame_profiler.zone_start("blur");
@@ -1242,7 +1332,41 @@ impl WaylandCompositor {
         let blur_result_tex = if self.blur_enabled && has_frosted && !self.blur_fbos.is_empty() {
             self.temporal_blur_total_count += 1;
 
-            let current_hash = self.compute_window_positions_hash();
+            const FNV_PRIME: u64 = 0x100000001b3;
+            let glow_hash = {
+                let mut hash = 0xcbf29ce484222325u64;
+                let mut any_visible = false;
+                for &(win_id, _, _, _, _) in visible_scene {
+                    let Some(wt) = self.windows.get(&win_id) else {
+                        continue;
+                    };
+                    if wt.gl_texture.is_none() {
+                        continue;
+                    }
+                    let Some(style) = glow_settings.style_for(WindowGlowTarget {
+                        focused: focused == Some(win_id),
+                        fullscreen: wt.is_fullscreen,
+                        override_redirect: false,
+                        shaped: wt.is_shaped,
+                        class_name: &wt.class_name,
+                        fade: wt.fade_opacity,
+                    }) else {
+                        continue;
+                    };
+                    any_visible = true;
+                    hash ^= win_id;
+                    hash = hash.wrapping_mul(FNV_PRIME);
+                    for word in style.hash_words() {
+                        hash ^= word;
+                        hash = hash.wrapping_mul(FNV_PRIME);
+                    }
+                }
+                if any_visible { hash } else { 0 }
+            };
+            let current_hash = self
+                .compute_window_positions_hash()
+                .wrapping_mul(FNV_PRIME)
+                .wrapping_add(glow_hash);
             let can_reuse = self.temporal_blur_enabled
                 && current_hash == self.prev_window_positions_hash
                 && self.prev_blur_fbo.is_some();

@@ -1,5 +1,6 @@
 use super::Compositor;
 use super::{PixmapBinding, RippleState, WindowTexture};
+use crate::backend::compositor_common::window_glow::WindowGlowSettings;
 use glow::HasContext;
 
 use super::CompositorConnection;
@@ -15,6 +16,21 @@ fn retirement_uses_genie(reason: WindowRetirement, genie_enabled: bool) -> bool 
 }
 
 impl<C: CompositorConnection> Compositor<C> {
+    fn decoration_damage_margin(&self) -> i32 {
+        let shadow_margin = if self.shadow_enabled && self.shadow_radius > 0.0 {
+            (self.shadow_radius
+                + self.shadow_offset[0].abs().max(self.shadow_offset[1].abs())
+                + self.shadow_bottom_extra.max(0.0)
+                + 4.0)
+                .ceil() as i32
+        } else {
+            0
+        };
+        let config = crate::config::CONFIG.load();
+        let glow_margin = WindowGlowSettings::from_behavior(config.behavior()).damage_margin();
+        shadow_margin.max(glow_margin)
+    }
+
     // =====================================================================
     // Feature 13: Set frame extents for blur mask
     // =====================================================================
@@ -480,6 +496,7 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     pub(crate) fn update_geometry(&mut self, x11_win: u32, x: i32, y: i32, w: u32, h: u32) {
+        let expand = self.decoration_damage_margin();
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             let size_changed = wt.w != w || wt.h != h;
             let moved = wt.x != x || wt.y != y;
@@ -490,8 +507,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
             if moved {
                 // Mark old and new positions as dirty instead of full screen.
-                // Expand by shadow radius to cover shadow artifacts.
-                let expand = self.shadow_radius as i32 + self.shadow_offset[0].abs() as i32 + 4;
+                // Expand by every compositor-owned decoration footprint.
                 self.damage_tracker.mark_region_dirty(
                     old_x - expand,
                     old_y - expand,
@@ -637,12 +653,11 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     pub(crate) fn mark_damaged(&mut self, x11_win: u32) {
+        let expand = self.decoration_damage_margin();
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             wt.dirty = true;
             self.damage_render_pending = true;
-            // Mark the window's region as dirty in the damage tracker
-            // Expand by shadow radius to cover shadow
-            let expand = self.shadow_radius as i32 + self.shadow_offset[0].abs() as i32 + 4;
+            // Mark the window and every compositor-owned decoration dirty.
             self.damage_tracker.mark_region_dirty(
                 wt.x - expand,
                 wt.y - expand,

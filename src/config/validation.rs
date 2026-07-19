@@ -458,6 +458,18 @@ impl Config {
             ("behavior.fade_out_step", behavior.fade_out_step, 0.0, 1.0),
             ("behavior.corner_radius", behavior.corner_radius, 0.0, 64.0),
             (
+                "behavior.border_glow_radius",
+                behavior.border_glow_radius,
+                0.0,
+                crate::backend::compositor_common::window_glow::MAX_WINDOW_GLOW_RADIUS,
+            ),
+            (
+                "behavior.border_glow_intensity",
+                behavior.border_glow_intensity,
+                0.0,
+                crate::backend::compositor_common::window_glow::MAX_WINDOW_GLOW_INTENSITY,
+            ),
+            (
                 "behavior.motion_trail_opacity",
                 behavior.motion_trail_opacity,
                 0.0,
@@ -485,6 +497,11 @@ impl Config {
         for (path, value) in [
             ("behavior.shadow_radius", behavior.shadow_radius),
             ("behavior.border_width", behavior.border_width),
+            ("behavior.border_glow_radius", behavior.border_glow_radius),
+            (
+                "behavior.border_glow_intensity",
+                behavior.border_glow_intensity,
+            ),
             (
                 "behavior.annotation_line_width",
                 behavior.annotation_line_width,
@@ -715,6 +732,7 @@ impl Config {
                 "behavior.border_color_unfocused",
                 behavior.border_color_unfocused,
             ),
+            ("behavior.border_glow_color", behavior.border_glow_color),
             ("behavior.edge_glow_color", behavior.edge_glow_color),
             ("behavior.attention_color", behavior.attention_color),
             ("behavior.pip_border_color", behavior.pip_border_color),
