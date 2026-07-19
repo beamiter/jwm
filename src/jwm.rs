@@ -179,7 +179,7 @@ pub struct Jwm {
     pub features: FeatureStates,
 
     /// Event coalescer for reducing high-frequency updates
-    pub event_coalescer: crate::backend::x11::compositor_common::event_coalescer::EventCoalescer,
+    pub event_coalescer: crate::backend::compositor_common::event_coalescer::EventCoalescer,
 
     /// _NET_WM_PING: pending pings awaiting pong response
     pub pending_pings: HashMap<WindowId, std::time::Instant>,
@@ -579,7 +579,7 @@ impl Jwm {
             last_night_light_update: None,
             features: FeatureStates::new(),
             event_coalescer:
-                crate::backend::x11::compositor_common::event_coalescer::EventCoalescer::new(),
+                crate::backend::compositor_common::event_coalescer::EventCoalescer::new(),
             pending_pings: HashMap::new(),
             unresponsive_windows: HashSet::new(),
             last_ping_time: None,

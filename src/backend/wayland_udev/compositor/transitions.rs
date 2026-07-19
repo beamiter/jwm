@@ -2,7 +2,7 @@ use super::*;
 use crate::backend::compositor_common::math::{
     mat4_mul, perspective_matrix, rotate_x_matrix, rotate_y_matrix, scale_matrix, translate_matrix,
 };
-use crate::backend::x11::compositor_common::transitions::normalized_transition_progress;
+use crate::backend::compositor_common::transitions::normalized_transition_progress;
 use smithay::backend::renderer::gles::ffi;
 
 /// Geometry shared by every workspace-transition mode.

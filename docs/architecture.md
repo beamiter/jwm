@@ -159,6 +159,13 @@ src/backend/api.rs          platform boundary
   concat) are pure functions shared by the key-binding and IPC entry points.
   The orchestration keeps only filesystem side effects, ffprobe/ffmpeg
   execution, and compositor calls.
+- The event coalescer, workspace-transition timing, and wobbly-window
+  simulation moved from the X11 namespace into `backend::compositor_common`,
+  their platform-neutral home. `x11::compositor_common` re-exports them so
+  the X11 tree keeps its paths, while the policy layer and the Wayland
+  backends import the canonical location; `tests/architecture_boundaries.rs`
+  now enforces both directions (no `x11::compositor_common` outside the X11
+  tree, and no `backend::x11::` imports from the policy layer at all).
 - Overview navigation policy lives in `jwm::features::overview_plan`. The
   prism sliding-window rule (`window_start`) is the single canonical
   implementation used by `OverviewState` and by cycling, replacing three

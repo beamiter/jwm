@@ -92,8 +92,8 @@ pub(crate) fn is_auxiliary_window_id(window_id: u64) -> bool {
     )
 }
 
-use crate::backend::x11::compositor_common::transitions::TransitionMode;
-use crate::backend::x11::compositor_common::wobbly::WobblyState;
+use crate::backend::compositor_common::transitions::TransitionMode;
+use crate::backend::compositor_common::wobbly::WobblyState;
 
 // ---------------------------------------------------------------------------
 // Matrix math

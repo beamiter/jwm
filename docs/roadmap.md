@@ -100,7 +100,13 @@ mock implementing the complete backend surface. (First met by
 
 - Extract protocol-free X11 behavior shared by X11RB and XCB.
 - Move platform-neutral dirty-region, frame-timing, animation, color, and effect
-  algorithms into compositor-common modules.
+  algorithms into compositor-common modules. Started: the event coalescer,
+  workspace-transition timing, and wobbly-window simulation — std-only
+  algorithms previously homed in the X11 tree and imported from policy and
+  Wayland code — now live in `backend::compositor_common`, with the X11
+  namespace keeping compatibility re-exports for its own tree. Architecture
+  boundary tests now reject new policy or Wayland imports of
+  `x11::compositor_common`.
 - Keep GLX and EGL/GLES resource ownership in explicit platform adapters.
 - Add differential tests that feed identical policy events to both X11
   transports and compare observable state.
