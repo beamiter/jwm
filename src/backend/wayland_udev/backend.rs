@@ -1395,6 +1395,10 @@ impl UdevBackend {
             // D-Bus registration or starts its own session.
             let restarting = std::env::var_os("JWM_RESTARTING").is_some();
             let nested = !restarting && std::env::var_os("WAYLAND_DISPLAY").is_some();
+            // Publish the resolved cursor theme/size so GTK/Qt/toolkit clients
+            // load the same pointer style as the compositor renders — a single,
+            // session-wide cursor like macOS.
+            let (cursor_theme, cursor_size) = crate::config::CONFIG.load().resolved_cursor();
             // SAFETY: JWM's backend is single-threaded and we set this once at startup.
             unsafe {
                 std::env::set_var("WAYLAND_DISPLAY", name);
@@ -1402,6 +1406,8 @@ impl UdevBackend {
                 std::env::set_var("XDG_SESSION_DESKTOP", "jwm");
                 std::env::set_var("DESKTOP_SESSION", "jwm");
                 std::env::set_var("XDG_SESSION_TYPE", "wayland");
+                std::env::set_var("XCURSOR_THEME", &cursor_theme);
+                std::env::set_var("XCURSOR_SIZE", cursor_size.to_string());
                 if nested {
                     log::info!(
                         "Nested Wayland session detected: clearing DBUS_SESSION_BUS_ADDRESS to isolate children from parent session bus"
@@ -1416,6 +1422,8 @@ impl UdevBackend {
                 "XDG_SESSION_DESKTOP",
                 "DESKTOP_SESSION",
                 "XDG_SESSION_TYPE",
+                "XCURSOR_THEME",
+                "XCURSOR_SIZE",
                 "DBUS_SESSION_BUS_ADDRESS",
                 "GTK_IM_MODULE",
                 "QT_IM_MODULE",
@@ -3095,6 +3103,10 @@ impl CompositorControl for UdevBackend {
     fn compositor_apply_config(&mut self) {
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.apply_config();
+        }
+        // Pick up cursor theme/size changes from the reloaded config.
+        if let Some(kms) = self.kms.as_ref() {
+            kms.borrow_mut().reload_cursor_config();
         }
     }
 

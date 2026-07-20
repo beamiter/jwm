@@ -159,6 +159,18 @@ pub struct AppearanceConfig {
     pub system_ui_font: String,
     pub status_bar_padding: i32,
     pub status_bar_height: i32,
+    /// Xcursor theme name that decides the pointer's *shape/look*, e.g.
+    /// "Adwaita", "Bibata-Modern-Ice", "macOS", "capitaine-cursors".
+    /// Empty string = defer to the `XCURSOR_THEME` environment variable and
+    /// then to "default". Applied by the Wayland DRM/KMS backend and exported
+    /// to launched clients so the whole session shares one cursor style.
+    #[serde(default)]
+    pub cursor_theme: String,
+    /// Pointer size in logical pixels — the macOS-style "pointer size" slider.
+    /// Typical values: 24 (normal), 32/48/64 (progressively larger).
+    /// 0 = defer to the `XCURSOR_SIZE` environment variable and then to 24.
+    #[serde(default)]
+    pub cursor_size: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1225,6 +1237,8 @@ impl Default for Config {
                     system_ui_font: "SauceCodePro Nerd Font Regular 11".to_string(),
                     status_bar_padding: 5,
                     status_bar_height: 42,
+                    cursor_theme: String::new(),
+                    cursor_size: 0,
                 },
                 behavior: BehaviorConfig {
                     focus_follows_new_window: false,
@@ -1984,6 +1998,48 @@ impl Config {
         &self.inner.appearance.system_ui_font
     }
 
+    /// Configured Xcursor theme name, or "" to defer to the environment.
+    /// See [`Config::resolved_cursor`] for the value backends should use.
+    pub fn cursor_theme(&self) -> &str {
+        &self.inner.appearance.cursor_theme
+    }
+
+    /// Configured pointer size in pixels, or 0 to defer to the environment.
+    /// See [`Config::resolved_cursor`] for the value backends should use.
+    pub fn cursor_size(&self) -> u32 {
+        self.inner.appearance.cursor_size
+    }
+
+    /// Resolve the effective cursor theme/size a rendering backend should use.
+    ///
+    /// Precedence: the `[appearance]` config values win when set; otherwise the
+    /// `XCURSOR_THEME` / `XCURSOR_SIZE` environment variables are honored (for
+    /// compatibility with existing sessions); otherwise the built-in defaults
+    /// ("default", 24px) apply.
+    pub fn resolved_cursor(&self) -> (String, u32) {
+        let theme = {
+            let configured = &self.inner.appearance.cursor_theme;
+            if configured.trim().is_empty() {
+                std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".into())
+            } else {
+                configured.clone()
+            }
+        };
+        let size = {
+            let configured = self.inner.appearance.cursor_size;
+            if configured == 0 {
+                std::env::var("XCURSOR_SIZE")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .filter(|&s| s != 0)
+                    .unwrap_or(24)
+            } else {
+                configured
+            }
+        };
+        (theme, size)
+    }
+
     pub fn show_bar(&self) -> bool {
         self.inner.status_bar.show_bar
     }
@@ -2690,6 +2746,14 @@ impl Config {
             "appearance.border_px" => self.inner.appearance.border_px = as_u32()?,
             "appearance.gap_px" => self.inner.appearance.gap_px = as_u32()?,
             "appearance.snap" => self.inner.appearance.snap = as_u32()?,
+            "appearance.cursor_theme" => self.inner.appearance.cursor_theme = as_string()?,
+            "appearance.cursor_size" => {
+                let v = as_u32()?;
+                if v > 512 {
+                    return Err(format!("appearance.cursor_size={v} out of [0, 512]"));
+                }
+                self.inner.appearance.cursor_size = v;
+            }
             "layout.m_fact" => {
                 let v = as_f32()?;
                 if !(0.05..=0.95).contains(&v) {
@@ -3520,6 +3584,55 @@ mod tests {
         assert_eq!(
             parsed.appearance.system_ui_font,
             "SauceCodePro Nerd Font Regular 11"
+        );
+    }
+
+    #[test]
+    fn cursor_settings_default_to_environment_sentinels() {
+        let cfg = Config::default();
+        // Out-of-the-box the config defers to the environment (empty/zero).
+        assert_eq!(cfg.cursor_theme(), "");
+        assert_eq!(cfg.cursor_size(), 0);
+    }
+
+    #[test]
+    fn explicit_cursor_config_wins_over_environment() {
+        let mut cfg = Config::default();
+        cfg.inner.appearance.cursor_theme = "Bibata-Modern-Ice".into();
+        cfg.inner.appearance.cursor_size = 48;
+        // Configured values take precedence and never consult the environment.
+        let (theme, size) = cfg.resolved_cursor();
+        assert_eq!(theme, "Bibata-Modern-Ice");
+        assert_eq!(size, 48);
+    }
+
+    #[test]
+    fn config_files_without_cursor_keys_still_parse() {
+        // Older configs predate the cursor keys; serde defaults must fill them.
+        let cfg = Config::default();
+        let mut serialized = toml::to_string(&cfg.inner).unwrap();
+        serialized = serialized
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("cursor_"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed: TomlConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(parsed.appearance.cursor_theme, "");
+        assert_eq!(parsed.appearance.cursor_size, 0);
+    }
+
+    #[test]
+    fn cursor_settings_are_hot_tunable_via_set_value() {
+        let mut cfg = Config::default();
+        cfg.set_value("appearance.cursor_theme", &serde_json::json!("macOS"))
+            .unwrap();
+        cfg.set_value("appearance.cursor_size", &serde_json::json!(32))
+            .unwrap();
+        assert_eq!(cfg.cursor_theme(), "macOS");
+        assert_eq!(cfg.cursor_size(), 32);
+        assert!(
+            cfg.set_value("appearance.cursor_size", &serde_json::json!(9999))
+                .is_err()
         );
     }
 }

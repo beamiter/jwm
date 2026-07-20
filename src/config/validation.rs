@@ -412,6 +412,17 @@ impl Config {
                 None,
             );
         }
+        if self.inner.appearance.cursor_size > 512 {
+            diagnostics.warning(
+                "appearance.cursor_size",
+                format!(
+                    "{}px is far larger than any Xcursor theme provides and will \
+                     be scaled from the nearest available image",
+                    self.inner.appearance.cursor_size
+                ),
+                Some("use a value in the 24-128 range (0 = follow the environment)".into()),
+            );
+        }
         if self.inner.status_bar.show_bar && self.inner.appearance.status_bar_height <= 0 {
             diagnostics.error(
                 "appearance.status_bar_height",

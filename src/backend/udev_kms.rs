@@ -193,6 +193,9 @@ pub(super) struct KmsState {
     background_id: Id,
 
     cursor_theme: CursorTheme,
+    /// Name the current `cursor_theme` was loaded from, so a config hot-reload
+    /// can skip re-loading the theme (and clearing caches) when it is unchanged.
+    cursor_theme_name: String,
     cursor_size: u32,
     cursor_images: HashMap<String, Vec<Image>>,
     cursor_cache: HashMap<(StdCursorKind, u32), CursorBitmap>,
@@ -474,6 +477,36 @@ impl KmsState {
         }
 
         None
+    }
+
+    /// Re-read the cursor theme/size from the live config (called on hot
+    /// reload). Reloads the Xcursor theme only when the name changed, and drops
+    /// the rasterized-bitmap cache whenever either the theme or size changed so
+    /// the next frame re-rasterizes at the new shape/size.
+    pub(super) fn reload_cursor_config(&mut self) {
+        let (theme_name, size) = crate::config::CONFIG.load().resolved_cursor();
+        let mut changed = false;
+
+        if theme_name != self.cursor_theme_name {
+            self.cursor_theme = CursorTheme::load(&theme_name);
+            self.cursor_theme_name = theme_name;
+            self.cursor_images.clear();
+            changed = true;
+        }
+        if size != self.cursor_size {
+            self.cursor_size = size;
+            changed = true;
+        }
+
+        if changed {
+            self.cursor_cache.clear();
+            log::info!(
+                "[cursor] reloaded theme={:?} size={}px",
+                self.cursor_theme_name,
+                self.cursor_size
+            );
+            self.request_render();
+        }
     }
 
     pub(super) fn request_render(&mut self) {
@@ -2728,14 +2761,11 @@ impl KmsState {
             return Err(KmsInitError::NoConnector);
         }
 
-        let cursor_theme_name = std::env::var("XCURSOR_THEME")
-            .ok()
-            .unwrap_or_else(|| "default".into());
-        let cursor_size = std::env::var("XCURSOR_SIZE")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(24u32);
+        // Cursor shape (theme) and size follow the `[appearance]` config, with
+        // the XCURSOR_THEME/XCURSOR_SIZE environment as a compatibility fallback.
+        let (cursor_theme_name, cursor_size) = crate::config::CONFIG.load().resolved_cursor();
         let cursor_theme = CursorTheme::load(&cursor_theme_name);
+        log::info!("[cursor] theme={cursor_theme_name:?} size={cursor_size}px");
 
         let handle: KmsHandle = Rc::new(RefCell::new(KmsState {
             dev_path: dev_path.to_path_buf(),
@@ -2752,6 +2782,7 @@ impl KmsState {
             background_id: Id::new(),
 
             cursor_theme,
+            cursor_theme_name,
             cursor_size,
             cursor_images: HashMap::new(),
             cursor_cache: HashMap::new(),

@@ -1347,7 +1347,9 @@ impl WaylandWinitBackend {
             surfaces_on_output: HashSet::new(),
 
             cursor_id: Id::new(),
-            cursor_size: 16,
+            // Nested backend draws a simple solid-square pointer; honor the
+            // configured size so it tracks the [appearance] cursor_size setting.
+            cursor_size: crate::config::CONFIG.load().resolved_cursor().1 as i32,
 
             needs_render: true,
             background_id: Id::new(),
