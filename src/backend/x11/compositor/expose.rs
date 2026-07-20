@@ -105,7 +105,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.active_texture(glow::TEXTURE0);
 
             for entry in &self.expose_entries {
-                let wt = match self.windows.get(&entry.x11_win) {
+                let wt = match self.windows.get(&entry.id) {
                     Some(wt) => wt,
                     None => continue,
                 };
@@ -208,7 +208,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 && y >= entry.current_y
                 && y <= entry.current_y + entry.current_h
             {
-                Some(entry.x11_win)
+                Some(entry.id)
             } else {
                 None
             }

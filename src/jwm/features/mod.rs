@@ -11,6 +11,7 @@
 pub mod audio_recording;
 pub mod capture;
 pub mod capture_plan;
+pub mod expose_plan;
 pub mod magnifier;
 pub mod overview;
 pub mod overview_plan;
@@ -25,6 +26,7 @@ pub use capture::{CaptureInteractionState, CaptureTarget};
 pub use capture_plan::{
     CaptureCompletion, CaptureExecution, CapturePlan, execute_capture_plan, plan_capture_completion,
 };
+pub use expose_plan::ExposeAction;
 pub use magnifier::MagnifierState;
 pub use overview::OverviewState;
 pub use overview_plan::CyclePlan;

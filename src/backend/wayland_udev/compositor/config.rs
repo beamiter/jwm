@@ -510,64 +510,19 @@ impl WaylandCompositor {
         windows: Vec<(u64, i32, i32, u32, u32)>,
     ) {
         if active {
-            let n = windows.len();
-            if n == 0 {
+            if windows.is_empty() {
                 self.expose_active = false;
                 self.expose_entries.clear();
                 self.needs_render = true;
                 return;
             }
 
-            let sw = self.screen_w as f32;
-            let sh = self.screen_h as f32;
-            let gap = 20.0f32;
-            let screen_aspect = sw / sh;
-
-            let cols = ((n as f32 * screen_aspect).sqrt()).ceil() as u32;
-            let cols = cols.max(1);
-            let rows = ((n as u32 + cols - 1) / cols).max(1);
-
-            let cell_w = (sw - gap * (cols as f32 + 1.0)) / cols as f32;
-            let cell_h = (sh - gap * (rows as f32 + 1.0)) / rows as f32;
-
-            self.expose_entries = windows
-                .iter()
-                .enumerate()
-                .map(|(i, &(id, x, y, w, h))| {
-                    let col = i as u32 % cols;
-                    let row = i as u32 / cols;
-
-                    let cell_x = gap + col as f32 * (cell_w + gap);
-                    let cell_y = gap + row as f32 * (cell_h + gap);
-
-                    let win_aspect = w as f32 / h.max(1) as f32;
-                    let cell_aspect = cell_w / cell_h;
-                    let (tw, th) = if win_aspect > cell_aspect {
-                        (cell_w, cell_w / win_aspect)
-                    } else {
-                        (cell_h * win_aspect, cell_h)
-                    };
-                    let tx = cell_x + (cell_w - tw) * 0.5;
-                    let ty = cell_y + (cell_h - th) * 0.5;
-
-                    ExposeEntry {
-                        window_id: id,
-                        orig_x: x as f32,
-                        orig_y: y as f32,
-                        orig_w: w as f32,
-                        orig_h: h as f32,
-                        target_x: tx,
-                        target_y: ty,
-                        target_w: tw,
-                        target_h: th,
-                        current_x: x as f32,
-                        current_y: y as f32,
-                        current_w: w as f32,
-                        current_h: h as f32,
-                        is_hovered: false,
-                    }
-                })
-                .collect();
+            self.expose_entries = crate::backend::compositor_common::expose::build_expose_entries(
+                self.screen_w as f32,
+                self.screen_h as f32,
+                20.0,
+                &windows,
+            );
 
             self.expose_active = true;
             self.expose_opacity = 0.0;
@@ -1191,68 +1146,26 @@ impl WaylandCompositor {
                 && y >= entry.current_y
                 && y <= entry.current_y + entry.current_h
             {
-                return Some(entry.window_id);
+                return Some(entry.id);
             }
         }
         None
     }
 
-    /// Tick expose animation. Returns true if still animating.
+    /// Tick expose animation via the shared platform-neutral implementation.
     pub(crate) fn tick_expose(&mut self, dt: f32) {
         if self.expose_entries.is_empty() && self.expose_opacity <= 0.0 {
             return;
         }
 
-        let ease_speed = 12.0f32;
-        let t = 1.0 - (-ease_speed * dt).exp();
-
-        if self.expose_active {
-            self.expose_opacity = (self.expose_opacity + dt * 4.0).min(1.0);
-
-            for entry in &mut self.expose_entries {
-                let dx = entry.target_x - entry.current_x;
-                let dy = entry.target_y - entry.current_y;
-                let dw = entry.target_w - entry.current_w;
-                let dh = entry.target_h - entry.current_h;
-
-                if dx.abs() > 0.5 || dy.abs() > 0.5 || dw.abs() > 0.5 || dh.abs() > 0.5 {
-                    entry.current_x += dx * t;
-                    entry.current_y += dy * t;
-                    entry.current_w += dw * t;
-                    entry.current_h += dh * t;
-                } else {
-                    entry.current_x = entry.target_x;
-                    entry.current_y = entry.target_y;
-                    entry.current_w = entry.target_w;
-                    entry.current_h = entry.target_h;
-                }
-            }
-        } else {
-            for entry in &mut self.expose_entries {
-                let dx = entry.orig_x - entry.current_x;
-                let dy = entry.orig_y - entry.current_y;
-                let dw = entry.orig_w - entry.current_w;
-                let dh = entry.orig_h - entry.current_h;
-
-                if dx.abs() > 0.5 || dy.abs() > 0.5 || dw.abs() > 0.5 || dh.abs() > 0.5 {
-                    entry.current_x += dx * t;
-                    entry.current_y += dy * t;
-                    entry.current_w += dw * t;
-                    entry.current_h += dh * t;
-                } else {
-                    entry.current_x = entry.orig_x;
-                    entry.current_y = entry.orig_y;
-                    entry.current_w = entry.orig_w;
-                    entry.current_h = entry.orig_h;
-                }
-            }
-
-            let fade_speed = 8.0;
-            self.expose_opacity = (self.expose_opacity - dt * fade_speed).max(0.0);
-
-            if self.expose_opacity <= 0.0 {
-                self.expose_entries.clear();
-            }
+        let result = crate::backend::compositor_common::expose::tick_expose_entries(
+            &mut self.expose_entries,
+            self.expose_active,
+            &mut self.expose_opacity,
+            dt,
+        );
+        if result.clear_entries {
+            self.expose_entries.clear();
         }
         self.needs_render = true;
     }

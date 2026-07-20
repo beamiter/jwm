@@ -104,7 +104,7 @@ impl WaylandCompositor {
             );
 
             for entry in &self.expose_entries {
-                let win = match self.windows.get(&entry.window_id) {
+                let win = match self.windows.get(&entry.id) {
                     Some(w) => w,
                     None => continue,
                 };
@@ -517,7 +517,7 @@ impl WaylandCompositor {
                 && y >= entry.current_y
                 && y <= entry.current_y + entry.current_h
             {
-                return Some(entry.window_id);
+                return Some(entry.id);
             }
         }
         None
@@ -528,7 +528,7 @@ impl WaylandCompositor {
         let mut changed = false;
 
         for entry in &mut self.expose_entries {
-            let should_hover = Some(entry.window_id) == hit_id;
+            let should_hover = Some(entry.id) == hit_id;
             if entry.is_hovered != should_hover {
                 entry.is_hovered = should_hover;
                 changed = true;

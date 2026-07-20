@@ -504,22 +504,9 @@ pub(crate) struct GenieAnimation {
 // Expose entry
 // ---------------------------------------------------------------------------
 
-pub(crate) struct ExposeEntry {
-    pub window_id: u64,
-    pub orig_x: f32,
-    pub orig_y: f32,
-    pub orig_w: f32,
-    pub orig_h: f32,
-    pub target_x: f32,
-    pub target_y: f32,
-    pub target_w: f32,
-    pub target_h: f32,
-    pub current_x: f32,
-    pub current_y: f32,
-    pub current_w: f32,
-    pub current_h: f32,
-    pub is_hovered: bool,
-}
+/// Expose entry keyed by the compositor's u64 window id. Layout and animation
+/// come from the shared platform-neutral implementation.
+pub(crate) type ExposeEntry = crate::backend::compositor_common::expose::ExposeEntry<u64>;
 
 // ---------------------------------------------------------------------------
 // Overview entry

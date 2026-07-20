@@ -3,13 +3,14 @@
 //! 这个模块包含所有窗口管理器特性的切换函数（toggle* 系列）
 
 use crate::backend::api::Backend;
-use crate::backend::common_define::{EventMaskBits, StdCursorKind, WindowId};
+use crate::backend::common_define::{EventMaskBits, StdCursorKind};
 use crate::config::CONFIG;
 use crate::core::animation::AnimationKind;
 use crate::core::models::ClientKey;
 use crate::core::types::Rect;
 use crate::jwm::Jwm;
 use crate::jwm::features::capture::CaptureTarget;
+use crate::jwm::features::expose_plan;
 use crate::jwm::types::WMArgEnum;
 use log::{error, info};
 use std::process::Command;
@@ -953,14 +954,10 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.features.expose_active {
-            self.features.expose_active = false;
-            backend.compositor_set_expose_mode(false, vec![]);
-            let _ = backend.key_ops().ungrab_keyboard();
-            let _ = backend.input_ops().ungrab_pointer();
-        } else {
-            // Collect visible windows across all monitors
-            let mut windows: Vec<(WindowId, i32, i32, u32, u32)> = Vec::new();
+        // Collect windows visible on their monitor; eligibility filtering and
+        // the enter/exit decision live in the pure plan.
+        let mut candidates: Vec<expose_plan::ExposeCandidate> = Vec::new();
+        if !self.features.expose_active {
             for &mon_key in &self.state.monitor_order.clone() {
                 if let Some(clients) = self.state.monitor_clients.get(mon_key) {
                     for &ck in clients {
@@ -969,26 +966,51 @@ impl Jwm {
                         }
                         if let Some(client) = self.state.clients.get(ck) {
                             let g = &client.geometry;
-                            if g.w > 0 && g.h > 0 {
-                                windows.push((client.win, g.x, g.y, g.w as u32, g.h as u32));
-                            }
+                            candidates.push((client.win, g.x, g.y, g.w, g.h));
                         }
                     }
                 }
             }
-            if windows.is_empty() {
-                return Ok(());
+        }
+        let action = expose_plan::plan_toggle(self.features.expose_active, candidates);
+        self.apply_expose_action(backend, action)
+    }
+
+    /// 执行 expose 计划：进入时排布窗口并抓取输入，退出时统一走同一段
+    /// 清理序列（此前在切换、Escape 与两种点击路径中重复了四次）。
+    pub(crate) fn apply_expose_action(
+        &mut self,
+        backend: &mut dyn Backend,
+        action: expose_plan::ExposeAction,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match action {
+            expose_plan::ExposeAction::Keep => {}
+            expose_plan::ExposeAction::Enter { windows } => {
+                self.features.expose_active = true;
+                backend.compositor_set_expose_mode(true, windows);
+                if let Some(root) = backend.root_window() {
+                    let _ = backend.key_ops().grab_keyboard(root);
+                }
+                let pointer_mask = (EventMaskBits::BUTTON_PRESS
+                    | EventMaskBits::BUTTON_RELEASE
+                    | EventMaskBits::POINTER_MOTION)
+                    .bits();
+                let _ = backend.input_ops().grab_pointer(pointer_mask, None);
             }
-            self.features.expose_active = true;
-            backend.compositor_set_expose_mode(true, windows);
-            if let Some(root) = backend.root_window() {
-                let _ = backend.key_ops().grab_keyboard(root);
+            expose_plan::ExposeAction::Exit { focus } => {
+                self.features.expose_active = false;
+                backend.compositor_set_expose_mode(false, vec![]);
+                let _ = backend.key_ops().ungrab_keyboard();
+                let _ = backend.input_ops().ungrab_pointer();
+                if let Some(wid) = focus
+                    && let Some(ck) = self.wintoclient(wid)
+                {
+                    self.focus(backend, Some(ck))?;
+                    if let Some(mon_key) = self.state.sel_mon {
+                        let _ = self.restack(backend, Some(mon_key));
+                    }
+                }
             }
-            let pointer_mask = (EventMaskBits::BUTTON_PRESS
-                | EventMaskBits::BUTTON_RELEASE
-                | EventMaskBits::POINTER_MOTION)
-                .bits();
-            let _ = backend.input_ops().grab_pointer(pointer_mask, None);
         }
         Ok(())
     }

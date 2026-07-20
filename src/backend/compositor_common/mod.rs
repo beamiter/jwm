@@ -3,6 +3,7 @@
 pub mod capture;
 pub mod effects;
 pub mod event_coalescer;
+pub mod expose;
 pub mod math;
 pub mod media;
 pub mod rules;

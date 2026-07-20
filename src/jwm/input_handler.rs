@@ -8,6 +8,7 @@ use crate::backend::common_define::{ConfigWindowBits, Mods, MouseButton, WindowI
 use crate::config::CONFIG;
 use crate::core::models::ClientKey;
 use crate::core::types::Rect;
+use crate::jwm::features::expose_plan;
 use crate::jwm::features::screenshot::{ScreenshotAnnotation, ScreenshotTool};
 use crate::jwm::features::{CaptureTarget, MonitorDirection};
 use crate::jwm::types::{WMArgEnum, WMClickType};
@@ -502,11 +503,7 @@ impl Jwm {
 
         if self.features.expose_active {
             if keysym == keys::KEY_Escape {
-                self.features.expose_active = false;
-                backend.compositor_set_expose_mode(false, vec![]);
-                let _ = backend.key_ops().ungrab_keyboard();
-                let _ = backend.input_ops().ungrab_pointer();
-                return Ok(());
+                return self.apply_expose_action(backend, expose_plan::plan_escape());
             }
             // Fall through to normal keybinding dispatch so Alt+E can toggle off
         }
@@ -740,28 +737,12 @@ impl Jwm {
             return Ok(());
         }
 
-        // Expose mode intercept: route clicks to compositor
+        // Expose mode intercept: route clicks to compositor. A hit focuses the
+        // clicked window; hit or miss, expose exits.
         if self.features.expose_active {
             let (rx, ry) = self.last_mouse_root;
-            if let Some(wid) = backend.compositor_expose_click(rx as f32, ry as f32) {
-                self.features.expose_active = false;
-                backend.compositor_set_expose_mode(false, vec![]);
-                let _ = backend.key_ops().ungrab_keyboard();
-                let _ = backend.input_ops().ungrab_pointer();
-                if let Some(ck) = self.wintoclient(wid) {
-                    self.focus(backend, Some(ck))?;
-                    if let Some(mon_key) = self.state.sel_mon {
-                        let _ = self.restack(backend, Some(mon_key));
-                    }
-                }
-            } else {
-                // Clicked outside any exposed window — exit expose
-                self.features.expose_active = false;
-                backend.compositor_set_expose_mode(false, vec![]);
-                let _ = backend.key_ops().ungrab_keyboard();
-                let _ = backend.input_ops().ungrab_pointer();
-            }
-            return Ok(());
+            let hit = backend.compositor_expose_click(rx as f32, ry as f32);
+            return self.apply_expose_action(backend, expose_plan::plan_click(hit));
         }
 
         let mut click_type = WMClickType::ClickRootWin;
