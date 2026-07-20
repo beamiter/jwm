@@ -39,8 +39,16 @@ not authorize a rewrite or a release-profile change without measurements.
       window-manager selection (display), control-socket binding (ipc),
       libseat/udev/libinput/KMS-output startup in the udev backend (device),
       and GPU-compositor initialization in both X11 transports (renderer).
-      Remaining: per-operation adoption inside frame production, capture, and
-      hotplug paths.
+      The udev backend's runtime paths followed: frame production (DRM
+      render/queue/vblank watchdog and post-failure reactivation), every
+      capture pipeline (screenshot, screenshot-region, wlr-screencopy,
+      ext-image-copy-capture output and toplevel), and the hotplug/control
+      boundaries (rebuild-outputs on udev events, VT-switch and session
+      activation — the last of which previously discarded its error — plus
+      DPMS, gamma, and output configuration, whose tagged reasons now flow
+      into output-management transaction failure records without changing
+      field classification). Remaining: per-operation adoption inside the
+      X11 compositors' frame production and capture paths.
 - [ ] Add a deterministic nested-backend smoke matrix covering startup, IPC
       health, config reload, basic window lifecycle, screenshot capture, and
       clean shutdown.
@@ -90,7 +98,14 @@ handler only execute the returned plans. Overview navigation followed in
 `jwm::features::overview_plan`: the prism sliding-window rule — previously
 implemented three times with one drifting copy — has a single tested
 implementation, and cycling returns a plan (rotate versus refresh-subset)
-that the orchestration executes. Expose and the magnifier remain.
+that the orchestration executes. Expose followed in
+`jwm::features::expose_plan`: window eligibility (visible, positive size,
+non-empty set) and the enter/exit/click/escape decisions are pure
+`ExposeAction` plans, and the exit sequence — previously duplicated four
+times across `toggles.rs` and `input_handler.rs` — has a single executor
+(`apply_expose_action`). The magnifier already meets the bar: its state and
+source-rectangle math are a pure, tested module (`features::magnifier`) with
+orchestration confined to the input handlers.
 
 Exit criteria: a core policy test can use small fake capabilities instead of a
 mock implementing the complete backend surface. (First met by
@@ -106,7 +121,11 @@ mock implementing the complete backend surface. (First met by
   Wayland code — now live in `backend::compositor_common`, with the X11
   namespace keeping compatibility re-exports for its own tree. Architecture
   boundary tests now reject new policy or Wayland imports of
-  `x11::compositor_common`.
+  `x11::compositor_common`. The expose grid layout and animation followed:
+  the Wayland tree carried a drifted inline copy (missing division guards,
+  no accelerated fade-out once geometry converges); both backends now
+  instantiate the single implementation in
+  `backend::compositor_common::expose` over their native window-id types.
 - Keep GLX and EGL/GLES resource ownership in explicit platform adapters.
 - Add differential tests that feed identical policy events to both X11
   transports and compare observable state.

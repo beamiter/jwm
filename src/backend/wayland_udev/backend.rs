@@ -1117,7 +1117,12 @@ impl UdevBackend {
                     self.request_flush();
                 }
                 Err(err) => {
-                    log::warn!("[udev] rebuild_outputs after session activation failed: {err:?}");
+                    let err = err.with_context(crate::backend::error::BackendErrorContext::new(
+                        "wayland-udev",
+                        ErrorBoundary::Device,
+                        "rebuild outputs after session activation",
+                    ));
+                    log::warn!("{err}");
                 }
             }
         } else if was_active {
@@ -2631,7 +2636,13 @@ impl UdevBackend {
                         pending_events
                             .lock_safe()
                             .push_back(BackendEvent::ScreenLayoutChanged);
-                        let _ = rebuild_outputs(&shared, &pending_events);
+                        if let Err(err) = rebuild_outputs(&shared, &pending_events).backend_context(
+                            "wayland-udev",
+                            ErrorBoundary::Device,
+                            "rebuild outputs after VT-switch activation",
+                        ) {
+                            log::warn!("{err}");
+                        }
                         sync_output_rects(_state, &shared);
                         if let Some(grab_win) = _state.popup_grab_toplevel {
                             _state.reconstrain_popups_for_toplevel(grab_win);
@@ -2679,9 +2690,14 @@ impl UdevBackend {
                         return;
                     }
 
-                    let outputs_changed =
-                        rebuild_outputs(&shared, &pending_events).unwrap_or_else(|err| {
-                            log::warn!("[udev] rebuild_outputs failed: {err:?}");
+                    let outputs_changed = rebuild_outputs(&shared, &pending_events)
+                        .backend_context(
+                            "wayland-udev",
+                            ErrorBoundary::Device,
+                            "rebuild outputs after device hotplug",
+                        )
+                        .unwrap_or_else(|err| {
+                            log::warn!("{err}");
                             false
                         });
 
@@ -4603,8 +4619,12 @@ impl Backend for UdevBackend {
                             let mut kms = kms.borrow_mut();
                             let idx = kms.output_index_by_name(output_name);
                             if let Some(idx) = idx {
-                                if let Err(e) = kms.set_dpms_for_output(idx, on) {
-                                    log::warn!("[dpms] set_dpms_for_output failed: {e}");
+                                if let Err(e) = kms.set_dpms_for_output(idx, on).backend_context(
+                                    "wayland-udev",
+                                    ErrorBoundary::Device,
+                                    "set DPMS output power state",
+                                ) {
+                                    log::warn!("{e}");
                                 }
                             }
                         }
@@ -4619,8 +4639,15 @@ impl Backend for UdevBackend {
                             let mut kms = kms.borrow_mut();
                             let idx = kms.output_index_by_name(output_name);
                             if let Some(idx) = idx {
-                                if let Err(e) = kms.set_gamma_for_output(idx, gamma_size, ramp) {
-                                    log::warn!("[gamma] set_gamma_for_output failed: {e}");
+                                if let Err(e) = kms
+                                    .set_gamma_for_output(idx, gamma_size, ramp)
+                                    .backend_context(
+                                        "wayland-udev",
+                                        ErrorBoundary::Device,
+                                        "apply gamma ramp",
+                                    )
+                                {
+                                    log::warn!("{e}");
                                 }
                             }
                         }
@@ -4659,19 +4686,25 @@ impl Backend for UdevBackend {
                                 }
                                 // Re-enabling clears the soft-disable flag.
                                 self.state.soft_disabled_outputs.remove(&change.name);
-                                if let Err(e) = kms.configure_output(
-                                    &change.name,
-                                    change.mode,
-                                    change.position,
-                                    change.transform,
-                                    change.scale,
-                                ) {
-                                    log::warn!(
-                                        "[output-mgmt] configure_output('{}') failed: {e}",
-                                        change.name
+                                if let Err(e) = kms
+                                    .configure_output(
+                                        &change.name,
+                                        change.mode,
+                                        change.position,
+                                        change.transform,
+                                        change.scale,
+                                    )
+                                    .backend_context(
+                                        "wayland-udev",
+                                        ErrorBoundary::Device,
+                                        "configure output",
+                                    )
+                                {
+                                    log::warn!("[output-mgmt] '{}': {e}", change.name);
+                                    let mut failure = output_management_failure(
+                                        change.name.clone(),
+                                        e.to_string(),
                                     );
-                                    let mut failure =
-                                        output_management_failure(change.name.clone(), e);
                                     if let Some((w, h, refresh)) = change.mode {
                                         failure.requested_value =
                                             Some(format!("{w}x{h}@{refresh}"));
@@ -5127,6 +5160,32 @@ mod udev_backend_selection_tests {
         b = a.clone();
         b.hdr_capable = true;
         assert!(!output_info_equivalent(&a, &b));
+    }
+
+    #[test]
+    fn output_management_failure_classifies_context_tagged_reasons() {
+        // The configure-output path now feeds `[wayland-udev/device] configure
+        // output: …` reasons into the classifier; the tag itself must not
+        // change which field the failure is attributed to.
+        let failure = output_management_failure(
+            "HDMI-A-1",
+            "[wayland-udev/device] configure output: DRM use_mode failed: EINVAL".to_string(),
+        );
+        assert_eq!(failure.field.as_deref(), Some("mode"));
+        assert_eq!(failure.drm_property.as_deref(), Some("MODE_ID"));
+
+        let failure = output_management_failure(
+            "HDMI-A-1",
+            "[wayland-udev/device] configure output: unsupported transform".to_string(),
+        );
+        assert_eq!(failure.field.as_deref(), Some("transform"));
+
+        // A tag-only reason must not spuriously match a field keyword.
+        let failure = output_management_failure(
+            "*",
+            "[wayland-udev/device] configure output: no KMS backend available".to_string(),
+        );
+        assert_eq!(failure.field.as_deref(), Some("backend"));
     }
 }
 

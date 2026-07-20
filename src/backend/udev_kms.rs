@@ -55,6 +55,7 @@ use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 
 use crate::backend::common_define::StdCursorKind;
+use crate::backend::error::{BackendErrorContext, ErrorBoundary};
 
 use xcursor::{
     CursorTheme,
@@ -70,6 +71,19 @@ smithay::backend::renderer::element::render_elements! {
 }
 
 pub(super) type KmsHandle = Rc<RefCell<KmsState>>;
+
+/// `[wayland-udev/renderer] operation` context for frame-production and
+/// capture log lines. These errors never cross an API boundary (the render
+/// loop degrades and retries instead of propagating), so the roadmap's
+/// backend-tagged context appears in the log record itself.
+fn renderer_ctx(operation: &'static str) -> BackendErrorContext {
+    BackendErrorContext::new("wayland-udev", ErrorBoundary::Renderer, operation)
+}
+
+/// `[wayland-udev/device] operation` context for DRM/KMS device operations.
+fn device_ctx(operation: &'static str) -> BackendErrorContext {
+    BackendErrorContext::new("wayland-udev", ErrorBoundary::Device, operation)
+}
 
 struct KmsOutputState {
     crtc: crtc::Handle,
@@ -1389,19 +1403,22 @@ impl KmsState {
                     {
                         Ok(()) => {
                             log::warn!(
-                                "[output-mgmt] '{name}': modeset failed, rolled back to previous mode ({primary_err})"
+                                "{}: '{name}': modeset failed, rolled back to previous mode ({primary_err})",
+                                device_ctx("apply output mode")
                             );
                         }
                         Err(rollback_err) => {
                             log::error!(
-                                "[output-mgmt] '{name}': modeset failed AND rollback failed: \
-                                 primary={primary_err}, rollback={rollback_err:?}"
+                                "{}: '{name}': modeset failed AND rollback failed: \
+                                 primary={primary_err}, rollback={rollback_err:?}",
+                                device_ctx("apply output mode")
                             );
                         }
                     }
                 } else {
                     log::error!(
-                        "[output-mgmt] '{name}': modeset failed, no previous mode captured for rollback ({primary_err})"
+                        "{}: '{name}': modeset failed, no previous mode captured for rollback ({primary_err})",
+                        device_ctx("apply output mode")
                     );
                 }
                 return Err(primary_err);
@@ -1446,7 +1463,10 @@ impl KmsState {
             match Offscreen::create_buffer(renderer, Fourcc::Abgr8888, size) {
                 Ok(rb) => rb,
                 Err(e) => {
-                    log::error!("[screenshot] create offscreen buffer failed: {e:?}");
+                    log::error!(
+                        "{}: {e:?}",
+                        renderer_ctx("screenshot: create offscreen buffer")
+                    );
                     return;
                 }
             };
@@ -1455,7 +1475,7 @@ impl KmsState {
         let mut target = match renderer.bind(&mut renderbuffer) {
             Ok(t) => t,
             Err(e) => {
-                log::error!("[screenshot] bind offscreen failed: {e:?}");
+                log::error!("{}: {e:?}", renderer_ctx("screenshot: bind offscreen"));
                 return;
             }
         };
@@ -1472,7 +1492,7 @@ impl KmsState {
             elements,
             clear_color,
         ) {
-            log::error!("[screenshot] render_output failed: {e:?}");
+            log::error!("{}: {e:?}", renderer_ctx("screenshot: render_output"));
             return;
         }
 
@@ -1481,7 +1501,7 @@ impl KmsState {
         let mapping = match renderer.copy_framebuffer(&target, region, Fourcc::Abgr8888) {
             Ok(m) => m,
             Err(e) => {
-                log::error!("[screenshot] copy_framebuffer failed: {e:?}");
+                log::error!("{}: {e:?}", renderer_ctx("screenshot: copy_framebuffer"));
                 return;
             }
         };
@@ -1489,14 +1509,14 @@ impl KmsState {
         let pixels = match renderer.map_texture(&mapping) {
             Ok(p) => p,
             Err(e) => {
-                log::error!("[screenshot] map_texture failed: {e:?}");
+                log::error!("{}: {e:?}", renderer_ctx("screenshot: map_texture"));
                 return;
             }
         };
 
         // 5. Save as PNG (pixels are ABGR8888 / RGBA from GL perspective)
         if let Err(e) = save_rgba_png(path, width as u32, height as u32, pixels) {
-            log::error!("[screenshot] save PNG failed: {e}");
+            log::error!("{}: {e}", renderer_ctx("screenshot: save PNG"));
         } else {
             log::info!("[screenshot] saved to {}", path.display());
         }
@@ -1520,7 +1540,10 @@ impl KmsState {
             match Offscreen::create_buffer(renderer, Fourcc::Abgr8888, size) {
                 Ok(rb) => rb,
                 Err(e) => {
-                    log::error!("[screenshot-region] create offscreen buffer failed: {e:?}");
+                    log::error!(
+                        "{}: {e:?}",
+                        renderer_ctx("screenshot-region: create offscreen buffer")
+                    );
                     return;
                 }
             };
@@ -1528,7 +1551,10 @@ impl KmsState {
         let mut target = match renderer.bind(&mut renderbuffer) {
             Ok(t) => t,
             Err(e) => {
-                log::error!("[screenshot-region] bind offscreen failed: {e:?}");
+                log::error!(
+                    "{}: {e:?}",
+                    renderer_ctx("screenshot-region: bind offscreen")
+                );
                 return;
             }
         };
@@ -1540,7 +1566,10 @@ impl KmsState {
         if let Err(e) =
             damage_tracker.render_output(renderer, &mut target, 0, elements, clear_color)
         {
-            log::error!("[screenshot-region] render_output failed: {e:?}");
+            log::error!(
+                "{}: {e:?}",
+                renderer_ctx("screenshot-region: render_output")
+            );
             return;
         }
 
@@ -1549,14 +1578,17 @@ impl KmsState {
         let mapping = match renderer.copy_framebuffer(&target, full_region, Fourcc::Abgr8888) {
             Ok(m) => m,
             Err(e) => {
-                log::error!("[screenshot-region] copy_framebuffer failed: {e:?}");
+                log::error!(
+                    "{}: {e:?}",
+                    renderer_ctx("screenshot-region: copy_framebuffer")
+                );
                 return;
             }
         };
         let full_pixels = match renderer.map_texture(&mapping) {
             Ok(p) => p,
             Err(e) => {
-                log::error!("[screenshot-region] map_texture failed: {e:?}");
+                log::error!("{}: {e:?}", renderer_ctx("screenshot-region: map_texture"));
                 return;
             }
         };
@@ -1568,7 +1600,10 @@ impl KmsState {
         let cw = rw.min((width as u32).saturating_sub(x));
         let ch = rh.min((height as u32).saturating_sub(y));
         if cw == 0 || ch == 0 {
-            log::warn!("[screenshot-region] region is empty");
+            log::warn!(
+                "{}: region is empty",
+                renderer_ctx("screenshot-region: crop")
+            );
             return;
         }
 
@@ -1583,7 +1618,7 @@ impl KmsState {
         }
 
         if let Err(e) = save_rgba_png(path, cw, ch, &cropped) {
-            log::error!("[screenshot-region] save PNG failed: {e}");
+            log::error!("{}: {e}", renderer_ctx("screenshot-region: save PNG"));
         } else {
             log::info!(
                 "[screenshot-region] saved to {} ({}x{} at {},{})",
@@ -1617,7 +1652,10 @@ impl KmsState {
             match Offscreen::create_buffer(renderer, Fourcc::Abgr8888, size) {
                 Ok(rb) => *cache = Some((width, height, rb)),
                 Err(e) => {
-                    log::error!("[screencopy] create offscreen buffer failed: {e:?}");
+                    log::error!(
+                        "{}: {e:?}",
+                        renderer_ctx("screencopy: create offscreen buffer")
+                    );
                     *cache = None;
                     return None;
                 }
@@ -1644,7 +1682,10 @@ impl KmsState {
         let mut target = match renderer.bind(&mut dmabuf) {
             Ok(t) => t,
             Err(e) => {
-                log::error!("[capture/dmabuf] bind client dmabuf failed: {e:?}");
+                log::error!(
+                    "{}: {e:?}",
+                    renderer_ctx("capture/dmabuf: bind client dmabuf")
+                );
                 return false;
             }
         };
@@ -1656,7 +1697,7 @@ impl KmsState {
                 true
             }
             Err(e) => {
-                log::error!("[capture/dmabuf] render_output failed: {e:?}");
+                log::error!("{}: {e:?}", renderer_ctx("capture/dmabuf: render_output"));
                 false
             }
         }
@@ -1714,7 +1755,10 @@ impl KmsState {
                     // capture into a dmabuf is unsupported, so fail those (rare) and
                     // let the client fall back to SHM.
                     if f.region.is_some() {
-                        log::warn!("[screencopy] region capture into dmabuf unsupported");
+                        log::warn!(
+                            "{}: region capture into dmabuf unsupported",
+                            renderer_ctx("screencopy: dmabuf capture")
+                        );
                         Self::note_screencopy_render_failed(counters);
                         f.frame.failed();
                         continue;
@@ -1767,7 +1811,7 @@ impl KmsState {
         let mut target = match renderer.bind(renderbuffer) {
             Ok(t) => t,
             Err(e) => {
-                log::error!("[screencopy] bind offscreen failed: {e:?}");
+                log::error!("{}: {e:?}", renderer_ctx("screencopy: bind offscreen"));
                 for f in &frames {
                     Self::note_screencopy_render_failed(counters);
                     f.frame.failed();
@@ -1783,7 +1827,7 @@ impl KmsState {
         if let Err(e) =
             damage_tracker.render_output(renderer, &mut target, 0, elements, clear_color)
         {
-            log::error!("[screencopy] render_output failed: {e:?}");
+            log::error!("{}: {e:?}", renderer_ctx("screencopy: render_output"));
             for f in &frames {
                 Self::note_screencopy_render_failed(counters);
                 f.frame.failed();
@@ -1796,7 +1840,7 @@ impl KmsState {
         let mapping = match renderer.copy_framebuffer(&target, region, Fourcc::Abgr8888) {
             Ok(m) => m,
             Err(e) => {
-                log::error!("[screencopy] copy_framebuffer failed: {e:?}");
+                log::error!("{}: {e:?}", renderer_ctx("screencopy: copy_framebuffer"));
                 for f in &frames {
                     Self::note_screencopy_render_failed(counters);
                     f.frame.failed();
@@ -1808,7 +1852,7 @@ impl KmsState {
         let pixels = match renderer.map_texture(&mapping) {
             Ok(p) => p,
             Err(e) => {
-                log::error!("[screencopy] map_texture failed: {e:?}");
+                log::error!("{}: {e:?}", renderer_ctx("screencopy: map_texture"));
                 for f in &frames {
                     Self::note_screencopy_render_failed(counters);
                     f.frame.failed();
@@ -1902,7 +1946,7 @@ impl KmsState {
                     Self::note_screencopy_fulfilled(counters);
                 }
                 Err(e) => {
-                    log::warn!("[screencopy] buffer access failed: {e:?}");
+                    log::warn!("{}: {e:?}", renderer_ctx("screencopy: buffer access"));
                     Self::note_screencopy_render_failed(counters);
                     frame_info.frame.failed();
                 }
@@ -2010,7 +2054,7 @@ impl KmsState {
         let mut target = match renderer.bind(renderbuffer) {
             Ok(t) => t,
             Err(e) => {
-                log::error!("[image-capture] bind offscreen failed: {e:?}");
+                log::error!("{}: {e:?}", renderer_ctx("image-capture: bind offscreen"));
                 fail_all(&frames);
                 return;
             }
@@ -2023,7 +2067,7 @@ impl KmsState {
         if let Err(e) =
             damage_tracker.render_output(renderer, &mut target, 0, elements, clear_color)
         {
-            log::error!("[image-capture] render_output failed: {e:?}");
+            log::error!("{}: {e:?}", renderer_ctx("image-capture: render_output"));
             fail_all(&frames);
             return;
         }
@@ -2032,7 +2076,7 @@ impl KmsState {
         let mapping = match renderer.copy_framebuffer(&target, region, Fourcc::Abgr8888) {
             Ok(m) => m,
             Err(e) => {
-                log::error!("[image-capture] copy_framebuffer failed: {e:?}");
+                log::error!("{}: {e:?}", renderer_ctx("image-capture: copy_framebuffer"));
                 fail_all(&frames);
                 return;
             }
@@ -2040,7 +2084,7 @@ impl KmsState {
         let pixels = match renderer.map_texture(&mapping) {
             Ok(p) => p,
             Err(e) => {
-                log::error!("[image-capture] map_texture failed: {e:?}");
+                log::error!("{}: {e:?}", renderer_ctx("image-capture: map_texture"));
                 fail_all(&frames);
                 return;
             }
@@ -2097,7 +2141,7 @@ impl KmsState {
                     Self::note_image_capture_fulfilled(counters);
                 }
                 Err(e) => {
-                    log::warn!("[image-capture] buffer access failed: {e:?}");
+                    log::warn!("{}: {e:?}", renderer_ctx("image-capture: buffer access"));
                     Self::note_image_capture_render_failed(counters);
                     frame_info.frame.failed(FailureReason::Unknown);
                 }
@@ -2222,7 +2266,10 @@ impl KmsState {
             let mut target = match renderer.bind(renderbuffer) {
                 Ok(t) => t,
                 Err(e) => {
-                    log::error!("[image-capture/toplevel] bind offscreen failed: {e:?}");
+                    log::error!(
+                        "{}: {e:?}",
+                        renderer_ctx("image-capture/toplevel: bind offscreen")
+                    );
                     Self::note_image_capture_render_failed(counters);
                     frame_info.frame.failed(FailureReason::Unknown);
                     continue;
@@ -2237,7 +2284,10 @@ impl KmsState {
             if let Err(e) =
                 damage_tracker.render_output(renderer, &mut target, 0, &elements, clear_color)
             {
-                log::error!("[image-capture/toplevel] render_output failed: {e:?}");
+                log::error!(
+                    "{}: {e:?}",
+                    renderer_ctx("image-capture/toplevel: render_output")
+                );
                 Self::note_image_capture_render_failed(counters);
                 frame_info.frame.failed(FailureReason::Unknown);
                 continue;
@@ -2247,7 +2297,10 @@ impl KmsState {
             let mapping = match renderer.copy_framebuffer(&target, region, Fourcc::Abgr8888) {
                 Ok(m) => m,
                 Err(e) => {
-                    log::error!("[image-capture/toplevel] copy_framebuffer failed: {e:?}");
+                    log::error!(
+                        "{}: {e:?}",
+                        renderer_ctx("image-capture/toplevel: copy_framebuffer")
+                    );
                     Self::note_image_capture_render_failed(counters);
                     frame_info.frame.failed(FailureReason::Unknown);
                     continue;
@@ -2256,7 +2309,10 @@ impl KmsState {
             let pixels = match renderer.map_texture(&mapping) {
                 Ok(p) => p,
                 Err(e) => {
-                    log::error!("[image-capture/toplevel] map_texture failed: {e:?}");
+                    log::error!(
+                        "{}: {e:?}",
+                        renderer_ctx("image-capture/toplevel: map_texture")
+                    );
                     Self::note_image_capture_render_failed(counters);
                     frame_info.frame.failed(FailureReason::Unknown);
                     continue;
@@ -2313,7 +2369,10 @@ impl KmsState {
                     Self::note_image_capture_fulfilled(counters);
                 }
                 Err(e) => {
-                    log::warn!("[image-capture/toplevel] buffer access failed: {e:?}");
+                    log::warn!(
+                        "{}: {e:?}",
+                        renderer_ctx("image-capture/toplevel: buffer access")
+                    );
                     Self::note_image_capture_render_failed(counters);
                     frame_info.frame.failed(FailureReason::Unknown);
                 }
@@ -2720,7 +2779,7 @@ impl KmsState {
                     handle_clone.borrow_mut().on_vblank(crtc, metadata);
                 }
                 DrmEvent::Error(err) => {
-                    log::warn!("drm event error: {err:?}");
+                    log::warn!("{}: {err:?}", renderer_ctx("process DRM event"));
                 }
             })
             .expect("failed to register drm notifier");
@@ -2766,8 +2825,9 @@ impl KmsState {
                     .unwrap_or(false);
                 if stale {
                     log::warn!(
-                        "[vblank-watchdog] output {} frame_pending for >{:?} without vblank; \
+                        "{}: output {} frame_pending for >{:?} without vblank; \
                          force-clearing to recover",
+                        renderer_ctx("await page-flip vblank"),
                         out.output.name(),
                         timeout,
                     );
@@ -3592,7 +3652,7 @@ impl KmsState {
                     }
 
                     if let Err(err) = out.drm_output.queue_frame(()) {
-                        log::warn!("drm queue_frame failed: {err:?}");
+                        log::warn!("{}: {err:?}", renderer_ctx("queue DRM frame"));
 
                         // If we started while not being DRM master (e.g. GNOME was active),
                         // switching VTs later can make us eligible to become master. Try to
@@ -3606,7 +3666,10 @@ impl KmsState {
                             }
                             Err(act_err) => {
                                 log::warn!(
-                                    "drm backend activate failed after queue_frame failure: {act_err:?}"
+                                    "{}: {act_err:?}",
+                                    renderer_ctx(
+                                        "reactivate DRM backend after queue_frame failure"
+                                    )
                                 );
                             }
                         }
@@ -3619,7 +3682,7 @@ impl KmsState {
                     }
                 }
                 Err(err) => {
-                    log::warn!("drm render_frame failed: {err:?}");
+                    log::warn!("{}: {err:?}", renderer_ctx("render DRM frame"));
 
                     match self.drm_output_manager.lock().activate(false) {
                         Ok(_) => {
@@ -3630,7 +3693,8 @@ impl KmsState {
                         }
                         Err(act_err) => {
                             log::warn!(
-                                "drm backend activate failed after render_frame failure: {act_err:?}"
+                                "{}: {act_err:?}",
+                                renderer_ctx("reactivate DRM backend after render_frame failure")
                             );
                         }
                     }
