@@ -17,6 +17,10 @@ pub mod sys_stats;
 
 pub mod x11;
 
+// Shared Xcursor theme loader (theme name + size resolution, image selection)
+// used by every backend that renders or installs a themed pointer.
+pub mod xcursor_theme;
+
 // Shared Smithay Wayland compositor state (used by udev/KMS and windowed X11 backend).
 pub mod wayland;
 

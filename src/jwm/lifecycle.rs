@@ -526,6 +526,24 @@ impl Jwm {
         // 6. Hot-reload all compositor settings
         backend.compositor_apply_config();
 
+        // 6b. Hot-reload the cursor theme/size on backends that install a themed
+        // pointer (X11RB/XCB). When it changed, re-apply the default arrow to the
+        // root window so the new shape/size becomes visible immediately.
+        match backend.cursor_provider().reload_theme() {
+            Ok(true) => {
+                if let Some(root) = backend.root_window() {
+                    if let Err(e) = backend
+                        .cursor_provider()
+                        .apply(root, crate::backend::common_define::StdCursorKind::LeftPtr)
+                    {
+                        warn!("[config] re-applying root cursor failed: {e}");
+                    }
+                }
+            }
+            Ok(false) => {}
+            Err(e) => warn!("[config] cursor theme reload failed: {e}"),
+        }
+
         let client_keys: Vec<ClientKey> = self.state.client_order.clone();
         for ck in client_keys {
             if let Some(_client) = self.state.clients.get(ck) {

@@ -270,23 +270,7 @@ const CURSOR_RECTS: &[(i32, i32, i32, i32)] = &[
     (2, 18, 5, 2),
 ];
 
-fn cursor_candidates(kind: StdCursorKind) -> &'static [&'static str] {
-    match kind {
-        StdCursorKind::LeftPtr => &["left_ptr", "default"],
-        StdCursorKind::Hand => &["hand2", "hand1", "pointer", "default"],
-        StdCursorKind::XTerm => &["xterm", "text", "default"],
-        StdCursorKind::Watch => &["watch", "wait", "default"],
-        StdCursorKind::Crosshair => &["crosshair", "default"],
-        StdCursorKind::Fleur => &["fleur", "move", "default"],
-        StdCursorKind::HDoubleArrow => &["sb_h_double_arrow", "h_double_arrow", "default"],
-        StdCursorKind::VDoubleArrow => &["sb_v_double_arrow", "v_double_arrow", "default"],
-        StdCursorKind::TopLeftCorner => &["top_left_corner", "nw-resize", "default"],
-        StdCursorKind::TopRightCorner => &["top_right_corner", "ne-resize", "default"],
-        StdCursorKind::BottomLeftCorner => &["bottom_left_corner", "sw-resize", "default"],
-        StdCursorKind::BottomRightCorner => &["bottom_right_corner", "se-resize", "default"],
-        StdCursorKind::Sizing => &["sizing", "default"],
-    }
-}
+use crate::backend::xcursor_theme::cursor_candidates;
 
 #[allow(dead_code)]
 #[derive(Debug)]

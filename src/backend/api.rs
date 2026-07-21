@@ -1106,6 +1106,14 @@ pub trait CursorProvider: Send {
     fn get(&mut self, kind: StdCursorKind) -> Result<CursorHandle, BackendError>;
     fn apply(&mut self, window_id: WindowId, kind: StdCursorKind) -> Result<(), BackendError>;
     fn cleanup(&mut self) -> Result<(), BackendError>;
+
+    /// Re-read the cursor theme/size from the live `[appearance]` config and
+    /// rebuild any cached cursors. Returns `true` when the theme or size
+    /// actually changed, so the caller can re-apply the pointer to the root
+    /// window. Backends without themed cursors keep the no-op default.
+    fn reload_theme(&mut self) -> Result<bool, BackendError> {
+        Ok(false)
+    }
 }
 
 /// Benchmark capability exposed by compositor-backed platforms.

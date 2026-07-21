@@ -263,7 +263,7 @@ impl X11rbBackend {
             ids.clone(),
         )));
         let cursor_provider: Box<dyn CursorProvider> =
-            Box::new(X11CursorProvider::new(conn.clone(), ids.clone())?);
+            Box::new(X11CursorProvider::new(conn.clone(), root_x11, ids.clone())?);
         let color_allocator: Box<dyn ColorAllocator> = Box::new(X11ColorAllocator::new(
             conn.clone(),
             screen.default_colormap,
@@ -2245,9 +2245,13 @@ mod cursor {
     use crate::backend::api::CursorProvider;
     use crate::backend::common_define::{CursorHandle, StdCursorKind, WindowId};
     use crate::backend::error::BackendError;
+    use crate::backend::xcursor_theme::{ResolvedCursor, XcursorImages};
     use std::collections::HashMap;
     use std::sync::Arc;
     use x11rb::connection::Connection;
+    use x11rb::protocol::render::{
+        self, ConnectionExt as RenderConnectionExt, PictType, Pictformat,
+    };
     use x11rb::protocol::xproto::*;
 
     #[allow(dead_code)]
@@ -2574,22 +2578,130 @@ mod cursor {
 
     pub(super) struct X11CursorProvider<C: Connection> {
         conn: Arc<C>,
+        /// A drawable on the target screen used to allocate the ARGB pixmaps.
+        root: u32,
+        /// Legacy core "cursor" font, used as a fallback when the Xcursor theme
+        /// has no image for a given kind (or RENDER is unavailable).
         cursor_font: Font,
+        /// XRENDER a8r8g8b8 picture format id; `None` disables themed cursors.
+        argb_format: Option<Pictformat>,
+        /// Whether the server's image byte order is LSB-first (the common case).
+        lsb_first: bool,
+        /// Live Xcursor theme/size loader shared with the other backends.
+        images: XcursorImages,
         cache: HashMap<StdCursorKind, Cursor>,
         ids: X11IdRegistry,
     }
 
     impl<C: Connection> X11CursorProvider<C> {
-        pub(super) fn new(conn: Arc<C>, ids: X11IdRegistry) -> Result<Self, BackendError> {
+        pub(super) fn new(
+            conn: Arc<C>,
+            root: u32,
+            ids: X11IdRegistry,
+        ) -> Result<Self, BackendError> {
             use x11rb::protocol::xproto::ConnectionExt;
             let font = conn.generate_id()?;
             conn.open_font(font, b"cursor")?;
+            let lsb_first = conn.setup().image_byte_order == ImageOrder::LSB_FIRST;
+            let argb_format = Self::query_argb_format(&*conn);
+            if argb_format.is_none() {
+                log::info!(
+                    "[cursor] XRENDER ARGB32 format unavailable; using legacy glyph cursors"
+                );
+            }
+            let images = XcursorImages::from_config();
+            log::info!(
+                "[cursor] x11rb theme={:?} size={}px",
+                images.theme_name(),
+                images.size()
+            );
             Ok(Self {
                 conn,
+                root,
                 cursor_font: font,
+                argb_format,
+                lsb_first,
+                images,
                 cache: HashMap::new(),
                 ids,
             })
+        }
+
+        /// Locate the standard a8r8g8b8 (premultiplied) picture format, if the
+        /// RENDER extension is present.
+        fn query_argb_format(conn: &C) -> Option<Pictformat> {
+            let reply = conn.render_query_pict_formats().ok()?.reply().ok()?;
+            reply
+                .formats
+                .iter()
+                .find(|f| {
+                    f.type_ == PictType::DIRECT
+                        && f.depth == 32
+                        && f.direct.alpha_mask == 0xff
+                        && f.direct.alpha_shift == 24
+                        && f.direct.red_shift == 16
+                        && f.direct.green_shift == 8
+                        && f.direct.blue_shift == 0
+                })
+                .map(|f| f.id)
+        }
+
+        /// Build a themed ARGB cursor for `kind`, or `None` to fall back to the
+        /// glyph font (no RENDER, no theme image, or an upload error).
+        fn build_themed_cursor(&mut self, kind: StdCursorKind) -> Option<Cursor> {
+            let format = self.argb_format?;
+            let img = self.images.resolve(kind, 1)?;
+            match self.upload_cursor(format, &img) {
+                Ok(cursor) => Some(cursor),
+                Err(e) => {
+                    log::warn!(
+                        "[cursor] themed upload failed for {kind:?}: {e}; using glyph fallback"
+                    );
+                    None
+                }
+            }
+        }
+
+        /// Upload a resolved ARGB image as an XRENDER cursor and return its id.
+        fn upload_cursor(
+            &self,
+            format: Pictformat,
+            img: &ResolvedCursor,
+        ) -> Result<Cursor, BackendError> {
+            use x11rb::protocol::xproto::ConnectionExt;
+            let conn = &*self.conn;
+            let w = img.width as u16;
+            let h = img.height as u16;
+
+            // The image is little-endian ARGB ([B,G,R,A]); on an MSB-first
+            // server each pixel must be byte-reversed to [A,R,G,B].
+            let data: std::borrow::Cow<'_, [u8]> = if self.lsb_first {
+                std::borrow::Cow::Borrowed(&img.pixels_argb_le)
+            } else {
+                let mut swapped = img.pixels_argb_le.clone();
+                for px in swapped.chunks_exact_mut(4) {
+                    px.reverse();
+                }
+                std::borrow::Cow::Owned(swapped)
+            };
+
+            let pixmap = conn.generate_id()?;
+            conn.create_pixmap(32, pixmap, self.root, w, h)?;
+
+            let gc = conn.generate_id()?;
+            conn.create_gc(gc, pixmap, &CreateGCAux::new())?;
+            conn.put_image(ImageFormat::Z_PIXMAP, pixmap, gc, w, h, 0, 0, 0, 32, &data)?;
+            conn.free_gc(gc)?;
+
+            let picture = conn.generate_id()?;
+            conn.render_create_picture(picture, pixmap, format, &render::CreatePictureAux::new())?;
+
+            let cursor = conn.generate_id()?;
+            conn.render_create_cursor(cursor, picture, img.xhot as u16, img.yhot as u16)?;
+
+            conn.render_free_picture(picture)?;
+            conn.free_pixmap(pixmap)?;
+            Ok(cursor)
         }
 
         fn map_kind(kind: StdCursorKind) -> X11StdCursor {
@@ -2637,10 +2749,32 @@ mod cursor {
             if let Some(&c) = self.cache.get(&kind) {
                 return Ok(CursorHandle(c as u64));
             }
-            let x11_cursor = Self::map_kind(kind);
-            let cursor = x11_cursor.create(&*self.conn, self.cursor_font)?;
+            let cursor = match self.build_themed_cursor(kind) {
+                Some(c) => c,
+                None => Self::map_kind(kind).create(&*self.conn, self.cursor_font)?,
+            };
             self.cache.insert(kind, cursor);
             Ok(CursorHandle(cursor as u64))
+        }
+
+        fn reload_theme(&mut self) -> Result<bool, BackendError> {
+            use x11rb::protocol::xproto::ConnectionExt;
+            if !self.images.reload_from_config() {
+                return Ok(false);
+            }
+            // Drop cursors built from the previous theme/size; they are rebuilt
+            // lazily on the next get(). Freeing a cursor still installed on a
+            // window is safe — the server keeps displaying it until replaced.
+            for &cursor in self.cache.values() {
+                let _ = (*self.conn).free_cursor(cursor);
+            }
+            self.cache.clear();
+            log::info!(
+                "[cursor] x11rb reloaded theme={:?} size={}px",
+                self.images.theme_name(),
+                self.images.size()
+            );
+            Ok(true)
         }
 
         fn apply(&mut self, window: WindowId, kind: StdCursorKind) -> Result<(), BackendError> {

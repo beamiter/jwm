@@ -900,6 +900,7 @@ impl XcbBackend {
                 xcb::Extension::Damage,
                 xcb::Extension::Present,
                 xcb::Extension::XFixes,
+                xcb::Extension::Render,
             ],
         )
         .map_err(xcb_err)?;
@@ -954,7 +955,7 @@ impl XcbBackend {
         let ewmh = Some(
             Box::new(XcbEwmh::new(conn.clone(), ids.clone(), atoms, root)) as Box<dyn EwmhFacade>,
         );
-        let cursor_provider = Box::new(XcbCursorProvider::new(conn.clone(), ids.clone())?);
+        let cursor_provider = Box::new(XcbCursorProvider::new(conn.clone(), ids.clone(), root)?);
         let color_allocator = Box::new(XcbColorAllocator::new(conn.clone(), default_colormap));
 
         let _ = conn.check_request(conn.send_request_checked(&xcb::randr::SelectInput {
@@ -4891,24 +4892,167 @@ impl ColorAllocator for XcbColorAllocator {
 struct XcbCursorProvider {
     conn: Arc<xcb::Connection>,
     ids: XcbIdRegistry,
+    /// A drawable on the target screen used to allocate the ARGB pixmaps.
+    root: x::Window,
+    /// Legacy core "cursor" font, used when the theme has no image for a kind.
     font: x::Font,
+    /// XRENDER a8r8g8b8 picture format id; `None` disables themed cursors.
+    argb_format: Option<xcb::render::Pictformat>,
+    /// Whether the server's image byte order is LSB-first (the common case).
+    lsb_first: bool,
+    /// Live Xcursor theme/size loader shared with the other backends.
+    images: crate::backend::xcursor_theme::XcursorImages,
     cache: HashMap<StdCursorKind, x::Cursor>,
 }
 
 impl XcbCursorProvider {
-    fn new(conn: Arc<xcb::Connection>, ids: XcbIdRegistry) -> XcbResult<Self> {
+    fn new(conn: Arc<xcb::Connection>, ids: XcbIdRegistry, root: x::Window) -> XcbResult<Self> {
         let font: x::Font = conn.generate_id();
         conn.send_and_check_request(&x::OpenFont {
             fid: font,
             name: b"cursor",
         })
         .map_err(xcb_err)?;
+        let lsb_first = conn.get_setup().image_byte_order() == x::ImageOrder::LsbFirst;
+        let argb_format = Self::query_argb_format(&conn);
+        if argb_format.is_none() {
+            log::info!("[cursor] XRENDER ARGB32 format unavailable; using legacy glyph cursors");
+        }
+        let images = crate::backend::xcursor_theme::XcursorImages::from_config();
+        log::info!(
+            "[cursor] xcb theme={:?} size={}px",
+            images.theme_name(),
+            images.size()
+        );
         Ok(Self {
             conn,
             ids,
+            root,
             font,
+            argb_format,
+            lsb_first,
+            images,
             cache: HashMap::new(),
         })
+    }
+
+    /// Locate the standard a8r8g8b8 (premultiplied) picture format, if RENDER
+    /// is present.
+    fn query_argb_format(conn: &xcb::Connection) -> Option<xcb::render::Pictformat> {
+        let reply = conn
+            .wait_for_reply(conn.send_request(&xcb::render::QueryPictFormats {}))
+            .ok()?;
+        reply
+            .formats()
+            .iter()
+            .find(|f| {
+                let d = f.direct();
+                f.r#type() == xcb::render::PictType::Direct
+                    && f.depth() == 32
+                    && d.alpha_mask == 0xff
+                    && d.alpha_shift == 24
+                    && d.red_shift == 16
+                    && d.green_shift == 8
+                    && d.blue_shift == 0
+            })
+            .map(|f| f.id())
+    }
+
+    /// Build a themed ARGB cursor for `kind`, or `None` to fall back to the
+    /// glyph font (no RENDER, no theme image, or an upload error).
+    fn build_themed_cursor(&mut self, kind: StdCursorKind) -> Option<x::Cursor> {
+        let format = self.argb_format?;
+        let img = self.images.resolve(kind, 1)?;
+        match self.upload_cursor(format, &img) {
+            Ok(cursor) => Some(cursor),
+            Err(e) => {
+                log::warn!("[cursor] themed upload failed for {kind:?}: {e}; using glyph fallback");
+                None
+            }
+        }
+    }
+
+    /// Upload a resolved ARGB image as an XRENDER cursor and return its id.
+    fn upload_cursor(
+        &self,
+        format: xcb::render::Pictformat,
+        img: &crate::backend::xcursor_theme::ResolvedCursor,
+    ) -> XcbResult<x::Cursor> {
+        let w = img.width as u16;
+        let h = img.height as u16;
+
+        // The image is little-endian ARGB ([B,G,R,A]); on an MSB-first server
+        // each pixel must be byte-reversed to [A,R,G,B].
+        let data: std::borrow::Cow<'_, [u8]> = if self.lsb_first {
+            std::borrow::Cow::Borrowed(&img.pixels_argb_le)
+        } else {
+            let mut swapped = img.pixels_argb_le.clone();
+            for px in swapped.chunks_exact_mut(4) {
+                px.reverse();
+            }
+            std::borrow::Cow::Owned(swapped)
+        };
+
+        let pixmap: x::Pixmap = self.conn.generate_id();
+        self.conn
+            .send_and_check_request(&x::CreatePixmap {
+                depth: 32,
+                pid: pixmap,
+                drawable: x::Drawable::Window(self.root),
+                width: w,
+                height: h,
+            })
+            .map_err(xcb_err)?;
+
+        let gc: x::Gcontext = self.conn.generate_id();
+        self.conn
+            .send_and_check_request(&x::CreateGc {
+                cid: gc,
+                drawable: x::Drawable::Pixmap(pixmap),
+                value_list: &[],
+            })
+            .map_err(xcb_err)?;
+        self.conn
+            .send_and_check_request(&x::PutImage {
+                format: x::ImageFormat::ZPixmap,
+                drawable: x::Drawable::Pixmap(pixmap),
+                gc,
+                width: w,
+                height: h,
+                dst_x: 0,
+                dst_y: 0,
+                left_pad: 0,
+                depth: 32,
+                data: &data,
+            })
+            .map_err(xcb_err)?;
+        let _ = self.conn.send_and_check_request(&x::FreeGc { gc });
+
+        let picture: xcb::render::Picture = self.conn.generate_id();
+        self.conn
+            .send_and_check_request(&xcb::render::CreatePicture {
+                pid: picture,
+                drawable: x::Drawable::Pixmap(pixmap),
+                format,
+                value_list: &[],
+            })
+            .map_err(xcb_err)?;
+
+        let cursor: x::Cursor = self.conn.generate_id();
+        self.conn
+            .send_and_check_request(&xcb::render::CreateCursor {
+                cid: cursor,
+                source: picture,
+                x: img.xhot as u16,
+                y: img.yhot as u16,
+            })
+            .map_err(xcb_err)?;
+
+        let _ = self
+            .conn
+            .send_and_check_request(&xcb::render::FreePicture { picture });
+        let _ = self.conn.send_and_check_request(&x::FreePixmap { pixmap });
+        Ok(cursor)
     }
 
     fn glyph(kind: StdCursorKind) -> u16 {
@@ -4956,25 +5100,50 @@ impl CursorProvider for XcbCursorProvider {
         if let Some(c) = self.cache.get(&kind).copied() {
             return Ok(CursorHandle(c.resource_id() as u64));
         }
-        let cursor: x::Cursor = self.conn.generate_id();
-        let glyph = Self::glyph(kind);
-        self.conn
-            .send_and_check_request(&x::CreateGlyphCursor {
-                cid: cursor,
-                source_font: self.font,
-                mask_font: self.font,
-                source_char: glyph,
-                mask_char: glyph + 1,
-                fore_red: 0,
-                fore_green: 0,
-                fore_blue: 0,
-                back_red: 65535,
-                back_green: 65535,
-                back_blue: 65535,
-            })
-            .map_err(xcb_err)?;
+        let cursor = match self.build_themed_cursor(kind) {
+            Some(c) => c,
+            None => {
+                let cursor: x::Cursor = self.conn.generate_id();
+                let glyph = Self::glyph(kind);
+                self.conn
+                    .send_and_check_request(&x::CreateGlyphCursor {
+                        cid: cursor,
+                        source_font: self.font,
+                        mask_font: self.font,
+                        source_char: glyph,
+                        mask_char: glyph + 1,
+                        fore_red: 0,
+                        fore_green: 0,
+                        fore_blue: 0,
+                        back_red: 65535,
+                        back_green: 65535,
+                        back_blue: 65535,
+                    })
+                    .map_err(xcb_err)?;
+                cursor
+            }
+        };
         self.cache.insert(kind, cursor);
         Ok(CursorHandle(cursor.resource_id() as u64))
+    }
+
+    fn reload_theme(&mut self) -> XcbResult<bool> {
+        if !self.images.reload_from_config() {
+            return Ok(false);
+        }
+        // Drop cursors built from the previous theme/size; they are rebuilt
+        // lazily on the next get(). Freeing a cursor still installed on a window
+        // is safe — the server keeps displaying it until replaced.
+        for cursor in self.cache.values().copied() {
+            let _ = self.conn.send_and_check_request(&x::FreeCursor { cursor });
+        }
+        self.cache.clear();
+        log::info!(
+            "[cursor] xcb reloaded theme={:?} size={}px",
+            self.images.theme_name(),
+            self.images.size()
+        );
+        Ok(true)
     }
 
     fn apply(&mut self, window_id: WindowId, kind: StdCursorKind) -> XcbResult<()> {
