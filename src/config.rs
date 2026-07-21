@@ -160,7 +160,13 @@ pub struct AppearanceConfig {
     pub status_bar_padding: i32,
     pub status_bar_height: i32,
     /// Xcursor theme name that decides the pointer's *shape/look*, e.g.
-    /// "Adwaita", "Bibata-Modern-Ice", "macOS", "capitaine-cursors".
+    /// "Adwaita", "Bibata-Modern-Ice", "capitaine-cursors".
+    /// Must match an *installed* theme directory name under one of the icon
+    /// search paths (`~/.local/share/icons`, `~/.icons`, `/usr/share/icons`,
+    /// or `$XCURSOR_PATH`); the value is a directory name, not a display name.
+    /// A name with no matching theme resolves to no images, so every backend
+    /// silently falls back to its built-in glyph pointer and `cursor_size` is
+    /// ignored — see the `[cursor]` warning logged by `XcursorImages`.
     /// Empty string = defer to the `XCURSOR_THEME` environment variable and
     /// then to "default". Applied by the Wayland DRM/KMS backend and exported
     /// to launched clients so the whole session shares one cursor style.

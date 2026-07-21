@@ -74,11 +74,37 @@ impl XcursorImages {
     /// Build a loader from the resolved `[appearance]` cursor configuration.
     pub fn from_config() -> Self {
         let (theme_name, size) = crate::config::CONFIG.load().resolved_cursor();
-        Self {
+        let mut images = Self {
             theme: CursorTheme::load(&theme_name),
             theme_name,
             size,
             images: HashMap::new(),
+        };
+        images.probe_availability();
+        images
+    }
+
+    /// Try to resolve the base pointer at 1× and log the result, so a
+    /// misconfigured or missing theme (e.g. `cursor_theme` naming a theme that
+    /// is not installed) is diagnosable instead of silently degrading to the
+    /// backend's built-in glyph cursor. A `None` here means every kind will
+    /// fall back and the configured `cursor_size` is effectively ignored.
+    fn probe_availability(&mut self) {
+        if self.resolve(StdCursorKind::LeftPtr, 1).is_some() {
+            log::info!(
+                "[cursor] theme {:?} resolved (size={}px)",
+                self.theme_name,
+                self.size
+            );
+        } else {
+            log::warn!(
+                "[cursor] theme {:?} provides no usable pointer image \
+                 (not installed, or missing a left_ptr/default cursor); \
+                 falling back to built-in glyph cursors and ignoring \
+                 cursor_size={}px",
+                self.theme_name,
+                self.size
+            );
         }
     }
 
@@ -105,6 +131,9 @@ impl XcursorImages {
         if size != self.size {
             self.size = size;
             changed = true;
+        }
+        if changed {
+            self.probe_availability();
         }
         changed
     }

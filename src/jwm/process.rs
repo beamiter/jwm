@@ -31,6 +31,15 @@ impl Jwm {
     /// toolkits can connect to this compositor.  When running the udev backend
     /// we propagate the XWayland DISPLAY so X11 apps can connect.
     pub(super) fn setup_smithay_child_env(command: &mut Command, backend: &dyn Backend) {
+        // Share the session's Xcursor theme/size with every launched client so
+        // its *own* windows use the same pointer. On X11 the WM cannot re-cursor
+        // a client's content window; libXcursor in the client reads these env
+        // vars (or the root RESOURCE_MANAGER the XCB backend also publishes).
+        // Idempotent on Wayland, where the session env already carries them.
+        let (cursor_theme, cursor_size) = crate::config::CONFIG.load().resolved_cursor();
+        command.env("XCURSOR_THEME", &cursor_theme);
+        command.env("XCURSOR_SIZE", cursor_size.to_string());
+
         if Self::is_smithay_backend(backend) {
             if let Ok(v) = std::env::var("WAYLAND_DISPLAY") {
                 command.env("WAYLAND_DISPLAY", &v);

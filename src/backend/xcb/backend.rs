@@ -4924,6 +4924,9 @@ impl XcbCursorProvider {
             images.theme_name(),
             images.size()
         );
+        // Publish to clients so their own windows share the pointer (the WM's
+        // themed cursor only covers root + frames it owns).
+        sync_xcursor_resources(&conn, root, images.theme_name(), images.size());
         Ok(Self {
             conn,
             ids,
@@ -5143,6 +5146,8 @@ impl CursorProvider for XcbCursorProvider {
             self.images.theme_name(),
             self.images.size()
         );
+        // Re-publish so clients launched after the reload pick up the new theme.
+        sync_xcursor_resources(&self.conn, self.root, self.images.theme_name(), self.images.size());
         Ok(true)
     }
 
@@ -5418,6 +5423,58 @@ fn change_bytes(
         data,
     })
     .map_err(xcb_err)
+}
+
+/// Merge the resolved Xcursor `theme`/`size` into the root window's
+/// `RESOURCE_MANAGER` (the xrdb resource database). X11 cursors are a per-window
+/// attribute the WM cannot override on a client's own content window; instead
+/// libXcursor in each client reads `Xcursor.theme`/`Xcursor.size` from this
+/// database, so publishing them here is how the session theme reaches inside
+/// application windows. Every other resource line is preserved — only the two
+/// `Xcursor.*` entries are rewritten.
+fn sync_xcursor_resources(conn: &xcb::Connection, root: x::Window, theme: &str, size: u32) {
+    // RESOURCE_MANAGER is a STRING of newline-separated "Key:\tvalue" lines.
+    let cookie = conn.send_request(&x::GetProperty {
+        delete: false,
+        window: root,
+        property: x::ATOM_RESOURCE_MANAGER,
+        r#type: x::ATOM_STRING,
+        long_offset: 0,
+        long_length: u32::MAX / 4,
+    });
+    let existing = conn
+        .wait_for_reply(cookie)
+        .ok()
+        .filter(|r| r.format() == 8)
+        .map(|r| String::from_utf8_lossy(r.value::<u8>()).into_owned())
+        .unwrap_or_default();
+
+    let mut out = String::new();
+    for line in existing.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let key = line.split(':').next().unwrap_or("").trim();
+        if key == "Xcursor.theme" || key == "Xcursor.size" {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(&format!("Xcursor.theme:\t{theme}\n"));
+    out.push_str(&format!("Xcursor.size:\t{size}\n"));
+
+    if let Err(e) = change_bytes(
+        conn,
+        root,
+        x::ATOM_RESOURCE_MANAGER,
+        x::ATOM_STRING,
+        out.as_bytes(),
+    ) {
+        log::warn!("[cursor] failed to publish Xcursor.* to RESOURCE_MANAGER: {e}");
+    } else {
+        log::info!("[cursor] published Xcursor.theme={theme:?} size={size}px to RESOURCE_MANAGER");
+    }
 }
 
 fn supported_features() -> Vec<EwmhFeature> {
