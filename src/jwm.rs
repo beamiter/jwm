@@ -343,6 +343,8 @@ impl Jwm {
             "toggle_annotation"
         } else if eq!(Jwm::toggle_waterlily) {
             "toggle_waterlily"
+        } else if eq!(Jwm::waterlily_case) {
+            "waterlily_case"
         } else if eq!(Jwm::save_session) {
             "save_session"
         } else if eq!(Jwm::restore_session) {

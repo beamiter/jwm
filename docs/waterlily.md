@@ -6,10 +6,22 @@ native-size visual layer. The Julia process owns the simulation and can run it
 on the CPU, an NVIDIA GPU, or an AMD GPU. JWM owns only the frame transport,
 texture upload, opacity, and final compositor rendering.
 
-The initial adapter is an independently authored `hover` thin-plate simulation,
-visually aligned with upstream's
-[`TwoD_Hover`](https://github.com/WaterLily-jl/WaterLily-Examples/blob/58792dd17cfe585f7f4eea8be925de1b4ffefa25/examples/TwoD_Hover.jl)
-example without copying its implementation. The long-term goal is a case
+The built-in adapters are independently authored simulations using WaterLily's
+public `AutoBody` and `Simulation` APIs:
+
+| Case | Effect | Palette |
+| --- | --- | --- |
+| `hover` | Heaving, pitching thin plate, visually aligned with upstream's [`TwoD_Hover`](https://github.com/WaterLily-jl/WaterLily-Examples/blob/58792dd17cfe585f7f4eea8be925de1b4ffefa25/examples/TwoD_Hover.jl) example without copying its implementation | seismic blue/red |
+| `cylinder` | Static circular cylinder shedding the classic von Kármán vortex street | ocean teal/orange |
+| `dance` | Cylinder oscillating transversely to the stream, weaving a wide braided wake | violet purple/green |
+| `flap` | Plate pitching about its leading edge, producing a thrust-type reverse Kármán wake | ember indigo/amber |
+| `tandem` | Two static cylinders in tandem with interfering, merging vortex streets | glacier azure/bronze |
+| `diamond` | Square prism rotated 45° whose sharp edges shed a wide, angular street | berry magenta/lime |
+| `orbit` | Cylinder stirring quiescent fluid along a circular orbit, curling spiral vortex arms | cosmos rose/slate |
+
+Every diverging palette shares the same near-white midpoint, so the compositor
+shader's bright/low-chroma keying replaces quiescent fluid with the frosted
+backdrop regardless of the selected case. The long-term goal is a case
 registry that can adapt the 2D and 3D simulations in
 [WaterLily-Examples](https://github.com/WaterLily-jl/WaterLily-Examples)
 without coupling the Rust compositor to Julia packages or case-specific fields.
@@ -75,6 +87,10 @@ julia --project=waterlily --threads=auto waterlily/runner.jl \
   --device auto \
   --fps 30
 ```
+
+Swap `--case hover` for any other registered case to select the starting
+effect; `--help` prints the current registry. A running worker can also be
+switched live — see "Hot-switching cases" below.
 
 Use `JWM_BACKEND=xcb` to exercise the other X11 frontend. The compositor code
 and the frame protocol are shared by both.
@@ -150,6 +166,28 @@ The default `Alt+Shift+F11` binding invokes the canonical action
 ```bash
 jwm-tool msg toggle_waterlily
 ```
+
+### Hot-switching cases
+
+The wake socket is bidirectional: the compositor writes newline-terminated
+control commands (`case <name>` or `case next`) back to the connected worker,
+which rebuilds the requested simulation at the current resolution without
+restarting or touching the frame file. The default `Alt+Shift+F10` binding
+invokes the `waterlily_case` action with the `next` argument, cycling the
+worker's sorted registry. Over IPC:
+
+```bash
+# Cycle to the next registered case
+jwm-tool msg waterlily_case
+
+# Select a specific case
+jwm-tool msg waterlily_case --args '"dance"'
+```
+
+Case names are restricted to short lowercase identifiers on the compositor
+side, and the worker validates them against its registry, so a compositor
+with a stale case list logs a warning instead of wedging the worker. If no
+worker is connected the request is dropped with a log message.
 
 The following environment variables are read when the integration starts:
 

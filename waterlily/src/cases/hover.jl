@@ -1,5 +1,3 @@
-abstract type AbstractWaterLilyCase end
-
 struct HoverCase{S,T} <: AbstractWaterLilyCase
     simulation::S
     dimensions::Tuple{Int,Int}
@@ -83,13 +81,7 @@ function build_hover_case(
     )
 end
 
-function advance!(case::HoverCase, dimensionless_step::Real)
-    target = WaterLily.sim_time(case.simulation) + dimensionless_step
-    WaterLily.sim_step!(case.simulation, target; remeasure=true)
-    return case
-end
-
-function plate_distance(case::HoverCase, x::Real, y::Real, dimensionless_time::Real)
+function body_distance(case::HoverCase, x::Real, y::Real, dimensionless_time::Real)
     phase = 2pi * dimensionless_time / case.period
     vertical = case.center[2] + case.heave_amplitude * sin(phase)
     angle = case.pitch_amplitude * sin(phase + pi / 2)
@@ -102,80 +94,5 @@ function plate_distance(case::HoverCase, x::Real, y::Real, dimensionless_time::R
     return hypot(segment_dx, local_y) - case.half_thickness
 end
 
-const SEISMIC_PALETTE = (
-    (UInt8(0x00), UInt8(0x18), UInt8(0x8f)),
-    (UInt8(0x00), UInt8(0x45), UInt8(0xd8)),
-    (UInt8(0x36), UInt8(0x7c), UInt8(0xf3)),
-    (UInt8(0x85), UInt8(0xad), UInt8(0xff)),
-    (UInt8(0xc9), UInt8(0xda), UInt8(0xff)),
-    (UInt8(0xfa), UInt8(0xfa), UInt8(0xfd)),
-    (UInt8(0xff), UInt8(0xd0), UInt8(0xd0)),
-    (UInt8(0xff), UInt8(0x8c), UInt8(0x8c)),
-    (UInt8(0xf4), UInt8(0x42), UInt8(0x42)),
-    (UInt8(0xc9), UInt8(0x00), UInt8(0x20)),
-    (UInt8(0x78), UInt8(0x00), UInt8(0x13)),
-)
-const BODY_LAVENDER = (UInt8(0x91), UInt8(0x87), UInt8(0xff))
-
-function vorticity_field(case::HoverCase)
-    velocity = Array(case.simulation.flow.u)
-    width, height = case.dimensions
-    vorticity = Matrix{Float32}(undef, width, height)
-    scale = Float32(case.simulation.L / case.simulation.U)
-    @inbounds for y in 1:height, x in 1:width
-        index = CartesianIndex(x + 1, y + 1)
-        vorticity[x, y] = Float32(WaterLily.curl(3, index, velocity) * scale)
-    end
-    return vorticity
-end
-
-function palette_scale(vorticity::AbstractMatrix)
-    energy = 0.0
-    peak = 0.0
-    count = 0
-    @inbounds for value in vorticity
-        isfinite(value) || continue
-        magnitude = abs(Float64(value))
-        energy += magnitude * magnitude
-        peak = max(peak, magnitude)
-        count += 1
-    end
-    count == 0 && return 1.0
-    # RMS resists a handful of extreme cells while the peak bound keeps the
-    # strongest vortices on the palette instead of clipping the whole wake.
-    return max(0.35, min(peak, 3.5 * sqrt(energy / count)))
-end
-
-function seismic_color(value::Real, scale::Real)
-    normalized = clamp(Float64(value) / scale, -1.0, 1.0)
-    index = round(Int, (normalized + 1.0) * 0.5 * (length(SEISMIC_PALETTE) - 1)) + 1
-    return SEISMIC_PALETTE[clamp(index, 1, length(SEISMIC_PALETTE))]
-end
-
-function render_rgba(case::HoverCase)
-    width, height = case.dimensions
-    vorticity = vorticity_field(case)
-    color_scale = palette_scale(vorticity)
-    simulation_time = WaterLily.sim_time(case.simulation)
-    rgba = Vector{UInt8}(undef, width * height * 4)
-
-    # Rows are emitted top-to-bottom. WaterLily's second coordinate increases
-    # upward, hence the explicit vertical flip into the top-left protocol.
-    output = 1
-    @inbounds for row in 1:height
-        y = height - row + 1
-        for x in 1:width
-            color = if plate_distance(case, x + 0.5, y + 0.5, simulation_time) <= 0
-                BODY_LAVENDER
-            else
-                seismic_color(vorticity[x, y], color_scale)
-            end
-            rgba[output] = color[1]
-            rgba[output + 1] = color[2]
-            rgba[output + 2] = color[3]
-            rgba[output + 3] = 0xff
-            output += 4
-        end
-    end
-    return rgba
-end
+case_palette(::HoverCase) = SEISMIC_PALETTE
+body_color(::HoverCase) = BODY_LAVENDER

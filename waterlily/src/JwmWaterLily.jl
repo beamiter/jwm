@@ -5,7 +5,14 @@ using StaticArrays
 using WaterLily
 
 include("protocol.jl")
+include("cases/common.jl")
 include("cases/hover.jl")
+include("cases/cylinder.jl")
+include("cases/dance.jl")
+include("cases/flap.jl")
+include("cases/tandem.jl")
+include("cases/diamond.jl")
+include("cases/orbit.jl")
 include("cases/registry.jl")
 
 const DEFAULT_FPS = 30.0
@@ -285,6 +292,31 @@ function prepare_runtime_parent(path::AbstractString)
     return parent
 end
 
+"""
+Resolve a compositor control command against the case registry. `case NAME`
+selects a registered case, `case next` cycles through the sorted registry.
+Unknown commands and unknown case names are logged and ignored so a newer
+compositor can never crash an older worker.
+"""
+function resolve_case_command(command::AbstractString, current_case::AbstractString)
+    parts = split(command)
+    if length(parts) != 2 || parts[1] != "case"
+        @warn "ignoring unknown WaterLily command" command
+        return nothing
+    end
+    name = String(parts[2])
+    cases = available_cases()
+    if name == "next"
+        index = findfirst(==(String(current_case)), cases)
+        return index === nothing ? first(cases) : cases[mod1(index + 1, length(cases))]
+    end
+    if !(name in cases)
+        @warn "ignoring unknown WaterLily case" requested = name available = cases
+        return nothing
+    end
+    return name
+end
+
 function run_worker_with_backend(options::RunnerOptions, backend::SelectedBackend)
     options.requested_size != options.simulation_size &&
         @info "normalized simulation size for WaterLily multigrid" requested =
@@ -308,14 +340,38 @@ function run_worker_with_backend(options::RunnerOptions, backend::SelectedBacken
     atexit(cleanup)
 
     frame_period = 1.0 / options.fps
+    current_case = options.case_name
     try
         while true
             started = time_ns()
+            while (command = take_command!(wakeups)) !== nothing
+                requested = resolve_case_command(command, current_case)
+                (requested === nothing || requested == current_case) && continue
+                try
+                    simulation_case = build_case(
+                        requested,
+                        options.simulation_size;
+                        memory=backend.memory,
+                    )
+                    current_case = requested
+                    @info "switched WaterLily case" case = requested
+                catch error
+                    @warn(
+                        "could not switch WaterLily case; keeping the current one",
+                        requested,
+                        exception=(error, catch_backtrace()),
+                    )
+                end
+            end
+
             advance!(simulation_case, frame_period)
             rgba = render_rgba(simulation_case)
             publish!(publisher, rgba, time_ns())
             notify!(wakeups)
 
+            # Guarantee a scheduler point per frame so the command reader task
+            # runs even when the solver saturates the frame budget.
+            yield()
             elapsed = Float64(time_ns() - started) / 1.0e9
             elapsed < frame_period && sleep(frame_period - elapsed)
         end

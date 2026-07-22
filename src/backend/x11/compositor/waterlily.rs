@@ -26,6 +26,7 @@ pub(super) struct WaterlilyIpc {
     connected: Arc<AtomicBool>,
     loop_signal: Arc<Mutex<Option<calloop::LoopSignal>>>,
     stop: Arc<AtomicBool>,
+    command_stream: Arc<Mutex<Option<UnixStream>>>,
     receiver: Option<JoinHandle<()>>,
 }
 
@@ -49,11 +50,13 @@ impl WaterlilyIpc {
         let connected = Arc::new(AtomicBool::new(false));
         let loop_signal = Arc::new(Mutex::new(None::<calloop::LoopSignal>));
         let stop = Arc::new(AtomicBool::new(false));
+        let command_stream = Arc::new(Mutex::new(None::<UnixStream>));
         let thread_pending = pending.clone();
         let thread_new_connection = new_connection.clone();
         let thread_connected = connected.clone();
         let thread_loop_signal = loop_signal.clone();
         let thread_stop = stop.clone();
+        let thread_command_stream = command_stream.clone();
         let log_path = path.clone();
 
         let receiver = std::thread::Builder::new()
@@ -73,6 +76,12 @@ impl WaterlilyIpc {
                                     "compositor: could not bound WaterLily stream reads: {error}"
                                 );
                                 continue;
+                            }
+                            // Hot-switch commands travel over the same stream
+                            // in the other direction; publish a writable clone
+                            // for the compositor thread.
+                            if let Ok(mut slot) = thread_command_stream.lock() {
+                                *slot = stream.try_clone().ok();
                             }
                             thread_connected.store(true, Ordering::Release);
                             thread_new_connection.store(true, Ordering::Release);
@@ -113,6 +122,9 @@ impl WaterlilyIpc {
                                     }
                                 }
                             }
+                            if let Ok(mut slot) = thread_command_stream.lock() {
+                                *slot = None;
+                            }
                             thread_connected.store(false, Ordering::Release);
                             mark_pending(&thread_pending, &thread_loop_signal);
                         }
@@ -145,8 +157,30 @@ impl WaterlilyIpc {
             connected,
             loop_signal,
             stop,
+            command_stream,
             receiver: Some(receiver),
         })
+    }
+
+    /// Deliver one newline-terminated control command to the connected worker.
+    /// Returns false when no worker is connected or the write fails.
+    pub(super) fn send_command(&self, command: &str) -> bool {
+        use std::io::Write;
+        let Ok(mut slot) = self.command_stream.lock() else {
+            return false;
+        };
+        let Some(stream) = slot.as_mut() else {
+            return false;
+        };
+        let payload = format!("{command}\n");
+        match stream.write_all(payload.as_bytes()) {
+            Ok(()) => true,
+            Err(error) => {
+                log::warn!("compositor: WaterLily command delivery failed: {error}");
+                *slot = None;
+                false
+            }
+        }
     }
 
     pub(super) fn has_pending(&self) -> bool {
@@ -393,6 +427,30 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         );
         self.waterlily_effect_enabled
+    }
+
+    /// Ask the connected worker to switch its simulation case. `next` cycles
+    /// the worker's registry; other names must match a registered case, which
+    /// the worker validates so a stale compositor list can never pin it.
+    pub(crate) fn set_waterlily_case(&mut self, case: &str) -> bool {
+        if !is_valid_case_request(case) {
+            log::warn!("compositor: rejected malformed WaterLily case request {case:?}");
+            return false;
+        }
+        let Some(ipc) = self.waterlily_ipc.as_ref() else {
+            log::warn!("compositor: WaterLily IPC is not initialized");
+            return false;
+        };
+        if !ipc.connected() {
+            log::info!("compositor: no WaterLily worker connected; case request dropped");
+            return false;
+        }
+        let delivered = ipc.send_command(&format!("case {case}"));
+        if delivered {
+            ipc.request_poll();
+            log::info!("compositor: requested WaterLily case {case}");
+        }
+        delivered
     }
 
     pub(super) fn poll_waterlily_frame(&mut self) -> bool {
@@ -777,6 +835,17 @@ fn expand_waterlily_damage(
     )
 }
 
+/// Case requests are forwarded verbatim onto the worker control stream, so
+/// only short lowercase identifiers (or the `next` cycling keyword) are
+/// eligible; anything else could smuggle protocol framing.
+fn is_valid_case_request(case: &str) -> bool {
+    !case.is_empty()
+        && case.len() <= 32
+        && case
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-')
+}
+
 fn mark_pending(pending: &AtomicBool, loop_signal: &Mutex<Option<calloop::LoopSignal>>) {
     pending.store(true, Ordering::Release);
     if let Ok(signal) = loop_signal.lock()
@@ -930,6 +999,52 @@ mod tests {
             );
             assert_eq!(motion.position(), [0.0, 0.0]);
         }
+    }
+
+    #[test]
+    fn command_stream_reaches_a_connected_worker() {
+        use std::io::{BufRead, BufReader};
+
+        let path = std::env::temp_dir().join(format!(
+            "jwm-waterlily-cmd-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let ipc = super::WaterlilyIpc::bind(path.clone()).unwrap();
+
+        assert!(
+            !ipc.send_command("case dance"),
+            "commands must not be deliverable before a worker connects"
+        );
+
+        let worker = std::os::unix::net::UnixStream::connect(&path).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !ipc.connected() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(ipc.connected());
+        assert!(ipc.send_command("case dance"));
+
+        worker
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(&worker).read_line(&mut line).unwrap();
+        assert_eq!(line, "case dance\n");
+    }
+
+    #[test]
+    fn case_requests_are_restricted_to_safe_identifiers() {
+        use super::is_valid_case_request;
+        assert!(is_valid_case_request("next"));
+        assert!(is_valid_case_request("hover"));
+        assert!(is_valid_case_request("von-karman_2"));
+        assert!(!is_valid_case_request(""));
+        assert!(!is_valid_case_request("case hover"));
+        assert!(!is_valid_case_request("hover\nquit"));
+        assert!(!is_valid_case_request("../../etc/passwd"));
+        assert!(!is_valid_case_request("Hover"));
+        assert!(!is_valid_case_request(&"x".repeat(33)));
     }
 
     #[test]

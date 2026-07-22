@@ -830,6 +830,12 @@ impl CompositorControl for X11rbBackend {
             .map(|compositor| compositor.toggle_waterlily_effect())
     }
 
+    fn compositor_set_waterlily_case(&mut self, case: &str) -> Option<bool> {
+        self.compositor
+            .as_mut()
+            .map(|compositor| compositor.set_waterlily_case(case))
+    }
+
     fn compositor_set_transition_mode(&mut self, mode: &str) {
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.set_transition_mode(mode);

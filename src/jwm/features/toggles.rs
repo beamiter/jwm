@@ -264,6 +264,28 @@ impl Jwm {
         Ok(())
     }
 
+    /// Hot-switch the WaterLily simulation case on the running worker.
+    /// An explicit name selects that case; no argument (or `next`) cycles
+    /// through the worker's registry.
+    pub fn waterlily_case(
+        &mut self,
+        backend: &mut dyn Backend,
+        arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let requested = match arg {
+            WMArgEnum::StringVec(values) if !values.is_empty() => values[0].as_str(),
+            _ => "next",
+        };
+        match backend.compositor_set_waterlily_case(requested) {
+            Some(true) => log::info!("WaterLily case request `{requested}` delivered"),
+            Some(false) => {
+                log::warn!("WaterLily case request `{requested}` dropped (no worker connected)")
+            }
+            None => log::warn!("WaterLily effect is unavailable on this backend"),
+        }
+        Ok(())
+    }
+
     /// 切换部分重绘(scissor 局部刷新,实验性,默认关)
     pub fn togglepartialdamage(
         &mut self,

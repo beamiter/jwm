@@ -199,9 +199,10 @@ end
 mutable struct WakeClient
     path::String
     stream::Union{Nothing,Base.PipeEndpoint}
+    commands::Channel{String}
 end
 
-WakeClient(path::AbstractString) = WakeClient(String(path), nothing)
+WakeClient(path::AbstractString) = WakeClient(String(path), nothing, Channel{String}(16))
 
 function disconnect!(client::WakeClient)
     if client.stream !== nothing
@@ -213,6 +214,37 @@ function disconnect!(client::WakeClient)
     end
 end
 
+"""
+The wake socket is bidirectional: the worker writes one-byte frame wakeups
+while the compositor writes newline-terminated control commands (for example
+`case dance`). A background task drains the read side into `commands` so the
+publish loop can poll without blocking.
+"""
+function start_command_reader!(client::WakeClient)
+    stream = client.stream
+    stream === nothing && return nothing
+    @async try
+        while true
+            line = readline(stream)
+            command = strip(line)
+            if isempty(command)
+                eof(stream) && break
+                continue
+            end
+            put!(client.commands, String(command))
+        end
+    catch
+        # A dropped consumer stream simply stops command delivery until the
+        # next reconnect creates a fresh reader.
+    end
+    return nothing
+end
+
+function take_command!(client::WakeClient)
+    isready(client.commands) || return nothing
+    return take!(client.commands)
+end
+
 function notify!(client::WakeClient)
     for _attempt in 1:2
         if client.stream === nothing
@@ -221,6 +253,7 @@ function notify!(client::WakeClient)
             catch
                 return false
             end
+            start_command_reader!(client)
         end
 
         try

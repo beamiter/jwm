@@ -1215,6 +1215,13 @@ pub trait CompositorControl: Send {
         None
     }
 
+    /// Ask the connected WaterLily worker to switch its simulation case
+    /// (`next` cycles). Returns None when the backend has no compositor and
+    /// Some(delivered) otherwise.
+    fn compositor_set_waterlily_case(&mut self, _case: &str) -> Option<bool> {
+        None
+    }
+
     fn compositor_set_transition_mode(&mut self, _mode: &str) {}
     fn compositor_apply_config(&mut self) {}
 }

@@ -1,4 +1,5 @@
 using JwmWaterLily
+using Sockets
 using Test
 
 @testset "CLI whitelist and dimensions" begin
@@ -71,8 +72,66 @@ end
           JwmWaterLily.SEISMIC_PALETTE[6]
 end
 
-@testset "CPU hover simulation smoke" begin
-    simulation_case = build_case("hover", (64, 64); memory=Array)
+@testset "palettes share the compositor keying contract" begin
+    @test length(JwmWaterLily.ALL_PALETTES) == 7
+    @test allunique(JwmWaterLily.ALL_PALETTES)
+    for palette in JwmWaterLily.ALL_PALETTES
+        @test length(palette) == 11
+        # The compositor shader replaces bright, low-chroma pixels with the
+        # frosted backdrop; every palette midpoint must stay in that key.
+        center = palette[6]
+        @test minimum(center) >= 0xf0
+        @test maximum(center) - minimum(center) <= 6
+        # The extremes must stay saturated so vortices remain opaque.
+        for extreme in (palette[1], palette[end])
+            @test maximum(extreme) - minimum(extreme) > 0x30
+        end
+    end
+end
+
+@testset "case registry lists every effect" begin
+    @test available_cases() ==
+          ["cylinder", "dance", "diamond", "flap", "hover", "orbit", "tandem"]
+end
+
+@testset "hot-switch command resolution" begin
+    @test JwmWaterLily.resolve_case_command("case dance", "hover") == "dance"
+    @test JwmWaterLily.resolve_case_command("case next", "cylinder") == "dance"
+    # `next` wraps the sorted registry and recovers from unknown current names.
+    @test JwmWaterLily.resolve_case_command("case next", "tandem") == "cylinder"
+    @test JwmWaterLily.resolve_case_command("case next", "retired") == "cylinder"
+    @test JwmWaterLily.resolve_case_command("case ../../etc", "hover") === nothing
+    @test JwmWaterLily.resolve_case_command("bogus", "hover") === nothing
+end
+
+@testset "wake client receives hot-switch commands" begin
+    mktempdir() do directory
+        path = joinpath(directory, "wake.sock")
+        server = Sockets.listen(path)
+        client = JwmWaterLily.WakeClient(path)
+        @test notify!(client)
+        consumer = Sockets.accept(server)
+        @test read(consumer, UInt8) == 0x01
+
+        write(consumer, "case dance\ncase next\n")
+        flush(consumer)
+        deadline = time() + 5.0
+        received = String[]
+        while length(received) < 2 && time() < deadline
+            command = JwmWaterLily.take_command!(client)
+            command === nothing ? sleep(0.01) : push!(received, command)
+        end
+        @test received == ["case dance", "case next"]
+        @test JwmWaterLily.take_command!(client) === nothing
+
+        close(client)
+        close(consumer)
+        close(server)
+    end
+end
+
+@testset "CPU simulation smoke: $name" for name in available_cases()
+    simulation_case = build_case(name, (64, 64); memory=Array)
     JwmWaterLily.advance!(simulation_case, 0.01)
     rgba = render_rgba(simulation_case)
 

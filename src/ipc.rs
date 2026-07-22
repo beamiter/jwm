@@ -136,6 +136,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "toggletag",
         "toggleview",
         "view",
+        "waterlily_case",
         "zoom",
     ],
     special_commands: &[
@@ -431,6 +432,14 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "togglecompositor" => Ok((Jwm::togglecompositor, parse_int_arg(args, 0)?)),
         "togglepartialdamage" => Ok((Jwm::togglepartialdamage, parse_int_arg(args, 0)?)),
         "toggle_waterlily" => Ok((Jwm::toggle_waterlily, parse_int_arg(args, 0)?)),
+        "waterlily_case" => {
+            let requested = if argument_is_omitted(args) {
+                vec!["next".to_string()]
+            } else {
+                parse_string_vec_arg(args).map_err(|e| format!("waterlily_case: {e}"))?
+            };
+            Ok((Jwm::waterlily_case, WMArgEnum::StringVec(requested)))
+        }
         // Compatibility only: intentionally omitted from IPC capability discovery.
         "toggle_slime" => {
             log::warn!("IPC action `toggle_slime` is deprecated; use `toggle_waterlily` instead");
