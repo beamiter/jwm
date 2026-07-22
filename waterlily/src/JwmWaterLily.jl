@@ -17,7 +17,7 @@ include("cases/wander.jl")
 include("cases/registry.jl")
 
 const DEFAULT_FPS = 30.0
-const DEFAULT_SIZE = (1280, 800)
+const DEFAULT_SIZE = (1980, 1080)
 const MIN_SIM_DIMENSION = 64
 const MAX_SIM_DIMENSION = 4096
 const MULTIGRID_QUANTUM = 16
