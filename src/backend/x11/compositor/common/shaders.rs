@@ -758,8 +758,41 @@ vec3 blurred_scene(vec2 uv) {
     return sum / 256.0;
 }
 
+// Catmull-Rom bicubic upsampling as nine bilinear fetches. The simulation
+// frame is stretched several times to cover the display; plain bilinear
+// magnification leaves visible texel stars on smooth vorticity gradients.
+vec4 sample_simulation(vec2 uv) {
+    vec2 tex_size = vec2(textureSize(u_texture, 0));
+    vec2 sample_pos = uv * tex_size;
+    vec2 nearest_texel = floor(sample_pos - 0.5) + 0.5;
+    vec2 f = sample_pos - nearest_texel;
+
+    vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    vec2 w3 = f * f * (-0.5 + 0.5 * f);
+    vec2 w12 = w1 + w2;
+
+    vec2 pos0 = (nearest_texel - 1.0) / tex_size;
+    vec2 pos12 = (nearest_texel + w2 / w12) / tex_size;
+    vec2 pos3 = (nearest_texel + 2.0) / tex_size;
+
+    vec4 result =
+          texture(u_texture, vec2(pos0.x, pos0.y)) * w0.x * w0.y
+        + texture(u_texture, vec2(pos12.x, pos0.y)) * w12.x * w0.y
+        + texture(u_texture, vec2(pos3.x, pos0.y)) * w3.x * w0.y
+        + texture(u_texture, vec2(pos0.x, pos12.y)) * w0.x * w12.y
+        + texture(u_texture, vec2(pos12.x, pos12.y)) * w12.x * w12.y
+        + texture(u_texture, vec2(pos3.x, pos12.y)) * w3.x * w12.y
+        + texture(u_texture, vec2(pos0.x, pos3.y)) * w0.x * w3.y
+        + texture(u_texture, vec2(pos12.x, pos3.y)) * w12.x * w3.y
+        + texture(u_texture, vec2(pos3.x, pos3.y)) * w3.x * w3.y;
+    // The negative Catmull-Rom lobes can overshoot on sharp edges.
+    return clamp(result, 0.0, 1.0);
+}
+
 void main() {
-    vec4 simulation = texture(u_texture, v_uv);
+    vec4 simulation = sample_simulation(v_uv);
 
     // The v1 producer emits an opaque, nearly-white simulation background.
     // Key only bright, low-chroma pixels so pale blue/red flow details remain.

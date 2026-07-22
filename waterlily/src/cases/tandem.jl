@@ -61,3 +61,13 @@ end
 case_palette(::TandemCase) = GLACIER_PALETTE
 body_color(::TandemCase) = BODY_COPPER
 remeasure_on_step(::TandemCase) = false
+
+function body_bounds(case::TandemCase, _dimensionless_time::Real)
+    reach = case.radius + 2
+    return (
+        case.front_center[1] - reach,
+        case.rear_center[1] + reach,
+        min(case.front_center[2], case.rear_center[2]) - reach,
+        max(case.front_center[2], case.rear_center[2]) + reach,
+    )
+end

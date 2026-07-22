@@ -63,3 +63,10 @@ end
 
 case_palette(::DanceCase) = VIOLET_PALETTE
 body_color(::DanceCase) = BODY_ROSE
+
+function body_bounds(case::DanceCase, dimensionless_time::Real)
+    vertical =
+        case.center[2] + case.heave_amplitude * sin(2pi * dimensionless_time / case.period)
+    reach = case.radius + 2
+    return (case.center[1] - reach, case.center[1] + reach, vertical - reach, vertical + reach)
+end

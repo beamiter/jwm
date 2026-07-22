@@ -13,10 +13,11 @@ include("cases/flap.jl")
 include("cases/tandem.jl")
 include("cases/diamond.jl")
 include("cases/orbit.jl")
+include("cases/wander.jl")
 include("cases/registry.jl")
 
 const DEFAULT_FPS = 30.0
-const DEFAULT_SIZE = (640, 400)
+const DEFAULT_SIZE = (1280, 800)
 const MIN_SIM_DIMENSION = 64
 const MAX_SIM_DIMENSION = 4096
 const MULTIGRID_QUANTUM = 16
@@ -59,7 +60,7 @@ function usage(io::IO=stdout)
         """
         usage: julia --project=waterlily waterlily/runner.jl [options]
 
-          --case NAME          registered case ($cases; default: hover)
+          --case NAME          registered case ($cases; default: wander)
           --device DEVICE      auto, cpu, cuda, or rocm (default: auto)
           --fps FPS            publication rate, 1..240 (default: 30)
           --socket PATH        compositor wakeup Unix socket
@@ -136,7 +137,7 @@ function parse_cli(args::AbstractVector{<:AbstractString})
     parsed === nothing && return nothing
 
     values = Dict(
-        "--case" => "hover",
+        "--case" => "wander",
         "--device" => "auto",
         "--fps" => string(DEFAULT_FPS),
         "--socket" => default_socket_path(),
@@ -341,6 +342,7 @@ function run_worker_with_backend(options::RunnerOptions, backend::SelectedBacken
 
     frame_period = 1.0 / options.fps
     current_case = options.case_name
+    scratch = RenderScratch(options.simulation_size)
     try
         while true
             started = time_ns()
@@ -364,10 +366,17 @@ function run_worker_with_backend(options::RunnerOptions, backend::SelectedBacken
                 end
             end
 
-            advance!(simulation_case, frame_period)
-            rgba = render_rgba(simulation_case)
+            # Pipeline the frame: snapshot the current state's vorticity and
+            # body pose on the host, then let the solver advance toward the
+            # next frame (GPU-heavy) while this thread colorizes and publishes
+            # the snapshot (CPU-heavy).
+            pose_time = simulation_time(simulation_case)
+            compute_vorticity!(scratch, simulation_case)
+            advance_task = Threads.@spawn advance!(simulation_case, frame_period)
+            rgba = render_rgba!(scratch, simulation_case, pose_time)
             publish!(publisher, rgba, time_ns())
             notify!(wakeups)
+            wait(advance_task)
 
             # Guarantee a scheduler point per frame so the command reader task
             # runs even when the solver saturates the frame budget.

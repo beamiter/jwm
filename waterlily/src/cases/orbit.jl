@@ -70,3 +70,12 @@ end
 
 case_palette(::OrbitCase) = COSMOS_PALETTE
 body_color(::OrbitCase) = BODY_GOLD
+
+function body_bounds(case::OrbitCase, dimensionless_time::Real)
+    phase = 2pi * dimensionless_time / case.period
+    sine, cosine = sincos(phase)
+    body_x = case.center[1] + case.orbit_radius * cosine
+    body_y = case.center[2] + case.orbit_radius * sine
+    reach = case.radius + 2
+    return (body_x - reach, body_x + reach, body_y - reach, body_y + reach)
+end

@@ -185,7 +185,7 @@ pub(crate) use wallpaper_common::{
     WallpaperImageData, WallpaperMode, compute_wallpaper_rect, parse_wallpaper_mode,
     resolve_wallpaper_for_tag,
 };
-use waterlily::{WaterlilyIpc, WaterlilyMotion, WaterlilyTexture};
+use waterlily::{WaterlilyIpc, WaterlilyTexture};
 pub(crate) use wobbly::WobblyState;
 
 use crate::backend::x11::compositor_common::{
@@ -528,7 +528,6 @@ where
     waterlily_ipc: Option<WaterlilyIpc>,
     waterlily_frame_reader: crate::backend::compositor_common::waterlily::WaterlilyFrameReader,
     waterlily_texture: Option<WaterlilyTexture>,
-    waterlily_motion: WaterlilyMotion,
     waterlily_effect_enabled: bool,
     waterlily_active: bool,
     /// A WaterLily publication/visibility change that must reach the front

@@ -883,7 +883,6 @@ impl<C: CompositorConnection> Compositor<C> {
             waterlily_ipc,
             waterlily_frame_reader,
             waterlily_texture: None,
-            waterlily_motion: WaterlilyMotion::new(),
             waterlily_effect_enabled: std::env::var("JWM_WATERLILY_ENABLED")
                 .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
                 .unwrap_or(false),

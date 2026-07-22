@@ -73,7 +73,7 @@ end
 end
 
 @testset "palettes share the compositor keying contract" begin
-    @test length(JwmWaterLily.ALL_PALETTES) == 7
+    @test length(JwmWaterLily.ALL_PALETTES) == 8
     @test allunique(JwmWaterLily.ALL_PALETTES)
     for palette in JwmWaterLily.ALL_PALETTES
         @test length(palette) == 11
@@ -91,17 +91,32 @@ end
 
 @testset "case registry lists every effect" begin
     @test available_cases() ==
-          ["cylinder", "dance", "diamond", "flap", "hover", "orbit", "tandem"]
+          ["cylinder", "dance", "diamond", "flap", "hover", "orbit", "tandem", "wander"]
 end
 
 @testset "hot-switch command resolution" begin
     @test JwmWaterLily.resolve_case_command("case dance", "hover") == "dance"
     @test JwmWaterLily.resolve_case_command("case next", "cylinder") == "dance"
     # `next` wraps the sorted registry and recovers from unknown current names.
-    @test JwmWaterLily.resolve_case_command("case next", "tandem") == "cylinder"
+    @test JwmWaterLily.resolve_case_command("case next", "wander") == "cylinder"
     @test JwmWaterLily.resolve_case_command("case next", "retired") == "cylinder"
     @test JwmWaterLily.resolve_case_command("case ../../etc", "hover") === nothing
     @test JwmWaterLily.resolve_case_command("bogus", "hover") === nothing
+end
+
+@testset "wandering body stays inside the canvas" begin
+    case = build_case("wander", (128, 64); memory=Array)
+    margin = case.radius
+    for time in 0.0:0.25:120.0
+        x, y = JwmWaterLily.wander_position(case, time)
+        @test margin <= x <= 128 - margin
+        @test margin <= y <= 64 - margin
+    end
+    # The non-repeating path must sweep most of the canvas over time.
+    xs = [JwmWaterLily.wander_position(case, t)[1] for t in 0.0:0.5:600.0]
+    ys = [JwmWaterLily.wander_position(case, t)[2] for t in 0.0:0.5:600.0]
+    @test maximum(xs) - minimum(xs) > 0.7 * 128
+    @test maximum(ys) - minimum(ys) > 0.5 * 64
 end
 
 @testset "wake client receives hot-switch commands" begin
@@ -138,4 +153,20 @@ end
     @test length(rgba) == 64 * 64 * 4
     @test all(==(0xff), @view rgba[4:4:end])
     @test length(unique(Iterators.partition(rgba, 4))) > 2
+
+    # The reusable-scratch fast path must colorize exactly like the
+    # allocating wrapper, and its body bounds must contain the body.
+    scratch = JwmWaterLily.RenderScratch((64, 64))
+    JwmWaterLily.compute_vorticity!(scratch, simulation_case)
+    pose_time = JwmWaterLily.simulation_time(simulation_case)
+    scratch_rgba = JwmWaterLily.render_rgba!(scratch, simulation_case, pose_time)
+    @test scratch_rgba === scratch.rgba
+    @test scratch_rgba == rgba
+
+    bounds = JwmWaterLily.body_bounds(simulation_case, pose_time)
+    @test bounds !== nothing
+    xmin, xmax, ymin, ymax = bounds
+    center_x, center_y = (xmin + xmax) / 2, (ymin + ymax) / 2
+    @test JwmWaterLily.body_distance(simulation_case, center_x, center_y, pose_time) <
+          (xmax - xmin)
 end

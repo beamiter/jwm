@@ -52,3 +52,13 @@ body_distance(case::CylinderCase, x::Real, y::Real, _dimensionless_time::Real) =
 case_palette(::CylinderCase) = OCEAN_PALETTE
 body_color(::CylinderCase) = BODY_SLATE
 remeasure_on_step(::CylinderCase) = false
+
+function body_bounds(case::CylinderCase, _dimensionless_time::Real)
+    reach = case.radius + 2
+    return (
+        case.center[1] - reach,
+        case.center[1] + reach,
+        case.center[2] - reach,
+        case.center[2] + reach,
+    )
+end

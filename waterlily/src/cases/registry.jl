@@ -6,6 +6,7 @@ const CASE_REGISTRY = Dict{String,Function}(
     "tandem" => build_tandem_case,
     "diamond" => build_diamond_case,
     "orbit" => build_orbit_case,
+    "wander" => build_wander_case,
 )
 
 available_cases() = sort!(collect(keys(CASE_REGISTRY)))

@@ -1378,7 +1378,6 @@ impl<C: CompositorConnection> Compositor<C> {
             self.context_current = true;
         }
         self.poll_waterlily_frame();
-        self.tick_waterlily_motion(std::time::Instant::now());
         let waterlily_layer_dirty = self.waterlily_layer_dirty;
 
         // P6A: Process deferred X11 operations at start of render frame

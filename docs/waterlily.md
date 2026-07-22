@@ -2,7 +2,7 @@
 
 JWM can composite colored frames produced by an external Julia
 [WaterLily.jl](https://github.com/WaterLily-jl/WaterLily.jl) worker as a
-native-size visual layer. The Julia process owns the simulation and can run it
+full-screen canvas layer. The Julia process owns the simulation and can run it
 on the CPU, an NVIDIA GPU, or an AMD GPU. JWM owns only the frame transport,
 texture upload, opacity, and final compositor rendering.
 
@@ -18,6 +18,7 @@ public `AutoBody` and `Simulation` APIs:
 | `tandem` | Two static cylinders in tandem with interfering, merging vortex streets | glacier azure/bronze |
 | `diamond` | Square prism rotated 45° whose sharp edges shed a wide, angular street | berry magenta/lime |
 | `orbit` | Cylinder stirring quiescent fluid along a circular orbit, curling spiral vortex arms | cosmos rose/slate |
+| `wander` | Cylinder roaming quiescent fluid on a smooth non-repeating Lissajous path, trailing its wake across the whole canvas (default) | aurora teal/magenta |
 
 Every diverging palette shares the same near-white midpoint, so the compositor
 shader's bright/low-chroma keying replaces quiescent fluid with the frosted
@@ -35,15 +36,18 @@ Julia WaterLily worker
               | RGBA8 double-buffer file + Unix socket wakeups
               v
 JWM X11 compositor
-  upload texture -> native-size, frosted, input-transparent moving layer
+  upload texture -> full-screen, frosted, input-transparent canvas layer
 ```
 
 This implementation is currently limited to the shared X11 compositor used by
 the `x11rb` and `xcb` backends. It is not available on the Wayland backends.
-The image is drawn one-to-one: a `320x200` worker frame occupies exactly
-`320x200` screen pixels. It follows continuously steered random waypoints while
-remaining inside the compositor area. Frames larger than the screen are
-clipped, never scaled. There is no per-window target.
+The worker frame is stretched to fill the entire output as a full-screen
+canvas: quiescent near-white fluid keys out to a frosted blur of the client
+scene across the whole display, while motion lives inside the simulation
+itself — the default `wander` case roams its body around the canvas and the
+wake ripples propagate everywhere it goes. Fluid has no reference geometry,
+so the stretch from the simulation aspect ratio to the display's is not
+visually objectionable. There is no per-window target.
 
 WaterLily is rendered in its own compositor pass after client post-processing,
 so it does not alter client texture sampling, blur, color/accessibility
@@ -83,12 +87,12 @@ In a second terminal, start the worker:
 
 ```bash
 julia --project=waterlily --threads=auto waterlily/runner.jl \
-  --case hover \
+  --case wander \
   --device auto \
   --fps 30
 ```
 
-Swap `--case hover` for any other registered case to select the starting
+Swap `--case wander` for any other registered case to select the starting
 effect; `--help` prints the current registry. A running worker can also be
 switched live — see "Hot-switching cases" below.
 
@@ -116,10 +120,10 @@ target/debug/jwm
 
 ```bash
 julia --project=waterlily --threads=auto waterlily/runner.jl \
-  --case hover \
+  --case wander \
   --device cpu \
   --fps 30 \
-  --sim-size 320x200 \
+  --sim-size 640x400 \
   --socket /tmp/jwm-waterlily-test.sock \
   --frame-file /tmp/jwm-waterlily-test.frame
 ```
@@ -199,8 +203,15 @@ The following environment variables are read when the integration starts:
 | `JWM_WATERLILY_OPACITY` | Layer blend opacity, clamped to `0..1` |
 
 The socket and frame-file values supplied to JWM and the worker must match.
-The published simulation resolution is also its compositor display size; JWM
-does not stretch it to the display resolution.
+The published simulation frame is stretched to cover the display, so the
+`--sim-size` choice trades solver cost against on-screen sharpness; `640x400`
+reads well on common 16:9/16:10 outputs, and `1280x800` is comfortable on a
+discrete GPU. The worker pipelines each frame — the device solver advances
+the next state while host threads colorize and publish the previous one — so
+start it with `--threads=auto` to keep the renderer parallel. Raw solver time
+per published frame scales with the case's length scale (its body size), so a
+case that overruns the frame budget degrades to a lower publish rate instead
+of stuttering.
 
 ## Version 1 frame-file protocol
 

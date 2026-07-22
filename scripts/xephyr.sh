@@ -13,9 +13,9 @@ target/debug/jwm
 
 # Julia producer. The simulation is scaled by JWM to the complete Xephyr output.
 julia --project=waterlily --threads=auto waterlily/runner.jl \
-  --case hover \
+  --case wander \
   --device auto \
   --fps 30 \
-  --sim-size 320x200 \
+  --sim-size 640x400 \
   --socket /tmp/jwm-waterlily-test.sock \
   --frame-file /tmp/jwm-waterlily-test.frame

@@ -67,3 +67,13 @@ end
 case_palette(::DiamondCase) = BERRY_PALETTE
 body_color(::DiamondCase) = BODY_PLUM
 remeasure_on_step(::DiamondCase) = false
+
+function body_bounds(case::DiamondCase, _dimensionless_time::Real)
+    reach = case.half_side * sqrt(2.0) + 2
+    return (
+        case.center[1] - reach,
+        case.center[1] + reach,
+        case.center[2] - reach,
+        case.center[2] + reach,
+    )
+end

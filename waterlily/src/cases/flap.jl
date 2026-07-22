@@ -83,3 +83,13 @@ end
 
 case_palette(::FlapCase) = EMBER_PALETTE
 body_color(::FlapCase) = BODY_TEAL
+
+function body_bounds(case::FlapCase, _dimensionless_time::Real)
+    reach = case.chord + case.half_thickness + 2
+    return (
+        case.pivot[1] - reach,
+        case.pivot[1] + reach,
+        case.pivot[2] - reach,
+        case.pivot[2] + reach,
+    )
+end

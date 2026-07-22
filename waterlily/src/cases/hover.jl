@@ -96,3 +96,10 @@ end
 
 case_palette(::HoverCase) = SEISMIC_PALETTE
 body_color(::HoverCase) = BODY_LAVENDER
+
+function body_bounds(case::HoverCase, dimensionless_time::Real)
+    phase = 2pi * dimensionless_time / case.period
+    vertical = case.center[2] + case.heave_amplitude * sin(phase)
+    reach = case.half_span + case.half_thickness + 2
+    return (case.center[1] - reach, case.center[1] + reach, vertical - reach, vertical + reach)
+end
