@@ -16,7 +16,7 @@ include("cases/orbit.jl")
 include("cases/registry.jl")
 
 const DEFAULT_FPS = 30.0
-const DEFAULT_SIZE = (320, 200)
+const DEFAULT_SIZE = (640, 400)
 const MIN_SIM_DIMENSION = 64
 const MAX_SIM_DIMENSION = 4096
 const MULTIGRID_QUANTUM = 16
