@@ -154,6 +154,31 @@ function advance!(case::AbstractWaterLilyCase, dimensionless_step::Real)
 end
 
 """
+Advance toward `dimensionless_step` more simulation time, but stop after the
+substep that crosses `deadline_ns` (`time_ns()` clock). At least one substep
+always runs. Returns the dimensionless time actually gained.
+
+This keeps the publish cadence fixed under load: when the solver cannot
+reach real time within the frame budget the simulation clock dilates into
+smooth slow motion instead of stalling the frame stream.
+"""
+function advance_budgeted!(
+    case::AbstractWaterLilyCase,
+    dimensionless_step::Real,
+    deadline_ns::UInt64,
+)
+    simulation = case.simulation
+    remeasure = remeasure_on_step(case)
+    start = WaterLily.sim_time(simulation)
+    target = start + dimensionless_step
+    while true
+        WaterLily.sim_step!(simulation; remeasure)
+        achieved = WaterLily.sim_time(simulation)
+        (achieved >= target || time_ns() >= deadline_ns) && return achieved - start
+    end
+end
+
+"""
 Reusable host-side buffers for the frame renderer. Allocating fresh
 megabyte-scale arrays every frame produced enough garbage to stall the
 publish loop, so the worker keeps one scratch for its lifetime.

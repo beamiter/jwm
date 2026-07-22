@@ -104,6 +104,16 @@ end
     @test JwmWaterLily.resolve_case_command("bogus", "hover") === nothing
 end
 
+@testset "budgeted advance dilates instead of stalling" begin
+    case = build_case("wander", (64, 64); memory=Array)
+    # A generous deadline reaches the requested step.
+    full = JwmWaterLily.advance_budgeted!(case, 0.02, time_ns() + UInt64(30_000_000_000))
+    @test full >= 0.02
+    # An expired deadline still takes exactly one substep and makes progress.
+    partial = JwmWaterLily.advance_budgeted!(case, 10.0, time_ns())
+    @test 0 < partial < 10.0
+end
+
 @testset "wandering body stays inside the canvas" begin
     case = build_case("wander", (128, 64); memory=Array)
     margin = case.radius

@@ -343,6 +343,14 @@ function run_worker_with_backend(options::RunnerOptions, backend::SelectedBacken
     frame_period = 1.0 / options.fps
     current_case = options.case_name
     scratch = RenderScratch(options.simulation_size)
+    # Leave a slice of the budget for publish pacing; the solver checks the
+    # deadline only between substeps, so it can overshoot by one substep and
+    # the pacing sleep below absorbs that overshoot.
+    advance_budget_ns = UInt64(round(0.85 * frame_period * 1.0e9))
+    frame_period_ns = UInt64(round(frame_period * 1.0e9))
+    dilation_window = 0.0
+    dilation_frames = 0
+    next_frame_ns = time_ns() + frame_period_ns
     try
         while true
             started = time_ns()
@@ -366,23 +374,51 @@ function run_worker_with_backend(options::RunnerOptions, backend::SelectedBacken
                 end
             end
 
-            # Pipeline the frame: snapshot the current state's vorticity and
-            # body pose on the host, then let the solver advance toward the
-            # next frame (GPU-heavy) while this thread colorizes and publishes
-            # the snapshot (CPU-heavy).
+            # Publish first, then advance: the frame reaches the compositor a
+            # few milliseconds into the period, and the solver spends the rest
+            # of the budget stepping toward the next state. Overlapping the
+            # solver in a separate task measured slower — the threaded
+            # colorize loop starves the task issuing device kernels.
             pose_time = simulation_time(simulation_case)
             compute_vorticity!(scratch, simulation_case)
-            advance_task = Threads.@spawn advance!(simulation_case, frame_period)
             rgba = render_rgba!(scratch, simulation_case, pose_time)
             publish!(publisher, rgba, time_ns())
             notify!(wakeups)
-            wait(advance_task)
+            achieved_step = advance_budgeted!(
+                simulation_case,
+                frame_period,
+                started + advance_budget_ns,
+            )
+
+            # Report sustained slow motion about once every ten seconds
+            # rather than spamming per frame.
+            dilation_window += min(Float64(achieved_step) / frame_period, 1.0)
+            dilation_frames += 1
+            if dilation_frames >= round(Int, 10 * options.fps)
+                speed = dilation_window / dilation_frames
+                speed < 0.9 && @info(
+                    "solver below real time; simulation running in slow motion",
+                    speed = round(speed; digits=2),
+                    hint = "reduce --sim-size for real-time playback",
+                )
+                dilation_window = 0.0
+                dilation_frames = 0
+            end
 
             # Guarantee a scheduler point per frame so the command reader task
             # runs even when the solver saturates the frame budget.
             yield()
-            elapsed = Float64(time_ns() - started) / 1.0e9
-            elapsed < frame_period && sleep(frame_period - elapsed)
+            # Pace against an absolute schedule: sleep() habitually oversleeps
+            # by a millisecond or two, and a per-frame relative sleep would
+            # accumulate that jitter into a visibly lower publish rate.
+            now = time_ns()
+            if now < next_frame_ns
+                sleep(Float64(next_frame_ns - now) / 1.0e9)
+                next_frame_ns += frame_period_ns
+            else
+                # Behind schedule: restart the cadence rather than bursting.
+                next_frame_ns = time_ns() + frame_period_ns
+            end
         end
     catch error
         error isa InterruptException || rethrow()

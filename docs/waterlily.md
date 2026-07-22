@@ -206,12 +206,13 @@ The socket and frame-file values supplied to JWM and the worker must match.
 The published simulation frame is stretched to cover the display, so the
 `--sim-size` choice trades solver cost against on-screen sharpness; `640x400`
 reads well on common 16:9/16:10 outputs, and `1280x800` is comfortable on a
-discrete GPU. The worker pipelines each frame — the device solver advances
-the next state while host threads colorize and publish the previous one — so
-start it with `--threads=auto` to keep the renderer parallel. Raw solver time
-per published frame scales with the case's length scale (its body size), so a
-case that overruns the frame budget degrades to a lower publish rate instead
-of stuttering.
+discrete GPU. Start the worker with `--threads=auto` to keep the colorize loop parallel.
+Publishing is paced against an absolute schedule and the solver advances
+under a per-frame time budget: when the simulation cannot reach real time
+within the budget, the publish cadence stays fixed and the simulation clock
+dilates into smooth slow motion instead of stuttering. The worker logs the
+sustained simulation speed when it stays below real time; reduce
+`--sim-size` for real-time playback.
 
 ## Version 1 frame-file protocol
 
