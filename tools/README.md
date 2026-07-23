@@ -68,24 +68,34 @@ jwm-tool debug
 ### 嵌套后端冒烟矩阵
 
 在现有桌面里以私有 `XDG_RUNTIME_DIR` 启动嵌套开发后端
-（`wayland-winit` / `wayland-x11`），按固定矩阵依次验证:启动、
-IPC 健康、配置重载、窗口生命周期、截图能力、干净退出。每一步都有
-显式超时;失败时保留唯一一份日志目录并在报告中给出可执行的下一步。
+（`wayland-winit` / `wayland-x11`,以及 Xephyr 内的 `x11rb` /
+`xcb`），按固定矩阵依次验证:启动、IPC 健康、配置重载、窗口生命
+周期、截图能力、策略场景、干净退出。每一步都有显式超时;失败时保
+留唯一一份日志目录并在报告中给出可执行的下一步。
 
 ```bash
-jwm-tool nested-smoke                 # 按宿主会话自动选择后端
+jwm-tool nested-smoke                 # 按宿主会话自动选择全部后端
 jwm-tool nested-smoke --backend winit # 只测 wayland-winit
+jwm-tool nested-smoke --backend x11-transports # 只测 x11rb+xcb 及差分
 jwm-tool nested-smoke --json          # 版本化 JSON 报告 (schema_version 1)
 jwm-tool nested-smoke --save          # 保存到 $XDG_RUNTIME_DIR/jwm-smoke
 jwm-tool nested-smoke --client foot   # 指定窗口生命周期客户端
 jwm-tool nested-smoke --keep          # 通过时也保留运行目录与日志
 ```
 
-退出码:`0` 全部通过(跳过不算失败)、`1` 有步骤失败、`2` 宿主
-会话没有可测的嵌套后端。窗口生命周期步骤自动探测常见 Wayland
-客户端(foot、weston-terminal、alacritty、kitty、adwaita-1-demo、
-gtk4-demo);截图步骤按 `get_capture_status` 的真实能力决定执行或
-跳过——嵌套后端不服务帧捕获,因此如实记为 skip。
+退出码:`0` 全部通过(跳过不算失败)、`1` 有步骤失败或传输差分不
+一致、`2` 宿主会话没有可测的嵌套后端。窗口生命周期步骤按会话协议
+自动探测客户端(Wayland:foot、weston-terminal、alacritty、kitty、
+adwaita-1-demo、gtk4-demo;X11:xterm、xclock、xeyes);截图步骤在
+Wayland 行按 `get_capture_status` 的真实能力决定执行或跳过(嵌套
+后端不服务帧捕获,如实记 skip),在 X11 行用 `xwd` 抓取 Xephyr
+根窗口验证像素可读。
+
+**x11rb vs xcb 差分**:两个 X11 传输在各自的 Xephyr 里执行同一段
+固定 IPC 场景(映射客户端 → 切 tag → 切回 → 切浮动),每一步截取
+一份归一化可观测状态快照(窗口 class/tags/浮动/几何 + 工作区布局/
+占用;传输相关 id 与异步标题按定义排除)。任一快照不一致即整个矩
+阵失败,并指明第几个快照、哪个部分发生分歧。
 
 ### 守护进程日志
 

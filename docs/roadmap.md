@@ -150,7 +150,17 @@ mock implementing the complete backend surface. (First met by
   `backend::compositor_common::expose` over their native window-id types.
 - Keep GLX and EGL/GLES resource ownership in explicit platform adapters.
 - Add differential tests that feed identical policy events to both X11
-  transports and compare observable state.
+  transports and compare observable state. Started: the nested smoke
+  matrix now boots `x11rb` and `xcb` inside private Xephyr servers and
+  drives both through the same fixed IPC scenario (map a client, switch
+  tags, toggle floating), capturing a normalized observable-state
+  snapshot after each stage — window class/tags/floating/geometry and
+  per-workspace layout/occupancy, with transport-relative ids and
+  asynchronous titles excluded by construction. `jwm-tool nested-smoke`
+  compares the two transports' snapshot sequences and fails the matrix
+  on the first divergence, naming the snapshot index and section; the
+  normalization and comparison rules are pure and unit-tested, and the
+  first live runs confirmed both transports produce identical state.
 
 Exit criteria: new X11 policy features are implemented once, while protocol and
 renderer differences remain isolated and independently testable.

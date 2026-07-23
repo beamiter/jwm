@@ -230,10 +230,12 @@ enum Commands {
         save: Option<Option<PathBuf>>,
     },
 
-    /// 嵌套后端冒烟矩阵：启动 wayland-winit / wayland-x11，验证启动、IPC
-    /// 健康、配置重载、窗口生命周期、截图能力与干净退出
+    /// 嵌套后端冒烟矩阵：启动 wayland-winit / wayland-x11 及 Xephyr 内的
+    /// x11rb / xcb，验证启动、IPC 健康、配置重载、窗口生命周期、截图能力、
+    /// 策略场景（x11rb vs xcb 可观测状态差分）与干净退出
     NestedSmoke {
-        /// 只测指定后端（winit | x11；默认按宿主会话自动选择）
+        /// 只测指定后端（winit | x11 | x11rb | xcb | x11-transports；
+        /// 默认按宿主会话自动选择全部）
         #[arg(long, value_name = "BACKEND")]
         backend: Option<String>,
         /// 输出版本化 JSON 报告
@@ -1768,20 +1770,40 @@ fn parse_nested_smoke_backends(
 ) -> io::Result<Vec<nested_smoke::NestedBackendKind>> {
     let display = env::var("DISPLAY").ok();
     let wayland_display = env::var("WAYLAND_DISPLAY").ok();
-    let eligible = nested_smoke::eligible_backends(display.as_deref(), wayland_display.as_deref());
+    let eligible = nested_smoke::eligible_backends(
+        display.as_deref(),
+        wayland_display.as_deref(),
+        nested_smoke::xephyr_available(),
+    );
+    let keep = |wanted: nested_smoke::NestedBackendKind| -> Vec<nested_smoke::NestedBackendKind> {
+        eligible
+            .iter()
+            .copied()
+            .filter(|kind| *kind == wanted)
+            .collect()
+    };
     match requested {
         None | Some("all") => Ok(eligible),
-        Some("winit") | Some("wayland-winit") => Ok(eligible
+        Some("winit") | Some("wayland-winit") => Ok(keep(nested_smoke::NestedBackendKind::Winit)),
+        Some("x11") | Some("wayland-x11") => Ok(keep(nested_smoke::NestedBackendKind::X11)),
+        Some("x11rb") => Ok(keep(nested_smoke::NestedBackendKind::X11rb)),
+        Some("xcb") => Ok(keep(nested_smoke::NestedBackendKind::Xcb)),
+        // Both X11 transports plus the differential comparison between them.
+        Some("x11-transports") | Some("differential") => Ok(eligible
             .into_iter()
-            .filter(|kind| matches!(kind, nested_smoke::NestedBackendKind::Winit))
-            .collect()),
-        Some("x11") | Some("wayland-x11") => Ok(eligible
-            .into_iter()
-            .filter(|kind| matches!(kind, nested_smoke::NestedBackendKind::X11))
+            .filter(|kind| {
+                matches!(
+                    kind,
+                    nested_smoke::NestedBackendKind::X11rb | nested_smoke::NestedBackendKind::Xcb
+                )
+            })
             .collect()),
         Some(other) => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("unknown nested backend '{other}'; expected winit | x11 | all"),
+            format!(
+                "unknown nested backend '{other}'; expected \
+                 winit | x11 | x11rb | xcb | x11-transports | all"
+            ),
         )),
     }
 }
@@ -1873,6 +1895,21 @@ fn run_nested_smoke_command(
             }
             if let Some(artifacts) = &run.artifacts_dir {
                 println!("  artifacts: {artifacts}");
+            }
+        }
+        if let Some(differential) = &report.differential {
+            println!();
+            println!(
+                "[differential x11rb vs xcb] {}  {}",
+                match differential.status {
+                    nested_smoke::DifferentialStatus::Pass => "PASS",
+                    nested_smoke::DifferentialStatus::Fail => "FAIL",
+                    nested_smoke::DifferentialStatus::Skip => "skip",
+                },
+                differential.detail
+            );
+            if let Some(action) = &differential.action {
+                println!("  -> {action}");
             }
         }
         if let Some(path) = &saved_path {

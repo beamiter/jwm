@@ -31,6 +31,15 @@ pub const NESTED_SMOKE_SCHEMA_VERSION: u32 = 1;
 pub enum NestedBackendKind {
     Winit,
     X11,
+    X11rb,
+    Xcb,
+}
+
+/// Which display protocol the nested jwm session serves to its clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NestedFamily {
+    Wayland,
+    X11,
 }
 
 impl NestedBackendKind {
@@ -39,6 +48,8 @@ impl NestedBackendKind {
         match self {
             Self::Winit => "wayland-winit",
             Self::X11 => "wayland-x11",
+            Self::X11rb => "x11rb",
+            Self::Xcb => "xcb",
         }
     }
 
@@ -47,6 +58,16 @@ impl NestedBackendKind {
         match self {
             Self::Winit => "winit",
             Self::X11 => "x11",
+            Self::X11rb => "x11rb",
+            Self::Xcb => "xcb",
+        }
+    }
+
+    #[must_use]
+    pub const fn family(self) -> NestedFamily {
+        match self {
+            Self::Winit | Self::X11 => NestedFamily::Wayland,
+            Self::X11rb | Self::Xcb => NestedFamily::X11,
         }
     }
 }
@@ -54,11 +75,13 @@ impl NestedBackendKind {
 /// Which nested backends can run on this host session.
 ///
 /// `wayland-winit` follows winit and accepts either host session type;
-/// `wayland-x11` requires an X11 host.
+/// `wayland-x11` requires an X11 host; the `x11rb`/`xcb` transports run
+/// inside a Xephyr server, which itself needs an X11-capable host display.
 #[must_use]
 pub fn eligible_backends(
     display: Option<&str>,
     wayland_display: Option<&str>,
+    has_xephyr: bool,
 ) -> Vec<NestedBackendKind> {
     let has_x11 = display.is_some_and(|value| !value.is_empty());
     let has_wayland = wayland_display.is_some_and(|value| !value.is_empty());
@@ -69,7 +92,17 @@ pub fn eligible_backends(
     if has_x11 {
         backends.push(NestedBackendKind::X11);
     }
+    if has_x11 && has_xephyr {
+        backends.push(NestedBackendKind::X11rb);
+        backends.push(NestedBackendKind::Xcb);
+    }
     backends
+}
+
+/// Whether the Xephyr nested X server needed by the X11 transports exists.
+#[must_use]
+pub fn xephyr_available() -> bool {
+    command_in_path("Xephyr")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +143,11 @@ pub const MATRIX: &[StepSpec] = &[
         timeout: Duration::from_secs(10),
     },
     StepSpec {
+        name: "policy_scenario",
+        required: false,
+        timeout: Duration::from_secs(30),
+    },
+    StepSpec {
         name: "clean_shutdown",
         required: true,
         timeout: Duration::from_secs(10),
@@ -138,12 +176,14 @@ pub fn absolute_wayland_display(host_runtime_dir: &str, wayland_display: &str) -
 /// Environment overrides for the nested jwm child process.
 ///
 /// Returns `(set, remove)` pairs; pure so the isolation policy is testable.
+/// `nested_x11_display` is the Xephyr display the X11 transports run inside.
 #[must_use]
 pub fn child_env_overrides(
     kind: NestedBackendKind,
     private_runtime_dir: &Path,
     host_runtime_dir: Option<&str>,
     host_wayland_display: Option<&str>,
+    nested_x11_display: Option<&str>,
 ) -> (Vec<(String, String)>, Vec<&'static str>) {
     let mut set = vec![
         (
@@ -174,6 +214,14 @@ pub fn child_env_overrides(
         NestedBackendKind::X11 => {
             // The smithay X11 backend uses DISPLAY only; a live host
             // WAYLAND_DISPLAY must not leak into the nested session.
+            remove.push("WAYLAND_DISPLAY");
+        }
+        NestedBackendKind::X11rb | NestedBackendKind::Xcb => {
+            // The X11 transports manage the private Xephyr display; the
+            // host session must not leak in through either protocol.
+            if let Some(display) = nested_x11_display {
+                set.push(("DISPLAY".to_string(), display.to_string()));
+            }
             remove.push("WAYLAND_DISPLAY");
         }
     }
@@ -223,9 +271,240 @@ pub const CLIENT_CANDIDATES: &[&str] = &[
     "gtk4-demo",
 ];
 
+/// Client candidates for the nested X11 (Xephyr) sessions.
+pub const X11_CLIENT_CANDIDATES: &[&str] = &["xterm", "xclock", "xeyes"];
+
+#[must_use]
+pub const fn client_candidates(family: NestedFamily) -> &'static [&'static str] {
+    match family {
+        NestedFamily::Wayland => CLIENT_CANDIDATES,
+        NestedFamily::X11 => X11_CLIENT_CANDIDATES,
+    }
+}
+
 #[must_use]
 pub fn png_signature_valid(bytes: &[u8]) -> bool {
     bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A])
+}
+
+/// Sanity-check an `xwd` dump: the header is at least 100 bytes and encodes
+/// `header_size` then `file_version == 7`, both big-endian.
+#[must_use]
+pub fn xwd_signature_valid(bytes: &[u8]) -> bool {
+    if bytes.len() < 100 {
+        return false;
+    }
+    let header_size = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let version = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    header_size >= 100 && version == 7
+}
+
+// ---------------------------------------------------------------------------
+// Differential policy scenario (pure normalization + comparison)
+// ---------------------------------------------------------------------------
+
+/// The fixed IPC command sequence driven between scenario snapshots. Snapshot
+/// 0 is taken right after the scenario client maps; each command produces one
+/// further snapshot, so `SCENARIO_COMMANDS.len() + 1` snapshots total.
+pub const SCENARIO_COMMANDS: &[(&str, &str)] = &[
+    ("view", r#"{"tag":2}"#),
+    ("view", r#"{"tag":1}"#),
+    ("togglefloating", "null"),
+];
+
+/// Reduce `get_windows` + `get_workspaces` payloads to the transport-neutral
+/// observable state the differential comparison is defined over.
+///
+/// Dropped on purpose: window ids (transport-relative) and titles (set
+/// asynchronously by clients, so capture timing would make them flaky).
+/// Geometry stays: the tiling layout fully determines it, so a divergence is
+/// a real policy or pixel-math difference between the transports.
+#[must_use]
+pub fn normalize_observable_state(
+    windows: &serde_json::Value,
+    workspaces: &serde_json::Value,
+) -> serde_json::Value {
+    let mut normalized_windows: Vec<serde_json::Value> = windows
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|window| {
+                    serde_json::json!({
+                        "class": window["class"],
+                        "instance": window["instance"],
+                        "tags": window["tags"],
+                        "floating": window["is_floating"],
+                        "fullscreen": window["is_fullscreen"],
+                        "focused": window["is_focused"],
+                        "monitor": window["monitor"],
+                        "x": window["x"],
+                        "y": window["y"],
+                        "w": window["w"],
+                        "h": window["h"],
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    normalized_windows.sort_by_key(|window| {
+        (
+            window["class"].as_str().unwrap_or_default().to_string(),
+            window["instance"].as_str().unwrap_or_default().to_string(),
+            window["x"].as_i64().unwrap_or_default(),
+            window["y"].as_i64().unwrap_or_default(),
+        )
+    });
+
+    let mut normalized_workspaces: Vec<serde_json::Value> = workspaces
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|workspace| {
+                    serde_json::json!({
+                        "monitor": workspace["monitor"],
+                        "tag_index": workspace["tag_index"],
+                        "layout": workspace["layout"],
+                        "n_master": workspace["n_master"],
+                        "num_clients": workspace["num_clients"],
+                        "focused": workspace["focused"],
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    normalized_workspaces.sort_by_key(|workspace| {
+        (
+            workspace["monitor"].as_i64().unwrap_or_default(),
+            workspace["tag_index"].as_i64().unwrap_or_default(),
+        )
+    });
+
+    serde_json::json!({
+        "windows": normalized_windows,
+        "workspaces": normalized_workspaces,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DifferentialStatus {
+    Pass,
+    Fail,
+    Skip,
+}
+
+/// Outcome of comparing the two X11 transports' scenario snapshots.
+#[derive(Debug, Clone, Serialize)]
+pub struct DifferentialReport {
+    pub status: DifferentialStatus,
+    /// Transports whose snapshots were compared (labels).
+    pub compared: Vec<String>,
+    pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+}
+
+/// Compare the x11rb and xcb scenario snapshots. Only produced when at least
+/// one X11 transport was part of the matrix; skips (with the reason) when the
+/// comparison has fewer than two complete snapshot sets.
+#[must_use]
+pub fn differential_outcome(runs: &[RunReport]) -> Option<DifferentialReport> {
+    let x11_runs: Vec<&RunReport> = runs
+        .iter()
+        .filter(|run| run.backend.family() == NestedFamily::X11)
+        .collect();
+    if x11_runs.is_empty() {
+        return None;
+    }
+    let complete: Vec<&RunReport> = x11_runs
+        .iter()
+        .copied()
+        .filter(|run| run.scenario.is_some())
+        .collect();
+    if complete.len() < 2 {
+        return Some(DifferentialReport {
+            status: DifferentialStatus::Skip,
+            compared: Vec::new(),
+            detail: format!(
+                "need scenario snapshots from both X11 transports, have {}",
+                complete.len()
+            ),
+            action: None,
+        });
+    }
+    let reference = complete[0];
+    let reference_snapshots = reference.scenario.as_ref().expect("filtered above");
+    for candidate in &complete[1..] {
+        let candidate_snapshots = candidate.scenario.as_ref().expect("filtered above");
+        if reference_snapshots.len() != candidate_snapshots.len() {
+            return Some(divergence_report(
+                reference,
+                candidate,
+                format!(
+                    "snapshot counts differ: {} has {}, {} has {}",
+                    reference.backend.label(),
+                    reference_snapshots.len(),
+                    candidate.backend.label(),
+                    candidate_snapshots.len()
+                ),
+            ));
+        }
+        for (index, (left, right)) in reference_snapshots
+            .iter()
+            .zip(candidate_snapshots)
+            .enumerate()
+        {
+            if left != right {
+                let section = if left["windows"] != right["windows"] {
+                    "windows"
+                } else {
+                    "workspaces"
+                };
+                return Some(divergence_report(
+                    reference,
+                    candidate,
+                    format!(
+                        "snapshot {index} diverges in `{section}` between {} and {}",
+                        reference.backend.label(),
+                        candidate.backend.label()
+                    ),
+                ));
+            }
+        }
+    }
+    Some(DifferentialReport {
+        status: DifferentialStatus::Pass,
+        compared: complete
+            .iter()
+            .map(|run| run.backend.label().to_string())
+            .collect(),
+        detail: format!(
+            "{} scenario snapshots identical across {} transports",
+            reference_snapshots.len(),
+            complete.len()
+        ),
+        action: None,
+    })
+}
+
+fn divergence_report(
+    reference: &RunReport,
+    candidate: &RunReport,
+    detail: String,
+) -> DifferentialReport {
+    DifferentialReport {
+        status: DifferentialStatus::Fail,
+        compared: vec![
+            reference.backend.label().to_string(),
+            candidate.backend.label().to_string(),
+        ],
+        detail,
+        action: Some(
+            "re-run with `--json --save` and diff the two runs' `scenario` arrays".to_string(),
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +541,10 @@ pub struct RunReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifacts_dir: Option<String>,
     pub steps: Vec<StepReport>,
+    /// Normalized observable-state snapshots captured by `policy_scenario`;
+    /// present only when the scenario ran to completion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scenario: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -285,6 +568,10 @@ pub struct MatrixReport {
     pub generated_unix_ms: u128,
     pub host: HostInfo,
     pub runs: Vec<RunReport>,
+    /// x11rb-versus-xcb observable-state comparison; present whenever at
+    /// least one X11 transport was part of the matrix.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub differential: Option<DifferentialReport>,
 }
 
 /// A run fails exactly when a step failed; skips (missing optional tooling,
@@ -307,10 +594,15 @@ pub fn matrix_exit_code(report: &MatrixReport) -> i32 {
     if report.runs.is_empty() {
         return 2;
     }
-    if report
-        .runs
-        .iter()
-        .any(|run| matches!(run.result, RunResult::Fail))
+    let differential_failed = report
+        .differential
+        .as_ref()
+        .is_some_and(|differential| matches!(differential.status, DifferentialStatus::Fail));
+    if differential_failed
+        || report
+            .runs
+            .iter()
+            .any(|run| matches!(run.result, RunResult::Fail))
     {
         1
     } else {
@@ -343,11 +635,12 @@ pub fn run_nested_smoke(options: &NestedSmokeOptions) -> MatrixReport {
         wayland_display: std::env::var("WAYLAND_DISPLAY").ok(),
         jwm_binary: options.jwm_binary.display().to_string(),
     };
-    let runs = options
+    let runs: Vec<RunReport> = options
         .backends
         .iter()
         .map(|kind| run_backend(*kind, options))
         .collect();
+    let differential = differential_outcome(&runs);
     MatrixReport {
         schema_version: NESTED_SMOKE_SCHEMA_VERSION,
         generated_unix_ms: SystemTime::now()
@@ -356,13 +649,19 @@ pub fn run_nested_smoke(options: &NestedSmokeOptions) -> MatrixReport {
             .unwrap_or_default(),
         host,
         runs,
+        differential,
     }
 }
 
 struct RunContext {
+    kind: NestedBackendKind,
     runtime_dir: PathBuf,
     child: Option<Child>,
     log_path: PathBuf,
+    /// The private Xephyr server hosting an X11-transport run.
+    xephyr: Option<Child>,
+    /// `DISPLAY` value of that Xephyr server (e.g. `:91`).
+    nested_x11_display: Option<String>,
 }
 
 impl RunContext {
@@ -393,11 +692,12 @@ fn run_backend(kind: NestedBackendKind, options: &NestedSmokeOptions) -> RunRepo
                 ),
             });
             fill_not_run(&mut steps);
-            return finish_run(kind, steps, None, options.keep_artifacts);
+            return finish_run(kind, steps, None, None, options.keep_artifacts);
         }
     };
 
     let mut aborted = false;
+    let mut scenario: Option<Vec<serde_json::Value>> = None;
     for spec in MATRIX {
         if spec.name == "clean_shutdown" {
             // Shutdown always runs so a crashed step never leaks the child.
@@ -421,6 +721,11 @@ fn run_backend(kind: NestedBackendKind, options: &NestedSmokeOptions) -> RunRepo
             "config_reload" => run_config_reload_step(spec, &context),
             "window_lifecycle" => run_window_lifecycle_step(spec, &context, options),
             "screenshot_capture" => run_screenshot_step(spec, &context),
+            "policy_scenario" => {
+                let (report, snapshots) = run_policy_scenario_step(spec, &context, options);
+                scenario = snapshots;
+                report
+            }
             other => StepReport {
                 name: spec.name,
                 status: StepStatus::Fail,
@@ -440,12 +745,13 @@ fn run_backend(kind: NestedBackendKind, options: &NestedSmokeOptions) -> RunRepo
     let artifacts = Some(context.runtime_dir.clone());
     // Belt and braces: never leave a child behind, whatever the steps did.
     kill_child(&mut context);
-    finish_run(kind, steps, artifacts, options.keep_artifacts)
+    finish_run(kind, steps, scenario, artifacts, options.keep_artifacts)
 }
 
 fn finish_run(
     kind: NestedBackendKind,
     steps: Vec<StepReport>,
+    scenario: Option<Vec<serde_json::Value>>,
     artifacts: Option<PathBuf>,
     keep_artifacts: bool,
 ) -> RunReport {
@@ -463,6 +769,7 @@ fn finish_run(
         result,
         artifacts_dir,
         steps,
+        scenario,
     }
 }
 
@@ -484,6 +791,17 @@ fn prepare_run_context(
     options: &NestedSmokeOptions,
 ) -> io::Result<RunContext> {
     let runtime_dir = create_private_runtime_dir(kind)?;
+    let (xephyr, nested_x11_display) = if kind.family() == NestedFamily::X11 {
+        match spawn_xephyr(&runtime_dir) {
+            Ok((child, display)) => (Some(child), Some(display)),
+            Err(error) => {
+                let _ = fs::remove_dir_all(&runtime_dir);
+                return Err(error);
+            }
+        }
+    } else {
+        (None, None)
+    };
     let log_path = runtime_dir.join("jwm.log");
     let log_file = fs::File::create(&log_path)?;
     let (set, remove) = child_env_overrides(
@@ -491,6 +809,7 @@ fn prepare_run_context(
         &runtime_dir,
         std::env::var("XDG_RUNTIME_DIR").ok().as_deref(),
         std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
+        nested_x11_display.as_deref(),
     );
     let mut command = Command::new(&options.jwm_binary);
     command
@@ -504,17 +823,80 @@ fn prepare_run_context(
     for key in remove {
         command.env_remove(key);
     }
-    let child = command.spawn().map_err(|error| {
-        let _ = fs::remove_dir_all(&runtime_dir);
-        io::Error::new(
-            error.kind(),
-            format!("could not launch {}: {error}", options.jwm_binary.display()),
-        )
-    })?;
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            if let Some(mut xephyr) = xephyr {
+                let _ = xephyr.kill();
+                let _ = xephyr.wait();
+            }
+            let _ = fs::remove_dir_all(&runtime_dir);
+            return Err(io::Error::new(
+                error.kind(),
+                format!("could not launch {}: {error}", options.jwm_binary.display()),
+            ));
+        }
+    };
     Ok(RunContext {
+        kind,
         runtime_dir,
         child: Some(child),
         log_path,
+        xephyr,
+        nested_x11_display,
+    })
+}
+
+const XEPHYR_SCREEN: &str = "1280x800";
+const XEPHYR_START_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Boot a private Xephyr server on a free display and wait (bounded) for its
+/// socket. The fixed screen size keeps X11-transport geometry deterministic.
+fn spawn_xephyr(runtime_dir: &Path) -> io::Result<(Child, String)> {
+    let Some(number) = find_free_x11_display() else {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "no free X display number in :80..=:99 for Xephyr",
+        ));
+    };
+    let display = format!(":{number}");
+    let log = fs::File::create(runtime_dir.join("xephyr.log"))?;
+    let mut child = Command::new("Xephyr")
+        .arg(&display)
+        .args(["-screen", XEPHYR_SCREEN, "-nolisten", "tcp"])
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        .spawn()
+        .map_err(|error| {
+            io::Error::new(error.kind(), format!("could not launch Xephyr: {error}"))
+        })?;
+    let socket = PathBuf::from(format!("/tmp/.X11-unix/X{number}"));
+    let deadline = Instant::now() + XEPHYR_START_TIMEOUT;
+    while Instant::now() < deadline {
+        if socket.exists() {
+            return Ok((child, display));
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(io::Error::other(format!(
+                "Xephyr exited during startup ({status}); see xephyr.log"
+            )));
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("Xephyr did not create {display} within {XEPHYR_START_TIMEOUT:?}"),
+    ))
+}
+
+/// First display number in `:80..=:99` with neither a lock file nor a socket.
+fn find_free_x11_display() -> Option<u32> {
+    (80..=99).find(|number| {
+        !Path::new(&format!("/tmp/.X{number}-lock")).exists()
+            && !Path::new(&format!("/tmp/.X11-unix/X{number}")).exists()
     })
 }
 
@@ -709,6 +1091,61 @@ fn run_config_reload_step(spec: &StepSpec, context: &RunContext) -> StepReport {
     }
 }
 
+/// Resolve the client command for a run: explicit override first, otherwise
+/// the first present candidate for the session's display family.
+fn resolve_client_argv(
+    kind: NestedBackendKind,
+    options: &NestedSmokeOptions,
+) -> Option<Vec<String>> {
+    match &options.client {
+        Some(argv) if !argv.is_empty() => Some(argv.clone()),
+        _ => client_candidates(kind.family())
+            .iter()
+            .find(|candidate| command_in_path(candidate))
+            .map(|candidate| vec![(*candidate).to_string()]),
+    }
+}
+
+/// Spawn a client into the nested session with the environment matching the
+/// session's display family.
+fn spawn_nested_client(
+    kind: NestedBackendKind,
+    argv: &[String],
+    context: &RunContext,
+) -> Result<Child, String> {
+    let mut command = Command::new(&argv[0]);
+    command
+        .args(&argv[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("XDG_RUNTIME_DIR", &context.runtime_dir);
+    match kind.family() {
+        NestedFamily::Wayland => {
+            let nested_socket = find_nested_wayland_socket(&context.runtime_dir)
+                .ok_or("no nested wayland socket found in the private runtime directory")?;
+            command
+                .env("WAYLAND_DISPLAY", &nested_socket)
+                .env("GDK_BACKEND", "wayland")
+                .env("QT_QPA_PLATFORM", "wayland")
+                .env("SDL_VIDEODRIVER", "wayland")
+                .env_remove("DISPLAY");
+        }
+        NestedFamily::X11 => {
+            let display = context
+                .nested_x11_display
+                .as_deref()
+                .ok_or("no nested Xephyr display recorded for this run")?;
+            command
+                .env("DISPLAY", display)
+                .env_remove("WAYLAND_DISPLAY");
+        }
+    }
+    command
+        .spawn()
+        .map_err(|error| format!("spawn {argv:?}: {error}"))
+}
+
 fn run_window_lifecycle_step(
     spec: &StepSpec,
     context: &RunContext,
@@ -717,23 +1154,9 @@ fn run_window_lifecycle_step(
     let started = Instant::now();
     let deadline = started + spec.timeout;
     let socket = context.socket_path();
+    let kind = context.kind;
 
-    let Some(nested_socket) = find_nested_wayland_socket(&context.runtime_dir) else {
-        return step_fail(
-            spec,
-            started,
-            "no nested wayland socket found in the private runtime directory".to_string(),
-            context,
-        );
-    };
-    let client_argv = match &options.client {
-        Some(argv) if !argv.is_empty() => Some(argv.clone()),
-        _ => CLIENT_CANDIDATES
-            .iter()
-            .find(|candidate| command_in_path(candidate))
-            .map(|candidate| vec![(*candidate).to_string()]),
-    };
-    let Some(argv) = client_argv else {
+    let Some(argv) = resolve_client_argv(kind, options) else {
         return StepReport {
             name: spec.name,
             status: StepStatus::Skip,
@@ -741,7 +1164,7 @@ fn run_window_lifecycle_step(
             duration_ms: elapsed_ms(started),
             detail: format!(
                 "no lifecycle client found (probed: {})",
-                CLIENT_CANDIDATES.join(", ")
+                client_candidates(kind.family()).join(", ")
             ),
             action: None,
         };
@@ -752,23 +1175,9 @@ fn run_window_lifecycle_step(
         Err(error) => return step_fail(spec, started, error, context),
     };
 
-    let mut command = Command::new(&argv[0]);
-    command
-        .args(&argv[1..])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .env("XDG_RUNTIME_DIR", &context.runtime_dir)
-        .env("WAYLAND_DISPLAY", &nested_socket)
-        .env("GDK_BACKEND", "wayland")
-        .env("QT_QPA_PLATFORM", "wayland")
-        .env("SDL_VIDEODRIVER", "wayland")
-        .env_remove("DISPLAY");
-    let mut client = match command.spawn() {
+    let mut client = match spawn_nested_client(kind, &argv, context) {
         Ok(child) => child,
-        Err(error) => {
-            return step_fail(spec, started, format!("spawn {argv:?}: {error}"), context);
-        }
+        Err(error) => return step_fail(spec, started, error, context),
     };
 
     let mapped = poll_until(deadline, || {
@@ -812,6 +1221,9 @@ fn run_window_lifecycle_step(
 }
 
 fn run_screenshot_step(spec: &StepSpec, context: &RunContext) -> StepReport {
+    if context.kind.family() == NestedFamily::X11 {
+        return run_x11_screenshot_step(spec, context);
+    }
     let started = Instant::now();
     let socket = context.socket_path();
 
@@ -903,6 +1315,215 @@ fn run_screenshot_step(spec: &StepSpec, context: &RunContext) -> StepReport {
             context,
         ),
     }
+}
+
+/// Capture the nested Xephyr root window with `xwd`; validates that the
+/// nested X display is alive and produces readable pixels.
+fn run_x11_screenshot_step(spec: &StepSpec, context: &RunContext) -> StepReport {
+    let started = Instant::now();
+    if !command_in_path("xwd") {
+        return StepReport {
+            name: spec.name,
+            status: StepStatus::Skip,
+            required: spec.required,
+            duration_ms: elapsed_ms(started),
+            detail: "xwd is not installed".to_string(),
+            action: None,
+        };
+    }
+    let Some(display) = context.nested_x11_display.as_deref() else {
+        return step_fail(
+            spec,
+            started,
+            "no nested Xephyr display recorded for this run".to_string(),
+            context,
+        );
+    };
+    let shot = context.runtime_dir.join("smoke-shot.xwd");
+    let mut child = match Command::new("xwd")
+        .args(["-root", "-silent", "-display", display, "-out"])
+        .arg(&shot)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => return step_fail(spec, started, format!("spawn xwd: {error}"), context),
+    };
+    let deadline = started + spec.timeout;
+    let exited = poll_until(deadline, || {
+        child
+            .try_wait()
+            .map(|status| status.is_some())
+            .map_err(|error| error.to_string())
+    });
+    if !matches!(exited, Ok(true)) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return step_fail(
+            spec,
+            started,
+            "xwd did not finish before the step deadline".to_string(),
+            context,
+        );
+    }
+    match fs::read(&shot) {
+        Ok(bytes) if xwd_signature_valid(&bytes) => StepReport {
+            name: spec.name,
+            status: StepStatus::Pass,
+            required: spec.required,
+            duration_ms: elapsed_ms(started),
+            detail: format!(
+                "xwd captured the nested root window ({} bytes)",
+                bytes.len()
+            ),
+            action: None,
+        },
+        Ok(bytes) => step_fail(
+            spec,
+            started,
+            format!("xwd output is not a valid dump ({} bytes)", bytes.len()),
+            context,
+        ),
+        Err(error) => step_fail(
+            spec,
+            started,
+            format!("xwd wrote no file: {error}"),
+            context,
+        ),
+    }
+}
+
+/// Drive the fixed `SCENARIO_COMMANDS` sequence against a mapped client and
+/// capture a normalized observable-state snapshot after each stage. Snapshots
+/// feed the x11rb-versus-xcb differential comparison; the wayland rows skip
+/// (their clients and protocol surface differ, so equality is not defined).
+fn run_policy_scenario_step(
+    spec: &StepSpec,
+    context: &RunContext,
+    options: &NestedSmokeOptions,
+) -> (StepReport, Option<Vec<serde_json::Value>>) {
+    let started = Instant::now();
+    if context.kind.family() != NestedFamily::X11 {
+        return (
+            StepReport {
+                name: spec.name,
+                status: StepStatus::Skip,
+                required: spec.required,
+                duration_ms: elapsed_ms(started),
+                detail: "differential scenario applies to the X11 transports".to_string(),
+                action: None,
+            },
+            None,
+        );
+    }
+    let Some(argv) = resolve_client_argv(context.kind, options) else {
+        return (
+            StepReport {
+                name: spec.name,
+                status: StepStatus::Skip,
+                required: spec.required,
+                duration_ms: elapsed_ms(started),
+                detail: format!(
+                    "no scenario client found (probed: {})",
+                    client_candidates(context.kind.family()).join(", ")
+                ),
+                action: None,
+            },
+            None,
+        );
+    };
+    let deadline = started + spec.timeout;
+    let socket = context.socket_path();
+
+    let baseline = match window_count(&socket) {
+        Ok(count) => count,
+        Err(error) => return (step_fail(spec, started, error, context), None),
+    };
+    let mut client = match spawn_nested_client(context.kind, &argv, context) {
+        Ok(child) => child,
+        Err(error) => return (step_fail(spec, started, error, context), None),
+    };
+
+    let outcome = drive_scenario(&socket, deadline, baseline);
+
+    // The client must never outlive the step, whatever happened above.
+    let _ = ipc_command(&socket, "killclient");
+    let _ = poll_until(deadline, || {
+        window_count(&socket).map(|count| count <= baseline)
+    });
+    let _ = client.kill();
+    let _ = client.wait();
+
+    match outcome {
+        Ok(snapshots) => (
+            StepReport {
+                name: spec.name,
+                status: StepStatus::Pass,
+                required: spec.required,
+                duration_ms: elapsed_ms(started),
+                detail: format!(
+                    "captured {} normalized snapshots with {}",
+                    snapshots.len(),
+                    argv[0]
+                ),
+                action: None,
+            },
+            Some(snapshots),
+        ),
+        Err(error) => (step_fail(spec, started, error, context), None),
+    }
+}
+
+/// Wait for the scenario client, then take one settled snapshot per stage.
+fn drive_scenario(
+    socket: &Path,
+    deadline: Instant,
+    baseline: usize,
+) -> Result<Vec<serde_json::Value>, String> {
+    match poll_until(deadline, || {
+        window_count(socket).map(|count| count > baseline)
+    }) {
+        Ok(true) => {}
+        Ok(false) => return Err("scenario client never mapped a window".to_string()),
+        Err(error) => return Err(error),
+    }
+    let mut snapshots = Vec::with_capacity(SCENARIO_COMMANDS.len() + 1);
+    snapshots.push(settled_snapshot(socket, deadline)?);
+    for (command, args) in SCENARIO_COMMANDS {
+        let args: serde_json::Value = serde_json::from_str(args)
+            .map_err(|error| format!("scenario args for {command}: {error}"))?;
+        let request = serde_json::json!({ "command": command, "args": args });
+        let response = ipc_roundtrip(socket, &request)?;
+        expect_success(command, response)?;
+        snapshots.push(settled_snapshot(socket, deadline)?);
+    }
+    Ok(snapshots)
+}
+
+/// Normalized snapshot that is stable across two consecutive reads, so
+/// asynchronous follow-ups (property updates, arrange) cannot race the
+/// comparison. Falls back to the last read at the deadline.
+fn settled_snapshot(socket: &Path, deadline: Instant) -> Result<serde_json::Value, String> {
+    let mut previous = read_normalized_state(socket)?;
+    loop {
+        std::thread::sleep(POLL_INTERVAL);
+        let current = read_normalized_state(socket)?;
+        if current == previous || Instant::now() >= deadline {
+            return Ok(current);
+        }
+        previous = current;
+    }
+}
+
+fn read_normalized_state(socket: &Path) -> Result<serde_json::Value, String> {
+    let windows = ipc_query(socket, "get_windows")?;
+    let workspaces = ipc_query(socket, "get_workspaces")?;
+    Ok(normalize_observable_state(
+        &windows["data"],
+        &workspaces["data"],
+    ))
 }
 
 fn run_shutdown_step(spec: &StepSpec, context: &mut RunContext) -> StepReport {
@@ -1037,6 +1658,13 @@ fn kill_child(context: &mut RunContext) {
         }
         let _ = child.wait();
     }
+    // The private Xephyr server has no purpose once jwm is gone.
+    if let Some(mut xephyr) = context.xephyr.take() {
+        if matches!(xephyr.try_wait(), Ok(None)) {
+            let _ = xephyr.kill();
+        }
+        let _ = xephyr.wait();
+    }
 }
 
 fn command_in_path(command: &str) -> bool {
@@ -1078,17 +1706,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn winit_runs_on_either_host_session_and_x11_needs_display() {
+    fn winit_runs_on_either_host_session_and_x11_kinds_need_display() {
         assert_eq!(
-            eligible_backends(Some(":0"), None),
+            eligible_backends(Some(":0"), None, false),
             vec![NestedBackendKind::Winit, NestedBackendKind::X11]
         );
         assert_eq!(
-            eligible_backends(None, Some("wayland-1")),
+            eligible_backends(Some(":0"), None, true),
+            vec![
+                NestedBackendKind::Winit,
+                NestedBackendKind::X11,
+                NestedBackendKind::X11rb,
+                NestedBackendKind::Xcb
+            ]
+        );
+        // The X11 transports need both an X-capable host and Xephyr.
+        assert_eq!(
+            eligible_backends(None, Some("wayland-1"), true),
             vec![NestedBackendKind::Winit]
         );
-        assert_eq!(eligible_backends(None, None), Vec::new());
-        assert_eq!(eligible_backends(Some(""), Some("")), Vec::new());
+        assert_eq!(eligible_backends(None, None, true), Vec::new());
+        assert_eq!(eligible_backends(Some(""), Some(""), true), Vec::new());
     }
 
     #[test]
@@ -1102,6 +1740,7 @@ mod tests {
                 "config_reload",
                 "window_lifecycle",
                 "screenshot_capture",
+                "policy_scenario",
                 "clean_shutdown",
             ]
         );
@@ -1112,7 +1751,7 @@ mod tests {
                 spec.name
             );
         }
-        // Startup, health, reload and shutdown gate the run; the two
+        // Startup, health, reload and shutdown gate the run; the
         // tooling-dependent steps may skip without failing the matrix.
         assert!(step_spec("startup").unwrap().required);
         assert!(step_spec("ipc_health").unwrap().required);
@@ -1120,6 +1759,7 @@ mod tests {
         assert!(step_spec("clean_shutdown").unwrap().required);
         assert!(!step_spec("window_lifecycle").unwrap().required);
         assert!(!step_spec("screenshot_capture").unwrap().required);
+        assert!(!step_spec("policy_scenario").unwrap().required);
     }
 
     #[test]
@@ -1142,6 +1782,7 @@ mod tests {
             &private,
             Some("/run/user/1000"),
             Some("wayland-1"),
+            None,
         );
         assert!(set.contains(&("XDG_RUNTIME_DIR".to_string(), "/tmp/private".to_string())));
         assert!(set.contains(&("JWM_BACKEND".to_string(), "wayland-winit".to_string())));
@@ -1157,8 +1798,21 @@ mod tests {
             &private,
             Some("/run/user/1000"),
             Some("wayland-1"),
+            None,
         );
         assert!(set.contains(&("JWM_BACKEND".to_string(), "wayland-x11".to_string())));
+        assert!(remove.contains(&"WAYLAND_DISPLAY"));
+
+        // The X11 transports run inside Xephyr, never the host session.
+        let (set, remove) = child_env_overrides(
+            NestedBackendKind::Xcb,
+            &private,
+            Some("/run/user/1000"),
+            Some("wayland-1"),
+            Some(":91"),
+        );
+        assert!(set.contains(&("JWM_BACKEND".to_string(), "xcb".to_string())));
+        assert!(set.contains(&("DISPLAY".to_string(), ":91".to_string())));
         assert!(remove.contains(&"WAYLAND_DISPLAY"));
     }
 
@@ -1204,6 +1858,7 @@ mod tests {
                 jwm_binary: "jwm".to_string(),
             },
             runs: Vec::new(),
+            differential: None,
         };
         assert_eq!(matrix_exit_code(&report), 2);
         report.runs.push(RunReport {
@@ -1211,13 +1866,24 @@ mod tests {
             result: RunResult::Pass,
             artifacts_dir: None,
             steps: Vec::new(),
+            scenario: None,
         });
         assert_eq!(matrix_exit_code(&report), 0);
+        // A transport divergence fails the matrix even with all runs green.
+        report.differential = Some(DifferentialReport {
+            status: DifferentialStatus::Fail,
+            compared: vec!["x11rb".to_string(), "xcb".to_string()],
+            detail: "diverged".to_string(),
+            action: None,
+        });
+        assert_eq!(matrix_exit_code(&report), 1);
+        report.differential = None;
         report.runs.push(RunReport {
             backend: NestedBackendKind::X11,
             result: RunResult::Fail,
             artifacts_dir: None,
             steps: Vec::new(),
+            scenario: None,
         });
         assert_eq!(matrix_exit_code(&report), 1);
     }
@@ -1245,7 +1911,14 @@ mod tests {
                     detail: "boom".to_string(),
                     action: Some("look at the log".to_string()),
                 }],
+                scenario: None,
             }],
+            differential: Some(DifferentialReport {
+                status: DifferentialStatus::Pass,
+                compared: vec!["x11rb".to_string(), "xcb".to_string()],
+                detail: "identical".to_string(),
+                action: None,
+            }),
         };
         let value = serde_json::to_value(&report).expect("serialize");
         assert_eq!(value["schema_version"], 1);
@@ -1253,6 +1926,10 @@ mod tests {
         assert_eq!(value["runs"][0]["result"], "fail");
         assert_eq!(value["runs"][0]["steps"][0]["status"], "fail");
         assert_eq!(value["runs"][0]["steps"][0]["action"], "look at the log");
+        assert_eq!(value["differential"]["status"], "pass");
+        assert_eq!(value["differential"]["compared"][0], "x11rb");
+        // Runs without a scenario omit the field entirely.
+        assert!(value["runs"][0].get("scenario").is_none());
         // Passing steps omit `action` entirely instead of writing null.
         let pass = serde_json::to_value(StepReport {
             name: "ipc_health",
@@ -1287,6 +1964,117 @@ mod tests {
         );
         drop(listener);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn run_with_scenario(
+        backend: NestedBackendKind,
+        scenario: Option<Vec<serde_json::Value>>,
+    ) -> RunReport {
+        RunReport {
+            backend,
+            result: RunResult::Pass,
+            artifacts_dir: None,
+            steps: Vec::new(),
+            scenario,
+        }
+    }
+
+    #[test]
+    fn normalizer_drops_transport_ids_and_titles_and_sorts_deterministically() {
+        let windows = serde_json::json!([
+            {"id": 99, "name": "async title", "class": "xterm", "instance": "xterm",
+             "tags": 1, "is_floating": false, "is_fullscreen": false, "is_focused": true,
+             "monitor": 0, "x": 640, "y": 52, "w": 636, "h": 745},
+            {"id": 3, "name": "other", "class": "xclock", "instance": "xclock",
+             "tags": 1, "is_floating": true, "is_fullscreen": false, "is_focused": false,
+             "monitor": 0, "x": 0, "y": 52, "w": 640, "h": 745},
+        ]);
+        let workspaces = serde_json::json!([
+            {"tag_mask": 2, "tag_index": 1, "monitor": 0, "layout": "L", "m_fact": 0.55,
+             "n_master": 1, "num_clients": 0, "focused": false},
+            {"tag_mask": 1, "tag_index": 0, "monitor": 0, "layout": "L", "m_fact": 0.55,
+             "n_master": 1, "num_clients": 2, "focused": true},
+        ]);
+        let normalized = normalize_observable_state(&windows, &workspaces);
+        // Sorted by class: xclock before xterm; ids and titles gone.
+        assert_eq!(normalized["windows"][0]["class"], "xclock");
+        assert_eq!(normalized["windows"][1]["class"], "xterm");
+        assert!(normalized["windows"][0].get("id").is_none());
+        assert!(normalized["windows"][0].get("name").is_none());
+        // Workspaces sorted by (monitor, tag_index).
+        assert_eq!(normalized["workspaces"][0]["tag_index"], 0);
+        assert_eq!(normalized["workspaces"][0]["num_clients"], 2);
+        // Identical inputs in a different order normalize identically.
+        let reordered_windows = serde_json::json!([windows[1].clone(), windows[0].clone(),]);
+        assert_eq!(
+            normalize_observable_state(&reordered_windows, &workspaces),
+            normalized
+        );
+    }
+
+    #[test]
+    fn differential_needs_both_transports_and_detects_divergence() {
+        // No X11 transports in the matrix: no differential section at all.
+        assert!(
+            differential_outcome(&[run_with_scenario(NestedBackendKind::Winit, None)]).is_none()
+        );
+
+        // Only one complete scenario: skip with the reason.
+        let one = [
+            run_with_scenario(
+                NestedBackendKind::X11rb,
+                Some(vec![serde_json::json!({"a": 1})]),
+            ),
+            run_with_scenario(NestedBackendKind::Xcb, None),
+        ];
+        let outcome = differential_outcome(&one).expect("x11 transports present");
+        assert_eq!(outcome.status, DifferentialStatus::Skip);
+
+        // Identical snapshots: pass, naming both transports.
+        let snapshot = serde_json::json!({"windows": [], "workspaces": [{"tag_index": 0}]});
+        let same = [
+            run_with_scenario(NestedBackendKind::X11rb, Some(vec![snapshot.clone()])),
+            run_with_scenario(NestedBackendKind::Xcb, Some(vec![snapshot.clone()])),
+        ];
+        let outcome = differential_outcome(&same).expect("comparison ran");
+        assert_eq!(outcome.status, DifferentialStatus::Pass);
+        assert_eq!(outcome.compared, vec!["x11rb", "xcb"]);
+
+        // A divergence names the snapshot index and the differing section.
+        let diverged =
+            serde_json::json!({"windows": [{"class": "xterm"}], "workspaces": [{"tag_index": 0}]});
+        let differ = [
+            run_with_scenario(NestedBackendKind::X11rb, Some(vec![snapshot.clone()])),
+            run_with_scenario(NestedBackendKind::Xcb, Some(vec![diverged])),
+        ];
+        let outcome = differential_outcome(&differ).expect("comparison ran");
+        assert_eq!(outcome.status, DifferentialStatus::Fail);
+        assert!(outcome.detail.contains("snapshot 0"));
+        assert!(outcome.detail.contains("windows"));
+        assert!(outcome.action.is_some());
+    }
+
+    #[test]
+    fn xwd_signature_check_validates_header_size_and_version() {
+        let mut header = vec![0u8; 100];
+        header[..4].copy_from_slice(&100u32.to_be_bytes());
+        header[4..8].copy_from_slice(&7u32.to_be_bytes());
+        assert!(xwd_signature_valid(&header));
+        // Wrong version.
+        header[4..8].copy_from_slice(&6u32.to_be_bytes());
+        assert!(!xwd_signature_valid(&header));
+        // Too short.
+        assert!(!xwd_signature_valid(&[0u8; 50]));
+    }
+
+    #[test]
+    fn scenario_commands_parse_and_target_known_ipc_commands() {
+        for (command, args) in SCENARIO_COMMANDS {
+            let parsed: serde_json::Value =
+                serde_json::from_str(args).expect("scenario args must be valid JSON");
+            assert!(parsed.is_object() || parsed.is_null());
+            assert!(!command.is_empty());
+        }
     }
 
     #[test]
