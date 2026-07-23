@@ -1,6 +1,8 @@
 use chrono::Local;
 use clap::{Parser, Subcommand};
 use glob::glob;
+
+mod nested_smoke;
 use nix::fcntl::{OFlag, open};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::signal::{Signal, kill};
@@ -226,6 +228,29 @@ enum Commands {
         /// 保存 JSON 报告；可选目录，默认 $XDG_RUNTIME_DIR/jwm-smoke
         #[arg(long, value_name = "DIR", num_args = 0..=1)]
         save: Option<Option<PathBuf>>,
+    },
+
+    /// 嵌套后端冒烟矩阵：启动 wayland-winit / wayland-x11，验证启动、IPC
+    /// 健康、配置重载、窗口生命周期、截图能力与干净退出
+    NestedSmoke {
+        /// 只测指定后端（winit | x11；默认按宿主会话自动选择）
+        #[arg(long, value_name = "BACKEND")]
+        backend: Option<String>,
+        /// 输出版本化 JSON 报告
+        #[arg(long)]
+        json: bool,
+        /// 保存 JSON 报告；可选目录，默认 $XDG_RUNTIME_DIR/jwm-smoke
+        #[arg(long, value_name = "DIR", num_args = 0..=1)]
+        save: Option<Option<PathBuf>>,
+        /// 被测 jwm 可执行文件（默认与 jwm-tool 同目录，其次 PATH）
+        #[arg(long, env = "JWM_BINARY", value_name = "PATH")]
+        jwm_binary: Option<PathBuf>,
+        /// 窗口生命周期步骤使用的客户端命令（空格分隔；默认自动探测）
+        #[arg(long, value_name = "CMD")]
+        client: Option<String>,
+        /// 通过时也保留私有运行目录与日志
+        #[arg(long)]
+        keep: bool,
     },
 
     /// 打印推荐的 Wayland scrolling 触控板手势配置片段
@@ -1716,6 +1741,148 @@ fn smoke_report_path(dir: &Path) -> PathBuf {
     dir.join(format!("jwm-smoke-{stamp}.json"))
 }
 
+fn nested_smoke_report_path(dir: &Path) -> PathBuf {
+    let stamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
+    dir.join(format!("jwm-nested-smoke-{stamp}.json"))
+}
+
+/// Resolve the jwm binary under test: explicit flag, then the sibling of this
+/// jwm-tool executable, then plain `jwm` from PATH.
+fn resolve_nested_smoke_jwm_binary(explicit: Option<PathBuf>) -> PathBuf {
+    if let Some(path) = explicit {
+        return path;
+    }
+    if let Ok(current) = env::current_exe() {
+        if let Some(dir) = current.parent() {
+            let sibling = dir.join("jwm");
+            if sibling.is_file() {
+                return sibling;
+            }
+        }
+    }
+    PathBuf::from("jwm")
+}
+
+fn parse_nested_smoke_backends(
+    requested: Option<&str>,
+) -> io::Result<Vec<nested_smoke::NestedBackendKind>> {
+    let display = env::var("DISPLAY").ok();
+    let wayland_display = env::var("WAYLAND_DISPLAY").ok();
+    let eligible = nested_smoke::eligible_backends(display.as_deref(), wayland_display.as_deref());
+    match requested {
+        None | Some("all") => Ok(eligible),
+        Some("winit") | Some("wayland-winit") => Ok(eligible
+            .into_iter()
+            .filter(|kind| matches!(kind, nested_smoke::NestedBackendKind::Winit))
+            .collect()),
+        Some("x11") | Some("wayland-x11") => Ok(eligible
+            .into_iter()
+            .filter(|kind| matches!(kind, nested_smoke::NestedBackendKind::X11))
+            .collect()),
+        Some(other) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unknown nested backend '{other}'; expected winit | x11 | all"),
+        )),
+    }
+}
+
+fn run_nested_smoke_command(
+    backend: Option<&str>,
+    json_output: bool,
+    save: Option<Option<PathBuf>>,
+    jwm_binary: Option<PathBuf>,
+    client: Option<&str>,
+    keep: bool,
+) -> io::Result<i32> {
+    let backends = parse_nested_smoke_backends(backend)?;
+    if backends.is_empty() {
+        eprintln!(
+            "nested-smoke: no eligible nested backend on this host \
+             (need DISPLAY and/or WAYLAND_DISPLAY)"
+        );
+        return Ok(2);
+    }
+    let options = nested_smoke::NestedSmokeOptions {
+        backends,
+        jwm_binary: resolve_nested_smoke_jwm_binary(jwm_binary),
+        client: client.map(|command| {
+            command
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        }),
+        keep_artifacts: keep,
+    };
+    if !json_output {
+        println!(
+            "nested-smoke: testing {} with {}",
+            options
+                .backends
+                .iter()
+                .map(|kind| kind.jwm_backend_value())
+                .collect::<Vec<_>>()
+                .join(", "),
+            options.jwm_binary.display()
+        );
+    }
+
+    let report = nested_smoke::run_nested_smoke(&options);
+
+    let saved_path = if let Some(dir) = save {
+        let dir = dir.unwrap_or_else(default_smoke_report_dir);
+        let path = nested_smoke_report_path(&dir);
+        let value = serde_json::to_value(&report)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        save_wayland_smoke_snapshot_at(&value, &path)?;
+        Some(path)
+    } else {
+        None
+    };
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+        );
+    } else {
+        for run in &report.runs {
+            println!();
+            println!(
+                "[{}] {}",
+                run.backend.jwm_backend_value(),
+                match run.result {
+                    nested_smoke::RunResult::Pass => "PASS",
+                    nested_smoke::RunResult::Fail => "FAIL",
+                }
+            );
+            for step in &run.steps {
+                let status = match step.status {
+                    nested_smoke::StepStatus::Pass => "pass",
+                    nested_smoke::StepStatus::Fail => "FAIL",
+                    nested_smoke::StepStatus::Skip => "skip",
+                    nested_smoke::StepStatus::NotRun => "not-run",
+                };
+                println!(
+                    "  {:<20} {:<7} {:>6} ms  {}",
+                    step.name, status, step.duration_ms, step.detail
+                );
+                if let Some(action) = &step.action {
+                    println!("  {:<20} {:<7} {:>9}  -> {}", "", "", "", action);
+                }
+            }
+            if let Some(artifacts) = &run.artifacts_dir {
+                println!("  artifacts: {artifacts}");
+            }
+        }
+        if let Some(path) = &saved_path {
+            println!();
+            println!("report saved: {}", path.display());
+        }
+    }
+    Ok(nested_smoke::matrix_exit_code(&report))
+}
+
 fn save_wayland_smoke_snapshot_at(snapshot: &serde_json::Value, path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -2047,6 +2214,27 @@ fn main() -> io::Result<()> {
         Commands::WaylandStatus { json } => run_wayland_status(json)?,
 
         Commands::WaylandSmoke { json, save } => print_wayland_smoke(json, save)?,
+
+        Commands::NestedSmoke {
+            backend,
+            json,
+            save,
+            jwm_binary,
+            client,
+            keep,
+        } => {
+            let code = run_nested_smoke_command(
+                backend.as_deref(),
+                json,
+                save,
+                jwm_binary,
+                client.as_deref(),
+                keep,
+            )?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
 
         Commands::WaylandGestureConfig { toml } => print_wayland_gesture_config(toml),
 

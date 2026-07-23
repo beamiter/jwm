@@ -547,9 +547,6 @@ impl PropertyOps for WaylandPropertyOps {
 }
 
 pub struct WaylandWinitBackend {
-    _display: Rc<RefCell<Display<JwmWaylandState>>>,
-    _display_handle: DisplayHandle,
-
     event_loop: SendWrapper<EventLoop<'static, JwmWaylandState>>,
     state: Box<JwmWaylandState>,
     #[allow(dead_code)]
@@ -581,6 +578,14 @@ pub struct WaylandWinitBackend {
     key_ops: Box<dyn KeyOps>,
     cursor_provider: Box<dyn CursorProvider>,
     color_allocator: Box<dyn ColorAllocator>,
+
+    // NOTE: Field drop order matters.
+    // On some EGL stacks (notably NVIDIA + egl-wayland), the EGL display drop path may call
+    // `eglUnbindWaylandDisplayWL`, which expects the Wayland `wl_display` to still be alive.
+    // Keep `display`/`display_handle` *after* the EGL/GLES renderer (`winit_backend`) so they
+    // outlive it; declaring them first previously segfaulted on clean shutdown.
+    _display: Rc<RefCell<Display<JwmWaylandState>>>,
+    _display_handle: DisplayHandle,
 }
 
 unsafe impl Send for WaylandWinitBackend {}
@@ -1100,6 +1105,9 @@ impl WaylandWinitBackend {
             flush_pending.clone(),
             seat_name,
             true,
+            // The nested winit frame loop does not drain the capture queues;
+            // do not advertise capture globals clients could never complete.
+            false,
         )
         .map_err(|e| BackendError::Message(format!("wayland init failed: {e}")))?;
 

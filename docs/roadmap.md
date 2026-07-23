@@ -58,9 +58,22 @@ not authorize a rewrite or a release-profile change without measurements.
       allocation failures) is tagged. `save_png_async` now carries the
       requesting backend's context so asynchronous encode/rename failures
       stay attributable after the capture call returns.
-- [ ] Add a deterministic nested-backend smoke matrix covering startup, IPC
+- [x] Add a deterministic nested-backend smoke matrix covering startup, IPC
       health, config reload, basic window lifecycle, screenshot capture, and
-      clean shutdown.
+      clean shutdown. `jwm-tool nested-smoke` boots `wayland-winit` and
+      `wayland-x11` inside a private `XDG_RUNTIME_DIR`, drives every step
+      over the real IPC socket with bounded per-step timeouts from a pure,
+      unit-tested matrix table, and emits a versioned JSON report
+      (schema_version 1). A failing step preserves exactly one log bundle
+      and names it in the report; missing optional tooling (lifecycle
+      client, grim) records a skip instead of a false failure. The first
+      runs surfaced and fixed two real defects: a shutdown segfault in the
+      winit backend (EGL unbound the Wayland display after it was dropped —
+      the field-order fix the X11 nested backend already carried), and
+      capture globals advertised by nested backends that never service
+      them, which made grim hang forever (capture globals are now gated on
+      `frame_capture_supported`, so nested sessions report the capability
+      honestly and capture clients fail fast).
 - [x] Add bounded log rotation or journald guidance for the optional supervisor.
       The daemon log is rotated at a 1 MiB bound into a single previous
       generation (at most two files), and tools/README.md documents the

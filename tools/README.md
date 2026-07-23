@@ -65,6 +65,28 @@ JWM_DIR=/path/to/jwm jwm-tool rebuild
 jwm-tool debug
 ```
 
+### 嵌套后端冒烟矩阵
+
+在现有桌面里以私有 `XDG_RUNTIME_DIR` 启动嵌套开发后端
+（`wayland-winit` / `wayland-x11`），按固定矩阵依次验证:启动、
+IPC 健康、配置重载、窗口生命周期、截图能力、干净退出。每一步都有
+显式超时;失败时保留唯一一份日志目录并在报告中给出可执行的下一步。
+
+```bash
+jwm-tool nested-smoke                 # 按宿主会话自动选择后端
+jwm-tool nested-smoke --backend winit # 只测 wayland-winit
+jwm-tool nested-smoke --json          # 版本化 JSON 报告 (schema_version 1)
+jwm-tool nested-smoke --save          # 保存到 $XDG_RUNTIME_DIR/jwm-smoke
+jwm-tool nested-smoke --client foot   # 指定窗口生命周期客户端
+jwm-tool nested-smoke --keep          # 通过时也保留运行目录与日志
+```
+
+退出码:`0` 全部通过(跳过不算失败)、`1` 有步骤失败、`2` 宿主
+会话没有可测的嵌套后端。窗口生命周期步骤自动探测常见 Wayland
+客户端(foot、weston-terminal、alacritty、kitty、adwaita-1-demo、
+gtk4-demo);截图步骤按 `get_capture_status` 的真实能力决定执行或
+跳过——嵌套后端不服务帧捕获,因此如实记为 skip。
+
 ### 守护进程日志
 
 守护进程日志写入 `~/.local/share/jwm/jwm_daemon.log`，并做有界轮转：

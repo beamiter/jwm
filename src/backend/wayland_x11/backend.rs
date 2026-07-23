@@ -1187,6 +1187,9 @@ impl WaylandX11Backend {
             flush_pending.clone(),
             seat_name,
             true,
+            // The nested X11 frame loop does not drain the capture queues;
+            // do not advertise capture globals clients could never complete.
+            false,
         )
         .map_err(|e| BackendError::Message(format!("wayland init failed: {e}")))?;
 

@@ -1380,6 +1380,8 @@ impl UdevBackend {
             flush_pending.clone(),
             seat_name.clone(),
             true,
+            // The DRM/KMS frame pipeline services capture requests.
+            true,
         )
         .map_err(|e| BackendError::Message(format!("wayland init failed: {e}")))?;
 

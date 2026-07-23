@@ -1531,6 +1531,7 @@ impl JwmWaylandState {
         flush_pending: Arc<AtomicBool>,
         seat_name: String,
         listen_on_socket: bool,
+        frame_capture_supported: bool,
     ) -> Result<(Self, Option<String>), Box<dyn std::error::Error + Send + Sync>> {
         let socket_name = if listen_on_socket {
             let source = ListeningSocketSource::new_auto()?;
@@ -1585,14 +1586,19 @@ impl JwmWaylandState {
         // Extra desktop/tooling protocols are useful, but clients enumerate and
         // bind globals before creating toplevels. Keep them individually
         // toggleable while locating early-client native faults.
-        let screencopy_pending =
-            if optional_global_enabled(behavior.wayland_enable_screencopy, "JWM_ENABLE_SCREENCOPY")
-            {
-                // wlr-screencopy-unstable-v1 – allows grim and similar tools to capture screen content.
-                Some(crate::backend::wayland_udev::screencopy::init_screencopy_manager(dh))
-            } else {
-                None
-            };
+        // Frame-capture globals are only advertised when the backend can also
+        // service them: today only the DRM/KMS frame pipeline drains the
+        // pending capture queues. Advertising them on the nested development
+        // backends made capture clients (grim etc.) hang forever instead of
+        // failing with a clear "protocol not supported" error.
+        let screencopy_pending = if frame_capture_supported
+            && optional_global_enabled(behavior.wayland_enable_screencopy, "JWM_ENABLE_SCREENCOPY")
+        {
+            // wlr-screencopy-unstable-v1 – allows grim and similar tools to capture screen content.
+            Some(crate::backend::wayland_udev::screencopy::init_screencopy_manager(dh))
+        } else {
+            None
+        };
 
         let tearing_hints = if optional_global_enabled(
             behavior.wayland_enable_tearing_control,
@@ -1642,10 +1648,11 @@ impl JwmWaylandState {
                 None
             };
 
-        let image_capture_pending = if optional_global_enabled(
-            behavior.wayland_enable_image_copy_capture,
-            "JWM_ENABLE_IMAGE_COPY_CAPTURE",
-        ) {
+        let image_capture_pending = if frame_capture_supported
+            && optional_global_enabled(
+                behavior.wayland_enable_image_copy_capture,
+                "JWM_ENABLE_IMAGE_COPY_CAPTURE",
+            ) {
             // ext-image-copy-capture-v1 – modern screen capture (replaces wlr-screencopy).
             Some(crate::backend::wayland_udev::image_copy_capture::init_image_copy_capture(dh))
         } else {
