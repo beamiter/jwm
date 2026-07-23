@@ -135,7 +135,17 @@ mock implementing the complete backend surface. (First met by
 
 ## Phase 3 — backend consolidation
 
-- Extract protocol-free X11 behavior shared by X11RB and XCB.
+- Extract protocol-free X11 behavior shared by X11RB and XCB. Started: the
+  request-flush batching policy — pending-op and elapsed-time thresholds
+  and their load-adaptive tuning — was byte-for-byte duplicated in
+  `x11rb/batch.rs` and `xcb/batch.rs` (the x11rb copy even carried a
+  "keep semantics identical to the native XCB backend" comment, i.e. a
+  manual-sync burden). It now lives once in
+  `backend::x11::wm::batch::BatchCounters`, a transport-neutral,
+  unit-tested coordinator: `note_op` decides whether a flush is due,
+  `on_flushed` resets, and each transport keeps only its own
+  `conn.flush()`. The x11rb/xcb differential confirmed the two transports
+  produce identical observable state before and after the move.
 - Move platform-neutral dirty-region, frame-timing, animation, color, and effect
   algorithms into compositor-common modules. Started: the event coalescer,
   workspace-transition timing, and wobbly-window simulation — std-only

@@ -1,135 +1,57 @@
 use crate::backend::error::BackendError;
+use crate::backend::x11::wm::batch::BatchCounters;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::Mutex;
-/// X11 Request Batching - Reduces flush() calls for better performance
-///
-/// Instead of flushing after every configure/property operation,
-/// batch operations and flush periodically to reduce X11 round-trips.
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 
-/// Batches X11 requests and flushes intelligently
+/// Batches X11 requests and flushes intelligently.
+///
+/// The batching policy (thresholds, timing, load adaptation) lives in the
+/// shared, transport-neutral [`BatchCounters`]; this wrapper only performs
+/// the x11rb-specific `conn.flush()`.
+#[derive(Clone, Default)]
 pub struct X11RequestBatcher {
-    /// Count of pending operations
-    pending_ops: Arc<AtomicU32>,
-    /// Last flush time
-    last_flush: Arc<Mutex<Instant>>,
-    /// Threshold: flush after N operations OR M milliseconds
-    flush_op_threshold: Arc<AtomicU32>,
-    flush_time_threshold_ms: Arc<std::sync::atomic::AtomicU64>,
-    /// CPU/GPU load estimation (0-100)
-    system_load: Arc<AtomicU32>,
+    counters: BatchCounters,
 }
 
 impl X11RequestBatcher {
     pub fn new() -> Self {
-        Self {
-            pending_ops: Arc::new(AtomicU32::new(0)),
-            last_flush: Arc::new(Mutex::new(Instant::now())),
-            flush_op_threshold: Arc::new(AtomicU32::new(8)), // Flush after 8 queued operations
-            flush_time_threshold_ms: Arc::new(std::sync::atomic::AtomicU64::new(8)), // OR after 8ms
-            system_load: Arc::new(AtomicU32::new(50)),
-        }
+        Self::default()
     }
 
-    /// Record an operation and maybe flush
+    /// Record an operation and maybe flush.
     pub fn mark_op<C: Connection>(&self, conn: &C) -> Result<(), BackendError> {
-        // Keep the batching semantics identical to the native XCB backend:
-        // `threshold = 8` flushes the eighth queued operation, not the
-        // ninth. AcqRel is sufficient here; the counter is only used for
-        // batching decisions and does not publish request payloads.
-        let count = self.pending_ops.fetch_add(1, Ordering::AcqRel) + 1;
-        let threshold = self.flush_op_threshold.load(Ordering::Relaxed);
-
-        // Check if we should flush
-        let should_flush = if threshold > 0 && count >= threshold {
-            // Operation threshold reached
-            true
-        } else if (count == 1 || count % 4 == 0)
-            && let Ok(last) = self.last_flush.lock()
-        {
-            // Time threshold reached?
-            let timeout_ms = self.flush_time_threshold_ms.load(Ordering::Relaxed);
-            last.elapsed() > Duration::from_millis(timeout_ms)
-        } else {
-            false
-        };
-
-        if should_flush {
+        if self.counters.note_op() {
             self.do_flush(conn)?;
         }
-
         Ok(())
     }
 
-    /// Force a flush
+    /// Force a flush.
     pub fn flush<C: Connection>(&self, conn: &C) -> Result<(), BackendError> {
-        self.do_flush(conn)?;
-        Ok(())
+        self.do_flush(conn)
     }
 
     fn do_flush<C: Connection>(&self, conn: &C) -> Result<(), BackendError> {
         conn.flush()?;
-        self.pending_ops.store(0, Ordering::SeqCst);
-        if let Ok(mut last) = self.last_flush.lock() {
-            *last = Instant::now();
-        }
+        self.counters.on_flushed();
         Ok(())
     }
 
-    /// Get pending operations count (for debugging)
+    /// Get pending operations count (for debugging).
     #[allow(dead_code)]
     pub fn pending_count(&self) -> u32 {
-        self.pending_ops.load(Ordering::Acquire)
+        self.counters.pending_count()
     }
 
-    /// Adjust batch thresholds based on system load
-    /// load: 0-100, higher means busier system
+    /// Adjust batch thresholds based on system load (0-100).
     pub fn adjust_thresholds(&self, load: u32) {
-        self.system_load.store(load.min(100), Ordering::Relaxed);
-
-        if load > 80 {
-            // High load: batch more to reduce overhead
-            self.flush_op_threshold.store(16, Ordering::Release);
-            self.flush_time_threshold_ms.store(16, Ordering::Release);
-        } else if load > 60 {
-            self.flush_op_threshold.store(12, Ordering::Release);
-            self.flush_time_threshold_ms.store(12, Ordering::Release);
-        } else if load < 30 {
-            // Low load: respond more quickly
-            self.flush_op_threshold.store(4, Ordering::Release);
-            self.flush_time_threshold_ms.store(4, Ordering::Release);
-        } else {
-            // Normal load: default thresholds
-            self.flush_op_threshold.store(8, Ordering::Release);
-            self.flush_time_threshold_ms.store(8, Ordering::Release);
-        }
+        self.counters.adjust_thresholds(load);
     }
 
-    /// Get current system load estimate
+    /// Get current system load estimate.
     pub fn system_load(&self) -> u32 {
-        self.system_load.load(Ordering::Relaxed)
-    }
-}
-
-impl Clone for X11RequestBatcher {
-    fn clone(&self) -> Self {
-        Self {
-            pending_ops: self.pending_ops.clone(),
-            last_flush: self.last_flush.clone(),
-            flush_op_threshold: self.flush_op_threshold.clone(),
-            flush_time_threshold_ms: self.flush_time_threshold_ms.clone(),
-            system_load: self.system_load.clone(),
-        }
-    }
-}
-
-impl Default for X11RequestBatcher {
-    fn default() -> Self {
-        Self::new()
+        self.counters.system_load()
     }
 }
 
@@ -335,115 +257,28 @@ impl<'a, C: Connection> BatchedAttributesRequest<'a, C> {
 mod tests {
     use super::*;
 
+    // The batching *policy* (thresholds, timing, load bands, shared clone
+    // state) is tested once in `backend::x11::wm::batch`. These cover the
+    // x11rb wrapper delegating through the shared counters.
+
     #[test]
-    fn test_batcher_creation() {
+    fn wrapper_starts_empty_with_a_neutral_load() {
         let batcher = X11RequestBatcher::new();
         assert_eq!(batcher.pending_count(), 0);
         assert_eq!(batcher.system_load(), 50);
     }
 
     #[test]
-    fn test_pending_ops_count() {
+    fn load_adjustment_is_reflected_through_the_wrapper() {
         let batcher = X11RequestBatcher::new();
-        assert_eq!(batcher.pending_count(), 0);
-
-        batcher.pending_ops.fetch_add(5, Ordering::SeqCst);
-        assert_eq!(batcher.pending_count(), 5);
-    }
-
-    #[test]
-    fn test_load_adjustment_high_load() {
-        let batcher = X11RequestBatcher::new();
-
         batcher.adjust_thresholds(85);
         assert_eq!(batcher.system_load(), 85);
-        assert_eq!(
-            batcher.flush_op_threshold.load(Ordering::Acquire),
-            16,
-            "High load should increase operation threshold"
-        );
-        assert_eq!(
-            batcher.flush_time_threshold_ms.load(Ordering::Acquire),
-            16,
-            "High load should increase time threshold"
-        );
-    }
-
-    #[test]
-    fn test_load_adjustment_medium_load() {
-        let batcher = X11RequestBatcher::new();
-
-        batcher.adjust_thresholds(70);
-        assert_eq!(batcher.system_load(), 70);
-        assert_eq!(
-            batcher.flush_op_threshold.load(Ordering::Acquire),
-            12,
-            "Medium load should adjust operation threshold"
-        );
-        assert_eq!(
-            batcher.flush_time_threshold_ms.load(Ordering::Acquire),
-            12,
-            "Medium load should adjust time threshold"
-        );
-    }
-
-    #[test]
-    fn test_load_adjustment_low_load() {
-        let batcher = X11RequestBatcher::new();
-
-        batcher.adjust_thresholds(20);
-        assert_eq!(batcher.system_load(), 20);
-        assert_eq!(
-            batcher.flush_op_threshold.load(Ordering::Acquire),
-            4,
-            "Low load should decrease operation threshold"
-        );
-        assert_eq!(
-            batcher.flush_time_threshold_ms.load(Ordering::Acquire),
-            4,
-            "Low load should decrease time threshold"
-        );
-    }
-
-    #[test]
-    fn test_load_adjustment_clamping() {
-        let batcher = X11RequestBatcher::new();
-
         batcher.adjust_thresholds(150);
-        assert_eq!(batcher.system_load(), 100, "Load should be clamped to 100");
+        assert_eq!(batcher.system_load(), 100, "load is clamped to 100");
     }
 
     #[test]
-    fn test_load_adjustment_normal_load() {
-        let batcher = X11RequestBatcher::new();
-
-        batcher.adjust_thresholds(50);
-        assert_eq!(batcher.system_load(), 50);
-        assert_eq!(
-            batcher.flush_op_threshold.load(Ordering::Acquire),
-            8,
-            "Normal load should use default thresholds"
-        );
-    }
-
-    #[test]
-    fn test_batcher_clone() {
-        let batcher = X11RequestBatcher::new();
-        batcher.pending_ops.fetch_add(3, Ordering::SeqCst);
-
-        let cloned = batcher.clone();
-        assert_eq!(cloned.pending_count(), 3, "Clone should share state");
-
-        cloned.pending_ops.fetch_add(2, Ordering::SeqCst);
-        assert_eq!(
-            batcher.pending_count(),
-            5,
-            "Both instances should see the same pending count"
-        );
-    }
-
-    #[test]
-    fn test_batcher_default() {
+    fn default_matches_new() {
         let batcher = X11RequestBatcher::default();
         assert_eq!(batcher.pending_count(), 0);
         assert_eq!(batcher.system_load(), 50);

@@ -6,6 +6,9 @@ use crate::backend::api::{
 use crate::backend::common_define::{OutputId, WindowId};
 use std::ops::BitOr;
 
+/// Protocol-free flush-batching coordinator shared by both X11 transports.
+pub mod batch;
+
 #[derive(Clone, Copy)]
 pub struct WindowTypeAtoms<A> {
     pub desktop: A,

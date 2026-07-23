@@ -922,12 +922,54 @@ fn spawn_xephyr(runtime_dir: &Path) -> io::Result<(Child, String)> {
     ))
 }
 
-/// First display number in `:80..=:99` with neither a lock file nor a socket.
+/// First free display number in `:80..=:99`. A slot is free when it has no
+/// lock file, or a lock whose owning process is dead — Xephyr killed with
+/// SIGKILL cannot remove its own lock/socket, so stale artifacts would
+/// otherwise exhaust the range. A reclaimed slot's stale lock and socket are
+/// removed so a fresh Xephyr can bind it.
 fn find_free_x11_display() -> Option<u32> {
-    (80..=99).find(|number| {
-        !Path::new(&format!("/tmp/.X{number}-lock")).exists()
-            && !Path::new(&format!("/tmp/.X11-unix/X{number}")).exists()
-    })
+    (80..=99).find(|&number| reclaim_if_free(number))
+}
+
+/// True when display `number` is free, cleaning up any stale artifacts first.
+fn reclaim_if_free(number: u32) -> bool {
+    let lock = format!("/tmp/.X{number}-lock");
+    let socket = format!("/tmp/.X11-unix/X{number}");
+    match lock_owner_pid(Path::new(&lock)) {
+        // A live X server owns this slot.
+        Some(pid) if process_is_alive(pid) => false,
+        // Stale lock from a crashed/killed server: reclaim it.
+        Some(_) => {
+            let _ = fs::remove_file(&lock);
+            let _ = fs::remove_file(&socket);
+            true
+        }
+        // No lock; clear any orphaned socket so Xephyr can bind cleanly.
+        None => {
+            let _ = fs::remove_file(&socket);
+            true
+        }
+    }
+}
+
+/// PID recorded in an X lock file (`%10d\n`), if the file exists and parses.
+fn lock_owner_pid(lock: &Path) -> Option<u32> {
+    fs::read_to_string(lock).ok()?.trim().parse::<u32>().ok()
+}
+
+/// Whether a process is still alive (Linux `/proc` presence).
+fn process_is_alive(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// Remove the lock and socket for a display we created, so killing Xephyr
+/// (even with SIGKILL) never leaks a slot.
+fn remove_display_artifacts(display: &str) {
+    let Some(number) = display.strip_prefix(':') else {
+        return;
+    };
+    let _ = fs::remove_file(format!("/tmp/.X{number}-lock"));
+    let _ = fs::remove_file(format!("/tmp/.X11-unix/X{number}"));
 }
 
 fn create_private_runtime_dir(kind: NestedBackendKind) -> io::Result<PathBuf> {
@@ -1718,6 +1760,11 @@ fn kill_child(context: &mut RunContext) {
             let _ = xephyr.kill();
         }
         let _ = xephyr.wait();
+        // SIGKILL leaves Xephyr's lock and socket behind; remove them so the
+        // display slot does not leak across runs.
+        if let Some(display) = context.nested_x11_display.take() {
+            remove_display_artifacts(&display);
+        }
     }
 }
 
@@ -2119,6 +2166,33 @@ mod tests {
         assert!(!xwd_signature_valid(&header));
         // Too short.
         assert!(!xwd_signature_valid(&[0u8; 50]));
+    }
+
+    #[test]
+    fn a_lock_owned_by_a_live_process_is_not_reclaimed() {
+        // Our own PID is alive, so a slot it "owns" must read as taken.
+        assert!(process_is_alive(std::process::id()));
+    }
+
+    #[test]
+    fn a_lock_owned_by_a_dead_pid_is_stale() {
+        // PID 1 (init) is always alive; a very high PID is almost certainly
+        // free. The liveness check underpins stale-lock reclamation.
+        assert!(process_is_alive(1));
+        assert!(!process_is_alive(u32::MAX));
+    }
+
+    #[test]
+    fn lock_owner_pid_parses_the_x_lock_format() {
+        let dir = std::env::temp_dir().join(format!("jwm-lockfmt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create test dir");
+        let lock = dir.join("lock");
+        // X writes the PID space-padded to 10 columns with a trailing newline.
+        fs::write(&lock, b"    364726\n").expect("write lock");
+        assert_eq!(lock_owner_pid(&lock), Some(364726));
+        assert_eq!(lock_owner_pid(&dir.join("absent")), None);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
