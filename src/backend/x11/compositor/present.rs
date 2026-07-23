@@ -15,6 +15,16 @@ pub(crate) struct X11rbPresentManager<C: CompositorConnection> {
 
 #[allow(dead_code)]
 impl<C: CompositorConnection> X11rbPresentManager<C> {
+    /// Per-operation display-boundary error context tagged with the active
+    /// X11 transport, for Present protocol failures.
+    fn display_ctx(&self, operation: &'static str) -> crate::backend::error::BackendErrorContext {
+        crate::backend::error::BackendErrorContext::new(
+            self.conn.backend_name(),
+            crate::backend::error::ErrorBoundary::Display,
+            operation,
+        )
+    }
+
     /// Load and initialize Present extension
     pub(crate) fn load(conn: Arc<C>) -> Option<Self> {
         let (major_version, minor_version) = conn.query_present_version().ok()?;
@@ -66,7 +76,11 @@ impl<C: CompositorConnection> X11rbPresentManager<C> {
             Ok(event_id) => match self.conn.select_present_input(event_id, x11_win) {
                 Ok(()) => {
                     if let Err(e) = self.conn.flush_x11() {
-                        log::error!("compositor: flush failed after Present select_input: {}", e);
+                        log::error!(
+                            "{}: {}",
+                            self.display_ctx("present: flush after select input"),
+                            e
+                        );
                         return Err(format!("flush failed: {}", e));
                     }
                     log::info!(
@@ -77,12 +91,12 @@ impl<C: CompositorConnection> X11rbPresentManager<C> {
                     Ok(())
                 }
                 Err(e) => {
-                    log::error!("compositor: Present select_input failed: {}", e);
+                    log::error!("{}: {}", self.display_ctx("present: select input"), e);
                     Err(format!("select_input failed: {}", e))
                 }
             },
             Err(e) => {
-                log::error!("compositor: generate_id failed: {}", e);
+                log::error!("{}: {}", self.display_ctx("present: allocate event id"), e);
                 Err(format!("generate_id failed: {}", e))
             }
         }
@@ -127,7 +141,7 @@ impl<C: CompositorConnection> X11rbPresentManager<C> {
                 Ok(())
             }
             Err(e) => {
-                log::error!("compositor: present_pixmap failed: {}", e);
+                log::error!("{}: {}", self.display_ctx("present: present pixmap"), e);
                 Err(format!("present_pixmap failed: {}", e))
             }
         }
@@ -147,7 +161,7 @@ impl<C: CompositorConnection> X11rbPresentManager<C> {
         match self.conn.notify_present_msc(x11_win, serial, target_msc) {
             Ok(_) => Ok(()),
             Err(e) => {
-                log::error!("compositor: notify_msc failed: {}", e);
+                log::error!("{}: {}", self.display_ctx("present: notify msc"), e);
                 Err(format!("notify_msc failed: {}", e))
             }
         }

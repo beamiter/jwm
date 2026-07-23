@@ -267,6 +267,10 @@ impl X11BootstrapOps for XcbCompositorProtocol<'_> {
 }
 
 impl X11ConnectionOps for XcbCompositorProtocol<'_> {
+    fn backend_name(&self) -> &'static str {
+        "xcb"
+    }
+
     fn generate_xid(&self) -> Result<u32, String> {
         let xid: x::Window = self.conn.generate_id();
         Ok(xid.resource_id())
@@ -669,6 +673,10 @@ impl X11BootstrapOps for XcbSharedCompositorConnection {
 }
 
 impl X11ConnectionOps for XcbSharedCompositorConnection {
+    fn backend_name(&self) -> &'static str {
+        "xcb"
+    }
+
     fn generate_xid(&self) -> Result<u32, String> {
         let protocol = self.protocol();
         <XcbCompositorProtocol<'_> as X11ConnectionOps>::generate_xid(&protocol)

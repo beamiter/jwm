@@ -2456,7 +2456,7 @@ impl Backend for XcbBackend {
         let focused_x11 = focused_window.and_then(|raw| self.ids.x11(WindowId::from_raw(raw)).ok());
         let root = self.root.resource_id();
         let compositor = self.compositor.as_mut().unwrap();
-        compositor.ensure_scene_windows_tracked(&x11_scene, root, scene.len(), "xcb");
+        compositor.ensure_scene_windows_tracked(&x11_scene, root, scene.len());
 
         let _ = self.conn.flush();
         let rendered = compositor.render_frame(&x11_scene, focused_x11);
@@ -5153,7 +5153,12 @@ impl CursorProvider for XcbCursorProvider {
             self.images.size()
         );
         // Re-publish so clients launched after the reload pick up the new theme.
-        sync_xcursor_resources(&self.conn, self.root, self.images.theme_name(), self.images.size());
+        sync_xcursor_resources(
+            &self.conn,
+            self.root,
+            self.images.theme_name(),
+            self.images.size(),
+        );
         Ok(true)
     }
 

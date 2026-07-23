@@ -146,6 +146,10 @@ impl<T> X11ConnectionOps for T
 where
     T: Connection + RequestConnection,
 {
+    fn backend_name(&self) -> &'static str {
+        "x11rb"
+    }
+
     fn generate_xid(&self) -> Result<u32, String> {
         self.generate_id().map_err(|e| format!("generate_id: {e}"))
     }

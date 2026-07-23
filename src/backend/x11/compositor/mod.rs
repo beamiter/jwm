@@ -818,6 +818,35 @@ where
     scratch_swap_damage: Vec<i32>,
 }
 
+impl<C: CompositorConnection> Compositor<C> {
+    /// Per-operation renderer-boundary error context tagged with the active
+    /// X11 transport (`x11rb` / `xcb`). Used on GL/GLX/EGL failures in the
+    /// frame-production and capture paths.
+    pub(crate) fn renderer_ctx(
+        &self,
+        operation: &'static str,
+    ) -> crate::backend::error::BackendErrorContext {
+        crate::backend::error::BackendErrorContext::new(
+            self.conn.backend_name(),
+            crate::backend::error::ErrorBoundary::Renderer,
+            operation,
+        )
+    }
+
+    /// Per-operation display-boundary error context for X11 protocol
+    /// failures (redirect, flush, Present) in the frame-production path.
+    pub(crate) fn display_ctx(
+        &self,
+        operation: &'static str,
+    ) -> crate::backend::error::BackendErrorContext {
+        crate::backend::error::BackendErrorContext::new(
+            self.conn.backend_name(),
+            crate::backend::error::ErrorBoundary::Display,
+            operation,
+        )
+    }
+}
+
 // Safety: The compositor is only accessed from the single-threaded X11 event loop.
 // All raw graphics-platform handles are only used from that thread.
 unsafe impl<C: CompositorConnection> Send for Compositor<C> {}

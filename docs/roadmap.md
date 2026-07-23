@@ -32,7 +32,7 @@ not authorize a rewrite or a release-profile change without measurements.
 
 ## Phase 1 — reliability and supportability
 
-- [ ] Add backend-tagged structured error contexts at display, device, renderer,
+- [x] Add backend-tagged structured error contexts at display, device, renderer,
       and IPC boundaries. Started: `BackendError` carries an optional
       `[backend/boundary] operation` context with the original error preserved
       through `source()`. Tagged so far: backend construction and
@@ -47,8 +47,17 @@ not authorize a rewrite or a release-profile change without measurements.
       activation — the last of which previously discarded its error — plus
       DPMS, gamma, and output configuration, whose tagged reasons now flow
       into output-management transaction failure records without changing
-      field classification). Remaining: per-operation adoption inside the
-      X11 compositors' frame production and capture paths.
+      field classification). The shared X11 compositor completed the item:
+      `X11ConnectionOps::backend_name` lets the transport-generic compositor
+      tag contexts with the live transport (`x11rb`/`xcb`), frame production
+      (make-current, transition/presented-scene FBO allocation, native
+      texture sync, pixmap rebinding, buffer swap — renderer) and the
+      fullscreen unredirect/Present protocol paths (display) log
+      per-operation contexts, and every capture path (screenshot,
+      screenshot-region, window thumbnails — including previously silent GL
+      allocation failures) is tagged. `save_png_async` now carries the
+      requesting backend's context so asynchronous encode/rename failures
+      stay attributable after the capture call returns.
 - [ ] Add a deterministic nested-backend smoke matrix covering startup, IPC
       health, config reload, basic window lifecycle, screenshot capture, and
       clean shutdown.

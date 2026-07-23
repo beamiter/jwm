@@ -1428,7 +1428,7 @@ impl Backend for X11rbBackend {
             self.ids.x11(wid).ok()
         });
         let compositor = self.compositor.as_mut().unwrap();
-        compositor.ensure_scene_windows_tracked(&x11_scene, self.root_x11, scene.len(), "x11rb");
+        compositor.ensure_scene_windows_tracked(&x11_scene, self.root_x11, scene.len());
 
         let _ = self.conn.flush();
         let rendered = compositor.render_frame(&x11_scene, focused_x11);

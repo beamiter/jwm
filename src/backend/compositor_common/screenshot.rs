@@ -1,5 +1,6 @@
 //! Backend-neutral screenshot file output helpers.
 
+use crate::backend::error::BackendErrorContext;
 use std::collections::VecDeque;
 
 /// A screenshot request expressed in compositor coordinates (top-left origin).
@@ -54,7 +55,16 @@ impl ScreenshotQueue {
 
 /// Encode RGBA pixels off the render thread and atomically publish the PNG.
 /// Consumers therefore only ever observe a complete image at `path`.
-pub fn save_png_async(path: std::path::PathBuf, pixels: Vec<u8>, width: u32, height: u32) {
+///
+/// `context` tags the asynchronous failure with the requesting backend and
+/// operation, since by the time encoding fails the capture call has returned.
+pub fn save_png_async(
+    path: std::path::PathBuf,
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    context: BackendErrorContext,
+) {
     std::thread::spawn(move || {
         let tmp_path = path.with_extension(format!(
             "{}.tmp",
@@ -73,7 +83,7 @@ pub fn save_png_async(path: std::path::PathBuf, pixels: Vec<u8>, width: u32, hei
         .and_then(|_| std::fs::rename(&tmp_path, &path).map_err(image::ImageError::IoError));
         if let Err(e) = result {
             let _ = std::fs::remove_file(&tmp_path);
-            log::warn!("compositor: screenshot save failed: {e}");
+            log::warn!("{context}: {e}");
         } else {
             log::info!("compositor: screenshot saved to {}", path.display());
         }

@@ -612,9 +612,9 @@ impl<C: CompositorConnection> Compositor<C> {
 fn is_valid_case_request(case: &str) -> bool {
     !case.is_empty()
         && case.len() <= 32
-        && case
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-')
+        && case.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'
+        })
 }
 
 fn mark_pending(pending: &AtomicBool, loop_signal: &Mutex<Option<calloop::LoopSignal>>) {
@@ -713,10 +713,8 @@ mod tests {
     fn command_stream_reaches_a_connected_worker() {
         use std::io::{BufRead, BufReader};
 
-        let path = std::env::temp_dir().join(format!(
-            "jwm-waterlily-cmd-{}.sock",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("jwm-waterlily-cmd-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let ipc = super::WaterlilyIpc::bind(path.clone()).unwrap();
 

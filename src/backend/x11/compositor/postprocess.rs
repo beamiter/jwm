@@ -43,7 +43,13 @@ impl<C: CompositorConnection> Compositor<C> {
             );
         }
         flip_rgba_vertical(&mut pixels, w, h);
-        save_png_async(path.to_path_buf(), pixels, w, h);
+        save_png_async(
+            path.to_path_buf(),
+            pixels,
+            w,
+            h,
+            self.renderer_ctx("screenshot: save PNG"),
+        );
         true
     }
 
@@ -57,7 +63,10 @@ impl<C: CompositorConnection> Compositor<C> {
         rh: u32,
     ) -> bool {
         let Some(region) = clip_region(self.screen_w, self.screen_h, rx, ry, rw, rh) else {
-            log::warn!("compositor: screenshot region is empty");
+            log::warn!(
+                "{}: requested region is empty",
+                self.renderer_ctx("screenshot-region: clip region")
+            );
             return false;
         };
         let (x, y, w, h) = (region.x, region.y, region.width, region.height);
@@ -76,7 +85,13 @@ impl<C: CompositorConnection> Compositor<C> {
             );
         }
         flip_rgba_vertical(&mut pixels, w, h);
-        save_png_async(path.to_path_buf(), pixels, w, h);
+        save_png_async(
+            path.to_path_buf(),
+            pixels,
+            w,
+            h,
+            self.renderer_ctx("screenshot-region: save PNG"),
+        );
         log::info!(
             "compositor: region screenshot queued to {} ({}x{} at {},{})",
             path.display(),
@@ -114,7 +129,16 @@ impl<C: CompositorConnection> Compositor<C> {
 
         unsafe {
             // Create temp FBO
-            let tex = self.gl.create_texture().ok()?;
+            let tex = self
+                .gl
+                .create_texture()
+                .map_err(|error| {
+                    log::warn!(
+                        "{}: {error}",
+                        self.renderer_ctx("thumbnail: create texture")
+                    );
+                })
+                .ok()?;
             self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
             // Use 10-bit internal format for HDR-ready pipeline
             const GL_RGB10_A2: u32 = 0x8059;
@@ -139,7 +163,18 @@ impl<C: CompositorConnection> Compositor<C> {
                 glow::TEXTURE_MAG_FILTER,
                 glow::LINEAR as i32,
             );
-            let fbo = self.gl.create_framebuffer().ok()?;
+            let fbo = self
+                .gl
+                .create_framebuffer()
+                .map_err(|error| {
+                    // Release the texture the FBO would have owned.
+                    self.gl.delete_texture(tex);
+                    log::warn!(
+                        "{}: {error}",
+                        self.renderer_ctx("thumbnail: create framebuffer")
+                    );
+                })
+                .ok()?;
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
             self.gl.framebuffer_texture_2d(
                 glow::FRAMEBUFFER,

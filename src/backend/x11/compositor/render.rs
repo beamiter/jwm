@@ -356,7 +356,10 @@ impl<C: CompositorConnection> Compositor<C> {
         // Ensure the selected graphics context is current.
         if !self.context_current {
             if let Err(error) = self.graphics.make_current() {
-                log::error!("compositor: failed to make context current: {error}");
+                log::error!(
+                    "{}: {error}",
+                    self.renderer_ctx("transition: make context current")
+                );
                 return;
             }
             self.context_current = true;
@@ -420,7 +423,8 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.retire_transition_targets();
                     self.force_full_redraw();
                     log::warn!(
-                        "compositor: tag-switch transition target allocation failed: {error}"
+                        "{}: {error}",
+                        self.renderer_ctx("transition: allocate target FBO")
                     );
                     return;
                 }
@@ -437,7 +441,8 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.retire_transition_targets();
                     self.force_full_redraw();
                     log::warn!(
-                        "compositor: secondary tag-switch target allocation failed: {error}"
+                        "{}: {error}",
+                        self.renderer_ctx("transition: allocate secondary target FBO")
                     );
                     return;
                 }
@@ -647,7 +652,8 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.presented_scene_status
                         .record_allocation_failure(self.screen_w, self.screen_h);
                     log::warn!(
-                        "compositor: last-presented scene target allocation failed: {error}"
+                        "{}: {error}",
+                        self.renderer_ctx("presented-scene: allocate snapshot FBO")
                     );
                     return false;
                 }
@@ -704,8 +710,8 @@ impl<C: CompositorConnection> Compositor<C> {
         scene: &[(u32, i32, i32, u32, u32)],
         root: u32,
         original_scene_len: usize,
-        backend_label: &str,
     ) {
+        let backend_label = self.conn.backend_name();
         if original_scene_len != 0 && scene.is_empty() {
             log::warn!(
                 "[{backend_label} compositor] scene has {original_scene_len} entries but x11_scene is empty (ID lookup failed)"
@@ -746,7 +752,8 @@ impl<C: CompositorConnection> Compositor<C> {
                     match self.graphics.make_current() {
                         Ok(()) => self.context_current = true,
                         Err(error) => log::warn!(
-                            "compositor: deferring disabled transition snapshot cleanup: {error}"
+                            "{}: deferring snapshot cleanup: {error}",
+                            self.renderer_ctx("transition cleanup: make context current")
                         ),
                     }
                 }
@@ -1162,7 +1169,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.unredirected_window = Some(window);
                 self.needs_render = true;
                 log::warn!(
-                    "compositor: failed to re-redirect window 0x{:x} ({}): {}",
+                    "{}: window 0x{:x} ({}): {}",
+                    self.display_ctx("fullscreen: re-redirect window"),
                     window,
                     reason,
                     error
@@ -1216,7 +1224,8 @@ impl<C: CompositorConnection> Compositor<C> {
                                 if let Err(error) = self.conn.flush_x11() {
                                     self.needs_render = true;
                                     log::warn!(
-                                        "compositor: retrying fullscreen unredirect flush for 0x{:x}: {}",
+                                        "{}: retrying for 0x{:x}: {}",
+                                        self.display_ctx("fullscreen unredirect: flush"),
                                         focused_win,
                                         error
                                     );
@@ -1239,7 +1248,8 @@ impl<C: CompositorConnection> Compositor<C> {
                                     if let Err(error) = self.conn.flush_x11() {
                                         self.needs_render = true;
                                         log::warn!(
-                                            "compositor: fullscreen unredirect flush failed for 0x{:x}: {}",
+                                            "{}: window 0x{:x}: {}",
+                                            self.display_ctx("fullscreen unredirect: flush"),
                                             focused_win,
                                             error
                                         );
@@ -1254,7 +1264,8 @@ impl<C: CompositorConnection> Compositor<C> {
                                 Err(error) => {
                                     self.needs_render = true;
                                     log::warn!(
-                                        "compositor: failed to unredirect fullscreen window 0x{:x}: {}",
+                                        "{}: window 0x{:x}: {}",
+                                        self.display_ctx("fullscreen: unredirect window"),
                                         focused_win,
                                         error
                                     );
@@ -1371,7 +1382,10 @@ impl<C: CompositorConnection> Compositor<C> {
             && !self.context_current
         {
             if let Err(error) = self.graphics.make_current() {
-                log::error!("compositor: failed to make context current: {error}");
+                log::error!(
+                    "{}: {error}",
+                    self.renderer_ctx("waterlily: make context current")
+                );
                 self.needs_render = true;
                 return false;
             }
@@ -1763,7 +1777,10 @@ impl<C: CompositorConnection> Compositor<C> {
         // Ensure the selected graphics context is current.
         if !self.context_current {
             if let Err(error) = self.graphics.make_current() {
-                log::error!("compositor: failed to make context current: {error}");
+                log::error!(
+                    "{}: {error}",
+                    self.renderer_ctx("frame: make context current")
+                );
                 self.needs_render = true;
                 return false;
             }
@@ -1815,7 +1832,10 @@ impl<C: CompositorConnection> Compositor<C> {
         let mut tfp_budget_exhausted = false;
         if needs_native_texture_sync && !pixmaps_native_synced {
             if let Err(error) = self.graphics.sync_x11() {
-                log::warn!("compositor: native texture synchronization failed: {error}");
+                log::warn!(
+                    "{}: {error}",
+                    self.renderer_ctx("frame: synchronize native textures")
+                );
             }
         }
         for win in &tfp_order {
@@ -1848,7 +1868,8 @@ impl<C: CompositorConnection> Compositor<C> {
                                 .refresh_pixmap_binding(&self.gl, wt.gl_texture, binding)
                         {
                             log::warn!(
-                                "compositor: {} texture refresh failed for 0x{win:x}: {error}",
+                                "{}: {} binding for 0x{win:x}: {error}",
+                                self.renderer_ctx("frame: refresh pixmap binding"),
                                 self.graphics.api_name()
                             );
                             continue;
@@ -4171,7 +4192,8 @@ impl<C: CompositorConnection> Compositor<C> {
             // frame was not presented. Never expose it as an "old scene".
             self.presented_scene_status.invalidate();
             log::error!(
-                "compositor: {} buffer swap failed: {error}",
+                "{}: {} swap failed: {error}",
+                self.renderer_ctx("frame: swap buffers"),
                 self.graphics.api_name()
             );
             self.buffer_age_damage_history.clear();

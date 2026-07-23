@@ -104,7 +104,17 @@ impl ScreenshotReadback {
                     let mut pixels = std::slice::from_raw_parts(ptr as *const u8, size).to_vec();
                     gl.UnmapBuffer(ffi::PIXEL_PACK_BUFFER);
                     flip_rgba_vertical(&mut pixels, job.width, job.height);
-                    save_png_async(job.path, pixels, job.width, job.height);
+                    save_png_async(
+                        job.path,
+                        pixels,
+                        job.width,
+                        job.height,
+                        crate::backend::error::BackendErrorContext::new(
+                            "wayland-udev",
+                            crate::backend::error::ErrorBoundary::Renderer,
+                            "screenshot: save PNG",
+                        ),
+                    );
                 }
                 gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, 0);
                 gl.DeleteSync(job.fence);
