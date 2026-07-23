@@ -303,13 +303,43 @@ pub fn xwd_signature_valid(bytes: &[u8]) -> bool {
 // Differential policy scenario (pure normalization + comparison)
 // ---------------------------------------------------------------------------
 
-/// The fixed IPC command sequence driven between scenario snapshots. Snapshot
-/// 0 is taken right after the scenario client maps; each command produces one
-/// further snapshot, so `SCENARIO_COMMANDS.len() + 1` snapshots total.
-pub const SCENARIO_COMMANDS: &[(&str, &str)] = &[
-    ("view", r#"{"tag":2}"#),
-    ("view", r#"{"tag":1}"#),
-    ("togglefloating", "null"),
+/// One stage of the fixed differential scenario. A normalized snapshot is
+/// captured after every executed stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScenarioStage {
+    /// Map the next scenario client and wait for its window to appear.
+    /// Stages beyond the available client list are skipped identically on
+    /// every transport, so the snapshot sequences stay comparable.
+    MapClient,
+    /// Send one IPC command (name, JSON args).
+    Command(&'static str, &'static str),
+}
+
+/// The fixed stage sequence driven by `policy_scenario`. It walks the
+/// divergence-prone tiling policy surface: multi-client master/stack
+/// arrangement, layout switches, master-area parameters, stack rotation and
+/// focus movement, workarea changes, tag switches, and floating.
+pub const SCENARIO_STAGES: &[ScenarioStage] = &[
+    // One tiled window, then the two-client master/stack split.
+    ScenarioStage::MapClient,
+    ScenarioStage::MapClient,
+    // Deterministic layout baseline, then master-area math.
+    ScenarioStage::Command("setlayout", r#"{"layout":"tile"}"#),
+    ScenarioStage::Command("setmfact", r#"{"value":0.05}"#),
+    ScenarioStage::Command("incnmaster", r#"{"value":1}"#),
+    ScenarioStage::Command("incnmaster", r#"{"value":-1}"#),
+    // Stack manipulation: promote, move focus, rotate order.
+    ScenarioStage::Command("zoom", "null"),
+    ScenarioStage::Command("focusstack", r#"{"value":1}"#),
+    ScenarioStage::Command("movestack", r#"{"value":1}"#),
+    // Whole-area layout and workarea change.
+    ScenarioStage::Command("setlayout", r#"{"layout":"monocle"}"#),
+    ScenarioStage::Command("togglebar", "null"),
+    // Tag round-trip and floating, back on the tiled layout.
+    ScenarioStage::Command("setlayout", r#"{"layout":"tile"}"#),
+    ScenarioStage::Command("view", r#"{"tag":2}"#),
+    ScenarioStage::Command("view", r#"{"tag":1}"#),
+    ScenarioStage::Command("togglefloating", "null"),
 ];
 
 /// Reduce `get_windows` + `get_workspaces` payloads to the transport-neutral
@@ -1395,10 +1425,16 @@ fn run_x11_screenshot_step(spec: &StepSpec, context: &RunContext) -> StepReport 
     }
 }
 
-/// Drive the fixed `SCENARIO_COMMANDS` sequence against a mapped client and
-/// capture a normalized observable-state snapshot after each stage. Snapshots
-/// feed the x11rb-versus-xcb differential comparison; the wayland rows skip
-/// (their clients and protocol surface differ, so equality is not defined).
+/// Drive the fixed `SCENARIO_STAGES` sequence and capture a normalized
+/// observable-state snapshot after each executed stage. Snapshots feed the
+/// x11rb-versus-xcb differential comparison; the wayland rows skip (their
+/// clients and protocol surface differ, so equality is not defined).
+///
+/// Every `MapClient` stage spawns the *same* resolved client (xterm by
+/// default). A single reliable client used N times keeps the managed set
+/// deterministic: heterogeneous toolkit clients (xclock/xeyes via libXt)
+/// race on transient startup windows, which leaks client-startup timing —
+/// not a jwm policy difference — into the comparison.
 fn run_policy_scenario_step(
     spec: &StepSpec,
     context: &RunContext,
@@ -1441,31 +1477,30 @@ fn run_policy_scenario_step(
         Ok(count) => count,
         Err(error) => return (step_fail(spec, started, error, context), None),
     };
-    let mut client = match spawn_nested_client(context.kind, &argv, context) {
-        Ok(child) => child,
-        Err(error) => return (step_fail(spec, started, error, context), None),
-    };
 
-    let outcome = drive_scenario(&socket, deadline, baseline);
+    let mut clients: Vec<Child> = Vec::new();
+    let outcome = drive_scenario(&socket, deadline, baseline, &argv, &mut clients, context);
 
-    // The client must never outlive the step, whatever happened above.
-    let _ = ipc_command(&socket, "killclient");
+    // No scenario client may outlive the step, whatever happened above.
+    for client in &mut clients {
+        let _ = client.kill();
+        let _ = client.wait();
+    }
     let _ = poll_until(deadline, || {
         window_count(&socket).map(|count| count <= baseline)
     });
-    let _ = client.kill();
-    let _ = client.wait();
 
     match outcome {
-        Ok(snapshots) => (
+        Ok((snapshots, mapped)) => (
             StepReport {
                 name: spec.name,
                 status: StepStatus::Pass,
                 required: spec.required,
                 duration_ms: elapsed_ms(started),
                 detail: format!(
-                    "captured {} normalized snapshots with {}",
+                    "captured {} normalized snapshots across {} stages with {mapped}x {}",
                     snapshots.len(),
+                    SCENARIO_STAGES.len(),
                     argv[0]
                 ),
                 action: None,
@@ -1476,30 +1511,49 @@ fn run_policy_scenario_step(
     }
 }
 
-/// Wait for the scenario client, then take one settled snapshot per stage.
+/// Execute every stage, snapshotting after each one. `MapClient` stages all
+/// spawn `argv`. Returns the snapshots and how many clients were mapped.
 fn drive_scenario(
     socket: &Path,
     deadline: Instant,
     baseline: usize,
-) -> Result<Vec<serde_json::Value>, String> {
-    match poll_until(deadline, || {
-        window_count(socket).map(|count| count > baseline)
-    }) {
-        Ok(true) => {}
-        Ok(false) => return Err("scenario client never mapped a window".to_string()),
-        Err(error) => return Err(error),
-    }
-    let mut snapshots = Vec::with_capacity(SCENARIO_COMMANDS.len() + 1);
-    snapshots.push(settled_snapshot(socket, deadline)?);
-    for (command, args) in SCENARIO_COMMANDS {
-        let args: serde_json::Value = serde_json::from_str(args)
-            .map_err(|error| format!("scenario args for {command}: {error}"))?;
-        let request = serde_json::json!({ "command": command, "args": args });
-        let response = ipc_roundtrip(socket, &request)?;
-        expect_success(command, response)?;
+    argv: &[String],
+    clients: &mut Vec<Child>,
+    context: &RunContext,
+) -> Result<(Vec<serde_json::Value>, usize), String> {
+    let mut snapshots = Vec::with_capacity(SCENARIO_STAGES.len());
+    let mut mapped = 0usize;
+    for stage in SCENARIO_STAGES {
+        match stage {
+            ScenarioStage::MapClient => {
+                let child = spawn_nested_client(context.kind, argv, context)?;
+                clients.push(child);
+                mapped += 1;
+                let expected = baseline + mapped;
+                match poll_until(deadline, || {
+                    window_count(socket).map(|count| count >= expected)
+                }) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Err(format!(
+                            "scenario client {} (#{mapped}) never mapped a window",
+                            argv[0]
+                        ));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            ScenarioStage::Command(command, args) => {
+                let args: serde_json::Value = serde_json::from_str(args)
+                    .map_err(|error| format!("scenario args for {command}: {error}"))?;
+                let request = serde_json::json!({ "command": command, "args": args });
+                let response = ipc_roundtrip(socket, &request)?;
+                expect_success(command, response)?;
+            }
+        }
         snapshots.push(settled_snapshot(socket, deadline)?);
     }
-    Ok(snapshots)
+    Ok((snapshots, mapped))
 }
 
 /// Normalized snapshot that is stable across two consecutive reads, so
@@ -2068,13 +2122,28 @@ mod tests {
     }
 
     #[test]
-    fn scenario_commands_parse_and_target_known_ipc_commands() {
-        for (command, args) in SCENARIO_COMMANDS {
-            let parsed: serde_json::Value =
-                serde_json::from_str(args).expect("scenario args must be valid JSON");
-            assert!(parsed.is_object() || parsed.is_null());
-            assert!(!command.is_empty());
+    fn scenario_stages_parse_and_target_registered_ipc_commands() {
+        let mut map_clients = 0usize;
+        for stage in SCENARIO_STAGES {
+            match stage {
+                ScenarioStage::MapClient => map_clients += 1,
+                ScenarioStage::Command(command, args) => {
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(args).expect("scenario args must be valid JSON");
+                    assert!(parsed.is_object() || parsed.is_null());
+                    // Every scenario command must exist in the live IPC
+                    // registry, so the matrix can never drift from jwm.
+                    assert!(
+                        jwm::ipc::is_known_command(command),
+                        "{command} is not a registered IPC command"
+                    );
+                }
+            }
         }
+        // Snapshot 0 needs a mapped window, and the master/stack math the
+        // differential exists for needs at least two clients.
+        assert!(matches!(SCENARIO_STAGES[0], ScenarioStage::MapClient));
+        assert!(map_clients >= 2);
     }
 
     #[test]
