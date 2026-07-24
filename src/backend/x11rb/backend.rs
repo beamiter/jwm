@@ -3,7 +3,6 @@ use crate::backend::api::BackendEvent;
 use self::ids::X11IdRegistry;
 use crate::backend::api::EventHandler;
 use crate::backend::api::Geometry;
-use crate::backend::api::HitTarget;
 use crate::backend::api::InteractionAction;
 use crate::backend::api::PropertyKind;
 use crate::backend::api::ResizeEdge;
@@ -170,43 +169,11 @@ impl X11rbBackend {
     }
 
     fn enrich_event_with_output(&self, mut ev: BackendEvent) -> BackendEvent {
-        let fill_output = |x: f64, y: f64| self.output_ops.output_at(x as i32, y as i32);
-
-        match &mut ev {
-            BackendEvent::ButtonPress {
-                target,
-                root_x,
-                root_y,
-                ..
-            } => {
-                if matches!(target, HitTarget::Background { .. }) {
-                    *target = HitTarget::Background {
-                        output: fill_output(*root_x, *root_y),
-                    };
-                }
-            }
-            BackendEvent::MotionNotify {
-                target,
-                root_x,
-                root_y,
-                ..
-            } => {
-                if matches!(target, HitTarget::Background { .. }) {
-                    *target = HitTarget::Background {
-                        output: fill_output(*root_x, *root_y),
-                    };
-                }
-            }
-            BackendEvent::ButtonRelease { target, .. } => {
-                if matches!(target, HitTarget::Background { .. }) {}
-            }
-            // Invalidate output cache on screen layout changes
-            BackendEvent::ScreenLayoutChanged => {
-                self.output_ops.invalidate_output_cache();
-            }
-            _ => {}
-        }
-
+        crate::backend::x11::wm::enrich_background_event(
+            &mut ev,
+            |x, y| self.output_ops.output_at(x, y),
+            || self.output_ops.invalidate_output_cache(),
+        );
         ev
     }
     pub fn new() -> Result<Self, BackendError> {
@@ -580,19 +547,9 @@ impl X11rbBackend {
                     caps.supports_bt2020
                 );
 
+                let plan = crate::backend::edid::hdr_compositor_plan(&caps);
                 if let Some(c) = self.compositor.as_mut() {
-                    if caps.max_luminance_nits > 0.0 {
-                        c.set_hdr_peak_nits(caps.max_luminance_nits);
-                    }
-                    if caps.supports_pq {
-                        c.set_eotf_mode(1);
-                    } else if caps.supports_hlg {
-                        c.set_eotf_mode(2);
-                    }
-                    if caps.supports_bt2020 {
-                        c.set_output_colorspace(1);
-                    }
-                    c.set_hdr_output_10bit(true);
+                    c.apply_hdr_plan(&plan);
                 }
 
                 self.set_output_hdr_properties(output_id, true);

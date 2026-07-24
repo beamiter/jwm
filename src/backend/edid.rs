@@ -7,6 +7,45 @@ pub struct EdidHdrCapabilities {
     pub supports_hlg: bool,
 }
 
+/// Compositor colour settings derived from a display's HDR EDID block.
+///
+/// `None` fields mean "leave unchanged"; a present value is the setting to
+/// apply. Deriving this is pure and identical across the X11 transports, so
+/// both feed their fetched [`EdidHdrCapabilities`] through
+/// [`hdr_compositor_plan`] and hand the result to the shared compositor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HdrCompositorPlan {
+    /// Peak luminance in nits, when the display advertises a positive value.
+    pub peak_nits: Option<f32>,
+    /// EOTF mode: `1` for PQ, `2` for HLG; `None` keeps the SDR EOTF.
+    pub eotf_mode: Option<i32>,
+    /// Output colour space: `1` for BT.2020 when supported.
+    pub colorspace: Option<i32>,
+    /// Whether to drive a 10-bit output; set whenever HDR metadata exists.
+    pub output_10bit: bool,
+}
+
+/// Map EDID HDR capabilities to the compositor colour settings to apply.
+///
+/// PQ takes precedence over HLG when a display claims both, matching how the
+/// two X11 backends previously open-coded this decision.
+#[must_use]
+pub fn hdr_compositor_plan(caps: &EdidHdrCapabilities) -> HdrCompositorPlan {
+    let eotf_mode = if caps.supports_pq {
+        Some(1)
+    } else if caps.supports_hlg {
+        Some(2)
+    } else {
+        None
+    };
+    HdrCompositorPlan {
+        peak_nits: (caps.max_luminance_nits > 0.0).then_some(caps.max_luminance_nits),
+        eotf_mode,
+        colorspace: caps.supports_bt2020.then_some(1),
+        output_10bit: true,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EdidIdentity {
     pub vendor: String,
@@ -278,5 +317,46 @@ mod tests {
         assert_eq!(identity.serial_number, 0xAABBCCDD);
         assert_eq!(identity.monitor_name.as_deref(), Some("JWM Display"));
         assert_eq!(identity.monitor_serial.as_deref(), Some("SER123"));
+    }
+
+    fn caps(max: f32, pq: bool, hlg: bool, bt2020: bool) -> EdidHdrCapabilities {
+        EdidHdrCapabilities {
+            max_luminance_nits: max,
+            min_luminance_nits: 0.1,
+            supports_bt2020: bt2020,
+            supports_pq: pq,
+            supports_hlg: hlg,
+        }
+    }
+
+    #[test]
+    fn hdr_plan_selects_pq_over_hlg_and_sets_bt2020_and_peak() {
+        let plan = hdr_compositor_plan(&caps(1000.0, true, true, true));
+        assert_eq!(plan.peak_nits, Some(1000.0));
+        assert_eq!(
+            plan.eotf_mode,
+            Some(1),
+            "PQ wins when both PQ and HLG exist"
+        );
+        assert_eq!(plan.colorspace, Some(1));
+        assert!(plan.output_10bit);
+    }
+
+    #[test]
+    fn hdr_plan_falls_back_to_hlg_and_omits_bt2020() {
+        let plan = hdr_compositor_plan(&caps(600.0, false, true, false));
+        assert_eq!(plan.eotf_mode, Some(2));
+        assert_eq!(plan.colorspace, None);
+        assert_eq!(plan.peak_nits, Some(600.0));
+    }
+
+    #[test]
+    fn hdr_plan_keeps_sdr_eotf_and_drops_zero_peak() {
+        let plan = hdr_compositor_plan(&caps(0.0, false, false, false));
+        assert_eq!(plan.eotf_mode, None, "no PQ/HLG keeps the SDR EOTF");
+        assert_eq!(plan.peak_nits, None, "a zero peak is left unset");
+        assert_eq!(plan.colorspace, None);
+        // 10-bit output is still requested whenever HDR metadata was present.
+        assert!(plan.output_10bit);
     }
 }

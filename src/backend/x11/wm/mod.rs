@@ -1,7 +1,8 @@
 use crate::backend::api::OutputInfo;
 use crate::backend::api::{
-    AllowedAction, BackendEvent, EwmhFeature, IconData, MotifWmHints, NetWmAction, NetWmState,
-    NormalHints, PropertyKind, StackMode, StrutPartial, WindowChanges, WindowType, WmHints,
+    AllowedAction, BackendEvent, EwmhFeature, HitTarget, IconData, MotifWmHints, NetWmAction,
+    NetWmState, NormalHints, PropertyKind, StackMode, StrutPartial, WindowChanges, WindowType,
+    WmHints,
 };
 use crate::backend::common_define::{OutputId, WindowId};
 use std::ops::BitOr;
@@ -378,6 +379,46 @@ pub fn classify_client_message(
         return ClientMessageKind::PingResponse { window: data[2] };
     }
     ClientMessageKind::Other
+}
+
+/// Resolve which output a pointer event over the background landed on, and
+/// invalidate the output cache when the screen layout changes.
+///
+/// Both X11 transports run this identical, protocol-neutral step on the
+/// events they decode: a `ButtonPress`/`MotionNotify` whose hit target is the
+/// background gets its `output` filled from `output_at(root_x, root_y)`, and
+/// `ScreenLayoutChanged` triggers `invalidate_cache`. Other events, and
+/// pointer events already resolved to a surface, are left untouched.
+pub fn enrich_background_event<Lookup, Invalidate>(
+    event: &mut BackendEvent,
+    output_at: Lookup,
+    invalidate_cache: Invalidate,
+) where
+    Lookup: FnOnce(i32, i32) -> Option<OutputId>,
+    Invalidate: FnOnce(),
+{
+    match event {
+        BackendEvent::ButtonPress {
+            target,
+            root_x,
+            root_y,
+            ..
+        }
+        | BackendEvent::MotionNotify {
+            target,
+            root_x,
+            root_y,
+            ..
+        } => {
+            if matches!(target, HitTarget::Background { .. }) {
+                *target = HitTarget::Background {
+                    output: output_at(*root_x as i32, *root_y as i32),
+                };
+            }
+        }
+        BackendEvent::ScreenLayoutChanged => invalidate_cache(),
+        _ => {}
+    }
 }
 
 pub fn expand_net_wm_state_requests<F>(
@@ -817,9 +858,77 @@ fn decode_latin1(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_text_property, mode_refresh_hz, parse_icon_data, parse_normal_hints, parse_strut,
-        parse_wm_class, refresh_millihz_to_hz,
+        decode_text_property, enrich_background_event, mode_refresh_hz, parse_icon_data,
+        parse_normal_hints, parse_strut, parse_wm_class, refresh_millihz_to_hz,
     };
+    use crate::backend::api::{BackendEvent, HitTarget};
+    use crate::backend::common_define::OutputId;
+    use std::cell::Cell;
+
+    #[test]
+    fn background_pointer_events_get_their_output_filled() {
+        let mut event = BackendEvent::ButtonPress {
+            target: HitTarget::Background { output: None },
+            state: 0,
+            detail: 1,
+            time: 0,
+            root_x: 640.0,
+            root_y: 400.0,
+        };
+        let looked_up = Cell::new(None);
+        enrich_background_event(
+            &mut event,
+            |x, y| {
+                looked_up.set(Some((x, y)));
+                Some(OutputId(2))
+            },
+            || panic!("a pointer event must not invalidate the output cache"),
+        );
+        // The lookup receives the truncated integer root coordinates...
+        assert_eq!(looked_up.get(), Some((640, 400)));
+        // ...and its result is written back into the hit target.
+        match event {
+            BackendEvent::ButtonPress {
+                target: HitTarget::Background { output },
+                ..
+            } => assert_eq!(output, Some(OutputId(2))),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pointer_event_already_on_a_surface_is_left_untouched() {
+        let mut event = BackendEvent::MotionNotify {
+            target: HitTarget::Surface(crate::backend::common_define::WindowId::from_raw(7)),
+            root_x: 1.0,
+            root_y: 2.0,
+            time: 0,
+        };
+        enrich_background_event(
+            &mut event,
+            |_, _| panic!("a resolved surface must not be looked up"),
+            || panic!("a pointer event must not invalidate the output cache"),
+        );
+        assert!(matches!(
+            event,
+            BackendEvent::MotionNotify {
+                target: HitTarget::Surface(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn screen_layout_change_invalidates_the_output_cache() {
+        let mut event = BackendEvent::ScreenLayoutChanged;
+        let invalidated = Cell::new(false);
+        enrich_background_event(
+            &mut event,
+            |_, _| panic!("a layout change must not look up an output"),
+            || invalidated.set(true),
+        );
+        assert!(invalidated.get());
+    }
 
     #[test]
     fn refresh_units_are_rounded_for_compositor_policy() {

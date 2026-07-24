@@ -1182,19 +1182,9 @@ impl XcbBackend {
                     caps.supports_bt2020
                 );
 
+                let plan = crate::backend::edid::hdr_compositor_plan(&caps);
                 if let Some(c) = self.compositor.as_mut() {
-                    if caps.max_luminance_nits > 0.0 {
-                        c.set_hdr_peak_nits(caps.max_luminance_nits);
-                    }
-                    if caps.supports_pq {
-                        c.set_eotf_mode(1);
-                    } else if caps.supports_hlg {
-                        c.set_eotf_mode(2);
-                    }
-                    if caps.supports_bt2020 {
-                        c.set_output_colorspace(1);
-                    }
-                    c.set_hdr_output_10bit(true);
+                    c.apply_hdr_plan(&plan);
                 }
 
                 let _ = self.set_output_hdr_properties(output_id, true);
@@ -1705,33 +1695,11 @@ impl XcbBackend {
     }
 
     fn enrich_event_with_output(&self, mut event: BackendEvent) -> BackendEvent {
-        let fill_output = |x: f64, y: f64| self.output_ops.output_at(x as i32, y as i32);
-
-        match &mut event {
-            BackendEvent::ButtonPress {
-                target,
-                root_x,
-                root_y,
-                ..
-            }
-            | BackendEvent::MotionNotify {
-                target,
-                root_x,
-                root_y,
-                ..
-            } => {
-                if matches!(target, HitTarget::Background { .. }) {
-                    *target = HitTarget::Background {
-                        output: fill_output(*root_x, *root_y),
-                    };
-                }
-            }
-            BackendEvent::ScreenLayoutChanged => {
-                self.output_ops.invalidate_output_cache();
-            }
-            _ => {}
-        }
-
+        crate::backend::x11::wm::enrich_background_event(
+            &mut event,
+            |x, y| self.output_ops.output_at(x, y),
+            || self.output_ops.invalidate_output_cache(),
+        );
         event
     }
 

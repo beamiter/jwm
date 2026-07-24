@@ -146,6 +146,14 @@ mock implementing the complete backend surface. (First met by
   `on_flushed` resets, and each transport keeps only its own
   `conn.flush()`. The x11rb/xcb differential confirmed the two transports
   produce identical observable state before and after the move.
+  Two more protocol-free decisions followed: the EDID-HDR-caps → compositor
+  colour-settings mapping (PQ-over-HLG precedence, BT.2020, peak nits,
+  10-bit) is now the pure, tested `backend::edid::hdr_compositor_plan`
+  applied via `Compositor::apply_hdr_plan`, and the background-pointer
+  output resolution / screen-layout cache invalidation is the tested
+  `backend::x11::wm::enrich_background_event` — the latter had already
+  drifted (the x11rb copy carried a dead `ButtonRelease` arm the xcb copy
+  had dropped). Both backends now call the single implementation.
 - Move platform-neutral dirty-region, frame-timing, animation, color, and effect
   algorithms into compositor-common modules. Started: the event coalescer,
   workspace-transition timing, and wobbly-window simulation — std-only

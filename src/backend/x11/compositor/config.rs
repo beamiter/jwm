@@ -806,6 +806,22 @@ impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn set_hdr_output_10bit(&mut self, enabled: bool) {
         self.hdr_output_10bit = enabled;
     }
+
+    /// Apply the colour settings derived from a display's HDR EDID block.
+    /// The decision lives in `backend::edid::hdr_compositor_plan`; both X11
+    /// transports build a plan and call this so the mapping cannot drift.
+    pub(crate) fn apply_hdr_plan(&mut self, plan: &crate::backend::edid::HdrCompositorPlan) {
+        if let Some(nits) = plan.peak_nits {
+            self.set_hdr_peak_nits(nits);
+        }
+        if let Some(mode) = plan.eotf_mode {
+            self.set_eotf_mode(mode);
+        }
+        if let Some(colorspace) = plan.colorspace {
+            self.set_output_colorspace(colorspace);
+        }
+        self.set_hdr_output_10bit(plan.output_10bit);
+    }
 }
 
 #[cfg(test)]
