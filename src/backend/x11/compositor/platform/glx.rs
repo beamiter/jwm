@@ -6,6 +6,7 @@
 //! this file; the facade in the parent module dispatches into it.
 
 use super::super::PixmapBinding;
+use super::super::oml_sync_control::{OmlSyncControl, OmlSyncControlFunctions};
 use glow::HasContext;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_void};
@@ -47,7 +48,7 @@ fn validated_glx_buffer_age(supported: bool, queried_age: u32) -> u32 {
 
 pub(super) struct GlxPlatform {
     context: x11::glx::GLXContext,
-    pub(super) drawable: x11::glx::GLXDrawable,
+    drawable: x11::glx::GLXDrawable,
     buffer_age_supported: bool,
     tfp: TfpFunctions,
     fbconfig_rgba: x11::glx::GLXFBConfig,
@@ -201,6 +202,24 @@ impl GlxPlatform {
 
     pub(super) fn get_proc_address(&self, name: &str) -> *const c_void {
         glx_proc(name)
+    }
+
+    /// Resolve the `GLX_OML_sync_control` entry points and build the per-window
+    /// sync manager. Symbol resolution stays in this adapter; the manager only
+    /// receives ready function pointers.
+    pub(super) fn load_oml(&self, display: *mut x11::xlib::Display) -> Option<OmlSyncControl> {
+        let get_sync_values = glx_proc("glXGetSyncValuesOML");
+        let wait_for_msc = glx_proc("glXWaitForMscOML");
+        let swap_buffers_msc = glx_proc("glXSwapBuffersMscOML");
+        let funcs = OmlSyncControlFunctions {
+            get_sync_values: (!get_sync_values.is_null())
+                .then(|| unsafe { std::mem::transmute(get_sync_values) }),
+            wait_for_msc: (!wait_for_msc.is_null())
+                .then(|| unsafe { std::mem::transmute(wait_for_msc) }),
+            swap_buffers_msc: (!swap_buffers_msc.is_null())
+                .then(|| unsafe { std::mem::transmute(swap_buffers_msc) }),
+        };
+        OmlSyncControl::new(funcs, display, self.drawable)
     }
 
     fn select_tfp_config(

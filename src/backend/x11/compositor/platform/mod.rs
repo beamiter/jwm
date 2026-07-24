@@ -246,7 +246,7 @@ impl GraphicsPlatform {
 
     pub(super) fn load_oml(&self) -> Option<OmlSyncControl> {
         match &self.backend {
-            PlatformBackend::Glx(glx) => OmlSyncControl::load(self.xlib_display, glx.drawable),
+            PlatformBackend::Glx(glx) => glx.load_oml(self.xlib_display),
             PlatformBackend::Egl(_) => None,
         }
     }

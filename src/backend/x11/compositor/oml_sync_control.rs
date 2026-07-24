@@ -1,4 +1,3 @@
-use std::ffi::CString;
 use std::time::{Duration, Instant};
 
 use crate::backend::x11::compositor_common::oml_sync::OmlSyncWindow;
@@ -49,26 +48,14 @@ pub struct OmlSyncControl {
 }
 
 impl OmlSyncControl {
-    /// Load OML sync control extension functions
-    pub fn load(
+    /// Build the manager from extension entry points resolved by the GLX
+    /// platform adapter, which owns all GLX symbol resolution. Returns `None`
+    /// when the extension is incomplete.
+    pub fn new(
+        funcs: OmlSyncControlFunctions,
         xlib_display: *mut x11::xlib::Display,
         glx_drawable: x11::glx::GLXDrawable,
     ) -> Option<Self> {
-        let funcs = OmlSyncControlFunctions {
-            get_sync_values: unsafe {
-                let name = CString::new("glXGetSyncValuesOML").unwrap();
-                std::mem::transmute(x11::glx::glXGetProcAddress(name.as_ptr() as *const u8))
-            },
-            wait_for_msc: unsafe {
-                let name = CString::new("glXWaitForMscOML").unwrap();
-                std::mem::transmute(x11::glx::glXGetProcAddress(name.as_ptr() as *const u8))
-            },
-            swap_buffers_msc: unsafe {
-                let name = CString::new("glXSwapBuffersMscOML").unwrap();
-                std::mem::transmute(x11::glx::glXGetProcAddress(name.as_ptr() as *const u8))
-            },
-        };
-
         let available = funcs.get_sync_values.is_some()
             && funcs.wait_for_msc.is_some()
             && funcs.swap_buffers_msc.is_some();
