@@ -33,9 +33,7 @@ use crate::backend::api::{
     CompositorWorkspaceEffects, CursorProvider, DisplayControl, EwmhFacade, InputOps, KeyOps,
     OutputOps, PropertyOps, RenderScheduler, SystemUiOverlay, VrrCapabilities, WindowOps,
 };
-use crate::backend::x11::wm::{
-    DEFAULT_OUTPUT_REFRESH_MHZ, SUPPORTED_EWMH_FEATURES, refresh_millihz_to_hz,
-};
+use crate::backend::x11::wm::{SUPPORTED_EWMH_FEATURES, primary_refresh};
 
 use self::{
     color::X11ColorAllocator, cursor::X11CursorProvider, event_source::X11EventSource,
@@ -252,16 +250,11 @@ impl X11rbBackend {
             .unwrap_or_else(|_| crate::config::CONFIG.load().compositor_enabled());
 
         // P4: Query primary monitor refresh rate before compositor init
-        let outputs = OutputOps::enumerate_outputs(output_ops.as_ref());
-        let primary_refresh_millihz = outputs
-            .iter()
-            .find_map(|o| (o.refresh_rate > 0).then_some(o.refresh_rate))
-            .unwrap_or(DEFAULT_OUTPUT_REFRESH_MHZ);
-        let primary_refresh_hz = refresh_millihz_to_hz(primary_refresh_millihz).max(1);
+        let refresh = primary_refresh(&OutputOps::enumerate_outputs(output_ops.as_ref()));
         log::info!(
             "x11rb backend: primary monitor refresh rate: {:.3}Hz ({}Hz compositor policy)",
-            primary_refresh_millihz as f64 / 1000.0,
-            primary_refresh_hz
+            refresh.millihz as f64 / 1000.0,
+            refresh.hz
         );
 
         let compositor = if compositor_enabled {
@@ -270,7 +263,7 @@ impl X11rbBackend {
                 root_x11,
                 screen.width_in_pixels as u32,
                 screen.height_in_pixels as u32,
-                primary_refresh_hz,
+                refresh.hz,
             ) {
                 Ok(c) => {
                     log::info!("GPU compositor initialized successfully");

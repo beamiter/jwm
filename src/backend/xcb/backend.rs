@@ -30,8 +30,8 @@ use crate::backend::x11::wm::{
     lock_modifier_combinations, net_wm_ping_message, net_wm_state_from_atom,
     net_wm_sync_request_message, output_at, parse_gtk_frame_extents, parse_icon_data,
     parse_motif_hints, parse_normal_hints, parse_opaque_region, parse_strut, parse_strut_partial,
-    parse_wm_class, parse_wm_hints, property_kind_from_atom, protocol_supported,
-    refresh_millihz_to_hz, restack_window_changes, stack_mode_from_index, stack_mode_to_index,
+    parse_wm_class, parse_wm_hints, primary_refresh, property_kind_from_atom, protocol_supported,
+    restack_window_changes, stack_mode_from_index, stack_mode_to_index,
     window_changes_from_configure_request_parts, window_type_from_atom, wm_delete_window_message,
     wm_take_focus_message,
 };
@@ -969,16 +969,11 @@ impl XcbBackend {
             .map(|v| v == "1")
             .unwrap_or_else(|_| crate::config::CONFIG.load().compositor_enabled());
 
-        let primary_refresh_millihz = output_ops
-            .enumerate_outputs()
-            .into_iter()
-            .find_map(|o| (o.refresh_rate > 0).then_some(o.refresh_rate))
-            .unwrap_or(DEFAULT_OUTPUT_REFRESH_MHZ);
-        let primary_refresh_hz = refresh_millihz_to_hz(primary_refresh_millihz).max(1);
+        let refresh = primary_refresh(&output_ops.enumerate_outputs());
         log::info!(
             "xcb backend: primary monitor refresh rate: {:.3}Hz ({}Hz compositor policy)",
-            primary_refresh_millihz as f64 / 1000.0,
-            primary_refresh_hz
+            refresh.millihz as f64 / 1000.0,
+            refresh.hz
         );
 
         let shared_compositor_conn = if compositor_enabled {
@@ -1001,7 +996,7 @@ impl XcbBackend {
                     root.resource_id(),
                     screen_width as u32,
                     screen_height as u32,
-                    primary_refresh_hz,
+                    refresh.hz,
                 ) {
                     Ok(c) => {
                         log::info!("XCB backend: GPU compositor initialized successfully");

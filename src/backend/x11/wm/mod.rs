@@ -559,6 +559,28 @@ pub fn mode_refresh_hz(dot_clock: u32, htotal: u16, vtotal: u16) -> u32 {
     refresh_millihz_to_hz(refresh_millihz).max(1)
 }
 
+/// Primary-monitor refresh rate in both the backend-facing millihertz
+/// representation and the whole-Hz form compositor policy consumes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PrimaryRefresh {
+    pub millihz: u32,
+    pub hz: u32,
+}
+
+/// Derive the primary-monitor refresh rate for compositor construction: the
+/// first output reporting a positive rate wins, otherwise the 60 Hz default
+/// applies. The whole-Hz form is never zero.
+pub fn primary_refresh(outputs: &[OutputInfo]) -> PrimaryRefresh {
+    let millihz = outputs
+        .iter()
+        .find_map(|output| (output.refresh_rate > 0).then_some(output.refresh_rate))
+        .unwrap_or(DEFAULT_OUTPUT_REFRESH_MHZ);
+    PrimaryRefresh {
+        millihz,
+        hz: refresh_millihz_to_hz(millihz).max(1),
+    }
+}
+
 pub fn output_at(outputs: &[OutputInfo], x: i32, y: i32) -> Option<OutputId> {
     outputs.iter().find_map(|output| {
         if x >= output.x
@@ -858,8 +880,9 @@ fn decode_latin1(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_text_property, enrich_background_event, mode_refresh_hz, parse_icon_data,
-        parse_normal_hints, parse_strut, parse_wm_class, refresh_millihz_to_hz,
+        DEFAULT_OUTPUT_REFRESH_MHZ, decode_text_property, enrich_background_event, mode_refresh_hz,
+        parse_icon_data, parse_normal_hints, parse_strut, parse_wm_class, primary_refresh,
+        refresh_millihz_to_hz,
     };
     use crate::backend::api::{BackendEvent, HitTarget};
     use crate::backend::common_define::OutputId;
@@ -937,6 +960,41 @@ mod tests {
         assert_eq!(refresh_millihz_to_hz(120_081), 120);
         assert_eq!(mode_refresh_hz(497_500_000, 2720, 1525), 120);
         assert_eq!(mode_refresh_hz(0, 0, 0), 60);
+    }
+
+    #[test]
+    fn primary_refresh_picks_the_first_output_with_a_positive_rate() {
+        let outputs = [
+            output_with_rate(0),
+            output_with_rate(120_081),
+            output_with_rate(60_000),
+        ];
+        let refresh = primary_refresh(&outputs);
+        assert_eq!(refresh.millihz, 120_081);
+        assert_eq!(refresh.hz, 120);
+    }
+
+    #[test]
+    fn primary_refresh_defaults_to_60hz_without_a_reporting_output() {
+        for outputs in [&[][..], &[output_with_rate(0)][..]] {
+            let refresh = primary_refresh(outputs);
+            assert_eq!(refresh.millihz, DEFAULT_OUTPUT_REFRESH_MHZ);
+            assert_eq!(refresh.hz, 60);
+        }
+    }
+
+    fn output_with_rate(refresh_millihz: u32) -> crate::backend::api::OutputInfo {
+        super::build_output_info(
+            OutputId(1),
+            "test".to_string(),
+            0,
+            0,
+            1920,
+            1080,
+            refresh_millihz,
+            false,
+            None,
+        )
     }
 
     #[test]
