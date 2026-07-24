@@ -1,6 +1,7 @@
 // src/backend/mod.rs
 
 pub mod api;
+pub mod color_policy;
 pub mod common_define;
 pub mod edid;
 pub mod error;

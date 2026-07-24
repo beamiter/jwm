@@ -508,7 +508,7 @@ fn output_color_policy_json(
     render_path_enabled: bool,
     advanced_enabled: bool,
 ) -> serde_json::Value {
-    use crate::backend::wayland_udev::color_management::{params_from_edid, srgb_params};
+    use crate::backend::color_policy::{params_from_edid, srgb_params};
 
     let policy_source = if !advanced_enabled {
         "srgb_safe_default"
@@ -1471,7 +1471,7 @@ impl Jwm {
         let outputs = backend.output_ops().enumerate_outputs();
         let color_render_path_enabled = cfg.behavior().color_management_render_path;
         let color_advanced_enabled =
-            crate::backend::wayland_udev::color_management::advanced_color_management_enabled();
+            crate::backend::color_policy::advanced_color_management_enabled();
         let output_details: Vec<serde_json::Value> = outputs
             .iter()
             .map(|o| {
