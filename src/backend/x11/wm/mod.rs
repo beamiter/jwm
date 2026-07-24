@@ -9,6 +9,8 @@ use std::ops::BitOr;
 
 /// Protocol-free flush-batching coordinator shared by both X11 transports.
 pub mod batch;
+/// Shared generation of the compositor capability trait impls.
+pub mod compositor_delegation;
 
 #[derive(Clone, Copy)]
 pub struct WindowTypeAtoms<A> {
