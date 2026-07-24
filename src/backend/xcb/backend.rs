@@ -4897,7 +4897,7 @@ mod parity_tests {
     const X11_COMPOSITOR_INIT_SRC: &str = include_str!("../x11/compositor/init.rs");
     const X11_COMPOSITOR_RENDER_SRC: &str = include_str!("../x11/compositor/render.rs");
     const X11_COMPOSITOR_TFP_SRC: &str = include_str!("../x11/compositor/tfp.rs");
-    const X11_COMPOSITOR_PLATFORM_SRC: &str = include_str!("../x11/compositor/platform.rs");
+    const X11_COMPOSITOR_GLX_SRC: &str = include_str!("../x11/compositor/platform/glx.rs");
 
     fn impl_body_after<'a>(src: &'a str, needle: &str) -> &'a str {
         let start = src
@@ -5475,7 +5475,7 @@ mod parity_tests {
                 && !tfp_impl.contains("pending_fence"),
             "rendering should not create unconsumed per-window GPU fences"
         );
-        let platform_impl = impl_body_after(X11_COMPOSITOR_PLATFORM_SRC, "impl GlxPlatform");
+        let platform_impl = impl_body_after(X11_COMPOSITOR_GLX_SRC, "impl GlxPlatform");
         assert!(
             !platform_impl.contains("let attrs: Vec<i32> = vec!")
                 && platform_impl.contains("let attrs = ["),
