@@ -29,6 +29,20 @@ ALSA, D-Bus, and font/rendering development packages for your distribution.
 The minimum supported Rust version with the committed `Cargo.lock` is 1.89;
 it is declared in `Cargo.toml` and checked in CI.
 
+On a fresh Debian/Ubuntu machine, `scripts/bootstrap_deps.sh` installs every
+native dependency plus the Rust toolchain (via rustup, since distro packages are
+older than the 1.89 floor) in one step:
+
+```bash
+bash scripts/bootstrap_deps.sh              # apt packages + rustup toolchain
+JWM_CN_MIRROR=1 bash scripts/bootstrap_deps.sh   # China: rustup + cargo via rsproxy.cn
+bash scripts/bootstrap_deps.sh --help       # options: --no-apt, --no-rust, --with-portal, --cn
+```
+
+`--with-portal` (or `JWM_WITH_PORTAL=1`) adds the PipeWire headers needed by the
+screencast portal. On non-Debian distros the script prints the required library
+groups to map to your package manager. Then build:
+
 ```bash
 cargo build --locked --release
 cargo test --locked --lib --bins --tests
