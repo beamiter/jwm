@@ -157,6 +157,11 @@ where
     fn flush_x11(&self) -> Result<(), String> {
         self.flush().map_err(|e| format!("flush: {e}"))
     }
+
+    fn query_window_size(&self, window: u32) -> Option<(u32, u32)> {
+        let geometry = self.get_geometry(window).ok()?.reply().ok()?;
+        Some((u32::from(geometry.width), u32::from(geometry.height)))
+    }
 }
 
 impl<T> X11CompositeRedirectOps for T

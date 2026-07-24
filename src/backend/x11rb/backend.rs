@@ -32,6 +32,7 @@ use crate::backend::api::{
     EwmhFacade, InputOps, KeyOps, OutputOps, PropertyOps, RenderScheduler, VrrCapabilities,
     WindowOps,
 };
+use crate::backend::x11::wm::event_bridge::{CompositorEventSources, compositor_event_ops};
 use crate::backend::x11::wm::{SUPPORTED_EWMH_FEATURES, primary_refresh};
 
 use self::{
@@ -350,145 +351,30 @@ impl X11rbBackend {
     }
 
     fn compositor_handle_event(&mut self, event: &BackendEvent) {
-        let compositor = match self.compositor.as_mut() {
-            Some(c) => c,
-            None => return,
+        let Some(compositor) = self.compositor.as_mut() else {
+            return;
         };
         let overlay = compositor.overlay_window();
-        match event {
-            BackendEvent::WindowMapped(win) => {
-                if let Ok(x11w) = self.ids.x11(*win) {
-                    // Skip root and the compositor's overlay window
-                    if x11w != self.root_x11 && x11w != overlay {
-                        if let Ok(geom) = self.window_ops.get_geometry(*win) {
-                            compositor.add_window(x11w, geom.x, geom.y, geom.w, geom.h);
-                        }
-                        // Set window class for per-window rules
-                        let (_, cls) = self.property_ops.get_class(*win);
-                        if !cls.is_empty() {
-                            compositor.set_window_class(x11w, &cls);
-                        }
-                        // Mark override-redirect windows so the compositor can
-                        // skip backdrop blur for large overlays (screen sharing, etc.)
-                        if let Ok(attr) = self.window_ops.get_window_attributes(*win) {
-                            if attr.override_redirect {
-                                compositor.set_window_override_redirect(x11w, true);
-                            }
-                        }
-                    }
-                }
-            }
-            BackendEvent::WindowUnmapped(win) => {
-                if let Ok(x11w) = self.ids.x11(*win) {
-                    compositor.remove_window(x11w);
-                }
-            }
-            BackendEvent::WindowDestroyed(win) => {
-                if let Ok(x11w) = self.ids.x11(*win) {
-                    compositor.remove_window(x11w);
-                }
-            }
-            BackendEvent::WindowConfigured {
-                window,
-                x,
-                y,
-                width,
-                height,
-            } => {
-                if let Ok(x11w) = self.ids.x11(*window) {
-                    // Skip the overlay window
-                    if x11w != overlay {
-                        compositor.update_geometry(x11w, *x, *y, *width, *height);
-                    }
-                }
-            }
-            BackendEvent::WindowStateRequest {
-                window,
-                state,
-                action,
-            } => {
-                // Track fullscreen state changes for unredirect optimisation
-                if *state == crate::backend::api::NetWmState::Fullscreen {
-                    if let Ok(x11w) = self.ids.x11(*window) {
-                        let is_fs = matches!(
-                            action,
-                            crate::backend::api::NetWmAction::Add
-                                | crate::backend::api::NetWmAction::Toggle
-                        );
-                        compositor.set_window_fullscreen(x11w, is_fs);
-                    }
-                }
-            }
-            BackendEvent::PropertyChanged { window, kind } => {
-                // Update class name if WM_CLASS changed
-                if matches!(kind, crate::backend::api::PropertyKind::Class) {
-                    if let Ok(x11w) = self.ids.x11(*window) {
-                        let (_, cls) = self.property_ops.get_class(*window);
-                        if !cls.is_empty() {
-                            compositor.set_window_class(x11w, &cls);
-                        }
-                    }
-                }
-            }
-            BackendEvent::DamageNotify { drawable } => {
-                if let Ok(x11w) = self.ids.x11(*drawable) {
-                    // Skip the overlay window
-                    if x11w != overlay {
-                        compositor.mark_damaged(x11w);
-                    }
-                }
-            }
-            BackendEvent::PresentComplete {
-                window,
-                serial,
-                msc,
-                ust,
-            } => {
-                if let Ok(x11w) = self.ids.x11(*window) {
-                    // Update OML sync tracking with actual presentation MSC
-                    if let Some(oml) = compositor.oml_mut() {
-                        oml.on_window_presented(x11w, *msc, *ust);
-                    }
-                    // Update audio sync: mark frame as rendered
-                    compositor.on_present_complete(x11w, *serial, *msc, *ust);
-                }
-            }
-            BackendEvent::PresentIdle {
-                window,
-                serial,
-                pixmap,
-            } => {
-                if let Ok(x11w) = self.ids.x11(*window) {
-                    compositor.on_present_idle(x11w, *serial, *pixmap);
-                }
-            }
-            BackendEvent::MotionNotify { root_x, root_y, .. } => {
-                compositor.set_mouse_position(*root_x as f32, *root_y as f32);
-                compositor.record_input_event();
-            }
-            BackendEvent::ButtonPress { .. } => {
-                // Track button input for latency measurement
-                compositor.record_input_event();
-            }
-            BackendEvent::ButtonRelease { .. } => {
-                // Track button release for latency measurement
-                compositor.record_input_event();
-            }
-            BackendEvent::ScreenLayoutChanged => {
-                // Root window may have been resized by xrandr; update compositor
-                // viewport so it covers the full virtual screen.
-                use x11rb::protocol::xproto::ConnectionExt as _;
-                if let Ok(geo) = self.conn.get_geometry(self.root_x11) {
-                    if let Ok(geo) = geo.reply() {
-                        compositor.resize(geo.width as u32, geo.height as u32);
-                    }
-                }
-                // Monitor add/remove/mode-change can alter per-monitor geometry
-                // and refresh rates; rebuild both maps so per-window blur quality
-                // and refresh lookups don't keep using the init-time layout.
-                compositor.refresh_monitor_layout(self.root_x11);
-            }
-            _ => {}
+        let ids = &self.ids;
+        let window_ops = &self.window_ops;
+        let property_ops = &self.property_ops;
+        let sources = CompositorEventSources {
+            resolve: &|win| ids.x11(win).ok(),
+            geometry: &|win| {
+                window_ops
+                    .get_geometry(win)
+                    .ok()
+                    .map(|geometry| (geometry.x, geometry.y, geometry.w, geometry.h))
+            },
+            class: &|win| property_ops.get_class(win).1,
+            override_redirect: &|win| {
+                window_ops
+                    .get_window_attributes(win)
+                    .is_ok_and(|attributes| attributes.override_redirect)
+            },
+        };
+        for op in compositor_event_ops(event, self.root_x11, overlay, &sources) {
+            compositor.apply_event_op(self.root_x11, op);
         }
     }
 

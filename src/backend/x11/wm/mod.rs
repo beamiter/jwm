@@ -11,6 +11,8 @@ use std::ops::BitOr;
 pub mod batch;
 /// Shared generation of the compositor capability trait impls.
 pub mod compositor_delegation;
+/// Transport-free planning of compositor effects for backend events.
+pub mod event_bridge;
 
 #[derive(Clone, Copy)]
 pub struct WindowTypeAtoms<A> {

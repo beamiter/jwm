@@ -166,7 +166,15 @@ mock implementing the complete backend surface. (First met by
   now generate them from
   `wm::compositor_delegation::delegate_compositor_capabilities!`, and the
   source-parity test asserts the impls come from the macro rather than
-  diffing two hand-written blocks.
+  diffing two hand-written blocks. The backend-event → compositor bridge
+  (`compositor_handle_event`, two parallel ~130-line matches) followed the
+  plan/executor pattern: `wm::event_bridge::compositor_event_ops` is the
+  pure, tested decision (root/overlay exemptions, fullscreen add/toggle
+  mapping, class guards, present/damage forwarding), `Compositor::
+  apply_event_op` is the single executor, and the transport-specific
+  root-geometry query moved behind the new
+  `X11ConnectionOps::query_window_size`, leaving each backend a thin
+  closure-wiring wrapper.
 - Move platform-neutral dirty-region, frame-timing, animation, color, and effect
   algorithms into compositor-common modules. Started: the event coalescer,
   workspace-transition timing, and wobbly-window simulation — std-only

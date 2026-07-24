@@ -20,6 +20,7 @@ use crate::backend::common_define::{
     StdCursorKind, WindowId,
 };
 use crate::backend::error::{BackendContextExt, BackendError};
+use crate::backend::x11::wm::event_bridge::{CompositorEventSources, compositor_event_ops};
 use crate::backend::x11::wm::{
     AllowedActionAtoms, ClientMessageAtoms, ClientMessageKind, DEFAULT_OUTPUT_REFRESH_MHZ,
     EwmhFeatureAtoms, NetWmStateAtoms, PropertyKindAtoms, SUPPORTED_EWMH_FEATURES, WindowTypeAtoms,
@@ -1325,120 +1326,31 @@ impl XcbBackend {
     }
 
     fn compositor_handle_event(&mut self, event: &BackendEvent) {
-        let compositor = match self.compositor.as_mut() {
-            Some(c) => c,
-            None => return,
+        let Some(compositor) = self.compositor.as_mut() else {
+            return;
         };
         let overlay = compositor.overlay_window();
-        match event {
-            BackendEvent::WindowMapped(win) => {
-                if let Ok(x11w) = self.ids.x11(*win) {
-                    if x11w != self.root.resource_id() && x11w != overlay {
-                        if let Ok(geom) = self.window_ops.get_geometry(*win) {
-                            compositor.add_window(x11w, geom.x, geom.y, geom.w, geom.h);
-                        }
-                        let (_, cls) = self.property_ops.get_class(*win);
-                        if !cls.is_empty() {
-                            compositor.set_window_class(x11w, &cls);
-                        }
-                        if let Ok(attr) = self.window_ops.get_window_attributes(*win) {
-                            if attr.override_redirect {
-                                compositor.set_window_override_redirect(x11w, true);
-                            }
-                        }
-                    }
-                }
-            }
-            BackendEvent::WindowUnmapped(win) | BackendEvent::WindowDestroyed(win) => {
-                if let Ok(x11w) = self.ids.x11(*win) {
-                    compositor.remove_window(x11w);
-                }
-            }
-            BackendEvent::WindowConfigured {
-                window,
-                x,
-                y,
-                width,
-                height,
-            } => {
-                if let Ok(x11w) = self.ids.x11(*window) {
-                    if x11w != overlay {
-                        compositor.update_geometry(x11w, *x, *y, *width, *height);
-                    }
-                }
-            }
-            BackendEvent::WindowStateRequest {
-                window,
-                state,
-                action,
-            } => {
-                if *state == NetWmState::Fullscreen {
-                    if let Ok(x11w) = self.ids.x11(*window) {
-                        let is_fs = matches!(
-                            action,
-                            crate::backend::api::NetWmAction::Add
-                                | crate::backend::api::NetWmAction::Toggle
-                        );
-                        compositor.set_window_fullscreen(x11w, is_fs);
-                    }
-                }
-            }
-            BackendEvent::PropertyChanged { window, kind } => {
-                if matches!(kind, PropertyKind::Class) {
-                    if let Ok(x11w) = self.ids.x11(*window) {
-                        let (_, cls) = self.property_ops.get_class(*window);
-                        if !cls.is_empty() {
-                            compositor.set_window_class(x11w, &cls);
-                        }
-                    }
-                }
-            }
-            BackendEvent::DamageNotify { drawable } => {
-                if let Ok(x11w) = self.ids.x11(*drawable) {
-                    if x11w != overlay {
-                        compositor.mark_damaged(x11w);
-                    }
-                }
-            }
-            BackendEvent::PresentComplete {
-                window,
-                serial,
-                msc,
-                ust,
-            } => {
-                if let Ok(x11w) = self.ids.x11(*window) {
-                    if let Some(oml) = compositor.oml_mut() {
-                        oml.on_window_presented(x11w, *msc, *ust);
-                    }
-                    compositor.on_present_complete(x11w, *serial, *msc, *ust);
-                }
-            }
-            BackendEvent::PresentIdle {
-                window,
-                serial,
-                pixmap,
-            } => {
-                if let Ok(x11w) = self.ids.x11(*window) {
-                    compositor.on_present_idle(x11w, *serial, *pixmap);
-                }
-            }
-            BackendEvent::MotionNotify { root_x, root_y, .. } => {
-                compositor.set_mouse_position(*root_x as f32, *root_y as f32);
-                compositor.record_input_event();
-            }
-            BackendEvent::ButtonPress { .. } | BackendEvent::ButtonRelease { .. } => {
-                compositor.record_input_event();
-            }
-            BackendEvent::ScreenLayoutChanged => {
-                let cookie = self.conn.send_request(&x::GetGeometry {
-                    drawable: x::Drawable::Window(self.root),
-                });
-                if let Ok(geo) = self.conn.wait_for_reply(cookie) {
-                    compositor.resize(geo.width() as u32, geo.height() as u32);
-                }
-                compositor.refresh_monitor_layout(self.root.resource_id());
-            }
-            _ => {}
+        let root = self.root.resource_id();
+        let ids = &self.ids;
+        let window_ops = &self.window_ops;
+        let property_ops = &self.property_ops;
+        let sources = CompositorEventSources {
+            resolve: &|win| ids.x11(win).ok(),
+            geometry: &|win| {
+                window_ops
+                    .get_geometry(win)
+                    .ok()
+                    .map(|geometry| (geometry.x, geometry.y, geometry.w, geometry.h))
+            },
+            class: &|win| property_ops.get_class(win).1,
+            override_redirect: &|win| {
+                window_ops
+                    .get_window_attributes(win)
+                    .is_ok_and(|attributes| attributes.override_redirect)
+            },
+        };
+        for op in compositor_event_ops(event, root, overlay, &sources) {
+            compositor.apply_event_op(root, op);
         }
     }
 
