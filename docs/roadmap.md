@@ -154,6 +154,19 @@ mock implementing the complete backend surface. (First met by
   `backend::x11::wm::enrich_background_event` — the latter had already
   drifted (the x11rb copy carried a dead `ButtonRelease` arm the xcb copy
   had dropped). Both backends now call the single implementation.
+  The primary-monitor refresh derivation followed as the pure, tested
+  `wm::primary_refresh`, and consolidating it surfaced a real unit bug:
+  both transports' runtime compositor-toggle paths fed `Compositor::new`
+  raw RandR millihertz (60000 for "60 Hz") through per-backend helpers
+  whose comments claimed Hz, skewing blur tiers and refresh seeding —
+  startup had always converted correctly. The seven compositor capability
+  traits (benchmark, diagnostics, control, media, workspace effects,
+  window effects, annotation) were ~500 hand-written forwarding lines per
+  transport, drifting in method order and parameter names; both backends
+  now generate them from
+  `wm::compositor_delegation::delegate_compositor_capabilities!`, and the
+  source-parity test asserts the impls come from the macro rather than
+  diffing two hand-written blocks.
 - Move platform-neutral dirty-region, frame-timing, animation, color, and effect
   algorithms into compositor-common modules. Started: the event coalescer,
   workspace-transition timing, and wobbly-window simulation — std-only
