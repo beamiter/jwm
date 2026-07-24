@@ -501,27 +501,6 @@ impl X11rbBackend {
         &self.screen
     }
 
-    /// P4: Get primary monitor refresh rate in Hz from RandR (for dynamic blur strength)
-    pub fn get_primary_monitor_refresh_rate(&self) -> u32 {
-        let outputs = OutputOps::enumerate_outputs(self.output_ops.as_ref());
-
-        // Find primary output (first connected, or marked as primary)
-        for output in &outputs {
-            // Assume refresh_rate is already populated by RandR query
-            if output.refresh_rate > 0 {
-                log::info!(
-                    "backend: primary monitor refresh rate: {}Hz",
-                    output.refresh_rate
-                );
-                return output.refresh_rate;
-            }
-        }
-
-        // Fallback: return 60Hz
-        log::warn!("backend: no output with refresh rate found, defaulting to 60Hz");
-        60
-    }
-
     fn compositor_auto_configure_hdr(&mut self) {
         let cfg = crate::config::CONFIG.load();
         let behavior = cfg.behavior();
@@ -1265,13 +1244,13 @@ impl Backend for X11rbBackend {
             return Ok(false);
         }
         if enabled {
-            let primary_refresh_hz = self.get_primary_monitor_refresh_rate();
+            let refresh = primary_refresh(&OutputOps::enumerate_outputs(self.output_ops.as_ref()));
             match super::compositor::Compositor::new(
                 self.conn.clone(),
                 self.root_x11,
                 self.screen.width_in_pixels as u32,
                 self.screen.height_in_pixels as u32,
-                primary_refresh_hz,
+                refresh.hz,
             ) {
                 Ok(mut compositor) => {
                     if let Some(signal) = self.compositor_loop_signal.clone() {

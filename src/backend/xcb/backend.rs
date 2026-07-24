@@ -1061,14 +1061,6 @@ impl XcbBackend {
             .is_some_and(|overlay| overlay == window.resource_id())
     }
 
-    fn get_primary_monitor_refresh_rate(&self) -> u32 {
-        self.output_ops
-            .enumerate_outputs()
-            .into_iter()
-            .find_map(|o| (o.refresh_rate > 0).then_some(o.refresh_rate))
-            .unwrap_or(60)
-    }
-
     fn prime_compositor_event_extensions(conn: &xcb::Connection) -> XcbResult<()> {
         XcbCompositorProtocol::new(conn).prime_extensions()
     }
@@ -2369,7 +2361,7 @@ impl Backend for XcbBackend {
             self.root.resource_id(),
             screen.width as u32,
             screen.height as u32,
-            self.get_primary_monitor_refresh_rate(),
+            primary_refresh(&self.output_ops.enumerate_outputs()).hz,
         )
         .map_err(BackendError::Message)
         .backend_context(
