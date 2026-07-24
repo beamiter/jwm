@@ -188,6 +188,16 @@ mock implementing the complete backend surface. (First met by
   instantiate the single implementation in
   `backend::compositor_common::expose` over their native window-id types.
 - Keep GLX and EGL/GLES resource ownership in explicit platform adapters.
+  Started: the graphics platform is now a directory module with one adapter
+  per API — `compositor/platform/glx.rs` owns the GLX context, overlay
+  drawable, TFP entry points, and GLXPixmap lifecycle;
+  `compositor/platform/egl.rs` owns the EGL display/context/surface, the
+  GLES library handle, EGLImage lifecycle, and the damage/buffer-age entry
+  points — with the API-selection facade and recording-cursor compositing
+  in `platform/mod.rs`. GLX symbol resolution was consolidated en route:
+  the OML sync-control manager previously called glXGetProcAddress itself;
+  `GlxPlatform::load_oml` now resolves those entry points and hands the
+  manager ready function pointers.
 - Add differential tests that feed identical policy events to both X11
   transports and compare observable state. Started: the nested smoke
   matrix now boots `x11rb` and `xcb` inside private Xephyr servers and
