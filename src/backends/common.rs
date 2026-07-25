@@ -4,6 +4,89 @@ use std::io::Result;
 use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::time::Duration;
 
+#[cfg(any(feature = "futex", feature = "semaphore", feature = "eventfd"))]
+pub(crate) use waiter_gate::{RegisterOutcome, WaiterGate};
+
+/// sequence/waiter 注册握手：三个后端共享的丢唤醒防护原语。
+///
+/// 协议（全部 SeqCst）：
+/// - signal 侧总是先推进 `sequence`，再读 `waiters`，只在确有已登记
+///   等待者时进入内核唤醒；
+/// - waiter 侧先快照 `sequence`，递增 `waiters` 完成登记，随后复核
+///   数据与 `sequence`——若 signal 发生在登记前，复核会看到 sequence
+///   变化而拒绝入睡；若发生在登记后，signal 必然观察到该 waiter。
+///
+/// 两侧至少一方能观察到对方，因此"无等待者即跳过内核唤醒"的快路径
+/// 不会重新打开丢唤醒窗口。这段最微妙的并发逻辑集中在此处，修复只需
+/// 改一份代码。
+#[cfg(any(feature = "futex", feature = "semaphore", feature = "eventfd"))]
+mod waiter_gate {
+    use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+
+    pub(crate) struct WaiterGate<'a> {
+        pub sequence: &'a AtomicU32,
+        pub waiters: &'a AtomicI32,
+    }
+
+    /// 已登记等待者的 RAII 凭据；Drop 时注销登记。
+    pub(crate) struct WaiterRegistration<'a> {
+        waiters: &'a AtomicI32,
+    }
+
+    impl Drop for WaiterRegistration<'_> {
+        fn drop(&mut self) {
+            self.waiters.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    pub(crate) enum RegisterOutcome<'a> {
+        /// 登记过程中观察到数据已到，未保持登记。
+        DataReady,
+        /// sequence 在登记期间变化（可能有并发 signal），应重试外层循环。
+        Retry,
+        /// 登记成功；`snapshot` 是登记前的 sequence 值（futex 用作比较字）。
+        Registered {
+            registration: WaiterRegistration<'a>,
+            snapshot: u32,
+        },
+    }
+
+    impl<'a> WaiterGate<'a> {
+        /// waiter 侧：执行注册握手。
+        pub(crate) fn register(&self, has_data: impl Fn() -> bool) -> RegisterOutcome<'a> {
+            let snapshot = self.sequence.load(Ordering::SeqCst);
+            self.waiters.fetch_add(1, Ordering::SeqCst);
+            let registration = WaiterRegistration {
+                waiters: self.waiters,
+            };
+            if has_data() {
+                drop(registration);
+                return RegisterOutcome::DataReady;
+            }
+            if self.sequence.load(Ordering::SeqCst) != snapshot {
+                drop(registration);
+                return RegisterOutcome::Retry;
+            }
+            RegisterOutcome::Registered {
+                registration,
+                snapshot,
+            }
+        }
+
+        /// signal 侧：推进 sequence，返回是否需要进入内核唤醒一个等待者。
+        pub(crate) fn signal(&self) -> bool {
+            self.sequence.fetch_add(1, Ordering::SeqCst);
+            self.waiters.load(Ordering::SeqCst) > 0
+        }
+
+        /// 关停广播：推进 sequence，返回当前已登记的等待者数量。
+        pub(crate) fn broadcast_count(&self) -> usize {
+            self.sequence.fetch_add(1, Ordering::SeqCst);
+            self.waiters.load(Ordering::SeqCst).max(0) as usize
+        }
+    }
+}
+
 /// 运行时同步后端。
 ///
 /// 只有启用对应 Cargo feature 时，该变体才可用。数值是共享内存
@@ -36,7 +119,9 @@ impl SyncStrategy {
             2 => Some(Self::Semaphore),
             #[cfg(feature = "eventfd")]
             3 => Some(Self::EventFd),
-            0 => Some(Self::Unsupported),
+            // 0 never appears in an initialized header: `create` rejects `Unsupported`
+            // before writing any metadata, so an all-zero (torn/uninitialized) header
+            // must be rejected instead of silently degrading every wait to a poll.
             _ => None,
         }
     }
@@ -179,8 +264,9 @@ impl QueueCursor {
 
 /// 环形缓冲区的自描述共享头。
 ///
-/// 元数据和四个队列游标分开到独立 cache line，从而降低生产者、
-/// 消费者以及消息/命令通道之间的 false sharing。
+/// 元数据、`last_timestamp` 和四个队列游标分别占据独立 cache line：
+/// 元数据行在初始化后只读（含每次操作都要检查的 `is_destroyed`），
+/// 生产者高频写入的 `last_timestamp` 单独隔离，避免弄脏其他行。
 #[repr(C, align(64))]
 #[derive(Debug)]
 pub struct GenericHeader {
@@ -194,8 +280,10 @@ pub struct GenericHeader {
     pub command_slot_size: u32,
     pub layout_marker: u32,
     pub is_destroyed: AtomicU32,
-    _metadata_padding: [u8; 4],
+    pub creator_pid: u32,
+    _metadata_padding: [u8; 8],
     pub last_timestamp: AtomicU64,
+    _timestamp_padding: [u8; 56],
     pub(crate) message_write: QueueCursor,
     pub(crate) message_read: QueueCursor,
     pub(crate) command_write: QueueCursor,
@@ -213,6 +301,7 @@ impl GenericHeader {
         message_slot_size: u32,
         command_slot_size: u32,
         layout_marker: u32,
+        creator_pid: u32,
     ) -> Self {
         Self {
             magic: AtomicU64::new(0),
@@ -225,8 +314,10 @@ impl GenericHeader {
             command_slot_size,
             layout_marker,
             is_destroyed: AtomicU32::new(0),
-            _metadata_padding: [0; 4],
+            creator_pid,
+            _metadata_padding: [0; 8],
             last_timestamp: AtomicU64::new(0),
+            _timestamp_padding: [0; 56],
             message_write: QueueCursor::new(),
             message_read: QueueCursor::new(),
             command_write: QueueCursor::new(),
@@ -242,7 +333,11 @@ pub trait SyncBackend: Send + Sync {
     /// backend_ptr: 指向为后端分配的专属内存区域的指针。
     fn init(&mut self, is_creator: bool, backend_ptr: *mut u8) -> Result<()>;
 
-    /// 等待消息
+    /// 等待消息。
+    ///
+    /// 返回值契约：`Ok(true)` 表示 `has_data` 已观察为真；`Ok(false)` 仅表示
+    /// 本次等待没有观察到数据（超时、可恢复的底层错误降级等），**不保证**
+    /// 已经等满 `timeout`——调用方必须重查条件后自行决定是否继续等待。
     fn wait_for_message(
         &self,
         has_data: impl Fn() -> bool,
@@ -250,7 +345,7 @@ pub trait SyncBackend: Send + Sync {
         timeout: Option<Duration>,
     ) -> Result<bool>;
 
-    /// 等待命令
+    /// 等待命令，契约同 [`wait_for_message`](Self::wait_for_message)。
     fn wait_for_command(
         &self,
         has_data: impl Fn() -> bool,
@@ -265,6 +360,11 @@ pub trait SyncBackend: Send + Sync {
     fn signal_command(&self) -> Result<()>;
 
     /// 广播唤醒两个通道上的所有等待者。
+    ///
+    /// 边沿语义：只保证唤醒调用时刻已注册的等待者，恰在注册路径上的
+    /// 等待者可能带新快照重新入睡。因此用于关停时，调用方必须保证
+    /// `wake_all` 之后 `has_data` 恒为真（例如把销毁标志纳入条件闭包），
+    /// 本 crate 的 `destroy` 正是这样做的。
     fn wake_all(&self) -> Result<()> {
         self.signal_message()?;
         self.signal_command()

@@ -1,6 +1,3 @@
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use serde::{Deserialize, Serialize};
-use serde_big_array::BigArray;
 use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,18 +16,11 @@ fn now_millis() -> u64 {
 
 // 使用合理对齐
 #[repr(C)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
 pub struct TagStatus {
     pub is_selected: bool,
@@ -53,17 +43,11 @@ impl TagStatus {
 
 // 使用更合理的对齐策略
 #[repr(C)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
 pub struct MonitorInfo {
     pub monitor_num: i32,
@@ -72,7 +56,7 @@ pub struct MonitorInfo {
     pub monitor_x: i32,
     pub monitor_y: i32,
     pub tag_status_vec: [TagStatus; MAX_TAGS],
-    #[serde(with = "BigArray")]
+    #[cfg_attr(feature = "serde", serde(with = "serde_big_array::BigArray"))]
     pub client_name: [u8; MAX_CLIENT_NAME_LEN],
     pub ltsymbol: [u8; MAX_LT_SYMBOL_LEN],
 }
@@ -163,36 +147,37 @@ impl MonitorInfo {
 }
 
 #[repr(C)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
 pub struct SharedMessage {
     pub timestamp: u64,
     pub monitor_info: MonitorInfo,
 }
 
+/// `Default` 是廉价、可复现的零值（`timestamp == 0`），不含时钟副作用；
+/// 需要打时间戳时使用 [`SharedMessage::new`] 或
+/// [`SharedMessage::with_monitor_info`]。
 impl Default for SharedMessage {
     fn default() -> Self {
         Self {
-            timestamp: now_millis(),
+            timestamp: 0,
             monitor_info: MonitorInfo::default(),
         }
     }
 }
 
 impl SharedMessage {
+    /// 创建一条带当前时间戳的空消息。
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            timestamp: now_millis(),
+            monitor_info: MonitorInfo::default(),
+        }
     }
 
     #[must_use]
@@ -224,18 +209,11 @@ impl SharedMessage {
 
 // 命令相关定义
 #[repr(u32)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
 pub enum CommandType {
     #[default]
@@ -277,18 +255,11 @@ impl From<CommandType> for u32 {
 }
 
 #[repr(C)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
 pub struct SharedCommand {
     pub cmd_type: u32,
@@ -623,9 +594,11 @@ mod tests {
     }
 
     #[test]
-    fn test_shared_message_default_timestamp_nonzero() {
+    fn test_shared_message_default_is_zero_valued_and_reproducible() {
+        // Default 不含时钟副作用：可复现的零值，default() == default()。
         let msg = SharedMessage::default();
-        assert!(msg.get_timestamp() > 0);
+        assert_eq!(msg.get_timestamp(), 0);
+        assert_eq!(msg, SharedMessage::default());
     }
 
     // ── CommandType ──────────────────────────────────────────────────────────
@@ -824,9 +797,9 @@ mod tests {
         let b = SharedMessage::default();
         // 两者的 monitor_info 字段应相同（都是 MonitorInfo::default()）
         assert_eq!(a.get_monitor_info(), b.get_monitor_info());
-        // timestamp 均非零
+        // new() 打时间戳，default() 是零值
         assert!(a.get_timestamp() > 0);
-        assert!(b.get_timestamp() > 0);
+        assert_eq!(b.get_timestamp(), 0);
     }
 
     // ── 所有 SharedCommand 构造器时间戳均非零 ─────────────────────────────────

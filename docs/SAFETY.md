@@ -1,11 +1,11 @@
 # 安全说明
 
-本文说明 `shared_structures` 0.2 的安全边界、并发保证和应用必须遵守的运行条件。协议布局参见 [架构设计](./ARCHITECTURE.md)。
+本文说明 `shared_structures` 0.3 的安全边界、并发保证和应用必须遵守的运行条件。协议布局参见 [架构设计](./ARCHITECTURE.md)。
 
 ## 平台与参与者
 
 - 仅支持 Linux。
-- 共享同一映射的进程必须使用协议 v10、相同端序和兼容的目标架构。
+- 共享同一映射的进程必须使用协议 v11、相同端序和兼容的目标架构（32/64 位混用或跨架构容器共享同一映射不受支持；槽位校验和使用本机字节序，版本常量隐式承载 ABI 变更）。
 - feature 可以不同，但每个 opener 必须编译创建者选择的同步后端。
 - 共享内存参与者属于同一信任边界。本库会验证初始 header 和每个读取槽位，但不能防御另一个恶意进程在校验后任意改写映射。
 
@@ -43,11 +43,14 @@
 
 状态查询和 `stats` 是瞬时快照。即使刚观察到“非空”或“未满”，另一个参与者也可能先完成操作；调用者必须处理 `None`、full、timeout 或 closed 结果。
 
-## 方向锁不是进程健壮互斥锁
+## 方向锁的崩溃恢复语义
 
-共享方向锁是轻量原子锁，不具备 robust mutex 的 owner-death 恢复语义。如果进程在持锁期间被 `SIGKILL`、崩溃或 `abort`，对应方向可能保持锁定。当前恢复方式是终止参与者并重建映射；不要在临界区内执行可能阻塞的外部操作。
+共享方向锁的锁字存放持有者 PID。持有者进程消失（`SIGKILL`、崩溃、`abort`）后，竞争者通过 `/proc/<pid>` 探测发现并原子夺回锁，因此单个参与者崩溃不会永久卡死方向。两个已知边界：
 
-Rust panic 路径必须通过 RAII guard 释放方向锁。任何新增的提前返回或错误分支都必须经过同一 guard。
+- **PID 复用**：探测可能把复用了同一 PID 的无关进程误判为"持有者仍存活"。此时行为退回等待（与旧版本一致），不会错误夺锁；在 PID 快速复用的环境（容器内 pid_max 很小）中，建议仍配备外层监督。
+- **半写槽位**：写入者在槽位复制中途死亡时，被夺锁后的消费者会读到校验和不匹配的槽位并将其作为损坏数据消费掉；该消息丢失但队列继续工作。
+
+不要在临界区内执行可能阻塞的外部操作。Rust panic 路径必须通过 RAII guard 释放方向锁。任何新增的提前返回或错误分支都必须经过同一 guard。
 
 ## 等待、超时与通知
 
@@ -71,11 +74,11 @@ Futex、Semaphore 和 EventFd 都用共享 sequence 和 waiter 计数完成 SeqC
 - `destroy` 是显式全局关闭；调用开始前已经通过最终 destroyed 检查的并发写操作仍可能完成，随后发起的写入会被拒绝，等待者应尽快返回 closed。
 - 移除 flink 只阻止新的 opener；已经映射的进程仍持有其映射，必须通过 destroyed 状态协调退出。
 
-创建者意外退出会触发普通进程析构的前提只适用于正常展开；`SIGKILL`、`_exit`、断电或进程 abort 不运行 Drop。应用需要启动时清理陈旧 flink，并把“创建者仍存活”纳入监督策略。
+创建者意外退出会触发普通进程析构的前提只适用于正常展开；`SIGKILL`、`_exit`、断电或进程 abort 不运行 Drop。header 记录 `creator_pid`，`creator_alive()` 可用于探测创建者是否仍存活；`SharedRingBufferOptions::reclaim_stale(true)` 让 `open_or_create` 在确认创建者已死后移除残留 flink 并重建映射。回收应只由单一监督者角色执行：多个进程并发回收同一路径可能互相删除对方刚发布的 flink；PID 复用会让回收退化为打开旧映射（安全方向）。
 
 ## EventFd 特有条件
 
-EventFd 后端由创建者生成两个 eventfd，并通过 Unix domain socket 向 opener 传递文件描述符。创建者必须存活且监听 socket 可访问，新 opener 才能完成连接。socket 路径所在目录应限制权限；收到的 FD 只用于唤醒，队列数据仍从共享映射读取。
+EventFd 后端由创建者生成两个 eventfd，并通过 Unix domain socket 向 opener 传递文件描述符。socket 位于属主私有（0700）目录内（优先 `$XDG_RUNTIME_DIR`），创建者用 `SO_PEERCRED` 校验对端有效 UID，拒绝其他用户的连接。创建者必须存活且监听 socket 可访问，新 opener 才能完成连接；创建者关闭后，新 opener 得到明确的 `NotConnected` 错误。收到的 FD 只用于唤醒，队列数据仍从共享映射读取。
 
 现有 opener 已持有自己的 FD 副本。创建者销毁时会设置停止标志、主动唤醒并 join 监听线程、移除 socket，然后关闭其本地 FD；普通 opener 的 cleanup 不得停止创建者的监听线程。其他进程必须根据 destroyed 状态结束等待和访问。
 

@@ -219,7 +219,7 @@ fn receive_identified_message(
 fn send_ack(buffer: &SharedRingBuffer, token: u32, deadline: Instant) -> Result<(), String> {
     let ack = SharedCommand::view_tag(token, ACK_MONITOR_ID);
     loop {
-        match buffer.send_command(ack) {
+        match buffer.try_send_command(ack) {
             Ok(true) => return Ok(()),
             Ok(false) => {
                 remaining_slice(deadline)?;
@@ -303,4 +303,131 @@ fn unique_path(backend_name: &str, token: u32) -> Result<String, String> {
 
 fn expected_client_name(backend_name: &str, token: u32) -> String {
     format!("cross-process-{backend_name}-{token}")
+}
+
+// ── 跨进程多生产者 ────────────────────────────────────────────────────────────
+
+const PRODUCER_BASE_ENV: &str = "SHARED_STRUCTURES_CROSS_PROCESS_PRODUCER_BASE";
+const PRODUCER_COUNT_ENV: &str = "SHARED_STRUCTURES_CROSS_PROCESS_PRODUCER_COUNT";
+const MULTI_PRODUCERS: usize = 3;
+const PER_PRODUCER: usize = 64;
+
+/// 三个真实进程同时向容量远小于总量的消息环写入不相交的编号区间，
+/// 父进程消费全部消息并验证不重、不漏、不越界。覆盖跨进程方向锁竞争
+/// 与背压（队列满）路径。
+#[test]
+fn cross_process_multiple_producers() {
+    for &(backend_name, strategy) in COMPILED_BACKENDS {
+        if let Err(error) = run_multi_producer(backend_name, strategy) {
+            panic!("cross-process {backend_name} multi-producer failed: {error}");
+        }
+    }
+}
+
+// The parent launches this exact test in fresh processes. Keeping it ignored prevents a normal
+// `cargo test` invocation from running the helper without its required environment.
+#[test]
+#[ignore = "launched by cross_process_multiple_producers"]
+fn cross_process_producer_helper() {
+    assert!(matches!(env::var(CHILD_MODE_ENV).as_deref(), Ok("1")));
+
+    let path = env::var(PATH_ENV).expect("parent did not provide the shared-memory path");
+    let base = env::var(PRODUCER_BASE_ENV)
+        .expect("parent did not provide the producer base")
+        .parse::<i32>()
+        .expect("producer base is not an i32");
+    let count = env::var(PRODUCER_COUNT_ENV)
+        .expect("parent did not provide the producer count")
+        .parse::<i32>()
+        .expect("producer count is not an i32");
+    let deadline = Instant::now() + PROCESS_TIMEOUT;
+
+    let buffer = open_with_deadline(&path, deadline)
+        .unwrap_or_else(|error| panic!("producer could not open buffer: {error}"));
+    for value in base..base + count {
+        let mut message = SharedMessage::default();
+        message.get_monitor_info_mut().monitor_num = value;
+        loop {
+            match buffer.try_write_message(&message) {
+                Ok(true) => break,
+                Ok(false) => {
+                    // 队列满：短暂退让，父进程消费后重试。
+                    if Instant::now() >= deadline {
+                        panic!("producer timed out on a full queue at value {value}");
+                    }
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("producer write failed at value {value}: {error}"),
+            }
+        }
+    }
+}
+
+fn run_multi_producer(backend_name: &str, strategy: SyncStrategy) -> Result<(), String> {
+    let token = unique_token();
+    let path = SharedPathGuard(unique_path(&format!("mp_{backend_name}"), token)?);
+    let _ = fs::remove_file(&path.0);
+
+    // 容量 16 远小于 3×64 的总量，确保覆盖队列满/背压路径。
+    let buffer = SharedRingBuffer::create(&path.0, strategy, Some(16), Some(0))
+        .map_err(|error| format!("create failed: {error}"))?;
+
+    let mut children = Vec::new();
+    for producer in 0..MULTI_PRODUCERS {
+        let child = spawn_producer(&path.0, (producer * PER_PRODUCER) as i32)
+            .map_err(|error| format!("could not spawn producer {producer}: {error}"))?;
+        children.push(ChildGuard::new(child));
+    }
+
+    let deadline = Instant::now() + PROCESS_TIMEOUT;
+    let total = MULTI_PRODUCERS * PER_PRODUCER;
+    let mut seen = vec![false; total];
+    let mut received = 0usize;
+    while received < total {
+        let drained = buffer
+            .drain_messages(usize::MAX)
+            .map_err(|error| format!("drain failed: {error}"))?;
+        if drained.is_empty() {
+            let wait = remaining_slice(deadline)?;
+            buffer
+                .wait_for_message(Some(wait))
+                .map_err(|error| error.to_string())?;
+            continue;
+        }
+        for message in drained {
+            let value = message.get_monitor_info().monitor_num;
+            let index = usize::try_from(value)
+                .ok()
+                .filter(|&index| index < total)
+                .ok_or_else(|| format!("received out-of-range value {value}"))?;
+            if seen[index] {
+                return Err(format!("received duplicate value {value}"));
+            }
+            seen[index] = true;
+            received += 1;
+        }
+    }
+
+    for mut child in children {
+        child.wait_until(deadline)?;
+    }
+    drop(buffer);
+    Ok(())
+}
+
+fn spawn_producer(path: &str, base: i32) -> io::Result<Child> {
+    Command::new(env::current_exe()?)
+        .arg("--ignored")
+        .arg("--exact")
+        .arg("cross_process_producer_helper")
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env(CHILD_MODE_ENV, "1")
+        .env(PATH_ENV, path)
+        .env(PRODUCER_BASE_ENV, base.to_string())
+        .env(PRODUCER_COUNT_ENV, PER_PRODUCER.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
 }

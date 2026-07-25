@@ -2,6 +2,46 @@
 
 本项目的显著变更记录在此。0.x 阶段仍可能调整公共 API；共享内存协议的不兼容变化会单独标明。
 
+## [0.3.0] - 2026-07-25
+
+### Added
+
+- **泛型核心 `TypedRingBuffer<M, C>` 与 `WireSafe` 契约**：布局、跨进程锁、游标、后端与生命周期全部与 payload 解耦，任意满足契约（repr(C)、无 padding、任意位模式有效）的 POD 类型都可作为槽位类型；固定宽度整数、浮点与其数组自带 `WireSafe` 实现；`SharedRingBufferOptions` 新增 `create_typed`/`open_typed`/`open_or_create_typed`。`SharedRingBuffer` 成为 `TypedRingBuffer<WireMessage, WireCommand>` 的领域封装，公开 API 不变。
+- 跨进程多生产者集成测试（3 个真实进程写不相交区间 + 小容量强制背压）与泛型 payload 测试（含槽大小错配拒绝）。
+
+- 崩溃恢复：方向锁的锁字改存持有者 PID，其他进程通过 `/proc/<pid>` 探测发现持有者已死后原子夺回锁，消除持锁进程崩溃导致的永久卡死（半写 slot 由校验和兜底）。
+- 僵尸映射回收：header 新增 `creator_pid`；新增 `creator_pid()`、`creator_alive()` 查询，`SharedRingBufferOptions::reclaim_stale(true)` 让 `open_or_create` 回收创建者已崩溃的残留映射。
+- 新增 `WaitOutcome` 枚举与 `wait_message`/`wait_command`，区分「可读 / 超时 / 已销毁」；`timeout=None` 时保证只以 Ready 或 Destroyed 返回。
+- 新增一体化阻塞读 `read_message_timeout`/`receive_command_timeout`，内部完成「等待 → 读取 → 被抢走则重试」循环。
+- 新增 `try_peek_message`（不消费）、`drain_messages(max)`（单次持锁批量出队）、`write_message_overwrite`（队列满时覆盖最旧消息，面向状态广播场景）。
+- 新增 `try_send_command`（`send_command` 的更名版本）。
+- `SharedRingBufferOptions::command_capacity` 使命令环容量可配置（非零 2 的幂，默认仍为 16）。
+- 新增测试：死锁持有者夺回、校验和损坏注入、覆盖写、批量读、等待结局、命令容量、僵尸回收。
+
+### Changed
+
+- 三个后端的 sequence/waiter 注册握手收敛为 `common.rs` 中的共享 `WaiterGate` 原语（RAII 注销登记），最微妙的并发逻辑只剩一份实现；行为不变。
+- 校验和改为按 payload 整体字节计算（wire 类型以显式 `_reserved` 字段消除 padding）；命令通道引入独立的 `WireCommand` wire 表示，与消息通道的 wire/领域分离策略对齐。
+- `SharedMessage::default()` 不再读取时钟：返回可复现的零值（`timestamp == 0`）；需要时间戳时用 `SharedMessage::new()` / `with_monitor_info()`。依赖旧行为的调用方需改用 `new()`。
+- 自旋等待阶段周期性检查超时（长自旋预算配合短超时不再明显超期）；eventfd 单测不再串行化（socket 路径已含 PID+纳秒+nonce，无碰撞风险）。
+
+- **协议 v11**（与 v10 不兼容，升级需协调重启并重建映射）：锁字语义改为持有者 PID；header 增加 `creator_pid` 并把高频写入的 `last_timestamp` 移到独立 cache line；消息 slot 移除从未使用的 `written_at` 字段；校验和改为 8 字节块化 FNV-1a（约一个量级提速）；semaphore backend header 按通道做 cache line 隔离；命令容量成为布局参数。
+- `available_messages`/`available_commands` 改为免锁快照：等待路径的自旋探测不再每圈抢占两把跨进程方向锁。
+- `try_write_message` 把序列化、校验和与时间戳计算移出临界区，缩短多生产者争用窗口。
+- `wait_for_message`/`wait_for_command` 基于 `wait_message`/`wait_command` 实现；`timeout=None` 时不再可能虚假返回 `false`。
+- serde、serde-big-array、rkyv 降级为可选依赖（feature `serde` / `rkyv`，默认关闭）。领域类型的这些 derive 从默认构建移除；队列传输从未使用它们。
+- semaphore 后端超时改以单调钟为权威（`sem_timedwait` 切成短 REALTIME 片段），墙钟跳变不再把有界等待放大为近乎无限等待。
+- eventfd 后端：本地 fd 缺失时等待如实返回 `NotConnected` 错误，不再伪装成超时；poll 超时毫秒向上取整，消除尾段忙轮询；opener 等待创建者就绪改为带 200ms deadline 的重试；创建者 cleanup 会把就绪状态标记为「已关闭」，此后新 opener 得到明确错误而不是 200ms 重连超时。
+- eventfd fd 传递 socket 移入属主私有（0700）目录（优先 `$XDG_RUNTIME_DIR`），并用 `SO_PEERCRED` 校验对端 UID，拒绝其他用户连接。
+- 全零（未初始化）header 的 backend id 0 在打开时被拒绝，不再静默映射到占位后端。
+- `open` 与 `create` 使用同一套 flink 路径归一化。
+- 试探式非阻塞等待（`timeout = Some(0)`）不再烧掉整个自适应自旋预算。
+
+### Deprecated
+
+- `create_shared_ring_buffer_aux`、`create_shared_ring_buffer`、`create_aux`、`open_aux`：改用 `SharedRingBufferOptions` / `open_auto`。
+- `send_command`（更名为 `try_send_command`）、`receive_command`（改用 `try_receive_command`）。
+
 ## [0.2.0] - 2026-07-13
 
 ### Added

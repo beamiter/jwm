@@ -1,12 +1,15 @@
 // src/backends/futex.rs
 #![cfg(feature = "futex")]
 
-use super::common::SyncBackend;
+use super::common::{RegisterOutcome, SyncBackend, WaiterGate};
 use libc::timespec;
 use std::hint;
-use std::io::{Error, Result};
-use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use std::io::{Error, ErrorKind, Result};
+use std::sync::atomic::{AtomicI32, AtomicU32};
 use std::time::{Duration, Instant};
+
+/// 自旋阶段每多少次迭代检查一次超时（`Instant::now` 相对自旋并不便宜）。
+const SPIN_TIMEOUT_CHECK_INTERVAL: u32 = 1024;
 
 // ── 核心优化：将 seq 和 waiters 放在不同 cache line 上 ──────────────────────
 //
@@ -46,6 +49,17 @@ impl FutexBackend {
         }
     }
 
+    fn ensure_initialized(&self) -> Result<()> {
+        debug_assert!(!self.header.is_null(), "futex backend not initialized");
+        if self.header.is_null() {
+            return Err(Error::new(
+                ErrorKind::NotConnected,
+                "futex backend is not initialized",
+            ));
+        }
+        Ok(())
+    }
+
     fn wait_on_futex(
         &self,
         is_message: bool,
@@ -53,16 +67,38 @@ impl FutexBackend {
         adaptive_poll_spins: u32,
         timeout: Option<Duration>,
     ) -> Result<bool> {
+        self.ensure_initialized()?;
         let started = Instant::now();
-        for _ in 0..adaptive_poll_spins {
-            if has_data() {
-                return Ok(true);
+        // 试探式非阻塞调用不该烧掉整个自旋预算；长自旋预算配合短超时
+        // 时，周期性检查确保 "adaptive" 自旋不会明显超过 timeout。
+        if timeout != Some(Duration::ZERO) {
+            for spin in 0..adaptive_poll_spins {
+                if has_data() {
+                    return Ok(true);
+                }
+                if spin % SPIN_TIMEOUT_CHECK_INTERVAL == SPIN_TIMEOUT_CHECK_INTERVAL - 1
+                    && timeout.is_some_and(|limit| started.elapsed() >= limit)
+                {
+                    break;
+                }
+                hint::spin_loop();
             }
-            hint::spin_loop();
         }
         if has_data() {
             return Ok(true);
         }
+
+        let ch = unsafe {
+            if is_message {
+                &(*self.header).message
+            } else {
+                &(*self.header).command
+            }
+        };
+        let gate = WaiterGate {
+            sequence: &ch.seq,
+            waiters: &ch.waiters,
+        };
 
         loop {
             if has_data() {
@@ -72,37 +108,26 @@ impl FutexBackend {
                 return Ok(false);
             }
 
-            // Sequence + waiter count form the same SeqCst registration handshake used by the
-            // other backends. A signal before registration changes the sequence; one after the
-            // second sequence load must observe the registered waiter and issue FUTEX_WAKE.
-            let (ch, snapshot) = unsafe {
-                let ch = if is_message {
-                    &(*self.header).message
-                } else {
-                    &(*self.header).command
-                };
-                (ch, ch.seq.load(Ordering::SeqCst))
-            };
-
-            ch.waiters.fetch_add(1, Ordering::SeqCst);
-            if has_data() {
-                ch.waiters.fetch_sub(1, Ordering::SeqCst);
-                return Ok(true);
-            }
-            if ch.seq.load(Ordering::SeqCst) != snapshot {
-                ch.waiters.fetch_sub(1, Ordering::SeqCst);
-                continue;
-            }
-
-            let remaining = timeout.map(|limit| limit.saturating_sub(started.elapsed()));
-            let wait_result = futex_wait(&ch.seq, snapshot, remaining);
-            ch.waiters.fetch_sub(1, Ordering::SeqCst);
-            match wait_result {
-                Ok(_) if has_data() => return Ok(true),
-                Ok(_) => continue,
-                Err(error) => {
-                    log::warn!("futex_wait error: {error}. Fallback to check state");
-                    return Ok(has_data());
+            match gate.register(&has_data) {
+                RegisterOutcome::DataReady => return Ok(true),
+                RegisterOutcome::Retry => continue,
+                RegisterOutcome::Registered {
+                    registration,
+                    snapshot,
+                } => {
+                    let remaining = timeout.map(|limit| limit.saturating_sub(started.elapsed()));
+                    // futex 的 sequence 兼作内核比较字：内核在入睡前原子复核
+                    // `seq == snapshot`，关闭注册后到入睡前的窗口。
+                    let wait_result = futex_wait(&ch.seq, snapshot, remaining);
+                    drop(registration);
+                    match wait_result {
+                        Ok(_) if has_data() => return Ok(true),
+                        Ok(_) => continue,
+                        Err(error) => {
+                            log::warn!("futex_wait error: {error}. Fallback to check state");
+                            return Ok(has_data());
+                        }
+                    }
                 }
             }
         }
@@ -154,10 +179,14 @@ impl SyncBackend for FutexBackend {
     }
 
     fn signal_message(&self) -> Result<()> {
+        self.ensure_initialized()?;
         unsafe {
             let ch = &(*self.header).message;
-            ch.seq.fetch_add(1, Ordering::SeqCst);
-            if ch.waiters.load(Ordering::SeqCst) > 0 {
+            let gate = WaiterGate {
+                sequence: &ch.seq,
+                waiters: &ch.waiters,
+            };
+            if gate.signal() {
                 let _ = futex_wake(&ch.seq, 1);
             }
         }
@@ -165,10 +194,14 @@ impl SyncBackend for FutexBackend {
     }
 
     fn signal_command(&self) -> Result<()> {
+        self.ensure_initialized()?;
         unsafe {
             let ch = &(*self.header).command;
-            ch.seq.fetch_add(1, Ordering::SeqCst);
-            if ch.waiters.load(Ordering::SeqCst) > 0 {
+            let gate = WaiterGate {
+                sequence: &ch.seq,
+                waiters: &ch.waiters,
+            };
+            if gate.signal() {
                 let _ = futex_wake(&ch.seq, 1);
             }
         }
@@ -176,12 +209,19 @@ impl SyncBackend for FutexBackend {
     }
 
     fn wake_all(&self) -> Result<()> {
+        self.ensure_initialized()?;
         unsafe {
             let h = &*self.header;
-            h.message.seq.fetch_add(1, Ordering::SeqCst);
-            let _ = futex_wake(&h.message.seq, i32::MAX);
-            h.command.seq.fetch_add(1, Ordering::SeqCst);
-            let _ = futex_wake(&h.command.seq, i32::MAX);
+            for ch in [&h.message, &h.command] {
+                let gate = WaiterGate {
+                    sequence: &ch.seq,
+                    waiters: &ch.waiters,
+                };
+                // 广播必须无条件推进 sequence 并唤醒：正在注册路径上的
+                // waiter 依赖 sequence 变化拒绝入睡。
+                let _ = gate.broadcast_count();
+                let _ = futex_wake(&ch.seq, i32::MAX);
+            }
         }
         Ok(())
     }

@@ -1,79 +1,92 @@
 //! src/shared_ring_buffer.rs
+//!
+//! [`TypedRingBuffer`](crate::TypedRingBuffer) 的领域封装：把窗口管理器
+//! 领域类型 `SharedMessage`/`SharedCommand` 转换为满足
+//! [`WireSafe`](crate::WireSafe) 契约的 wire 表示后进出泛型核心。
 
-use crate::backends::common::{
-    AnySyncBackend, GenericHeader, QueueCursor, SyncBackend, SyncStrategy,
-};
+use crate::backends::common::SyncStrategy;
 use crate::shared_message::{SharedCommand, SharedMessage, TagStatus, MAX_TAGS};
+use crate::typed_ring_buffer::{
+    SharedRingBufferOptions, SharedRingBufferStats, TypedRingBuffer, WaitOutcome, WireSafe,
+    DEFAULT_BUFFER_SIZE, DEFAULT_CMD_BUFFER_SIZE,
+};
 
 use log::{error, info, warn};
-use shared_memory::{Shmem, ShmemConf, ShmemError};
-use std::io::{Error, ErrorKind, Result, Write};
-use std::mem::{align_of, size_of};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-const RING_BUFFER_MAGIC: u64 = 0x52494E47_42554646;
-const RING_BUFFER_VERSION: u64 = 10;
-const LAYOUT_MARKER: u32 = 0x5352_4232; // "SRB2"
-const DEFAULT_BUFFER_SIZE: usize = 16;
-const CMD_BUFFER_SIZE: usize = 16;
-const DEFAULT_ADAPTIVE_POLL_SPINS: u32 = 400;
-const OPEN_RETRY_TIMEOUT: Duration = Duration::from_millis(250);
-static FLINK_NONCE: AtomicU64 = AtomicU64::new(0);
-
-#[inline]
-fn checked_align_up(value: usize, align: usize) -> Result<usize> {
-    if !align.is_power_of_two() {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            "layout alignment must be a non-zero power of two",
-        ));
-    }
-    value
-        .checked_add(align - 1)
-        .map(|value| value & !(align - 1))
-        .ok_or_else(|| {
-            Error::new(
-                ErrorKind::InvalidInput,
-                "shared-memory layout overflows usize",
-            )
-        })
-}
-
-#[inline]
-fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct MessageSlot {
-    written_at: u64,
-    checksum: u32,
-    _padding: u32,
-    message: WireMessage,
-}
+use std::io::Result;
+use std::time::Duration;
 
 /// 共享内存中不含 `bool` 的稳定消息表示。
 ///
 /// 所有位模式都是有效的 Rust 值；只有在 checksum 通过后才会转换成
-/// 领域对象中的 `bool`。
+/// 领域对象中的 `bool`。`_reserved` 补齐尾部，使结构体不含 padding，
+/// 满足 [`WireSafe`] 的整体字节校验和要求。
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-struct WireMessage {
+pub(crate) struct WireMessage {
     timestamp: u64,
     monitor_num: i32,
     monitor_width: i32,
     monitor_height: i32,
     monitor_x: i32,
     monitor_y: i32,
-    tag_flags: [u8; MAX_TAGS],
+    pub(crate) tag_flags: [u8; MAX_TAGS],
     client_name: [u8; crate::MAX_CLIENT_NAME_LEN],
     ltsymbol: [u8; crate::MAX_LT_SYMBOL_LEN],
+    _reserved: [u8; 3],
+}
+
+// 布局守卫：字段字节数之和等于结构体大小 ⇒ 无 padding。
+const _: () = assert!(
+    std::mem::size_of::<WireMessage>()
+        == 8 + 4 * 5 + MAX_TAGS + crate::MAX_CLIENT_NAME_LEN + crate::MAX_LT_SYMBOL_LEN + 3
+);
+
+// SAFETY: repr(C)；上方 const 断言证明无 padding；全部字段为整数与
+// 字节数组，任意位模式有效；无内部可变性。
+unsafe impl WireSafe for WireMessage {}
+
+/// 共享内存中的稳定命令表示。
+///
+/// `SharedCommand` 的字段布局含 4 字节 padding（`monitor_id` 与
+/// `timestamp` 之间），不能直接按整体字节做校验和；`_reserved` 把
+/// 该空隙变成显式字段。
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WireCommand {
+    cmd_type: u32,
+    pub(crate) parameter: u32,
+    monitor_id: i32,
+    _reserved: u32,
+    timestamp: u64,
+}
+
+const _: () = assert!(std::mem::size_of::<WireCommand>() == 4 * 4 + 8);
+
+// SAFETY: repr(C)；上方 const 断言证明无 padding；全部字段为整数，
+// 任意位模式有效；无内部可变性。
+unsafe impl WireSafe for WireCommand {}
+
+impl From<SharedCommand> for WireCommand {
+    fn from(command: SharedCommand) -> Self {
+        Self {
+            cmd_type: command.cmd_type,
+            parameter: command.parameter,
+            monitor_id: command.monitor_id,
+            _reserved: 0,
+            timestamp: command.timestamp,
+        }
+    }
+}
+
+impl From<WireCommand> for SharedCommand {
+    fn from(command: WireCommand) -> Self {
+        Self {
+            cmd_type: command.cmd_type,
+            parameter: command.parameter,
+            monitor_id: command.monitor_id,
+            timestamp: command.timestamp,
+        }
+    }
 }
 
 impl From<&SharedMessage> for WireMessage {
@@ -98,6 +111,7 @@ impl From<&SharedMessage> for WireMessage {
             tag_flags,
             client_name: message.monitor_info.client_name,
             ltsymbol: message.monitor_info.ltsymbol,
+            _reserved: [0; 3],
         }
     }
 }
@@ -133,398 +147,56 @@ impl From<WireMessage> for SharedMessage {
     }
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct CommandSlot {
-    checksum: u32,
-    _padding: u32,
-    command: SharedCommand,
-}
-
-struct Checksum(u32);
-
-impl Checksum {
-    const fn new() -> Self {
-        Self(0x811c_9dc5)
-    }
-
-    #[inline(always)]
-    fn write(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.0 ^= u32::from(*byte);
-            self.0 = self.0.wrapping_mul(0x0100_0193);
-        }
-    }
-
-    const fn finish(self) -> u32 {
-        self.0
-    }
-}
-
-fn calculate_message_checksum(message: &WireMessage) -> u32 {
-    let mut checksum = Checksum::new();
-    checksum.write(&message.timestamp.to_ne_bytes());
-    checksum.write(&message.monitor_num.to_ne_bytes());
-    checksum.write(&message.monitor_width.to_ne_bytes());
-    checksum.write(&message.monitor_height.to_ne_bytes());
-    checksum.write(&message.monitor_x.to_ne_bytes());
-    checksum.write(&message.monitor_y.to_ne_bytes());
-    checksum.write(&message.tag_flags);
-    checksum.write(&message.client_name);
-    checksum.write(&message.ltsymbol);
-    checksum.finish()
-}
-
-fn calculate_command_checksum(command: &SharedCommand) -> u32 {
-    let mut checksum = Checksum::new();
-    checksum.write(&command.cmd_type.to_ne_bytes());
-    checksum.write(&command.parameter.to_ne_bytes());
-    checksum.write(&command.monitor_id.to_ne_bytes());
-    checksum.write(&command.timestamp.to_ne_bytes());
-    checksum.finish()
-}
-
-#[derive(Debug, Clone, Copy)]
-struct BufferLayout {
-    backend_offset: usize,
-    messages_offset: usize,
-    commands_offset: usize,
-    total_size: usize,
-}
-
-impl BufferLayout {
-    fn calculate(strategy: SyncStrategy, buffer_size: usize) -> Result<Self> {
-        if !strategy.is_supported() {
-            return Err(Error::new(
-                ErrorKind::Unsupported,
-                "no synchronization backend is enabled",
-            ));
-        }
-        if buffer_size == 0 || !buffer_size.is_power_of_two() {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                "message capacity must be a non-zero power of two",
-            ));
-        }
-        u32::try_from(buffer_size).map_err(|_| {
-            Error::new(
-                ErrorKind::InvalidInput,
-                "message capacity does not fit the shared protocol",
-            )
-        })?;
-
-        let backend_offset =
-            checked_align_up(size_of::<GenericHeader>(), strategy.backend_align())?;
-        let after_backend = backend_offset
-            .checked_add(strategy.backend_size())
-            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "backend layout overflows usize"))?;
-        let messages_offset = checked_align_up(after_backend, align_of::<MessageSlot>())?;
-        let messages_size = buffer_size
-            .checked_mul(size_of::<MessageSlot>())
-            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "message layout overflows usize"))?;
-        let after_messages = messages_offset
-            .checked_add(messages_size)
-            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "message layout overflows usize"))?;
-        let commands_offset = checked_align_up(after_messages, align_of::<CommandSlot>())?;
-        let commands_size = CMD_BUFFER_SIZE
-            .checked_mul(size_of::<CommandSlot>())
-            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "command layout overflows usize"))?;
-        let total_size = commands_offset.checked_add(commands_size).ok_or_else(|| {
-            Error::new(
-                ErrorKind::InvalidInput,
-                "shared-memory layout overflows usize",
-            )
-        })?;
-
-        Ok(Self {
-            backend_offset,
-            messages_offset,
-            commands_offset,
-            total_size,
-        })
-    }
-}
-
-fn map_shmem_error(operation: &str, error: ShmemError) -> Error {
-    let kind = match &error {
-        ShmemError::LinkDoesNotExist => ErrorKind::NotFound,
-        ShmemError::LinkExists | ShmemError::MappingIdExists => ErrorKind::AlreadyExists,
-        ShmemError::LinkOpenFailed(source)
-        | ShmemError::LinkCreateFailed(source)
-        | ShmemError::LinkReadFailed(source)
-        | ShmemError::LinkWriteFailed(source) => source.kind(),
-        _ => ErrorKind::Other,
-    };
-    Error::new(kind, format!("{operation}: {error}"))
-}
-
-fn absolute_flink_path(path: &str) -> Result<PathBuf> {
-    let requested = PathBuf::from(path);
-    let target = if requested.is_absolute() {
-        requested
-    } else {
-        std::env::current_dir()
-            .map_err(|error| {
-                Error::new(
-                    error.kind(),
-                    format!("failed to resolve relative flink path: {error}"),
-                )
-            })?
-            .join(requested)
-    };
-    if target.file_name().is_none() {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            "shared-memory link path must name a file",
-        ));
-    }
-    Ok(target)
-}
-
-/// Atomically publishes a fully initialized mapping without exposing a partially written flink.
-fn publish_flink(target: &Path, os_id: &str) -> Result<PathBuf> {
-    use std::fs::OpenOptions;
-    use std::os::unix::fs::OpenOptionsExt;
-
-    let parent = target
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let nonce = FLINK_NONCE.fetch_add(1, Ordering::Relaxed);
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temporary = parent.join(format!(
-        ".shared_structures.{}.{}.{}.tmp",
-        std::process::id(),
-        timestamp,
-        nonce
-    ));
-
-    let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)
-            .map_err(|error| {
-                Error::new(
-                    error.kind(),
-                    format!("failed to create flink staging file: {error}"),
-                )
-            })?;
-        file.write_all(os_id.as_bytes()).map_err(|error| {
-            Error::new(
-                error.kind(),
-                format!("failed to write flink staging file: {error}"),
-            )
-        })?;
-        file.sync_all().map_err(|error| {
-            Error::new(
-                error.kind(),
-                format!("failed to sync flink staging file: {error}"),
-            )
-        })?;
-
-        // A hard link is atomic and does not replace an existing target. Because the source is
-        // in the same directory, readers can only observe a complete os_id.
-        std::fs::hard_link(&temporary, target).map_err(|error| {
-            Error::new(
-                error.kind(),
-                format!("failed to publish shared-memory flink: {error}"),
-            )
-        })?;
-        Ok(target.to_path_buf())
-    })();
-
-    let _ = std::fs::remove_file(&temporary);
-    result
-}
-
-struct CursorGuard<'a> {
-    lock: &'a AtomicU32,
-}
-
-impl<'a> CursorGuard<'a> {
-    fn acquire(cursor: &'a QueueCursor) -> Self {
-        let mut attempts = 0u32;
-        while cursor
-            .lock
-            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            if attempts < 64 {
-                std::hint::spin_loop();
-                attempts += 1;
-            } else {
-                std::thread::yield_now();
-            }
-        }
-        Self { lock: &cursor.lock }
-    }
-}
-
-impl Drop for CursorGuard<'_> {
-    fn drop(&mut self) {
-        self.lock.store(0, Ordering::Release);
-    }
-}
-
-/// 环形缓冲区的构建选项。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SharedRingBufferOptions {
-    strategy: SyncStrategy,
-    buffer_size: usize,
-    adaptive_poll_spins: u32,
-}
-
-impl Default for SharedRingBufferOptions {
-    fn default() -> Self {
-        Self {
-            strategy: SyncStrategy::default(),
-            buffer_size: DEFAULT_BUFFER_SIZE,
-            adaptive_poll_spins: DEFAULT_ADAPTIVE_POLL_SPINS,
-        }
-    }
-}
-
 impl SharedRingBufferOptions {
-    /// 创建一组默认选项。
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 选择同步后端。
-    #[must_use]
-    pub const fn strategy(mut self, strategy: SyncStrategy) -> Self {
-        self.strategy = strategy;
-        self
-    }
-
-    /// 设置消息环容量（必须是非零的 2 的幂）。
-    #[must_use]
-    pub const fn capacity(mut self, buffer_size: usize) -> Self {
-        self.buffer_size = buffer_size;
-        self
-    }
-
-    /// 设置进入内核等待前的自适应自旋次数。
-    #[must_use]
-    pub const fn adaptive_poll_spins(mut self, spins: u32) -> Self {
-        self.adaptive_poll_spins = spins;
-        self
-    }
-
     /// 排他创建新缓冲区。
     pub fn create(self, path: &str) -> Result<SharedRingBuffer> {
-        SharedRingBuffer::create(
-            path,
-            self.strategy,
-            Some(self.buffer_size),
-            Some(self.adaptive_poll_spins),
-        )
+        Ok(SharedRingBuffer {
+            inner: self.create_typed(path)?,
+        })
     }
 
     /// 打开并校验已有缓冲区的后端。
     pub fn open(self, path: &str) -> Result<SharedRingBuffer> {
-        SharedRingBuffer::open(path, self.strategy, Some(self.adaptive_poll_spins))
+        Ok(SharedRingBuffer {
+            inner: self.open_typed(path)?,
+        })
     }
 
-    /// 打开缓冲区；仅在确认链接不存在时创建。
+    /// 打开缓冲区；仅在确认链接不存在（或确认可回收，见
+    /// [`reclaim_stale`](Self::reclaim_stale)）时创建。
     pub fn open_or_create(self, path: &str) -> Result<SharedRingBuffer> {
-        SharedRingBuffer::open_or_create(
-            path,
-            self.strategy,
-            Some(self.buffer_size),
-            Some(self.adaptive_poll_spins),
-        )
+        Ok(SharedRingBuffer {
+            inner: self.open_or_create_typed(path)?,
+        })
     }
 }
 
-/// 某一时刻的缓冲区状态快照。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SharedRingBufferStats {
-    pub capacity: usize,
-    pub available_messages: usize,
-    pub command_capacity: usize,
-    pub available_commands: usize,
-    pub last_message_timestamp: u64,
-    pub is_destroyed: bool,
-    pub is_creator: bool,
-    pub strategy: SyncStrategy,
-}
-
-/// 基于共享内存的有界环形缓冲区。
+/// 基于共享内存的有界环形缓冲区（领域封装）。
 ///
-/// 每个方向使用进程共享锁保护游标，因此安全 API 即使被多线程调用
-/// 也不会产生 slot 数据竞争；快速路径仍针对单生产者/单消费者优化。
+/// 消息通道传递 [`SharedMessage`]，命令通道传递 [`SharedCommand`]；
+/// 队列协调、崩溃恢复与等待语义由 [`TypedRingBuffer`] 提供。
+#[derive(Debug, Hash, PartialEq, Eq)]
 pub struct SharedRingBuffer {
-    shmem: Shmem,
-    flink_path: Option<PathBuf>,
-    header: *mut GenericHeader,
-    message_slots: *mut MessageSlot,
-    command_slots: *mut CommandSlot,
-    is_creator: bool,
-    adaptive_poll_spins: u32,
-    strategy: SyncStrategy,
-    backend: AnySyncBackend,
+    inner: TypedRingBuffer<WireMessage, WireCommand>,
 }
-
-impl std::fmt::Debug for SharedRingBuffer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SharedRingBuffer")
-            .field("os_id", &self.shmem.get_os_id())
-            .field("strategy", &self.strategy)
-            .field("capacity", &self.capacity())
-            .field("is_creator", &self.is_creator)
-            .field("is_destroyed", &self.is_destroyed())
-            .finish_non_exhaustive()
-    }
-}
-
-impl std::hash::Hash for SharedRingBuffer {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.shmem.get_os_id().hash(state);
-    }
-}
-impl PartialEq for SharedRingBuffer {
-    fn eq(&self, other: &Self) -> bool {
-        self.shmem.get_os_id() == other.shmem.get_os_id()
-    }
-}
-impl Eq for SharedRingBuffer {}
-
-// SAFETY: 映射在 `shmem` 的生命期内始终有效；四个可变队列方向分别由
-// 共享 `QueueCursor::lock` 串行化，slot 则通过 Release/Acquire 游标交接。
-unsafe impl Send for SharedRingBuffer {}
-unsafe impl Sync for SharedRingBuffer {}
 
 impl SharedRingBuffer {
+    #[cfg(all(
+        test,
+        any(feature = "futex", feature = "semaphore", feature = "eventfd")
+    ))]
     #[inline]
-    fn header(&self) -> &GenericHeader {
-        // SAFETY: constructors validate the complete mapping before constructing `Self`.
-        unsafe { &*self.header }
-    }
-
-    #[inline]
-    fn buffer_size(&self) -> u32 {
-        self.header().buffer_size
-    }
-
-    #[inline]
-    fn buffer_mask(&self) -> u32 {
-        self.buffer_size() - 1
-    }
-
-    #[inline]
-    fn cmd_buffer_mask(&self) -> u32 {
-        self.header().command_buffer_size - 1
+    fn header(&self) -> &crate::backends::common::GenericHeader {
+        self.inner.header()
     }
 
     /// 使用默认选项打开或创建缓冲区的兼容辅助函数。
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `SharedRingBufferOptions::open_or_create`"
+    )]
     pub fn create_shared_ring_buffer_aux(shared_path: &str) -> Option<Self> {
+        #[allow(deprecated)]
         Self::create_shared_ring_buffer(shared_path, SyncStrategy::default())
     }
 
@@ -532,6 +204,10 @@ impl SharedRingBuffer {
     ///
     /// 新代码应优先使用 [`SharedRingBufferOptions::open_or_create`]，以保留
     /// 完整的错误信息。
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `SharedRingBufferOptions::open_or_create`"
+    )]
     pub fn create_shared_ring_buffer(shared_path: &str, strategy: SyncStrategy) -> Option<Self> {
         if shared_path.is_empty() {
             warn!("No shared path provided, cannot use shared ring buffer.");
@@ -550,6 +226,7 @@ impl SharedRingBuffer {
     }
 
     /// 使用默认后端创建缓冲区。
+    #[deprecated(since = "0.3.0", note = "use `SharedRingBufferOptions::create`")]
     pub fn create_aux(
         path: &str,
         buffer_size: Option<usize>,
@@ -570,108 +247,29 @@ impl SharedRingBuffer {
         buffer_size: Option<usize>,
         adaptive_poll_spins: Option<u32>,
     ) -> Result<Self> {
-        if path.is_empty() {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                "shared-memory link path must not be empty",
-            ));
-        }
-        let flink_path = absolute_flink_path(path)?;
-        let buffer_size = buffer_size.unwrap_or(DEFAULT_BUFFER_SIZE);
-        let layout = BufferLayout::calculate(strategy, buffer_size)?;
-
-        // Fast path only; the final hard-link publication remains the authoritative exclusive
-        // create operation and closes the time-of-check/time-of-use race.
-        match std::fs::symlink_metadata(&flink_path) {
-            Ok(_) => {
-                return Err(Error::new(
-                    ErrorKind::AlreadyExists,
-                    "shared-memory flink already exists",
-                ));
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(Error::new(
-                    error.kind(),
-                    format!("failed to inspect shared-memory flink: {error}"),
-                ));
-            }
-        }
-
-        // Create the OS mapping privately. The public flink is hard-linked only after every
-        // protocol field and backend resource is initialized, so an opener can never race with
-        // construction of Rust atomic objects or plain metadata.
-        let shmem = ShmemConf::new()
-            .size(layout.total_size)
-            .create()
-            .map_err(|error| map_shmem_error("failed to create shared memory", error))?;
-
-        let base_ptr = shmem.as_ptr();
-        if (base_ptr as usize) % align_of::<GenericHeader>() != 0 {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                "shared-memory mapping is not sufficiently aligned",
-            ));
-        }
-
-        let header = base_ptr as *mut GenericHeader;
-        // SAFETY: the mapping has at least `size_of::<GenericHeader>()` writable bytes and the
-        // pointer alignment was checked above. The public flink is not visible yet.
-        unsafe {
-            header.write(GenericHeader::new(
-                RING_BUFFER_VERSION,
-                layout.total_size as u64,
-                buffer_size as u32,
-                CMD_BUFFER_SIZE as u32,
-                strategy.id(),
-                size_of::<MessageSlot>() as u32,
-                size_of::<CommandSlot>() as u32,
-                LAYOUT_MARKER,
-            ));
-        }
-
-        // SAFETY: checked layout offsets are within the mapping and correctly aligned.
-        let backend_ptr = unsafe { base_ptr.add(layout.backend_offset) };
-        let message_slots = unsafe { base_ptr.add(layout.messages_offset).cast::<MessageSlot>() };
-        let command_slots = unsafe { base_ptr.add(layout.commands_offset).cast::<CommandSlot>() };
-        let mut backend = Self::new_backend(strategy);
-        backend.init(true, backend_ptr)?;
-
-        // Publish readiness last. An opener that observes magic with Acquire also observes every
-        // plain metadata field and the initialized backend.
-        unsafe {
-            (*header).magic.store(RING_BUFFER_MAGIC, Ordering::Release);
-        }
-
-        let flink_path = match publish_flink(&flink_path, shmem.get_os_id()) {
-            Ok(path) => path,
-            Err(error) => {
-                backend.abort_init();
-                return Err(error);
-            }
-        };
-
         Ok(Self {
-            shmem,
-            flink_path: Some(flink_path),
-            header,
-            message_slots,
-            command_slots,
-            is_creator: true,
-            adaptive_poll_spins: adaptive_poll_spins.unwrap_or(DEFAULT_ADAPTIVE_POLL_SPINS),
-            strategy,
-            backend,
+            inner: TypedRingBuffer::create_impl(
+                path,
+                strategy,
+                buffer_size.unwrap_or(DEFAULT_BUFFER_SIZE),
+                DEFAULT_CMD_BUFFER_SIZE,
+                adaptive_poll_spins
+                    .unwrap_or(crate::typed_ring_buffer::DEFAULT_ADAPTIVE_POLL_SPINS),
+            )?,
         })
     }
 
     /// 自动识别共享头中记录的后端并打开。
+    #[deprecated(since = "0.3.0", note = "use `open_auto`")]
     pub fn open_aux(path: &str, adaptive_poll_spins: Option<u32>) -> Result<Self> {
         Self::open_auto(path, adaptive_poll_spins)
     }
 
     /// 自动识别后端并打开已有缓冲区。
     pub fn open_auto(path: &str, adaptive_poll_spins: Option<u32>) -> Result<Self> {
-        Self::open_impl(path, None, adaptive_poll_spins)
+        Ok(Self {
+            inner: TypedRingBuffer::open_auto(path, adaptive_poll_spins)?,
+        })
     }
 
     /// 使用指定后端打开已有缓冲区。
@@ -682,147 +280,8 @@ impl SharedRingBuffer {
         strategy: SyncStrategy,
         adaptive_poll_spins: Option<u32>,
     ) -> Result<Self> {
-        Self::open_impl(path, Some(strategy), adaptive_poll_spins)
-    }
-
-    fn open_impl(
-        path: &str,
-        expected_strategy: Option<SyncStrategy>,
-        adaptive_poll_spins: Option<u32>,
-    ) -> Result<Self> {
-        if path.is_empty() {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                "shared-memory link path must not be empty",
-            ));
-        }
-        let shmem = ShmemConf::new()
-            .flink(path)
-            .open()
-            .map_err(|error| map_shmem_error("failed to open shared memory", error))?;
-
-        if shmem.len() < size_of::<GenericHeader>() {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                "shared-memory mapping is shorter than the protocol header",
-            ));
-        }
-
-        let base_ptr = shmem.as_ptr();
-        if (base_ptr as usize) % align_of::<GenericHeader>() != 0 {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                "shared-memory mapping is not sufficiently aligned",
-            ));
-        }
-        let header = base_ptr as *mut GenericHeader;
-
-        // SAFETY: the fixed prefix length and alignment were checked above. Integer and atomic
-        // integer fields accept every bit pattern.
-        let magic = unsafe { (*header).magic.load(Ordering::Acquire) };
-        if magic == 0 {
-            return Err(Error::new(
-                ErrorKind::WouldBlock,
-                "shared-memory buffer is still initializing",
-            ));
-        }
-        if magic != RING_BUFFER_MAGIC {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("invalid shared-memory magic: {magic:#x}"),
-            ));
-        }
-        let version = unsafe { (*header).version.load(Ordering::Relaxed) };
-        if version != RING_BUFFER_VERSION {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                format!(
-                    "incompatible shared-memory protocol version {version}; expected {RING_BUFFER_VERSION}"
-                ),
-            ));
-        }
-
-        let backend_id = unsafe { std::ptr::addr_of!((*header).backend_id).read() };
-        let strategy = SyncStrategy::from_id(backend_id).ok_or_else(|| {
-            let kind = if (1..=3).contains(&backend_id) {
-                ErrorKind::Unsupported
-            } else {
-                ErrorKind::InvalidData
-            };
-            Error::new(
-                kind,
-                format!("shared-memory backend id {backend_id} is unavailable"),
-            )
-        })?;
-        if !strategy.is_supported() {
-            return Err(Error::new(
-                ErrorKind::Unsupported,
-                "shared-memory buffer does not name a usable backend",
-            ));
-        }
-        if let Some(expected) = expected_strategy {
-            if expected != strategy {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    format!(
-                        "synchronization backend mismatch: mapping uses {strategy}, caller requested {expected}"
-                    ),
-                ));
-            }
-        }
-
-        let buffer_size = unsafe { std::ptr::addr_of!((*header).buffer_size).read() as usize };
-        let command_buffer_size =
-            unsafe { std::ptr::addr_of!((*header).command_buffer_size).read() as usize };
-        let layout = BufferLayout::calculate(strategy, buffer_size).map_err(|error| {
-            Error::new(
-                ErrorKind::InvalidData,
-                format!("invalid shared-memory layout metadata: {error}"),
-            )
-        })?;
-        let recorded_total = unsafe { std::ptr::addr_of!((*header).total_size).read() };
-        let message_slot_size =
-            unsafe { std::ptr::addr_of!((*header).message_slot_size).read() as usize };
-        let command_slot_size =
-            unsafe { std::ptr::addr_of!((*header).command_slot_size).read() as usize };
-        let marker = unsafe { std::ptr::addr_of!((*header).layout_marker).read() };
-
-        if command_buffer_size != CMD_BUFFER_SIZE
-            || message_slot_size != size_of::<MessageSlot>()
-            || command_slot_size != size_of::<CommandSlot>()
-            || marker != LAYOUT_MARKER
-            || recorded_total != layout.total_size as u64
-            || shmem.len() != layout.total_size
-        {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                "shared-memory layout metadata does not match this build",
-            ));
-        }
-        if unsafe { (*header).is_destroyed.load(Ordering::Acquire) } != 0 {
-            return Err(Error::new(
-                ErrorKind::BrokenPipe,
-                "shared-memory buffer is destroyed",
-            ));
-        }
-
-        // SAFETY: the complete layout was checked against the exact mapping length.
-        let backend_ptr = unsafe { base_ptr.add(layout.backend_offset) };
-        let message_slots = unsafe { base_ptr.add(layout.messages_offset).cast::<MessageSlot>() };
-        let command_slots = unsafe { base_ptr.add(layout.commands_offset).cast::<CommandSlot>() };
-        let mut backend = Self::new_backend(strategy);
-        backend.init(false, backend_ptr)?;
-
         Ok(Self {
-            shmem,
-            flink_path: None,
-            header,
-            message_slots,
-            command_slots,
-            is_creator: false,
-            adaptive_poll_spins: adaptive_poll_spins.unwrap_or(DEFAULT_ADAPTIVE_POLL_SPINS),
-            strategy,
-            backend,
+            inner: TypedRingBuffer::open_impl(path, Some(strategy), adaptive_poll_spins)?,
         })
     }
 
@@ -833,52 +292,14 @@ impl SharedRingBuffer {
         buffer_size: Option<usize>,
         adaptive_poll_spins: Option<u32>,
     ) -> Result<Self> {
-        let deadline = Instant::now() + OPEN_RETRY_TIMEOUT;
-        let mut may_create = true;
-        loop {
-            match Self::open(path, strategy, adaptive_poll_spins) {
-                Ok(buffer) => return Ok(buffer),
-                Err(error) if error.kind() == ErrorKind::NotFound && may_create => {
-                    match Self::create(path, strategy, buffer_size, adaptive_poll_spins) {
-                        Ok(buffer) => return Ok(buffer),
-                        Err(create_error)
-                            if create_error.kind() == ErrorKind::AlreadyExists
-                                && Instant::now() < deadline =>
-                        {
-                            may_create = false;
-                        }
-                        Err(create_error) => return Err(create_error),
-                    }
-                }
-                Err(error)
-                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::NotFound)
-                        && Instant::now() < deadline =>
-                {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Err(error) => return Err(error),
-            }
+        let mut options = SharedRingBufferOptions::new().strategy(strategy);
+        if let Some(buffer_size) = buffer_size {
+            options = options.capacity(buffer_size);
         }
-    }
-
-    fn new_backend(strategy: SyncStrategy) -> AnySyncBackend {
-        match strategy {
-            #[cfg(feature = "futex")]
-            SyncStrategy::Futex => {
-                AnySyncBackend::Futex(crate::backends::futex::FutexBackend::new())
-            }
-
-            #[cfg(feature = "semaphore")]
-            SyncStrategy::Semaphore => {
-                AnySyncBackend::Semaphore(crate::backends::semaphore::SemaphoreBackend::new())
-            }
-
-            #[cfg(feature = "eventfd")]
-            SyncStrategy::EventFd => {
-                AnySyncBackend::EventFd(crate::backends::eventfd::EventFdBackend::new())
-            }
-            SyncStrategy::Unsupported => AnySyncBackend::_Unsupported,
+        if let Some(spins) = adaptive_poll_spins {
+            options = options.adaptive_poll_spins(spins);
         }
+        options.open_or_create(path)
     }
 
     /// 尝试写入一条消息。队列已满时返回 `Ok(false)`。
@@ -886,191 +307,81 @@ impl SharedRingBuffer {
     /// 通知后端只是等待优化；通知失败不会把已提交的消息伪装成
     /// 写入失败，避免调用者重试后产生重复消息。
     pub fn try_write_message(&self, message: &SharedMessage) -> Result<bool> {
-        if self.is_destroyed() {
-            return Err(Error::new(ErrorKind::BrokenPipe, "buffer is destroyed"));
-        }
+        self.inner.try_write_message(&WireMessage::from(message))
+    }
 
-        let header = self.header();
-        let guard = CursorGuard::acquire(&header.message_write);
-        if self.is_destroyed() {
-            return Err(Error::new(ErrorKind::BrokenPipe, "buffer is destroyed"));
-        }
-
-        unsafe {
-            let write_idx = header.message_write.index.load(Ordering::Relaxed);
-            let read_idx = header.message_read.index.load(Ordering::Acquire);
-            if write_idx.wrapping_sub(read_idx) >= self.buffer_size() {
-                return Ok(false);
-            }
-
-            let slot_idx = (write_idx & self.buffer_mask()) as usize;
-            let wire_message = WireMessage::from(message);
-            let written_at = now_millis();
-            self.message_slots.add(slot_idx).write(MessageSlot {
-                written_at,
-                checksum: calculate_message_checksum(&wire_message),
-                _padding: 0,
-                message: wire_message,
-            });
-            header.last_timestamp.store(written_at, Ordering::Release);
-            header
-                .message_write
-                .index
-                .store(write_idx.wrapping_add(1), Ordering::Release);
-        }
-        drop(guard);
-
-        if let Err(error) = self.backend.signal_message() {
-            warn!("message committed, but waiter notification failed: {error}");
-        }
-        Ok(true)
+    /// 写入一条消息；队列满时覆盖最旧的一条待读消息，因此总是成功。
+    ///
+    /// 适合"只关心最新状态"的广播场景（与 [`try_read_latest_message`]
+    /// 配对）。被覆盖的消息对所有消费者都不可见。
+    ///
+    /// [`try_read_latest_message`]: Self::try_read_latest_message
+    pub fn write_message_overwrite(&self, message: &SharedMessage) -> Result<()> {
+        self.inner
+            .write_message_overwrite(&WireMessage::from(message))
     }
 
     /// 读取并移除最早的消息。
+    ///
+    /// 校验和不匹配时返回 `InvalidData`；此时损坏的 slot **已被消费**
+    /// （读游标已推进），下一次调用会读取后续消息，损坏内容不会重复
+    /// 出现，也无法找回。
     pub fn try_read_next_message(&self) -> Result<Option<SharedMessage>> {
-        if self.is_destroyed() {
-            return Ok(None);
-        }
-
-        let header = self.header();
-        let _guard = CursorGuard::acquire(&header.message_read);
-        if self.is_destroyed() {
-            return Ok(None);
-        }
-
-        unsafe {
-            let write_idx = header.message_write.index.load(Ordering::Acquire);
-            let read_idx = header.message_read.index.load(Ordering::Relaxed);
-            if read_idx == write_idx {
-                return Ok(None);
-            }
-
-            let slot_idx = (read_idx & self.buffer_mask()) as usize;
-            let slot = self.message_slots.add(slot_idx).read();
-            header
-                .message_read
-                .index
-                .store(read_idx.wrapping_add(1), Ordering::Release);
-            if calculate_message_checksum(&slot.message) != slot.checksum {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    "message checksum mismatch",
-                ));
-            }
-            Ok(Some(SharedMessage::from(slot.message)))
-        }
+        Ok(self.inner.try_read_next_message()?.map(SharedMessage::from))
     }
 
     /// 读取最新消息并一次丢弃它之前的所有待读消息。
     pub fn try_read_latest_message(&self) -> Result<Option<SharedMessage>> {
-        if self.is_destroyed() {
-            return Ok(None);
-        }
+        Ok(self
+            .inner
+            .try_read_latest_message()?
+            .map(SharedMessage::from))
+    }
 
-        let header = self.header();
-        let _guard = CursorGuard::acquire(&header.message_read);
-        if self.is_destroyed() {
-            return Ok(None);
-        }
+    /// 复制最早的待读消息但不移除它。
+    ///
+    /// 校验和不匹配时返回 `InvalidData` 且**不**推进读游标；随后的
+    /// [`try_read_next_message`](Self::try_read_next_message) 会消费并跳过
+    /// 该损坏 slot。
+    pub fn try_peek_message(&self) -> Result<Option<SharedMessage>> {
+        Ok(self.inner.try_peek_message()?.map(SharedMessage::from))
+    }
 
-        unsafe {
-            let write_idx = header.message_write.index.load(Ordering::Acquire);
-            let read_idx = header.message_read.index.load(Ordering::Relaxed);
-            if read_idx == write_idx {
-                return Ok(None);
-            }
+    /// 单次持锁批量读取至多 `max` 条消息。
+    ///
+    /// 相比循环调用 [`try_read_next_message`](Self::try_read_next_message)，
+    /// 只做一次方向锁获取。校验和不匹配的 slot 会被跳过并记录警告，
+    /// 不会中断整个批次。
+    pub fn drain_messages(&self, max: usize) -> Result<Vec<SharedMessage>> {
+        Ok(self
+            .inner
+            .drain_messages(max)?
+            .into_iter()
+            .map(SharedMessage::from)
+            .collect())
+    }
 
-            let newest_idx = write_idx.wrapping_sub(1);
-            let slot_idx = (newest_idx & self.buffer_mask()) as usize;
-            let slot = self.message_slots.add(slot_idx).read();
-            header
-                .message_read
-                .index
-                .store(write_idx, Ordering::Release);
-            if calculate_message_checksum(&slot.message) != slot.checksum {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    "latest message checksum mismatch",
-                ));
-            }
-            Ok(Some(SharedMessage::from(slot.message)))
-        }
+    /// 尝试写入命令的兼容别名。
+    #[deprecated(since = "0.3.0", note = "renamed to `try_send_command`")]
+    pub fn send_command(&self, command: SharedCommand) -> Result<bool> {
+        self.try_send_command(command)
     }
 
     /// 尝试写入命令。命令队列已满时返回 `Ok(false)`。
-    pub fn send_command(&self, command: SharedCommand) -> Result<bool> {
-        if self.is_destroyed() {
-            return Err(Error::new(ErrorKind::BrokenPipe, "buffer is destroyed"));
-        }
-
-        let header = self.header();
-        let guard = CursorGuard::acquire(&header.command_write);
-        if self.is_destroyed() {
-            return Err(Error::new(ErrorKind::BrokenPipe, "buffer is destroyed"));
-        }
-
-        unsafe {
-            let write_idx = header.command_write.index.load(Ordering::Relaxed);
-            let read_idx = header.command_read.index.load(Ordering::Acquire);
-            if write_idx.wrapping_sub(read_idx) >= header.command_buffer_size {
-                return Ok(false);
-            }
-
-            let slot_idx = (write_idx & self.cmd_buffer_mask()) as usize;
-            self.command_slots.add(slot_idx).write(CommandSlot {
-                checksum: calculate_command_checksum(&command),
-                _padding: 0,
-                command,
-            });
-            header
-                .command_write
-                .index
-                .store(write_idx.wrapping_add(1), Ordering::Release);
-        }
-        drop(guard);
-
-        if let Err(error) = self.backend.signal_command() {
-            warn!("command committed, but waiter notification failed: {error}");
-        }
-        Ok(true)
+    pub fn try_send_command(&self, command: SharedCommand) -> Result<bool> {
+        self.inner.try_send_command(WireCommand::from(command))
     }
 
     /// 读取并移除最早的命令，并校验其完整性。
     pub fn try_receive_command(&self) -> Result<Option<SharedCommand>> {
-        if self.is_destroyed() {
-            return Ok(None);
-        }
-
-        let header = self.header();
-        let _guard = CursorGuard::acquire(&header.command_read);
-        if self.is_destroyed() {
-            return Ok(None);
-        }
-
-        unsafe {
-            let write_idx = header.command_write.index.load(Ordering::Acquire);
-            let read_idx = header.command_read.index.load(Ordering::Relaxed);
-            if read_idx == write_idx {
-                return Ok(None);
-            }
-
-            let slot_idx = (read_idx & self.cmd_buffer_mask()) as usize;
-            let slot = self.command_slots.add(slot_idx).read();
-            header
-                .command_read
-                .index
-                .store(read_idx.wrapping_add(1), Ordering::Release);
-            if calculate_command_checksum(&slot.command) != slot.checksum {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    "command checksum mismatch",
-                ));
-            }
-            Ok(Some(slot.command))
-        }
+        Ok(self.inner.try_receive_command()?.map(SharedCommand::from))
     }
 
     /// 读取命令的兼容 API。校验失败时记录错误并返回 `None`。
+    #[deprecated(
+        since = "0.3.0",
+        note = "use `try_receive_command` to keep the error information"
+    )]
     #[must_use]
     pub fn receive_command(&self) -> Option<SharedCommand> {
         match self.try_receive_command() {
@@ -1082,162 +393,139 @@ impl SharedRingBuffer {
         }
     }
 
-    /// 等待消息可读。
+    /// 等待消息可读。返回 `Ok(true)` 表示当下确有消息可读。
     pub fn wait_for_message(&self, timeout: Option<Duration>) -> Result<bool> {
-        if self.is_destroyed() {
-            return Ok(false);
-        }
-        let notified = self.backend.wait_for_message(
-            || self.is_destroyed_for_wait() || self.has_message(),
-            self.adaptive_poll_spins,
-            timeout,
-        )?;
-        Ok(notified && !self.is_destroyed() && self.has_message())
+        self.inner.wait_for_message(timeout)
     }
 
-    /// 等待命令可读。
+    /// 等待命令可读。返回 `Ok(true)` 表示当下确有命令可读。
     pub fn wait_for_command(&self, timeout: Option<Duration>) -> Result<bool> {
-        if self.is_destroyed() {
-            return Ok(false);
-        }
-        let notified = self.backend.wait_for_command(
-            || self.is_destroyed_for_wait() || self.has_command(),
-            self.adaptive_poll_spins,
-            timeout,
-        )?;
-        Ok(notified && !self.is_destroyed() && self.has_command())
+        self.inner.wait_for_command(timeout)
+    }
+
+    /// 等待消息可读，并区分「可读 / 超时 / 已销毁」三种结局。
+    ///
+    /// 语义见 [`TypedRingBuffer::wait_message`]。
+    pub fn wait_message(&self, timeout: Option<Duration>) -> Result<WaitOutcome> {
+        self.inner.wait_message(timeout)
+    }
+
+    /// 等待命令可读，语义同 [`wait_message`](Self::wait_message)。
+    pub fn wait_command(&self, timeout: Option<Duration>) -> Result<WaitOutcome> {
+        self.inner.wait_command(timeout)
+    }
+
+    /// 阻塞读取一条消息：内部完成「等待 → 读取 → 被抢走则重试」循环。
+    ///
+    /// 返回 `Ok(None)` 表示超时或缓冲区被销毁；校验和错误原样上抛
+    /// （对应的损坏 slot 已被消费）。
+    pub fn read_message_timeout(&self, timeout: Option<Duration>) -> Result<Option<SharedMessage>> {
+        Ok(self
+            .inner
+            .read_message_timeout(timeout)?
+            .map(SharedMessage::from))
+    }
+
+    /// 阻塞读取一条命令，语义同 [`read_message_timeout`](Self::read_message_timeout)。
+    pub fn receive_command_timeout(
+        &self,
+        timeout: Option<Duration>,
+    ) -> Result<Option<SharedCommand>> {
+        Ok(self
+            .inner
+            .receive_command_timeout(timeout)?
+            .map(SharedCommand::from))
     }
 
     /// 将整个共享缓冲区标记为已销毁并唤醒等待者。
     ///
     /// 该操作幂等；它不会立即删除 flink，flink 由 creator Drop 时清理。
     pub fn destroy(&self) -> Result<()> {
-        // SeqCst pairs with backend waiter registration and the registered-waiter count read.
-        // This closes the classic two-atomic registration/shutdown missed-wakeup window.
-        self.header().is_destroyed.store(1, Ordering::SeqCst);
-        // Even a repeated call retries the wake: a previous best-effort backend notification may
-        // have failed after the destroyed flag itself was successfully published.
-        self.backend.wake_all()
+        self.inner.destroy()
     }
 
     /// 返回缓冲区是否已销毁。
     #[inline]
     #[must_use]
     pub fn is_destroyed(&self) -> bool {
-        self.header().is_destroyed.load(Ordering::Acquire) != 0
-    }
-
-    #[inline]
-    fn is_destroyed_for_wait(&self) -> bool {
-        self.header().is_destroyed.load(Ordering::SeqCst) != 0
+        self.inner.is_destroyed()
     }
 
     /// 返回是否有待读消息。
     #[must_use]
     pub fn has_message(&self) -> bool {
-        !self.is_destroyed() && self.available_messages() > 0
+        self.inner.has_message()
     }
 
     /// 返回消息环容量。
     #[must_use]
     pub fn capacity(&self) -> usize {
-        self.buffer_size() as usize
+        self.inner.capacity()
     }
 
-    /// 返回当前待读消息数。
+    /// 返回当前待读消息数（免锁快照，见
+    /// [`TypedRingBuffer::available_messages`]）。
     #[must_use]
     pub fn available_messages(&self) -> usize {
-        if self.is_destroyed() {
-            return 0;
-        }
-        let header = self.header();
-        let _write_guard = CursorGuard::acquire(&header.message_write);
-        let _read_guard = CursorGuard::acquire(&header.message_read);
-        header
-            .message_write
-            .index
-            .load(Ordering::Acquire)
-            .wrapping_sub(header.message_read.index.load(Ordering::Acquire))
-            .min(header.buffer_size) as usize
+        self.inner.available_messages()
     }
 
     /// 返回是否有待读命令。
     #[must_use]
     pub fn has_command(&self) -> bool {
-        !self.is_destroyed() && self.available_commands() > 0
+        self.inner.has_command()
     }
 
     /// 返回命令环容量。
     #[must_use]
     pub fn command_capacity(&self) -> usize {
-        self.header().command_buffer_size as usize
+        self.inner.command_capacity()
     }
 
-    /// 返回当前待读命令数。
+    /// 返回当前待读命令数（免锁快照）。
     #[must_use]
     pub fn available_commands(&self) -> usize {
-        if self.is_destroyed() {
-            return 0;
-        }
-        let header = self.header();
-        let _write_guard = CursorGuard::acquire(&header.command_write);
-        let _read_guard = CursorGuard::acquire(&header.command_read);
-        header
-            .command_write
-            .index
-            .load(Ordering::Acquire)
-            .wrapping_sub(header.command_read.index.load(Ordering::Acquire))
-            .min(header.command_buffer_size) as usize
+        self.inner.available_commands()
     }
 
     /// 返回当前后端。
     #[must_use]
     pub const fn strategy(&self) -> SyncStrategy {
-        self.strategy
+        self.inner.strategy()
     }
 
     /// 返回当前句柄是否创建了该映射。
     #[must_use]
     pub const fn is_creator(&self) -> bool {
-        self.is_creator
+        self.inner.is_creator()
+    }
+
+    /// 返回创建该映射的进程 PID。
+    #[must_use]
+    pub fn creator_pid(&self) -> u32 {
+        self.inner.creator_pid()
+    }
+
+    /// 返回创建者进程当前是否存在。
+    ///
+    /// 基于 `/proc/<pid>` 探测；PID 复用可能造成误报"存活"。用于发现
+    /// 创建者崩溃后的僵尸映射（参见
+    /// [`SharedRingBufferOptions::reclaim_stale`]）。
+    #[must_use]
+    pub fn creator_alive(&self) -> bool {
+        self.inner.creator_alive()
     }
 
     /// 返回最近一次消息提交的 Unix 毫秒时间戳。
     #[must_use]
     pub fn last_message_timestamp(&self) -> u64 {
-        self.header().last_timestamp.load(Ordering::Acquire)
+        self.inner.last_message_timestamp()
     }
 
     /// 返回一份状态快照。
     #[must_use]
     pub fn stats(&self) -> SharedRingBufferStats {
-        SharedRingBufferStats {
-            capacity: self.capacity(),
-            available_messages: self.available_messages(),
-            command_capacity: self.command_capacity(),
-            available_commands: self.available_commands(),
-            last_message_timestamp: self.last_message_timestamp(),
-            is_destroyed: self.is_destroyed(),
-            is_creator: self.is_creator,
-            strategy: self.strategy,
-        }
-    }
-}
-
-impl Drop for SharedRingBuffer {
-    fn drop(&mut self) {
-        if self.header.is_null() {
-            return;
-        }
-
-        // A non-owner only detaches. The creator owns global shutdown and unlink semantics.
-        if self.is_creator {
-            let _ = self.destroy();
-            if let Some(path) = self.flink_path.take() {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-        self.backend.cleanup(self.is_creator);
+        self.inner.stats()
     }
 }
 
@@ -1245,17 +533,19 @@ impl Drop for SharedRingBuffer {
     test,
     any(feature = "futex", feature = "semaphore", feature = "eventfd")
 ))]
+// 大量测试沿用 deprecated 的兼容入口，保留它们的行为覆盖直到真正移除。
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::shared_message::{
         CommandType, MonitorInfo, SharedCommand, SharedMessage, TagStatus,
     };
+    use crate::typed_ring_buffer::CursorGuard;
+    use std::io::ErrorKind;
+    use std::path::Path;
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Barrier, Mutex};
-    use std::time::Duration;
-
-    // EventFd backend 的 socket 路径使用毫秒精度，并发创建会撞路径，用 Mutex 串行化
-    #[cfg(feature = "eventfd")]
-    static EVENTFD_LOCK: Mutex<()> = Mutex::new(());
+    use std::time::{Duration, Instant};
 
     fn mk_path(name: &str) -> String {
         format!("/tmp/srb_test_{}_{}_{}", std::process::id(), name, {
@@ -1373,7 +663,7 @@ mod tests {
             .create(&path)
             .unwrap();
         assert_eq!(buffer.capacity(), 32);
-        assert_eq!(buffer.command_capacity(), CMD_BUFFER_SIZE);
+        assert_eq!(buffer.command_capacity(), DEFAULT_CMD_BUFFER_SIZE);
         assert!(buffer.is_creator());
         assert_eq!(buffer.strategy(), SyncStrategy::default());
 
@@ -1381,7 +671,7 @@ mod tests {
         let stats = buffer.stats();
         assert_eq!(stats.capacity, 32);
         assert_eq!(stats.available_messages, 1);
-        assert_eq!(stats.command_capacity, CMD_BUFFER_SIZE);
+        assert_eq!(stats.command_capacity, DEFAULT_CMD_BUFFER_SIZE);
         assert_eq!(stats.available_commands, 0);
         assert!(stats.last_message_timestamp > 0);
         assert!(!stats.is_destroyed);
@@ -1391,7 +681,11 @@ mod tests {
     #[test]
     fn test_open_rejects_mapping_shorter_than_header() {
         let path = mk_path("short_mapping");
-        let _mapping = ShmemConf::new().size(8).flink(&path).create().unwrap();
+        let _mapping = shared_memory::ShmemConf::new()
+            .size(8)
+            .flink(&path)
+            .create()
+            .unwrap();
         let error = SharedRingBuffer::open_aux(&path, Some(0)).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidData);
     }
@@ -2094,7 +1388,6 @@ mod tests {
     #[test]
     #[cfg(feature = "eventfd")]
     fn test_explicit_eventfd_strategy_create_open() {
-        let _lock = EVENTFD_LOCK.lock().unwrap();
         let path = mk_path("efd_explicit");
         let creator = SharedRingBuffer::create(&path, SyncStrategy::EventFd, Some(16), Some(0));
         assert!(creator.is_ok());
@@ -2106,7 +1399,6 @@ mod tests {
     #[test]
     #[cfg(feature = "eventfd")]
     fn test_eventfd_spsc_with_wait() {
-        let _lock = EVENTFD_LOCK.lock().unwrap();
         let path = mk_path("efd_spsc_wait");
         let producer = Arc::new(
             SharedRingBuffer::create(&path, SyncStrategy::EventFd, Some(64), Some(0)).unwrap(),
@@ -3134,7 +2426,7 @@ mod tests {
         let path = mk_path("write_idx_mono");
         let buf = SharedRingBuffer::create_aux(&path, Some(8), Some(0)).unwrap();
         // 多轮写满 + 读空，写索引应持续增加
-        let header_ptr = buf.header;
+        let header_ptr = std::ptr::from_ref(buf.header());
         let initial_widx = unsafe {
             (*header_ptr)
                 .message_write
@@ -3207,5 +2499,262 @@ mod tests {
         }
         assert_eq!(total_written, total_read);
         assert_eq!(buf.available_messages(), 0);
+    }
+
+    // ── v11 新增能力 ─────────────────────────────────────────────────────────
+
+    /// `u32::MAX` 超过 Linux 的 pid_max 上限（2^22），`/proc/4294967295`
+    /// 永不存在，可确定性地模拟"持锁进程已死"。
+    const DEAD_PID: u32 = u32::MAX;
+
+    #[test]
+    fn test_lock_reclaimed_from_dead_holder_on_write() {
+        let path = mk_path("dead_lock_write");
+        let buf = SharedRingBuffer::create_aux(&path, Some(16), Some(0)).unwrap();
+        buf.header()
+            .message_write
+            .lock
+            .store(DEAD_PID, Ordering::SeqCst);
+        assert!(buf.try_write_message(&make_msg(1)).unwrap());
+        assert_eq!(buf.available_messages(), 1);
+    }
+
+    #[test]
+    fn test_lock_reclaimed_from_dead_holder_on_read() {
+        let path = mk_path("dead_lock_read");
+        let buf = SharedRingBuffer::create_aux(&path, Some(16), Some(0)).unwrap();
+        buf.try_write_message(&make_msg(7)).unwrap();
+        buf.header()
+            .message_read
+            .lock
+            .store(DEAD_PID, Ordering::SeqCst);
+        let got = buf.try_read_next_message().unwrap().unwrap();
+        assert_eq!(got.get_monitor_info().monitor_num, 7);
+    }
+
+    #[test]
+    fn test_live_holder_lock_is_not_reclaimed() {
+        let path = mk_path("live_lock");
+        let buf = Arc::new(SharedRingBuffer::create_aux(&path, Some(16), Some(0)).unwrap());
+        // 另一个线程持有写锁（同进程 PID，判定为存活）时，写入方等待而不是夺锁。
+        let _guard = CursorGuard::acquire(&buf.header().message_write);
+        let buf2 = Arc::clone(&buf);
+        let writer = std::thread::spawn(move || buf2.try_write_message(&make_msg(3)));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!writer.is_finished(), "writer must wait for a live holder");
+        drop(_guard);
+        assert!(writer.join().unwrap().unwrap());
+    }
+
+    #[test]
+    fn test_corrupt_message_slot_returns_invalid_data_and_is_consumed() {
+        let path = mk_path("corrupt_msg");
+        let buf = SharedRingBuffer::create_aux(&path, Some(16), Some(0)).unwrap();
+        buf.try_write_message(&make_msg(1)).unwrap();
+        buf.try_write_message(&make_msg(2)).unwrap();
+        // 篡改第一个 slot 的消息负载，模拟撕裂写入。
+        unsafe {
+            let slot = &mut *buf.inner.message_slots;
+            slot.payload.monitor_num = slot.payload.monitor_num.wrapping_add(999);
+        }
+        let error = buf.try_read_next_message().unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        // 损坏 slot 已被消费，后续消息可正常读出。
+        let got = buf.try_read_next_message().unwrap().unwrap();
+        assert_eq!(got.get_monitor_info().monitor_num, 2);
+    }
+
+    #[test]
+    fn test_corrupt_command_slot_returns_invalid_data() {
+        let path = mk_path("corrupt_cmd");
+        let buf = SharedRingBuffer::create_aux(&path, Some(16), Some(0)).unwrap();
+        assert!(buf.try_send_command(SharedCommand::view_tag(1, 0)).unwrap());
+        unsafe {
+            let slot = &mut *buf.inner.command_slots;
+            slot.payload.parameter = slot.payload.parameter.wrapping_add(999);
+        }
+        let error = buf.try_receive_command().unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_peek_does_not_consume() {
+        let path = mk_path("peek");
+        let buf = SharedRingBuffer::create_aux(&path, Some(16), Some(0)).unwrap();
+        assert!(buf.try_peek_message().unwrap().is_none());
+        buf.try_write_message(&make_msg(5)).unwrap();
+        let peeked = buf.try_peek_message().unwrap().unwrap();
+        assert_eq!(peeked.get_monitor_info().monitor_num, 5);
+        assert_eq!(buf.available_messages(), 1);
+        let read = buf.try_read_next_message().unwrap().unwrap();
+        assert_eq!(read.get_monitor_info().monitor_num, 5);
+        assert_eq!(buf.available_messages(), 0);
+    }
+
+    #[test]
+    fn test_drain_messages_batch_and_order() {
+        let path = mk_path("drain");
+        let buf = SharedRingBuffer::create_aux(&path, Some(16), Some(0)).unwrap();
+        for i in 0..10 {
+            buf.try_write_message(&make_msg(i)).unwrap();
+        }
+        let first = buf.drain_messages(4).unwrap();
+        assert_eq!(first.len(), 4);
+        for (i, message) in first.iter().enumerate() {
+            assert_eq!(message.get_monitor_info().monitor_num, i as i32);
+        }
+        let rest = buf.drain_messages(usize::MAX).unwrap();
+        assert_eq!(rest.len(), 6);
+        assert_eq!(rest[0].get_monitor_info().monitor_num, 4);
+        assert_eq!(buf.available_messages(), 0);
+        assert!(buf.drain_messages(8).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_write_message_overwrite_never_fails_when_full() {
+        let path = mk_path("overwrite");
+        let buf = SharedRingBuffer::create_aux(&path, Some(4), Some(0)).unwrap();
+        for i in 0..4 {
+            buf.try_write_message(&make_msg(i)).unwrap();
+        }
+        assert!(!buf.try_write_message(&make_msg(99)).unwrap());
+        buf.write_message_overwrite(&make_msg(100)).unwrap();
+        assert_eq!(buf.available_messages(), 4);
+        // 最旧的一条（0）被覆盖，读出顺序为 1,2,3,100。
+        let drained = buf.drain_messages(usize::MAX).unwrap();
+        let nums: Vec<i32> = drained
+            .iter()
+            .map(|m| m.get_monitor_info().monitor_num)
+            .collect();
+        assert_eq!(nums, vec![1, 2, 3, 100]);
+    }
+
+    #[test]
+    fn test_wait_outcome_timeout_and_destroy() {
+        let path = mk_path("wait_outcome");
+        let buf = Arc::new(SharedRingBuffer::create_aux(&path, Some(16), Some(0)).unwrap());
+        assert_eq!(
+            buf.wait_message(Some(Duration::from_millis(5))).unwrap(),
+            WaitOutcome::TimedOut
+        );
+        buf.try_write_message(&make_msg(1)).unwrap();
+        assert_eq!(buf.wait_message(None).unwrap(), WaitOutcome::Ready);
+
+        let buf2 = Arc::clone(&buf);
+        let waiter = std::thread::spawn(move || buf2.wait_command(None).unwrap());
+        std::thread::sleep(Duration::from_millis(20));
+        buf.destroy().unwrap();
+        assert_eq!(waiter.join().unwrap(), WaitOutcome::Destroyed);
+    }
+
+    #[test]
+    fn test_read_message_timeout_blocks_until_write() {
+        let path = mk_path("read_timeout");
+        let buf = Arc::new(SharedRingBuffer::create_aux(&path, Some(16), Some(0)).unwrap());
+        assert!(buf
+            .read_message_timeout(Some(Duration::from_millis(5)))
+            .unwrap()
+            .is_none());
+
+        let buf2 = Arc::clone(&buf);
+        let reader = std::thread::spawn(move || {
+            buf2.read_message_timeout(Some(Duration::from_secs(5)))
+                .unwrap()
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        buf.try_write_message(&make_msg(42)).unwrap();
+        let got = reader.join().unwrap().unwrap();
+        assert_eq!(got.get_monitor_info().monitor_num, 42);
+    }
+
+    #[test]
+    fn test_receive_command_timeout() {
+        let path = mk_path("recv_cmd_timeout");
+        let buf = SharedRingBuffer::create_aux(&path, Some(16), Some(0)).unwrap();
+        assert!(buf
+            .receive_command_timeout(Some(Duration::from_millis(5)))
+            .unwrap()
+            .is_none());
+        buf.try_send_command(SharedCommand::view_tag(2, 0)).unwrap();
+        let got = buf
+            .receive_command_timeout(Some(Duration::from_millis(100)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.get_command_type(), CommandType::ViewTag);
+    }
+
+    #[test]
+    fn test_configurable_command_capacity() {
+        let path = mk_path("cmd_capacity");
+        let buf = SharedRingBufferOptions::new()
+            .capacity(16)
+            .command_capacity(64)
+            .adaptive_poll_spins(0)
+            .create(&path)
+            .unwrap();
+        assert_eq!(buf.command_capacity(), 64);
+        for i in 0..64 {
+            assert!(buf.try_send_command(SharedCommand::view_tag(i, 0)).unwrap());
+        }
+        assert!(!buf
+            .try_send_command(SharedCommand::view_tag(64, 0))
+            .unwrap());
+
+        // opener 从 header 读取容量，与创建者一致。
+        let opener = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .open(&path)
+            .unwrap();
+        assert_eq!(opener.command_capacity(), 64);
+    }
+
+    #[test]
+    fn test_command_capacity_must_be_power_of_two() {
+        let path = mk_path("cmd_capacity_pow2");
+        let result = SharedRingBufferOptions::new()
+            .command_capacity(20)
+            .create(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_creator_pid_and_alive() {
+        let path = mk_path("creator_pid");
+        let buf = SharedRingBuffer::create_aux(&path, Some(16), Some(0)).unwrap();
+        assert_eq!(buf.creator_pid(), std::process::id());
+        assert!(buf.creator_alive());
+    }
+
+    #[test]
+    fn test_reclaim_stale_replaces_dead_creator_mapping() {
+        let path = mk_path("reclaim_stale");
+        let creator = SharedRingBuffer::create_aux(&path, Some(16), Some(0)).unwrap();
+        creator.try_write_message(&make_msg(1)).unwrap();
+        // 模拟创建者崩溃：伪造一个必死的 creator_pid，然后泄漏句柄
+        // （跳过 Drop 的 destroy/unlink，flink 残留）。
+        unsafe {
+            std::ptr::addr_of_mut!((*creator.inner.header).creator_pid).write(DEAD_PID);
+        }
+        std::mem::forget(creator);
+        assert!(Path::new(&path).is_file());
+
+        // 默认行为：打开僵尸映射。
+        let zombie = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .open_or_create(&path)
+            .unwrap();
+        assert!(!zombie.is_creator());
+        assert!(!zombie.creator_alive());
+        drop(zombie);
+
+        // 开启回收：删除残留 flink 并重建为全新映射。
+        let reclaimed = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .reclaim_stale(true)
+            .open_or_create(&path)
+            .unwrap();
+        assert!(reclaimed.is_creator());
+        assert!(reclaimed.creator_alive());
+        assert_eq!(reclaimed.available_messages(), 0);
     }
 }

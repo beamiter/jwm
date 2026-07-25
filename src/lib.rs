@@ -28,8 +28,13 @@ pub use shared_message::{
     MAX_LT_SYMBOL_LEN, MAX_TAGS,
 };
 
+mod typed_ring_buffer;
+pub use typed_ring_buffer::{
+    SharedRingBufferOptions, SharedRingBufferStats, TypedRingBuffer, WaitOutcome, WireSafe,
+};
+
 mod shared_ring_buffer;
-pub use shared_ring_buffer::{SharedRingBuffer, SharedRingBufferOptions, SharedRingBufferStats};
+pub use shared_ring_buffer::SharedRingBuffer;
 
 mod backends;
 pub use backends::common::SyncStrategy;

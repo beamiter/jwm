@@ -8,7 +8,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use shared_structures::{SharedCommand, SharedMessage, SharedRingBuffer};
+use shared_structures::{SharedCommand, SharedMessage, SharedRingBuffer, SharedRingBufferOptions};
+
+fn create_default(
+    path: &str,
+    capacity: Option<usize>,
+    spins: Option<u32>,
+) -> std::io::Result<SharedRingBuffer> {
+    let mut options = SharedRingBufferOptions::new();
+    if let Some(capacity) = capacity {
+        options = options.capacity(capacity);
+    }
+    if let Some(spins) = spins {
+        options = options.adaptive_poll_spins(spins);
+    }
+    options.create(path)
+}
 
 static PATH_NONCE: AtomicU64 = AtomicU64::new(0);
 
@@ -84,7 +99,7 @@ fn bench_single_threaded_write(c: &mut Criterion) {
     let test_path = mk_path("bench_single_write");
     let _ = std::fs::remove_file(&test_path);
 
-    let buffer = SharedRingBuffer::create_aux(&test_path, Some(1024), Some(0)).unwrap();
+    let buffer = create_default(&test_path, Some(1024), Some(0)).unwrap();
     let messages = prebuild_messages(100, 0);
 
     c.bench_function("single_threaded_write", |b| {
@@ -120,7 +135,7 @@ fn bench_single_threaded_read(c: &mut Criterion) {
     let test_path = mk_path("bench_single_read");
     let _ = std::fs::remove_file(&test_path);
 
-    let buffer = SharedRingBuffer::create_aux(&test_path, Some(1024), Some(0)).unwrap();
+    let buffer = create_default(&test_path, Some(1024), Some(0)).unwrap();
     let messages = prebuild_messages(100, 10_000);
 
     c.bench_function("single_threaded_read", |b| {
@@ -167,8 +182,7 @@ fn bench_throughput_varying_sizes(c: &mut Criterion) {
                 let test_path = mk_path(&format!("bench_throughput_{}", count));
                 let _ = std::fs::remove_file(&test_path);
 
-                let buffer =
-                    SharedRingBuffer::create_aux(&test_path, Some(16_384), Some(0)).unwrap();
+                let buffer = create_default(&test_path, Some(16_384), Some(0)).unwrap();
                 let messages = prebuild_messages(count, 20_000);
 
                 b.iter_custom(|iters| {
@@ -219,11 +233,10 @@ fn bench_producer_consumer(c: &mut Criterion) {
 
                 b.iter_custom(|iters| {
                     // 构建共享段（生产者创建，消费者打开）
-                    let producer = Arc::new(
-                        SharedRingBuffer::create_aux(&test_path, Some(2048), Some(spins)).unwrap(),
-                    );
+                    let producer =
+                        Arc::new(create_default(&test_path, Some(2048), Some(spins)).unwrap());
                     let consumer =
-                        Arc::new(SharedRingBuffer::open_aux(&test_path, Some(spins)).unwrap());
+                        Arc::new(SharedRingBuffer::open_auto(&test_path, Some(spins)).unwrap());
 
                     // 一次样本内的固定总工作量
                     let message_count_per_round = 1000usize;
@@ -314,13 +327,15 @@ fn bench_command_latency(c: &mut Criterion) {
     let test_path = mk_path("bench_cmd_latency");
     let _ = std::fs::remove_file(&test_path);
 
-    let sender = SharedRingBuffer::create_aux(&test_path, Some(1024), Some(1000)).unwrap();
-    let receiver = SharedRingBuffer::open_aux(&test_path, Some(1000)).unwrap();
+    let sender = create_default(&test_path, Some(1024), Some(1000)).unwrap();
+    let receiver = SharedRingBuffer::open_auto(&test_path, Some(1000)).unwrap();
 
     c.bench_function("command_round_trip", |b| {
         b.iter(|| {
             let command = black_box(SharedCommand::view_tag(1 << 3, 0));
-            assert!(sender.send_command(command).expect("command send failed"));
+            assert!(sender
+                .try_send_command(command)
+                .expect("command send failed"));
             assert!(
                 receiver
                     .wait_for_command(Some(Duration::from_millis(5)))
@@ -354,8 +369,7 @@ fn bench_memory_layout_efficiency(c: &mut Criterion) {
                     let test_path = mk_path(&format!("bench_layout_{}", size));
                     let _ = std::fs::remove_file(&test_path);
 
-                    let buffer =
-                        SharedRingBuffer::create_aux(&test_path, Some(size), Some(1000)).unwrap();
+                    let buffer = create_default(&test_path, Some(size), Some(1000)).unwrap();
                     let prefill_msgs = prebuild_messages((size * 3) / 4, 40_000);
                     let alternation_msgs = prebuild_messages(100, 41_000);
 
@@ -406,7 +420,7 @@ fn bench_burst_performance(c: &mut Criterion) {
                 let test_path = mk_path(&format!("bench_burst_{}", size));
                 let _ = std::fs::remove_file(&test_path);
 
-                let buffer = SharedRingBuffer::create_aux(&test_path, Some(2048), Some(0)).unwrap();
+                let buffer = create_default(&test_path, Some(2048), Some(0)).unwrap();
                 let burst_msgs = prebuild_messages(size, 50_000);
 
                 b.iter(|| {
@@ -445,7 +459,7 @@ fn bench_write_read_latency(c: &mut Criterion) {
     let test_path = mk_path("bench_latency");
     let _ = std::fs::remove_file(&test_path);
 
-    let buffer = SharedRingBuffer::create_aux(&test_path, Some(64), Some(0)).unwrap();
+    let buffer = create_default(&test_path, Some(64), Some(0)).unwrap();
     let msg = create_test_message(0);
 
     c.bench_function("single_message_write_read_latency", |b| {
@@ -474,7 +488,7 @@ fn bench_read_latest_vs_next(c: &mut Criterion) {
     {
         let test_path = mk_path("bench_read_next");
         let _ = std::fs::remove_file(&test_path);
-        let buffer = SharedRingBuffer::create_aux(&test_path, Some(128), Some(0)).unwrap();
+        let buffer = create_default(&test_path, Some(128), Some(0)).unwrap();
 
         group.bench_function("read_next_message", |b| {
             b.iter_custom(|iters| {
@@ -510,7 +524,7 @@ fn bench_read_latest_vs_next(c: &mut Criterion) {
     {
         let test_path = mk_path("bench_read_latest");
         let _ = std::fs::remove_file(&test_path);
-        let buffer = SharedRingBuffer::create_aux(&test_path, Some(128), Some(0)).unwrap();
+        let buffer = create_default(&test_path, Some(128), Some(0)).unwrap();
 
         group.bench_function("read_latest_message", |b| {
             b.iter_custom(|iters| {
@@ -561,7 +575,7 @@ fn bench_command_throughput(c: &mut Criterion) {
             |b, &count| {
                 let test_path = mk_path(&format!("bench_cmd_tp_{}", count));
                 let _ = std::fs::remove_file(&test_path);
-                let buffer = SharedRingBuffer::create_aux(&test_path, Some(2048), Some(0)).unwrap();
+                let buffer = create_default(&test_path, Some(2048), Some(0)).unwrap();
 
                 b.iter(|| {
                     while buffer
@@ -573,7 +587,7 @@ fn bench_command_throughput(c: &mut Criterion) {
                     for i in 0..count {
                         let cmd = SharedCommand::view_tag(1 << (i % 9), (i % 4) as i32);
                         while !buffer
-                            .send_command(black_box(cmd))
+                            .try_send_command(black_box(cmd))
                             .expect("command send failed")
                         {
                             if buffer
@@ -608,7 +622,7 @@ fn bench_create_destroy_cost(c: &mut Criterion) {
     c.bench_function("create_destroy_ring_buffer", |b| {
         b.iter(|| {
             let path = mk_path("bench_create_destroy");
-            let buf = SharedRingBuffer::create_aux(&path, Some(64), Some(0)).unwrap();
+            let buf = create_default(&path, Some(64), Some(0)).unwrap();
             black_box(buf.available_messages());
             drop(buf);
         });
@@ -623,7 +637,7 @@ fn bench_small_buffer_wraparound(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("capacity", size), &size, |b, &size| {
             let test_path = mk_path(&format!("bench_small_{}", size));
             let _ = std::fs::remove_file(&test_path);
-            let buffer = SharedRingBuffer::create_aux(&test_path, Some(size), Some(0)).unwrap();
+            let buffer = create_default(&test_path, Some(size), Some(0)).unwrap();
             let msg = create_test_message(77);
 
             b.iter(|| {
@@ -652,7 +666,7 @@ fn bench_availability_query(c: &mut Criterion) {
     let mut group = c.benchmark_group("availability_query");
     let test_path = mk_path("bench_avail");
     let _ = std::fs::remove_file(&test_path);
-    let buffer = SharedRingBuffer::create_aux(&test_path, Some(256), Some(0)).unwrap();
+    let buffer = create_default(&test_path, Some(256), Some(0)).unwrap();
 
     // 半满状态下查询
     let msg = create_test_message(0);
@@ -788,7 +802,7 @@ fn bench_strategy_command_latency(c: &mut Criterion) {
                         .is_some()
                     {}
                     assert!(buf
-                        .send_command(black_box(cmd))
+                        .try_send_command(black_box(cmd))
                         .expect("command send failed"));
                     black_box(
                         buf.try_receive_command()
