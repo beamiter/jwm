@@ -12,6 +12,7 @@ rust-version = "1.89"
 description = "A multi-backend X11 and Wayland window manager and compositor"
 repository = "https://github.com/beamiter/jwm"
 readme = "README.md"
+license = "MIT"
 
 [features]
 # The default build carries every backend, exactly like the pre-feature

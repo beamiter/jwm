@@ -189,3 +189,9 @@ changes is tracked in [the evolution roadmap](docs/roadmap.md).
 Before opening a pull request, read [CONTRIBUTING.md](CONTRIBUTING.md). Please
 report security-sensitive problems through the private process described in
 [SECURITY.md](SECURITY.md), not a public issue.
+
+## License
+
+jwm is distributed under the [MIT License](LICENSE). The `portal/` crate
+(the xdg-desktop-portal ScreenCast backend) is covered by the same license,
+as already declared in its manifest.

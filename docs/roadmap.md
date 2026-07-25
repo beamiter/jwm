@@ -24,7 +24,13 @@ not authorize a rewrite or a release-profile change without measurements.
 - [x] Privacy-aware support bundle generation.
 - [x] Commit and enforce `Cargo.lock` for reproducible application builds.
 - [x] Pin git dependencies to reviewed revisions or release tags.
-- [ ] Select and add the project license before publishing releases or crates.
+- [x] Select and add the project license before publishing releases or crates.
+      MIT, matching the license the portal crate already declared: the root
+      `LICENSE` file is the grant, the main manifest declares `license =
+      "MIT"`, and the README states that the portal crate is covered by the
+      same terms. The source tree carries no third-party code requiring
+      separate attribution, and every dependency is MIT/Apache-licensed or a
+      dynamically linked LGPL system library.
 - [x] Establish a documented minimum supported Rust version after testing it.
       Rust 1.89 is the floor imposed by the locked dependency graph, verified
       by `cargo +1.89.0 check --all-targets` and the full test suite, declared
