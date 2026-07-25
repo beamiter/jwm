@@ -9,8 +9,8 @@ web-sys = "0.3.81"
 
 tokio = { version = "1.47.1", features = ["full"] }
 log = "0.4.28"
-xbar_core = { git = "https://github.com/beamiter/xbar_core.git", rev = "f0912c8d981af251e56b0a18a3432090fd6ba6ad", default-features = false, features = ["clock-chrono", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-system", "transport-shared"] }
-xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", rev = "f0912c8d981af251e56b0a18a3432090fd6ba6ad" }
+xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.6.0", default-features = false, features = ["clock-chrono", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-system", "transport-shared"] }
+xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.6.0" }
 serde = { version = "1.0.228", features = ["derive"] }
 libc = "0.2.176"
 dioxus = { version = "0.7.9", features = ["desktop"] }
