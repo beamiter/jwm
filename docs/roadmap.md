@@ -297,6 +297,28 @@ Store machine-readable baselines with hardware, driver, backend, renderer API,
 and configuration metadata. Never compare unlabeled results from different
 systems as if they were the same benchmark.
 
+Done: the contract is `docs/performance.md` plus the machine-readable side
+in `tools/perf_contract.rs` — a versioned baseline schema whose system label
+(CPU, GPU, driver, kernel, backend, renderer API, resolution, configuration
+fingerprint) is mandatory, seven scenarios covering the bullets above, and
+version-1 regression budgets (ratio drift bounds, absolute rails, exact
+structural facts). `jwm-tool perf record` collects a labeled baseline from
+the live session over IPC and `/proc` sampling — scenarios the session
+cannot measure are recorded as skips with reasons, never silently omitted —
+and `jwm-tool perf compare` refuses unlabeled or cross-system results
+outright and exits non-zero on budget violations, so it can gate CI. In
+support, the compositor now captures GL_RENDERER/GL_VERSION at context
+creation (the benchmark report previously shipped empty hardware fields),
+`CompositorMetrics` reports the live `renderer_api`, the runtime status
+carries the compositor pid for external samplers, and the off-by-default
+`alloc-counter` feature (compile-checked in CI) feeds the allocs-per-frame
+scenario. The first reference baseline for this project's development
+machine is committed under `perf/baselines/`, and the comparison flow is
+validated live: recording twice and comparing stays within budgets, while
+mismatched labels are refused. The commented-out release profile stays
+disabled; any future enablement must cite baselines recorded through this
+contract.
+
 ## Phase 6 — release readiness
 
 - Publish signed source archives and checksums from an immutable tag.

@@ -118,7 +118,7 @@ jobs:
           - name: no-backends
             features: ""
           - name: all-backends-no-media
-            features: backend-x11rb,backend-xcb,backend-wayland-udev,backend-wayland-nested
+            features: backend-x11rb,backend-xcb,backend-wayland-udev,backend-wayland-nested,alloc-counter
     steps:
       - name: Check out source
         uses: actions/checkout@v7

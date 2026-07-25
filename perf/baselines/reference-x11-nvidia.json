@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-07-25T13:28:56Z",
+  "jwm_version": "0.2.0",
+  "label": {
+    "cpu": "Intel(R) Core(TM) Ultra 7 270K Plus",
+    "gpu": "NVIDIA GeForce RTX 5080",
+    "driver": "nvidia 595.71.05",
+    "kernel": "6.17.0-35-generic",
+    "backend": "xcb",
+    "renderer_api": "egl/gles3",
+    "resolution": "2560x1440",
+    "config_fingerprint": "d82c0f69fe8bf473"
+  },
+  "scenarios": {
+    "allocation_steady": {
+      "status": "skipped",
+      "reason": "allocation counter not compiled in (build with --features alloc-counter)"
+    },
+    "damage_redraw": {
+      "status": "recorded",
+      "metrics": {
+        "dirty_fraction_avg_percent": 33.333333333333336,
+        "dirty_region_merges_avg": 0.0,
+        "dirty_regions_avg": 26.666666666666668
+      }
+    },
+    "direct_scanout": {
+      "status": "recorded",
+      "metrics": {
+        "scanout_active_end": 0.0,
+        "scanout_toggles_per_minute": 0.0
+      }
+    },
+    "idle": {
+      "status": "recorded",
+      "metrics": {
+        "cpu_percent_avg": 1.9999586116565153,
+        "rss_mb": 233.7890625,
+        "sample_seconds": 10.000206946,
+        "wakeups_per_s": 270.6943980877093
+      }
+    },
+    "input_latency": {
+      "status": "recorded",
+      "metrics": {
+        "input_latency_p50_ms": 35.03122329711914,
+        "input_latency_p95_ms": 35.03122329711914,
+        "input_latency_p99_ms": 35.03122329711914,
+        "input_latency_samples": 300.0
+      }
+    },
+    "multi_monitor": {
+      "status": "recorded",
+      "metrics": {
+        "monitor_count": 1.0,
+        "refresh_hz": 60.0
+      }
+    },
+    "steady_frame": {
+      "status": "recorded",
+      "metrics": {
+        "fps_avg": 61.88871995560519,
+        "frame_samples": 300.0,
+        "frame_time_avg_ms": 16.158033333333325,
+        "frame_time_p50_ms": 16.406,
+        "frame_time_p95_ms": 16.639,
+        "frame_time_p99_ms": 16.7,
+        "frame_time_stddev_ms": 1.7950026013599216
+      }
+    }
+  }
+}
