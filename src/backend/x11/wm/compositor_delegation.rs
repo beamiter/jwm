@@ -129,6 +129,14 @@ macro_rules! delegate_compositor_capabilities {
                     .map(|compositor| compositor.set_waterlily_palette(palette))
             }
 
+            fn compositor_waterlily_status(
+                &self,
+            ) -> Option<crate::backend::api::WaterlilyStatus> {
+                self.compositor
+                    .as_ref()
+                    .map(|compositor| compositor.waterlily_status())
+            }
+
             fn compositor_set_transition_mode(&mut self, mode: &str) {
                 if let Some(compositor) = self.compositor.as_mut() {
                     compositor.set_transition_mode(mode);

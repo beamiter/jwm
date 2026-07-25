@@ -177,6 +177,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_tearing_hints",
         "get_tree",
         "get_version",
+        "get_waterlily_status",
         "get_wayland_status",
         "get_windows",
         "get_workspaces",
@@ -970,6 +971,12 @@ mod tests {
             "deprecated aliases must not be advertised"
         );
         assert!(capabilities.queries.iter().any(|name| name == "get_status"));
+        assert!(
+            capabilities
+                .queries
+                .iter()
+                .any(|name| name == "get_waterlily_status")
+        );
         assert!(
             capabilities
                 .queries

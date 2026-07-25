@@ -59,6 +59,10 @@ JWM_TOOL="$(find_jwm_tool)"
 ipc() { "$JWM_TOOL" msg "$@" >/dev/null; }
 ipc_query() { "$JWM_TOOL" msg "$1" --raw 2>/dev/null || true; }
 
+waterlily_flag() { # waterlily_flag enabled|active|worker_connected
+    ipc_query get_waterlily_status | grep -q "\"$1\"[[:space:]]*:[[:space:]]*true"
+}
+
 # --- chapter timeline --------------------------------------------------------
 
 RECORD_EPOCH=""
@@ -146,15 +150,28 @@ trap cleanup EXIT
 mkdir -p "$OUT_DIR"
 ensure_worker
 
-# 假设特效初始为关;若你的会话已开启,先手动关掉或设 SKIP_TOGGLE=1。
-if [[ "${SKIP_TOGGLE:-0}" != "1" ]]; then
+# 按查询到的真实状态决定是否开启特效,结束时恢复原状。
+if waterlily_flag enabled; then
+    log "WaterLily effect already enabled"
+else
     ipc toggle_waterlily
     EFFECT_TOGGLED=1
 fi
 ipc waterlily_palette --args '"auto"'
 ipc waterlily_case --args '"cylinder"'
 ((HAVE_XDOTOOL)) && read -r W H < <(screen_geometry) && xdotool mousemove "$((W - 4))" "$((H - 4))"
-sleep 3 # 让第一帧涡街铺开
+
+# 等 worker 的帧真正上屏(active 含义:特效开 + worker 连接 + 纹理在屏)。
+deadline=$((SECONDS + 60))
+until waterlily_flag active; do
+    if ((SECONDS >= deadline)); then
+        echo "WaterLily layer did not become active within 60s" >&2
+        ipc_query get_waterlily_status >&2
+        exit 1
+    fi
+    sleep 0.5
+done
+sleep 2 # 让第一帧涡街铺开
 
 log "recording to $OUT_FILE"
 : >"$CHAPTERS"

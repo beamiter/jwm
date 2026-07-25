@@ -1435,6 +1435,17 @@ impl Jwm {
                 }
                 None => IpcResponse::err("compositor not active".to_string()),
             },
+            "get_waterlily_status" => match backend.compositor_waterlily_status() {
+                Some(status) => IpcResponse::ok(Some(serde_json::json!({
+                    "enabled": status.enabled,
+                    "active": status.active,
+                    "worker_connected": status.worker_connected,
+                    "frame_width": status.frame_width,
+                    "frame_height": status.frame_height,
+                    "frame_sequence": status.frame_sequence,
+                }))),
+                None => IpcResponse::err("compositor not active".to_string()),
+            },
             "get_version" => IpcResponse::ok(Some(serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "name": "jwm",

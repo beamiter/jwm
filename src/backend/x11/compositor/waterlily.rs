@@ -317,6 +317,28 @@ impl<C: CompositorConnection> Compositor<C> {
         delivered
     }
 
+    /// Snapshot the layer state for the `get_waterlily_status` IPC query.
+    pub(crate) fn waterlily_status(&self) -> crate::backend::api::WaterlilyStatus {
+        let connected = self
+            .waterlily_ipc
+            .as_ref()
+            .is_some_and(|ipc| ipc.connected());
+        let (frame_width, frame_height, frame_sequence) = self
+            .waterlily_texture
+            .as_ref()
+            .map_or((0, 0, 0), |texture| {
+                (texture.width, texture.height, texture.sequence)
+            });
+        crate::backend::api::WaterlilyStatus {
+            enabled: self.waterlily_effect_enabled,
+            active: self.waterlily_visible(),
+            worker_connected: connected,
+            frame_width,
+            frame_height,
+            frame_sequence,
+        }
+    }
+
     /// Stream the pointer to the worker so interactive cases (stylus) can
     /// chase it. Throttled to ~30 Hz and suppressed while the effect is not
     /// on screen; a dropped sample is harmless because the worker only ever

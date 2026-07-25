@@ -166,6 +166,25 @@ pub struct BlurStatus {
     pub blur_quality_by_monitor: Vec<(u32, String)>,
 }
 
+/// Snapshot of the WaterLily layer, used by the `get_waterlily_status` IPC.
+/// Lets automation decide whether to toggle the effect and wait for frames
+/// instead of blind-toggling and sleeping.
+#[derive(Clone, Debug, Default)]
+pub struct WaterlilyStatus {
+    /// The user-facing effect toggle (`toggle_waterlily`).
+    pub enabled: bool,
+    /// True when the effect is enabled, a worker is connected, and a frame
+    /// texture is on screen.
+    pub active: bool,
+    /// True while a WaterLily worker holds the wake socket.
+    pub worker_connected: bool,
+    /// Dimensions of the last uploaded frame, or zero before the first one.
+    pub frame_width: u32,
+    pub frame_height: u32,
+    /// Sequence number of the last uploaded frame, or zero before the first.
+    pub frame_sequence: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DirectScanoutOutputStatus {
     pub output_name: String,
@@ -1230,6 +1249,12 @@ pub trait CompositorControl: Send {
     /// (`next` cycles, `auto` restores the per-case default). Returns None
     /// when the backend has no compositor and Some(delivered) otherwise.
     fn compositor_set_waterlily_palette(&mut self, _palette: &str) -> Option<bool> {
+        None
+    }
+
+    /// Snapshot the WaterLily layer state. Returns None when the backend has
+    /// no compositor.
+    fn compositor_waterlily_status(&self) -> Option<WaterlilyStatus> {
         None
     }
 
