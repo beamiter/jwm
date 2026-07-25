@@ -309,6 +309,10 @@ where
     /// compositor to other clients (screenshot tools, etc.).
     cm_selection_owner: u32,
     gl: glow::Context,
+    /// GL_RENDERER / GL_VERSION captured at context creation, for benchmark
+    /// and metrics labeling without re-entering the GL context.
+    gl_renderer: String,
+    gl_version: String,
     #[allow(dead_code)]
     shader_cache: ShaderCache,
     program: glow::Program,

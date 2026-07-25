@@ -823,6 +823,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let latency_stats = self.compute_latency_stats();
 
         crate::backend::api::CompositorMetrics {
+            renderer_api: self.graphics.api_name().to_string(),
             fps: self.frame_stats.fps,
             frame_count: self.frame_stats.frame_count,
             avg_frame_time_ms: avg_frame_time,

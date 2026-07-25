@@ -2136,6 +2136,7 @@ impl WaylandCompositor {
         };
         let ds_stats = self.direct_scanout_mgr.stats();
         crate::backend::api::CompositorMetrics {
+            renderer_api: "egl/gles".to_string(),
             fps: self.fps,
             frame_count: self.frame_count,
             avg_frame_time_ms: avg,

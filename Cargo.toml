@@ -53,6 +53,10 @@ backend-wayland-udev = [
 # audio track. Without it recording is video-only and audio capture reports
 # that it is not compiled in.
 media-audio = ["dep:alsa"]
+# Counting global allocator feeding the allocation_steady performance
+# scenario. Off by default: production builds keep the plain system
+# allocator.
+alloc-counter = []
 # Nested Wayland development backends (wayland-x11 and wayland-winit).
 backend-wayland-nested = [
     "wayland-backends",

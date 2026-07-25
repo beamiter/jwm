@@ -88,6 +88,11 @@ impl<C: CompositorConnection> Compositor<C> {
         );
         let gl =
             unsafe { glow::Context::from_loader_function(|name| graphics.get_proc_address(name)) };
+        // Captured while the fresh context is current; the benchmark report
+        // and metrics label hardware/driver from these later, off-thread.
+        let gl_renderer = unsafe { gl.get_parameter_string(glow::RENDERER) };
+        let gl_version = unsafe { gl.get_parameter_string(glow::VERSION) };
+        log::info!("compositor: GL renderer '{gl_renderer}' version '{gl_version}'");
         let oml_loaded = graphics.load_oml();
 
         // P5D: Create shader cache
@@ -707,6 +712,8 @@ impl<C: CompositorConnection> Compositor<C> {
             overlay_window,
             cm_selection_owner,
             gl,
+            gl_renderer,
+            gl_version,
             shader_cache,
             program,
             shadow_program,

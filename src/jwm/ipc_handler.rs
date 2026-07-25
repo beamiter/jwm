@@ -1976,6 +1976,8 @@ impl Jwm {
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
+            pid: std::process::id(),
+            allocations: crate::alloc_counter::current(),
             uptime_ms,
             health: runtime_health(&config, monitors),
             counts: RuntimeCounts {

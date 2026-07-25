@@ -757,8 +757,8 @@ impl<C: CompositorConnection> Compositor<C> {
             return false;
         }
         self.benchmark.system_info = super::benchmark::SystemInfo {
-            gpu: String::new(),
-            driver: String::new(),
+            gpu: self.gl_renderer.clone(),
+            driver: self.gl_version.clone(),
             resolution: format!("{}x{}", self.screen_w, self.screen_h),
         };
         self.benchmark.bench_config = super::benchmark::BenchmarkConfig {

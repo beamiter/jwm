@@ -252,6 +252,10 @@ pub struct RuntimeStatusV1 {
     pub backend: String,
     /// Backends compiled into this binary (Cargo backend-family features).
     pub compiled_backends: Vec<String>,
+    /// Process id of the compositor, for external samplers (perf tooling).
+    pub pid: u32,
+    /// Heap allocations since start when built with `alloc-counter`.
+    pub allocations: Option<u64>,
     pub uptime_ms: u64,
     pub health: RuntimeHealth,
     pub counts: RuntimeCounts,
@@ -980,6 +984,8 @@ mod tests {
             version: "0.2.0".into(),
             backend: "wayland-winit".into(),
             compiled_backends: vec!["wayland-winit".into()],
+            pid: 4242,
+            allocations: None,
             uptime_ms: 42,
             health: RuntimeHealth::from_reasons(Vec::new()),
             counts: RuntimeCounts {

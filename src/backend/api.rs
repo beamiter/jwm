@@ -11,6 +11,10 @@ use std::fmt::Debug;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompositorMetrics {
+    /// Live graphics platform ("glx/opengl", "egl/gles3", ...), so perf
+    /// baselines can label the renderer actually chosen at runtime.
+    #[serde(default)]
+    pub renderer_api: String,
     pub fps: f32,
     pub frame_count: u64,
     pub avg_frame_time_ms: f32,
