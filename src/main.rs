@@ -1,5 +1,4 @@
-use anyhow::{Context as _, Result};
-use cairo::{Context as CairoContext, Format, ImageSurface};
+use anyhow::Result;
 use log::warn;
 use pango::FontDescription;
 use pixels::wgpu::TextureFormat;
@@ -16,13 +15,13 @@ use winit::{
     window::{WindowAttributes, WindowId},
 };
 use xbar_core::{
-    AlignedWakeThread, BarEffect, BarRuntime, ModelConfig, PlatformEffectHandler, RuntimeUpdate,
-    TransportRecoveryConfig, TransportWakeSlot, WakeAck,
+    AlignedWakeThread, BarRuntime, ModelConfig, RuntimeUpdate, TransportRecoveryConfig,
+    TransportWakeSlot, WakeAck,
     logging::init as initialize_logging,
-    presentation::{Point, PointerAction, PresentationConfig, Size},
+    presentation::{Point, PointerAction, PresentationConfig},
     render::cairo::CairoBar,
 };
-use xbar_linux_actions::ProcessActionHandler;
+use xbar_linux_actions::{EffectRouter, GeometryRequest};
 
 const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -46,7 +45,7 @@ struct App {
     pixels_height: u32,
     proxy: EventLoopProxy<UserEvent>,
     transport_wake: TransportWakeSlot,
-    process_actions: ProcessActionHandler,
+    effects: EffectRouter,
 }
 
 impl App {
@@ -73,7 +72,7 @@ impl App {
             pixels_height: 0,
             proxy,
             transport_wake: TransportWakeSlot::new(true),
-            process_actions: ProcessActionHandler::default(),
+            effects: EffectRouter::default(),
         }
     }
 
@@ -87,44 +86,14 @@ impl App {
         if width == 0 || height == 0 {
             return Ok(());
         }
-        let width_i32 = i32::try_from(width).context("window width does not fit Cairo")?;
-        let height_i32 = i32::try_from(height).context("window height does not fit Cairo")?;
-        let stride = width_i32
-            .checked_mul(4)
-            .ok_or_else(|| anyhow::anyhow!("Cairo stride overflow"))?;
-
         let pixels = self.pixels.as_mut().expect("pixels presence checked above");
-        {
-            let frame = pixels.frame_mut();
-            let required = usize::try_from(stride)?
-                .checked_mul(usize::try_from(height_i32)?)
-                .ok_or_else(|| anyhow::anyhow!("frame size overflow"))?;
-            if frame.len() < required {
-                anyhow::bail!(
-                    "pixels frame is too small: expected {required}, got {}",
-                    frame.len()
-                );
-            }
-            let surface = unsafe {
-                ImageSurface::create_for_data_unsafe(
-                    frame.as_mut_ptr(),
-                    Format::ARgb32,
-                    width_i32,
-                    height_i32,
-                    stride,
-                )?
-            };
-            let context = CairoContext::new(&surface)?;
-            context.scale(self.scale_factor, self.scale_factor);
-            self.bar.render(
-                &context,
-                Size::new(
-                    self.logical_size.width as f32,
-                    self.logical_size.height as f32,
-                ),
-            )?;
-            surface.flush();
-        }
+        self.bar.render_into_bgra(
+            pixels.frame_mut(),
+            width,
+            height,
+            width.saturating_mul(4),
+            self.scale_factor,
+        )?;
         pixels
             .render()
             .map_err(|error| anyhow::anyhow!("pixels render failed: {error}"))?;
@@ -168,18 +137,23 @@ impl App {
     }
 
     fn handle_runtime_update(&mut self, update: RuntimeUpdate) {
-        let RuntimeUpdate {
-            changes,
-            platform_effects,
-            issues,
-        } = update;
-        for issue in issues {
-            warn!("xbar runtime issue: {issue:?}");
-        }
-        for effect in platform_effects {
-            self.handle_platform_effect(effect);
-        }
-        if !changes.is_empty() {
+        let mut effects = std::mem::take(&mut self.effects);
+        let needs_redraw = effects
+            .route::<_, std::convert::Infallible>(update, |request| {
+                match request {
+                    GeometryRequest::Apply(geometry) => self.apply_monitor_geometry(geometry),
+                    GeometryRequest::Clear => {
+                        if let Some(window) = &self.window {
+                            window.set_outer_position(LogicalPosition::new(0.0, 0.0));
+                            let _ = window.request_inner_size(self.default_logical_size);
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .expect("geometry closure is infallible");
+        self.effects = effects;
+        if needs_redraw {
             self.request_redraw();
         }
     }
@@ -197,30 +171,6 @@ impl App {
             proxy.send_event(UserEvent::SharedUpdated(ack))
         }) {
             warn!("failed to synchronize shared transport wake: {error}");
-        }
-    }
-
-    fn handle_platform_effect(&mut self, effect: BarEffect) {
-        match effect {
-            BarEffect::ApplyMonitorGeometry(geometry) => self.apply_monitor_geometry(geometry),
-            BarEffect::ClearMonitorGeometry => {
-                if let Some(window) = &self.window {
-                    window.set_outer_position(LogicalPosition::new(0.0, 0.0));
-                    let _ = window.request_inner_size(self.default_logical_size);
-                }
-            }
-            effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl) => {
-                if let Err(error) = self.process_actions.handle(effect) {
-                    warn!("failed to handle platform effect: {error}");
-                }
-            }
-            BarEffect::WindowManager(_)
-            | BarEffect::ToggleMute
-            | BarEffect::AdjustVolume(_)
-            | BarEffect::AdjustBrightness(_)
-            | BarEffect::RefreshBattery => {
-                warn!("no frontend adapter handled platform effect: {effect:?}");
-            }
         }
     }
 
@@ -376,14 +326,7 @@ impl ApplicationHandler<UserEvent> for App {
                         MouseScrollDelta::LineDelta(_, value) => f64::from(value),
                         MouseScrollDelta::PixelDelta(position) => position.y,
                     };
-                    let action = if vertical > 0.0 {
-                        Some(PointerAction::ScrollUp)
-                    } else if vertical < 0.0 {
-                        Some(PointerAction::ScrollDown)
-                    } else {
-                        None
-                    };
-                    if let Some(action) = action {
+                    if let Some(action) = PointerAction::from_vertical_delta(vertical) {
                         self.handle_pointer_action(point, action);
                     }
                 }
