@@ -4,6 +4,7 @@ use std::process::{Command, Stdio};
 
 /// Return whether both the local ALSA device and ffmpeg's ALSA input are
 /// available. Screen recording falls back to video-only when this is false.
+#[cfg(feature = "media-audio")]
 pub fn recording_audio_available(device: &str) -> bool {
     let alsa_available = alsa::pcm::PCM::new(device, alsa::Direction::Capture, true).is_ok();
     if !alsa_available {
@@ -19,6 +20,12 @@ pub fn recording_audio_available(device: &str) -> bool {
                     .lines()
                     .any(|line| line.split_whitespace().any(|field| field == "alsa"))
         })
+}
+
+/// Audio capture is not compiled in; screen recording stays video-only.
+#[cfg(not(feature = "media-audio"))]
+pub fn recording_audio_available(_device: &str) -> bool {
+    false
 }
 
 /// Add a timestamped ALSA input after the raw-video input.

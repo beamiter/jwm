@@ -3,15 +3,24 @@
 //! PCM WAV can be captured directly through ALSA. Compressed formats use an
 //! ffmpeg worker while retaining ALSA as the Linux capture source.
 
+#[cfg(feature = "media-audio")]
 use alsa::pcm::{Access, Format, HwParams, PCM};
+#[cfg(feature = "media-audio")]
 use alsa::{Direction, ValueOr};
+#[cfg(feature = "media-audio")]
 use std::fs::{File, OpenOptions};
+#[cfg(feature = "media-audio")]
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
+#[cfg(feature = "media-audio")]
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
-use std::thread::{self, JoinHandle};
+#[cfg(feature = "media-audio")]
+use std::sync::mpsc;
+#[cfg(feature = "media-audio")]
+use std::thread;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 struct AudioWorker {
@@ -91,6 +100,27 @@ impl std::fmt::Debug for AudioRecordingState {
 }
 
 impl AudioRecordingState {
+    /// Without the `media-audio` feature the capture engines are not
+    /// compiled; starting reports that plainly instead of failing deeper in.
+    #[cfg(not(feature = "media-audio"))]
+    #[allow(clippy::unused_self, clippy::too_many_arguments)]
+    pub fn start(
+        &mut self,
+        _output_path: &Path,
+        _device: &str,
+        _sample_rate: u32,
+        _channels: u16,
+        _configured_backend: &str,
+        _bitrate: &str,
+    ) -> Result<(), String> {
+        Err(
+            "audio capture is not compiled into this jwm binary (rebuild with \
+             --features media-audio)"
+                .into(),
+        )
+    }
+
+    #[cfg(feature = "media-audio")]
     pub fn start(
         &mut self,
         output_path: &Path,
@@ -224,6 +254,7 @@ impl AudioRecordingState {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "media-audio")]
 fn capture_with_ffmpeg(
     path: &Path,
     device: &str,
@@ -342,6 +373,7 @@ impl Drop for AudioRecordingState {
     }
 }
 
+#[cfg(feature = "media-audio")]
 fn capture_to_wav(
     path: &Path,
     device: &str,
@@ -438,6 +470,7 @@ fn capture_to_wav(
     result
 }
 
+#[cfg(feature = "media-audio")]
 fn write_wav_header(
     file: &mut File,
     rate: u32,
@@ -465,6 +498,7 @@ fn write_wav_header(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "media-audio")]
     #[test]
     fn wav_header_contains_negotiated_format_and_size() {
         let path =

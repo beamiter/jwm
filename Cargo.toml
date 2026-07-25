@@ -22,6 +22,7 @@ default = [
     "backend-xcb",
     "backend-wayland-udev",
     "backend-wayland-nested",
+    "media-audio",
 ]
 # Internal: shared X11 transport helpers and the GLX/EGL compositor.
 # Enabled through the per-transport features; not selected directly.
@@ -47,6 +48,10 @@ backend-wayland-udev = [
     "smithay/backend_session_libseat",
     "smithay/backend_udev",
 ]
+# ALSA audio capture: standalone audio recording and the screen-recording
+# audio track. Without it recording is video-only and audio capture reports
+# that it is not compiled in.
+media-audio = ["dep:alsa"]
 # Nested Wayland development backends (wayland-x11 and wayland-winit).
 backend-wayland-nested = [
     "wayland-backends",
@@ -87,7 +92,7 @@ xbar_core = { git = "https://github.com/beamiter/xbar_core.git", rev = "6a4b136c
 nix = { version = "0.31.3", features = ["signal", "inotify", "fs", "poll"] }
 lazy_static = "1.5.0"
 arc-swap = "1"
-alsa = "0.12"
+alsa = { version = "0.12", optional = true }
 ab_glyph = "0.2.32"
 rand = "0.10.2"
 xkbcommon = "0.9.0"

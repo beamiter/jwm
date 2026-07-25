@@ -8,6 +8,9 @@
 //! - magnifier: 放大镜
 //! - toggles: 所有特性的切换函数
 
+// Without media-audio only the state surface is exercised; the capture
+// helpers stay for the gated engines.
+#[cfg_attr(not(feature = "media-audio"), allow(dead_code))]
 pub mod audio_recording;
 pub mod capture;
 pub mod capture_plan;
