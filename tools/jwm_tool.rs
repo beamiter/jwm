@@ -3,6 +3,8 @@ use clap::{Parser, Subcommand};
 use glob::glob;
 
 mod nested_smoke;
+mod perf;
+mod perf_contract;
 use nix::fcntl::{OFlag, open};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::signal::{Signal, kill};
@@ -205,6 +207,12 @@ enum Commands {
 
     /// 打印调试信息（PID、套接字、控制管道等）
     Debug,
+
+    /// 性能契约 (Phase 5)：采集带系统标签的基线，按回归预算对比
+    Perf {
+        #[command(subcommand)]
+        action: PerfAction,
+    },
 
     /// 对比 niri / Hyprland 打印 wayland-udev 后端竞争力审计
     WaylandAudit {
@@ -2206,6 +2214,44 @@ fn print_wayland_smoke(json_output: bool, save: Option<Option<PathBuf>>) -> io::
 
 // --- main ---
 
+#[derive(Subcommand)]
+enum PerfAction {
+    /// 从活跃 JWM 会话采集一份带系统标签的性能基线
+    Record {
+        /// 输出文件（默认 perf/baselines/<label>.json）
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+        /// 基准采样帧数
+        #[arg(long, default_value_t = 300)]
+        frames: u32,
+        /// 预热帧数
+        #[arg(long, default_value_t = 60)]
+        warmup: u32,
+        /// 空闲场景采样秒数
+        #[arg(long, default_value_t = 10)]
+        idle_seconds: u32,
+        /// 基准窗口期间开启 waterlily 动画作为确定性负载
+        #[arg(long)]
+        waterlily_workload: bool,
+    },
+    /// 按预算对比候选结果与基线（系统标签必须完全一致）
+    Compare {
+        /// 参照基线 JSON
+        baseline: PathBuf,
+        /// 候选结果 JSON
+        candidate: PathBuf,
+        /// 输出机器可读 JSON 判定
+        #[arg(long)]
+        json: bool,
+    },
+    /// 打印契约场景与回归预算
+    Budgets {
+        /// 输出机器可读 JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
@@ -2245,6 +2291,28 @@ fn main() -> io::Result<()> {
         }
 
         Commands::Debug => debug_info(),
+
+        Commands::Perf { action } => match action {
+            PerfAction::Record {
+                out,
+                frames,
+                warmup,
+                idle_seconds,
+                waterlily_workload,
+            } => perf::run_record(&perf::RecordOptions {
+                out,
+                frames,
+                warmup,
+                idle_seconds,
+                waterlily_workload,
+            })?,
+            PerfAction::Compare {
+                baseline,
+                candidate,
+                json,
+            } => perf::run_compare(&baseline, &candidate, json)?,
+            PerfAction::Budgets { json } => perf::run_budgets(json)?,
+        },
 
         Commands::WaylandAudit { markdown } => print_wayland_audit(markdown),
 
