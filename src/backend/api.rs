@@ -1226,6 +1226,13 @@ pub trait CompositorControl: Send {
         None
     }
 
+    /// Ask the connected WaterLily worker to switch its render palette
+    /// (`next` cycles, `auto` restores the per-case default). Returns None
+    /// when the backend has no compositor and Some(delivered) otherwise.
+    fn compositor_set_waterlily_palette(&mut self, _palette: &str) -> Option<bool> {
+        None
+    }
+
     fn compositor_set_transition_mode(&mut self, _mode: &str) {}
     fn compositor_apply_config(&mut self) {}
 }

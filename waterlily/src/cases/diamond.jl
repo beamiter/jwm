@@ -64,7 +64,7 @@ function body_distance(case::DiamondCase, x::Real, y::Real, _dimensionless_time:
     return outside + inside
 end
 
-case_palette(::DiamondCase) = BERRY_PALETTE
+case_palette_name(::DiamondCase) = "berry"
 body_color(::DiamondCase) = BODY_PLUM
 remeasure_on_step(::DiamondCase) = false
 

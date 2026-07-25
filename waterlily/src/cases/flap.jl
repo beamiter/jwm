@@ -81,7 +81,7 @@ function body_distance(case::FlapCase, x::Real, y::Real, dimensionless_time::Rea
     return hypot(segment_dx, local_y) - case.half_thickness
 end
 
-case_palette(::FlapCase) = EMBER_PALETTE
+case_palette_name(::FlapCase) = "ember"
 body_color(::FlapCase) = BODY_TEAL
 
 function body_bounds(case::FlapCase, _dimensionless_time::Real)

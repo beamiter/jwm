@@ -296,6 +296,28 @@ impl Jwm {
         Ok(())
     }
 
+    /// Hot-swap the WaterLily render palette on the running worker. An
+    /// explicit name selects that palette, no argument (or `next`) cycles the
+    /// worker's registry, and `auto` restores the per-case default.
+    pub fn waterlily_palette(
+        &mut self,
+        backend: &mut dyn Backend,
+        arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let requested = match arg {
+            WMArgEnum::StringVec(values) if !values.is_empty() => values[0].as_str(),
+            _ => "next",
+        };
+        match backend.compositor_set_waterlily_palette(requested) {
+            Some(true) => log::info!("WaterLily palette request `{requested}` delivered"),
+            Some(false) => {
+                log::warn!("WaterLily palette request `{requested}` dropped (no worker connected)")
+            }
+            None => log::warn!("WaterLily effect is unavailable on this backend"),
+        }
+        Ok(())
+    }
+
     /// 切换部分重绘(scissor 局部刷新,实验性,默认关)
     pub fn togglepartialdamage(
         &mut self,

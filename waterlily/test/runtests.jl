@@ -73,7 +73,7 @@ end
 end
 
 @testset "palettes share the compositor keying contract" begin
-    @test length(JwmWaterLily.ALL_PALETTES) == 8
+    @test length(JwmWaterLily.ALL_PALETTES) == 11
     @test allunique(JwmWaterLily.ALL_PALETTES)
     for palette in JwmWaterLily.ALL_PALETTES
         @test length(palette) == 11
@@ -90,8 +90,57 @@ end
 end
 
 @testset "case registry lists every effect" begin
-    @test available_cases() ==
-          ["cylinder", "dance", "diamond", "flap", "hover", "orbit", "tandem", "wander"]
+    @test available_cases() == [
+        "cylinder",
+        "dance",
+        "diamond",
+        "flap",
+        "hover",
+        "orbit",
+        "stylus",
+        "tandem",
+        "wander",
+    ]
+end
+
+@testset "palette registry backs the hot-swap command" begin
+    @test available_palettes() == [
+        "aurora",
+        "berry",
+        "cosmos",
+        "ember",
+        "fluent",
+        "glacier",
+        "mica",
+        "ocean",
+        "seismic",
+        "sith",
+        "violet",
+    ]
+    # Every registered palette obeys the same keying contract as ALL_PALETTES.
+    for name in available_palettes()
+        @test JwmWaterLily.PALETTE_REGISTRY[name] in JwmWaterLily.ALL_PALETTES
+    end
+    @test JwmWaterLily.palette_shimmer("mica")
+    @test !JwmWaterLily.palette_shimmer("fluent")
+    @test !JwmWaterLily.palette_shimmer("seismic")
+
+    @test JwmWaterLily.resolve_palette_command("fluent", "seismic") == "fluent"
+    @test JwmWaterLily.resolve_palette_command("auto", "seismic") === nothing
+    @test JwmWaterLily.resolve_palette_command("next", "aurora") == "berry"
+    # `next` wraps the sorted registry and recovers from unknown current names.
+    @test JwmWaterLily.resolve_palette_command("next", "violet") == "aurora"
+    @test JwmWaterLily.resolve_palette_command("next", "retired") == "aurora"
+    @test JwmWaterLily.resolve_palette_command("../../etc", "seismic") === missing
+end
+
+@testset "pointer command parsing" begin
+    @test JwmWaterLily.parse_pointer_command(["pointer", "0.25", "0.75"]) == (0.25, 0.75)
+    # Out-of-range samples clamp instead of being dropped.
+    @test JwmWaterLily.parse_pointer_command(["pointer", "-1.5", "2.0"]) == (0.0, 1.0)
+    @test JwmWaterLily.parse_pointer_command(["pointer", "0.5"]) === nothing
+    @test JwmWaterLily.parse_pointer_command(["pointer", "0.5", "NaN"]) === nothing
+    @test JwmWaterLily.parse_pointer_command(["pointer", "0.5", "bogus"]) === nothing
 end
 
 @testset "hot-switch command resolution" begin
@@ -127,6 +176,63 @@ end
     ys = [JwmWaterLily.wander_position(case, t)[2] for t in 0.0:0.5:600.0]
     @test maximum(xs) - minimum(xs) > 0.7 * 128
     @test maximum(ys) - minimum(ys) > 0.5 * 64
+end
+
+@testset "stylus spring chases the pointer without teleporting" begin
+    case = build_case("stylus", (128, 64); memory=Array)
+    T = Float32
+    @test JwmWaterLily.case_palette_name(case) == "fluent"
+
+    # A rest-to-rest segment must peak below the CFL-safe speed cap and
+    # settle at its target.
+    segment = case.segment
+    far = JwmWaterLily.SpringSegment{T}(
+        T(0),
+        segment.position,
+        JwmWaterLily.SA[T(0), T(0)],
+        segment.position + JwmWaterLily.SA[
+            T(JwmWaterLily.STYLUS_MAX_SPEED * Base.MathConstants.e) / segment.rate,
+            T(0),
+        ],
+        segment.rate,
+    )
+    cap = T(JwmWaterLily.STYLUS_MAX_SPEED) * T(case.simulation.U)
+    horizon = 8.0 / Float64(segment.rate)
+    for time in range(0.0, horizon; length=400)
+        velocity = JwmWaterLily.segment_velocity(far, time)
+        @test hypot(velocity[1], velocity[2]) <= cap * 1.001
+    end
+    settled = JwmWaterLily.segment_position(far, horizon)
+    @test isapprox(settled[1], far.target[1]; atol=0.5)
+
+    # Pointer updates map top-left normalized coordinates into the y-up grid
+    # and clamp inside the margin.
+    JwmWaterLily.handle_pointer!(case, 1.0, 1.0)
+    @test case.goal[1] ≈ 128 - case.margin
+    @test case.goal[2] ≈ case.margin
+    JwmWaterLily.handle_pointer!(case, 0.5, 0.0)
+    @test case.goal[1] ≈ 64
+    @test case.goal[2] ≈ 64 - case.margin
+
+    # Retargeting splices the new segment at the current pose: the body must
+    # not jump when the pointer does.
+    now = Float64(JwmWaterLily.WaterLily.time(case.simulation.flow))
+    before = JwmWaterLily.segment_position(case.segment, now)
+    JwmWaterLily.handle_pointer!(case, 0.9, 0.8)
+    after = JwmWaterLily.segment_position(case.segment, now)
+    @test isapprox(before[1], after[1]; atol=1e-3)
+    @test isapprox(before[2], after[2]; atol=1e-3)
+
+    # The chase makes real progress toward the goal as the simulation runs.
+    start = JwmWaterLily.segment_position(case.segment, now)
+    start_gap = hypot((case.goal - start)...)
+    for _ in 1:12
+        JwmWaterLily.frame_tick!(case)
+        JwmWaterLily.advance!(case, 0.05)
+    end
+    later = Float64(JwmWaterLily.WaterLily.time(case.simulation.flow))
+    position = JwmWaterLily.segment_position(case.segment, later)
+    @test hypot((case.goal - position)...) < start_gap
 end
 
 @testset "wake client receives hot-switch commands" begin

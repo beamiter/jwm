@@ -108,6 +108,55 @@ const AURORA_PALETTE = (
     (UInt8(0xa8), UInt8(0x37), UInt8(0x96)),
     (UInt8(0x6b), UInt8(0x12), UInt8(0x60)),
 )
+# Ansys-Fluent-style rainbow split at the keying white: the cold half runs
+# dark blue → cyan → green below zero and the warm half yellow → orange → red
+# above, so contours read like Fluent post-processing while quiescent fluid
+# still frosts out.
+const FLUENT_PALETTE = (
+    (UInt8(0x00), UInt8(0x08), UInt8(0x8a)),
+    (UInt8(0x00), UInt8(0x45), UInt8(0xe0)),
+    (UInt8(0x00), UInt8(0xa8), UInt8(0xe8)),
+    (UInt8(0x28), UInt8(0xd0), UInt8(0x9a)),
+    (UInt8(0xa8), UInt8(0xe8), UInt8(0xb0)),
+    (UInt8(0xfa), UInt8(0xfa), UInt8(0xfd)),
+    (UInt8(0xf8), UInt8(0xf0), UInt8(0x8c)),
+    (UInt8(0xff), UInt8(0xd2), UInt8(0x2e)),
+    (UInt8(0xff), UInt8(0x8c), UInt8(0x00)),
+    (UInt8(0xf0), UInt8(0x3c), UInt8(0x00)),
+    (UInt8(0x99), UInt8(0x12), UInt8(0x00)),
+)
+# Crimson-on-crimson: negative vorticity sinks into cold black-red, positive
+# burns toward a hot scarlet core. Both halves stay red so the whole wake
+# reads as one saber glow, yet the depth split keeps the sign legible.
+const SITH_PALETTE = (
+    (UInt8(0x4a), UInt8(0x00), UInt8(0x14)),
+    (UInt8(0x6e), UInt8(0x04), UInt8(0x1a)),
+    (UInt8(0x92), UInt8(0x10), UInt8(0x24)),
+    (UInt8(0xbe), UInt8(0x3a), UInt8(0x46)),
+    (UInt8(0xe6), UInt8(0x9c), UInt8(0xa2)),
+    (UInt8(0xfa), UInt8(0xfa), UInt8(0xfd)),
+    (UInt8(0xff), UInt8(0xd6), UInt8(0xc2)),
+    (UInt8(0xff), UInt8(0x9d), UInt8(0x6e)),
+    (UInt8(0xff), UInt8(0x5a), UInt8(0x2e)),
+    (UInt8(0xe0), UInt8(0x1e), UInt8(0x00)),
+    (UInt8(0x8a), UInt8(0x0c), UInt8(0x00)),
+)
+# Dyed water with mica powder: deep teal on one side, amethyst on the other,
+# both fading through silvery pastels. Pair with the shimmer pass, which adds
+# pearlescent glints along shear layers where real mica flakes align.
+const MICA_PALETTE = (
+    (UInt8(0x0e), UInt8(0x3d), UInt8(0x4d)),
+    (UInt8(0x1e), UInt8(0x64), UInt8(0x78)),
+    (UInt8(0x4e), UInt8(0x96), UInt8(0xa4)),
+    (UInt8(0x94), UInt8(0xc2), UInt8(0xc8)),
+    (UInt8(0xd2), UInt8(0xe4), UInt8(0xe2)),
+    (UInt8(0xfa), UInt8(0xfa), UInt8(0xfd)),
+    (UInt8(0xe4), UInt8(0xda), UInt8(0xee)),
+    (UInt8(0xc4), UInt8(0xb0), UInt8(0xe2)),
+    (UInt8(0x9d), UInt8(0x82), UInt8(0xcc)),
+    (UInt8(0x74), UInt8(0x58), UInt8(0xac)),
+    (UInt8(0x49), UInt8(0x35), UInt8(0x7d)),
+)
 const ALL_PALETTES = (
     SEISMIC_PALETTE,
     OCEAN_PALETTE,
@@ -117,7 +166,32 @@ const ALL_PALETTES = (
     BERRY_PALETTE,
     COSMOS_PALETTE,
     AURORA_PALETTE,
+    FLUENT_PALETTE,
+    SITH_PALETTE,
+    MICA_PALETTE,
 )
+
+# Palettes addressable by the compositor's `palette NAME` command; every case
+# default also resolves through this table so `palette next` can cycle from it.
+const PALETTE_REGISTRY = Dict{String,typeof(SEISMIC_PALETTE)}(
+    "seismic" => SEISMIC_PALETTE,
+    "ocean" => OCEAN_PALETTE,
+    "violet" => VIOLET_PALETTE,
+    "ember" => EMBER_PALETTE,
+    "glacier" => GLACIER_PALETTE,
+    "berry" => BERRY_PALETTE,
+    "cosmos" => COSMOS_PALETTE,
+    "aurora" => AURORA_PALETTE,
+    "fluent" => FLUENT_PALETTE,
+    "sith" => SITH_PALETTE,
+    "mica" => MICA_PALETTE,
+)
+
+available_palettes() = sort!(collect(keys(PALETTE_REGISTRY)))
+
+# The mica look is a property of the palette, not the case: any flow field
+# gains the pearlescent pass when the mica palette is selected.
+palette_shimmer(name::AbstractString) = name == "mica"
 
 const BODY_LAVENDER = (UInt8(0x91), UInt8(0x87), UInt8(0xff))
 const BODY_SLATE = (UInt8(0x4a), UInt8(0x5f), UInt8(0x6d))
@@ -132,9 +206,24 @@ const BODY_INDIGO = (UInt8(0x5c), UInt8(0x6b), UInt8(0xc0))
 # and implements `body_distance`; palette, body color, remeasure policy, and
 # body bounds have sensible defaults.
 function body_distance end
-case_palette(::AbstractWaterLilyCase) = SEISMIC_PALETTE
+case_palette_name(::AbstractWaterLilyCase) = "seismic"
+case_palette(case::AbstractWaterLilyCase) = PALETTE_REGISTRY[case_palette_name(case)]
 body_color(::AbstractWaterLilyCase) = BODY_LAVENDER
 remeasure_on_step(::AbstractWaterLilyCase) = true
+
+"""
+Per-frame hook the publish loop calls before advancing the solver. Cases with
+externally driven targets (for example the pointer-chasing stylus) use it to
+refresh their trajectory; everything else ignores it.
+"""
+frame_tick!(::AbstractWaterLilyCase) = nothing
+
+"""
+Pointer-target hook for interactive cases. `x` and `y` are normalized display
+coordinates in `[0, 1]` with a top-left origin. The default ignores the event
+so pointer streaming is always safe to leave enabled.
+"""
+handle_pointer!(::AbstractWaterLilyCase, ::Real, ::Real) = nothing
 
 """
 Loose axis-aligned `(xmin, xmax, ymin, ymax)` bounds of the body and its
@@ -248,17 +337,30 @@ end
 
 seismic_color(value::Real, scale::Real) = palette_color(SEISMIC_PALETTE, value, scale)
 
+# Pearlescent glint endpoints: cool silver for one shear direction, warm
+# gold for the other, like mica flakes catching light at different angles.
+const MICA_SILVER = (UInt8(0xea), UInt8(0xef), UInt8(0xf6))
+const MICA_GOLD = (UInt8(0xf4), UInt8(0xe2), UInt8(0xbe))
+
 """
 Colorize the vorticity snapshot in `scratch` into its RGBA buffer, using the
 body pose at dimensionless time `τ`. The pose time is passed explicitly so
 the worker can render one frame while the solver already advances the next.
+
+`palette` overrides the case default when the compositor hot-swaps colors;
+`shimmer` adds the mica glint pass along vorticity shear layers.
 """
-function render_rgba!(scratch::RenderScratch, case::AbstractWaterLilyCase, τ::Real)
+function render_rgba!(
+    scratch::RenderScratch,
+    case::AbstractWaterLilyCase,
+    τ::Real;
+    palette::Tuple=case_palette(case),
+    shimmer::Bool=false,
+)
     width, height = case.dimensions
     padded = scratch.padded_vorticity
     rgba = scratch.rgba
     color_scale = palette_scale(@view padded[2:(end - 1), 2:(end - 1)])
-    palette = case_palette(case)
     body = body_color(case)
     bounds = body_bounds(case, τ)
     body_xmin, body_xmax, body_ymin, body_ymax =
@@ -272,7 +374,21 @@ function render_rgba!(scratch::RenderScratch, case::AbstractWaterLilyCase, τ::R
         row_may_touch_body = body_ymin <= py <= body_ymax
         output = (row - 1) * width * 4 + 1
         @inbounds for x in 1:width
-            color = palette_color(palette, padded[x + 1, y + 1], color_scale)
+            value = padded[x + 1, y + 1]
+            color = palette_color(palette, value, color_scale)
+            if shimmer
+                # Central-difference vorticity gradient: shear layers are
+                # where mica flakes align, so the glint strength follows the
+                # gradient while the silver/gold hue follows the local band.
+                gradient_x = Float64(padded[x + 2, y + 1]) - Float64(padded[x, y + 1])
+                gradient_y = Float64(padded[x + 1, y + 2]) - Float64(padded[x + 1, y])
+                glint = min(0.55, 0.9 * hypot(gradient_x, gradient_y) / color_scale)
+                if glint > 0.02
+                    normalized = clamp(Float64(value) / color_scale, -1.0, 1.0)
+                    tint = blend_color(MICA_SILVER, MICA_GOLD, 0.5 + 0.5 * sinpi(3.0 * normalized))
+                    color = blend_color(color, tint, glint)
+                end
+            end
             if row_may_touch_body && body_xmin <= x + 0.5 <= body_xmax
                 distance = body_distance(case, x + 0.5, py, τ)
                 # The signed distance doubles as pixel coverage: feathering

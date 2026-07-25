@@ -147,6 +147,7 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | Alt+Control+S | Toggle sticky window |
 | Alt+Shift+F11 | Toggle the WaterLily simulation |
 | Alt+Shift+F10 | Cycle the WaterLily simulation case |
+| Alt+Shift+F9 | Cycle the WaterLily render palette |
 | Alt+Shift+/ | Show all bindings |
 
 During interactive screenshot or recording selection, press `G`, `W`, `M`, or

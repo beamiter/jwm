@@ -58,7 +58,7 @@ function body_distance(case::TandemCase, x::Real, y::Real, _dimensionless_time::
     return min(front, rear) - case.radius
 end
 
-case_palette(::TandemCase) = GLACIER_PALETTE
+case_palette_name(::TandemCase) = "glacier"
 body_color(::TandemCase) = BODY_COPPER
 remeasure_on_step(::TandemCase) = false
 

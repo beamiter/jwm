@@ -539,6 +539,9 @@ where
     /// buffer before fullscreen bypass paths may resume.
     waterlily_layer_dirty: bool,
     waterlily_opacity: f32,
+    /// Last pointer sample forwarded to the worker and when, for throttling
+    /// the `pointer X Y` stream to roughly the worker's frame rate.
+    waterlily_pointer_sent: Option<(std::time::Instant, f32, f32)>,
 
     // --- Window 3D tilt ---
     tilt_program: glow::Program,

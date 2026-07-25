@@ -123,6 +123,12 @@ macro_rules! delegate_compositor_capabilities {
                     .map(|compositor| compositor.set_waterlily_case(case))
             }
 
+            fn compositor_set_waterlily_palette(&mut self, palette: &str) -> Option<bool> {
+                self.compositor
+                    .as_mut()
+                    .map(|compositor| compositor.set_waterlily_palette(palette))
+            }
+
             fn compositor_set_transition_mode(&mut self, mode: &str) {
                 if let Some(compositor) = self.compositor.as_mut() {
                     compositor.set_transition_mode(mode);

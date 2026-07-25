@@ -61,7 +61,7 @@ function body_distance(case::DanceCase, x::Real, y::Real, dimensionless_time::Re
     return hypot(x - case.center[1], y - vertical) - case.radius
 end
 
-case_palette(::DanceCase) = VIOLET_PALETTE
+case_palette_name(::DanceCase) = "violet"
 body_color(::DanceCase) = BODY_ROSE
 
 function body_bounds(case::DanceCase, dimensionless_time::Real)

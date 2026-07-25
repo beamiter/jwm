@@ -1575,6 +1575,12 @@ impl Config {
             },
             KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
+                key: "F9".to_string(),
+                function: "waterlily_palette".to_string(),
+                argument: ArgumentConfig::StringVec(vec!["next".to_string()]),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Shift".to_string()],
                 key: "a".to_string(),
                 function: "toggle_annotation".to_string(),
                 argument: ArgumentConfig::Int(0),
@@ -2387,6 +2393,7 @@ impl Config {
             "toggle_debug_hud" => Some(Jwm::toggle_debug_hud),
             "toggle_waterlily" => Some(Jwm::toggle_waterlily),
             "waterlily_case" => Some(Jwm::waterlily_case),
+            "waterlily_palette" => Some(Jwm::waterlily_palette),
             // Compatibility only: new/default configuration must use the canonical name.
             "toggle_slime" => {
                 log::warn!(

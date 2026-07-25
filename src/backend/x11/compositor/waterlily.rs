@@ -293,6 +293,62 @@ impl<C: CompositorConnection> Compositor<C> {
         delivered
     }
 
+    /// Ask the connected worker to switch its render palette. `next` cycles
+    /// the worker's registry, `auto` returns to the per-case default; the
+    /// worker validates names so a stale compositor list can never pin it.
+    pub(crate) fn set_waterlily_palette(&mut self, palette: &str) -> bool {
+        if !is_valid_case_request(palette) {
+            log::warn!("compositor: rejected malformed WaterLily palette request {palette:?}");
+            return false;
+        }
+        let Some(ipc) = self.waterlily_ipc.as_ref() else {
+            log::warn!("compositor: WaterLily IPC is not initialized");
+            return false;
+        };
+        if !ipc.connected() {
+            log::info!("compositor: no WaterLily worker connected; palette request dropped");
+            return false;
+        }
+        let delivered = ipc.send_command(&format!("palette {palette}"));
+        if delivered {
+            ipc.request_poll();
+            log::info!("compositor: requested WaterLily palette {palette}");
+        }
+        delivered
+    }
+
+    /// Stream the pointer to the worker so interactive cases (stylus) can
+    /// chase it. Throttled to ~30 Hz and suppressed while the effect is not
+    /// on screen; a dropped sample is harmless because the worker only ever
+    /// wants the latest target.
+    pub(crate) fn forward_waterlily_pointer(&mut self, x: f32, y: f32) {
+        const MIN_INTERVAL: Duration = Duration::from_millis(33);
+        const MIN_TRAVEL: f32 = 2.0;
+        if !self.waterlily_visible() {
+            return;
+        }
+        let Some(ipc) = self.waterlily_ipc.as_ref() else {
+            return;
+        };
+        if !ipc.connected() {
+            return;
+        }
+        let now = Instant::now();
+        if let Some((sent_at, sent_x, sent_y)) = self.waterlily_pointer_sent {
+            let travelled = (x - sent_x).hypot(y - sent_y);
+            if now.duration_since(sent_at) < MIN_INTERVAL || travelled < MIN_TRAVEL {
+                return;
+            }
+        }
+        let width = self.screen_w.max(1) as f32;
+        let height = self.screen_h.max(1) as f32;
+        let normalized_x = (x / width).clamp(0.0, 1.0);
+        let normalized_y = (y / height).clamp(0.0, 1.0);
+        if ipc.send_command(&format!("pointer {normalized_x:.4} {normalized_y:.4}")) {
+            self.waterlily_pointer_sent = Some((now, x, y));
+        }
+    }
+
     pub(super) fn poll_waterlily_frame(&mut self) -> bool {
         let Some(ipc) = self.waterlily_ipc.as_ref() else {
             return false;

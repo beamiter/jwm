@@ -104,7 +104,7 @@ function body_distance(case::WanderCase, x::Real, y::Real, dimensionless_time::R
     return hypot(x - body_x, y - body_y) - case.radius
 end
 
-case_palette(::WanderCase) = AURORA_PALETTE
+case_palette_name(::WanderCase) = "aurora"
 body_color(::WanderCase) = BODY_INDIGO
 
 function body_bounds(case::WanderCase, dimensionless_time::Real)

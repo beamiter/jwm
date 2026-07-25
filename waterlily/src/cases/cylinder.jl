@@ -49,7 +49,7 @@ end
 body_distance(case::CylinderCase, x::Real, y::Real, _dimensionless_time::Real) =
     hypot(x - case.center[1], y - case.center[2]) - case.radius
 
-case_palette(::CylinderCase) = OCEAN_PALETTE
+case_palette_name(::CylinderCase) = "ocean"
 body_color(::CylinderCase) = BODY_SLATE
 remeasure_on_step(::CylinderCase) = false
 

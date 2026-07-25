@@ -68,7 +68,7 @@ function body_distance(case::OrbitCase, x::Real, y::Real, dimensionless_time::Re
     return hypot(x - body_x, y - body_y) - case.radius
 end
 
-case_palette(::OrbitCase) = COSMOS_PALETTE
+case_palette_name(::OrbitCase) = "cosmos"
 body_color(::OrbitCase) = BODY_GOLD
 
 function body_bounds(case::OrbitCase, dimensionless_time::Real)

@@ -137,6 +137,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "toggleview",
         "view",
         "waterlily_case",
+        "waterlily_palette",
         "zoom",
     ],
     special_commands: &[
@@ -445,6 +446,14 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
                 parse_string_vec_arg(args).map_err(|e| format!("waterlily_case: {e}"))?
             };
             Ok((Jwm::waterlily_case, WMArgEnum::StringVec(requested)))
+        }
+        "waterlily_palette" => {
+            let requested = if argument_is_omitted(args) {
+                vec!["next".to_string()]
+            } else {
+                parse_string_vec_arg(args).map_err(|e| format!("waterlily_palette: {e}"))?
+            };
+            Ok((Jwm::waterlily_palette, WMArgEnum::StringVec(requested)))
         }
         // Compatibility only: intentionally omitted from IPC capability discovery.
         "toggle_slime" => {

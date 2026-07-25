@@ -37,6 +37,7 @@ impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn set_mouse_position(&mut self, x: f32, y: f32) {
         self.mouse_x = x;
         self.mouse_y = y;
+        self.forward_waterlily_pointer(x, y);
         if self.edge_glow {
             self.edge_glow_tick(x, y);
         }

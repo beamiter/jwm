@@ -901,6 +901,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 .filter(|value| value.is_finite())
                 .unwrap_or(1.0)
                 .clamp(0.0, 1.0),
+            waterlily_pointer_sent: None,
             // Window tilt
             tilt_program,
             tilt_uniforms,

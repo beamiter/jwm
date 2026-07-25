@@ -13,6 +13,7 @@ include("cases/flap.jl")
 include("cases/tandem.jl")
 include("cases/diamond.jl")
 include("cases/orbit.jl")
+include("cases/stylus.jl")
 include("cases/wander.jl")
 include("cases/registry.jl")
 
@@ -306,7 +307,10 @@ function resolve_case_command(command::AbstractString, current_case::AbstractStr
         @warn "ignoring unknown WaterLily command" command
         return nothing
     end
-    name = String(parts[2])
+    return resolve_case_name(String(parts[2]), current_case)
+end
+
+function resolve_case_name(name::String, current_case::AbstractString)
     cases = available_cases()
     if name == "next"
         index = findfirst(==(String(current_case)), cases)
@@ -317,6 +321,40 @@ function resolve_case_command(command::AbstractString, current_case::AbstractStr
         return nothing
     end
     return name
+end
+
+"""
+Resolve `palette NAME`: a registered palette name selects it, `next` cycles
+the sorted registry from the currently resolved palette, and `auto` returns
+to the per-case default. Returns the new override (`nothing` for `auto`) or
+`missing` when the request must be ignored.
+"""
+function resolve_palette_command(name::String, current_palette::AbstractString)
+    name == "auto" && return nothing
+    palettes = available_palettes()
+    if name == "next"
+        index = findfirst(==(String(current_palette)), palettes)
+        return index === nothing ? first(palettes) :
+               palettes[mod1(index + 1, length(palettes))]
+    end
+    if !(name in palettes)
+        @warn "ignoring unknown WaterLily palette" requested = name available = palettes
+        return missing
+    end
+    return name
+end
+
+"""
+Parse `pointer X Y` with normalized top-left display coordinates. Returns
+`nothing` for malformed events; the pointer stream is high-rate, so bad
+events are dropped silently instead of flooding the log.
+"""
+function parse_pointer_command(parts::AbstractVector{<:AbstractString})
+    length(parts) == 3 || return nothing
+    x = tryparse(Float64, parts[2])
+    y = tryparse(Float64, parts[3])
+    (x === nothing || y === nothing || !isfinite(x) || !isfinite(y)) && return nothing
+    return (clamp(x, 0.0, 1.0), clamp(y, 0.0, 1.0))
 end
 
 function run_worker_with_backend(options::RunnerOptions, backend::SelectedBackend)
@@ -343,6 +381,7 @@ function run_worker_with_backend(options::RunnerOptions, backend::SelectedBacken
 
     frame_period = 1.0 / options.fps
     current_case = options.case_name
+    palette_override = nothing
     scratch = RenderScratch(options.simulation_size)
     # Leave a slice of the budget for publish pacing; the solver checks the
     # deadline only between substeps, so it can overshoot by one substep and
@@ -356,22 +395,41 @@ function run_worker_with_backend(options::RunnerOptions, backend::SelectedBacken
         while true
             started = time_ns()
             while (command = take_command!(wakeups)) !== nothing
-                requested = resolve_case_command(command, current_case)
-                (requested === nothing || requested == current_case) && continue
-                try
-                    simulation_case = build_case(
-                        requested,
-                        options.simulation_size;
-                        memory=backend.memory,
+                parts = split(command)
+                if length(parts) == 2 && parts[1] == "case"
+                    requested = resolve_case_name(String(parts[2]), current_case)
+                    (requested === nothing || requested == current_case) && continue
+                    try
+                        simulation_case = build_case(
+                            requested,
+                            options.simulation_size;
+                            memory=backend.memory,
+                        )
+                        current_case = requested
+                        @info "switched WaterLily case" case = requested
+                    catch error
+                        @warn(
+                            "could not switch WaterLily case; keeping the current one",
+                            requested,
+                            exception=(error, catch_backtrace()),
+                        )
+                    end
+                elseif length(parts) == 2 && parts[1] == "palette"
+                    resolved_name = something(
+                        palette_override,
+                        case_palette_name(simulation_case),
                     )
-                    current_case = requested
-                    @info "switched WaterLily case" case = requested
-                catch error
-                    @warn(
-                        "could not switch WaterLily case; keeping the current one",
-                        requested,
-                        exception=(error, catch_backtrace()),
-                    )
+                    requested = resolve_palette_command(String(parts[2]), resolved_name)
+                    requested === missing && continue
+                    palette_override = requested
+                    @info "switched WaterLily palette" palette =
+                        something(palette_override, "auto")
+                elseif !isempty(parts) && parts[1] == "pointer"
+                    point = parse_pointer_command(parts)
+                    point === nothing && continue
+                    handle_pointer!(simulation_case, point[1], point[2])
+                else
+                    @warn "ignoring unknown WaterLily command" command
                 end
             end
 
@@ -382,9 +440,17 @@ function run_worker_with_backend(options::RunnerOptions, backend::SelectedBacken
             # colorize loop starves the task issuing device kernels.
             pose_time = simulation_time(simulation_case)
             compute_vorticity!(scratch, simulation_case)
-            rgba = render_rgba!(scratch, simulation_case, pose_time)
+            frame_palette = something(palette_override, case_palette_name(simulation_case))
+            rgba = render_rgba!(
+                scratch,
+                simulation_case,
+                pose_time;
+                palette=PALETTE_REGISTRY[frame_palette],
+                shimmer=palette_shimmer(frame_palette),
+            )
             publish!(publisher, rgba, time_ns())
             notify!(wakeups)
+            frame_tick!(simulation_case)
             achieved_step = advance_budgeted!(
                 simulation_case,
                 frame_period,
@@ -463,6 +529,7 @@ end
 export FramePublisher,
     RunnerOptions,
     available_cases,
+    available_palettes,
     build_case,
     main,
     normalize_size,

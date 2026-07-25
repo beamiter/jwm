@@ -94,7 +94,7 @@ function body_distance(case::HoverCase, x::Real, y::Real, dimensionless_time::Re
     return hypot(segment_dx, local_y) - case.half_thickness
 end
 
-case_palette(::HoverCase) = SEISMIC_PALETTE
+case_palette_name(::HoverCase) = "seismic"
 body_color(::HoverCase) = BODY_LAVENDER
 
 function body_bounds(case::HoverCase, dimensionless_time::Real)
