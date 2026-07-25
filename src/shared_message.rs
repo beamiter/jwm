@@ -328,17 +328,6 @@ mod tests {
     // ── TagStatus ────────────────────────────────────────────────────────────
 
     #[test]
-    fn test_struct_alignment() {
-        assert!(std::mem::size_of::<SharedMessage>() > 0);
-        assert!(std::mem::size_of::<SharedCommand>() > 0);
-        let mut mi = MonitorInfo::default();
-        mi.set_client_name("abc");
-        mi.set_ltsymbol("[]=");
-        assert_eq!(&mi.get_client_name(), "abc");
-        assert_eq!(&mi.get_ltsymbol(), "[]=");
-    }
-
-    #[test]
     fn test_tag_status_default_all_false() {
         let s = TagStatus::default();
         assert!(!s.is_selected);
@@ -348,28 +337,18 @@ mod tests {
     }
 
     #[test]
-    fn test_tag_status_new() {
-        let s = TagStatus::new(true, false, true, false);
-        assert!(s.is_selected);
-        assert!(!s.is_urg);
-        assert!(s.is_filled);
-        assert!(!s.is_occ);
-    }
-
-    #[test]
-    fn test_tag_status_equality() {
-        let a = TagStatus::new(true, true, false, false);
-        let b = TagStatus::new(true, true, false, false);
-        let c = TagStatus::new(false, true, false, false);
-        assert_eq!(a, b);
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    fn test_tag_status_copy() {
-        let original = TagStatus::new(true, false, true, true);
-        let copied = original;
-        assert_eq!(original, copied);
+    fn test_tag_status_all_bool_combinations() {
+        for bits in 0u8..16 {
+            let sel = bits & 1 != 0;
+            let urg = bits & 2 != 0;
+            let fil = bits & 4 != 0;
+            let occ = bits & 8 != 0;
+            let s = TagStatus::new(sel, urg, fil, occ);
+            assert_eq!(s.is_selected, sel);
+            assert_eq!(s.is_urg, urg);
+            assert_eq!(s.is_filled, fil);
+            assert_eq!(s.is_occ, occ);
+        }
     }
 
     // ── MonitorInfo ──────────────────────────────────────────────────────────
@@ -390,24 +369,17 @@ mod tests {
     }
 
     #[test]
-    fn test_monitor_info_methods() {
-        let mut info = MonitorInfo::default();
-        info.set_client_name("test_client");
-        assert_eq!(info.get_client_name(), "test_client");
-
-        let long_name = "a".repeat(200);
-        info.set_client_name(&long_name);
-        let result = info.get_client_name();
-        assert!(result.len() < MAX_CLIENT_NAME_LEN);
-
-        info.set_ltsymbol("[]=");
-        assert_eq!(info.get_ltsymbol(), "[]=");
-
-        let status = TagStatus::new(true, false, true, false);
-        info.set_tag_status(0, status);
-        assert_eq!(info.get_tag_status(0), Some(status));
-        assert_eq!(info.get_tag_status(MAX_TAGS), None);
+    fn test_monitor_info_equality() {
+        let mut a = MonitorInfo::default();
+        let mut b = MonitorInfo::default();
+        assert_eq!(a, b);
+        a.monitor_num = 5;
+        assert_ne!(a, b);
+        b.monitor_num = 5;
+        assert_eq!(a, b);
     }
+
+    // ── MonitorInfo: client_name / ltsymbol ──────────────────────────────────
 
     #[test]
     fn test_client_name_empty_string() {
@@ -462,6 +434,16 @@ mod tests {
     }
 
     #[test]
+    fn test_client_name_single_char() {
+        let mut mi = MonitorInfo::default();
+        mi.set_client_name("X");
+        assert_eq!(mi.get_client_name(), "X");
+        // 只有第 0 字节被写入，第 1 字节应为 0（终止符）
+        assert_eq!(mi.client_name[0], b'X');
+        assert_eq!(mi.client_name[1], 0);
+    }
+
+    #[test]
     fn test_ltsymbol_empty_string() {
         let mut mi = MonitorInfo::default();
         mi.set_ltsymbol("[M]");
@@ -495,6 +477,8 @@ mod tests {
         assert!(got.chars().all(|character| character == '🖥'));
     }
 
+    // ── MonitorInfo: tag 状态 ────────────────────────────────────────────────
+
     #[test]
     fn test_all_tag_indices_valid() {
         let mut mi = MonitorInfo::default();
@@ -516,82 +500,17 @@ mod tests {
     }
 
     #[test]
-    fn test_monitor_info_numeric_fields() {
-        let mi = MonitorInfo {
-            monitor_num: -1,
-            monitor_width: 1920,
-            monitor_height: 1080,
-            monitor_x: -320,
-            monitor_y: 0,
-            ..MonitorInfo::default()
-        };
-        assert_eq!(mi.monitor_num, -1);
-        assert_eq!(mi.monitor_width, 1920);
-        assert_eq!(mi.monitor_height, 1080);
-        assert_eq!(mi.monitor_x, -320);
-        assert_eq!(mi.monitor_y, 0);
-    }
-
-    #[test]
-    fn test_monitor_info_copy_semantics() {
-        let mut a = MonitorInfo::default();
-        a.set_client_name("original");
-        a.monitor_num = 7;
-        let mut b = a;
-        b.set_client_name("copy");
-        b.monitor_num = 99;
-        // 修改 b 不影响 a
-        assert_eq!(a.get_client_name(), "original");
-        assert_eq!(a.monitor_num, 7);
-        assert_eq!(b.get_client_name(), "copy");
-        assert_eq!(b.monitor_num, 99);
+    fn test_set_tag_status_at_max_is_noop() {
+        let mut mi = MonitorInfo::default();
+        let before: Vec<_> = (0..MAX_TAGS).map(|i| mi.get_tag_status(i)).collect();
+        // MAX_TAGS 及以上应为 no-op，不 panic
+        mi.set_tag_status(MAX_TAGS, TagStatus::new(true, true, true, true));
+        mi.set_tag_status(MAX_TAGS + 1, TagStatus::new(true, true, true, true));
+        let after: Vec<_> = (0..MAX_TAGS).map(|i| mi.get_tag_status(i)).collect();
+        assert_eq!(before, after);
     }
 
     // ── SharedMessage ────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_shared_message() {
-        let mut message = SharedMessage::new();
-        assert!(message.get_timestamp() > 0);
-        let monitor_info = message.get_monitor_info_mut();
-        monitor_info.set_client_name("test");
-        monitor_info.monitor_num = 42;
-        assert_eq!(message.get_monitor_info().get_client_name(), "test");
-        assert_eq!(message.get_monitor_info().monitor_num, 42);
-    }
-
-    #[test]
-    fn test_shared_message_with_monitor_info() {
-        let mut mi = MonitorInfo {
-            monitor_num: 3,
-            ..MonitorInfo::default()
-        };
-        mi.set_client_name("wm");
-        let msg = SharedMessage::with_monitor_info(mi);
-        assert!(msg.get_timestamp() > 0);
-        assert_eq!(msg.get_monitor_info().monitor_num, 3);
-        assert_eq!(msg.get_monitor_info().get_client_name(), "wm");
-    }
-
-    #[test]
-    fn test_shared_message_update_timestamp() {
-        let mut msg = SharedMessage::new();
-        let t1 = msg.get_timestamp();
-        // 等待 1ms 确保时钟前进
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        msg.update_timestamp();
-        let t2 = msg.get_timestamp();
-        assert!(t2 >= t1);
-    }
-
-    #[test]
-    fn test_shared_message_copy_semantics() {
-        let mut a = SharedMessage::new();
-        a.get_monitor_info_mut().monitor_num = 5;
-        let mut b = a;
-        b.get_monitor_info_mut().monitor_num = 99;
-        assert_eq!(a.get_monitor_info().monitor_num, 5);
-    }
 
     #[test]
     fn test_shared_message_default_is_zero_valued_and_reproducible() {
@@ -601,7 +520,86 @@ mod tests {
         assert_eq!(msg, SharedMessage::default());
     }
 
+    #[test]
+    fn test_shared_message_new_and_default_equivalent_structure() {
+        let a = SharedMessage::new();
+        let b = SharedMessage::default();
+        // 两者的 monitor_info 字段应相同（都是 MonitorInfo::default()）
+        assert_eq!(a.get_monitor_info(), b.get_monitor_info());
+        // new() 打时间戳，default() 是零值
+        assert!(a.get_timestamp() > 0);
+        assert_eq!(b.get_timestamp(), 0);
+    }
+
+    #[test]
+    fn test_update_timestamp_strictly_increases() {
+        let mut msg = SharedMessage::new();
+        let t1 = msg.get_timestamp();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        msg.update_timestamp();
+        let t2 = msg.get_timestamp();
+        assert!(t2 > t1, "t2={t2} should be strictly greater than t1={t1}");
+    }
+
+    #[test]
+    fn test_get_monitor_info_ref_reflects_mutation() {
+        let mut msg = SharedMessage::new();
+        msg.get_monitor_info_mut().monitor_num = 42;
+        // 通过不可变引用读取刚才的修改
+        assert_eq!(msg.get_monitor_info().monitor_num, 42);
+        msg.get_monitor_info_mut().set_client_name("hello");
+        assert_eq!(msg.get_monitor_info().get_client_name(), "hello");
+    }
+
+    #[test]
+    fn test_with_monitor_info_preserves_all_fields() {
+        let mut mi = MonitorInfo {
+            monitor_num: 3,
+            monitor_width: 2560,
+            monitor_height: 1440,
+            monitor_x: -100,
+            monitor_y: 50,
+            ..MonitorInfo::default()
+        };
+        mi.set_client_name("wm_client");
+        mi.set_ltsymbol("[M]");
+        for i in 0..MAX_TAGS {
+            mi.set_tag_status(i, TagStatus::new(i % 2 == 0, true, false, i % 3 == 0));
+        }
+
+        let msg = SharedMessage::with_monitor_info(mi);
+        assert!(msg.get_timestamp() > 0);
+        let got = msg.get_monitor_info();
+
+        assert_eq!(got.monitor_num, 3);
+        assert_eq!(got.monitor_width, 2560);
+        assert_eq!(got.monitor_height, 1440);
+        assert_eq!(got.monitor_x, -100);
+        assert_eq!(got.monitor_y, 50);
+        assert_eq!(got.get_client_name(), "wm_client");
+        assert_eq!(got.get_ltsymbol(), "[M]");
+        for i in 0..MAX_TAGS {
+            assert_eq!(
+                got.get_tag_status(i),
+                Some(TagStatus::new(i % 2 == 0, true, false, i % 3 == 0))
+            );
+        }
+    }
+
     // ── CommandType ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_command_type_default() {
+        assert_eq!(CommandType::default(), CommandType::None);
+    }
+
+    #[test]
+    fn test_command_type_known_u32_values() {
+        assert_eq!(u32::from(CommandType::None), 0);
+        assert_eq!(u32::from(CommandType::ViewTag), 1);
+        assert_eq!(u32::from(CommandType::ToggleTag), 2);
+        assert_eq!(u32::from(CommandType::SetLayout), 3);
+    }
 
     #[test]
     fn test_command_type_from_u32() {
@@ -634,20 +632,31 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_command_type_default() {
-        assert_eq!(CommandType::default(), CommandType::None);
-    }
-
     // ── SharedCommand ────────────────────────────────────────────────────────
 
     #[test]
-    fn test_shared_command() {
+    fn test_shared_command_default() {
+        let cmd = SharedCommand::default();
+        assert_eq!(cmd.get_command_type(), CommandType::None);
+        assert_eq!(cmd.get_parameter(), 0);
+        assert_eq!(cmd.get_monitor_id(), 0);
+    }
+
+    #[test]
+    fn test_shared_command_new_direct() {
+        let cmd = SharedCommand::new(CommandType::ViewTag, 7, 3);
+        assert_eq!(cmd.get_command_type(), CommandType::ViewTag);
+        assert_eq!(cmd.get_parameter(), 7);
+        assert_eq!(cmd.get_monitor_id(), 3);
+        assert!(cmd.get_timestamp() > 0);
+    }
+
+    #[test]
+    fn test_shared_command_view_tag() {
         let cmd = SharedCommand::view_tag(1 << 2, 0);
         assert_eq!(cmd.get_command_type(), CommandType::ViewTag);
         assert_eq!(cmd.get_parameter(), 1 << 2);
         assert_eq!(cmd.get_monitor_id(), 0);
-        assert!(cmd.get_timestamp() > 0);
     }
 
     #[test]
@@ -667,28 +676,11 @@ mod tests {
     }
 
     #[test]
-    fn test_shared_command_new_direct() {
-        let cmd = SharedCommand::new(CommandType::ViewTag, 7, 3);
-        assert_eq!(cmd.get_command_type(), CommandType::ViewTag);
-        assert_eq!(cmd.get_parameter(), 7);
-        assert_eq!(cmd.get_monitor_id(), 3);
-        assert!(cmd.get_timestamp() > 0);
-    }
-
-    #[test]
-    fn test_shared_command_copy_semantics() {
-        let a = SharedCommand::view_tag(1, 0);
-        let b = a;
-        assert_eq!(a.get_parameter(), b.get_parameter());
-        assert_eq!(a.get_monitor_id(), b.get_monitor_id());
-    }
-
-    #[test]
-    fn test_shared_command_default() {
-        let cmd = SharedCommand::default();
-        assert_eq!(cmd.get_command_type(), CommandType::None);
-        assert_eq!(cmd.get_parameter(), 0);
-        assert_eq!(cmd.get_monitor_id(), 0);
+    fn test_all_shared_command_constructors_have_nonzero_timestamp() {
+        assert!(SharedCommand::view_tag(0, 0).get_timestamp() > 0);
+        assert!(SharedCommand::toggle_tag(0, 0).get_timestamp() > 0);
+        assert!(SharedCommand::set_layout(0, 0).get_timestamp() > 0);
+        assert!(SharedCommand::new(CommandType::None, 0, 0).get_timestamp() > 0);
     }
 
     // ── 内存布局 ──────────────────────────────────────────────────────────────
@@ -705,422 +697,6 @@ mod tests {
         assert!(sz_msg >= sz_mi + 8); // timestamp (u64) + MonitorInfo
         assert!(sz_cmd >= 16); // cmd_type + parameter + monitor_id + timestamp
     }
-
-    #[test]
-    fn test_shared_message_size_matches_components() {
-        // SharedMessage 至少能容纳 timestamp(u64) 和 MonitorInfo
-        assert!(
-            std::mem::size_of::<SharedMessage>()
-                >= std::mem::size_of::<u64>() + std::mem::size_of::<MonitorInfo>()
-        );
-    }
-
-    // ── TagStatus 全部 16 种布尔组合 ─────────────────────────────────────────
-
-    #[test]
-    fn test_tag_status_all_bool_combinations() {
-        for bits in 0u8..16 {
-            let sel = bits & 1 != 0;
-            let urg = bits & 2 != 0;
-            let fil = bits & 4 != 0;
-            let occ = bits & 8 != 0;
-            let s = TagStatus::new(sel, urg, fil, occ);
-            assert_eq!(s.is_selected, sel);
-            assert_eq!(s.is_urg, urg);
-            assert_eq!(s.is_filled, fil);
-            assert_eq!(s.is_occ, occ);
-            // 相同参数构造两次，结果应相等
-            assert_eq!(s, TagStatus::new(sel, urg, fil, occ));
-        }
-    }
-
-    // ── set_tag_status 越界写入应为无副作用 ──────────────────────────────────
-
-    #[test]
-    fn test_set_tag_status_at_max_is_noop() {
-        let mut mi = MonitorInfo::default();
-        let before: Vec<_> = (0..MAX_TAGS).map(|i| mi.get_tag_status(i)).collect();
-        // MAX_TAGS 及以上应为 no-op，不 panic
-        mi.set_tag_status(MAX_TAGS, TagStatus::new(true, true, true, true));
-        mi.set_tag_status(MAX_TAGS + 1, TagStatus::new(true, true, true, true));
-        let after: Vec<_> = (0..MAX_TAGS).map(|i| mi.get_tag_status(i)).collect();
-        assert_eq!(before, after);
-    }
-
-    // ── client_name 含特殊字符 ────────────────────────────────────────────────
-
-    #[test]
-    fn test_client_name_special_ascii_chars() {
-        let mut mi = MonitorInfo::default();
-        let special = "foo_bar-baz.123 !@#";
-        mi.set_client_name(special);
-        assert_eq!(mi.get_client_name(), special);
-    }
-
-    #[test]
-    fn test_ltsymbol_common_patterns() {
-        let mut mi = MonitorInfo::default();
-        for sym in &["[]=", "[M]", "TTT", ">", "###", "floating"] {
-            mi.set_ltsymbol(sym);
-            assert_eq!(mi.get_ltsymbol(), *sym);
-        }
-    }
-
-    // ── MonitorInfo PartialEq ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_monitor_info_equality() {
-        let mut a = MonitorInfo::default();
-        let mut b = MonitorInfo::default();
-        assert_eq!(a, b);
-        a.monitor_num = 5;
-        assert_ne!(a, b);
-        b.monitor_num = 5;
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn test_monitor_info_equality_client_name() {
-        let mut a = MonitorInfo::default();
-        let mut b = MonitorInfo::default();
-        a.set_client_name("foo");
-        assert_ne!(a, b);
-        b.set_client_name("foo");
-        assert_eq!(a, b);
-    }
-
-    // ── SharedMessage::new() 与 default() 结构等价 ────────────────────────────
-
-    #[test]
-    fn test_shared_message_new_and_default_equivalent_structure() {
-        let a = SharedMessage::new();
-        let b = SharedMessage::default();
-        // 两者的 monitor_info 字段应相同（都是 MonitorInfo::default()）
-        assert_eq!(a.get_monitor_info(), b.get_monitor_info());
-        // new() 打时间戳，default() 是零值
-        assert!(a.get_timestamp() > 0);
-        assert_eq!(b.get_timestamp(), 0);
-    }
-
-    // ── 所有 SharedCommand 构造器时间戳均非零 ─────────────────────────────────
-
-    #[test]
-    fn test_all_shared_command_constructors_have_nonzero_timestamp() {
-        assert!(SharedCommand::view_tag(0, 0).get_timestamp() > 0);
-        assert!(SharedCommand::toggle_tag(0, 0).get_timestamp() > 0);
-        assert!(SharedCommand::set_layout(0, 0).get_timestamp() > 0);
-        assert!(SharedCommand::new(CommandType::None, 0, 0).get_timestamp() > 0);
-    }
-
-    // ── CommandType::None 可作为 SharedCommand 参数 ───────────────────────────
-
-    #[test]
-    fn test_shared_command_with_command_type_none() {
-        let cmd = SharedCommand::new(CommandType::None, 0, 0);
-        assert_eq!(cmd.get_command_type(), CommandType::None);
-        assert_eq!(cmd.cmd_type, 0u32);
-    }
-
-    // ── client_name 全零时 get_client_name 返回空串 ───────────────────────────
-
-    #[test]
-    fn test_get_client_name_on_zero_array_returns_empty() {
-        let mi = MonitorInfo::default(); // client_name 全为 0
-        assert_eq!(mi.get_client_name(), "");
-        assert_eq!(mi.get_ltsymbol(), "");
-    }
-
-    // ── SharedMessage PartialEq ───────────────────────────────────────────────
-
-    #[test]
-    fn test_shared_message_partial_eq_same_content() {
-        let mi = MonitorInfo::default();
-        let x = SharedMessage::with_monitor_info(mi);
-        let y = SharedMessage::with_monitor_info(mi);
-        // monitor_info 部分应相等
-        assert_eq!(x.get_monitor_info(), y.get_monitor_info());
-    }
-
-    #[test]
-    fn test_shared_message_partial_eq_differs_on_monitor_num() {
-        let mut a = SharedMessage::default();
-        let mut b = SharedMessage::default();
-        a.get_monitor_info_mut().monitor_num = 1;
-        b.get_monitor_info_mut().monitor_num = 2;
-        assert_ne!(a.get_monitor_info(), b.get_monitor_info());
-    }
-
-    // ── SharedCommand PartialEq ───────────────────────────────────────────────
-
-    #[test]
-    fn test_shared_command_partial_eq() {
-        let a = SharedCommand::new(CommandType::ViewTag, 42, 1);
-        let b = SharedCommand::new(CommandType::ViewTag, 42, 1);
-        // 字段值相同（但 timestamp 可能不同）
-        assert_eq!(a.get_command_type(), b.get_command_type());
-        assert_eq!(a.get_parameter(), b.get_parameter());
-        assert_eq!(a.get_monitor_id(), b.get_monitor_id());
-    }
-
-    #[test]
-    fn test_shared_command_ne_on_different_type() {
-        let a = SharedCommand::view_tag(1, 0);
-        let b = SharedCommand::toggle_tag(1, 0);
-        assert_ne!(a.get_command_type(), b.get_command_type());
-    }
-
-    // ── MonitorInfo: 设置某个 tag 不影响其他 tag ──────────────────────────────
-
-    #[test]
-    fn test_tag_status_set_one_does_not_affect_others() {
-        let mut mi = MonitorInfo::default();
-        // 先把所有 tag 设为全 true
-        for i in 0..MAX_TAGS {
-            mi.set_tag_status(i, TagStatus::new(true, true, true, true));
-        }
-        // 修改 tag[3]
-        mi.set_tag_status(3, TagStatus::new(false, false, false, false));
-        // 其他 tag 应不受影响
-        for i in 0..MAX_TAGS {
-            if i == 3 {
-                assert_eq!(
-                    mi.get_tag_status(i),
-                    Some(TagStatus::new(false, false, false, false))
-                );
-            } else {
-                assert_eq!(
-                    mi.get_tag_status(i),
-                    Some(TagStatus::new(true, true, true, true))
-                );
-            }
-        }
-    }
-
-    // ── MonitorInfo: 所有 tag 全真 ────────────────────────────────────────────
-
-    #[test]
-    fn test_monitor_info_all_tags_truthy() {
-        let mut mi = MonitorInfo::default();
-        let full = TagStatus::new(true, true, true, true);
-        for i in 0..MAX_TAGS {
-            mi.set_tag_status(i, full);
-        }
-        for i in 0..MAX_TAGS {
-            assert_eq!(mi.get_tag_status(i), Some(full));
-        }
-    }
-
-    // ── SharedCommand: 极端参数值 ─────────────────────────────────────────────
-
-    #[test]
-    fn test_shared_command_max_parameter() {
-        let cmd = SharedCommand::view_tag(u32::MAX, i32::MIN);
-        assert_eq!(cmd.get_parameter(), u32::MAX);
-        assert_eq!(cmd.get_monitor_id(), i32::MIN);
-    }
-
-    #[test]
-    fn test_shared_command_max_monitor_id() {
-        let cmd = SharedCommand::toggle_tag(0, i32::MAX);
-        assert_eq!(cmd.get_monitor_id(), i32::MAX);
-    }
-
-    // ── client_name / ltsymbol: 单字符 ───────────────────────────────────────
-
-    #[test]
-    fn test_client_name_single_char() {
-        let mut mi = MonitorInfo::default();
-        mi.set_client_name("X");
-        assert_eq!(mi.get_client_name(), "X");
-        // 只有第 0 字节被写入，第 1 字节应为 0（终止符）
-        assert_eq!(mi.client_name[0], b'X');
-        assert_eq!(mi.client_name[1], 0);
-    }
-
-    #[test]
-    fn test_ltsymbol_single_char() {
-        let mut mi = MonitorInfo::default();
-        mi.set_ltsymbol("F");
-        assert_eq!(mi.get_ltsymbol(), "F");
-        assert_eq!(mi.ltsymbol[0], b'F');
-        assert_eq!(mi.ltsymbol[1], 0);
-    }
-
-    // ── update_timestamp 时间戳实际递增 ──────────────────────────────────────
-
-    #[test]
-    fn test_update_timestamp_strictly_increases() {
-        let mut msg = SharedMessage::new();
-        let t1 = msg.get_timestamp();
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        msg.update_timestamp();
-        let t2 = msg.get_timestamp();
-        assert!(t2 > t1, "t2={t2} should be strictly greater than t1={t1}");
-    }
-
-    // ── CommandType 完整性：所有枚举值 u32 为已知数 ───────────────────────────
-
-    #[test]
-    fn test_command_type_known_u32_values() {
-        assert_eq!(u32::from(CommandType::None), 0);
-        assert_eq!(u32::from(CommandType::ViewTag), 1);
-        assert_eq!(u32::from(CommandType::ToggleTag), 2);
-        assert_eq!(u32::from(CommandType::SetLayout), 3);
-    }
-
-    // ── SharedMessage 完整相等性（同 timestamp + 同内容）─────────────────────
-
-    #[test]
-    fn test_shared_message_full_equality() {
-        // 直接构造相同内容的两条消息，timestamp 手动对齐
-        let mi = MonitorInfo::default();
-        let mut a = SharedMessage::with_monitor_info(mi);
-        let mut b = SharedMessage::with_monitor_info(mi);
-        // 强制 timestamp 一致后应完全相等
-        let ts = a.get_timestamp();
-        // 通过 unsafe 写入相同 timestamp（测试 PartialEq 覆盖 timestamp 字段）
-        a.timestamp = ts;
-        b.timestamp = ts;
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn test_shared_message_ne_on_timestamp() {
-        let mi = MonitorInfo::default();
-        let a = SharedMessage::with_monitor_info(mi);
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        let b = SharedMessage::with_monitor_info(mi);
-        // 时间戳不同则消息不等
-        if a.get_timestamp() != b.get_timestamp() {
-            assert_ne!(a, b);
-        }
-    }
-
-    // ── MonitorInfo: 负坐标值 ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_monitor_info_negative_coordinates() {
-        let mi = MonitorInfo {
-            monitor_x: i32::MIN,
-            monitor_y: i32::MIN,
-            monitor_width: -1920,
-            monitor_height: -1080,
-            ..MonitorInfo::default()
-        };
-        assert_eq!(mi.monitor_x, i32::MIN);
-        assert_eq!(mi.monitor_y, i32::MIN);
-        assert_eq!(mi.monitor_width, -1920);
-        assert_eq!(mi.monitor_height, -1080);
-    }
-
-    #[test]
-    fn test_monitor_info_ne_on_each_field() {
-        let base = MonitorInfo::default();
-        let mut mi = base;
-        mi.monitor_num = 1;
-        assert_ne!(mi, base);
-
-        let mut mi = base;
-        mi.monitor_width = 1920;
-        assert_ne!(mi, base);
-
-        let mut mi = base;
-        mi.monitor_height = 1080;
-        assert_ne!(mi, base);
-
-        let mut mi = base;
-        mi.monitor_x = 10;
-        assert_ne!(mi, base);
-
-        let mut mi = base;
-        mi.monitor_y = 20;
-        assert_ne!(mi, base);
-
-        let mut mi = base;
-        mi.set_ltsymbol("[M]");
-        assert_ne!(mi, base);
-
-        let mut mi = base;
-        mi.set_tag_status(0, TagStatus::new(true, false, false, false));
-        assert_ne!(mi, base);
-    }
-
-    // ── get_monitor_info 返回的引用反映可变引用的修改 ─────────────────────────
-
-    #[test]
-    fn test_get_monitor_info_ref_reflects_mutation() {
-        let mut msg = SharedMessage::new();
-        msg.get_monitor_info_mut().monitor_num = 42;
-        // 通过不可变引用读取刚才的修改
-        assert_eq!(msg.get_monitor_info().monitor_num, 42);
-        msg.get_monitor_info_mut().set_client_name("hello");
-        assert_eq!(msg.get_monitor_info().get_client_name(), "hello");
-    }
-
-    // ── with_monitor_info 精确保留所有字段 ───────────────────────────────────
-
-    #[test]
-    fn test_with_monitor_info_preserves_all_fields() {
-        let mut mi = MonitorInfo {
-            monitor_num: 3,
-            monitor_width: 2560,
-            monitor_height: 1440,
-            monitor_x: -100,
-            monitor_y: 50,
-            ..MonitorInfo::default()
-        };
-        mi.set_client_name("wm_client");
-        mi.set_ltsymbol("[M]");
-        for i in 0..MAX_TAGS {
-            mi.set_tag_status(i, TagStatus::new(i % 2 == 0, true, false, i % 3 == 0));
-        }
-
-        let msg = SharedMessage::with_monitor_info(mi);
-        let got = msg.get_monitor_info();
-
-        assert_eq!(got.monitor_num, 3);
-        assert_eq!(got.monitor_width, 2560);
-        assert_eq!(got.monitor_height, 1440);
-        assert_eq!(got.monitor_x, -100);
-        assert_eq!(got.monitor_y, 50);
-        assert_eq!(got.get_client_name(), "wm_client");
-        assert_eq!(got.get_ltsymbol(), "[M]");
-        for i in 0..MAX_TAGS {
-            assert_eq!(
-                got.get_tag_status(i),
-                Some(TagStatus::new(i % 2 == 0, true, false, i % 3 == 0))
-            );
-        }
-    }
-
-    // ── CommandType PartialEq ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_command_type_partial_eq() {
-        assert_eq!(CommandType::None, CommandType::None);
-        assert_eq!(CommandType::ViewTag, CommandType::ViewTag);
-        assert_ne!(CommandType::ViewTag, CommandType::ToggleTag);
-        assert_ne!(CommandType::ToggleTag, CommandType::SetLayout);
-        assert_ne!(CommandType::None, CommandType::SetLayout);
-    }
-
-    // ── SharedCommand: 不同监视器 ID 的不等性 ────────────────────────────────
-
-    #[test]
-    fn test_shared_command_ne_on_monitor_id() {
-        let a = SharedCommand::new(CommandType::ViewTag, 1, 0);
-        let b = SharedCommand::new(CommandType::ViewTag, 1, 1);
-        assert_ne!(a.get_monitor_id(), b.get_monitor_id());
-    }
-
-    #[test]
-    fn test_shared_command_ne_on_parameter() {
-        let a = SharedCommand::view_tag(1, 0);
-        let b = SharedCommand::view_tag(2, 0);
-        assert_ne!(a.get_parameter(), b.get_parameter());
-    }
-
-    // ── 结构体大小对齐在编译期固定（确保 repr(C) 稳定）────────────────────────
 
     #[test]
     fn test_tag_status_size_is_four_bytes() {

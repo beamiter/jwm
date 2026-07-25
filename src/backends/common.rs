@@ -281,7 +281,10 @@ pub struct GenericHeader {
     pub layout_marker: u32,
     pub is_destroyed: AtomicU32,
     pub creator_pid: u32,
-    _metadata_padding: [u8; 8],
+    /// 消息/命令槽位类型指纹（`WireSafe::FINGERPRINT`）：拒绝"槽大小
+    /// 相同但类型不同"的错配打开。
+    pub message_fingerprint: u32,
+    pub command_fingerprint: u32,
     pub last_timestamp: AtomicU64,
     _timestamp_padding: [u8; 56],
     pub(crate) message_write: QueueCursor,
@@ -302,6 +305,8 @@ impl GenericHeader {
         command_slot_size: u32,
         layout_marker: u32,
         creator_pid: u32,
+        message_fingerprint: u32,
+        command_fingerprint: u32,
     ) -> Self {
         Self {
             magic: AtomicU64::new(0),
@@ -315,7 +320,8 @@ impl GenericHeader {
             layout_marker,
             is_destroyed: AtomicU32::new(0),
             creator_pid,
-            _metadata_padding: [0; 8],
+            message_fingerprint,
+            command_fingerprint,
             last_timestamp: AtomicU64::new(0),
             _timestamp_padding: [0; 56],
             message_write: QueueCursor::new(),

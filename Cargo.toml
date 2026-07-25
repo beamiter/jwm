@@ -47,3 +47,7 @@ harness = false
 [[bench]]
 name = "stress_test"
 harness = false
+
+[[bench]]
+name = "cross_process_latency"
+harness = false

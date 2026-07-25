@@ -6,6 +6,8 @@
 
 ### Added
 
+- 类型指纹：header 记录消息/命令槽位类型指纹（`WireSafe::fingerprint`，默认哈希类型名，可覆写），打开时校验，拒绝"槽大小相同但类型不同"的错配打开。
+- 跨进程唤醒延迟基准 `cross_process_latency`：真实两进程 ping-pong，按后端 × {自旋命中, 纯内核唤醒} 两种模式出数（参考：自旋路径约 0.7µs 后端无关；内核唤醒 futex ≈ 4.3µs < semaphore ≈ 4.6µs < eventfd ≈ 4.8µs）。
 - **泛型核心 `TypedRingBuffer<M, C>` 与 `WireSafe` 契约**：布局、跨进程锁、游标、后端与生命周期全部与 payload 解耦，任意满足契约（repr(C)、无 padding、任意位模式有效）的 POD 类型都可作为槽位类型；固定宽度整数、浮点与其数组自带 `WireSafe` 实现；`SharedRingBufferOptions` 新增 `create_typed`/`open_typed`/`open_or_create_typed`。`SharedRingBuffer` 成为 `TypedRingBuffer<WireMessage, WireCommand>` 的领域封装，公开 API 不变。
 - 跨进程多生产者集成测试（3 个真实进程写不相交区间 + 小容量强制背压）与泛型 payload 测试（含槽大小错配拒绝）。
 
@@ -20,6 +22,9 @@
 
 ### Changed
 
+- 对抗性审查修复：`WireSafe` 契约补充"所有字节必须已初始化（禁止 union）"与对齐上限条款；布局计算拒绝对齐超过 4096 的 payload（mmap 只保证页对齐）；`/proc` 不可用时存活探测退化为"假定存活"（绝不失明夺锁）；SAFETY.md 明确夺锁机制要求所有参与者共享 PID namespace，并修正 PID 复用误夺的概率表述。
+- `shared_message.rs` 测试从 70 个精简到 36 个（删除验证语言保证与近似重复的低信噪测试，行为测试全部保留）。
+- CI：cargo-deny 暂只检查 advisories/bans/sources（根 crate 有意未声明许可证，licenses 门禁待声明后启用）；dependabot 忽略 `dtolnay/rust-toolchain`（MSRV pin 不是可升级版本）。
 - 三个后端的 sequence/waiter 注册握手收敛为 `common.rs` 中的共享 `WaiterGate` 原语（RAII 注销登记），最微妙的并发逻辑只剩一份实现；行为不变。
 - 校验和改为按 payload 整体字节计算（wire 类型以显式 `_reserved` 字段消除 padding）；命令通道引入独立的 `WireCommand` wire 表示，与消息通道的 wire/领域分离策略对齐。
 - `SharedMessage::default()` 不再读取时钟：返回可复现的零值（`timestamp == 0`）；需要时间戳时用 `SharedMessage::new()` / `with_monitor_info()`。依赖旧行为的调用方需改用 `new()`。

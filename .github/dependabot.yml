@@ -8,3 +8,6 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    ignore:
+      # MSRV job 用 @1.86.0 作为语义化的工具链 pin，不是可升级的 action 版本。
+      - dependency-name: dtolnay/rust-toolchain

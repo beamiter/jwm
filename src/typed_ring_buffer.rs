@@ -21,7 +21,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const RING_BUFFER_MAGIC: u64 = 0x52494E47_42554646;
 const RING_BUFFER_VERSION: u64 = 11;
-const LAYOUT_MARKER: u32 = 0x5352_4233; // "SRB3"
+const LAYOUT_MARKER: u32 = 0x5352_4234; // "SRB4"
+
+/// mmap 对基址的对齐保证（Linux 基础页大小）。payload 对齐超过它时
+/// 无法保证槽位对齐，布局计算直接拒绝。
+const MAX_PAYLOAD_ALIGN: usize = 4096;
 pub(crate) const DEFAULT_BUFFER_SIZE: usize = 16;
 pub(crate) const DEFAULT_CMD_BUFFER_SIZE: usize = 16;
 pub(crate) const DEFAULT_ADAPTIVE_POLL_SPINS: u32 = 400;
@@ -41,12 +45,44 @@ static FLINK_NONCE: AtomicU64 = AtomicU64::new(0);
 /// 3. **每一种位模式都是合法值**：不含 `bool`、`char`、枚举、引用、
 ///    指针或任何有位有效性约束的字段——共享内存可能被其他进程写入
 ///    任意字节；
-/// 4. 类型不含内部可变性与析构逻辑（`Copy` 已排除 `Drop`）。
+/// 4. 类型不含内部可变性与析构逻辑（`Copy` 已排除 `Drop`）；
+/// 5. **对象的所有字节在任何时刻都已初始化**——实际上禁止 `union` 与
+///    `MaybeUninit` 字段：校验和按整体字节读取对象，读未初始化字节是
+///    未定义行为（无 padding 不足以保证这一点，小变体构造的 union
+///    就是反例）；
+/// 6. 对齐不得超过 4096（mmap 只保证页对齐，超页对齐的槽位无法保证；
+///    布局计算会在运行期拒绝违例类型）。
 ///
 /// 违反契约不会破坏队列协调（游标与锁独立于 payload），但会把未定义
 /// 行为引入槽位读取路径。领域类型应转换为满足契约的 wire 表示后再
 /// 进入队列，参见 crate 文档中 `WireMessage` 的做法。
-pub unsafe trait WireSafe: Copy + 'static {}
+pub unsafe trait WireSafe: Copy + 'static {
+    /// 槽位类型指纹：创建时写入共享 header，打开时校验，用于拒绝
+    /// "槽大小相同但类型不同"的错配打开（大小校验对此无能为力）。
+    ///
+    /// 默认实现哈希 `std::any::type_name::<Self>()`。注意 type name 含
+    /// crate/模块路径：多个二进制各自定义同布局类型共享一个映射时，
+    /// 两侧应把 `fingerprint` 覆写为同一常量。指纹是防错配自检，
+    /// 不是安全边界——同名同路径但字段重排的类型仍检测不到，跨版本
+    /// 布局纪律仍由使用者负责。
+    #[must_use]
+    fn fingerprint() -> u32 {
+        fnv32_str(std::any::type_name::<Self>())
+    }
+}
+
+/// 字符串 FNV-1a（const fn），用于默认类型指纹。
+const fn fnv32_str(value: &str) -> u32 {
+    let bytes = value.as_bytes();
+    let mut hash = 0x811c_9dc5u32;
+    let mut index = 0;
+    while index < bytes.len() {
+        hash ^= bytes[index] as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+        index += 1;
+    }
+    hash
+}
 
 // SAFETY: 固定宽度整数与 IEEE-754 浮点数无 padding、任意位模式有效、
 // 无内部可变性。有意不包含 `bool`/`char`（位有效性约束）与
@@ -118,8 +154,15 @@ pub(crate) fn checksum_of<T: WireSafe>(value: &T) -> u32 {
 ///
 /// 本 crate 仅支持 Linux，`/proc/<pid>` 是否存在即为权威判据；无须
 /// 关心权限（`kill(pid, 0)` 的 EPERM 歧义在这里不存在）。
+///
+/// 防御：`/proc` 不可用（未挂载的极简容器等）时无从判断，返回
+/// "存活"——夺锁/回收机制退化为纯等待，绝不基于失明的探测误夺活锁。
+/// 跨 PID namespace 部署的前提要求见 SAFETY.md。
 #[inline]
 pub(crate) fn process_alive(pid: u32) -> bool {
+    if !Path::new("/proc/self").exists() {
+        return true;
+    }
     Path::new("/proc").join(pid.to_string()).exists()
 }
 
@@ -180,6 +223,12 @@ impl BufferLayout {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
                 "command capacity must be a non-zero power of two",
+            ));
+        }
+        if align_of::<Slot<M>>() > MAX_PAYLOAD_ALIGN || align_of::<Slot<C>>() > MAX_PAYLOAD_ALIGN {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "payload alignment exceeds the page-alignment guarantee of the mapping",
             ));
         }
         u32::try_from(buffer_size)
@@ -680,6 +729,8 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
                 size_of::<Slot<C>>() as u32,
                 LAYOUT_MARKER,
                 std::process::id(),
+                M::fingerprint(),
+                C::fingerprint(),
             ));
         }
 
@@ -832,6 +883,17 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
             return Err(Error::new(
                 ErrorKind::InvalidData,
                 "shared-memory layout metadata does not match this build",
+            ));
+        }
+        let message_fingerprint =
+            unsafe { std::ptr::addr_of!((*header).message_fingerprint).read() };
+        let command_fingerprint =
+            unsafe { std::ptr::addr_of!((*header).command_fingerprint).read() };
+        if message_fingerprint != M::fingerprint() || command_fingerprint != C::fingerprint() {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "shared-memory payload type fingerprint mismatch; \
+                 the mapping was created with different slot types",
             ));
         }
         if unsafe { (*header).is_destroyed.load(Ordering::Acquire) } != 0 {
@@ -1084,6 +1146,9 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
     }
 
     /// 读取最新消息并一次丢弃它之前的所有待读消息。
+    ///
+    /// 校验和不匹配时返回 `InvalidData`，此时读游标同样已推进到写游标：
+    /// 包括可能完好的更早消息在内的**全部**待读消息都已被丢弃。
     pub fn try_read_latest_message(&self) -> Result<Option<M>> {
         if self.is_destroyed() {
             return Ok(None);
@@ -1614,6 +1679,35 @@ mod tests {
         // Sample 槽 24 字节，u64 槽 16 字节：布局校验必须拒绝错配打开。
         let mismatch = TypedRingBuffer::<u64, u64>::open_auto(&path, Some(0));
         assert_eq!(mismatch.unwrap_err().kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn typed_open_rejects_same_size_different_type() {
+        let path = mk_path("fingerprint_mismatch");
+        let _ring: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+
+        // [u32; 2] 与 u64 槽大小相同（16 字节），只有类型指纹能拒绝错配。
+        let mismatch = TypedRingBuffer::<[u32; 2], u64>::open_auto(&path, Some(0));
+        assert_eq!(mismatch.unwrap_err().kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn typed_create_rejects_overaligned_payload() {
+        #[repr(C, align(8192))]
+        #[derive(Clone, Copy)]
+        struct OverAligned([u8; 8192]);
+        // SAFETY（测试用途）: repr(C)、无 padding、任意位模式有效；对齐
+        // 超限恰好是本测试要验证被拒绝的属性。
+        unsafe impl WireSafe for OverAligned {}
+
+        let path = mk_path("overaligned");
+        let result = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .create_typed::<OverAligned, u64>(&path);
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidInput);
     }
 
     #[test]

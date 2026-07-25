@@ -18,6 +18,18 @@ cargo bench --all-features --no-run
 `eventfd` 或 `semaphore` 的结果没有实际落到默认 `futex` 后端。传入 `--clean`
 可以先清除旧的 Criterion 数据；设置 `RUN_STRESS=1` 才会执行耗时更长的压力组。
 
+跨进程唤醒延迟使用独立的两进程 ping-pong 基准（父进程 spawn 真实 echo
+子进程，往返 = 写消息 → 对端回 ack 命令）：
+
+```bash
+cargo bench --bench cross_process_latency
+```
+
+每个后端出两组数字：`adaptive_spin`（默认自旋预算内命中，测轮询快路径）
+与 `kernel_wake`（自旋为 0，每次等待都进内核，测真实跨进程唤醒延迟，
+三后端的差异集中在这里）。参考量级：自旋路径约几百纳秒且后端无关；
+内核唤醒路径为微秒级，futex < semaphore < eventfd。
+
 基准遵循以下计时边界：
 
 - 共享内存创建、打开、消息预构建和工作线程创建通常在计时区间之外；专门的
