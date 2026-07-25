@@ -9,22 +9,34 @@ use super::Jwm;
 
 impl Jwm {
     fn is_smithay_backend(backend: &dyn Backend) -> bool {
-        backend
-            .as_any()
-            .is::<crate::backend::wayland_udev::backend::UdevBackend>()
-            || backend
-                .as_any()
-                .is::<crate::backend::wayland_x11::backend::WaylandX11Backend>()
-            || backend
-                .as_any()
-                .is::<crate::backend::wayland_winit::backend::WaylandWinitBackend>()
+        #[allow(unused_mut)]
+        let mut is_smithay = Self::is_udev_backend(backend);
+        #[cfg(feature = "backend-wayland-nested")]
+        {
+            is_smithay = is_smithay
+                || backend
+                    .as_any()
+                    .is::<crate::backend::wayland_x11::backend::WaylandX11Backend>()
+                || backend
+                    .as_any()
+                    .is::<crate::backend::wayland_winit::backend::WaylandWinitBackend>();
+        }
+        is_smithay
     }
 
     /// Returns `true` if `backend` is the udev/KMS backend (no Xwayland, no X11 DISPLAY).
     pub(super) fn is_udev_backend(backend: &dyn Backend) -> bool {
-        backend
-            .as_any()
-            .is::<crate::backend::wayland_udev::backend::UdevBackend>()
+        #[cfg(feature = "backend-wayland-udev")]
+        {
+            backend
+                .as_any()
+                .is::<crate::backend::wayland_udev::backend::UdevBackend>()
+        }
+        #[cfg(not(feature = "backend-wayland-udev"))]
+        {
+            let _ = backend;
+            false
+        }
     }
 
     /// Set Wayland-related environment variables on a child `Command` so that

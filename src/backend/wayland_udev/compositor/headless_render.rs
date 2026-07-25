@@ -20,6 +20,7 @@ enum GlApi {
     /// OpenGL ES 3 — for the Wayland backend's `#version 300 es` shaders.
     Gles3,
     /// Desktop OpenGL 3.3 core — for the X11 backend's `#version 330 core` shaders.
+    #[cfg_attr(not(feature = "x11-backends"), allow(dead_code))]
     GlCore33,
 }
 
@@ -411,6 +412,7 @@ fn wayland_shaders() -> Vec<(&'static str, Stage, &'static str)> {
 /// Every shader constant in the X11 backend's `shaders` module (desktop GL
 /// `#version 330 core`). These have diverged from the Wayland set (different
 /// GLSL dialect) and must be validated against a desktop-GL core context.
+#[cfg(feature = "x11-backends")]
 fn x11_shaders() -> Vec<(&'static str, Stage, &'static str)> {
     use crate::backend::x11::compositor::shaders as s;
     use Stage::{Fragment as F, Vertex as V};
@@ -492,11 +494,13 @@ fn wayland_shaders_compile() {
     assert_all_compile(GlApi::Gles3, "wayland_shaders_compile", wayland_shaders());
 }
 
+#[cfg(feature = "x11-backends")]
 #[test]
 fn x11_shaders_compile() {
     assert_all_compile(GlApi::GlCore33, "x11_shaders_compile", x11_shaders());
 }
 
+#[cfg(feature = "x11-backends")]
 #[test]
 fn waterlily_shader_keys_white_to_translucent_scene_and_preserves_color() {
     use crate::backend::x11::compositor::shaders as s;

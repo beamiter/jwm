@@ -7,10 +7,15 @@
 use crate::Jwm;
 use crate::backend::api::{Backend, CompositorBenchmark};
 use crate::backend::error::{BackendContextExt, BackendError, ErrorBoundary};
+#[cfg(feature = "backend-wayland-udev")]
 use crate::backend::wayland_udev::backend::UdevBackend;
+#[cfg(feature = "backend-wayland-nested")]
 use crate::backend::wayland_winit::backend::WaylandWinitBackend;
+#[cfg(feature = "backend-wayland-nested")]
 use crate::backend::wayland_x11::backend::WaylandX11Backend;
+#[cfg(feature = "backend-x11rb")]
 use crate::backend::x11rb::backend::X11rbBackend;
+#[cfg(feature = "backend-xcb")]
 use crate::backend::xcb::backend::XcbBackend;
 use crate::config::{BackendFamily, Config, ConfigDiagnostics, ConfigError, set_backend_family};
 use log::{error, info};
@@ -63,6 +68,44 @@ impl BackendChoice {
             Self::WaylandWinit => "wayland-winit",
         }
     }
+
+    /// The Cargo feature that compiles this backend into the binary.
+    #[must_use]
+    pub const fn feature_name(self) -> &'static str {
+        match self {
+            Self::X11rb => "backend-x11rb",
+            Self::Xcb => "backend-xcb",
+            Self::WaylandUdev => "backend-wayland-udev",
+            Self::WaylandX11 | Self::WaylandWinit => "backend-wayland-nested",
+        }
+    }
+
+    /// Whether this backend was compiled into the running binary.
+    #[must_use]
+    pub const fn is_compiled(self) -> bool {
+        match self {
+            Self::X11rb => cfg!(feature = "backend-x11rb"),
+            Self::Xcb => cfg!(feature = "backend-xcb"),
+            Self::WaylandUdev => cfg!(feature = "backend-wayland-udev"),
+            Self::WaylandX11 | Self::WaylandWinit => cfg!(feature = "backend-wayland-nested"),
+        }
+    }
+}
+
+/// Names of the backends compiled into this binary, in canonical order.
+#[must_use]
+pub fn compiled_backends() -> Vec<&'static str> {
+    [
+        BackendChoice::X11rb,
+        BackendChoice::Xcb,
+        BackendChoice::WaylandUdev,
+        BackendChoice::WaylandX11,
+        BackendChoice::WaylandWinit,
+    ]
+    .into_iter()
+    .filter(|choice| choice.is_compiled())
+    .map(BackendChoice::as_str)
+    .collect()
 }
 
 impl FromStr for BackendChoice {
@@ -210,6 +253,16 @@ fn preflight_config(choice: BackendChoice) -> Result<(), ConfigError> {
 }
 
 fn create_backend(choice: BackendChoice) -> Result<Box<dyn Backend>, Box<dyn std::error::Error>> {
+    if !choice.is_compiled() {
+        return Err(format!(
+            "backend '{}' is not compiled into this jwm binary (rebuild with \
+             --features {}); compiled backends: {}",
+            choice.as_str(),
+            choice.feature_name(),
+            compiled_backends().join(", ")
+        )
+        .into());
+    }
     preflight_config(choice)?;
     // Config is a process-wide singleton, so its family must be established
     // before any backend constructor can access CONFIG.
@@ -220,16 +273,28 @@ fn create_backend(choice: BackendChoice) -> Result<Box<dyn Backend>, Box<dyn std
         choice.config_name()
     );
 
+    #[allow(unreachable_patterns)]
     let backend: Result<Box<dyn Backend>, BackendError> = match choice {
+        #[cfg(feature = "backend-x11rb")]
         BackendChoice::X11rb => X11rbBackend::new().map(|b| Box::new(b) as Box<dyn Backend>),
+        #[cfg(feature = "backend-xcb")]
         BackendChoice::Xcb => XcbBackend::new().map(|b| Box::new(b) as Box<dyn Backend>),
+        #[cfg(feature = "backend-wayland-udev")]
         BackendChoice::WaylandUdev => UdevBackend::new().map(|b| Box::new(b) as Box<dyn Backend>),
+        #[cfg(feature = "backend-wayland-nested")]
         BackendChoice::WaylandX11 => {
             WaylandX11Backend::new().map(|b| Box::new(b) as Box<dyn Backend>)
         }
+        #[cfg(feature = "backend-wayland-nested")]
         BackendChoice::WaylandWinit => {
             WaylandWinitBackend::new().map(|b| Box::new(b) as Box<dyn Backend>)
         }
+        // Uncompiled variants are rejected by the is_compiled guard above;
+        // this arm only matters if that guard is ever bypassed.
+        _ => Err(BackendError::Message(format!(
+            "backend '{}' is not compiled into this jwm binary",
+            choice.as_str()
+        ))),
     };
     Ok(backend.backend_context(
         choice.as_str(),
@@ -396,6 +461,31 @@ mod tests {
         assert_eq!("wayland".parse(), Ok(BackendChoice::WaylandUdev));
         assert_eq!("windowed".parse(), Ok(BackendChoice::WaylandX11));
         assert_eq!("winit".parse(), Ok(BackendChoice::WaylandWinit));
+    }
+
+    #[test]
+    fn compiled_backends_reflect_the_enabled_features() {
+        let compiled = super::compiled_backends();
+        assert_eq!(compiled.contains(&"x11rb"), cfg!(feature = "backend-x11rb"));
+        assert_eq!(compiled.contains(&"xcb"), cfg!(feature = "backend-xcb"));
+        assert_eq!(
+            compiled.contains(&"wayland-udev"),
+            cfg!(feature = "backend-wayland-udev")
+        );
+        assert_eq!(
+            compiled.contains(&"wayland-x11"),
+            cfg!(feature = "backend-wayland-nested")
+        );
+        assert_eq!(
+            compiled.contains(&"wayland-winit"),
+            cfg!(feature = "backend-wayland-nested")
+        );
+        // Every backend advertises the feature that would compile it in.
+        assert_eq!(BackendChoice::Xcb.feature_name(), "backend-xcb");
+        assert_eq!(
+            BackendChoice::WaylandWinit.feature_name(),
+            "backend-wayland-nested"
+        );
     }
 
     #[test]

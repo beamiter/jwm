@@ -8,7 +8,7 @@
 ///
 /// Bound at version 1, so the v1 `ready` / `preferred_changed` events are sent
 /// (the v2 `ready2` / `preferred_changed2` variants will be added when we bump).
-use crate::backend::color_policy::{PRIMARIES_BT709, PRIMARIES_BT2020, params_match};
+use crate::backend::color_policy::params_match;
 pub(crate) use crate::backend::color_policy::{
     ParametricParams, advanced_color_management_enabled, params_from_edid, srgb_params,
 };

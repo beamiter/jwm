@@ -53,12 +53,22 @@ impl Jwm {
         if !backend.has_compositor() {
             return Err("display layout requires the JWM compositor".into());
         }
-        let is_x11 = backend
-            .as_any()
-            .is::<crate::backend::x11rb::backend::X11rbBackend>()
-            || backend
-                .as_any()
-                .is::<crate::backend::xcb::backend::XcbBackend>();
+        #[allow(unused_mut)]
+        let mut is_x11 = false;
+        #[cfg(feature = "backend-x11rb")]
+        {
+            is_x11 = is_x11
+                || backend
+                    .as_any()
+                    .is::<crate::backend::x11rb::backend::X11rbBackend>();
+        }
+        #[cfg(feature = "backend-xcb")]
+        {
+            is_x11 = is_x11
+                || backend
+                    .as_any()
+                    .is::<crate::backend::xcb::backend::XcbBackend>();
+        }
         if !is_x11 {
             return Err("display layout via xrandr is only available on an X11 backend".into());
         }

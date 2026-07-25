@@ -13,6 +13,31 @@ description = "A multi-backend X11 and Wayland window manager and compositor"
 repository = "https://github.com/beamiter/jwm"
 readme = "README.md"
 
+[features]
+# The default build carries every backend, exactly like the pre-feature
+# builds: one binary, runtime selection via --backend / JWM_BACKEND.
+# Features are additive; slim profiles opt out with --no-default-features.
+default = [
+    "backend-x11rb",
+    "backend-xcb",
+    "backend-wayland-udev",
+    "backend-wayland-nested",
+]
+# Internal: shared X11 transport helpers and the GLX/EGL compositor.
+# Enabled through the per-transport features; not selected directly.
+x11-backends = []
+# Internal: shared Smithay Wayland frontend. Enabled through the per-backend
+# Wayland features; not selected directly.
+wayland-backends = []
+# X11RB transport + shared X11 compositor.
+backend-x11rb = ["x11-backends"]
+# XCB transport + shared X11 compositor.
+backend-xcb = ["x11-backends"]
+# Direct Wayland DRM/KMS session backend.
+backend-wayland-udev = ["wayland-backends"]
+# Nested Wayland development backends (wayland-x11 and wayland-winit).
+backend-wayland-nested = ["wayland-backends"]
+
 [[bin]]
 name = "jwm-tool"
 path = "tools/jwm_tool.rs"

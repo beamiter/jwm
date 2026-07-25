@@ -29,6 +29,7 @@ pub const PRIMARIES_BT2020: [i32; 8] = [
     708_000, 292_000, 170_000, 797_000, 131_000, 46_000, 312_700, 329_000,
 ];
 
+#[must_use]
 pub fn advanced_color_management_enabled() -> bool {
     std::env::var_os("JWM_COLOR_MANAGEMENT_ADVANCED").as_deref() == Some(std::ffi::OsStr::new("1"))
 }
@@ -54,6 +55,7 @@ pub struct ParametricParams {
 impl ParametricParams {
     /// A creator may only `create` once both a transfer characteristic and a
     /// primaries description have been supplied.
+    #[must_use]
     pub fn is_complete(&self) -> bool {
         (self.tf_named.is_some() || self.tf_power.is_some())
             && (self.primaries_named.is_some() || self.primaries.is_some())
@@ -63,6 +65,7 @@ impl ParametricParams {
 /// Whether two descriptions agree on the fields that affect rendering
 /// (transfer function, primaries, peak luminance). Mastering metadata is
 /// advisory and deliberately ignored.
+#[must_use]
 pub fn params_match(a: &ParametricParams, b: &ParametricParams) -> bool {
     a.tf_named == b.tf_named
         && a.primaries_named == b.primaries_named
@@ -72,6 +75,7 @@ pub fn params_match(a: &ParametricParams, b: &ParametricParams) -> bool {
 
 /// Build a default sRGB parametric description (used when no HDR caps are
 /// known for an output).
+#[must_use]
 pub fn srgb_params() -> ParametricParams {
     ParametricParams {
         primaries_named: Some(PRIMARIES_NAMED_SRGB),
@@ -84,6 +88,7 @@ pub fn srgb_params() -> ParametricParams {
 /// image description. Mirrors the policy used by `hdr_metadata::build_from_edid`
 /// for the kernel-side blob so the wp-color-management answer and the
 /// HDR_OUTPUT_METADATA push agree on EOTF and gamut.
+#[must_use]
 pub fn params_from_edid(caps: &EdidHdrCapabilities) -> ParametricParams {
     let mut p = ParametricParams::default();
 
