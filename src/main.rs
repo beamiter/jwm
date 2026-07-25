@@ -5,8 +5,7 @@ use log::{debug, warn};
 use pango::FontDescription;
 use std::cell::{Cell, RefCell};
 use std::env;
-use std::io;
-use std::os::fd::{AsFd as _, AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
+use std::os::fd::AsFd as _;
 use std::time::Duration;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::ConnectionExt as _;
@@ -16,15 +15,16 @@ use x11rb::protocol::xproto::{
 };
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::xcb_ffi::XCBConnection;
-use xbar_core::linux::AlignedTimer;
+use xbar_core::linux::{AlignedTimer, Epoll};
 use xbar_core::presentation::{Point, PointerAction, PresentationConfig, Size};
 use xbar_core::render::cairo::CairoBar;
 use xbar_core::{
-    BarEffect, BarRuntime, ModelConfig, MonitorGeometry, NotifierChange, PlatformEffectHandler,
-    RuntimeUpdate, TransportNotifierSlot, TransportRecoveryConfig,
+    BarPlacement, BarRuntime, DockProperty, DockPropertyValue, DockWindowSpec, ModelConfig,
+    MonitorGeometry, NotifierChange, RuntimeUpdate, TransportNotifierSlot, TransportRecoveryConfig,
 };
-use xbar_linux_actions::ProcessActionHandler;
+use xbar_linux_actions::{EffectRouter, GeometryRequest};
 
+const BAR_NAME: &str = "x11rb_bar";
 const X_TOKEN: u64 = 1;
 const TIMER_TOKEN: u64 = 2;
 const SHARED_TOKEN: u64 = 3;
@@ -165,114 +165,57 @@ impl BackBuffer {
 }
 
 // ---------------- EWMH ----------------
-struct Atoms {
-    net_wm_window_type: Atom,
-    net_wm_window_type_dock: Atom,
-    net_wm_state: Atom,
-    net_wm_state_above: Atom,
-    net_wm_desktop: Atom,
-    net_wm_strut_partial: Atom,
-    net_wm_strut: Atom,
-    net_wm_name: Atom,
-    utf8_string: Atom,
-}
-
-fn intern_atoms(conn: &XCBConnection) -> Result<Atoms> {
+/// Write core-described dock properties with this connection. Atom names come
+/// from `DockWindowSpec`; only interning and the property calls live here.
+fn write_dock_properties(
+    conn: &XCBConnection,
+    win: Window,
+    properties: &[DockProperty],
+) -> Result<()> {
     let intern = |name: &str| -> Result<Atom> {
         Ok(conn.intern_atom(false, name.as_bytes())?.reply()?.atom)
     };
-    Ok(Atoms {
-        net_wm_window_type: intern("_NET_WM_WINDOW_TYPE")?,
-        net_wm_window_type_dock: intern("_NET_WM_WINDOW_TYPE_DOCK")?,
-        net_wm_state: intern("_NET_WM_STATE")?,
-        net_wm_state_above: intern("_NET_WM_STATE_ABOVE")?,
-        net_wm_desktop: intern("_NET_WM_DESKTOP")?,
-        net_wm_strut_partial: intern("_NET_WM_STRUT_PARTIAL")?,
-        net_wm_strut: intern("_NET_WM_STRUT")?,
-        net_wm_name: intern("_NET_WM_NAME")?,
-        utf8_string: intern("UTF8_STRING")?,
-    })
-}
-
-fn update_strut(
-    conn: &XCBConnection,
-    atoms: &Atoms,
-    win: Window,
-    x: i32,
-    y: i32,
-    width: u32,
-    bar_height: u16,
-) -> Result<()> {
-    let top = u32::try_from(y)
-        .unwrap_or(0)
-        .saturating_add(u32::from(bar_height));
-    let top_start_x = u32::try_from(x).unwrap_or(0);
-    let top_end_x = top_start_x.saturating_add(width.saturating_sub(1));
-    let strut_partial = [0, 0, top, 0, 0, 0, 0, 0, top_start_x, top_end_x, 0, 0];
-    conn.change_property32(
-        PropMode::REPLACE,
-        win,
-        atoms.net_wm_strut_partial,
-        AtomEnum::CARDINAL,
-        &strut_partial,
-    )?;
-    conn.change_property32(
-        PropMode::REPLACE,
-        win,
-        atoms.net_wm_strut,
-        AtomEnum::CARDINAL,
-        &[0, 0, top, 0],
-    )?;
+    for property in properties {
+        let name = intern(property.name)?;
+        match &property.value {
+            DockPropertyValue::Atoms(values) => {
+                let values = values
+                    .iter()
+                    .map(|value| intern(value))
+                    .collect::<Result<Vec<Atom>>>()?;
+                conn.change_property32(PropMode::REPLACE, win, name, AtomEnum::ATOM, &values)?;
+            }
+            DockPropertyValue::Cardinals(values) => {
+                conn.change_property32(PropMode::REPLACE, win, name, AtomEnum::CARDINAL, values)?;
+            }
+            DockPropertyValue::Utf8Text(text) => {
+                let utf8_string = intern("UTF8_STRING")?;
+                conn.change_property8(PropMode::REPLACE, win, name, utf8_string, text.as_bytes())?;
+            }
+        }
+    }
     Ok(())
 }
 
-fn set_dock_properties(
-    conn: &XCBConnection,
-    atoms: &Atoms,
-    win: Window,
-    width: u32,
-    bar_height: u16,
-) -> Result<()> {
-    conn.change_property32(
-        PropMode::REPLACE,
-        win,
-        atoms.net_wm_window_type,
-        AtomEnum::ATOM,
-        &[atoms.net_wm_window_type_dock],
-    )?;
-    conn.change_property32(
-        PropMode::REPLACE,
-        win,
-        atoms.net_wm_state,
-        AtomEnum::ATOM,
-        &[atoms.net_wm_state_above],
-    )?;
-    conn.change_property32(
-        PropMode::REPLACE,
-        win,
-        atoms.net_wm_desktop,
-        AtomEnum::CARDINAL,
-        &[u32::MAX],
-    )?;
-    update_strut(conn, atoms, win, 0, 0, width, bar_height)?;
-    conn.change_property8(
-        PropMode::REPLACE,
-        win,
-        atoms.net_wm_name,
-        atoms.utf8_string,
-        b"x11rb_bar",
-    )?;
-    Ok(())
+fn dock_spec(x: i32, y: i32, width: u32, bar_height: u16) -> DockWindowSpec {
+    DockWindowSpec::top(
+        BAR_NAME,
+        BarPlacement {
+            x,
+            y,
+            width,
+            height: u32::from(bar_height),
+        },
+    )
 }
 
 // ---------------- Platform integration ----------------
 struct WindowAdapter<'a> {
     conn: &'a XCBConnection,
     screen: &'a Screen,
-    atoms: &'a Atoms,
     win: Window,
     bar_height: Cell<u16>,
-    process_actions: RefCell<ProcessActionHandler>,
+    effects: RefCell<EffectRouter>,
 }
 
 impl WindowAdapter<'_> {
@@ -286,41 +229,18 @@ impl WindowAdapter<'_> {
     }
 
     fn apply_runtime_update(&self, update: RuntimeUpdate) -> Result<bool> {
-        let needs_redraw = update.needs_redraw();
-        for issue in update.issues {
-            warn!("xbar runtime issue: {issue:?}");
-        }
-        for effect in update.platform_effects {
-            self.apply_effect(effect)?;
-        }
-        Ok(needs_redraw)
-    }
-
-    fn apply_effect(&self, effect: BarEffect) -> Result<()> {
-        match effect {
-            BarEffect::ApplyMonitorGeometry(geometry) => self.apply_geometry(geometry),
-            BarEffect::ClearMonitorGeometry => self.apply_geometry(MonitorGeometry {
-                x: 0,
-                y: 0,
-                width: u32::from(self.screen.width_in_pixels),
-                height: u32::from(self.screen.height_in_pixels),
-            }),
-            effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl) => {
-                self.process_actions.borrow_mut().handle(effect)?;
-                Ok(())
-            }
-            BarEffect::WindowManager(command) => {
-                warn!("no shared transport handled window-manager command: {command:?}");
-                Ok(())
-            }
-            BarEffect::ToggleMute
-            | BarEffect::AdjustVolume(_)
-            | BarEffect::AdjustBrightness(_)
-            | BarEffect::RefreshBattery => {
-                warn!("enabled xbar provider unexpectedly returned platform effect: {effect:?}");
-                Ok(())
-            }
-        }
+        self.effects.borrow_mut().route(update, |request| {
+            let geometry = match request {
+                GeometryRequest::Apply(geometry) => geometry,
+                GeometryRequest::Clear => MonitorGeometry {
+                    x: 0,
+                    y: 0,
+                    width: u32::from(self.screen.width_in_pixels),
+                    height: u32::from(self.screen.height_in_pixels),
+                },
+            };
+            self.apply_geometry(geometry)
+        })
     }
 
     fn apply_geometry(&self, geometry: MonitorGeometry) -> Result<()> {
@@ -334,21 +254,10 @@ impl WindowAdapter<'_> {
                 .width(width)
                 .height(u32::from(bar_height)),
         )?;
-        update_strut(
-            self.conn, self.atoms, self.win, geometry.x, geometry.y, width, bar_height,
-        )?;
+        let spec = dock_spec(geometry.x, geometry.y, width, bar_height);
+        write_dock_properties(self.conn, self.win, &spec.strut_properties())?;
         self.conn.flush()?;
         Ok(())
-    }
-}
-
-fn pointer_action(button: u8) -> Option<PointerAction> {
-    match button {
-        1 => Some(PointerAction::Primary),
-        3 => Some(PointerAction::Secondary),
-        4 => Some(PointerAction::ScrollUp),
-        5 => Some(PointerAction::ScrollDown),
-        _ => None,
     }
 }
 
@@ -413,7 +322,7 @@ fn handle_x_event(
             ));
         }
         x11rb::protocol::Event::ButtonPress(event) => {
-            if let Some(input) = pointer_action(event.detail) {
+            if let Some(input) = PointerAction::from_x11_button(event.detail) {
                 let update = bar.pointer_action(
                     Point::new(f32::from(event.event_x), f32::from(event.event_y)),
                     input,
@@ -463,62 +372,20 @@ fn drain_x_events(
     Ok(())
 }
 
-fn create_epoll() -> io::Result<OwnedFd> {
-    let raw_fd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
-    if raw_fd < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(unsafe { OwnedFd::from_raw_fd(raw_fd) })
-    }
-}
-
-fn epoll_add(epoll: RawFd, descriptor: RawFd, token: u64) -> io::Result<()> {
-    let mut event = libc::epoll_event {
-        events: libc::EPOLLIN as u32,
-        u64: token,
-    };
-    let result = unsafe { libc::epoll_ctl(epoll, libc::EPOLL_CTL_ADD, descriptor, &mut event) };
-    if result < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-fn epoll_wait(epoll: RawFd, events: &mut [libc::epoll_event]) -> io::Result<usize> {
-    loop {
-        let ready = unsafe {
-            libc::epoll_wait(
-                epoll,
-                events.as_mut_ptr(),
-                i32::try_from(events.len()).unwrap_or(i32::MAX),
-                -1,
-            )
-        };
-        if ready >= 0 {
-            return Ok(ready as usize);
-        }
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::EINTR) {
-            return Err(error);
-        }
-    }
-}
-
 fn sync_notifier(
     slot: &mut TransportNotifierSlot,
     runtime: &BarRuntime,
-    epoll: RawFd,
+    epoll: &Epoll,
 ) -> Result<()> {
     if let NotifierChange::Replaced { fd, .. } = slot.sync(runtime)? {
-        epoll_add(epoll, fd.as_raw_fd(), SHARED_TOKEN)?;
+        epoll.add(fd, SHARED_TOKEN)?;
     }
     Ok(())
 }
 
 fn main() -> Result<()> {
     let shared_path = env::args().skip(1).last().unwrap_or_default();
-    xbar_core::logging::init("x11rb_bar", &shared_path)?;
+    xbar_core::logging::init(BAR_NAME, &shared_path)?;
 
     let runtime = if shared_path.is_empty() {
         BarRuntime::new(ModelConfig::default())?
@@ -573,8 +440,8 @@ fn main() -> Result<()> {
             ),
     )?;
 
-    let atoms = intern_atoms(&conn)?;
-    set_dock_properties(&conn, &atoms, win, u32::from(current_width), current_height)?;
+    let spec = dock_spec(0, 0, u32::from(current_width), current_height);
+    write_dock_properties(&conn, win, &spec.properties())?;
     conn.map_window(win)?;
     conn.change_window_attributes(
         win,
@@ -585,10 +452,9 @@ fn main() -> Result<()> {
     let window = WindowAdapter {
         conn: &conn,
         screen,
-        atoms: &atoms,
         win,
         bar_height: Cell::new(bar_height),
-        process_actions: RefCell::new(ProcessActionHandler::default()),
+        effects: RefCell::new(EffectRouter::default()),
     };
     let mut back = BackBuffer::new(
         window.conn,
@@ -613,20 +479,18 @@ fn main() -> Result<()> {
     )?;
 
     let timer = AlignedTimer::new(Duration::from_secs(1))?;
-    let epoll = create_epoll()?;
-    epoll_add(epoll.as_raw_fd(), window.conn.as_fd().as_raw_fd(), X_TOKEN)?;
-    epoll_add(epoll.as_raw_fd(), timer.as_raw_fd(), TIMER_TOKEN)?;
+    let mut epoll = Epoll::new()?;
+    epoll.add(window.conn.as_fd(), X_TOKEN)?;
+    epoll.add(timer.as_fd(), TIMER_TOKEN)?;
     let mut notifier_slot = TransportNotifierSlot::new(true);
-    sync_notifier(&mut notifier_slot, bar.runtime(), epoll.as_raw_fd())?;
+    sync_notifier(&mut notifier_slot, bar.runtime(), &epoll)?;
 
-    const EVENT_CAPACITY: usize = 32;
-    let mut events: [libc::epoll_event; EVENT_CAPACITY] =
-        std::array::from_fn(|_| libc::epoll_event { events: 0, u64: 0 });
-
+    let mut ready_tokens = Vec::new();
     loop {
-        let ready = epoll_wait(epoll.as_raw_fd(), &mut events)?;
-        for event in events.iter().take(ready) {
-            match event.u64 {
+        ready_tokens.clear();
+        ready_tokens.extend(epoll.wait()?);
+        for token in &ready_tokens {
+            match *token {
                 X_TOKEN => drain_x_events(
                     &cairo_xcb,
                     &window,
@@ -641,7 +505,7 @@ fn main() -> Result<()> {
                         let mut update = bar.tick();
                         update.merge(bar.poll_transport());
                         let needs_redraw = window.apply_runtime_update(update)?;
-                        sync_notifier(&mut notifier_slot, bar.runtime(), epoll.as_raw_fd())?;
+                        sync_notifier(&mut notifier_slot, bar.runtime(), &epoll)?;
                         if needs_redraw {
                             redraw(
                                 &cairo_xcb,
@@ -660,7 +524,7 @@ fn main() -> Result<()> {
                         notifier.drain()?;
                         let update = bar.poll_transport();
                         let needs_redraw = window.apply_runtime_update(update)?;
-                        sync_notifier(&mut notifier_slot, bar.runtime(), epoll.as_raw_fd())?;
+                        sync_notifier(&mut notifier_slot, bar.runtime(), &epoll)?;
                         if needs_redraw {
                             redraw(
                                 &cairo_xcb,
