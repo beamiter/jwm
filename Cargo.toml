@@ -5,8 +5,9 @@ edition = "2024"
 
 [dependencies]
 libc = "0.2.186"
-xbar_core = { git = "https://github.com/beamiter/xbar_core.git", rev = "f0912c8d981af251e56b0a18a3432090fd6ba6ad", default-features = false, features = [
+xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.6.0", default-features = false, features = [
     "clock-chrono",
+    "config-toml",
     "logging-flexi",
     "provider-alsa",
     "provider-battery-sysfs",
@@ -16,7 +17,7 @@ xbar_core = { git = "https://github.com/beamiter/xbar_core.git", rev = "f0912c8d
     "runtime-linux",
     "transport-shared",
 ] }
-xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", rev = "f0912c8d981af251e56b0a18a3432090fd6ba6ad" }
+xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.6.0" }
 softbuffer = "0.4.8"
 log = "0.4.33"
 anyhow = "1.0.103"
