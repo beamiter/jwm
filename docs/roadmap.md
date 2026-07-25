@@ -237,6 +237,27 @@ Target profiles should eventually include:
 - nested Wayland development backends;
 - optional portal and media integrations.
 
+Started: `backend-x11rb`, `backend-xcb`, `backend-wayland-udev`, and
+`backend-wayland-nested` are additive features over internal
+`x11-backends` / `wayland-backends` umbrellas; the default set enables
+all four, so a plain build is byte-for-byte the same universal binary
+with runtime `--backend` selection. Requesting an uncompiled backend
+fails with an error naming the missing feature and the compiled roster
+(`application::compiled_backends`). Backend-specific dependencies are
+optional and feature-wired — the X11 umbrella carries Xlib/GLX and the
+Present protocol types, each transport its connection crate, and
+smithay's per-backend features split between the udev and nested
+profiles — so an X11-only build resolves 225 crates instead of 362 and
+never compiles Smithay, winit, or the KMS stack. Preparatory moves: the
+pure colour-parameter policy left the Wayland protocol module for
+`backend::color_policy` (protocol enum values pinned by a parity test),
+and the udev session backend / DRM compositor / KMS colour pipeline now
+gate separately from the Smithay protocol state shared with the nested
+backends. CI checks every single-backend profile plus the empty set with
+all targets; each compiles warning-free. Remaining: accurate capability
+reporting in doctor/health surfaces, and the optional portal/media
+integration profile.
+
 Exit criteria: each supported profile compiles in CI, reports its capabilities
 accurately, and fails clearly when a disabled backend is requested.
 
