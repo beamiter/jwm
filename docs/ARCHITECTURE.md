@@ -54,7 +54,7 @@ WM snapshot ──────────────────────�
 - `config`: optional validated TOML appearance/theme configuration shared by
   every bar; invalid values are startup errors, never silent fallbacks.
 - provider modules: independently selected ALSA, sysinfo CPU/memory,
-  brightnessctl, and battery-sysfs adapters.
+  brightnessctl, battery-sysfs, and network-sysfs adapters.
 - `transport`: current JWM shared-memory adapter and queue outcome mapping.
 - `notifier`, `wake`, and `linux`: reconnect-aware owned eventfd/timerfd,
   an owned token-based `Epoll`, and event-loop wake primitives. No public API

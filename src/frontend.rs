@@ -80,8 +80,11 @@ impl FrontendPartitions {
     pub const SYSTEM: u8 = 1 << 1;
     pub const AUDIO: u8 = 1 << 2;
     pub const BRIGHTNESS: u8 = 1 << 3;
+    pub const NETWORK: u8 = 1 << 4;
+    pub const MEDIA: u8 = 1 << 5;
 
-    const KNOWN: u8 = Self::MONITOR | Self::SYSTEM | Self::AUDIO | Self::BRIGHTNESS;
+    const KNOWN: u8 =
+        Self::MONITOR | Self::SYSTEM | Self::AUDIO | Self::BRIGHTNESS | Self::NETWORK | Self::MEDIA;
     const MONITOR_DIRTY: DirtyBits = DirtyBits::new(
         DirtyBits::MONITOR_CHANGED
             | DirtyBits::GEOMETRY_CHANGED
@@ -132,6 +135,12 @@ impl FrontendPartitions {
         }
         if changes.contains(DirtyBits::BRIGHTNESS_CHANGED) {
             bits |= Self::BRIGHTNESS;
+        }
+        if changes.contains(DirtyBits::NETWORK_CHANGED) {
+            bits |= Self::NETWORK;
+        }
+        if changes.contains(DirtyBits::MEDIA_CHANGED) {
+            bits |= Self::MEDIA;
         }
         Self(bits)
     }
@@ -421,6 +430,12 @@ pub fn snapshot_changes(previous: &BarSnapshot, current: &BarSnapshot) -> DirtyB
     }
     if previous.battery != current.battery {
         changes.set(DirtyBits::BATTERY_CHANGED);
+    }
+    if previous.network != current.network {
+        changes.set(DirtyBits::NETWORK_CHANGED);
+    }
+    if previous.media != current.media {
+        changes.set(DirtyBits::MEDIA_CHANGED);
     }
 
     changes

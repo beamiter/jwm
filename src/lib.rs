@@ -24,6 +24,8 @@ pub mod linux;
 #[cfg(feature = "logging-flexi")]
 pub mod logging;
 pub mod model;
+#[cfg(feature = "provider-network-sysfs")]
+pub mod network;
 #[cfg(all(feature = "runtime-linux", feature = "transport-shared"))]
 pub mod notifier;
 pub mod placement;
@@ -43,8 +45,8 @@ pub use controls::{
 pub use display::{
     BatteryThresholds, IconSet, LayoutCatalogEntry, MetricTone, TagFallback, ThresholdError,
     UsageThresholds, VolumeLevel, VolumeThresholds, battery_tone, canonical_layout_catalog,
-    canonical_layout_id, canonical_layout_symbol, compact_monitor_label, format_bytes, usage_tone,
-    volume_level, volume_level_for_device,
+    canonical_layout_id, canonical_layout_symbol, compact_monitor_label, format_bytes,
+    format_transfer_rate, usage_tone, volume_level, volume_level_for_device,
 };
 pub use frontend::{
     ActionRequest, ActionRequestError, FrontendEnvelope, FrontendPartitions, FrontendSession,
@@ -52,9 +54,9 @@ pub use frontend::{
 };
 pub use model::{
     AudioDeviceInfo, AudioState, BarEffect, BarEvent, BarModel, BarSnapshot, BarView, BatteryState,
-    BrightnessState, ClockState, LayoutId, ModelConfig, ModelError, ModelUpdate, MonitorGeometry,
-    MonitorId, Percent, PercentError, SystemDetails, SystemLoadAverage, SystemState, TagId,
-    TagState, UserAction, WmCommand, WmSnapshot,
+    BrightnessState, ClockState, LayoutId, MediaPlayback, MediaState, ModelConfig, ModelError,
+    ModelUpdate, MonitorGeometry, MonitorId, NetworkState, Percent, PercentError, SystemDetails,
+    SystemLoadAverage, SystemState, TagId, TagState, UserAction, WmCommand, WmSnapshot,
 };
 pub use placement::{
     BarPlacement, DockProperty, DockPropertyValue, DockWindowSpec, EwmhStrut, LayerShellAnchors,
@@ -117,6 +119,8 @@ impl DirtyBits {
     pub const BATTERY_CHANGED: u32 = 1 << 8;
     pub const CLIENT_CHANGED: u32 = 1 << 9;
     pub const GEOMETRY_CHANGED: u32 = 1 << 10;
+    pub const NETWORK_CHANGED: u32 = 1 << 11;
+    pub const MEDIA_CHANGED: u32 = 1 << 12;
 
     const KNOWN: u32 = Self::TIME_CHANGED
         | Self::HOVER_CHANGED
@@ -128,7 +132,9 @@ impl DirtyBits {
         | Self::BRIGHTNESS_CHANGED
         | Self::BATTERY_CHANGED
         | Self::CLIENT_CHANGED
-        | Self::GEOMETRY_CHANGED;
+        | Self::GEOMETRY_CHANGED
+        | Self::NETWORK_CHANGED
+        | Self::MEDIA_CHANGED;
 
     #[must_use]
     pub const fn new(bits: u32) -> Self {

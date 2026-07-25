@@ -32,6 +32,7 @@ pub enum RuntimeAdapter {
     System,
     Brightness,
     Battery,
+    Network,
     Clock,
 }
 
@@ -43,6 +44,7 @@ impl fmt::Display for RuntimeAdapter {
             Self::System => "system provider",
             Self::Brightness => "brightness provider",
             Self::Battery => "battery provider",
+            Self::Network => "network provider",
             Self::Clock => "clock provider",
         })
     }
@@ -530,6 +532,8 @@ pub struct BarRuntime {
     brightness: crate::brightness::BrightnessManager,
     #[cfg(feature = "provider-battery-sysfs")]
     battery: crate::battery::BatteryManager,
+    #[cfg(feature = "provider-network-sysfs")]
+    network: crate::network::NetworkMonitor,
 }
 
 impl Default for BarRuntime {
@@ -558,6 +562,8 @@ impl BarRuntime {
             brightness: crate::brightness::BrightnessManager::new(),
             #[cfg(feature = "provider-battery-sysfs")]
             battery: crate::battery::BatteryManager::new(),
+            #[cfg(feature = "provider-network-sysfs")]
+            network: crate::network::NetworkMonitor::new(),
         })
     }
 
@@ -808,6 +814,21 @@ impl BarRuntime {
                 });
             }
             update.merge(self.sync_battery());
+        }
+
+        #[cfg(feature = "provider-network-sysfs")]
+        match self.network.poll() {
+            Ok(state) => update.merge(self.apply_event(BarEvent::Network(state))),
+            Err(error) => {
+                update.issues.push(RuntimeIssue::AdapterFailed {
+                    adapter: RuntimeAdapter::Network,
+                    operation: "poll",
+                    message: error.to_string(),
+                });
+                update.merge(
+                    self.apply_event(BarEvent::Network(crate::NetworkState::disconnected())),
+                );
+            }
         }
 
         update

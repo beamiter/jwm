@@ -1,6 +1,6 @@
 [package]
 name = "xbar_core"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 description = "Backend-neutral status-bar model, frontend projection, runtime, and explicit adapters"
 repository = "https://github.com/beamiter/xbar_core"
@@ -17,6 +17,7 @@ logging-flexi = ["dep:anyhow", "dep:flexi_logger", "dep:log"]
 provider-alsa = ["dep:alsa", "dep:anyhow", "dep:log"]
 provider-battery-sysfs = []
 provider-brightnessctl = ["dep:log"]
+provider-network-sysfs = []
 provider-system = ["dep:sysinfo"]
 render-cairo = ["dep:anyhow", "dep:cairo-rs", "dep:pango", "dep:pangocairo"]
 runtime-linux = ["dep:libc", "dep:log"]

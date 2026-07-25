@@ -389,6 +389,12 @@ pub fn format_bytes(bytes: u64) -> String {
     format!("{value:.1} {}", UNITS[unit])
 }
 
+/// Compact per-second transfer rate, e.g. `1.5MiB/s`.
+#[must_use]
+pub fn format_transfer_rate(bytes_per_second: u64) -> String {
+    format!("{}/s", format_bytes(bytes_per_second))
+}
+
 /// Stable compact fallback for an arbitrary (including negative) monitor ID.
 #[must_use]
 pub fn compact_monitor_label(monitor: MonitorId) -> String {

@@ -1,6 +1,6 @@
 # xbar_core
 
-`xbar_core` 0.6 is the backend-neutral status-bar kernel shared by the XCB,
+`xbar_core` 0.7 is the backend-neutral status-bar kernel shared by the XCB,
 x11rb, winit, tao, wgpu, pixels, softbuffer, toolkit, and web bars in JWM.
 
 The default build has no window-system, Cairo, ALSA, sysfs, logging, or shared
@@ -13,7 +13,7 @@ dependencies cannot leak into the portable kernel. Current adapters:
 `xbar_linux_actions` (process effects, checked command output, and the
 standard `EffectRouter` host route), `xbar_present_wgpu` (wgpu surface
 lifecycle and damage-aware CPU-frame presentation), `xbar_dbus_providers`
-(UPower battery aggregation over the system bus), and `xbar_tauri` (the
+(UPower battery and MPRIS now-playing over D-Bus), and `xbar_tauri` (the
 complete webview bridge). Releases are tagged; consumers pin `tag = "vX.Y.Z"`.
 
 ## Architecture
@@ -153,6 +153,7 @@ if let Some(envelope) = cursor.update_frame(&frame) {
 | `provider-alsa` | ALSA audio manager/runtime adapter |
 | `provider-system` | sysinfo CPU/memory provider (no battery dependency) |
 | `provider-brightnessctl` | brightnessctl provider |
+| `provider-network-sysfs` | dependency-free primary-interface throughput provider |
 | `provider-battery-sysfs` | independent deterministic multi-battery sysfs provider |
 | `transport-shared` | typed JWM transport plus core-managed bounded recovery |
 | `runtime-linux` | `AlignedTimer`, owned token-based `Epoll`, reconnect-aware notifier ownership, and owned wake forwarding |
@@ -209,8 +210,9 @@ cargo doc --no-default-features --no-deps
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for module ownership,
 [docs/CONSUMER-MATRIX.md](docs/CONSUMER-MATRIX.md) for every JWM bar family,
 [docs/COMPANION-CRATES.md](docs/COMPANION-CRATES.md) for adapter boundaries,
-and [docs/MIGRATION-0.6.md](docs/MIGRATION-0.6.md) for presentation/config adoption
-([0.5 host-integration](docs/MIGRATION-0.5.md),
+and [docs/MIGRATION-0.7.md](docs/MIGRATION-0.7.md) for the network/media states
+([0.6 presentation/config](docs/MIGRATION-0.6.md),
+[0.5 host-integration](docs/MIGRATION-0.5.md),
 [0.4 projection/bridge](docs/MIGRATION-0.4.md), and
 [0.3 lifecycle](docs/MIGRATION-0.3.md) notes remain relevant).
 

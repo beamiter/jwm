@@ -476,6 +476,157 @@ impl BatteryState {
     }
 }
 
+/// Aggregate throughput of the host's primary network interface.
+///
+/// Rates are unavailable (`None`) until a provider has observed two samples;
+/// they are never displayed as a healthy zero.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct NetworkState {
+    /// Primary interface name; `None` while disconnected.
+    pub interface: Option<String>,
+    pub connected: bool,
+    /// Receive rate in bytes per second over the previous sample window.
+    pub rx_bytes_per_second: Option<u64>,
+    /// Transmit rate in bytes per second over the previous sample window.
+    pub tx_bytes_per_second: Option<u64>,
+}
+
+impl<'de> Deserialize<'de> for NetworkState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireState {
+            interface: Option<String>,
+            connected: bool,
+            rx_bytes_per_second: Option<u64>,
+            tx_bytes_per_second: Option<u64>,
+        }
+
+        let wire = WireState::deserialize(deserializer)?;
+        Ok(if wire.connected {
+            Self::connected(
+                wire.interface.unwrap_or_default(),
+                wire.rx_bytes_per_second,
+                wire.tx_bytes_per_second,
+            )
+        } else {
+            Self::disconnected()
+        })
+    }
+}
+
+impl NetworkState {
+    #[must_use]
+    pub const fn disconnected() -> Self {
+        Self {
+            interface: None,
+            connected: false,
+            rx_bytes_per_second: None,
+            tx_bytes_per_second: None,
+        }
+    }
+
+    #[must_use]
+    pub fn connected(
+        interface: impl Into<String>,
+        rx_bytes_per_second: Option<u64>,
+        tx_bytes_per_second: Option<u64>,
+    ) -> Self {
+        Self {
+            interface: Some(interface.into()),
+            connected: true,
+            rx_bytes_per_second,
+            tx_bytes_per_second,
+        }
+    }
+
+    #[must_use]
+    pub fn normalized(self) -> Self {
+        if self.connected {
+            Self::connected(
+                self.interface.unwrap_or_default(),
+                self.rx_bytes_per_second,
+                self.tx_bytes_per_second,
+            )
+        } else {
+            Self::disconnected()
+        }
+    }
+}
+
+/// Media playback status mirroring the MPRIS `PlaybackStatus` values.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MediaPlayback {
+    #[default]
+    Stopped,
+    Paused,
+    Playing,
+}
+
+/// Now-playing state from a desktop media player.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct MediaState {
+    pub playback: MediaPlayback,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    /// Player identity, e.g. `spotify` or `mpv`.
+    pub player: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for MediaState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireState {
+            playback: MediaPlayback,
+            title: Option<String>,
+            artist: Option<String>,
+            player: Option<String>,
+        }
+
+        let wire = WireState::deserialize(deserializer)?;
+        Ok(Self {
+            playback: wire.playback,
+            title: wire.title,
+            artist: wire.artist,
+            player: wire.player,
+        }
+        .normalized())
+    }
+}
+
+impl MediaState {
+    #[must_use]
+    pub const fn inactive() -> Self {
+        Self {
+            playback: MediaPlayback::Stopped,
+            title: None,
+            artist: None,
+            player: None,
+        }
+    }
+
+    /// Whether a player is meaningfully present: stopped state with no track
+    /// metadata reduces to [`MediaState::inactive`].
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.playback != MediaPlayback::Stopped || self.title.is_some()
+    }
+
+    #[must_use]
+    pub fn normalized(self) -> Self {
+        if self.is_active() {
+            self
+        } else {
+            Self::inactive()
+        }
+    }
+}
+
 /// Runtime-neutral behavior configuration. Visual labels and layout belong to
 /// the renderer configuration, not to the model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -571,6 +722,8 @@ pub enum BarEvent {
     SystemDetails(SystemDetails),
     Brightness(BrightnessState),
     Battery(BatteryState),
+    Network(NetworkState),
+    Media(MediaState),
     User(UserAction),
 }
 
@@ -680,6 +833,8 @@ pub struct BarView<'a> {
     pub system_details: &'a SystemDetails,
     pub brightness: BrightnessState,
     pub battery: BatteryState,
+    pub network: &'a NetworkState,
+    pub media: &'a MediaState,
 }
 
 /// An owned, serializable projection of [`BarModel`].
@@ -706,6 +861,8 @@ pub struct BarSnapshot {
     pub system_details: SystemDetails,
     pub brightness: BrightnessState,
     pub battery: BatteryState,
+    pub network: NetworkState,
+    pub media: MediaState,
 }
 
 impl BarSnapshot {
@@ -730,6 +887,8 @@ impl BarSnapshot {
             system_details: &self.system_details,
             brightness: self.brightness,
             battery: self.battery,
+            network: &self.network,
+            media: &self.media,
         }
     }
 }
@@ -757,6 +916,8 @@ pub struct BarModel {
     system_details: SystemDetails,
     brightness: BrightnessState,
     battery: BatteryState,
+    network: NetworkState,
+    media: MediaState,
 }
 
 impl Default for BarModel {
@@ -787,6 +948,8 @@ impl BarModel {
             system_details: SystemDetails::default(),
             brightness: BrightnessState::default(),
             battery: BatteryState::default(),
+            network: NetworkState::default(),
+            media: MediaState::default(),
             config,
         })
     }
@@ -821,6 +984,8 @@ impl BarModel {
             system_details: &self.system_details,
             brightness: self.brightness,
             battery: self.battery,
+            network: &self.network,
+            media: &self.media,
         }
     }
 
@@ -846,6 +1011,8 @@ impl BarModel {
             system_details: view.system_details.clone(),
             brightness: view.brightness,
             battery: view.battery,
+            network: view.network.clone(),
+            media: view.media.clone(),
         }
     }
 
@@ -861,6 +1028,8 @@ impl BarModel {
             BarEvent::SystemDetails(details) => Ok(self.replace_system_details(details)),
             BarEvent::Brightness(brightness) => Ok(self.replace_brightness(brightness)),
             BarEvent::Battery(battery) => Ok(self.replace_battery(battery)),
+            BarEvent::Network(network) => Ok(self.replace_network(network)),
+            BarEvent::Media(media) => Ok(self.replace_media(media)),
             BarEvent::User(action) => self.update_user(action),
         }
     }
@@ -1010,6 +1179,20 @@ impl BarModel {
         let changed = self.battery != battery;
         self.battery = battery;
         Self::changed(DirtyBits::BATTERY_CHANGED, changed)
+    }
+
+    fn replace_network(&mut self, network: NetworkState) -> ModelUpdate {
+        let network = network.normalized();
+        let changed = self.network != network;
+        self.network = network;
+        Self::changed(DirtyBits::NETWORK_CHANGED, changed)
+    }
+
+    fn replace_media(&mut self, media: MediaState) -> ModelUpdate {
+        let media = media.normalized();
+        let changed = self.media != media;
+        self.media = media;
+        Self::changed(DirtyBits::MEDIA_CHANGED, changed)
     }
 
     fn update_user(&mut self, action: UserAction) -> Result<ModelUpdate, ModelError> {
@@ -1539,6 +1722,64 @@ mod tests {
             BatteryState::from_f64(Some(-1.0), false, true),
             Err(PercentError::OutOfRange)
         );
+    }
+
+    #[test]
+    fn network_and_media_events_normalize_and_flag_changes() {
+        let mut model = BarModel::default();
+
+        let update = model
+            .update(BarEvent::Network(NetworkState::connected(
+                "wlan0",
+                Some(1024),
+                None,
+            )))
+            .unwrap();
+        assert!(update.dirty.contains(DirtyBits::NETWORK_CHANGED));
+        assert_eq!(model.view().network.interface.as_deref(), Some("wlan0"));
+        assert_eq!(model.view().network.rx_bytes_per_second, Some(1024));
+        assert_eq!(model.view().network.tx_bytes_per_second, None);
+
+        // A disconnected report clears stale interface and rate values.
+        let update = model
+            .update(BarEvent::Network(NetworkState {
+                interface: Some("stale".to_owned()),
+                connected: false,
+                rx_bytes_per_second: Some(5),
+                tx_bytes_per_second: Some(5),
+            }))
+            .unwrap();
+        assert!(update.dirty.contains(DirtyBits::NETWORK_CHANGED));
+        assert_eq!(*model.view().network, NetworkState::disconnected());
+
+        let update = model
+            .update(BarEvent::Network(NetworkState::disconnected()))
+            .unwrap();
+        assert!(update.dirty.is_empty());
+
+        let playing = MediaState {
+            playback: MediaPlayback::Playing,
+            title: Some("track".to_owned()),
+            artist: None,
+            player: Some("mpv".to_owned()),
+        };
+        let update = model.update(BarEvent::Media(playing.clone())).unwrap();
+        assert!(update.dirty.contains(DirtyBits::MEDIA_CHANGED));
+        assert_eq!(*model.view().media, playing);
+        assert!(model.view().media.is_active());
+
+        // Stopped with no track metadata reduces to the inactive state even
+        // when a player identity lingers.
+        let update = model
+            .update(BarEvent::Media(MediaState {
+                playback: MediaPlayback::Stopped,
+                title: None,
+                artist: Some("ghost".to_owned()),
+                player: Some("mpv".to_owned()),
+            }))
+            .unwrap();
+        assert!(update.dirty.contains(DirtyBits::MEDIA_CHANGED));
+        assert_eq!(*model.view().media, MediaState::inactive());
     }
 
     #[test]

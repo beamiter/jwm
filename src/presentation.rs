@@ -202,6 +202,8 @@ pub enum NodeId {
     Brightness,
     Battery,
     Audio,
+    Network,
+    Media,
     Theme,
     Screenshot,
     Clock,
@@ -571,6 +573,10 @@ pub struct PresentationLabels {
     pub brightness: String,
     pub battery: String,
     pub charging: String,
+    pub network: String,
+    pub network_offline: String,
+    pub media_playing: String,
+    pub media_paused: String,
 }
 
 impl Default for PresentationLabels {
@@ -588,6 +594,10 @@ impl Default for PresentationLabels {
             brightness: "🔆".to_owned(),
             battery: "🔋".to_owned(),
             charging: "⚡".to_owned(),
+            network: "📶".to_owned(),
+            network_offline: "📵".to_owned(),
+            media_playing: "▶".to_owned(),
+            media_paused: "⏸".to_owned(),
         }
     }
 }
@@ -607,6 +617,10 @@ impl From<&IconSet> for PresentationLabels {
             brightness: icons.brightness.clone(),
             battery: icons.battery.clone(),
             charging: icons.battery_charging.clone(),
+            network: "\u{f05a9}".to_owned(),
+            network_offline: "\u{f05aa}".to_owned(),
+            media_playing: "\u{f040a}".to_owned(),
+            media_paused: "\u{f03e4}".to_owned(),
         }
     }
 }
@@ -627,6 +641,8 @@ pub struct PresentationVisibility {
     pub audio: bool,
     pub brightness: bool,
     pub battery: bool,
+    pub network: bool,
+    pub media: bool,
     pub theme: bool,
     pub screenshot: bool,
     pub clock: bool,
@@ -641,6 +657,8 @@ impl Default for PresentationVisibility {
             audio: true,
             brightness: true,
             battery: true,
+            network: true,
+            media: true,
             theme: true,
             screenshot: true,
             clock: true,
@@ -1267,7 +1285,11 @@ mod tests {
     }
 
     fn view<'a>(tags: &'a [TagState], client_name: &'a str) -> BarView<'a> {
+        static NETWORK: crate::NetworkState = crate::NetworkState::disconnected();
+        static MEDIA: crate::MediaState = crate::MediaState::inactive();
         BarView {
+            network: &NETWORK,
+            media: &MEDIA,
             wm_available: true,
             wm_sequence: Some(1),
             tags,
@@ -1421,6 +1443,8 @@ mod tests {
                 audio: false,
                 brightness: false,
                 battery: false,
+                network: false,
+                media: false,
                 theme: false,
                 screenshot: false,
                 clock: false,

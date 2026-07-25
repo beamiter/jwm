@@ -53,10 +53,10 @@ consumers share one presenter. It never renders scenes or owns windows.
 ### `xbar_dbus_providers`
 
 Owns D-Bus service policy (bus names, object paths, service quirks) and
-translates desktop services into existing model values. The first provider
-reduces UPower's display device to `BatteryState`. Providers that need new
-semantic state (network, MPRIS) first grow that state in the core model, then
-land their adapter here.
+translates desktop services into model values. `UPowerBatteryProvider`
+reduces UPower's display device to `BatteryState`; `MprisMediaProvider` (0.2)
+reduces the first MPRIS player on the session bus to `MediaState`. Hosts feed
+polled media state through `BarEvent::Media`.
 
 ### `xbar_tauri`
 

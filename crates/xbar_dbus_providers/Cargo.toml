@@ -1,6 +1,6 @@
 [package]
 name = "xbar_dbus_providers"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "D-Bus desktop-service providers for xbar_core hosts"
 repository = "https://github.com/beamiter/xbar_core"

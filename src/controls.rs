@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ThemeMode;
 use crate::display::{MetricTone, VolumeLevel};
-use crate::model::{BarView, Percent, TagId, UserAction};
+use crate::model::{BarView, MediaPlayback, MediaState, NetworkState, Percent, TagId, UserAction};
 use crate::presentation::{NodeId, PresentationConfig};
 
 /// Text used when a visible metric has no value.
@@ -18,15 +18,17 @@ pub const UNKNOWN_VALUE: &str = "--";
 ///
 /// The first visible entry is anchored at the right edge. Hidden entries are
 /// omitted without changing the relative order of the remaining controls.
-pub const STATUS_ORDER_RIGHT_TO_LEFT: [NodeId; 9] = [
+pub const STATUS_ORDER_RIGHT_TO_LEFT: [NodeId; 11] = [
     NodeId::Clock,
     NodeId::Screenshot,
     NodeId::Theme,
     NodeId::Battery,
     NodeId::Brightness,
     NodeId::Audio,
+    NodeId::Network,
     NodeId::Memory,
     NodeId::Cpu,
+    NodeId::Media,
     NodeId::Monitor,
 ];
 
@@ -365,6 +367,26 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
             },
         ));
     }
+    if visibility.network {
+        let icon = if view.network.connected {
+            labels.network.clone()
+        } else {
+            labels.network_offline.clone()
+        };
+        status.push(
+            control(
+                NodeId::Network,
+                icon,
+                network_value(view.network),
+                (!view.network.connected).then_some(MetricTone::Unavailable),
+                None,
+                None,
+                ControlState::default(),
+                InputBindings::default(),
+            )
+            .with_availability(view.network.connected),
+        );
+    }
     if visibility.system {
         status.push(control(
             NodeId::Memory,
@@ -383,6 +405,22 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
             Some(config.usage_thresholds.tone(view.system.cpu_percent)),
             None,
             view.system.cpu_percent,
+            ControlState::default(),
+            InputBindings::default(),
+        ));
+    }
+    if visibility.media && view.media.is_active() {
+        let icon = match view.media.playback {
+            MediaPlayback::Playing => labels.media_playing.clone(),
+            MediaPlayback::Paused | MediaPlayback::Stopped => labels.media_paused.clone(),
+        };
+        status.push(control(
+            NodeId::Media,
+            icon,
+            media_value(view.media),
+            None,
+            None,
+            None,
             ControlState::default(),
             InputBindings::default(),
         ));
@@ -436,6 +474,32 @@ fn control(
     }
 }
 
+/// `↓rate ↑rate` with explicit unknowns; rates never display as a healthy 0.
+fn network_value(network: &NetworkState) -> String {
+    if !network.connected {
+        return UNKNOWN_VALUE.to_owned();
+    }
+    let rate = |value: Option<u64>| {
+        value.map_or_else(
+            || UNKNOWN_VALUE.to_owned(),
+            crate::display::format_transfer_rate,
+        )
+    };
+    format!(
+        "\u{2193}{} \u{2191}{}",
+        rate(network.rx_bytes_per_second),
+        rate(network.tx_bytes_per_second)
+    )
+}
+
+fn media_value(media: &MediaState) -> String {
+    match (media.title.as_deref(), media.artist.as_deref()) {
+        (Some(title), Some(artist)) => format!("{title} \u{2014} {artist}"),
+        (Some(title), None) => title.to_owned(),
+        (None, _) => String::new(),
+    }
+}
+
 fn percent_value(value: Option<Percent>) -> String {
     value.map_or_else(
         || UNKNOWN_VALUE.to_owned(),
@@ -476,6 +540,8 @@ mod tests {
             system_details: Default::default(),
             brightness: BrightnessState::default(),
             battery: BatteryState::absent(),
+            network: NetworkState::disconnected(),
+            media: MediaState::inactive(),
         }
     }
 
@@ -600,8 +666,62 @@ mod tests {
     }
 
     #[test]
+    fn network_and_media_pills_track_connection_and_activity() {
+        let mut snapshot = snapshot();
+        let config = PresentationConfig::default();
+
+        let projected = PresentationProjector::project(snapshot.view(), &config);
+        let network = projected
+            .status
+            .iter()
+            .find(|control| control.id == NodeId::Network)
+            .expect("network pill is visible by default");
+        assert!(!network.available);
+        assert_eq!(network.value, UNKNOWN_VALUE);
+        assert_eq!(network.tone, Some(MetricTone::Unavailable));
+        assert!(
+            !projected
+                .status
+                .iter()
+                .any(|control| control.id == NodeId::Media),
+            "inactive media must not occupy bar space"
+        );
+
+        snapshot.network = NetworkState::connected("wlan0", Some(1_572_864), None);
+        snapshot.media = MediaState {
+            playback: MediaPlayback::Paused,
+            title: Some("track".to_owned()),
+            artist: Some("artist".to_owned()),
+            player: Some("mpv".to_owned()),
+        };
+        let projected = PresentationProjector::project(snapshot.view(), &config);
+        let network = projected
+            .status
+            .iter()
+            .find(|control| control.id == NodeId::Network)
+            .unwrap();
+        assert!(network.available);
+        assert_eq!(network.value, "\u{2193}1.5 MiB/s \u{2191}--");
+        let media = projected
+            .status
+            .iter()
+            .find(|control| control.id == NodeId::Media)
+            .unwrap();
+        assert_eq!(media.value, "track \u{2014} artist");
+        assert_eq!(media.icon, config.labels.media_paused);
+    }
+
+    #[test]
     fn status_order_visibility_and_client_match_layout_semantics() {
-        let snapshot = snapshot();
+        let mut snapshot = snapshot();
+        // Media only appears while a player is active; activate it so the
+        // complete status order is projected.
+        snapshot.media = MediaState {
+            playback: MediaPlayback::Playing,
+            title: Some("song".to_owned()),
+            artist: Some("artist".to_owned()),
+            player: Some("test".to_owned()),
+        };
         let mut config = PresentationConfig::default();
         let all = PresentationProjector::project(snapshot.view(), &config);
         assert_eq!(
@@ -620,6 +740,8 @@ mod tests {
             audio: true,
             brightness: false,
             battery: true,
+            network: false,
+            media: false,
             theme: false,
             screenshot: true,
             clock: false,

@@ -11,6 +11,7 @@ clock-chrono = ["xbar_core/clock-chrono"]
 provider-alsa = ["xbar_core/provider-alsa"]
 provider-battery-sysfs = ["xbar_core/provider-battery-sysfs"]
 provider-brightnessctl = ["xbar_core/provider-brightnessctl"]
+provider-network-sysfs = ["xbar_core/provider-network-sysfs"]
 provider-system = ["xbar_core/provider-system"]
 
 [dependencies]

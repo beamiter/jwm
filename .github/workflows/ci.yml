@@ -18,10 +18,48 @@ jobs:
       - run: cargo test --no-default-features
       - name: Check every adapter independently
         run: |
-          for feature in clock-chrono logging-flexi provider-alsa provider-battery-sysfs provider-brightnessctl provider-system render-cairo runtime-linux transport-shared; do
+          for feature in clock-chrono config-toml logging-flexi provider-alsa provider-battery-sysfs provider-brightnessctl provider-network-sysfs provider-system render-cairo runtime-linux transport-shared; do
             cargo check --no-default-features --all-targets --features "$feature"
           done
       - run: cargo test --no-default-features --features render-cairo
       - run: cargo test --workspace --all-targets --all-features
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+
+  consumer-smoke:
+    runs-on: ubuntu-latest
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        consumer:
+          - repo: xcb_bar
+            extra: ""
+          - repo: iced_bar
+            extra: ""
+          - repo: gtk_bar
+            extra: "libgtk-4-dev libadwaita-1-dev"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: xbar_core
+      - uses: actions/checkout@v4
+        with:
+          repository: beamiter/${{ matrix.consumer.repo }}
+          path: consumer
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: consumer
+      - name: Install native libraries
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libcairo2-dev libpango1.0-dev ${{ matrix.consumer.extra }}
+      - name: Build the consumer against this core checkout
+        working-directory: consumer
+        run: |
+          mkdir -p .cargo
+          cat >> .cargo/config.toml <<'EOF'
+          [patch."https://github.com/beamiter/xbar_core.git"]
+          xbar_core = { path = "../xbar_core" }
+          xbar_linux_actions = { path = "../xbar_core/crates/xbar_linux_actions" }
+          EOF
+          cargo check
