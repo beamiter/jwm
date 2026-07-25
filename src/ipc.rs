@@ -250,6 +250,8 @@ pub struct RuntimeStatusV1 {
     pub schema_version: u32,
     pub version: String,
     pub backend: String,
+    /// Backends compiled into this binary (Cargo backend-family features).
+    pub compiled_backends: Vec<String>,
     pub uptime_ms: u64,
     pub health: RuntimeHealth,
     pub counts: RuntimeCounts,
@@ -977,6 +979,7 @@ mod tests {
             schema_version: 1,
             version: "0.2.0".into(),
             backend: "wayland-winit".into(),
+            compiled_backends: vec!["wayland-winit".into()],
             uptime_ms: 42,
             health: RuntimeHealth::from_reasons(Vec::new()),
             counts: RuntimeCounts {

@@ -83,6 +83,8 @@ pub struct DoctorSummary {
 pub struct DoctorReport {
     pub schema_version: u32,
     pub backend: String,
+    /// Backends compiled into this binary (Cargo backend-family features).
+    pub compiled_backends: Vec<String>,
     pub status: DoctorStatus,
     pub summary: DoctorSummary,
     pub checks: Vec<DoctorCheck>,
@@ -105,6 +107,10 @@ impl DoctorReport {
         Self {
             schema_version: 1,
             backend: choice.as_str().to_string(),
+            compiled_backends: crate::application::compiled_backends()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
             status,
             summary,
             checks,
@@ -156,6 +162,7 @@ pub fn diagnose(choice: BackendChoice) -> DoctorReport {
 
 fn diagnose_with_inputs(choice: BackendChoice, inputs: &DoctorInputs) -> DoctorReport {
     let mut checks = Vec::new();
+    checks.push(check_backend_compiled(choice, choice.is_compiled()));
     checks.extend(check_config(&inputs.config_path, choice));
     checks.push(check_status_bar(
         &inputs.config_path,
@@ -170,6 +177,38 @@ fn diagnose_with_inputs(choice: BackendChoice, inputs: &DoctorInputs) -> DoctorR
     checks.push(check_dbus(inputs.dbus_session_bus_address.as_deref()));
     checks.push(check_jwm_tool(inputs.path.as_deref()));
     DoctorReport::from_checks(choice, checks)
+}
+
+/// Whether the selected backend is compiled into this binary. `compiled` is
+/// passed explicitly so both branches stay testable under any feature set.
+fn check_backend_compiled(choice: BackendChoice, compiled: bool) -> DoctorCheck {
+    if compiled {
+        DoctorCheck::new(
+            DoctorStatus::Pass,
+            "backend.compiled",
+            "The selected backend is compiled into this binary",
+            Some(format!(
+                "compiled backends: {}",
+                crate::application::compiled_backends().join(", ")
+            )),
+            None,
+        )
+    } else {
+        DoctorCheck::new(
+            DoctorStatus::Error,
+            "backend.compiled",
+            "The selected backend is not compiled into this binary",
+            Some(format!(
+                "requested: {}; compiled backends: {}",
+                choice.as_str(),
+                crate::application::compiled_backends().join(", ")
+            )),
+            Some(format!(
+                "Rebuild with `cargo build --features {}` or choose a compiled backend",
+                choice.feature_name()
+            )),
+        )
+    }
 }
 
 fn check_config(path: &Path, choice: BackendChoice) -> Vec<DoctorCheck> {
@@ -840,6 +879,7 @@ mod tests {
                 .map(|check| check.id.as_str())
                 .collect::<Vec<_>>(),
             vec![
+                "backend.compiled",
                 "config.file",
                 "config.validation",
                 "command.status_bar",
@@ -849,5 +889,22 @@ mod tests {
                 "command.jwm_tool",
             ]
         );
+        // The report advertises the compile-time roster alongside the checks.
+        assert_eq!(
+            report.compiled_backends,
+            crate::application::compiled_backends()
+        );
+    }
+
+    #[test]
+    fn an_uncompiled_backend_fails_the_compiled_check_with_the_feature_hint() {
+        let check = check_backend_compiled(BackendChoice::Xcb, false);
+        assert_eq!(check.status, DoctorStatus::Error);
+        assert_eq!(check.id, "backend.compiled");
+        assert!(check.hint.as_deref().unwrap().contains("backend-xcb"));
+        assert!(check.detail.as_deref().unwrap().contains("requested: xcb"));
+
+        let check = check_backend_compiled(BackendChoice::Xcb, true);
+        assert_eq!(check.status, DoctorStatus::Pass);
     }
 }

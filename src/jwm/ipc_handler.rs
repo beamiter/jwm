@@ -1972,6 +1972,10 @@ impl Jwm {
             schema_version: 1,
             version: env!("CARGO_PKG_VERSION").to_string(),
             backend: self.runtime_backend.clone(),
+            compiled_backends: crate::application::compiled_backends()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
             uptime_ms,
             health: runtime_health(&config, monitors),
             counts: RuntimeCounts {

@@ -108,6 +108,7 @@ struct SystemSnapshot {
 struct SupportDoctorReport {
     schema_version: u32,
     backend: String,
+    compiled_backends: Vec<String>,
     status: DoctorStatus,
     summary: DoctorSummary,
     checks: Vec<SupportDoctorCheck>,
@@ -146,6 +147,7 @@ impl From<DoctorReport> for SupportDoctorReport {
         Self {
             schema_version: report.schema_version,
             backend: report.backend,
+            compiled_backends: report.compiled_backends,
             status: report.status,
             summary: report.summary,
             checks,
@@ -614,6 +616,7 @@ SECRET_TOKEN=do-not-copy
         let report = DoctorReport {
             schema_version: 1,
             backend: "x11rb".to_string(),
+            compiled_backends: vec!["x11rb".to_string()],
             status: DoctorStatus::Pass,
             summary: DoctorSummary {
                 passed: 1,
@@ -641,6 +644,7 @@ SECRET_TOKEN=do-not-copy
         let report = DoctorReport {
             schema_version: 1,
             backend: "x11rb".to_string(),
+            compiled_backends: vec!["x11rb".to_string()],
             status: DoctorStatus::Pass,
             summary: DoctorSummary {
                 passed: 1,

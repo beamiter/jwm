@@ -254,9 +254,13 @@ pure colour-parameter policy left the Wayland protocol module for
 and the udev session backend / DRM compositor / KMS colour pipeline now
 gate separately from the Smithay protocol state shared with the nested
 backends. CI checks every single-backend profile plus the empty set with
-all targets; each compiles warning-free. Remaining: accurate capability
-reporting in doctor/health surfaces, and the optional portal/media
-integration profile.
+all targets; each compiles warning-free. The build roster is reported
+everywhere health is: `RuntimeStatusV1` and the doctor report carry a
+`compiled_backends` field (compatible additions within schema v1), the
+doctor's first check fails with the missing feature name when the
+selected backend is not compiled, and the support bundle forwards the
+roster as non-sensitive build metadata. Remaining: the optional
+portal/media integration profile.
 
 Exit criteria: each supported profile compiles in CI, reports its capabilities
 accurately, and fails clearly when a disabled backend is requested.
