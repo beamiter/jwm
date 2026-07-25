@@ -14,10 +14,10 @@ use winit::{
     window::{Window, WindowAttributes, WindowId},
 };
 use xbar_core::{
-    AlignedWakeThread, BarRuntime, ModelConfig, RuntimeUpdate, TransportRecoveryConfig,
-    TransportWakeSlot, WakeAck,
+    AlignedWakeThread, BarRuntime, RuntimeUpdate, TransportRecoveryConfig, TransportWakeSlot,
+    WakeAck,
     logging::init as initialize_logging,
-    presentation::{Point, PointerAction, PresentationConfig},
+    presentation::{Point, PointerAction},
     render::cairo::{CairoBar, CpuCanvas},
 };
 use xbar_linux_actions::{EffectRouter, GeometryRequest};
@@ -110,9 +110,21 @@ impl App {
                 target[row * width_usize..(row + 1) * width_usize].copy_from_slice(source);
             }
         }
-        target
-            .present()
-            .map_err(|error| anyhow::anyhow!("softbuffer present failed: {error}"))?;
+        match frame.damage {
+            Some(rect) if !rect.is_empty() => {
+                let damage = softbuffer::Rect {
+                    x: rect.x,
+                    y: rect.y,
+                    width: NonZeroU32::new(rect.width).expect("checked non-empty"),
+                    height: NonZeroU32::new(rect.height).expect("checked non-empty"),
+                };
+                target.present_with_damage(&[damage])
+            }
+            // First frame, a resize, or an unchanged scene after an expose:
+            // present everything.
+            _ => target.present(),
+        }
+        .map_err(|error| anyhow::anyhow!("softbuffer present failed: {error}"))?;
         Ok(())
     }
 
@@ -350,19 +362,23 @@ impl ApplicationHandler<UserEvent> for App {
 fn main() -> Result<()> {
     let shared_path = env::args().skip(1).last().unwrap_or_default();
     initialize_logging("winit_softbuffer_bar", &shared_path)?;
+    let app_config = xbar_core::config::BarConfig::load_default()?;
 
     let runtime = if shared_path.is_empty() {
-        BarRuntime::new(ModelConfig::default())?
+        BarRuntime::new(app_config.model_config())?
     } else {
         let recovery = TransportRecoveryConfig::new(shared_path.clone(), TRANSPORT_RETRY_INTERVAL)?;
-        BarRuntime::with_managed_transport(ModelConfig::default(), recovery)?
+        BarRuntime::with_managed_transport(app_config.model_config(), recovery)?
     };
-    let presentation = PresentationConfig {
-        bar_height: 38.0,
-        ..PresentationConfig::default()
-    };
-    let font = env::var("XBAR_FONT").unwrap_or_else(|_| "monospace 11".to_owned());
-    let bar = CairoBar::new(runtime, presentation, FontDescription::from_string(&font));
+    let presentation = app_config.presentation.clone();
+    let mut bar = CairoBar::new(
+        runtime,
+        presentation,
+        FontDescription::from_string(&app_config.font),
+    );
+    if let Some(opacity) = app_config.background_opacity {
+        bar.renderer_mut().set_background_opacity(Some(opacity));
+    }
 
     let event_loop: EventLoop<UserEvent> = EventLoop::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
