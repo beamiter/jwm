@@ -1,6 +1,6 @@
 [package]
 name = "xbar_linux_actions"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Linux desktop process-effect adapter for xbar_core"
 repository = "https://github.com/beamiter/xbar_core"

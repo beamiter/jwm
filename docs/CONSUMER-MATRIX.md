@@ -1,5 +1,10 @@
 # JWM bar consumer matrix
 
+Version 0.5 keeps every profile below and additionally hands the native bars
+`linux::Epoll`, the `DockWindowSpec` property protocol, CPU-frame rendering
+(`render_into_bgra`/`CpuCanvas`), and the `xbar_linux_actions::EffectRouter`
+host route; see `MIGRATION-0.5.md` for the per-family adoption map.
+
 The core boundary and 0.4 compatibility were checked against every one of the
 24 bar repositories under `jwm/submodules`. The profiles below describe the 0.4
 adoption target: window creation, native window/property calls, and concrete

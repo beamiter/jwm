@@ -94,9 +94,130 @@ impl EwmhStrut {
     }
 }
 
+/// One EWMH property write expressed as data.
+///
+/// `name` and any [`DockPropertyValue::Atoms`] entries are atom *names*; the
+/// frontend interns them with its own connection and writes the value with its
+/// native `change_property` call. This keeps the dock/strut protocol identical
+/// across XCB and x11rb without a connection dependency here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DockProperty {
+    pub name: &'static str,
+    pub value: DockPropertyValue,
+}
+
+/// Typed value for a [`DockProperty`] write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DockPropertyValue {
+    /// `ATOM[]` property; entries are atom names to intern.
+    Atoms(Vec<&'static str>),
+    /// `CARDINAL[]` property.
+    Cardinals(Vec<u32>),
+    /// `UTF8_STRING` text property.
+    Utf8Text(String),
+}
+
+/// Complete EWMH property set for a top dock bar window.
+///
+/// [`DockWindowSpec::properties`] describes the initial window setup;
+/// [`DockWindowSpec::strut_properties`] describes the two writes that must be
+/// repeated whenever monitor geometry moves the bar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DockWindowSpec {
+    pub title: String,
+    pub strut: EwmhStrut,
+}
+
+impl DockWindowSpec {
+    /// Dock spec for `title` covering the physical `placement` rectangle.
+    #[must_use]
+    pub fn top(title: impl Into<String>, placement: BarPlacement) -> Self {
+        Self {
+            title: title.into(),
+            strut: placement.ewmh_strut(),
+        }
+    }
+
+    /// Every property to write when the dock window is created.
+    #[must_use]
+    pub fn properties(&self) -> Vec<DockProperty> {
+        let mut properties = vec![
+            DockProperty {
+                name: "_NET_WM_WINDOW_TYPE",
+                value: DockPropertyValue::Atoms(vec!["_NET_WM_WINDOW_TYPE_DOCK"]),
+            },
+            DockProperty {
+                name: "_NET_WM_STATE",
+                value: DockPropertyValue::Atoms(vec!["_NET_WM_STATE_ABOVE"]),
+            },
+            DockProperty {
+                name: "_NET_WM_DESKTOP",
+                value: DockPropertyValue::Cardinals(vec![u32::MAX]),
+            },
+        ];
+        properties.extend(self.strut_properties());
+        properties.push(DockProperty {
+            name: "_NET_WM_NAME",
+            value: DockPropertyValue::Utf8Text(self.title.clone()),
+        });
+        properties
+    }
+
+    /// The strut writes to repeat after each geometry change.
+    #[must_use]
+    pub fn strut_properties(&self) -> [DockProperty; 2] {
+        [
+            DockProperty {
+                name: "_NET_WM_STRUT_PARTIAL",
+                value: DockPropertyValue::Cardinals(self.strut.partial.to_vec()),
+            },
+            DockProperty {
+                name: "_NET_WM_STRUT",
+                value: DockPropertyValue::Cardinals(self.strut.basic.to_vec()),
+            },
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dock_spec_lists_complete_property_protocol_in_write_order() {
+        let placement = BarPlacement {
+            x: 10,
+            y: 0,
+            width: 1920,
+            height: 40,
+        };
+        let spec = DockWindowSpec::top("xcb_bar", placement);
+        let properties = spec.properties();
+
+        assert_eq!(properties.len(), 6);
+        assert_eq!(properties[0].name, "_NET_WM_WINDOW_TYPE");
+        assert_eq!(
+            properties[0].value,
+            DockPropertyValue::Atoms(vec!["_NET_WM_WINDOW_TYPE_DOCK"])
+        );
+        assert_eq!(
+            properties[2].value,
+            DockPropertyValue::Cardinals(vec![u32::MAX])
+        );
+        assert_eq!(properties[3].name, "_NET_WM_STRUT_PARTIAL");
+        assert_eq!(
+            properties[4].value,
+            DockPropertyValue::Cardinals(vec![0, 0, 40, 0])
+        );
+        assert_eq!(
+            properties[5].value,
+            DockPropertyValue::Utf8Text("xcb_bar".to_owned())
+        );
+
+        let strut_only = spec.strut_properties();
+        assert_eq!(strut_only[0], properties[3]);
+        assert_eq!(strut_only[1], properties[4]);
+    }
 
     #[test]
     fn top_placement_rounds_scale_and_preserves_monitor_origin() {

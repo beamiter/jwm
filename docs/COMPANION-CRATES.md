@@ -36,6 +36,12 @@ ignored. The same crate's separate `CommandRunner` executes output-producing
 host probes directly (without a shell), accepts only successful exit status,
 and preserves stderr in structured failures.
 
+`xbar_linux_actions::EffectRouter` (0.2) composes that handler with the
+standard Linux host policy for one `RuntimeUpdate`: issues and unhandled
+effects are logged, geometry effects go to the caller's window closure, and
+only window-system errors can fail the route. Bars with non-standard effect
+policy keep using `RuntimeUpdate::handle_platform_effects` directly.
+
 ### `xbar_tauri`
 
 Owns Tauri state registration, one `xbar-state` envelope event, one checked
@@ -52,16 +58,18 @@ the same `FrontendEnvelope` schema directly.
 
 ### `xbar_xcb` and `xbar_x11rb`
 
-Own atom interning and typed writes for dock type, above state, desktop,
-window name, and EWMH struts. They consume `BarPlacement`/`EwmhStrut` from core
-but retain concrete connection and window types.
+Own atom interning and typed property writes with concrete connection and
+window types. Since 0.5 the protocol itself (`DockWindowSpec` atom names and
+typed values) lives in core placement, so these adapters would only remove the
+small generic intern/write loop; they stay below the extraction threshold
+until a third X11 lifecycle appears.
 
 ### Presentation adapters
 
 `xbar_present_pixels`, `xbar_present_softbuffer`, and `xbar_present_wgpu` own
 surface lifetime, resize/recovery, pixel format conversion, and damaged-region
-upload. They consume `Scene` or a Cairo-produced buffer without moving GPU
-types into core.
+upload. Core 0.5 `render_into_bgra`/`CpuCanvas` already produce the validated
+CPU frame, so these adapters would own only surface/GPU lifecycle.
 
 ## Extraction threshold
 

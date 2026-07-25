@@ -1,6 +1,6 @@
 # xbar_core
 
-`xbar_core` 0.4 is the backend-neutral status-bar kernel shared by the XCB,
+`xbar_core` 0.5 is the backend-neutral status-bar kernel shared by the XCB,
 x11rb, winit, tao, wgpu, pixels, softbuffer, toolkit, and web bars in JWM.
 
 The default build has no window-system, Cairo, ALSA, sysfs, logging, or shared
@@ -97,10 +97,13 @@ WM-owned ring and later polls retry boundedly after failures. If low-latency
 native notification is useful, create a `SharedEventNotifier` from the current
 transport and let `TransportNotifierSlot` rebuild it whenever
 `transport_generation()` changes. Then wrap the runtime with
-`render::cairo::CairoBar`. Native pointer events map to `PointerInput`;
-`BarPlacement` and `EwmhStrut` centralize pure window geometry. Unhandled
-`RuntimeUpdate::platform_effects` remain the frontend's responsibility and can
-be drained through one `PlatformEffectHandler` policy.
+`render::cairo::CairoBar`. Native pointer events map to `PointerInput` (or
+through `PointerAction::from_x11_button`/`from_vertical_delta`);
+`BarPlacement`, `EwmhStrut`, and the `DockWindowSpec` property protocol
+centralize pure window geometry, while `linux::Epoll` owns the native wait
+loop. Unhandled `RuntimeUpdate::platform_effects` remain the frontend's
+responsibility and can be drained through one `PlatformEffectHandler` policy —
+or through `xbar_linux_actions::EffectRouter` for the standard Linux route.
 
 Toolkit and Tauri frontends use the same `BarRuntime` directly. A
 `RuntimeSchedule` replaces their local `last_tick`, reconnect deadline, and
@@ -149,8 +152,8 @@ if let Some(envelope) = cursor.update_frame(&frame) {
 | `provider-brightnessctl` | brightnessctl provider |
 | `provider-battery-sysfs` | independent deterministic multi-battery sysfs provider |
 | `transport-shared` | typed JWM transport plus core-managed bounded recovery |
-| `runtime-linux` | `AlignedTimer`, reconnect-aware notifier ownership, and owned wake forwarding |
-| `render-cairo` | Scene-based `CairoRenderer`, text measurer, and `CairoBar` |
+| `runtime-linux` | `AlignedTimer`, owned token-based `Epoll`, reconnect-aware notifier ownership, and owned wake forwarding |
+| `render-cairo` | Scene-based `CairoRenderer`, text measurer, `CairoBar`, and validated CPU-frame rendering (`render_into_bgra`, `CpuCanvas`) |
 
 ## Companion crates
 
@@ -203,8 +206,9 @@ cargo doc --no-default-features --no-deps
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for module ownership,
 [docs/CONSUMER-MATRIX.md](docs/CONSUMER-MATRIX.md) for every JWM bar family,
 [docs/COMPANION-CRATES.md](docs/COMPANION-CRATES.md) for adapter boundaries,
-and [docs/MIGRATION-0.4.md](docs/MIGRATION-0.4.md) for projection/bridge adoption
-([0.3 lifecycle notes](docs/MIGRATION-0.3.md) remain relevant).
+and [docs/MIGRATION-0.5.md](docs/MIGRATION-0.5.md) for host-integration adoption
+([0.4 projection/bridge notes](docs/MIGRATION-0.4.md) and
+[0.3 lifecycle notes](docs/MIGRATION-0.3.md) remain relevant).
 
 The repository intentionally does not declare a license until the project
 owner selects and adds one.

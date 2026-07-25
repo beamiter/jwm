@@ -365,6 +365,74 @@ impl CairoBar {
         Ok(())
     }
 
+    /// Render into a caller-owned premultiplied Cairo `ARgb32` byte buffer
+    /// (BGRA on little-endian) covering `physical_width x physical_height`
+    /// device pixels with `stride` bytes per row.
+    ///
+    /// The scene is laid out in logical units derived from `scale_factor`, so
+    /// softbuffer/pixels frontends pass their surface buffer and window scale
+    /// without repeating stride, bounds, or transform arithmetic.
+    pub fn render_into_bgra(
+        &mut self,
+        frame: &mut [u8],
+        physical_width: u32,
+        physical_height: u32,
+        stride: u32,
+        scale_factor: f64,
+    ) -> Result<()> {
+        if physical_width == 0 || physical_height == 0 {
+            anyhow::bail!("CPU frame dimensions must be non-zero");
+        }
+        if !scale_factor.is_finite() || scale_factor <= 0.0 {
+            anyhow::bail!("scale factor must be finite and greater than zero");
+        }
+        let width = i32::try_from(physical_width)
+            .map_err(|_| anyhow::anyhow!("CPU frame width does not fit Cairo"))?;
+        let height = i32::try_from(physical_height)
+            .map_err(|_| anyhow::anyhow!("CPU frame height does not fit Cairo"))?;
+        let tight_row = physical_width
+            .checked_mul(4)
+            .ok_or_else(|| anyhow::anyhow!("CPU frame row size overflow"))?;
+        if stride < tight_row || !stride.is_multiple_of(4) {
+            anyhow::bail!("stride {stride} cannot hold a {physical_width}-pixel ARgb32 row");
+        }
+        let required = usize::try_from(stride)
+            .ok()
+            .and_then(|stride| stride.checked_mul(physical_height as usize))
+            .ok_or_else(|| anyhow::anyhow!("CPU frame size overflow"))?;
+        if frame.len() < required {
+            anyhow::bail!(
+                "CPU frame is too small: expected at least {required} bytes, got {}",
+                frame.len()
+            );
+        }
+
+        let stride_i32 =
+            i32::try_from(stride).map_err(|_| anyhow::anyhow!("stride does not fit Cairo"))?;
+        // SAFETY: the surface borrows `frame` only inside this scope, the
+        // buffer length was validated against `stride * height`, and the
+        // surface is flushed and dropped before the borrow ends.
+        let surface = unsafe {
+            cairo::ImageSurface::create_for_data_unsafe(
+                frame.as_mut_ptr(),
+                cairo::Format::ARgb32,
+                width,
+                height,
+                stride_i32,
+            )?
+        };
+        let context = Context::new(&surface)?;
+        context.scale(scale_factor, scale_factor);
+        let viewport = Size::new(
+            (f64::from(physical_width) / scale_factor) as f32,
+            (f64::from(physical_height) / scale_factor) as f32,
+        );
+        self.render(&context, viewport)?;
+        drop(context);
+        surface.flush();
+        Ok(())
+    }
+
     /// Update the semantic hover target. `true` means the frontend should
     /// schedule a render so node visual states can be rebuilt.
     pub fn pointer_motion(&mut self, point: Point) -> bool {
@@ -461,6 +529,79 @@ impl CairoBar {
 
     pub fn poll_transport(&mut self) -> RuntimeUpdate {
         self.runtime.poll_transport()
+    }
+}
+
+/// Reusable owned `ARgb32` CPU canvas for GPU-upload frontends.
+///
+/// wgpu bars keep one canvas alive, render each frame into it, and upload the
+/// returned [`CpuFrame`] with its Cairo-preferred stride. Reallocation happens
+/// only when the physical size changes.
+#[derive(Debug, Default)]
+pub struct CpuCanvas {
+    data: Vec<u8>,
+    width: u32,
+    height: u32,
+    stride: u32,
+}
+
+/// Borrowed view of one rendered CPU frame.
+#[derive(Debug, Clone, Copy)]
+pub struct CpuFrame<'a> {
+    /// Premultiplied `ARgb32` bytes, `stride` bytes per row.
+    pub data: &'a [u8],
+    pub width: u32,
+    pub height: u32,
+    /// Bytes per row, aligned as Cairo prefers; may exceed `width * 4`.
+    pub stride: u32,
+}
+
+impl CpuCanvas {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Render `bar` at the given physical size and return the frame bytes.
+    pub fn render<'a>(
+        &'a mut self,
+        bar: &mut CairoBar,
+        physical_width: u32,
+        physical_height: u32,
+        scale_factor: f64,
+    ) -> Result<CpuFrame<'a>> {
+        if physical_width == 0 || physical_height == 0 {
+            anyhow::bail!("CPU canvas dimensions must be non-zero");
+        }
+        if self.width != physical_width || self.height != physical_height {
+            let width = i32::try_from(physical_width)
+                .map_err(|_| anyhow::anyhow!("CPU canvas width does not fit Cairo"))?;
+            let stride = cairo::Format::ARgb32.stride_for_width(physical_width)?;
+            let stride = u32::try_from(stride)
+                .map_err(|_| anyhow::anyhow!("Cairo returned a negative stride for {width}"))?;
+            let size = usize::try_from(stride)
+                .ok()
+                .and_then(|stride| stride.checked_mul(physical_height as usize))
+                .ok_or_else(|| anyhow::anyhow!("CPU canvas size overflow"))?;
+            self.data.clear();
+            self.data.resize(size, 0);
+            self.width = physical_width;
+            self.height = physical_height;
+            self.stride = stride;
+        }
+        bar.render_into_bgra(
+            &mut self.data,
+            self.width,
+            self.height,
+            self.stride,
+            scale_factor,
+        )?;
+        Ok(CpuFrame {
+            data: &self.data,
+            width: self.width,
+            height: self.height,
+            stride: self.stride,
+        })
     }
 }
 
@@ -940,6 +1081,48 @@ mod tests {
         let pixel = u32::from_ne_bytes(data[stride + 4..stride + 8].try_into().unwrap());
         assert_eq!((pixel >> 24) as u8, 255);
         assert!((pixel >> 16) as u8 > 240);
+    }
+
+    #[test]
+    fn cpu_canvas_renders_scaled_frames_and_validates_external_buffers() {
+        let mut bar = CairoBar::new(
+            BarRuntime::default(),
+            crate::presentation::PresentationConfig::default(),
+            FontDescription::from_string("Sans"),
+        );
+
+        let mut canvas = CpuCanvas::new();
+        let first_stride = {
+            let frame = canvas.render(&mut bar, 640, 76, 2.0).unwrap();
+            assert_eq!((frame.width, frame.height), (640, 76));
+            assert!(frame.stride >= 640 * 4);
+            assert_eq!(frame.data.len(), frame.stride as usize * 76);
+            assert!(
+                frame.data.iter().any(|byte| *byte != 0),
+                "rendered frame stayed fully transparent"
+            );
+            frame.stride
+        };
+        let stride = canvas.render(&mut bar, 640, 76, 2.0).unwrap().stride;
+        assert_eq!(stride, first_stride, "unchanged size must not reallocate");
+
+        let mut tight = vec![0_u8; 64 * 38 * 4];
+        bar.render_into_bgra(&mut tight, 64, 38, 64 * 4, 1.0)
+            .unwrap();
+        assert!(tight.iter().any(|byte| *byte != 0));
+
+        let error = bar
+            .render_into_bgra(&mut tight, 64, 38, 63 * 4, 1.0)
+            .unwrap_err();
+        assert!(error.to_string().contains("stride"));
+        let error = bar
+            .render_into_bgra(&mut tight[..16], 64, 38, 64 * 4, 1.0)
+            .unwrap_err();
+        assert!(error.to_string().contains("too small"));
+        let error = bar
+            .render_into_bgra(&mut tight, 64, 38, 64 * 4, f64::NAN)
+            .unwrap_err();
+        assert!(error.to_string().contains("scale factor"));
     }
 
     #[test]

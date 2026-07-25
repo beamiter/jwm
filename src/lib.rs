@@ -54,7 +54,9 @@ pub use model::{
     MonitorId, Percent, PercentError, SystemDetails, SystemLoadAverage, SystemState, TagId,
     TagState, UserAction, WmCommand, WmSnapshot,
 };
-pub use placement::{BarPlacement, EwmhStrut, PlacementError};
+pub use placement::{
+    BarPlacement, DockProperty, DockPropertyValue, DockWindowSpec, EwmhStrut, PlacementError,
+};
 pub use runtime::{
     BarRuntime, DEFAULT_RUNTIME_TICK_INTERVAL, PlatformEffectFailure, PlatformEffectHandler,
     PlatformEffectReport, RuntimeAdapter, RuntimeConfigError, RuntimeFrame, RuntimeIssue,
@@ -79,7 +81,8 @@ pub mod render {
     #[cfg(feature = "render-cairo")]
     pub mod cairo {
         pub use crate::cairo_renderer::{
-            CairoBar, CairoRenderer, PangoTextMeasurer, PointerButton, PointerInput, PointerUpdate,
+            CairoBar, CairoRenderer, CpuCanvas, CpuFrame, PangoTextMeasurer, PointerButton,
+            PointerInput, PointerUpdate,
         };
     }
 }

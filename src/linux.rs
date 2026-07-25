@@ -141,6 +141,92 @@ impl AsRawFd for AlignedTimer {
     }
 }
 
+/// An owned level-triggered epoll instance for single-threaded bar loops.
+///
+/// Every registration is read-interest (`EPOLLIN`) and identified by a caller
+/// token. `wait` retries `EINTR` internally and exposes only ready tokens, so
+/// frontends keep no `libc` event-buffer or error-classification copies.
+#[derive(Debug)]
+pub struct Epoll {
+    fd: OwnedFd,
+    ready: Vec<libc::epoll_event>,
+}
+
+impl Epoll {
+    /// Create a close-on-exec epoll descriptor with a bounded ready buffer.
+    pub fn new() -> io::Result<Self> {
+        let raw_fd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
+        if raw_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            // SAFETY: `epoll_create1` returned a new descriptor whose sole
+            // owner is this `OwnedFd`.
+            fd: unsafe { OwnedFd::from_raw_fd(raw_fd) },
+            ready: vec![libc::epoll_event { events: 0, u64: 0 }; 32],
+        })
+    }
+
+    /// Register `descriptor` for read readiness under `token`.
+    ///
+    /// The caller keeps ownership of the descriptor; epoll drops the interest
+    /// automatically when that descriptor closes.
+    pub fn add(&self, descriptor: BorrowedFd<'_>, token: u64) -> io::Result<()> {
+        let mut event = libc::epoll_event {
+            events: libc::EPOLLIN as u32,
+            u64: token,
+        };
+        let result = unsafe {
+            libc::epoll_ctl(
+                self.fd.as_raw_fd(),
+                libc::EPOLL_CTL_ADD,
+                descriptor.as_raw_fd(),
+                &mut event,
+            )
+        };
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Block until at least one registered descriptor is readable and return
+    /// the ready tokens in kernel order.
+    pub fn wait(&mut self) -> io::Result<impl Iterator<Item = u64> + '_> {
+        let ready = loop {
+            let count = unsafe {
+                libc::epoll_wait(
+                    self.fd.as_raw_fd(),
+                    self.ready.as_mut_ptr(),
+                    i32::try_from(self.ready.len()).unwrap_or(i32::MAX),
+                    -1,
+                )
+            };
+            if count >= 0 {
+                break count as usize;
+            }
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EINTR) {
+                return Err(error);
+            }
+        };
+        Ok(self.ready[..ready].iter().map(|event| event.u64))
+    }
+}
+
+impl AsFd for Epoll {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+}
+
+impl AsRawFd for Epoll {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
 fn validate_interval(interval: Duration) -> io::Result<()> {
     if interval.is_zero() {
         Err(io::Error::new(
@@ -217,6 +303,21 @@ mod tests {
         assert_ne!(descriptor.revents & libc::POLLIN, 0);
         assert!(timer.drain().unwrap() >= 1);
         assert_eq!(timer.drain().unwrap(), 0);
+    }
+
+    #[test]
+    fn epoll_reports_registered_timer_token() {
+        let timer = AlignedTimer::new(Duration::from_millis(20)).unwrap();
+        let mut epoll = Epoll::new().unwrap();
+        epoll.add(timer.as_fd(), 7).unwrap();
+
+        let descriptor_flags = unsafe { libc::fcntl(epoll.as_raw_fd(), libc::F_GETFD) };
+        assert!(descriptor_flags >= 0);
+        assert_ne!(descriptor_flags & libc::FD_CLOEXEC, 0);
+
+        let tokens: Vec<u64> = epoll.wait().unwrap().collect();
+        assert_eq!(tokens, vec![7]);
+        assert!(timer.drain().unwrap() >= 1);
     }
 
     #[test]

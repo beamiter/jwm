@@ -43,15 +43,19 @@ WM snapshot ──────────────────────�
 - `controls`/`presentation`: a geometry-free control projection shared by
   widget toolkits and the logical-coordinate layout; stable scene nodes,
   interaction state, semantic hit regions, and old/new scene damage.
-- `placement`: pure monitor/scale-to-physical-bar and EWMH strut calculation.
+- `placement`: pure monitor/scale-to-physical-bar and EWMH strut calculation,
+  plus the dock property protocol expressed as atom names and typed values so
+  XCB and x11rb write identical properties with their own connections.
 - `render::cairo`: Cairo/Pango scene renderer and the high-level `CairoBar`
-  facade. It does not own window or transport resources.
+  facade, including validated CPU-buffer rendering (`render_into_bgra`,
+  `CpuCanvas`) for pixels/softbuffer/wgpu presentation. It does not own window
+  or transport resources.
 - provider modules: independently selected ALSA, sysinfo CPU/memory,
   brightnessctl, and battery-sysfs adapters.
 - `transport`: current JWM shared-memory adapter and queue outcome mapping.
-- `notifier`, `wake`, and `linux`: reconnect-aware owned eventfd/timerfd and
-  event-loop wake primitives. No public API asks callers to close a raw
-  descriptor or join an unbounded worker manually.
+- `notifier`, `wake`, and `linux`: reconnect-aware owned eventfd/timerfd,
+  an owned token-based `Epoll`, and event-loop wake primitives. No public API
+  asks callers to close a raw descriptor or join an unbounded worker manually.
 - `logging`: optional process-global logger setup.
 
 ## Frontend responsibilities

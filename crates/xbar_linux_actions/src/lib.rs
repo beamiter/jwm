@@ -12,7 +12,7 @@ use std::{
     thread,
 };
 
-use xbar_core::{BarEffect, PlatformEffectHandler};
+use xbar_core::{BarEffect, MonitorGeometry, PlatformEffectHandler, RuntimeUpdate};
 
 /// One executable and its fixed argument list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -284,6 +284,68 @@ impl PlatformEffectHandler for ProcessActionHandler {
     }
 }
 
+/// Window-geometry request the host must apply with its native window API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeometryRequest {
+    /// Constrain the bar to this monitor rectangle.
+    Apply(MonitorGeometry),
+    /// The WM constraint is gone; restore the host's default placement.
+    Clear,
+}
+
+/// Standard Linux host routing for one [`RuntimeUpdate`].
+///
+/// Issues and unhandled effects are logged, geometry effects go to the
+/// caller's window closure, and screenshot/audio-control effects go to the
+/// owned [`ProcessActionHandler`] (whose launch failures are logged rather
+/// than aborting the frame). Only the geometry closure can fail the route,
+/// because window-system errors are the one thing a frontend must see.
+#[derive(Debug, Clone, Default)]
+pub struct EffectRouter {
+    process: ProcessActionHandler,
+}
+
+impl EffectRouter {
+    #[must_use]
+    pub const fn new(process: ProcessActionHandler) -> Self {
+        Self { process }
+    }
+
+    pub const fn process_mut(&mut self) -> &mut ProcessActionHandler {
+        &mut self.process
+    }
+
+    /// Route `update` and report whether the frontend should redraw.
+    pub fn route<F, E>(&mut self, update: RuntimeUpdate, mut apply_geometry: F) -> Result<bool, E>
+    where
+        F: FnMut(GeometryRequest) -> Result<(), E>,
+    {
+        let needs_redraw = update.needs_redraw();
+        for issue in &update.issues {
+            log::warn!("xbar runtime issue: {issue}");
+        }
+        for effect in update.platform_effects {
+            match effect {
+                BarEffect::ApplyMonitorGeometry(geometry) => {
+                    apply_geometry(GeometryRequest::Apply(geometry))?;
+                }
+                BarEffect::ClearMonitorGeometry => {
+                    apply_geometry(GeometryRequest::Clear)?;
+                }
+                effect if ProcessActionHandler::supports(effect) => {
+                    if let Err(error) = PlatformEffectHandler::handle(&mut self.process, effect) {
+                        log::warn!("failed to handle process effect: {error}");
+                    }
+                }
+                effect => {
+                    log::warn!("no frontend adapter handled platform effect: {effect:?}");
+                }
+            }
+        }
+        Ok(needs_redraw)
+    }
+}
+
 fn waiter_name(prefix: &str, program: &OsStr) -> String {
     format!("{prefix}-{}", program.to_string_lossy())
 }
@@ -383,6 +445,57 @@ mod tests {
             CommandRunError::Exit { status, .. } if status.code() == Some(7)
         ));
         assert!(failed.to_string().contains("failure"));
+    }
+
+    #[test]
+    fn effect_router_forwards_geometry_and_absorbs_process_failures() {
+        let mut router = EffectRouter::new(ProcessActionHandler::new(ProcessActionConfig {
+            screenshot: Some(CommandSpec::new("/bin/true")),
+            audio_control: None,
+            waiter_thread_prefix: "xbar-router-test".to_owned(),
+        }));
+        let geometry = MonitorGeometry {
+            x: 5,
+            y: 0,
+            width: 800,
+            height: 600,
+        };
+        let update = RuntimeUpdate {
+            platform_effects: vec![
+                BarEffect::ApplyMonitorGeometry(geometry),
+                BarEffect::Screenshot,
+                BarEffect::OpenAudioControl,
+                BarEffect::RefreshBattery,
+                BarEffect::ClearMonitorGeometry,
+            ],
+            ..RuntimeUpdate::default()
+        };
+
+        let mut requests = Vec::new();
+        let needs_redraw = router
+            .route::<_, std::convert::Infallible>(update, |request| {
+                requests.push(request);
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(!needs_redraw);
+        assert_eq!(
+            requests,
+            vec![GeometryRequest::Apply(geometry), GeometryRequest::Clear]
+        );
+    }
+
+    #[test]
+    fn effect_router_propagates_only_window_system_errors() {
+        let mut router = EffectRouter::default();
+        let update = RuntimeUpdate {
+            platform_effects: vec![BarEffect::ClearMonitorGeometry],
+            ..RuntimeUpdate::default()
+        };
+
+        let error = router.route(update, |_| Err("window gone")).unwrap_err();
+        assert_eq!(error, "window gone");
     }
 
     #[test]
