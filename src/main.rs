@@ -1,5 +1,4 @@
 use anyhow::{Context as _, Result};
-use cairo::{Context as CairoContext, Format, ImageSurface};
 use log::warn;
 use pango::FontDescription;
 use std::env;
@@ -16,13 +15,13 @@ use tao::{
 };
 
 use xbar_core::{
-    AlignedWakeThread, BarEffect, BarRuntime, ModelConfig, PlatformEffectHandler, RuntimeUpdate,
-    TransportRecoveryConfig, TransportWakeSlot, WakeAck,
+    AlignedWakeThread, BarRuntime, ModelConfig, RuntimeUpdate, TransportRecoveryConfig,
+    TransportWakeSlot, WakeAck,
     logging::init as initialize_logging,
-    presentation::{Point, PointerAction, PresentationConfig, Size},
-    render::cairo::CairoBar,
+    presentation::{Point, PointerAction, PresentationConfig},
+    render::cairo::{CairoBar, CpuCanvas},
 };
-use xbar_linux_actions::ProcessActionHandler;
+use xbar_linux_actions::{EffectRouter, GeometryRequest};
 
 const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -32,44 +31,9 @@ enum UserEvent {
     SharedUpdated(WakeAck),
 }
 
-struct CairoBackBuffer {
-    width: u32,
-    height: u32,
-    image: ImageSurface,
-}
-
-impl CairoBackBuffer {
-    fn new(width: u32, height: u32) -> Result<Self> {
-        let image = ImageSurface::create(
-            Format::ARgb32,
-            i32::try_from(width)?,
-            i32::try_from(height)?,
-        )?;
-        Ok(Self {
-            width,
-            height,
-            image,
-        })
-    }
-
-    fn ensure_size(&mut self, width: u32, height: u32) -> Result<()> {
-        if self.width == width && self.height == height {
-            return Ok(());
-        }
-        self.image = ImageSurface::create(
-            Format::ARgb32,
-            i32::try_from(width)?,
-            i32::try_from(height)?,
-        )?;
-        self.width = width;
-        self.height = height;
-        Ok(())
-    }
-}
-
 struct App {
     window: Rc<Window>,
-    back: CairoBackBuffer,
+    canvas: CpuCanvas,
     soft_surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
     bar: CairoBar,
     scale_factor: f64,
@@ -79,7 +43,7 @@ struct App {
     last_cursor_pos: Option<Point>,
     proxy: EventLoopProxy<UserEvent>,
     transport_wake: TransportWakeSlot,
-    process_actions: ProcessActionHandler,
+    effects: EffectRouter,
 }
 
 impl App {
@@ -99,7 +63,7 @@ impl App {
 
         Ok(Self {
             window,
-            back: CairoBackBuffer::new(physical_size.width, physical_size.height)?,
+            canvas: CpuCanvas::new(),
             soft_surface,
             bar,
             scale_factor,
@@ -109,7 +73,7 @@ impl App {
             last_cursor_pos: None,
             proxy,
             transport_wake: TransportWakeSlot::new(true),
-            process_actions: ProcessActionHandler::default(),
+            effects: EffectRouter::default(),
         })
     }
 
@@ -118,36 +82,27 @@ impl App {
         if width == 0 || height == 0 {
             return Ok(());
         }
-        self.back.ensure_size(width, height)?;
 
-        {
-            let context = CairoContext::new(&self.back.image)?;
-            context.scale(self.scale_factor, self.scale_factor);
-            self.bar.render(
-                &context,
-                Size::new(
-                    self.logical_size.width as f32,
-                    self.logical_size.height as f32,
-                ),
-            )?;
-        }
-
-        self.back.image.flush();
-        let stride = usize::try_from(self.back.image.stride())?;
-        let data = self.back.image.data()?;
+        let frame = self
+            .canvas
+            .render(&mut self.bar, width, height, self.scale_factor)?;
         let width = width as usize;
         let height = height as usize;
         let mut buffer = self
             .soft_surface
             .buffer_mut()
             .map_err(|error| anyhow::anyhow!("failed to acquire softbuffer frame: {error}"))?;
+        if buffer.len() < width * height {
+            anyhow::bail!("softbuffer returned an undersized frame");
+        }
 
+        let stride = frame.stride as usize;
         if stride == width * 4 {
-            let source: &[u32] = bytemuck::cast_slice(&data[..height * stride]);
+            let source: &[u32] = bytemuck::cast_slice(&frame.data[..height * stride]);
             buffer[..width * height].copy_from_slice(source);
         } else {
             for y in 0..height {
-                let row = &data[y * stride..y * stride + width * 4];
+                let row = &frame.data[y * stride..y * stride + width * 4];
                 let source: &[u32] = bytemuck::cast_slice(row);
                 buffer[y * width..(y + 1) * width].copy_from_slice(source);
             }
@@ -183,19 +138,22 @@ impl App {
     }
 
     fn handle_runtime_update(&mut self, update: RuntimeUpdate) {
-        let RuntimeUpdate {
-            changes,
-            platform_effects,
-            issues,
-        } = update;
-
-        for issue in issues {
-            warn!("xbar runtime issue: {issue:?}");
-        }
-        for effect in platform_effects {
-            self.handle_platform_effect(effect);
-        }
-        if !changes.is_empty() {
+        let mut effects = std::mem::take(&mut self.effects);
+        let needs_redraw = effects
+            .route::<_, std::convert::Infallible>(update, |request| {
+                match request {
+                    GeometryRequest::Apply(geometry) => self.apply_monitor_geometry(geometry),
+                    GeometryRequest::Clear => {
+                        self.window
+                            .set_outer_position(LogicalPosition::new(0.0, 0.0));
+                        self.window.set_inner_size(self.default_logical_size);
+                    }
+                }
+                Ok(())
+            })
+            .expect("geometry closure is infallible");
+        self.effects = effects;
+        if needs_redraw {
             self.request_redraw();
         }
     }
@@ -213,29 +171,6 @@ impl App {
             proxy.send_event(UserEvent::SharedUpdated(ack))
         }) {
             warn!("failed to synchronize shared transport wake: {error}");
-        }
-    }
-
-    fn handle_platform_effect(&mut self, effect: BarEffect) {
-        match effect {
-            BarEffect::ApplyMonitorGeometry(geometry) => self.apply_monitor_geometry(geometry),
-            BarEffect::ClearMonitorGeometry => {
-                self.window
-                    .set_outer_position(LogicalPosition::new(0.0, 0.0));
-                self.window.set_inner_size(self.default_logical_size);
-            }
-            effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl) => {
-                if let Err(error) = self.process_actions.handle(effect) {
-                    warn!("failed to handle platform effect: {error}");
-                }
-            }
-            BarEffect::WindowManager(_)
-            | BarEffect::ToggleMute
-            | BarEffect::AdjustVolume(_)
-            | BarEffect::AdjustBrightness(_)
-            | BarEffect::RefreshBattery => {
-                warn!("no frontend adapter handled platform effect: {effect:?}");
-            }
         }
     }
 
