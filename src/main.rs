@@ -1,9 +1,9 @@
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use pango::FontDescription;
 use std::cell::{Cell, RefCell};
 use std::env;
 use std::ffi::c_void;
-use std::num::{NonZero, NonZeroU32};
+use std::num::NonZeroU32;
 use std::os::fd::AsFd as _;
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -24,13 +24,14 @@ use raw_window_handle::{
 };
 
 use xbar_core::linux::{AlignedTimer, Epoll};
-use xbar_core::presentation::{Point, PointerAction, PresentationConfig};
+use xbar_core::presentation::{Point, PointerAction};
 use xbar_core::render::cairo::{CairoBar, CpuCanvas};
 use xbar_core::{
-    BarPlacement, BarRuntime, DockProperty, DockPropertyValue, DockWindowSpec, ModelConfig,
-    MonitorGeometry, NotifierChange, RuntimeUpdate, TransportNotifierSlot, TransportRecoveryConfig,
+    BarPlacement, BarRuntime, DockProperty, DockPropertyValue, DockWindowSpec, MonitorGeometry,
+    NotifierChange, RuntimeUpdate, TransportNotifierSlot, TransportRecoveryConfig,
 };
 use xbar_linux_actions::{EffectRouter, GeometryRequest};
+use xbar_present_wgpu::{PresentRect, WgpuPresenter};
 
 const BAR_NAME: &str = "x11rb_wgpu_bar";
 const X_TOKEN: u64 = 1;
@@ -64,387 +65,6 @@ impl HasWindowHandle for XcbTarget {
         let mut handle = XcbWindowHandle::new(NonZeroU32::new(self.window).unwrap());
         handle.visual_id = NonZeroU32::new(self.visual_id);
         Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Xcb(handle)) })
-    }
-}
-
-// ============================================================================
-// 2. WGPU 封装
-// ============================================================================
-struct Gpu {
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    cpu_tex: wgpu::Texture,
-    cpu_tex_view: wgpu::TextureView,
-    cpu_tex_format: wgpu::TextureFormat,
-    upload_scratch: Vec<u8>,
-    sampler: wgpu::Sampler,
-    pipeline: wgpu::RenderPipeline,
-    bind_group: wgpu::BindGroup,
-    width: u32,
-    height: u32,
-}
-
-const FULLSCREEN_WGSL: &str = r#"
-@group(0) @binding(0) var tex: texture_2d<f32>;
-@group(0) @binding(1) var samp: sampler;
-
-struct VSOut {
-  @builtin(position) pos: vec4<f32>,
-  @location(0) uv: vec2<f32>,
-};
-
-@vertex
-fn vs(@builtin(vertex_index) vid: u32) -> VSOut {
-  var pos = array<vec2<f32>, 3>(
-    vec2(-1.0, -1.0),
-    vec2( 3.0, -1.0),
-    vec2(-1.0,  3.0),
-  )[vid];
-  var out: VSOut;
-  out.pos = vec4(pos, 0.0, 1.0);
-  let uv = 0.5 * pos + vec2(0.5, 0.5);
-  out.uv = vec2(uv.x, 1.0 - uv.y);
-  return out;
-}
-
-@fragment
-fn fs(in: VSOut) -> @location(0) vec4<f32> {
-  return textureSample(tex, samp, in.uv);
-}
-"#;
-
-impl Gpu {
-    async fn new(target: Arc<XcbTarget>, width: u32, height: u32) -> Result<Self> {
-        let instance = wgpu::Instance::default();
-        let surface = instance.create_surface(target)?;
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::LowPower,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-                apply_limit_buckets: false,
-            })
-            .await
-            .expect("No adapter found");
-
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await?;
-
-        let caps = surface.get_capabilities(&adapter);
-        let surface_format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(caps.formats[0]);
-
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            color_space: wgpu::SurfaceColorSpace::Auto,
-            width,
-            height,
-            present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-        surface.configure(&device, &config);
-
-        let cpu_tex_format = if surface_format == wgpu::TextureFormat::Bgra8UnormSrgb {
-            wgpu::TextureFormat::Bgra8UnormSrgb
-        } else {
-            wgpu::TextureFormat::Rgba8UnormSrgb
-        };
-
-        let cpu_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cpu-upload-texture"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: cpu_tex_format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let cpu_tex_view = cpu_tex.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
-
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("fullscreen-shader"),
-            source: wgpu::ShaderSource::Wgsl(FULLSCREEN_WGSL.into()),
-        });
-
-        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("tex-sampler-layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("pipeline-layout"),
-            bind_group_layouts: &[Some(&bind_layout)], // 修复：包装在 Some 中
-            immediate_size: 0,                         // 修复：添加 immediate_size
-        });
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("fullscreen-pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            cache: None,
-            multiview_mask: NonZero::new(0),
-        });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("tex-sampler-bindgroup"),
-            layout: &bind_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&cpu_tex_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-        });
-
-        Ok(Self {
-            surface,
-            device,
-            queue,
-            config,
-            cpu_tex,
-            cpu_tex_view,
-            cpu_tex_format,
-            upload_scratch: Vec::new(),
-            sampler,
-            pipeline,
-            bind_group,
-            width,
-            height,
-        })
-    }
-
-    fn resize(&mut self, width: u32, height: u32) {
-        if width == 0 || height == 0 {
-            return;
-        }
-        self.width = width;
-        self.height = height;
-        self.config.width = width;
-        self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
-
-        self.cpu_tex = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("cpu-upload-texture"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.cpu_tex_format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        self.cpu_tex_view = self
-            .cpu_tex
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        let bind_layout = self.pipeline.get_bind_group_layout(0);
-        self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("tex-sampler-bindgroup"),
-            layout: &bind_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.cpu_tex_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        });
-    }
-
-    fn upload_and_present(&mut self, cpu_data: &[u8], stride: u32) -> Result<()> {
-        let bpr = stride;
-        let aligned_bpr = bpr.div_ceil(256) * 256;
-        let height = self.height;
-        let width = self.width;
-        let source_row_bytes = bpr as usize;
-        let upload_row_bytes = aligned_bpr as usize;
-        let height_usize = height as usize;
-        let pixel_bytes = (width as usize)
-            .checked_mul(4)
-            .ok_or_else(|| anyhow!("upload row size overflow"))?;
-        if pixel_bytes > source_row_bytes {
-            return Err(anyhow!(
-                "Cairo stride is smaller than the visible pixel row"
-            ));
-        }
-        let source_len = source_row_bytes
-            .checked_mul(height_usize)
-            .ok_or_else(|| anyhow!("source frame size overflow"))?;
-        if cpu_data.len() < source_len {
-            return Err(anyhow!("Cairo frame is shorter than stride * height"));
-        }
-
-        let rgba_upload = self.cpu_tex_format == wgpu::TextureFormat::Rgba8UnormSrgb;
-        let data_ref: &[u8] = if rgba_upload || aligned_bpr != bpr {
-            let upload_len = upload_row_bytes
-                .checked_mul(height_usize)
-                .ok_or_else(|| anyhow!("upload frame size overflow"))?;
-            self.upload_scratch.resize(upload_len, 0);
-            for row in 0..height_usize {
-                let source_start = row * source_row_bytes;
-                let upload_start = row * upload_row_bytes;
-                let source = &cpu_data[source_start..source_start + source_row_bytes];
-                let upload =
-                    &mut self.upload_scratch[upload_start..upload_start + upload_row_bytes];
-                if rgba_upload {
-                    for (source, upload) in source[..pixel_bytes]
-                        .chunks_exact(4)
-                        .zip(upload[..pixel_bytes].chunks_exact_mut(4))
-                    {
-                        upload.copy_from_slice(&[source[2], source[1], source[0], source[3]]);
-                    }
-                    upload[pixel_bytes..source_row_bytes]
-                        .copy_from_slice(&source[pixel_bytes..source_row_bytes]);
-                } else {
-                    upload[..source_row_bytes].copy_from_slice(source);
-                }
-                upload[source_row_bytes..].fill(0);
-            }
-            &self.upload_scratch
-        } else {
-            cpu_data
-        };
-
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.cpu_tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            data_ref,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(aligned_bpr),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
-                depth_or_array_layers: 1,
-            },
-        );
-
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
-                self.surface.configure(&self.device, &self.config);
-                frame
-            }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return Ok(());
-            }
-            wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.device, &self.config);
-                return Ok(());
-            }
-            wgpu::CurrentSurfaceTexture::Lost => anyhow::bail!("wgpu surface lost"),
-            wgpu::CurrentSurfaceTexture::Validation => {
-                anyhow::bail!("wgpu surface validation error")
-            }
-        };
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: None,
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
-                multiview_mask: None,
-            });
-            rp.set_pipeline(&self.pipeline);
-            rp.set_bind_group(0, &self.bind_group, &[]);
-            rp.draw(0..3, 0..1);
-        }
-
-        self.queue.submit(Some(encoder.finish()));
-        self.queue.present(frame);
-        Ok(())
     }
 }
 
@@ -576,7 +196,7 @@ impl WindowAdapter<'_> {
 }
 
 fn redraw(
-    gpu: &mut Gpu,
+    gpu: &mut WgpuPresenter,
     canvas: &mut CpuCanvas,
     width: u16,
     height: u16,
@@ -584,7 +204,13 @@ fn redraw(
 ) -> Result<()> {
     let frame = canvas.render(bar, u32::from(width), u32::from(height), 1.0)?;
     let _ = bar.runtime_mut().take_changes();
-    gpu.upload_and_present(frame.data, frame.stride)?;
+    let damage = frame.damage.map(|rect| PresentRect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+    });
+    gpu.present_bgra(frame.data, frame.stride, damage)?;
     Ok(())
 }
 
@@ -605,26 +231,29 @@ fn sync_notifier(
 fn main() -> Result<()> {
     let shared_path = env::args().skip(1).last().unwrap_or_default();
     xbar_core::logging::init(BAR_NAME, &shared_path)?;
+    let app_config = xbar_core::config::BarConfig::load_default()?;
 
     let runtime = if shared_path.is_empty() {
-        BarRuntime::new(ModelConfig::default())?
+        BarRuntime::new(app_config.model_config())?
     } else {
         let recovery = TransportRecoveryConfig::new(shared_path.clone(), TRANSPORT_RETRY_INTERVAL)?;
-        BarRuntime::with_managed_transport(ModelConfig::default(), recovery)?
+        BarRuntime::with_managed_transport(app_config.model_config(), recovery)?
     };
 
     let (conn, screen_num) = XCBConnection::connect(None)?;
     let setup = conn.setup();
     let screen = &setup.roots[screen_num];
 
-    let presentation = PresentationConfig::default();
+    let presentation = app_config.presentation.clone();
     let bar_height = presentation
         .bar_height
         .round()
         .clamp(1.0, f32::from(u16::MAX)) as u16;
-    let font_name = env::var("XBAR_FONT").unwrap_or_else(|_| "monospace 11".to_owned());
-    let font = FontDescription::from_string(&font_name);
+    let font = FontDescription::from_string(&app_config.font);
     let mut bar = CairoBar::new(runtime, presentation, font);
+    if let Some(opacity) = app_config.background_opacity {
+        bar.renderer_mut().set_background_opacity(Some(opacity));
+    }
 
     let win = conn.generate_id()?;
     let mut current_width = screen.width_in_pixels;
@@ -664,11 +293,8 @@ fn main() -> Result<()> {
         window: win,
         visual_id: screen.root_visual,
     });
-    let mut gpu = pollster::block_on(Gpu::new(
-        target,
-        u32::from(current_width),
-        u32::from(current_height),
-    ))?;
+    let mut gpu =
+        WgpuPresenter::new_blocking(target, u32::from(current_width), u32::from(current_height))?;
     let mut canvas = CpuCanvas::new();
 
     conn.map_window(win)?.check()?;
