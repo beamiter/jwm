@@ -239,13 +239,40 @@ pub(super) struct WaterlilyTexture {
 }
 
 impl<C: CompositorConnection> Compositor<C> {
-    pub(crate) fn set_waterlily_loop_signal(&self, signal: calloop::LoopSignal) {
+    pub(crate) fn set_waterlily_loop_signal(&mut self, signal: calloop::LoopSignal) {
+        self.waterlily_loop_signal = Some(signal.clone());
         if let Some(ipc) = &self.waterlily_ipc {
             ipc.set_loop_signal(signal);
         }
     }
 
+    /// Heal a missing wake socket. The startup bind is lost when a restart
+    /// overlaps the previous compositor instance still holding the listener
+    /// (its exit then removes the socket file); retrying on the next control
+    /// action recovers without another restart, and the worker's per-publish
+    /// reconnect picks the new socket up on its own.
+    fn ensure_waterlily_ipc(&mut self) -> bool {
+        if self.waterlily_ipc.is_some() {
+            return true;
+        }
+        match WaterlilyIpc::bind_default() {
+            Ok(ipc) => {
+                if let Some(signal) = self.waterlily_loop_signal.clone() {
+                    ipc.set_loop_signal(signal);
+                }
+                log::info!("compositor: WaterLily frame IPC recovered");
+                self.waterlily_ipc = Some(ipc);
+                true
+            }
+            Err(error) => {
+                log::warn!("compositor: WaterLily frame IPC still unavailable: {error}");
+                false
+            }
+        }
+    }
+
     pub(crate) fn toggle_waterlily_effect(&mut self) -> bool {
+        self.ensure_waterlily_ipc();
         let previous_damage = self.waterlily_damage_rect();
         self.waterlily_effect_enabled = !self.waterlily_effect_enabled;
         self.waterlily_active = false;
@@ -277,8 +304,10 @@ impl<C: CompositorConnection> Compositor<C> {
             log::warn!("compositor: rejected malformed WaterLily case request {case:?}");
             return false;
         }
+        if !self.ensure_waterlily_ipc() {
+            return false;
+        }
         let Some(ipc) = self.waterlily_ipc.as_ref() else {
-            log::warn!("compositor: WaterLily IPC is not initialized");
             return false;
         };
         if !ipc.connected() {
@@ -301,8 +330,10 @@ impl<C: CompositorConnection> Compositor<C> {
             log::warn!("compositor: rejected malformed WaterLily palette request {palette:?}");
             return false;
         }
+        if !self.ensure_waterlily_ipc() {
+            return false;
+        }
         let Some(ipc) = self.waterlily_ipc.as_ref() else {
-            log::warn!("compositor: WaterLily IPC is not initialized");
             return false;
         };
         if !ipc.connected() {

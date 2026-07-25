@@ -1070,7 +1070,7 @@ impl Backend for X11rbBackend {
         let mut event_loop: EventLoop<X11rbLoopData> = EventLoop::try_new()?;
         let loop_signal = event_loop.get_signal();
         self.compositor_loop_signal = Some(loop_signal.clone());
-        if let Some(compositor) = self.compositor.as_ref() {
+        if let Some(compositor) = self.compositor.as_mut() {
             compositor.set_waterlily_loop_signal(loop_signal);
         }
         let handle = event_loop.handle();

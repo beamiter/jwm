@@ -888,6 +888,7 @@ impl<C: CompositorConnection> Compositor<C> {
             waterlily_uniforms,
             waterlily_scene_fbo: None,
             waterlily_ipc,
+            waterlily_loop_signal: None,
             waterlily_frame_reader,
             waterlily_texture: None,
             waterlily_effect_enabled: std::env::var("JWM_WATERLILY_ENABLED")

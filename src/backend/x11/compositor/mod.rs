@@ -531,6 +531,9 @@ where
     /// Private scene snapshot used only by the WaterLily frosted backdrop.
     waterlily_scene_fbo: Option<(glow::Framebuffer, glow::Texture)>,
     waterlily_ipc: Option<WaterlilyIpc>,
+    /// Kept for wake-socket rebinds after a failed startup bind (for example
+    /// when a restart overlapped the previous instance's listener).
+    waterlily_loop_signal: Option<calloop::LoopSignal>,
     waterlily_frame_reader: crate::backend::compositor_common::waterlily::WaterlilyFrameReader,
     waterlily_texture: Option<WaterlilyTexture>,
     waterlily_effect_enabled: bool,

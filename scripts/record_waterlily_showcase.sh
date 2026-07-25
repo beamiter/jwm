@@ -32,8 +32,9 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT_FILE="$OUT_DIR/waterlily-showcase-$STAMP.mp4"
 CHAPTERS="$OUT_DIR/waterlily-showcase-$STAMP.chapters.csv"
 WORKER_LOG="$OUT_DIR/waterlily-worker-$STAMP.log"
-RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/jwm-$(id -u)}"
-FRAME_FILE="${JWM_WATERLILY_FRAME_FILE:-$RUNTIME_DIR/jwm-waterlily.frame}"
+# 冷启动的 GPU 探测/编译可能要几分钟;已有进程未连接时给 STALE_GRACE 秒机会。
+WORKER_WAIT="${WORKER_WAIT:-240}"
+STALE_GRACE="${STALE_GRACE:-45}"
 
 # 展示顺序:经典卡门涡街开场,游走类推进,最后进入交互 stylus。
 CASES=(cylinder tandem diamond dance flap orbit hover wander)
@@ -105,31 +106,74 @@ stylus_performance() {
 
 # --- worker lifecycle --------------------------------------------------------
 
-SPAWNED_WORKER=""
+worker_pids() { pgrep -f "julia.*waterlily/runner" || true; }
+
+# TERM first, KILL after a grace period: a worker stuck in shutdown (blocked
+# exit-time task) would otherwise linger for hours and shadow future runs.
+kill_workers() {
+    local pids elapsed
+    pids="$(worker_pids)"
+    [[ -z "$pids" ]] && return
+    # shellcheck disable=SC2086
+    kill $pids 2>/dev/null || true
+    for elapsed in {1..10}; do
+        sleep 0.5
+        [[ -z "$(worker_pids)" ]] && return
+    done
+    log "worker ignored SIGTERM; escalating to SIGKILL"
+    # shellcheck disable=SC2086
+    kill -9 $(worker_pids) 2>/dev/null || true
+}
+
+# 唯一可信的健康信号是压缩器视角的 worker_connected;pgrep 只能证明有进程,
+# 证明不了它还活着(卡死的退出中进程照样被 pgrep 抓到)。
+wait_for_worker() {
+    local seconds="$1" deadline=$((SECONDS + $1))
+    while ((SECONDS < deadline)); do
+        waterlily_flag worker_connected && return 0
+        sleep 1
+    done
+    return 1
+}
+
+SPAWNED_WORKER=0
 ensure_worker() {
-    if pgrep -f "waterlily/runner.jl" >/dev/null; then
-        log "WaterLily worker already running"
+    # 任一控制命令都会触发压缩器懒重绑 wake socket(重启竞态自愈)。
+    ipc waterlily_case --args '"cylinder"' || true
+    if waterlily_flag worker_connected; then
+        log "WaterLily worker already connected"
         return
+    fi
+    if [[ -n "$(worker_pids)" ]]; then
+        log "worker process exists but is not connected; waiting up to ${STALE_GRACE}s"
+        if wait_for_worker "$STALE_GRACE"; then
+            log "worker connected"
+            return
+        fi
+        log "replacing unresponsive worker"
+        kill_workers
     fi
     log "starting WaterLily worker (--sim-size $SIM_SIZE --fps $WORKER_FPS, device auto)"
     nohup julia --project="$REPO/waterlily" "$REPO/waterlily/runner.jl" \
         --device auto --fps "$WORKER_FPS" --sim-size "$SIM_SIZE" \
         >"$WORKER_LOG" 2>&1 &
-    SPAWNED_WORKER="$!"
-    # GPU probe + package load can take a while on a cold cache.
-    local deadline=$((SECONDS + 180))
-    until [[ -e "$FRAME_FILE" ]]; do
+    SPAWNED_WORKER=1
+    # GPU probe + package load can take minutes on a cold cache.
+    local deadline=$((SECONDS + WORKER_WAIT))
+    until waterlily_flag worker_connected; do
         if ((SECONDS >= deadline)); then
-            echo "worker did not publish a frame within 180s; see $WORKER_LOG" >&2
+            echo "worker did not connect within ${WORKER_WAIT}s; log tail:" >&2
+            tail -20 "$WORKER_LOG" >&2
             exit 1
         fi
-        kill -0 "$SPAWNED_WORKER" 2>/dev/null || {
-            echo "worker exited early; see $WORKER_LOG" >&2
+        if [[ -z "$(worker_pids)" ]]; then
+            echo "worker exited early; log tail:" >&2
+            tail -20 "$WORKER_LOG" >&2
             exit 1
-        }
+        fi
         sleep 1
     done
-    log "worker is publishing frames"
+    log "worker connected and publishing"
 }
 
 # --- cleanup -----------------------------------------------------------------
@@ -141,13 +185,21 @@ cleanup() {
     ((RECORDING)) && ipc stop_recording
     ipc waterlily_palette --args '"auto"'
     ((EFFECT_TOGGLED)) && ipc toggle_waterlily
-    [[ -n "$SPAWNED_WORKER" ]] && kill "$SPAWNED_WORKER" 2>/dev/null
+    ((SPAWNED_WORKER)) && kill_workers
 }
 trap cleanup EXIT
 
 # --- showcase ----------------------------------------------------------------
 
 mkdir -p "$OUT_DIR"
+
+# 一次探测覆盖三件事:jwm 在跑、compositor 激活、构建带 waterlily 状态查询。
+if ! ipc_query get_waterlily_status | grep -q '"success"[[:space:]]*:[[:space:]]*true'; then
+    echo "get_waterlily_status failed — jwm 未运行、compositor 未激活或二进制过旧:" >&2
+    ipc_query get_waterlily_status >&2
+    exit 1
+fi
+
 ensure_worker
 
 # 按查询到的真实状态决定是否开启特效,结束时恢复原状。
