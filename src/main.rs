@@ -1,5 +1,4 @@
-use anyhow::{Context as _, Result};
-use cairo::{Context as CairoContext, Format, ImageSurface};
+use anyhow::Result;
 use log::warn;
 use pango::FontDescription;
 use std::env;
@@ -15,13 +14,13 @@ use winit::{
 };
 
 use xbar_core::{
-    AlignedWakeThread, BarEffect, BarRuntime, ModelConfig, PlatformEffectHandler, RuntimeUpdate,
-    TransportRecoveryConfig, TransportWakeSlot, WakeAck,
+    AlignedWakeThread, BarRuntime, ModelConfig, RuntimeUpdate, TransportRecoveryConfig,
+    TransportWakeSlot, WakeAck,
     logging::init as initialize_logging,
-    presentation::{Point, PointerAction, PresentationConfig, Size},
-    render::cairo::CairoBar,
+    presentation::{Point, PointerAction, PresentationConfig},
+    render::cairo::{CairoBar, CpuCanvas},
 };
-use xbar_linux_actions::ProcessActionHandler;
+use xbar_linux_actions::{EffectRouter, GeometryRequest};
 
 const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -459,10 +458,10 @@ struct App {
     last_cursor_pos: Option<Point>,
 
     gpu: Option<Gpu>,
-    cpu_frame: Vec<u8>,
+    canvas: CpuCanvas,
     proxy: EventLoopProxy<UserEvent>,
     transport_wake: TransportWakeSlot,
-    process_actions: ProcessActionHandler,
+    effects: EffectRouter,
 }
 
 impl App {
@@ -485,10 +484,10 @@ impl App {
             ),
             last_cursor_pos: None,
             gpu: None,
-            cpu_frame: Vec::new(),
+            canvas: CpuCanvas::new(),
             proxy,
             transport_wake: TransportWakeSlot::new(true),
-            process_actions: ProcessActionHandler::default(),
+            effects: EffectRouter::default(),
         }
     }
 
@@ -497,51 +496,21 @@ impl App {
             return Ok(());
         }
 
-        let width_px = i32::try_from(self.last_physical_size.width)
-            .context("window width does not fit Cairo")?;
-        let height_px = i32::try_from(self.last_physical_size.height)
-            .context("window height does not fit Cairo")?;
-        if width_px == 0 || height_px == 0 {
+        let width = self.last_physical_size.width;
+        let height = self.last_physical_size.height;
+        if width == 0 || height == 0 {
             return Ok(());
         }
-        let stride = width_px
-            .checked_mul(4)
-            .ok_or_else(|| anyhow::anyhow!("stride overflow"))?;
 
-        let needed = usize::try_from(stride)?
-            .checked_mul(usize::try_from(height_px)?)
-            .ok_or_else(|| anyhow::anyhow!("frame size overflow"))?;
-        if self.cpu_frame.len() != needed {
-            self.cpu_frame.resize(needed, 0);
-        }
-
-        // Cairo 在逻辑坐标中构建 Scene，CPU 表面仍使用物理像素。
-        {
-            let surface = unsafe {
-                ImageSurface::create_for_data_unsafe(
-                    self.cpu_frame.as_mut_ptr(),
-                    Format::ARgb32,
-                    width_px,
-                    height_px,
-                    stride,
-                )?
-            };
-            let cr = CairoContext::new(&surface)?;
-            cr.scale(self.scale_factor, self.scale_factor);
-            self.bar.render(
-                &cr,
-                Size::new(
-                    self.logical_size.width as f32,
-                    self.logical_size.height as f32,
-                ),
-            )?;
-            surface.flush();
-        }
-
+        // Cairo builds the scene in logical coordinates; the CPU frame stays
+        // in physical pixels.
+        let frame = self
+            .canvas
+            .render(&mut self.bar, width, height, self.scale_factor)?;
         self.gpu
             .as_mut()
             .expect("GPU presence checked above")
-            .upload_and_present(&self.cpu_frame, stride as u32)?;
+            .upload_and_present(frame.data, frame.stride)?;
         Ok(())
     }
 
@@ -564,19 +533,23 @@ impl App {
     }
 
     fn handle_runtime_update(&mut self, update: RuntimeUpdate) {
-        let RuntimeUpdate {
-            changes,
-            platform_effects,
-            issues,
-        } = update;
-
-        for issue in issues {
-            warn!("xbar runtime issue: {issue:?}");
-        }
-        for effect in platform_effects {
-            self.handle_platform_effect(effect);
-        }
-        if !changes.is_empty() {
+        let mut effects = std::mem::take(&mut self.effects);
+        let needs_redraw = effects
+            .route::<_, std::convert::Infallible>(update, |request| {
+                match request {
+                    GeometryRequest::Apply(geometry) => self.apply_monitor_geometry(geometry),
+                    GeometryRequest::Clear => {
+                        if let Some(window) = &self.window {
+                            window.set_outer_position(LogicalPosition::new(0.0, 0.0));
+                            let _ = window.request_inner_size(self.default_logical_size);
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .expect("geometry closure is infallible");
+        self.effects = effects;
+        if needs_redraw {
             self.request_redraw();
         }
     }
@@ -594,30 +567,6 @@ impl App {
             proxy.send_event(UserEvent::SharedUpdated(ack))
         }) {
             warn!("failed to synchronize shared transport wake: {error}");
-        }
-    }
-
-    fn handle_platform_effect(&mut self, effect: BarEffect) {
-        match effect {
-            BarEffect::ApplyMonitorGeometry(geometry) => self.apply_monitor_geometry(geometry),
-            BarEffect::ClearMonitorGeometry => {
-                if let Some(window) = &self.window {
-                    window.set_outer_position(LogicalPosition::new(0.0, 0.0));
-                    let _ = window.request_inner_size(self.default_logical_size);
-                }
-            }
-            effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl) => {
-                if let Err(error) = self.process_actions.handle(effect) {
-                    warn!("failed to handle platform effect: {error}");
-                }
-            }
-            BarEffect::WindowManager(_)
-            | BarEffect::ToggleMute
-            | BarEffect::AdjustVolume(_)
-            | BarEffect::AdjustBrightness(_)
-            | BarEffect::RefreshBattery => {
-                warn!("no frontend adapter handled platform effect: {effect:?}");
-            }
         }
     }
 
@@ -680,9 +629,6 @@ impl ApplicationHandler<UserEvent> for App {
                 ))
                 .expect("wgpu init failed"),
             );
-            self.cpu_frame =
-                vec![0u8; physical_size.width as usize * physical_size.height as usize * 4];
-
             self.window_id = Some(win_id);
 
             let tick = self.bar.tick();
@@ -729,7 +675,6 @@ impl ApplicationHandler<UserEvent> for App {
                     let w = (self.logical_size.width * self.scale_factor).round() as u32;
                     let h = (self.logical_size.height * self.scale_factor).round() as u32;
                     gpu.resize(w, h);
-                    self.cpu_frame.resize((w * h * 4) as usize, 0);
                 }
 
                 self.request_redraw();
@@ -742,7 +687,6 @@ impl ApplicationHandler<UserEvent> for App {
                     let w = (self.logical_size.width * self.scale_factor).round() as u32;
                     let h = (self.logical_size.height * self.scale_factor).round() as u32;
                     gpu.resize(w, h);
-                    self.cpu_frame.resize((w * h * 4) as usize, 0);
                 }
 
                 if let Some(geometry) = self.bar.runtime().view().geometry {
