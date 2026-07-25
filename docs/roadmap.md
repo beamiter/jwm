@@ -259,8 +259,17 @@ everywhere health is: `RuntimeStatusV1` and the doctor report carry a
 `compiled_backends` field (compatible additions within schema v1), the
 doctor's first check fails with the missing feature name when the
 selected backend is not compiled, and the support bundle forwards the
-roster as non-sensitive build metadata. Remaining: the optional
-portal/media integration profile.
+roster as non-sensitive build metadata. The media integration is the
+default-on `media-audio` feature: the alsa dependency is optional, the
+audio recorder keeps its state/IPC surface but reports plainly that
+capture is not compiled in, and screen recording degrades to
+video-only; CI compiles the all-backends-no-media profile. The portal
+integration stays a separate crate (its PipeWire/tokio/zbus stack never
+enters the compositor's dependency graph): CI builds `portal/` against
+PipeWire >= 1.2, with `scripts/ensure_pipewire.sh` compiling a minimal
+private prefix on distributions that ship older PipeWire — the same
+script developers use, feeding the `JWM_PIPEWIRE_PREFIX` rpath support
+already in the portal's build script.
 
 Exit criteria: each supported profile compiles in CI, reports its capabilities
 accurately, and fails clearly when a disabled backend is requested.

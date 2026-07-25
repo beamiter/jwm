@@ -119,6 +119,9 @@ APT_RUNTIME=(
 )
 
 # Optional: xdg-desktop-portal ScreenCast backend (PipeWire).
+# The portal needs PipeWire >= 1.2 headers; when the distribution ships an
+# older version, `scripts/ensure_pipewire.sh` builds a minimal private prefix
+# and prints the PKG_CONFIG_PATH / JWM_PIPEWIRE_PREFIX environment to use.
 APT_PORTAL=(
     libpipewire-0.3-dev libspa-0.2-dev
 )

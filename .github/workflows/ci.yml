@@ -173,6 +173,49 @@ jobs:
           cargo check --locked --all-targets --no-default-features
           ${{ matrix.profile.features != '' && format('--features {0}', matrix.profile.features) || '' }}
 
+  portal:
+    name: Portal (xdg-desktop-portal ScreenCast backend)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            git \
+            meson \
+            ninja-build \
+            clang \
+            libclang-dev \
+            libdrm-dev \
+            libgbm-dev
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo build data
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: portal
+
+      - name: Cache the PipeWire prefix
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/jwm/pipewire-prefix
+          key: pipewire-prefix-${{ runner.os }}-1.2.7
+
+      - name: Ensure PipeWire >= 1.2 development metadata
+        run: bash scripts/ensure_pipewire.sh --env >> "$GITHUB_ENV"
+
+      - name: Check the portal crate
+        working-directory: portal
+        run: cargo check --locked --all-targets
+
   msrv:
     name: Minimum supported Rust version
     runs-on: ubuntu-latest
