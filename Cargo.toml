@@ -25,18 +25,37 @@ default = [
 ]
 # Internal: shared X11 transport helpers and the GLX/EGL compositor.
 # Enabled through the per-transport features; not selected directly.
-x11-backends = []
+x11-backends = ["dep:x11", "dep:x11rb-protocol"]
 # Internal: shared Smithay Wayland frontend. Enabled through the per-backend
 # Wayland features; not selected directly.
-wayland-backends = []
+wayland-backends = ["dep:smithay"]
 # X11RB transport + shared X11 compositor.
-backend-x11rb = ["x11-backends"]
+backend-x11rb = ["x11-backends", "dep:x11rb"]
 # XCB transport + shared X11 compositor.
-backend-xcb = ["x11-backends"]
+backend-xcb = ["x11-backends", "dep:xcb"]
 # Direct Wayland DRM/KMS session backend.
-backend-wayland-udev = ["wayland-backends"]
+backend-wayland-udev = [
+    "wayland-backends",
+    "dep:drm",
+    "dep:drm-ffi",
+    "dep:egl",
+    "dep:gbm",
+    "dep:libseat",
+    "smithay/backend_drm",
+    "smithay/backend_gbm",
+    "smithay/backend_libinput",
+    "smithay/backend_session_libseat",
+    "smithay/backend_udev",
+]
 # Nested Wayland development backends (wayland-x11 and wayland-winit).
-backend-wayland-nested = ["wayland-backends"]
+backend-wayland-nested = [
+    "wayland-backends",
+    "dep:gbm",
+    "dep:winit",
+    "dep:x11rb",
+    "smithay/backend_winit",
+    "smithay/backend_x11",
+]
 
 [[bin]]
 name = "jwm-tool"
@@ -52,9 +71,9 @@ dirs = "6.0.0"
 glob = "0.3.3"
 signal-hook = "0.4.4"
 slotmap = { version = "1.1.1", features = ["serde"] }
-x11 = { version = "2.21.0", features = ["glx", "xlib", "xlib_xcb", "xcursor", "xfixes", "xinput", "xrandr", "xrender", "dpms", "xf86vmode"] }
-x11rb = { version = "0.13.2", features = ["all-extensions", "allow-unsafe-code"] }
-x11rb-protocol = "0.13.2"
+x11 = { version = "2.21.0", features = ["glx", "xlib", "xlib_xcb", "xcursor", "xfixes", "xinput", "xrandr", "xrender", "dpms", "xf86vmode"], optional = true }
+x11rb = { version = "0.13.2", features = ["all-extensions", "allow-unsafe-code"], optional = true }
+x11rb-protocol = { version = "0.13.2", features = ["present"], optional = true }
 
 libc = "0.2.186"
 notify = "8.2"
@@ -73,17 +92,10 @@ ab_glyph = "0.2.32"
 rand = "0.10.2"
 xkbcommon = "0.9.0"
 bitflags = "2.13.1"
-smithay = { git = "https://github.com/Smithay/smithay.git", rev = "e76f1af1418e9cdf012da9020c2f1ecc0fe020fa", default-features = false, features = [
+smithay = { git = "https://github.com/Smithay/smithay.git", rev = "e76f1af1418e9cdf012da9020c2f1ecc0fe020fa", default-features = false, optional = true, features = [
 "use_system_lib",
 "wayland-backend",
 "wayland_frontend",
-"backend_x11",
-"backend_winit",
-"backend_udev",
-"backend_libinput",
-"backend_session_libseat",
-"backend_drm",
-"backend_gbm",
 "backend_egl",
 "renderer_gl",
 "desktop",
@@ -91,17 +103,17 @@ smithay = { git = "https://github.com/Smithay/smithay.git", rev = "e76f1af1418e9
 ] }
 calloop = { version = "0.14.4", features = ["signals"] }
 glow = "0.18"
-winit = "0.30.13"
+winit = { version = "0.30.13", optional = true }
 png = "0.18"
 image = "0.25"
 xcursor = "0.3.10"
 tracing = "0.1.44"
-drm = "0.15.0"
-drm-ffi = "0.9.1"
-libseat = "0.2.4"
-gbm = "0.18.0"
-egl = "0.2.7"
-xcb = { version = "1.7.0", features = ["composite", "shape", "randr", "damage", "present", "xfixes"] }
+drm = { version = "0.15.0", optional = true }
+drm-ffi = { version = "0.9.1", optional = true }
+libseat = { version = "0.2.4", optional = true }
+gbm = { version = "0.18.0", optional = true }
+egl = { version = "0.2.7", optional = true }
+xcb = { version = "1.7.0", features = ["composite", "shape", "randr", "damage", "present", "xfixes"], optional = true }
 
 [dev-dependencies]
 criterion = "0.8.2"
