@@ -155,13 +155,9 @@ jobs:
       - run: cargo check --features rkyv
 
   deny:
-    name: cargo-deny (advisories, bans, sources)
+    name: cargo-deny (advisories, licenses, bans, sources)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      # licenses 检查暂不启用：根 crate 有意未声明许可证（见 README），
-      # cargo-deny 会把它判为 unlicensed。声明许可证后改回完整 check。
       - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check advisories bans sources

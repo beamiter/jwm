@@ -6,6 +6,8 @@
 
 ### Added
 
+- 声明 MIT OR Apache-2.0 双许可（`LICENSE-MIT`、`LICENSE-APACHE`）；CI 恢复 cargo-deny 的完整 licenses 门禁。
+
 - 类型指纹：header 记录消息/命令槽位类型指纹（`WireSafe::fingerprint`，默认哈希类型名，可覆写），打开时校验，拒绝"槽大小相同但类型不同"的错配打开。
 - 跨进程唤醒延迟基准 `cross_process_latency`：真实两进程 ping-pong，按后端 × {自旋命中, 纯内核唤醒} 两种模式出数（参考：自旋路径约 0.7µs 后端无关；内核唤醒 futex ≈ 4.3µs < semaphore ≈ 4.6µs < eventfd ≈ 4.8µs）。
 - **泛型核心 `TypedRingBuffer<M, C>` 与 `WireSafe` 契约**：布局、跨进程锁、游标、后端与生命周期全部与 payload 解耦，任意满足契约（repr(C)、无 padding、任意位模式有效）的 POD 类型都可作为槽位类型；固定宽度整数、浮点与其数组自带 `WireSafe` 实现；`SharedRingBufferOptions` 新增 `create_typed`/`open_typed`/`open_or_create_typed`。`SharedRingBuffer` 成为 `TypedRingBuffer<WireMessage, WireCommand>` 的领域封装，公开 API 不变。
