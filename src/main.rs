@@ -8,11 +8,11 @@ use std::env;
 use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd};
 use std::time::Duration;
 use xbar_core::linux::{AlignedTimer, Epoll};
-use xbar_core::presentation::{Point, PointerAction, PresentationConfig, Size};
+use xbar_core::presentation::{Point, PointerAction, Size};
 use xbar_core::render::cairo::CairoBar;
 use xbar_core::{
-    BarPlacement, BarRuntime, DockProperty, DockPropertyValue, DockWindowSpec, ModelConfig,
-    MonitorGeometry, NotifierChange, RuntimeUpdate, TransportNotifierSlot, TransportRecoveryConfig,
+    BarPlacement, BarRuntime, DockProperty, DockPropertyValue, DockWindowSpec, MonitorGeometry,
+    NotifierChange, RuntimeUpdate, TransportNotifierSlot, TransportRecoveryConfig,
 };
 use xbar_linux_actions::{EffectRouter, GeometryRequest};
 use xcb::{self, Xid, x};
@@ -447,12 +447,13 @@ fn sync_notifier(
 fn main() -> Result<()> {
     let shared_path = env::args().skip(1).last().unwrap_or_default();
     xbar_core::logging::init(BAR_NAME, &shared_path)?;
+    let app_config = xbar_core::config::BarConfig::load_default()?;
 
     let runtime = if shared_path.is_empty() {
-        BarRuntime::new(ModelConfig::default())?
+        BarRuntime::new(app_config.model_config())?
     } else {
         let recovery = TransportRecoveryConfig::new(shared_path.clone(), TRANSPORT_RETRY_INTERVAL)?;
-        BarRuntime::with_managed_transport(ModelConfig::default(), recovery)?
+        BarRuntime::with_managed_transport(app_config.model_config(), recovery)?
     };
 
     let (conn, screen_num) = xcb::Connection::connect(None)?;
@@ -463,14 +464,16 @@ fn main() -> Result<()> {
         .ok_or_else(|| anyhow!("no X screen found"))?;
     let cairo_xcb = build_cairo_xcb(&conn, screen)?;
 
-    let presentation = PresentationConfig::default();
+    let presentation = app_config.presentation.clone();
     let bar_height = presentation
         .bar_height
         .round()
         .clamp(1.0, f32::from(u16::MAX)) as u16;
-    let font_name = env::var("XBAR_FONT").unwrap_or_else(|_| "monospace 11".to_owned());
-    let font = FontDescription::from_string(&font_name);
+    let font = FontDescription::from_string(&app_config.font);
     let mut bar = CairoBar::new(runtime, presentation, font);
+    if let Some(opacity) = app_config.background_opacity {
+        bar.renderer_mut().set_background_opacity(Some(opacity));
+    }
 
     let win = conn.generate_id();
     let gc = conn.generate_id();
