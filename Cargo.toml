@@ -5,19 +5,20 @@ edition = "2024"
 
 [dependencies]
 libc = "0.2.186"
-xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.6.0", default-features = false, features = [
+xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.7.0", default-features = false, features = [
     "clock-chrono",
     "config-toml",
     "logging-flexi",
     "provider-alsa",
     "provider-battery-sysfs",
     "provider-brightnessctl",
+    "provider-network-sysfs",
     "provider-system",
     "render-cairo",
     "runtime-linux",
     "transport-shared",
 ] }
-xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.6.0" }
+xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.7.0" }
 softbuffer = "0.4.8"
 pango = "0.22.8"
 cairo-rs = "0.22.0"
