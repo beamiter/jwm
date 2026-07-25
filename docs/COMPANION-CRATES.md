@@ -42,6 +42,22 @@ effects are logged, geometry effects go to the caller's window closure, and
 only window-system errors can fail the route. Bars with non-standard effect
 policy keep using `RuntimeUpdate::handle_platform_effects` directly.
 
+### `xbar_present_wgpu`
+
+Owns the wgpu 30 surface lifecycle for CPU-rendered bars: sRGB format choice,
+BGRA/RGBA upload conversion with 256-byte row alignment, damage-aware
+sub-rectangle upload, outdated/lost surface recovery, and the fullscreen blit.
+It accepts any `Into<wgpu::SurfaceTarget>` so XCB, x11rb, winit, and tao
+consumers share one presenter. It never renders scenes or owns windows.
+
+### `xbar_dbus_providers`
+
+Owns D-Bus service policy (bus names, object paths, service quirks) and
+translates desktop services into existing model values. The first provider
+reduces UPower's display device to `BatteryState`. Providers that need new
+semantic state (network, MPRIS) first grow that state in the core model, then
+land their adapter here.
+
 ### `xbar_tauri`
 
 Owns Tauri state registration, one `xbar-state` envelope event, one checked
@@ -64,12 +80,12 @@ typed values) lives in core placement, so these adapters would only remove the
 small generic intern/write loop; they stay below the extraction threshold
 until a third X11 lifecycle appears.
 
-### Presentation adapters
+### Remaining presentation adapters
 
-`xbar_present_pixels`, `xbar_present_softbuffer`, and `xbar_present_wgpu` own
-surface lifetime, resize/recovery, pixel format conversion, and damaged-region
-upload. Core 0.5 `render_into_bgra`/`CpuCanvas` already produce the validated
-CPU frame, so these adapters would own only surface/GPU lifecycle.
+`xbar_present_wgpu` shipped in 0.6 (below). `xbar_present_pixels` and
+`xbar_present_softbuffer` stay unextracted: after `CpuCanvas` and damage
+metadata, each backend keeps only a few lines of library-specific present
+calls, which is below the extraction threshold.
 
 ## Extraction threshold
 

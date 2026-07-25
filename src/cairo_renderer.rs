@@ -9,8 +9,8 @@ use pango::prelude::FontMapExt as _;
 use pango::{FontDescription, Layout};
 
 use crate::presentation::{
-    InteractionState, LayoutEngine, Point, PointerAction, Rect, Rgba, Scene, SceneNode, Size,
-    Stroke, TextAlign, TextMeasurer,
+    Damage, InteractionState, LayoutEngine, Point, PointerAction, Rect, Rgba, Scene, SceneNode,
+    Size, Stroke, TextAlign, TextMeasurer,
 };
 use crate::{BarModel, BarRuntime, BarSnapshot, RuntimeUpdate};
 
@@ -280,6 +280,7 @@ pub struct CairoBar {
     pressed_button: Option<PointerButton>,
     scene: Scene,
     renderer: CairoRenderer,
+    last_damage: Damage,
 }
 
 impl CairoBar {
@@ -297,6 +298,7 @@ impl CairoBar {
             pressed_button: None,
             scene: empty_scene(),
             renderer: CairoRenderer::new(font),
+            last_damage: Damage::default(),
         }
     }
 
@@ -360,9 +362,18 @@ impl CairoBar {
             next_scene = layout.build(self.runtime.view(), viewport, &next_interaction);
         }
         self.renderer.render(context, &next_scene)?;
+        self.last_damage = next_scene.damage_from(&self.scene);
         self.interaction = next_interaction;
         self.scene = next_scene;
         Ok(())
+    }
+
+    /// Logical-coordinate damage between the two most recent rendered scenes.
+    ///
+    /// Empty damage after a render means the scene was visually identical.
+    #[must_use]
+    pub const fn last_damage(&self) -> &Damage {
+        &self.last_damage
     }
 
     /// Render into a caller-owned premultiplied Cairo `ARgb32` byte buffer
@@ -545,6 +556,22 @@ pub struct CpuCanvas {
     stride: u32,
 }
 
+/// Device-pixel rectangle inside a CPU frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PixelRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl PixelRect {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.width == 0 || self.height == 0
+    }
+}
+
 /// Borrowed view of one rendered CPU frame.
 #[derive(Debug, Clone, Copy)]
 pub struct CpuFrame<'a> {
@@ -554,6 +581,12 @@ pub struct CpuFrame<'a> {
     pub height: u32,
     /// Bytes per row, aligned as Cairo prefers; may exceed `width * 4`.
     pub stride: u32,
+    /// Device pixels that changed since the previous frame from this canvas.
+    ///
+    /// `None` means the whole frame must be presented (first frame or a
+    /// resize). `Some(rect)` may be empty when the scene was visually
+    /// identical; presenters can then skip the upload entirely.
+    pub damage: Option<PixelRect>,
 }
 
 impl CpuCanvas {
@@ -573,7 +606,8 @@ impl CpuCanvas {
         if physical_width == 0 || physical_height == 0 {
             anyhow::bail!("CPU canvas dimensions must be non-zero");
         }
-        if self.width != physical_width || self.height != physical_height {
+        let reallocated = self.width != physical_width || self.height != physical_height;
+        if reallocated {
             let width = i32::try_from(physical_width)
                 .map_err(|_| anyhow::anyhow!("CPU canvas width does not fit Cairo"))?;
             let stride = cairo::Format::ARgb32.stride_for_width(physical_width)?;
@@ -596,12 +630,55 @@ impl CpuCanvas {
             self.stride,
             scale_factor,
         )?;
+        let damage = if reallocated {
+            None
+        } else {
+            Some(physical_damage(
+                bar.last_damage(),
+                scale_factor,
+                self.width,
+                self.height,
+            ))
+        };
         Ok(CpuFrame {
             data: &self.data,
             width: self.width,
             height: self.height,
             stride: self.stride,
+            damage,
         })
+    }
+}
+
+/// Union logical damage regions into one outward-rounded device-pixel rect
+/// clamped to the frame.
+fn physical_damage(damage: &Damage, scale_factor: f64, width: u32, height: u32) -> PixelRect {
+    let mut union: Option<Rect> = None;
+    for region in damage.regions() {
+        union = Some(match union {
+            Some(current) => current.union(*region),
+            None => *region,
+        });
+    }
+    let Some(union) = union else {
+        return PixelRect::default();
+    };
+
+    let left = (f64::from(union.x) * scale_factor).floor().max(0.0) as u32;
+    let top = (f64::from(union.y) * scale_factor).floor().max(0.0) as u32;
+    let right = (f64::from(union.x + union.width) * scale_factor)
+        .ceil()
+        .max(0.0) as u32;
+    let bottom = (f64::from(union.y + union.height) * scale_factor)
+        .ceil()
+        .max(0.0) as u32;
+    let left = left.min(width);
+    let top = top.min(height);
+    PixelRect {
+        x: left,
+        y: top,
+        width: right.min(width).saturating_sub(left),
+        height: bottom.min(height).saturating_sub(top),
     }
 }
 
@@ -1101,10 +1178,25 @@ mod tests {
                 frame.data.iter().any(|byte| *byte != 0),
                 "rendered frame stayed fully transparent"
             );
+            assert_eq!(frame.damage, None, "first frame must present fully");
             frame.stride
         };
-        let stride = canvas.render(&mut bar, 640, 76, 2.0).unwrap().stride;
-        assert_eq!(stride, first_stride, "unchanged size must not reallocate");
+        let second = canvas.render(&mut bar, 640, 76, 2.0).unwrap();
+        assert_eq!(
+            second.stride, first_stride,
+            "unchanged size must not reallocate"
+        );
+        let damage = second.damage.expect("steady-state frames carry damage");
+        assert!(
+            damage.is_empty(),
+            "identical scenes must produce empty damage, got {damage:?}"
+        );
+
+        let _ = bar.runtime_mut().dispatch(UserAction::ToggleTheme);
+        let themed = canvas.render(&mut bar, 640, 76, 2.0).unwrap();
+        let damage = themed.damage.expect("steady-state frames carry damage");
+        assert!(!damage.is_empty(), "a theme change must damage the frame");
+        assert!(damage.x + damage.width <= 640 && damage.y + damage.height <= 76);
 
         let mut tight = vec![0_u8; 64 * 38 * 4];
         bar.render_into_bgra(&mut tight, 64, 38, 64 * 4, 1.0)

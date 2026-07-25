@@ -571,6 +571,106 @@ mod tests {
         BarModel::default().snapshot()
     }
 
+    /// Every wire variant with representative payload values, used as the
+    /// property-test universe for the JSON contract.
+    fn wire_universe() -> Vec<ActionRequest> {
+        let mut cases = Vec::new();
+        for tag_index in [0_usize, 1, MAX_MODEL_TAGS - 1, MAX_MODEL_TAGS, usize::MAX] {
+            cases.push(ActionRequest::ViewTag { tag_index });
+            cases.push(ActionRequest::ToggleTag { tag_index });
+            for monitor_id in [i32::MIN, -1, 0, 7, i32::MAX] {
+                cases.push(ActionRequest::ViewTagOn {
+                    tag_index,
+                    monitor_id,
+                });
+                cases.push(ActionRequest::ToggleTagOn {
+                    tag_index,
+                    monitor_id,
+                });
+            }
+        }
+        for layout_id in [0_u32, 1, 2, u32::MAX] {
+            cases.push(ActionRequest::SetLayout { layout_id });
+            cases.push(ActionRequest::SetLayoutOn {
+                layout_id,
+                monitor_id: -3,
+            });
+        }
+        for delta in [i32::MIN, -5, 0, 5, i32::MAX] {
+            cases.push(ActionRequest::AdjustVolume { delta });
+            cases.push(ActionRequest::AdjustBrightness { delta });
+        }
+        cases.extend([
+            ActionRequest::ToggleLayoutSelector,
+            ActionRequest::ToggleSeconds,
+            ActionRequest::ToggleTheme,
+            ActionRequest::ToggleMute,
+            ActionRequest::VolumeUp,
+            ActionRequest::VolumeDown,
+            ActionRequest::BrightnessUp,
+            ActionRequest::BrightnessDown,
+            ActionRequest::RefreshBattery,
+            ActionRequest::Screenshot,
+            ActionRequest::OpenAudioControl,
+        ]);
+        cases
+    }
+
+    #[test]
+    fn wire_requests_round_trip_json_and_validate_consistently() {
+        for request in wire_universe() {
+            let json = serde_json::to_value(request).unwrap();
+            // The tag key is stable and snake_case.
+            let action = json
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("missing action tag in {json}"));
+            assert_eq!(action, action.to_lowercase());
+
+            let decoded: ActionRequest = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(decoded, request, "round trip changed {json}");
+
+            // Conversion never panics on any payload value; tag indices are
+            // the only checked dimension of this enum.
+            match request.into_user_action() {
+                Ok(_) => {}
+                Err(ActionRequestError::TagOutOfRange {
+                    tag_index,
+                    max_exclusive,
+                }) => {
+                    assert!(tag_index >= max_exclusive);
+                    assert_eq!(max_exclusive, MAX_MODEL_TAGS);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_wire_requests_are_rejected_not_defaulted() {
+        for payload in [
+            // Unknown or missing tag.
+            r#"{"action":"reboot"}"#,
+            r#"{"tag_index":1}"#,
+            r#"{}"#,
+            // Missing required payload field.
+            r#"{"action":"view_tag"}"#,
+            r#"{"action":"view_tag_on","tag_index":1}"#,
+            r#"{"action":"adjust_volume"}"#,
+            // Wrong payload types.
+            r#"{"action":"view_tag","tag_index":"one"}"#,
+            r#"{"action":"view_tag","tag_index":-1}"#,
+            r#"{"action":"set_layout","layout_id":-2}"#,
+            r#"{"action":"adjust_volume","delta":2147483648}"#,
+            // Wrong casing of the stable tag values.
+            r#"{"action":"ViewTag","tag_index":1}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ActionRequest>(payload).is_err(),
+                "accepted malformed request: {payload}"
+            );
+        }
+    }
+
     #[test]
     fn envelope_preserves_optional_model_semantics_and_layout_text() {
         let mut state = snapshot();

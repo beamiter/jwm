@@ -1,6 +1,6 @@
 [package]
 name = "xbar_core"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 description = "Backend-neutral status-bar model, frontend projection, runtime, and explicit adapters"
 repository = "https://github.com/beamiter/xbar_core"
@@ -12,6 +12,7 @@ repository = "https://github.com/beamiter/xbar_core"
 default = []
 
 clock-chrono = ["dep:chrono"]
+config-toml = ["dep:toml"]
 logging-flexi = ["dep:anyhow", "dep:flexi_logger", "dep:log"]
 provider-alsa = ["dep:alsa", "dep:anyhow", "dep:log"]
 provider-battery-sysfs = []
@@ -28,6 +29,7 @@ sysinfo = { version = "0.39.6", features = ["multithread"], optional = true }
 
 shared_structures = { git = "https://github.com/beamiter/shared_structures.git", features = ["use-futex"], optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
+toml = { version = "0.9.8", optional = true }
 
 alsa = { version = "0.12.0", optional = true }
 log = { version = "0.4.33", optional = true }
@@ -38,6 +40,15 @@ cairo-rs = { version = "0.22.0", optional = true }
 pango = { version = "0.22.8", optional = true }
 pangocairo = { version = "0.22.8", optional = true }
 
+[dev-dependencies]
+serde_json = "1.0.145"
+
 [workspace]
-members = [".", "crates/xbar_linux_actions", "crates/xbar_tauri"]
+members = [
+    ".",
+    "crates/xbar_dbus_providers",
+    "crates/xbar_linux_actions",
+    "crates/xbar_present_wgpu",
+    "crates/xbar_tauri",
+]
 resolver = "3"

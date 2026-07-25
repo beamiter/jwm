@@ -1,5 +1,9 @@
 # JWM bar consumer matrix
 
+Version 0.6 adds `xbar_present_wgpu` for the four wgpu bars, damage metadata
+consumed by softbuffer/wgpu presenters, and the shared `config-toml` appearance
+file adopted by all ten native bars; see `MIGRATION-0.6.md`.
+
 Version 0.5 keeps every profile below and additionally hands the native bars
 `linux::Epoll`, the `DockWindowSpec` property protocol, CPU-frame rendering
 (`render_into_bgra`/`CpuCanvas`), and the `xbar_linux_actions::EffectRouter`

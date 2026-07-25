@@ -94,6 +94,69 @@ impl EwmhStrut {
     }
 }
 
+/// wlr-layer-shell layer selection for a Wayland bar surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LayerShellLayer {
+    Background,
+    Bottom,
+    Top,
+    Overlay,
+}
+
+/// Edge anchors for a layer surface.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LayerShellAnchors {
+    pub top: bool,
+    pub bottom: bool,
+    pub left: bool,
+    pub right: bool,
+}
+
+/// Complete wlr-layer-shell configuration for a bar, expressed as data.
+///
+/// Mirrors [`DockWindowSpec`] for Wayland: the values a frontend passes to
+/// `zwlr_layer_surface_v1` (via smithay-client-toolkit or a raw binding) live
+/// here so X11 and Wayland bars reserve identical logical space. Sizes are in
+/// logical (surface-local) coordinates, matching the layer-shell protocol.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LayerShellPlacement {
+    /// `namespace` for `get_layer_surface`, conventionally the bar name.
+    pub namespace: String,
+    pub layer: LayerShellLayer,
+    pub anchors: LayerShellAnchors,
+    /// `set_exclusive_zone` value: logical pixels reserved for the bar.
+    pub exclusive_zone: i32,
+    /// Margins outside the anchored edges: top, right, bottom, left.
+    pub margins: [i32; 4],
+    /// `set_size` height; width 0 lets the compositor stretch between the
+    /// left/right anchors.
+    pub logical_height: u32,
+}
+
+impl LayerShellPlacement {
+    /// A top bar spanning the full output width on the `Top` layer, with an
+    /// exclusive zone equal to its height.
+    pub fn top(namespace: impl Into<String>, logical_height: f64) -> Result<Self, PlacementError> {
+        if !logical_height.is_finite() || logical_height <= 0.0 {
+            return Err(PlacementError::InvalidLogicalHeight);
+        }
+        let height = logical_height.ceil().clamp(1.0, f64::from(u32::MAX)) as u32;
+        Ok(Self {
+            namespace: namespace.into(),
+            layer: LayerShellLayer::Top,
+            anchors: LayerShellAnchors {
+                top: true,
+                bottom: false,
+                left: true,
+                right: true,
+            },
+            exclusive_zone: i32::try_from(height).unwrap_or(i32::MAX),
+            margins: [0; 4],
+            logical_height: height,
+        })
+    }
+}
+
 /// One EWMH property write expressed as data.
 ///
 /// `name` and any [`DockPropertyValue::Atoms`] entries are atom *names*; the
@@ -182,6 +245,27 @@ impl DockWindowSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layer_shell_top_bar_reserves_its_height_and_rejects_invalid_input() {
+        let placement = LayerShellPlacement::top("xbar", 38.4).unwrap();
+        assert_eq!(placement.logical_height, 39);
+        assert_eq!(placement.exclusive_zone, 39);
+        assert_eq!(placement.layer, LayerShellLayer::Top);
+        assert!(placement.anchors.top && placement.anchors.left && placement.anchors.right);
+        assert!(!placement.anchors.bottom);
+        assert_eq!(placement.margins, [0; 4]);
+        assert_eq!(placement.namespace, "xbar");
+
+        assert_eq!(
+            LayerShellPlacement::top("xbar", 0.0),
+            Err(PlacementError::InvalidLogicalHeight)
+        );
+        assert_eq!(
+            LayerShellPlacement::top("xbar", f64::NAN),
+            Err(PlacementError::InvalidLogicalHeight)
+        );
+    }
 
     #[test]
     fn dock_spec_lists_complete_property_protocol_in_write_order() {

@@ -44,12 +44,15 @@ WM snapshot ──────────────────────�
   widget toolkits and the logical-coordinate layout; stable scene nodes,
   interaction state, semantic hit regions, and old/new scene damage.
 - `placement`: pure monitor/scale-to-physical-bar and EWMH strut calculation,
-  plus the dock property protocol expressed as atom names and typed values so
-  XCB and x11rb write identical properties with their own connections.
+  the dock property protocol expressed as atom names and typed values so XCB
+  and x11rb write identical properties with their own connections, and the
+  wlr-layer-shell values a Wayland frontend passes to its layer surface.
 - `render::cairo`: Cairo/Pango scene renderer and the high-level `CairoBar`
   facade, including validated CPU-buffer rendering (`render_into_bgra`,
-  `CpuCanvas`) for pixels/softbuffer/wgpu presentation. It does not own window
-  or transport resources.
+  `CpuCanvas`) and per-frame damage metadata for pixels/softbuffer/wgpu
+  presentation. It does not own window or transport resources.
+- `config`: optional validated TOML appearance/theme configuration shared by
+  every bar; invalid values are startup errors, never silent fallbacks.
 - provider modules: independently selected ALSA, sysinfo CPU/memory,
   brightnessctl, and battery-sysfs adapters.
 - `transport`: current JWM shared-memory adapter and queue outcome mapping.

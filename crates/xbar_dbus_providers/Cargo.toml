@@ -1,0 +1,10 @@
+[package]
+name = "xbar_dbus_providers"
+version = "0.1.0"
+edition = "2024"
+description = "D-Bus desktop-service providers for xbar_core hosts"
+repository = "https://github.com/beamiter/xbar_core"
+
+[dependencies]
+xbar_core = { path = "../..", default-features = false }
+zbus = { version = "5.12.0", default-features = false, features = ["blocking-api", "async-io"] }

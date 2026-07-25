@@ -14,6 +14,8 @@ pub mod battery;
 pub mod brightness;
 #[cfg(feature = "render-cairo")]
 mod cairo_renderer;
+#[cfg(feature = "config-toml")]
+pub mod config;
 pub mod controls;
 pub mod display;
 pub mod frontend;
@@ -55,7 +57,8 @@ pub use model::{
     TagState, UserAction, WmCommand, WmSnapshot,
 };
 pub use placement::{
-    BarPlacement, DockProperty, DockPropertyValue, DockWindowSpec, EwmhStrut, PlacementError,
+    BarPlacement, DockProperty, DockPropertyValue, DockWindowSpec, EwmhStrut, LayerShellAnchors,
+    LayerShellLayer, LayerShellPlacement, PlacementError,
 };
 pub use runtime::{
     BarRuntime, DEFAULT_RUNTIME_TICK_INTERVAL, PlatformEffectFailure, PlatformEffectHandler,
@@ -81,8 +84,8 @@ pub mod render {
     #[cfg(feature = "render-cairo")]
     pub mod cairo {
         pub use crate::cairo_renderer::{
-            CairoBar, CairoRenderer, CpuCanvas, CpuFrame, PangoTextMeasurer, PointerButton,
-            PointerInput, PointerUpdate,
+            CairoBar, CairoRenderer, CpuCanvas, CpuFrame, PangoTextMeasurer, PixelRect,
+            PointerButton, PointerInput, PointerUpdate,
         };
     }
 }
