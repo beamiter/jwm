@@ -18,6 +18,8 @@ public `AutoBody` and `Simulation` APIs:
 | `tandem` | Two static cylinders in tandem with interfering, merging vortex streets | glacier azure/bronze |
 | `diamond` | Square prism rotated 45° whose sharp edges shed a wide, angular street | berry magenta/lime |
 | `orbit` | Cylinder stirring quiescent fluid along a circular orbit, curling spiral vortex arms | cosmos rose/slate |
+| `stylus` | Cylinder chasing the mouse pointer through quiescent fluid on a critically damped spring, so every cursor stroke writes vorticity onto the canvas | fluent rainbow |
+| `waltz` | Cylinder following the mouse pointer through a uniform stream with dance's transverse heave riding the chase spring, trailing the braided wake from the cursor | mica teal/amethyst |
 | `wander` | Cylinder roaming quiescent fluid on a smooth non-repeating Lissajous path, trailing its wake across the whole canvas (default) | aurora teal/magenta |
 
 Every diverging palette shares the same near-white midpoint, so the compositor
@@ -62,8 +64,10 @@ WaterLily. Direct scanout and fullscreen unredirect are suppressed while the
 layer is visible because both paths would bypass compositor-owned visuals.
 
 There is no hand tracking in this design. It does not use a camera, MediaPipe,
-landmarks, a selected window, or pointer motion. The chosen WaterLily case
-advances on its own simulation clock.
+landmarks, or a selected window. The chosen WaterLily case advances on its own
+simulation clock; the interactive `stylus` and `waltz` cases additionally
+receive the pointer position, which the compositor streams to the worker as
+throttled `pointer X Y` control commands while the layer is visible.
 
 ## Quick start
 

@@ -14,6 +14,7 @@ include("cases/tandem.jl")
 include("cases/diamond.jl")
 include("cases/orbit.jl")
 include("cases/stylus.jl")
+include("cases/waltz.jl")
 include("cases/wander.jl")
 include("cases/registry.jl")
 

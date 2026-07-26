@@ -99,6 +99,7 @@ end
         "orbit",
         "stylus",
         "tandem",
+        "waltz",
         "wander",
     ]
 end
@@ -220,6 +221,67 @@ end
     before = JwmWaterLily.segment_position(case.segment, now)
     JwmWaterLily.handle_pointer!(case, 0.9, 0.8)
     after = JwmWaterLily.segment_position(case.segment, now)
+    @test isapprox(before[1], after[1]; atol=1e-3)
+    @test isapprox(before[2], after[2]; atol=1e-3)
+
+    # The chase makes real progress toward the goal as the simulation runs.
+    start = JwmWaterLily.segment_position(case.segment, now)
+    start_gap = hypot((case.goal - start)...)
+    for _ in 1:12
+        JwmWaterLily.frame_tick!(case)
+        JwmWaterLily.advance!(case, 0.05)
+    end
+    later = Float64(JwmWaterLily.WaterLily.time(case.simulation.flow))
+    position = JwmWaterLily.segment_position(case.segment, later)
+    @test hypot((case.goal - position)...) < start_gap
+end
+
+@testset "waltz heave rides the chase spring within the speed budget" begin
+    case = build_case("waltz", (128, 64); memory=Array)
+    T = Float32
+    @test JwmWaterLily.case_palette_name(case) == "mica"
+
+    # The chase spring must peak below its 2U share of the CFL budget while
+    # the heave contributes exactly its budgeted 1U peak, so the combined
+    # body speed stays inside the 3U envelope the stylus case proves out.
+    segment = case.segment
+    far = JwmWaterLily.SpringSegment{T}(
+        T(0),
+        segment.position,
+        JwmWaterLily.SA[T(0), T(0)],
+        segment.position + JwmWaterLily.SA[
+            T(JwmWaterLily.WALTZ_CHASE_MAX_SPEED * Base.MathConstants.e) / segment.rate,
+            T(0),
+        ],
+        segment.rate,
+    )
+    chase_cap = T(JwmWaterLily.WALTZ_CHASE_MAX_SPEED) * T(case.simulation.U)
+    horizon = 8.0 / Float64(segment.rate)
+    for time in range(0.0, horizon; length=400)
+        velocity = JwmWaterLily.segment_velocity(far, time)
+        @test hypot(velocity[1], velocity[2]) <= chase_cap * 1.001
+    end
+    heave_peak = case.heave_amplitude * case.heave_rate
+    @test heave_peak ≈ T(JwmWaterLily.WALTZ_HEAVE_PEAK_SPEED) * T(case.simulation.U)
+
+    # Pointer updates map top-left normalized coordinates into the y-up grid;
+    # the vertical clamp reserves the heave amplitude on top of the margin so
+    # the oscillating body never leaves the canvas.
+    JwmWaterLily.handle_pointer!(case, 1.0, 1.0)
+    @test case.goal[1] ≈ 128 - case.margin
+    @test case.goal[2] ≈ case.margin + case.heave_amplitude
+    JwmWaterLily.handle_pointer!(case, 0.5, 0.0)
+    @test case.goal[1] ≈ 64
+    @test case.goal[2] ≈ 64 - case.margin - case.heave_amplitude
+
+    # Retargeting splices the new spring segment at the current pose, and the
+    # heave depends only on absolute solver time: the body must not jump when
+    # the pointer does.
+    now = Float64(JwmWaterLily.WaterLily.time(case.simulation.flow))
+    τ = JwmWaterLily.simulation_time(case)
+    before = JwmWaterLily.waltz_position(case, τ)
+    JwmWaterLily.handle_pointer!(case, 0.9, 0.8)
+    after = JwmWaterLily.waltz_position(case, τ)
     @test isapprox(before[1], after[1]; atol=1e-3)
     @test isapprox(before[2], after[2]; atol=1e-3)
 
