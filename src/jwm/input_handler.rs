@@ -17,9 +17,16 @@ use log::{error, info};
 impl Jwm {
     pub(crate) fn sync_system_ui(&self, backend: &mut dyn Backend) {
         let active = self.features.system_ui.is_active();
-        backend.compositor_set_system_ui(active.then(|| SystemUiOverlay {
-            text: self.features.system_ui.overlay_text(),
-            locked: self.features.system_ui.is_locked(),
+        backend.compositor_set_system_ui(active.then(|| {
+            let parts = self.features.system_ui.overlay_parts();
+            SystemUiOverlay {
+                title: parts.title,
+                query: parts.query,
+                items: parts.items,
+                selected: parts.selected,
+                hint: parts.hint,
+                locked: self.features.system_ui.is_locked(),
+            }
         }));
         backend.compositor_force_full_redraw();
     }

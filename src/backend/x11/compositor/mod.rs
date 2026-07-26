@@ -446,6 +446,9 @@ where
     annotation_line_program: glow::Program,
     annotation_line_uniforms: LineUniforms,
     hud_text_texture: Option<glow::Texture>,
+    /// Styled system-UI panel text sections: title, query, items, hint.
+    sysui_textures: [Option<(glow::Texture, u32, u32)>; 4],
+    sysui_cache: String,
     hud_text_width: u32,
     hud_text_height: u32,
     hud_text_cache: String,
@@ -889,6 +892,11 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
             self.gl.delete_program(self.hud_program);
             self.gl.delete_program(self.hud_text_program);
             self.gl.delete_program(self.annotation_line_program);
+            for slot in &mut self.sysui_textures {
+                if let Some((tex, _, _)) = slot.take() {
+                    self.gl.delete_texture(tex);
+                }
+            }
             if let Some(tex) = self.hud_text_texture.take() {
                 self.gl.delete_texture(tex);
             }

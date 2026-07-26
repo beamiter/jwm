@@ -231,10 +231,18 @@ pub struct ScreenInfo {
 }
 
 /// Backend-neutral compositor UI drawn above every client.  Input and policy
-/// live in JWM; backends only present this snapshot.
+/// live in JWM; backends only present this snapshot as a styled panel:
+/// headline, optional search field, list rows (one optionally highlighted),
+/// and a footer hint.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SystemUiOverlay {
-    pub text: String,
+    pub title: String,
+    /// Search-field content; `Some` renders a query bar with a caret.
+    pub query: Option<String>,
+    pub items: Vec<String>,
+    /// Row in `items` the renderer highlights with a selection pill.
+    pub selected: Option<usize>,
+    pub hint: String,
     /// A lock overlay is opaque; other system UI dims the current desktop.
     pub locked: bool,
 }

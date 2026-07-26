@@ -923,120 +923,339 @@ impl<C: CompositorConnection> Compositor<C> {
         self.hud_text_cache = text.to_string();
     }
 
-    fn update_system_ui_text_texture(&mut self, text: &str) {
+    /// Rasterize the four text sections of the system-UI panel (title, query
+    /// line, list items, footer hint), each with its own tone so the styled
+    /// card reads with clear hierarchy.
+    fn update_system_ui_textures(&mut self, overlay: &crate::backend::api::SystemUiOverlay) {
         let config = crate::config::CONFIG.load();
         let description = config.system_ui_font();
         let size = crate::backend::compositor_font::ui_font_pixel_size(description);
-        let cache_key = format!("{description}\0{size}\0{text}");
-        if cache_key == self.hud_text_cache && self.hud_text_texture.is_some() {
-            return;
-        }
-        let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
-            text,
-            description,
-            size,
-            [235, 240, 255, 255],
+        let query_text = overlay.query.as_ref().map(|q| format!("\u{f002}  {q}_"));
+        let items_text = overlay.items.join("\n");
+        let cache_key = format!(
+            "{description}\0{size}\0{}\0{}\0{}\0{}",
+            overlay.title,
+            query_text.as_deref().unwrap_or("\u{1}"),
+            items_text,
+            overlay.hint,
         );
-        if w == 0 || h == 0 {
+        if cache_key == self.sysui_cache && self.sysui_textures.iter().any(Option::is_some) {
             return;
         }
-        unsafe {
-            if let Some(old) = self.hud_text_texture.take() {
-                self.gl.delete_texture(old);
-            }
-            if let Ok(tex) = self.gl.create_texture() {
-                self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                self.gl.tex_image_2d(
-                    glow::TEXTURE_2D,
-                    0,
-                    glow::RGBA8 as i32,
-                    w as i32,
-                    h as i32,
-                    0,
-                    glow::RGBA,
-                    glow::UNSIGNED_BYTE,
-                    glow::PixelUnpackData::Slice(Some(&pixels)),
-                );
-                for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
-                    self.gl
-                        .tex_parameter_i32(glow::TEXTURE_2D, filter, glow::LINEAR as i32);
+        const COLORS: [[u8; 4]; 4] = [
+            [205, 224, 255, 255], // title: bright cool white
+            [238, 242, 252, 255], // query: primary
+            [216, 224, 240, 255], // items: body
+            [140, 150, 172, 255], // hint: dim
+        ];
+        let texts: [Option<&str>; 4] = [
+            (!overlay.title.is_empty()).then_some(overlay.title.as_str()),
+            query_text.as_deref(),
+            (!items_text.is_empty()).then_some(items_text.as_str()),
+            (!overlay.hint.is_empty()).then_some(overlay.hint.as_str()),
+        ];
+        for (slot, text) in texts.into_iter().enumerate() {
+            unsafe {
+                if let Some((old, _, _)) = self.sysui_textures[slot].take() {
+                    self.gl.delete_texture(old);
                 }
-                self.gl.bind_texture(glow::TEXTURE_2D, None);
-                self.hud_text_texture = Some(tex);
-                self.hud_text_width = w;
-                self.hud_text_height = h;
+            }
+            let Some(text) = text else { continue };
+            let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
+                text,
+                description,
+                size,
+                COLORS[slot],
+            );
+            if w == 0 || h == 0 {
+                continue;
+            }
+            unsafe {
+                if let Ok(tex) = self.gl.create_texture() {
+                    self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                    self.gl.tex_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        glow::RGBA8 as i32,
+                        w as i32,
+                        h as i32,
+                        0,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(&pixels)),
+                    );
+                    for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+                        self.gl
+                            .tex_parameter_i32(glow::TEXTURE_2D, filter, glow::LINEAR as i32);
+                    }
+                    self.gl.bind_texture(glow::TEXTURE_2D, None);
+                    self.sysui_textures[slot] = Some((tex, w, h));
+                }
             }
         }
-        self.hud_text_cache = cache_key;
+        self.sysui_cache = cache_key;
     }
 
+    /// Filled rounded rectangle through the border program (a border wider
+    /// than the rect fills it). The program and projection must be bound.
+    unsafe fn sysui_fill_rounded(&self, x: f32, y: f32, w: f32, h: f32, r: f32, color: [f32; 4]) {
+        unsafe {
+            self.gl
+                .uniform_1_f32(self.border_uniforms.border_width.as_ref(), w.max(h));
+            self.gl.uniform_4_f32(
+                self.border_uniforms.border_color.as_ref(),
+                color[0],
+                color[1],
+                color[2],
+                color[3],
+            );
+            self.gl
+                .uniform_1_f32(self.border_uniforms.radius.as_ref(), r);
+            self.gl
+                .uniform_2_f32(self.border_uniforms.size.as_ref(), w, h);
+            self.gl
+                .uniform_4_f32(self.border_uniforms.rect.as_ref(), x, y, w, h);
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        }
+    }
+
+    /// Modal system UI drawn as a material-style card: dimmed scrim, drop
+    /// shadow, rounded panel with a gradient accent ring, a search-field bar,
+    /// and a selection pill under the highlighted list row.
     fn render_system_ui(&mut self, proj: &[f32; 16]) {
         let Some(overlay) = self.system_ui.clone() else {
             return;
         };
-        self.update_system_ui_text_texture(&overlay.text);
+        self.update_system_ui_textures(&overlay);
+        let dims = |slot: usize| -> (f32, f32) {
+            self.sysui_textures[slot]
+                .map(|(_, w, h)| (w as f32, h as f32))
+                .unwrap_or((0.0, 0.0))
+        };
+        let (title_w, title_h) = dims(0);
+        let (query_w, query_h) = dims(1);
+        let (items_w, items_h) = dims(2);
+        let (hint_w, hint_h) = dims(3);
+
         let pad = 30.0;
-        let text_w = self.hud_text_width as f32;
-        let text_h = self.hud_text_height as f32;
-        let panel_w = (text_w + pad * 2.0).min(self.screen_w as f32 - 32.0);
-        let panel_h = text_h + pad * 2.0;
-        let x = (self.screen_w as f32 - panel_w) * 0.5;
-        let y = (self.screen_h as f32 - panel_h) * 0.5;
+        let gap = 16.0;
+        let qpad = 12.0;
+        let radius = 18.0;
+        let screen_w = self.screen_w as f32;
+        let screen_h = self.screen_h as f32;
+
+        let query_bar_h = if query_h > 0.0 { query_h + 16.0 } else { 0.0 };
+        let content_w = title_w
+            .max(query_w + 2.0 * qpad)
+            .max(items_w)
+            .max(hint_w)
+            .max(360.0);
+        let panel_w = (content_w + 2.0 * pad).min(screen_w - 64.0);
+        let mut panel_h = 2.0 * pad + title_h;
+        if query_bar_h > 0.0 {
+            panel_h += gap + query_bar_h;
+        }
+        if items_h > 0.0 {
+            panel_h += gap + items_h;
+        }
+        if hint_h > 0.0 {
+            panel_h += gap + hint_h;
+        }
+
+        let x = ((screen_w - panel_w) * 0.5).max(16.0);
+        // Launcher-style panels sit spotlight-like in the upper third; the
+        // lock card centers on its opaque backdrop.
+        let y = if overlay.locked {
+            ((screen_h - panel_h) * 0.5).max(16.0)
+        } else {
+            (screen_h * 0.22).min((screen_h - panel_h - 32.0).max(16.0))
+        };
+
+        let accent = self.border_gradient_color_a;
         unsafe {
-            if overlay.locked {
-                self.gl.clear_color(0.018, 0.022, 0.035, 1.0);
-                self.gl.clear(glow::COLOR_BUFFER_BIT);
-            }
-            self.gl.use_program(Some(self.hud_program));
-            self.gl
-                .uniform_matrix_4_f32_slice(self.hud_uniforms.projection.as_ref(), false, proj);
-            self.gl.uniform_4_f32(
-                self.hud_uniforms.bg_color.as_ref(),
-                0.025,
-                0.03,
-                0.045,
-                if overlay.locked { 1.0 } else { 0.94 },
-            );
-            self.gl
-                .uniform_4_f32(self.hud_uniforms.fg_color.as_ref(), 0.4, 0.7, 1.0, 1.0);
-            self.gl.uniform_2_f32(
-                self.hud_uniforms.size.as_ref(),
-                self.screen_w as f32,
-                self.screen_h as f32,
-            );
-            self.gl.uniform_4_f32(
-                self.hud_uniforms.rect.as_ref(),
-                0.0,
-                0.0,
-                self.screen_w as f32,
-                self.screen_h as f32,
-            );
             self.gl.bind_vertex_array(Some(self.quad_vao));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-            self.gl
-                .uniform_4_f32(self.hud_uniforms.bg_color.as_ref(), 0.08, 0.10, 0.15, 0.98);
-            self.gl
-                .uniform_2_f32(self.hud_uniforms.size.as_ref(), panel_w, panel_h);
-            self.gl
-                .uniform_4_f32(self.hud_uniforms.rect.as_ref(), x, y, panel_w, panel_h);
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-            if let Some(tex) = self.hud_text_texture {
-                self.gl.use_program(Some(self.hud_text_program));
+
+            if overlay.locked {
+                self.gl.clear_color(0.016, 0.020, 0.032, 1.0);
+                self.gl.clear(glow::COLOR_BUFFER_BIT);
+            } else {
+                // Scrim: dim the desktop behind the panel.
+                self.gl.use_program(Some(self.hud_program));
                 self.gl.uniform_matrix_4_f32_slice(
-                    self.hud_text_uniforms.projection.as_ref(),
+                    self.hud_uniforms.projection.as_ref(),
                     false,
                     proj,
                 );
                 self.gl.uniform_4_f32(
-                    self.hud_text_uniforms.rect.as_ref(),
-                    x + pad,
-                    y + pad,
-                    text_w,
-                    text_h,
+                    self.hud_uniforms.bg_color.as_ref(),
+                    0.012,
+                    0.016,
+                    0.028,
+                    0.62,
                 );
                 self.gl
-                    .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
-                self.gl.active_texture(glow::TEXTURE0);
+                    .uniform_2_f32(self.hud_uniforms.size.as_ref(), screen_w, screen_h);
+                self.gl
+                    .uniform_4_f32(self.hud_uniforms.rect.as_ref(), 0.0, 0.0, screen_w, screen_h);
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
+
+            // Drop shadow behind the card.
+            self.gl.use_program(Some(self.shadow_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.shadow_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+            let spread = 48.0;
+            self.gl
+                .uniform_1_f32(self.shadow_uniforms.spread.as_ref(), spread);
+            self.gl.uniform_4_f32(
+                self.shadow_uniforms.shadow_color.as_ref(),
+                0.0,
+                0.0,
+                0.0,
+                0.6,
+            );
+            self.gl
+                .uniform_1_f32(self.shadow_uniforms.radius.as_ref(), radius);
+            self.gl
+                .uniform_2_f32(self.shadow_uniforms.size.as_ref(), panel_w, panel_h);
+            self.gl.uniform_4_f32(
+                self.shadow_uniforms.rect.as_ref(),
+                x - spread,
+                y - spread + 14.0,
+                panel_w + 2.0 * spread,
+                panel_h + 2.0 * spread,
+            );
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+            // Card, query-field bar, and selection pill share the border
+            // program's rounded-fill mode.
+            self.gl.use_program(Some(self.border_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.border_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+            self.sysui_fill_rounded(x, y, panel_w, panel_h, radius, [0.071, 0.082, 0.114, 0.985]);
+
+            let mut cy = y + pad + title_h;
+            let mut query_text_pos = None;
+            if query_bar_h > 0.0 {
+                cy += gap;
+                self.sysui_fill_rounded(
+                    x + pad,
+                    cy,
+                    panel_w - 2.0 * pad,
+                    query_bar_h,
+                    10.0,
+                    [0.108, 0.122, 0.165, 1.0],
+                );
+                query_text_pos = Some((x + pad + qpad, cy + 8.0));
+                cy += query_bar_h;
+            }
+            let mut items_pos = None;
+            if items_h > 0.0 {
+                cy += gap;
+                items_pos = Some((x + pad, cy));
+                if let (Some(sel), rows) = (overlay.selected, overlay.items.len()) {
+                    if rows > 0 && sel < rows {
+                        let line_h = (items_h - 4.0) / rows as f32;
+                        self.sysui_fill_rounded(
+                            x + pad - 8.0,
+                            cy + 2.0 + sel as f32 * line_h - 2.0,
+                            panel_w - 2.0 * pad + 16.0,
+                            line_h + 4.0,
+                            8.0,
+                            [accent[0], accent[1], accent[2], 0.26],
+                        );
+                    }
+                }
+                cy += items_h;
+            }
+            let mut hint_pos = None;
+            if hint_h > 0.0 {
+                cy += gap;
+                hint_pos = Some((x + pad, cy));
+            }
+
+            // Gradient accent ring around the card, matching the focused
+            // window's border gradient.
+            self.gl.use_program(Some(self.gradient_border_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.gradient_border_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+            let ring = 1.5;
+            let [ar, ag, ab, aa] = self.border_gradient_color_a;
+            let [br, bg, bb, ba] = self.border_gradient_color_b;
+            self.gl
+                .uniform_1_f32(self.gradient_border_uniforms.border_width.as_ref(), ring);
+            self.gl.uniform_4_f32(
+                self.gradient_border_uniforms.color_a.as_ref(),
+                ar,
+                ag,
+                ab,
+                aa * 0.95,
+            );
+            self.gl.uniform_4_f32(
+                self.gradient_border_uniforms.color_b.as_ref(),
+                br,
+                bg,
+                bb,
+                ba * 0.95,
+            );
+            self.gl.uniform_1_f32(
+                self.gradient_border_uniforms.gradient_angle.as_ref(),
+                self.border_gradient_angle.to_radians(),
+            );
+            self.gl.uniform_1_f32(
+                self.gradient_border_uniforms.radius.as_ref(),
+                radius + ring,
+            );
+            self.gl.uniform_2_f32(
+                self.gradient_border_uniforms.size.as_ref(),
+                panel_w + 2.0 * ring,
+                panel_h + 2.0 * ring,
+            );
+            self.gl.uniform_4_f32(
+                self.gradient_border_uniforms.rect.as_ref(),
+                x - ring,
+                y - ring,
+                panel_w + 2.0 * ring,
+                panel_h + 2.0 * ring,
+            );
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+            // Text sections.
+            self.gl.use_program(Some(self.hud_text_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.hud_text_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+            self.gl
+                .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
+            self.gl.active_texture(glow::TEXTURE0);
+            let positions = [
+                Some((x + pad, y + pad)),
+                query_text_pos,
+                items_pos,
+                hint_pos,
+            ];
+            for (slot, pos) in positions.into_iter().enumerate() {
+                let (Some((tex, w, h)), Some((tx, ty))) = (self.sysui_textures[slot], pos) else {
+                    continue;
+                };
+                self.gl.uniform_4_f32(
+                    self.hud_text_uniforms.rect.as_ref(),
+                    tx,
+                    ty,
+                    w as f32,
+                    h as f32,
+                );
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }

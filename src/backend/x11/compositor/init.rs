@@ -846,6 +846,8 @@ impl<C: CompositorConnection> Compositor<C> {
             annotation_line_program,
             annotation_line_uniforms,
             hud_text_texture: None,
+            sysui_textures: [None; 4],
+            sysui_cache: String::new(),
             hud_text_width: 0,
             hud_text_height: 0,
             hud_text_cache: String::new(),

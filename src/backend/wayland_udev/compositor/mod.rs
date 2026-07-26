@@ -598,6 +598,7 @@ pub(crate) struct WaylandCompositor {
     particle_program: u32,
     overview_bg_program: u32,
     hud_program: u32,
+    sysui_text_program: u32,
     temporal_blur_mix_program: u32,
 
     // Uniform locations
@@ -940,6 +941,9 @@ pub(crate) struct WaylandCompositor {
     // --- Debug HUD extended ---
     debug_hud_extended: bool,
     hud_text_texture: Option<u32>,
+    /// Styled system-UI panel text sections: title, query, items, hint.
+    sysui_textures: [Option<(u32, u32, u32)>; 4],
+    sysui_cache: String,
     hud_text_width: u32,
     hud_text_height: u32,
     hud_text_cache: String,
@@ -1183,6 +1187,8 @@ impl WaylandCompositor {
             )?;
             let hud_program =
                 create_program(gl, shaders::VERTEX_SHADER, shaders::HUD_FRAGMENT_SHADER)?;
+            let sysui_text_program =
+                create_program(gl, shaders::VERTEX_SHADER, shaders::HUD_TEXT_FRAGMENT_SHADER)?;
             let temporal_blur_mix_program = create_program(
                 gl,
                 shaders::TEMPORAL_BLUR_MIX_VERTEX,
@@ -1520,6 +1526,7 @@ impl WaylandCompositor {
                 particle_program,
                 overview_bg_program,
                 hud_program,
+                sysui_text_program,
                 temporal_blur_mix_program,
 
                 // Uniform locations
@@ -1829,6 +1836,8 @@ impl WaylandCompositor {
                 // Debug HUD extended
                 debug_hud_extended: false,
                 hud_text_texture: None,
+                sysui_textures: [None; 4],
+                sysui_cache: String::new(),
                 hud_text_width: 0,
                 hud_text_height: 0,
                 hud_text_cache: String::new(),

@@ -14,6 +14,20 @@ pub struct LaunchEntry {
     search: String,
 }
 
+/// Structured content of the modal system UI panel, consumed by the
+/// compositor's styled-card renderer (rounded panel, search bar, highlighted
+/// selection row) and by [`SystemUiState::overlay_text`] for flat text.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OverlayParts {
+    pub title: String,
+    /// Search-field content; `Some` renders a query bar with a caret.
+    pub query: Option<String>,
+    pub items: Vec<String>,
+    /// Row in `items` to highlight.
+    pub selected: Option<usize>,
+    pub hint: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MonitorLayoutEntry {
     pub name: String,
@@ -458,19 +472,31 @@ impl SystemUiState {
         }
     }
 
-    pub fn overlay_text(&self) -> String {
+    /// Structured overlay content the compositor renders as a styled panel:
+    /// headline, optional search field, list rows with an optional highlighted
+    /// row, and a footer hint.
+    pub fn overlay_parts(&self) -> OverlayParts {
         match self {
-            Self::Inactive => String::new(),
+            Self::Inactive => OverlayParts::default(),
             Self::Locked { password, message } => {
                 let status = if message.is_empty() {
                     "Enter password to unlock"
                 } else {
                     message
                 };
-                format!(
-                    "\u{f023}  JWM LOCKED\n\n{status}\n\n\u{f084}  Password  {}",
-                    "*".repeat(password.chars().count())
-                )
+                OverlayParts {
+                    title: "\u{f023}  JWM LOCKED".into(),
+                    query: None,
+                    items: vec![
+                        status.to_string(),
+                        format!(
+                            "\u{f084}  Password  {}",
+                            "*".repeat(password.chars().count())
+                        ),
+                    ],
+                    selected: None,
+                    hint: "Enter  unlock    Esc  clear".into(),
+                }
             }
             Self::Launcher {
                 query,
@@ -478,17 +504,25 @@ impl SystemUiState {
                 matches,
                 selected,
             } => {
-                let mut out = format!("\u{f135}  APPLICATIONS\n\n\u{f002}  {query}_\n\n");
-                if matches.is_empty() {
-                    out.push_str("  No matching applications");
-                }
                 let start = selected.saturating_sub(11);
-                for (row, &index) in matches.iter().enumerate().skip(start).take(12) {
-                    let marker = if row == *selected { "\u{f054}" } else { " " };
-                    out.push_str(&format!("{marker} {}\n", entries[index].name));
+                let items: Vec<String> = if matches.is_empty() {
+                    vec!["  No matching applications".into()]
+                } else {
+                    matches
+                        .iter()
+                        .skip(start)
+                        .take(12)
+                        .map(|&index| entries[index].name.clone())
+                        .collect()
+                };
+                OverlayParts {
+                    title: "\u{f135}  APPLICATIONS".into(),
+                    query: Some(query.clone()),
+                    selected: (!matches.is_empty()).then(|| selected - start),
+                    items,
+                    hint: "\u{f2f6} Enter  launch    Esc  close    \u{f062}/\u{f063}  select"
+                        .into(),
                 }
-                out.push_str("\n\u{f2f6} Enter  launch    Esc  close    \u{f062}/\u{f063}  select");
-                out
             }
             Self::Info {
                 title,
@@ -497,26 +531,89 @@ impl SystemUiState {
                 matches,
                 offset,
             } => {
-                let mut out = format!("{title}\n\n\u{f002}  {query}_\n\n");
-                if matches.is_empty() {
-                    out.push_str("  No matching shortcuts\n");
+                let items: Vec<String> = if matches.is_empty() {
+                    vec!["  No matching shortcuts".into()]
                 } else {
-                    for &index in matches.iter().skip(*offset).take(28) {
-                        out.push_str(&lines[index]);
-                        out.push('\n');
-                    }
+                    matches
+                        .iter()
+                        .skip(*offset)
+                        .take(28)
+                        .map(|&index| lines[index].clone())
+                        .collect()
+                };
+                OverlayParts {
+                    title: title.clone(),
+                    query: Some(query.clone()),
+                    items,
+                    selected: None,
+                    hint:
+                        "Type  search    Backspace  erase    Esc  close    \u{f062}/\u{f063}  scroll"
+                            .into(),
                 }
-                out.push_str(
-                    "\nType  search    Backspace  erase    Esc  close    \u{f062}/\u{f063}  scroll",
-                );
-                out
             }
             Self::MonitorLayout {
                 entries,
                 selected,
                 reference,
                 message,
-            } => monitor_layout_overlay(entries, *selected, *reference, message),
+            } => {
+                let text = monitor_layout_overlay(entries, *selected, *reference, message);
+                let mut lines = text.lines().map(str::to_string);
+                let title = lines.next().unwrap_or_default();
+                let mut items: Vec<String> = lines.collect();
+                if items.first().is_some_and(String::is_empty) {
+                    items.remove(0);
+                }
+                let hint = if items.len() >= 4 {
+                    let tail = items.split_off(items.len() - 4);
+                    while items.last().is_some_and(String::is_empty) {
+                        items.pop();
+                    }
+                    tail.join("\n")
+                } else {
+                    String::new()
+                };
+                OverlayParts {
+                    title,
+                    query: None,
+                    items,
+                    selected: None,
+                    hint,
+                }
+            }
+        }
+    }
+
+    /// Flat-text form of [`Self::overlay_parts`]; the layout contract several
+    /// tests (and any plain-text consumer) rely on.
+    pub fn overlay_text(&self) -> String {
+        if let Self::MonitorLayout {
+            entries,
+            selected,
+            reference,
+            message,
+        } = self
+        {
+            return monitor_layout_overlay(entries, *selected, *reference, message);
+        }
+        let parts = self.overlay_parts();
+        if !parts.title.is_empty() || !parts.items.is_empty() {
+            let mut out = format!("{}\n\n", parts.title);
+            if let Some(query) = &parts.query {
+                let _ = writeln!(out, "\u{f002}  {query}_\n");
+            }
+            for (row, item) in parts.items.iter().enumerate() {
+                let marker = if parts.selected == Some(row) {
+                    "\u{f054}"
+                } else {
+                    " "
+                };
+                let _ = writeln!(out, "{marker} {item}");
+            }
+            let _ = write!(out, "\n{}", parts.hint);
+            out
+        } else {
+            String::new()
         }
     }
 
@@ -1040,6 +1137,55 @@ mod tests {
     fn fuzzy_matching() {
         assert!(fuzzy_score("visual studio code", "vsc").is_some());
         assert!(fuzzy_score("firefox", "zzz").is_none());
+    }
+
+    #[test]
+    fn launcher_overlay_parts_window_the_list_and_track_selection() {
+        let entries: Vec<LaunchEntry> = (0..20)
+            .map(|i| LaunchEntry {
+                name: format!("app{i:02}"),
+                command: vec![format!("app{i:02}")],
+                search: format!("app{i:02}"),
+            })
+            .collect();
+        let matches = (0..entries.len()).collect();
+        let mut state = SystemUiState::Launcher {
+            query: String::new(),
+            entries,
+            matches,
+            selected: 0,
+        };
+
+        let parts = state.overlay_parts();
+        assert_eq!(parts.title, "\u{f135}  APPLICATIONS");
+        assert_eq!(parts.query.as_deref(), Some(""));
+        assert_eq!(parts.items.len(), 12);
+        assert_eq!(parts.items[0], "app00");
+        assert_eq!(parts.selected, Some(0));
+        assert!(parts.hint.contains("Enter"));
+
+        // Move past the visible window: the list scrolls and the highlighted
+        // row stays inside the visible slice.
+        for _ in 0..14 {
+            state.move_selection(1);
+        }
+        let parts = state.overlay_parts();
+        assert_eq!(parts.items.len(), 12);
+        assert_eq!(parts.items[0], "app03");
+        assert_eq!(parts.selected, Some(11));
+        assert_eq!(parts.items[11], "app14");
+    }
+
+    #[test]
+    fn locked_overlay_parts_mask_the_password() {
+        let mut state = SystemUiState::lock();
+        for ch in "hunter2".chars() {
+            state.push_char(ch);
+        }
+        let parts = state.overlay_parts();
+        assert!(state.is_locked());
+        assert!(parts.items.iter().any(|line| line.contains(&"*".repeat(7))));
+        assert!(!parts.items.iter().any(|line| line.contains("hunter2")));
     }
 
     #[test]

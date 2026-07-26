@@ -2626,95 +2626,311 @@ impl WaylandCompositor {
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]
+    /// Rasterize the four text sections of the system-UI panel (title, query
+    /// line, list items, footer hint), each with its own tone so the styled
+    /// card reads with clear hierarchy.
+    unsafe fn update_system_ui_textures(
+        &mut self,
+        gl: &ffi::Gles2,
+        overlay: &crate::backend::api::SystemUiOverlay,
+    ) {
+        let config = crate::config::CONFIG.load();
+        let description = config.system_ui_font();
+        let size = crate::backend::compositor_font::ui_font_pixel_size(description);
+        let query_text = overlay.query.as_ref().map(|q| format!("\u{f002}  {q}_"));
+        let items_text = overlay.items.join("\n");
+        let cache_key = format!(
+            "{description}\0{size}\0{}\0{}\0{}\0{}",
+            overlay.title,
+            query_text.as_deref().unwrap_or("\u{1}"),
+            items_text,
+            overlay.hint,
+        );
+        if cache_key == self.sysui_cache && self.sysui_textures.iter().any(Option::is_some) {
+            return;
+        }
+        const COLORS: [[u8; 4]; 4] = [
+            [205, 224, 255, 255], // title: bright cool white
+            [238, 242, 252, 255], // query: primary
+            [216, 224, 240, 255], // items: body
+            [140, 150, 172, 255], // hint: dim
+        ];
+        let texts: [Option<&str>; 4] = [
+            (!overlay.title.is_empty()).then_some(overlay.title.as_str()),
+            query_text.as_deref(),
+            (!items_text.is_empty()).then_some(items_text.as_str()),
+            (!overlay.hint.is_empty()).then_some(overlay.hint.as_str()),
+        ];
+        for (slot, text) in texts.into_iter().enumerate() {
+            if let Some((old, _, _)) = self.sysui_textures[slot].take() {
+                unsafe { gl.DeleteTextures(1, &old) };
+            }
+            let Some(text) = text else { continue };
+            let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
+                text,
+                description,
+                size,
+                COLORS[slot],
+            );
+            if w == 0 || h == 0 {
+                continue;
+            }
+            unsafe {
+                let mut tex = 0;
+                gl.GenTextures(1, &mut tex);
+                gl.BindTexture(ffi::TEXTURE_2D, tex);
+                gl.TexImage2D(
+                    ffi::TEXTURE_2D,
+                    0,
+                    ffi::RGBA as i32,
+                    w as i32,
+                    h as i32,
+                    0,
+                    ffi::RGBA,
+                    ffi::UNSIGNED_BYTE,
+                    pixels.as_ptr().cast(),
+                );
+                gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+                gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
+                self.sysui_textures[slot] = Some((tex, w, h));
+            }
+        }
+        self.sysui_cache = cache_key;
+    }
+
+    /// Filled rounded rectangle through the border program (a border wider
+    /// than the rect fills it). The program and projection must be bound.
+    unsafe fn sysui_fill_rounded(
+        &self,
+        gl: &ffi::Gles2,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        r: f32,
+        color: [f32; 4],
+    ) {
+        unsafe {
+            gl.Uniform1f(self.border_uniforms.border_width, w.max(h));
+            gl.Uniform4f(
+                self.border_uniforms.border_color,
+                color[0],
+                color[1],
+                color[2],
+                color[3],
+            );
+            gl.Uniform1f(self.border_uniforms.radius, r);
+            gl.Uniform2f(self.border_uniforms.size, w, h);
+            self.set_rect_uniform(gl, self.border_uniforms.rect, x, y, w, h);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+        }
+    }
+
+    /// Modal system UI drawn as a material-style card: dimmed scrim, drop
+    /// shadow, rounded panel with a gradient accent ring, a search-field bar,
+    /// and a selection pill under the highlighted list row.
     unsafe fn render_system_ui(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
         let Some(overlay) = self.system_ui.clone() else {
             return;
         };
-        let config = crate::config::CONFIG.load();
-        let description = config.system_ui_font();
-        let size = crate::backend::compositor_font::ui_font_pixel_size(description);
-        let cache_key = format!("{description}\0{size}\0{}", overlay.text);
-        if cache_key != self.hud_text_cache {
-            let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
-                &overlay.text,
-                description,
-                size,
-                [235, 240, 255, 255],
-            );
-            if let Some(old) = self.hud_text_texture.take() {
-                gl.DeleteTextures(1, &old);
-            }
-            let mut tex = 0;
-            gl.GenTextures(1, &mut tex);
-            gl.BindTexture(ffi::TEXTURE_2D, tex);
-            gl.TexImage2D(
-                ffi::TEXTURE_2D,
-                0,
-                ffi::RGBA as i32,
-                w as i32,
-                h as i32,
-                0,
-                ffi::RGBA,
-                ffi::UNSIGNED_BYTE,
-                pixels.as_ptr().cast(),
-            );
-            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
-            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
-            self.hud_text_texture = Some(tex);
-            self.hud_text_width = w;
-            self.hud_text_height = h;
-            self.hud_text_cache = cache_key;
-        }
+        unsafe { self.update_system_ui_textures(gl, &overlay) };
+        let dims = |slot: usize| -> (f32, f32) {
+            self.sysui_textures[slot]
+                .map(|(_, w, h)| (w as f32, h as f32))
+                .unwrap_or((0.0, 0.0))
+        };
+        let (title_w, title_h) = dims(0);
+        let (query_w, query_h) = dims(1);
+        let (items_w, items_h) = dims(2);
+        let (hint_w, hint_h) = dims(3);
+
         let pad = 30.0;
-        let tw = self.hud_text_width as f32;
-        let th = self.hud_text_height as f32;
-        let pw = (tw + pad * 2.0).min(self.screen_w as f32 - 32.0);
-        let ph = th + pad * 2.0;
-        let x = (self.screen_w as f32 - pw) * 0.5;
-        let y = (self.screen_h as f32 - ph) * 0.5;
-        if overlay.locked {
-            gl.ClearColor(0.018, 0.022, 0.035, 1.0);
-            gl.Clear(ffi::COLOR_BUFFER_BIT);
+        let gap = 16.0;
+        let qpad = 12.0;
+        let radius = 18.0;
+        let screen_w = self.screen_w as f32;
+        let screen_h = self.screen_h as f32;
+
+        let query_bar_h = if query_h > 0.0 { query_h + 16.0 } else { 0.0 };
+        let content_w = title_w
+            .max(query_w + 2.0 * qpad)
+            .max(items_w)
+            .max(hint_w)
+            .max(360.0);
+        let panel_w = (content_w + 2.0 * pad).min(screen_w - 64.0);
+        let mut panel_h = 2.0 * pad + title_h;
+        if query_bar_h > 0.0 {
+            panel_h += gap + query_bar_h;
         }
-        let rect = super::get_uniform_loc(gl, self.hud_program, "u_rect");
-        let proj = super::get_uniform_loc(gl, self.hud_program, "u_projection");
-        let bg = super::get_uniform_loc(gl, self.hud_program, "u_bg_color");
-        let size = super::get_uniform_loc(gl, self.hud_program, "u_size");
-        gl.UseProgram(self.hud_program);
-        gl.UniformMatrix4fv(proj, 1, ffi::FALSE as u8, projection.as_ptr());
-        gl.Uniform4f(
-            bg,
-            0.025,
-            0.03,
-            0.045,
-            if overlay.locked { 1.0 } else { 0.94 },
-        );
-        gl.Uniform2f(size, self.screen_w as f32, self.screen_h as f32);
-        gl.Uniform4f(rect, 0.0, 0.0, self.screen_w as f32, self.screen_h as f32);
-        gl.BindVertexArray(self.quad_vao);
-        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
-        gl.Uniform4f(bg, 0.08, 0.10, 0.15, 0.98);
-        gl.Uniform2f(size, pw, ph);
-        gl.Uniform4f(rect, x, y, pw, ph);
-        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
-        if let Some(tex) = self.hud_text_texture {
-            gl.UseProgram(self.program);
-            self.set_projection_uniform(gl, self.win_uniforms.projection, projection);
-            gl.Uniform1i(self.win_uniforms.texture, 0);
-            gl.Uniform1f(self.win_uniforms.opacity, 1.0);
-            gl.Uniform1f(self.win_uniforms.dim, 1.0);
-            gl.Uniform1f(self.win_uniforms.desat, 0.0);
-            gl.Uniform1f(self.win_uniforms.radius, 0.0);
-            gl.Uniform2f(self.win_uniforms.size, tw, th);
-            self.set_rect_uniform(gl, self.win_uniforms.rect, x + pad, y + pad, tw, th);
-            gl.Uniform4f(self.win_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
-            gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
-            gl.ActiveTexture(ffi::TEXTURE0);
-            gl.BindTexture(ffi::TEXTURE_2D, tex);
+        if items_h > 0.0 {
+            panel_h += gap + items_h;
+        }
+        if hint_h > 0.0 {
+            panel_h += gap + hint_h;
+        }
+
+        let x = ((screen_w - panel_w) * 0.5).max(16.0);
+        // Launcher-style panels sit spotlight-like in the upper third; the
+        // lock card centers on its opaque backdrop.
+        let y = if overlay.locked {
+            ((screen_h - panel_h) * 0.5).max(16.0)
+        } else {
+            (screen_h * 0.22).min((screen_h - panel_h - 32.0).max(16.0))
+        };
+
+        let accent = self.border_gradient_color_a;
+        unsafe {
+            gl.BindVertexArray(self.quad_vao);
+
+            if overlay.locked {
+                gl.ClearColor(0.016, 0.020, 0.032, 1.0);
+                gl.Clear(ffi::COLOR_BUFFER_BIT);
+            } else {
+                // Scrim: dim the desktop behind the panel.
+                let rect = super::get_uniform_loc(gl, self.hud_program, "u_rect");
+                let proj = super::get_uniform_loc(gl, self.hud_program, "u_projection");
+                let bg = super::get_uniform_loc(gl, self.hud_program, "u_bg_color");
+                let size = super::get_uniform_loc(gl, self.hud_program, "u_size");
+                gl.UseProgram(self.hud_program);
+                gl.UniformMatrix4fv(proj, 1, ffi::FALSE as u8, projection.as_ptr());
+                gl.Uniform4f(bg, 0.012, 0.016, 0.028, 0.62);
+                gl.Uniform2f(size, screen_w, screen_h);
+                gl.Uniform4f(rect, 0.0, 0.0, screen_w, screen_h);
+                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            }
+
+            // Drop shadow behind the card.
+            gl.UseProgram(self.shadow_program);
+            self.set_projection_uniform(gl, self.shadow_uniforms.projection, projection);
+            let spread = 48.0;
+            gl.Uniform1f(self.shadow_uniforms.spread, spread);
+            gl.Uniform4f(self.shadow_uniforms.shadow_color, 0.0, 0.0, 0.0, 0.6);
+            gl.Uniform1f(self.shadow_uniforms.radius, radius);
+            gl.Uniform2f(self.shadow_uniforms.size, panel_w, panel_h);
+            self.set_rect_uniform(
+                gl,
+                self.shadow_uniforms.rect,
+                x - spread,
+                y - spread + 14.0,
+                panel_w + 2.0 * spread,
+                panel_h + 2.0 * spread,
+            );
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+
+            // Card, query-field bar, and selection pill share the border
+            // program's rounded-fill mode. The overlay draws onto the
+            // display-encoded output, so scene-linear conversion stays off.
+            gl.UseProgram(self.border_program);
+            self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
+            gl.Uniform1i(self.border_uniforms.scene_linear, 0);
+            self.sysui_fill_rounded(
+                gl,
+                x,
+                y,
+                panel_w,
+                panel_h,
+                radius,
+                [0.071, 0.082, 0.114, 0.985],
+            );
+
+            let mut cy = y + pad + title_h;
+            let mut query_text_pos = None;
+            if query_bar_h > 0.0 {
+                cy += gap;
+                self.sysui_fill_rounded(
+                    gl,
+                    x + pad,
+                    cy,
+                    panel_w - 2.0 * pad,
+                    query_bar_h,
+                    10.0,
+                    [0.108, 0.122, 0.165, 1.0],
+                );
+                query_text_pos = Some((x + pad + qpad, cy + 8.0));
+                cy += query_bar_h;
+            }
+            let mut items_pos = None;
+            if items_h > 0.0 {
+                cy += gap;
+                items_pos = Some((x + pad, cy));
+                if let (Some(sel), rows) = (overlay.selected, overlay.items.len()) {
+                    if rows > 0 && sel < rows {
+                        let line_h = (items_h - 4.0) / rows as f32;
+                        self.sysui_fill_rounded(
+                            gl,
+                            x + pad - 8.0,
+                            cy + sel as f32 * line_h,
+                            panel_w - 2.0 * pad + 16.0,
+                            line_h + 4.0,
+                            8.0,
+                            [accent[0], accent[1], accent[2], 0.26],
+                        );
+                    }
+                }
+                cy += items_h;
+            }
+            let mut hint_pos = None;
+            if hint_h > 0.0 {
+                cy += gap;
+                hint_pos = Some((x + pad, cy));
+            }
+
+            // Gradient accent ring around the card, matching the focused
+            // window's border gradient.
+            gl.UseProgram(self.gradient_border_program);
+            self.set_projection_uniform(gl, self.gradient_border_uniforms.projection, projection);
+            gl.Uniform1i(self.gradient_border_uniforms.scene_linear, 0);
+            let ring = 1.5;
+            let [ar, ag, ab, aa] = self.border_gradient_color_a;
+            let [br, bg, bb, ba] = self.border_gradient_color_b;
+            gl.Uniform1f(self.gradient_border_uniforms.border_width, ring);
+            gl.Uniform4f(self.gradient_border_uniforms.color_a, ar, ag, ab, aa * 0.95);
+            gl.Uniform4f(self.gradient_border_uniforms.color_b, br, bg, bb, ba * 0.95);
+            gl.Uniform1f(
+                self.gradient_border_uniforms.gradient_angle,
+                self.border_gradient_angle.to_radians(),
+            );
+            gl.Uniform1f(self.gradient_border_uniforms.radius, radius + ring);
+            gl.Uniform2f(
+                self.gradient_border_uniforms.size,
+                panel_w + 2.0 * ring,
+                panel_h + 2.0 * ring,
+            );
+            self.set_rect_uniform(
+                gl,
+                self.gradient_border_uniforms.rect,
+                x - ring,
+                y - ring,
+                panel_w + 2.0 * ring,
+                panel_h + 2.0 * ring,
+            );
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+
+            // Text sections.
+            let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
+            let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
+            let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
+            gl.UseProgram(self.sysui_text_program);
+            gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
+            gl.Uniform1i(text_tex, 0);
+            gl.ActiveTexture(ffi::TEXTURE0);
+            let positions = [
+                Some((x + pad, y + pad)),
+                query_text_pos,
+                items_pos,
+                hint_pos,
+            ];
+            for (slot, pos) in positions.into_iter().enumerate() {
+                let (Some((tex, w, h)), Some((tx, ty))) = (self.sysui_textures[slot], pos) else {
+                    continue;
+                };
+                gl.Uniform4f(text_rect, tx, ty, w as f32, h as f32);
+                gl.BindTexture(ffi::TEXTURE_2D, tex);
+                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            }
+            gl.BindVertexArray(0);
+            gl.UseProgram(0);
         }
-        gl.BindVertexArray(0);
-        gl.UseProgram(0);
     }
 
     #[allow(dead_code)]
