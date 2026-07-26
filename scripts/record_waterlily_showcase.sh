@@ -41,6 +41,9 @@ done
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${OUT_DIR:-$HOME/Videos/jwm-waterlily}"
 SIM_SIZE="${SIM_SIZE:-1280x800}"
+# 轨迹速度在仿真网格坐标系里才有意义(像素→网格的 x/y 比例不同)。
+GRID_W="${SIM_SIZE%x*}"
+GRID_H="${SIM_SIZE#*x}"
 WORKER_FPS="${WORKER_FPS:-30}"
 CASE_DWELL="${CASE_DWELL:-12}"
 PALETTE_DWELL="${PALETTE_DWELL:-10}"
@@ -105,30 +108,76 @@ command -v xdotool >/dev/null && HAVE_XDOTOOL=1
 
 screen_geometry() { xdotool getdisplaygeometry; }
 
-# Sample a parametric path at ~30 Hz for a given number of seconds.
-# trace <seconds> <awk-expression producing "x y" from t in [0,1]>
-trace() {
-    local seconds="$1" expr="$2" width height steps i
-    read -r width height < <(screen_geometry)
-    steps=$((seconds * 30))
-    for ((i = 0; i < steps; i++)); do
-        # 末尾 print "" 补换行:read 在无换行的 EOF 上返回非零,会触发 set -e。
-        read -r x y < <(awk -v t="$(awk -v i="$i" -v n="$steps" 'BEGIN { printf "%.6f\n", i / n }')" \
-            -v W="$width" -v H="$height" "BEGIN { $expr; print \"\" }")
+# Play "x y" sample lines from stdin as 30 Hz pointer motion.
+play_samples() {
+    local x y
+    while read -r x y; do
         xdotool mousemove "$x" "$y"
         sleep 0.033
     done
 }
 
-# 圆周 → 8 字 → 横扫:先甩出稳定涡环,再写个 8,最后拖出一条长尾迹。
+# Sample a parametric path at ~30 Hz for a given number of seconds.
+# trace <seconds> <awk-statements printing "x y\n" from t in [0,1]>
+trace() {
+    local seconds="$1" expr="$2" width height
+    read -r width height < <(screen_geometry)
+    awk -v W="$width" -v H="$height" -v N="$((seconds * 30))" \
+        "BEGIN { for (i = 0; i < N; i++) { t = i / N; $expr } }" | play_samples
+}
+
+# 海螺线:光标从屏幕中心旋转扩散到外缘,目标是让圆柱的尾迹以最快速度铺满
+# 画布。三个铺满效率的设计,都以圆柱直径 D(= 速度/长度尺度 L)为标尺:
+#   1. 速度恒定 1.35U——弧长上限被弹簧 1.5U 焊死,恒速即整段预算全在铺新水,
+#      靠单遍细步长扫描 + 弧长反演做到严格恒速(解析参数化在角上会超速 60%);
+#   2. p=4 超椭圆环,贴合屏幕长宽比——圆环螺线永远够不到四角;
+#   3. 环距 ≈2D,即卡门涡街的横向宽度——环距再密就是在重复搅已有涡的水。
+# 同预算下尾迹覆盖率从椭圆螺线的 45% 提到 ~78%。每段开头光标瞬移回中心,
+# 弹簧拖一笔径向直线穿过上一圈螺线,像换页笔画。
 stylus_performance() {
-    # 注意:不能与 seconds 同一条 local——同条声明里 $(()) 先于赋值展开。
-    local seconds="$1"
-    local third=$((seconds / 3))
+    local seconds="$1" width height
     ((HAVE_XDOTOOL)) || { log "xdotool missing; stylus segment plays without mouse motion"; sleep "$seconds"; return; }
-    trace "$third" 'a = 2 * 3.14159265 * 2 * t; printf "%d %d", W/2 + W*0.28*cos(a), H/2 + H*0.30*sin(a)'
-    trace "$third" 'a = 2 * 3.14159265 * 2 * t; printf "%d %d", W/2 + W*0.32*sin(a), H/2 + H*0.28*sin(2*a)'
-    trace "$third" 'printf "%d %d", W*0.08 + W*0.84*t, H/2 + H*0.10*sin(2*3.14159265*3*t)'
+    read -r width height < <(screen_geometry)
+    awk -v W="$width" -v H="$height" -v N="$((seconds * 30))" \
+        -v GW="$GRID_W" -v GH="$GRID_H" '
+    function boundary(th,    c, s, ac, as) {
+        # 沿方向 th 从中心到 p=4 超椭圆边界的距离(网格坐标)。
+        c = cos(th); s = sin(th)
+        ac = (c < 0 ? -c : c); as = (s < 0 ? -s : s)
+        return 1 / ((ac / Ax)^4 + (as / Ay)^4)^0.25
+    }
+    BEGIN {
+        D = 0.10 * GH                # 圆柱直径 = 仿真的长度尺度 L
+        Ax = 0.42 * GW; Ay = 0.42 * GH
+        B = 1.35 * D * N / 30.0      # 弧长预算:1.35U 匀速走 N/30 秒
+        dth = 0.001
+        # 第一遍:未归一化螺线 Q(th) = th·boundary(th)·(cos th, sin th) 的
+        # 弧长 L_Q;真实螺线 P = Q/thmax,故 thmax 满足 L_Q(thmax)/thmax = B。
+        A = 0; th = dth; pqx = 0; pqy = 0
+        while (1) {
+            dd = boundary(th)
+            qx = th * dd * cos(th); qy = th * dd * sin(th)
+            A += sqrt((qx - pqx)^2 + (qy - pqy)^2); pqx = qx; pqy = qy
+            if (A / th >= B) break
+            th += dth
+        }
+        thmax = th
+        # 第二遍:同一扫描,弧长每跨过总长的 1/N 就发一个采样点——严格恒速。
+        A = 0; th = dth; pqx = 0; pqy = 0
+        print int(W / 2), int(H / 2); k = 1
+        while (k < N) {
+            dd = boundary(th)
+            qx = th * dd * cos(th); qy = th * dd * sin(th)
+            A += sqrt((qx - pqx)^2 + (qy - pqy)^2); pqx = qx; pqy = qy
+            while (k < N && A / thmax >= k * B / N) {
+                r = th / thmax
+                print int(W * (GW / 2 + r * dd * cos(th)) / GW), \
+                      int(H * (GH / 2 + r * dd * sin(th)) / GH)
+                k++
+            }
+            th += dth
+        }
+    }' | play_samples
 }
 
 # 慢速华尔兹:大椭圆一圈,再顺流横渡。waltz 的身体自带横向摆动,均匀来流把
@@ -137,8 +186,8 @@ waltz_performance() {
     local seconds="$1"
     local half=$((seconds / 2))
     ((HAVE_XDOTOOL)) || { log "xdotool missing; waltz segment plays without mouse motion"; sleep "$seconds"; return; }
-    trace "$half" 'a = 2 * 3.14159265 * t; printf "%d %d", W/2 + W*0.30*cos(a), H/2 + H*0.22*sin(a)'
-    trace "$half" 'printf "%d %d", W*0.15 + W*0.70*t, H/2 + H*0.18*sin(2*3.14159265*t)'
+    trace "$half" 'a = 2 * 3.14159265 * t; printf "%d %d\n", W/2 + W*0.30*cos(a), H/2 + H*0.22*sin(a)'
+    trace "$half" 'printf "%d %d\n", W*0.15 + W*0.70*t, H/2 + H*0.18*sin(2*3.14159265*t)'
 }
 
 # --- worker lifecycle --------------------------------------------------------
@@ -270,7 +319,15 @@ if ! wants cases && ! wants palettes; then
 fi
 ipc waterlily_palette --args '"auto"'
 ipc waterlily_case --args "\"$OPENING_CASE\""
-((HAVE_XDOTOOL)) && read -r W H < <(screen_geometry) && xdotool mousemove "$((W - 4))" "$((H - 4))"
+# 非交互开场把光标藏进角落;交互开场停在中心,海螺线正是从那里出发。
+if ((HAVE_XDOTOOL)); then
+    read -r W H < <(screen_geometry)
+    if [[ "$OPENING_CASE" == cylinder ]]; then
+        xdotool mousemove "$((W - 4))" "$((H - 4))"
+    else
+        xdotool mousemove "$((W / 2))" "$((H / 2))"
+    fi
+fi
 
 # 等 worker 的帧真正上屏(active 含义:特效开 + worker 连接 + 纹理在屏)。
 deadline=$((SECONDS + 60))
