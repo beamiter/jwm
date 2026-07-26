@@ -19,6 +19,24 @@ impl<C: CompositorConnection> Compositor<C> {
         self.system_ui = overlay;
         self.needs_render = true;
     }
+
+    pub(crate) fn push_toast(&mut self, toast: crate::backend::api::ToastNotification) {
+        let removed = self
+            .toast_stack
+            .push(toast, std::time::Instant::now());
+        self.free_toast_textures(&removed);
+        self.needs_render = true;
+    }
+
+    pub(crate) fn free_toast_textures(&mut self, ids: &[u64]) {
+        for id in ids {
+            if let Some(slots) = self.toast_textures.remove(id) {
+                for slot in slots.into_iter().flatten() {
+                    unsafe { self.gl.delete_texture(slot.0) };
+                }
+            }
+        }
+    }
     pub(crate) fn has_partial_damage(&self) -> bool {
         self.partial_damage_enabled
     }
@@ -610,6 +628,7 @@ impl<C: CompositorConnection> Compositor<C> {
                                     .get_uniform_location(new_program, "u_projection"),
                                 rect: self.gl.get_uniform_location(new_program, "u_rect"),
                                 texture: self.gl.get_uniform_location(new_program, "u_texture"),
+                                opacity: self.gl.get_uniform_location(new_program, "u_opacity"),
                             };
                             let old_program =
                                 std::mem::replace(&mut self.hud_text_program, new_program);

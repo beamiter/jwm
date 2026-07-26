@@ -944,6 +944,13 @@ pub(crate) struct WaylandCompositor {
     /// Styled system-UI panel text sections: title, query, items, hint.
     sysui_textures: [Option<(u32, u32, u32)>; 4],
     sysui_cache: String,
+
+    // --- Toast notifications (top-right stacked cards) ---
+    toast_stack: crate::backend::compositor_common::toast::ToastStack,
+    toast_textures: HashMap<u64, [Option<(u32, u32, u32)>; 2]>,
+    /// Toast ids evicted outside the render pass; their textures are freed
+    /// on the next frame while a GL context is current.
+    toast_retired: Vec<u64>,
     hud_text_width: u32,
     hud_text_height: u32,
     hud_text_cache: String,
@@ -1838,6 +1845,9 @@ impl WaylandCompositor {
                 hud_text_texture: None,
                 sysui_textures: [None; 4],
                 sysui_cache: String::new(),
+                toast_stack: Default::default(),
+                toast_textures: HashMap::new(),
+                toast_retired: Vec::new(),
                 hud_text_width: 0,
                 hud_text_height: 0,
                 hud_text_cache: String::new(),

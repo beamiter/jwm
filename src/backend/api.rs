@@ -247,6 +247,19 @@ pub struct SystemUiOverlay {
     pub locked: bool,
 }
 
+/// One transient notification card the compositor stacks in the top-right
+/// corner. Pushed fire-and-forget; the compositor owns display and expiry.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ToastNotification {
+    pub title: String,
+    /// Optional multi-line body under the title.
+    pub body: String,
+    /// 0 = low (dim accent), 1 = normal, 2 = critical (danger accent).
+    pub urgency: u8,
+    /// Display time in milliseconds; 0 selects the default.
+    pub timeout_ms: u32,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Capabilities {
     pub can_warp_pointer: bool,
@@ -1324,6 +1337,8 @@ pub trait CompositorMedia: Send {
 /// Workspace transition and interactive preview effects.
 pub trait CompositorWorkspaceEffects: Send {
     fn compositor_set_system_ui(&mut self, _overlay: Option<SystemUiOverlay>) {}
+
+    fn compositor_push_toast(&mut self, _toast: ToastNotification) {}
     fn compositor_notify_tag_switch(
         &mut self,
         _duration: std::time::Duration,

@@ -153,6 +153,10 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             }
         }
+        // Need render while toast cards are on screen (fade envelope + expiry)
+        if !self.toast_stack.is_empty() {
+            return true;
+        }
         // Need render while a rotating gradient border is visible
         if self.border_gradient_enabled
             && self.border_gradient_speed != 0.0

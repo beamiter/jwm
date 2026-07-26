@@ -2362,6 +2362,13 @@ impl WaylandCompositor {
             }
         }
 
+        // Toast cards sit above clients but under the modal system UI (its
+        // scrim dims them; the lock screen hides them).
+        unsafe {
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
+            self.render_toasts(gl, &projection);
+        }
+
         if self.system_ui.is_some() {
             unsafe {
                 gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
@@ -2910,9 +2917,11 @@ impl WaylandCompositor {
             let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
             let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
             let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
+            let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
             gl.UseProgram(self.sysui_text_program);
             gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
             gl.Uniform1i(text_tex, 0);
+            gl.Uniform1f(text_opacity, 1.0);
             gl.ActiveTexture(ffi::TEXTURE0);
             let positions = [
                 Some((x + pad, y + pad)),
@@ -2927,6 +2936,202 @@ impl WaylandCompositor {
                 gl.Uniform4f(text_rect, tx, ty, w as f32, h as f32);
                 gl.BindTexture(ffi::TEXTURE_2D, tex);
                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            }
+            gl.BindVertexArray(0);
+            gl.UseProgram(0);
+        }
+    }
+
+    /// Rasterize (and cache) one toast's title/body textures.
+    unsafe fn update_toast_textures(&mut self, gl: &ffi::Gles2, id: u64, title: &str, body: &str) {
+        if self.toast_textures.contains_key(&id) {
+            return;
+        }
+        let config = crate::config::CONFIG.load();
+        let description = config.system_ui_font();
+        let size = crate::backend::compositor_font::ui_font_pixel_size(description);
+        const COLORS: [[u8; 4]; 2] = [
+            [232, 238, 250, 255], // title
+            [164, 174, 196, 255], // body
+        ];
+        let mut slots = [None, None];
+        for (slot, text) in [title, body].into_iter().enumerate() {
+            if text.is_empty() {
+                continue;
+            }
+            let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
+                text,
+                description,
+                size,
+                COLORS[slot],
+            );
+            if w == 0 || h == 0 {
+                continue;
+            }
+            unsafe {
+                let mut tex = 0;
+                gl.GenTextures(1, &mut tex);
+                gl.BindTexture(ffi::TEXTURE_2D, tex);
+                gl.TexImage2D(
+                    ffi::TEXTURE_2D,
+                    0,
+                    ffi::RGBA as i32,
+                    w as i32,
+                    h as i32,
+                    0,
+                    ffi::RGBA,
+                    ffi::UNSIGNED_BYTE,
+                    pixels.as_ptr().cast(),
+                );
+                gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+                gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
+                slots[slot] = Some((tex, w, h));
+            }
+        }
+        self.toast_textures.insert(id, slots);
+    }
+
+    /// Delete cached textures for the given retired toast ids.
+    unsafe fn free_toast_textures(&mut self, gl: &ffi::Gles2, ids: &[u64]) {
+        for id in ids {
+            if let Some(slots) = self.toast_textures.remove(id) {
+                for slot in slots.into_iter().flatten() {
+                    unsafe { gl.DeleteTextures(1, &slot.0) };
+                }
+            }
+        }
+    }
+
+    /// Transient notification cards stacked in the top-right corner: rounded
+    /// card, drop shadow, urgency accent stripe, title over dimmer body, and
+    /// a fade in/out envelope shared with the X11 backend.
+    unsafe fn render_toasts(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+        let now = std::time::Instant::now();
+        let mut removed = std::mem::take(&mut self.toast_retired);
+        removed.extend(self.toast_stack.prune(now));
+        unsafe { self.free_toast_textures(gl, &removed) };
+        if self.toast_stack.is_empty() {
+            return;
+        }
+
+        let toasts: Vec<(u64, String, String, u8, f32)> = self
+            .toast_stack
+            .iter()
+            .map(|toast| {
+                (
+                    toast.id,
+                    toast.notification.title.clone(),
+                    toast.notification.body.clone(),
+                    toast.notification.urgency,
+                    toast.alpha(now),
+                )
+            })
+            .collect();
+        for (id, title, body, _, _) in &toasts {
+            unsafe { self.update_toast_textures(gl, *id, title, body) };
+        }
+
+        let pad = 18.0;
+        let pad_left = 30.0;
+        let gap = 12.0;
+        let radius = 14.0;
+        let stripe_w = 3.0;
+        let margin = 28.0;
+        let screen_w = self.screen_w as f32;
+        let mut top = margin;
+
+        unsafe {
+            gl.BindVertexArray(self.quad_vao);
+            let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
+            let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
+            let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
+            let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
+
+            for (id, _, _, urgency, alpha) in &toasts {
+                let slots = self.toast_textures.get(id).copied().unwrap_or([None, None]);
+                let (title_w, title_h) = slots[0]
+                    .map(|(_, w, h)| (w as f32, h as f32))
+                    .unwrap_or((0.0, 0.0));
+                let (body_w, body_h) = slots[1]
+                    .map(|(_, w, h)| (w as f32, h as f32))
+                    .unwrap_or((0.0, 0.0));
+                let content_w = title_w.max(body_w).clamp(220.0, 440.0);
+                let card_w = content_w + pad_left + pad;
+                let mut card_h = 2.0 * pad + title_h;
+                if body_h > 0.0 {
+                    card_h += 6.0 + body_h;
+                }
+                let x = screen_w - margin - card_w;
+                let y = top;
+                let a = *alpha;
+                let accent = match urgency {
+                    2 => [0.95, 0.30, 0.30, 1.0],
+                    0 => [0.45, 0.50, 0.62, 1.0],
+                    _ => self.border_gradient_color_a,
+                };
+
+                gl.UseProgram(self.shadow_program);
+                self.set_projection_uniform(gl, self.shadow_uniforms.projection, projection);
+                let spread = 32.0;
+                gl.Uniform1f(self.shadow_uniforms.spread, spread);
+                gl.Uniform4f(self.shadow_uniforms.shadow_color, 0.0, 0.0, 0.0, 0.45 * a);
+                gl.Uniform1f(self.shadow_uniforms.radius, radius);
+                gl.Uniform2f(self.shadow_uniforms.size, card_w, card_h);
+                self.set_rect_uniform(
+                    gl,
+                    self.shadow_uniforms.rect,
+                    x - spread,
+                    y - spread + 8.0,
+                    card_w + 2.0 * spread,
+                    card_h + 2.0 * spread,
+                );
+                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+
+                gl.UseProgram(self.border_program);
+                self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
+                gl.Uniform1i(self.border_uniforms.scene_linear, 0);
+                self.sysui_fill_rounded(
+                    gl,
+                    x,
+                    y,
+                    card_w,
+                    card_h,
+                    radius,
+                    [0.075, 0.086, 0.118, 0.97 * a],
+                );
+                self.sysui_fill_rounded(
+                    gl,
+                    x + 13.0,
+                    y + 13.0,
+                    stripe_w,
+                    card_h - 26.0,
+                    1.5,
+                    [accent[0], accent[1], accent[2], 0.9 * a],
+                );
+
+                gl.UseProgram(self.sysui_text_program);
+                gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
+                gl.Uniform1i(text_tex, 0);
+                gl.Uniform1f(text_opacity, a);
+                gl.ActiveTexture(ffi::TEXTURE0);
+                if let Some((tex, w, h)) = slots[0] {
+                    gl.Uniform4f(text_rect, x + pad_left, y + pad, w as f32, h as f32);
+                    gl.BindTexture(ffi::TEXTURE_2D, tex);
+                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                }
+                if let Some((tex, w, h)) = slots[1] {
+                    gl.Uniform4f(
+                        text_rect,
+                        x + pad_left,
+                        y + pad + title_h + 6.0,
+                        w as f32,
+                        h as f32,
+                    );
+                    gl.BindTexture(ffi::TEXTURE_2D, tex);
+                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                }
+
+                top += card_h + gap;
             }
             gl.BindVertexArray(0);
             gl.UseProgram(0);

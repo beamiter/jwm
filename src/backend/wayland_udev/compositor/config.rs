@@ -79,6 +79,12 @@ impl WaylandCompositor {
         self.needs_render = true;
     }
 
+    pub(crate) fn push_toast(&mut self, toast: crate::backend::api::ToastNotification) {
+        let removed = self.toast_stack.push(toast, std::time::Instant::now());
+        self.toast_retired.extend(removed);
+        self.needs_render = true;
+    }
+
     pub(crate) fn has_system_ui(&self) -> bool {
         self.system_ui.is_some()
     }

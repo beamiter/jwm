@@ -3277,6 +3277,12 @@ impl CompositorWorkspaceEffects for UdevBackend {
         }
         self.request_render();
     }
+    fn compositor_push_toast(&mut self, toast: crate::backend::api::ToastNotification) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.push_toast(toast);
+        }
+        self.request_render();
+    }
     fn compositor_notify_tag_switch(
         &mut self,
         duration: Duration,

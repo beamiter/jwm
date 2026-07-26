@@ -261,6 +261,12 @@ macro_rules! delegate_compositor_capabilities {
                 }
             }
 
+            fn compositor_push_toast(&mut self, toast: crate::backend::api::ToastNotification) {
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor.push_toast(toast);
+                }
+            }
+
             fn compositor_notify_tag_switch(
                 &mut self,
                 duration: std::time::Duration,

@@ -193,6 +193,7 @@ pub(super) struct HudTextUniforms {
     pub(super) projection: Option<glow::UniformLocation>,
     pub(super) rect: Option<glow::UniformLocation>,
     pub(super) texture: Option<glow::UniformLocation>,
+    pub(super) opacity: Option<glow::UniformLocation>,
 }
 
 pub(super) struct LineUniforms {

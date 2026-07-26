@@ -625,6 +625,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 );
                 self.gl
                     .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
+                self.gl
+                    .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), 1.0);
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 let _ = title_alpha; // opacity is baked into the title texture already

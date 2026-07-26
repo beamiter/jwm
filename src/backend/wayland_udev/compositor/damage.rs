@@ -71,6 +71,7 @@ impl WaylandCompositor {
             || self.debug_hud_extended
             || (self.annotation_active && !self.annotation_strokes.is_empty())
             || self.system_ui.is_some()
+            || !self.toast_stack.is_empty()
             || self.recording_region_overlay.is_some();
 
         !encoded_overlay_active
@@ -169,6 +170,9 @@ impl WaylandCompositor {
         if self.peek_active {
             return Some("peek mode requires composition");
         }
+        if !self.toast_stack.is_empty() {
+            return Some("toast notifications require composition");
+        }
         if self.edge_glow_enabled && self.edge_glow_active && !self.edge_glow_suppressed {
             return Some("edge glow requires composition");
         }
@@ -232,6 +236,11 @@ impl WaylandCompositor {
         }
         // Check transition
         if self.transition_active {
+            return true;
+        }
+        // Toast cards fade on a wall-clock envelope; keep frames coming
+        // while any card is visible (bounded by the toast timeout).
+        if !self.toast_stack.is_empty() {
             return true;
         }
         // A rotating gradient border needs continuous frames while any

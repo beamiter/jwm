@@ -8,6 +8,7 @@ pub mod math;
 pub mod media;
 pub mod rules;
 pub mod screenshot;
+pub(crate) mod toast;
 pub mod transitions;
 pub mod wallpaper;
 pub mod waterlily;

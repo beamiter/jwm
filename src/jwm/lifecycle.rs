@@ -364,6 +364,12 @@ impl Jwm {
             Ok(()) => {
                 self.record_config_reload_result(true, None);
                 self.apply_config_changes(backend);
+                backend.compositor_push_toast(crate::backend::api::ToastNotification {
+                    title: "\u{f021}  Configuration reloaded".into(),
+                    body: String::new(),
+                    urgency: 1,
+                    timeout_ms: 2500,
+                });
                 self.broadcast_ipc_event(
                     "config/reload",
                     serde_json::json!({
@@ -377,6 +383,12 @@ impl Jwm {
             Err(e) => {
                 let error = format!("config reload failed: {e}");
                 self.record_config_reload_result(false, Some(error.clone()));
+                backend.compositor_push_toast(crate::backend::api::ToastNotification {
+                    title: "\u{f071}  Configuration reload failed".into(),
+                    body: e.to_string(),
+                    urgency: 2,
+                    timeout_ms: 8000,
+                });
                 self.broadcast_ipc_event(
                     "config/reload",
                     serde_json::json!({

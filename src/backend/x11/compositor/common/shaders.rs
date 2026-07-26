@@ -447,13 +447,15 @@ void main() {
 pub const HUD_TEXT_FRAGMENT_SHADER: &str = r#"#version 330 core
 
 uniform sampler2D u_texture;
+uniform float u_opacity; // layer opacity for fading text (set 1.0 for static)
 in vec2 v_uv;
 out vec4 frag_color;
 
 void main() {
     vec4 texel = texture(u_texture, v_uv);
+    float a = texel.a * clamp(u_opacity, 0.0, 1.0);
     // Output premultiplied alpha for GL_ONE, GL_ONE_MINUS_SRC_ALPHA blending
-    frag_color = vec4(texel.rgb * texel.a, texel.a);
+    frag_color = vec4(texel.rgb * a, a);
 }
 "#;
 

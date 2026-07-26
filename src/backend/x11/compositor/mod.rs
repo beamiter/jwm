@@ -449,6 +449,10 @@ where
     /// Styled system-UI panel text sections: title, query, items, hint.
     sysui_textures: [Option<(glow::Texture, u32, u32)>; 4],
     sysui_cache: String,
+
+    // --- Toast notifications (top-right stacked cards) ---
+    toast_stack: crate::backend::compositor_common::toast::ToastStack,
+    toast_textures: HashMap<u64, [Option<(glow::Texture, u32, u32)>; 2]>,
     hud_text_width: u32,
     hud_text_height: u32,
     hud_text_cache: String,
@@ -895,6 +899,11 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
             for slot in &mut self.sysui_textures {
                 if let Some((tex, _, _)) = slot.take() {
                     self.gl.delete_texture(tex);
+                }
+            }
+            for (_, slots) in self.toast_textures.drain() {
+                for slot in slots.into_iter().flatten() {
+                    self.gl.delete_texture(slot.0);
                 }
             }
             if let Some(tex) = self.hud_text_texture.take() {

@@ -984,6 +984,38 @@ impl Jwm {
             return self.do_config_reload(backend);
         }
 
+        // Special command: notify — post a native toast card.
+        if name == "notify" {
+            let title = args
+                .get("title")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let body = args
+                .get("body")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            if title.is_empty() && body.is_empty() {
+                return IpcResponse::err("notify: expected string field 'title' and/or 'body'");
+            }
+            let urgency = args
+                .get("urgency")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(1)
+                .min(2) as u8;
+            let timeout_ms = args
+                .get("timeout_ms")
+                .and_then(|value| value.as_u64())
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(0);
+            backend.compositor_push_toast(crate::backend::api::ToastNotification {
+                title: title.to_string(),
+                body: body.to_string(),
+                urgency,
+                timeout_ms,
+            });
+            return IpcResponse::ok(None);
+        }
+
         // Special command: benchmark (requires mutable backend)
         if name == "benchmark" {
             return self.handle_benchmark_command(backend, args);

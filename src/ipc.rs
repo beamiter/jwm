@@ -145,6 +145,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "benchmark",
         "command_batch",
         "move_window_to_monitor",
+        "notify",
         "reload_config",
         "set_config",
         "set_config_batch",

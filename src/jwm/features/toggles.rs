@@ -921,6 +921,12 @@ impl Jwm {
             "[recording] stop → {output_path} ({} segments)",
             segments.len()
         );
+        backend.compositor_push_toast(crate::backend::api::ToastNotification {
+            title: "\u{f03d}  Recording stopped".into(),
+            body: output_path.clone(),
+            urgency: 1,
+            timeout_ms: 5000,
+        });
         Self::finalize_recording(segments, output_path);
         Ok(())
     }

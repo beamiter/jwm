@@ -319,6 +319,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 projection: gl.get_uniform_location(hud_text_program, "u_projection"),
                 rect: gl.get_uniform_location(hud_text_program, "u_rect"),
                 texture: gl.get_uniform_location(hud_text_program, "u_texture"),
+                opacity: gl.get_uniform_location(hud_text_program, "u_opacity"),
             }
         };
 
@@ -848,6 +849,8 @@ impl<C: CompositorConnection> Compositor<C> {
             hud_text_texture: None,
             sysui_textures: [None; 4],
             sysui_cache: String::new(),
+            toast_stack: Default::default(),
+            toast_textures: HashMap::new(),
             hud_text_width: 0,
             hud_text_height: 0,
             hud_text_cache: String::new(),
