@@ -55,7 +55,8 @@ find_jwm_tool() {
         exit 1
     }
 }
-JWM_TOOL="$(find_jwm_tool)"
+# JWM_TOOL 环境变量可覆盖(测试桩或非常规安装路径)。
+JWM_TOOL="${JWM_TOOL:-$(find_jwm_tool)}"
 
 ipc() { "$JWM_TOOL" msg "$@" >/dev/null; }
 ipc_query() { "$JWM_TOOL" msg "$1" --raw 2>/dev/null || true; }
@@ -88,8 +89,9 @@ trace() {
     read -r width height < <(screen_geometry)
     steps=$((seconds * 30))
     for ((i = 0; i < steps; i++)); do
-        read -r x y < <(awk -v t="$(awk -v i="$i" -v n="$steps" 'BEGIN { printf "%.6f", i / n }')" \
-            -v W="$width" -v H="$height" "BEGIN { $expr }")
+        # 末尾 print "" 补换行:read 在无换行的 EOF 上返回非零,会触发 set -e。
+        read -r x y < <(awk -v t="$(awk -v i="$i" -v n="$steps" 'BEGIN { printf "%.6f\n", i / n }')" \
+            -v W="$width" -v H="$height" "BEGIN { $expr; print \"\" }")
         xdotool mousemove "$x" "$y"
         sleep 0.033
     done
@@ -97,7 +99,9 @@ trace() {
 
 # 圆周 → 8 字 → 横扫:先甩出稳定涡环,再写个 8,最后拖出一条长尾迹。
 stylus_performance() {
-    local seconds="$1" third=$((seconds / 3))
+    # 注意:不能与 seconds 同一条 local——同条声明里 $(()) 先于赋值展开。
+    local seconds="$1"
+    local third=$((seconds / 3))
     ((HAVE_XDOTOOL)) || { log "xdotool missing; stylus segment plays without mouse motion"; sleep "$seconds"; return; }
     trace "$third" 'a = 2 * 3.14159265 * 2 * t; printf "%d %d", W/2 + W*0.28*cos(a), H/2 + H*0.30*sin(a)'
     trace "$third" 'a = 2 * 3.14159265 * 2 * t; printf "%d %d", W/2 + W*0.32*sin(a), H/2 + H*0.28*sin(2*a)'
@@ -128,7 +132,7 @@ kill_workers() {
 # 唯一可信的健康信号是压缩器视角的 worker_connected;pgrep 只能证明有进程,
 # 证明不了它还活着(卡死的退出中进程照样被 pgrep 抓到)。
 wait_for_worker() {
-    local seconds="$1" deadline=$((SECONDS + $1))
+    local deadline=$((SECONDS + $1))
     while ((SECONDS < deadline)); do
         waterlily_flag worker_connected && return 0
         sleep 1

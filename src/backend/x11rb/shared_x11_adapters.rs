@@ -162,6 +162,11 @@ where
         let geometry = self.get_geometry(window).ok()?.reply().ok()?;
         Some((u32::from(geometry.width), u32::from(geometry.height)))
     }
+
+    fn query_pointer_root(&self, root: u32) -> Option<(i16, i16)> {
+        let reply = self.query_pointer(root).ok()?.reply().ok()?;
+        Some((reply.root_x, reply.root_y))
+    }
 }
 
 impl<T> X11CompositeRedirectOps for T

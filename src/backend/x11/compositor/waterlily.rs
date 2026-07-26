@@ -467,6 +467,17 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.mark_waterlily_damage(rect);
             }
         }
+
+        // The WM only sees motion events during grabs or over the bare root
+        // window, so motion over client windows never reaches
+        // set_mouse_position. Poll the pointer on each worker wake (~worker
+        // fps) instead; forward_waterlily_pointer applies its own visibility,
+        // throttle, and minimum-travel gates.
+        if self.waterlily_visible() {
+            if let Some((x, y)) = self.conn.query_pointer_root(self.root) {
+                self.forward_waterlily_pointer(f32::from(x), f32::from(y));
+            }
+        }
         changed
     }
 

@@ -287,6 +287,14 @@ impl X11ConnectionOps for XcbCompositorProtocol<'_> {
         let geometry = self.conn.wait_for_reply(cookie).ok()?;
         Some((u32::from(geometry.width()), u32::from(geometry.height())))
     }
+
+    fn query_pointer_root(&self, root: u32) -> Option<(i16, i16)> {
+        let cookie = self.conn.send_request(&x::QueryPointer {
+            window: x::Window::new(root),
+        });
+        let reply = self.conn.wait_for_reply(cookie).ok()?;
+        Some((reply.root_x(), reply.root_y()))
+    }
 }
 
 impl X11CompositeRedirectOps for XcbCompositorProtocol<'_> {
@@ -698,6 +706,11 @@ impl X11ConnectionOps for XcbSharedCompositorConnection {
     fn query_window_size(&self, window: u32) -> Option<(u32, u32)> {
         let protocol = self.protocol();
         <XcbCompositorProtocol<'_> as X11ConnectionOps>::query_window_size(&protocol, window)
+    }
+
+    fn query_pointer_root(&self, root: u32) -> Option<(i16, i16)> {
+        let protocol = self.protocol();
+        <XcbCompositorProtocol<'_> as X11ConnectionOps>::query_pointer_root(&protocol, root)
     }
 }
 

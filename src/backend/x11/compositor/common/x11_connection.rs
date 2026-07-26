@@ -9,4 +9,8 @@ pub trait X11ConnectionOps {
     /// (e.g. the window is already gone). Used to resize the compositor
     /// viewport to the root window after screen-layout changes.
     fn query_window_size(&self, window: u32) -> Option<(u32, u32)>;
+    /// Root-relative pointer position, or `None` when the query fails. The
+    /// WM only receives motion events during grabs or over the root window,
+    /// so interactive layers (WaterLily stylus) poll this per frame instead.
+    fn query_pointer_root(&self, root: u32) -> Option<(i16, i16)>;
 }
