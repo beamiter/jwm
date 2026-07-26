@@ -21,8 +21,8 @@
 #   WORKER_FPS    worker --fps           (default: 30)
 #   CASE_DWELL    seconds per case       (default: 12)
 #   PALETTE_DWELL seconds per palette    (default: 10)
-#   STYLUS_DWELL  seconds per stylus palette (sith/fluent/mica) (default: 60)
-#   WALTZ_DWELL   seconds of waltz play  (default: 24)
+#   STYLUS_DWELL  seconds per stylus palette (fluent/sith/mica) (default: 40)
+#   WALTZ_DWELL   seconds per waltz palette (fluent/sith/mica) (default: 40)
 
 set -euo pipefail
 
@@ -47,8 +47,8 @@ GRID_H="${SIM_SIZE#*x}"
 WORKER_FPS="${WORKER_FPS:-30}"
 CASE_DWELL="${CASE_DWELL:-12}"
 PALETTE_DWELL="${PALETTE_DWELL:-10}"
-STYLUS_DWELL="${STYLUS_DWELL:-60}"
-WALTZ_DWELL="${WALTZ_DWELL:-24}"
+STYLUS_DWELL="${STYLUS_DWELL:-40}"
+WALTZ_DWELL="${WALTZ_DWELL:-40}"
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT_FILE="$OUT_DIR/waterlily-showcase-$STAMP.mp4"
@@ -64,8 +64,9 @@ GPU_MIN_FREE_MB="${GPU_MIN_FREE_MB:-3000}"
 CASES=(cylinder tandem diamond dance flap orbit hover wander)
 # 粉丝点名的三个配色,在涡街最丰富的 cylinder 上循环展示。
 PALETTES=(mica sith fluent)
-# stylus 长段的配色轮换:每种 STYLUS_DWELL 秒,顺序与第二幕一致。
-STYLUS_PALETTES=(mica sith fluent)
+# 交互两幕(stylus/waltz)的配色轮换:每种一段。第二幕以 fluent 收尾,
+# stylus 以 fluent 开场,幕间无切换,丝滑衔接。
+INTERACTIVE_PALETTES=(fluent sith mica)
 
 log() { printf '[showcase %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
@@ -368,25 +369,28 @@ if wants palettes; then
     ipc waterlily_palette --args '"auto"'
 fi
 
-# 第三幕:stylus 交互长段——三种粉丝配色各一分钟,每种画一幅完整海螺。
+# 第三幕:stylus 交互长段——三种粉丝配色各 STYLUS_DWELL 秒,每种画一幅
+# 完整海螺。
 if wants stylus; then
     ipc waterlily_case --args '"stylus"'
     sleep 2
-    for palette in "${STYLUS_PALETTES[@]}"; do
+    for palette in "${INTERACTIVE_PALETTES[@]}"; do
         ipc waterlily_palette --args "\"$palette\""
         chapter "stylus:$palette (mouse-driven)"
         stylus_performance "$STYLUS_DWELL"
     done
 fi
 
-# 终幕:waltz——dance 的横摆骑在追踪弹簧上;palette auto 落回其默认 mica,
-# 珠光闪烁里编织尾迹追着鼠标跑。
+# 终幕:waltz——dance 的横摆骑在追踪弹簧上,编织尾迹追着鼠标跑;同一套
+# 配色轮换,每种 WALTZ_DWELL 秒完整跳一支(椭圆一圈 + 顺流横渡)。
 if wants waltz; then
-    ipc waterlily_palette --args '"auto"'
     ipc waterlily_case --args '"waltz"'
-    chapter "finale:waltz (mica, mouse-led braided wake)"
     sleep 2
-    waltz_performance "$WALTZ_DWELL"
+    for palette in "${INTERACTIVE_PALETTES[@]}"; do
+        ipc waterlily_palette --args "\"$palette\""
+        chapter "waltz:$palette (mouse-led braided wake)"
+        waltz_performance "$WALTZ_DWELL"
+    done
 fi
 
 # --- finalize ----------------------------------------------------------------
