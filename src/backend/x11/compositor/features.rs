@@ -21,10 +21,13 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     pub(crate) fn push_toast(&mut self, toast: crate::backend::api::ToastNotification) {
-        let removed = self
-            .toast_stack
-            .push(toast, std::time::Instant::now());
+        let removed = self.toast_stack.push(toast, std::time::Instant::now());
         self.free_toast_textures(&removed);
+        self.needs_render = true;
+    }
+
+    pub(crate) fn show_osd(&mut self, kind: crate::backend::api::OsdKind, percent: u8) {
+        self.osd_slot.show(kind, percent, std::time::Instant::now());
         self.needs_render = true;
     }
 

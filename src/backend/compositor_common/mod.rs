@@ -6,6 +6,7 @@ pub mod event_coalescer;
 pub mod expose;
 pub mod math;
 pub mod media;
+pub(crate) mod osd;
 pub mod rules;
 pub mod screenshot;
 pub(crate) mod toast;

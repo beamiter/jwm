@@ -79,6 +79,44 @@ pub enum SystemUiState {
         password: String,
         message: String,
     },
+    ControlCenter {
+        entries: Vec<ControlEntry>,
+        selected: usize,
+    },
+}
+
+/// One row of the control center: sliders react to Left/Right, toggles and
+/// actions to Return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlKind {
+    Volume,
+    Brightness,
+    DoNotDisturb,
+    LockScreen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlEntry {
+    pub kind: ControlKind,
+    /// Slider position for Volume/Brightness; unused for toggles.
+    pub percent: u8,
+    /// Mute state for Volume, on/off for DoNotDisturb; unused otherwise.
+    pub enabled: bool,
+}
+
+/// Render a 20-cell slider bar, e.g. `█████████░░░░░░░░░░░`.
+fn slider_bar(percent: u8) -> String {
+    const CELLS: usize = 20;
+    let filled = (usize::from(percent.min(100)) * CELLS + 50) / 100;
+    let mut bar = String::with_capacity(CELLS * 3);
+    for cell in 0..CELLS {
+        bar.push(if cell < filled {
+            '\u{2588}'
+        } else {
+            '\u{2591}'
+        });
+    }
+    bar
 }
 
 impl Clone for SystemUiState {
@@ -125,6 +163,10 @@ impl Clone for SystemUiState {
                 password: String::new(),
                 message: message.clone(),
             },
+            Self::ControlCenter { entries, selected } => Self::ControlCenter {
+                entries: entries.clone(),
+                selected: *selected,
+            },
         }
     }
 }
@@ -164,6 +206,62 @@ impl SystemUiState {
         Self::Locked {
             password: String::new(),
             message: String::new(),
+        }
+    }
+
+    /// Build the control center from the currently available controls.
+    /// Volume/brightness rows appear only when a working control exists.
+    pub fn control_center(
+        volume: Option<(u8, bool)>,
+        brightness: Option<u8>,
+        do_not_disturb: bool,
+    ) -> Self {
+        let mut entries = Vec::new();
+        if let Some((percent, muted)) = volume {
+            entries.push(ControlEntry {
+                kind: ControlKind::Volume,
+                percent,
+                enabled: muted,
+            });
+        }
+        if let Some(percent) = brightness {
+            entries.push(ControlEntry {
+                kind: ControlKind::Brightness,
+                percent,
+                enabled: false,
+            });
+        }
+        entries.push(ControlEntry {
+            kind: ControlKind::DoNotDisturb,
+            percent: 0,
+            enabled: do_not_disturb,
+        });
+        entries.push(ControlEntry {
+            kind: ControlKind::LockScreen,
+            percent: 0,
+            enabled: false,
+        });
+        Self::ControlCenter {
+            entries,
+            selected: 0,
+        }
+    }
+
+    /// The control the selection currently rests on, if the panel is open.
+    pub fn selected_control(&self) -> Option<ControlKind> {
+        let Self::ControlCenter { entries, selected } = self else {
+            return None;
+        };
+        entries.get(*selected).map(|entry| entry.kind)
+    }
+
+    /// Write back the live value of one control row after a side effect.
+    pub fn update_control(&mut self, kind: ControlKind, percent: u8, enabled: bool) {
+        if let Self::ControlCenter { entries, .. } = self {
+            if let Some(entry) = entries.iter_mut().find(|entry| entry.kind == kind) {
+                entry.percent = percent;
+                entry.enabled = enabled;
+            }
         }
     }
 
@@ -403,7 +501,7 @@ impl SystemUiState {
                 password.push(ch);
                 message.clear();
             }
-            Self::Inactive | Self::MonitorLayout { .. } => return,
+            Self::Inactive | Self::MonitorLayout { .. } | Self::ControlCenter { .. } => return,
         }
         self.refresh_matches();
     }
@@ -417,7 +515,7 @@ impl SystemUiState {
                 password.pop();
                 message.clear();
             }
-            Self::Inactive | Self::MonitorLayout { .. } => return,
+            Self::Inactive | Self::MonitorLayout { .. } | Self::ControlCenter { .. } => return,
         }
         self.refresh_matches();
     }
@@ -438,6 +536,12 @@ impl SystemUiState {
         {
             let max = matches.len().saturating_sub(28);
             *offset = (*offset as isize + delta).clamp(0, max as isize) as usize;
+        } else if let Self::ControlCenter { entries, selected } = self {
+            if entries.is_empty() {
+                *selected = 0;
+                return;
+            }
+            *selected = (*selected as isize + delta).rem_euclid(entries.len() as isize) as usize;
         }
     }
 
@@ -551,6 +655,46 @@ impl SystemUiState {
                             .into(),
                 }
             }
+            Self::ControlCenter { entries, selected } => {
+                let items = entries
+                    .iter()
+                    .map(|entry| match entry.kind {
+                        ControlKind::Volume => {
+                            let icon = if entry.enabled {
+                                "\u{f6a9}" // fa-volume-mute
+                            } else {
+                                "\u{f028}" // fa-volume-up
+                            };
+                            let value = if entry.enabled {
+                                "  mute".to_string()
+                            } else {
+                                format!("{:>4}%", entry.percent)
+                            };
+                            format!(
+                                "{icon}  Volume       {}  {value}",
+                                slider_bar(if entry.enabled { 0 } else { entry.percent })
+                            )
+                        }
+                        ControlKind::Brightness => format!(
+                            "\u{f185}  Brightness   {}  {:>4}%",
+                            slider_bar(entry.percent),
+                            entry.percent
+                        ),
+                        ControlKind::DoNotDisturb => format!(
+                            "\u{f1f6}  Do Not Disturb{:>23}",
+                            if entry.enabled { "[ on ]" } else { "[ off ]" }
+                        ),
+                        ControlKind::LockScreen => "\u{f023}  Lock Screen".to_string(),
+                    })
+                    .collect();
+                OverlayParts {
+                    title: "\u{f1de}  CONTROL CENTER".into(),
+                    query: None,
+                    items,
+                    selected: Some((*selected).min(entries.len().saturating_sub(1))),
+                    hint: "\u{f060}/\u{f061}  adjust    Enter  toggle    Esc  close".into(),
+                }
+            }
             Self::MonitorLayout {
                 entries,
                 selected,
@@ -656,7 +800,10 @@ impl SystemUiState {
                 *matches = scored.into_iter().map(|(i, _)| i).collect();
                 *offset = 0;
             }
-            Self::Inactive | Self::Locked { .. } | Self::MonitorLayout { .. } => {}
+            Self::Inactive
+            | Self::Locked { .. }
+            | Self::MonitorLayout { .. }
+            | Self::ControlCenter { .. } => {}
         }
     }
 }
@@ -1126,6 +1273,60 @@ unsafe fn authenticate_pam(password: &str) -> Result<bool, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_center_builds_rows_for_available_controls() {
+        // Volume and brightness present.
+        let state = SystemUiState::control_center(Some((45, false)), Some(60), true);
+        assert_eq!(state.selected_control(), Some(ControlKind::Volume));
+        let parts = state.overlay_parts();
+        assert_eq!(parts.items.len(), 4);
+        assert!(parts.items[0].contains("45%"));
+        assert!(parts.items[1].contains("60%"));
+        assert!(parts.items[2].contains("[ on ]"));
+
+        // No audio, no backlight: only the toggles remain.
+        let state = SystemUiState::control_center(None, None, false);
+        assert_eq!(state.selected_control(), Some(ControlKind::DoNotDisturb));
+        assert_eq!(state.overlay_parts().items.len(), 2);
+    }
+
+    #[test]
+    fn control_center_selection_wraps_and_updates_write_back() {
+        let mut state = SystemUiState::control_center(Some((45, false)), Some(60), false);
+        state.move_selection(-1);
+        assert_eq!(state.selected_control(), Some(ControlKind::LockScreen));
+        state.move_selection(1);
+        assert_eq!(state.selected_control(), Some(ControlKind::Volume));
+
+        state.update_control(ControlKind::Volume, 50, true);
+        let parts = state.overlay_parts();
+        assert!(parts.items[0].contains("mute"));
+        // A muted slider renders an empty bar.
+        assert!(!parts.items[0].contains('\u{2588}'));
+    }
+
+    #[test]
+    fn slider_bar_is_twenty_cells() {
+        for percent in [0u8, 45, 100] {
+            assert_eq!(slider_bar(percent).chars().count(), 20);
+        }
+        assert_eq!(slider_bar(0).matches('\u{2588}').count(), 0);
+        assert_eq!(slider_bar(100).matches('\u{2588}').count(), 20);
+        assert_eq!(slider_bar(50).matches('\u{2588}').count(), 10);
+    }
+
+    #[test]
+    fn control_center_ignores_text_input() {
+        let mut state = SystemUiState::control_center(Some((45, false)), None, false);
+        state.push_char('x');
+        state.backspace();
+        assert_eq!(state.selected_control(), Some(ControlKind::Volume));
+        assert!(state.is_active());
+        state.cancel();
+        assert!(!state.is_active());
+    }
+
     #[test]
     fn parses_desktop_exec() {
         assert_eq!(

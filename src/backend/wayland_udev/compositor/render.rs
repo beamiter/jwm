@@ -2066,20 +2066,8 @@ impl WaylandCompositor {
                                 0
                             },
                         );
-                        gl.Uniform4f(
-                            self.gradient_border_uniforms.color_a,
-                            ar,
-                            ag,
-                            ab,
-                            aa * fade,
-                        );
-                        gl.Uniform4f(
-                            self.gradient_border_uniforms.color_b,
-                            br,
-                            bg,
-                            bb,
-                            ba * fade,
-                        );
+                        gl.Uniform4f(self.gradient_border_uniforms.color_a, ar, ag, ab, aa * fade);
+                        gl.Uniform4f(self.gradient_border_uniforms.color_b, br, bg, bb, ba * fade);
                         gl.Uniform1f(self.gradient_border_uniforms.gradient_angle, angle);
                         gl.Uniform1f(self.gradient_border_uniforms.border_width, border_width);
                         gl.Uniform1f(self.gradient_border_uniforms.radius, outer_radius);
@@ -2367,6 +2355,7 @@ impl WaylandCompositor {
         unsafe {
             gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
             self.render_toasts(gl, &projection);
+            self.render_osd(gl, &projection);
         }
 
         if self.system_ui.is_some() {
@@ -3133,6 +3122,169 @@ impl WaylandCompositor {
 
                 top += card_h + gap;
             }
+            gl.BindVertexArray(0);
+            gl.UseProgram(0);
+        }
+    }
+
+    /// Rasterize (and cache) the OSD label texture; re-render only when the
+    /// text changed (key repeat updates the percent every event).
+    unsafe fn update_osd_texture(&mut self, gl: &ffi::Gles2, text: &str) {
+        if self
+            .osd_texture
+            .as_ref()
+            .is_some_and(|(cached, _, _, _)| cached == text)
+        {
+            return;
+        }
+        if let Some((_, tex, _, _)) = self.osd_texture.take() {
+            unsafe { gl.DeleteTextures(1, &tex) };
+        }
+        let config = crate::config::CONFIG.load();
+        let description = config.system_ui_font();
+        let size = crate::backend::compositor_font::ui_font_pixel_size(description);
+        let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
+            text,
+            description,
+            size,
+            [232, 238, 250, 255],
+        );
+        if w == 0 || h == 0 {
+            return;
+        }
+        unsafe {
+            let mut tex = 0;
+            gl.GenTextures(1, &mut tex);
+            gl.BindTexture(ffi::TEXTURE_2D, tex);
+            gl.TexImage2D(
+                ffi::TEXTURE_2D,
+                0,
+                ffi::RGBA as i32,
+                w as i32,
+                h as i32,
+                0,
+                ffi::RGBA,
+                ffi::UNSIGNED_BYTE,
+                pixels.as_ptr().cast(),
+            );
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
+            self.osd_texture = Some((text.to_string(), tex, w, h));
+        }
+    }
+
+    /// Volume/brightness OSD: one replace-in-place pill card at the bottom
+    /// center — icon+percent label on the left, progress bar on the right —
+    /// with the hold+fade envelope shared with the X11 backend.
+    unsafe fn render_osd(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+        let now = std::time::Instant::now();
+        if self.osd_slot.prune(now) {
+            if let Some((_, tex, _, _)) = self.osd_texture.take() {
+                unsafe { gl.DeleteTextures(1, &tex) };
+            }
+        }
+        let Some(osd) = self.osd_slot.get() else {
+            return;
+        };
+        let a = osd.alpha(now);
+        let (icon, label) = osd.icon_and_label();
+        let fill = osd.fill();
+        let text = format!("{icon}  {label}");
+        unsafe { self.update_osd_texture(gl, &text) };
+        let Some((tex, text_w, text_h)) =
+            self.osd_texture.as_ref().map(|&(_, tex, w, h)| (tex, w, h))
+        else {
+            return;
+        };
+
+        let card_w = 360.0f32;
+        let card_h = 64.0f32;
+        let radius = 18.0;
+        let pad = 24.0;
+        // Fixed label zone so the bar does not shift as digits change.
+        let label_zone = 118.0;
+        let x = (self.screen_w as f32 - card_w) / 2.0;
+        let y = self.screen_h as f32 - 148.0;
+        let accent = self.border_gradient_color_a;
+
+        unsafe {
+            gl.BindVertexArray(self.quad_vao);
+
+            gl.UseProgram(self.shadow_program);
+            self.set_projection_uniform(gl, self.shadow_uniforms.projection, projection);
+            let spread = 32.0;
+            gl.Uniform1f(self.shadow_uniforms.spread, spread);
+            gl.Uniform4f(self.shadow_uniforms.shadow_color, 0.0, 0.0, 0.0, 0.45 * a);
+            gl.Uniform1f(self.shadow_uniforms.radius, radius);
+            gl.Uniform2f(self.shadow_uniforms.size, card_w, card_h);
+            self.set_rect_uniform(
+                gl,
+                self.shadow_uniforms.rect,
+                x - spread,
+                y - spread + 8.0,
+                card_w + 2.0 * spread,
+                card_h + 2.0 * spread,
+            );
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+
+            gl.UseProgram(self.border_program);
+            self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
+            gl.Uniform1i(self.border_uniforms.scene_linear, 0);
+            self.sysui_fill_rounded(
+                gl,
+                x,
+                y,
+                card_w,
+                card_h,
+                radius,
+                [0.075, 0.086, 0.118, 0.97 * a],
+            );
+
+            // Progress bar: dim track + accent fill.
+            let bar_x = x + label_zone;
+            let bar_w = card_w - label_zone - pad;
+            let bar_h = 6.0;
+            let bar_y = y + (card_h - bar_h) / 2.0;
+            self.sysui_fill_rounded(
+                gl,
+                bar_x,
+                bar_y,
+                bar_w,
+                bar_h,
+                bar_h / 2.0,
+                [0.22, 0.25, 0.33, 0.9 * a],
+            );
+            if fill > 0.0 {
+                self.sysui_fill_rounded(
+                    gl,
+                    bar_x,
+                    bar_y,
+                    (bar_w * fill).max(bar_h),
+                    bar_h,
+                    bar_h / 2.0,
+                    [accent[0], accent[1], accent[2], 0.95 * a],
+                );
+            }
+
+            gl.UseProgram(self.sysui_text_program);
+            let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
+            let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
+            let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
+            let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
+            gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
+            gl.Uniform1i(text_tex, 0);
+            gl.Uniform1f(text_opacity, a);
+            gl.ActiveTexture(ffi::TEXTURE0);
+            gl.Uniform4f(
+                text_rect,
+                x + pad,
+                y + (card_h - text_h as f32) / 2.0,
+                text_w as f32,
+                text_h as f32,
+            );
+            gl.BindTexture(ffi::TEXTURE_2D, tex);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+
             gl.BindVertexArray(0);
             gl.UseProgram(0);
         }

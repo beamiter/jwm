@@ -1054,11 +1054,11 @@ mod tests {
     use crate::core::animation::AnimationManager;
     use crate::core::state::WMState;
     use crate::jwm::features::FeatureStates;
-    use xbar_core::shared_structures::SharedMessage;
     use slotmap::SecondaryMap;
     use std::any::Any;
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::AtomicBool;
+    use xbar_core::shared_structures::SharedMessage;
 
     struct RenderSpyBackend {
         window_ops: DummyWindowOps,

@@ -1143,15 +1143,45 @@ fn assert_gradient_border_interpolates(api: GlApi, what: &str, vs: &'static str,
     };
 
     // Horizontal gradient (angle 0): t == v_uv.x, red → blue.
-    assert_pixel(sample(10.0, 50.0, 0.0, SIZE), [230, 0, 26, 255], 3, "gradient left");
-    assert_pixel(sample(50.0, 50.0, 0.0, SIZE), [128, 0, 128, 255], 3, "gradient middle");
-    assert_pixel(sample(90.0, 50.0, 0.0, SIZE), [26, 0, 230, 255], 3, "gradient right");
+    assert_pixel(
+        sample(10.0, 50.0, 0.0, SIZE),
+        [230, 0, 26, 255],
+        3,
+        "gradient left",
+    );
+    assert_pixel(
+        sample(50.0, 50.0, 0.0, SIZE),
+        [128, 0, 128, 255],
+        3,
+        "gradient middle",
+    );
+    assert_pixel(
+        sample(90.0, 50.0, 0.0, SIZE),
+        [26, 0, 230, 255],
+        3,
+        "gradient right",
+    );
     // Vertical gradient (angle 90): t == v_uv.y.
-    assert_pixel(sample(50.0, 10.0, 90.0, SIZE), [230, 0, 26, 255], 3, "gradient top");
-    assert_pixel(sample(50.0, 90.0, 90.0, SIZE), [26, 0, 230, 255], 3, "gradient bottom");
+    assert_pixel(
+        sample(50.0, 10.0, 90.0, SIZE),
+        [230, 0, 26, 255],
+        3,
+        "gradient top",
+    );
+    assert_pixel(
+        sample(50.0, 90.0, 90.0, SIZE),
+        [26, 0, 230, 255],
+        3,
+        "gradient bottom",
+    );
     // Thin ring: the interior is masked out. Blending is disabled in
     // render_quad, so the fully transparent fragment lands as-is.
-    assert_pixel(sample(50.0, 50.0, 0.0, 4.0), [0, 0, 0, 0], 2, "ring interior");
+    assert_pixel(
+        sample(50.0, 50.0, 0.0, 4.0),
+        [0, 0, 0, 0],
+        2,
+        "ring interior",
+    );
 
     unsafe { gl.delete_program(prog) };
 }

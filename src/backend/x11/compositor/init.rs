@@ -221,7 +221,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 rect: gl.get_uniform_location(gradient_border_program, "u_rect"),
                 color_a: gl.get_uniform_location(gradient_border_program, "u_color_a"),
                 color_b: gl.get_uniform_location(gradient_border_program, "u_color_b"),
-                gradient_angle: gl.get_uniform_location(gradient_border_program, "u_gradient_angle"),
+                gradient_angle: gl
+                    .get_uniform_location(gradient_border_program, "u_gradient_angle"),
                 size: gl.get_uniform_location(gradient_border_program, "u_size"),
                 radius: gl.get_uniform_location(gradient_border_program, "u_radius"),
                 border_width: gl.get_uniform_location(gradient_border_program, "u_border_width"),
@@ -851,6 +852,8 @@ impl<C: CompositorConnection> Compositor<C> {
             sysui_cache: String::new(),
             toast_stack: Default::default(),
             toast_textures: HashMap::new(),
+            osd_slot: Default::default(),
+            osd_texture: None,
             hud_text_width: 0,
             hud_text_height: 0,
             hud_text_cache: String::new(),

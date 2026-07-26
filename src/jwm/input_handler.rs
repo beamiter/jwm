@@ -198,6 +198,81 @@ impl Jwm {
         backend.compositor_force_full_redraw();
     }
 
+    /// Key handling while the control center is open: Up/Down move between
+    /// rows, Left/Right drive sliders, Return/space activates toggles.
+    fn handle_control_center_key(
+        &mut self,
+        backend: &mut dyn Backend,
+        control: crate::jwm::features::ControlKind,
+        keysym: u32,
+    ) {
+        use crate::jwm::features::{ControlKind, system_controls};
+
+        let slider_delta = match keysym {
+            keys::KEY_Left => Some(-5),
+            keys::KEY_Right => Some(5),
+            _ => None,
+        };
+        let activate = keysym == keys::KEY_Return || keysym == keys::KEY_space;
+
+        if keysym == keys::KEY_Up {
+            self.features.system_ui.move_selection(-1);
+        } else if keysym == keys::KEY_Down || keysym == keys::KEY_Tab {
+            self.features.system_ui.move_selection(1);
+        } else {
+            match control {
+                ControlKind::Volume => {
+                    let state = if let Some(delta) = slider_delta {
+                        system_controls::volume_adjust(delta)
+                    } else if activate || keysym == keys::KEY_m {
+                        system_controls::volume_toggle_mute()
+                    } else {
+                        None
+                    };
+                    if let Some(state) = state {
+                        self.features.system_ui.update_control(
+                            ControlKind::Volume,
+                            state.percent,
+                            state.muted,
+                        );
+                    }
+                }
+                ControlKind::Brightness => {
+                    if let Some(delta) = slider_delta {
+                        if let Some(percent) = system_controls::brightness_adjust(delta) {
+                            self.features.system_ui.update_control(
+                                ControlKind::Brightness,
+                                percent,
+                                false,
+                            );
+                        }
+                    }
+                }
+                ControlKind::DoNotDisturb => {
+                    if activate {
+                        self.do_not_disturb = !self.do_not_disturb;
+                        let enabled = self.do_not_disturb;
+                        self.features.system_ui.update_control(
+                            ControlKind::DoNotDisturb,
+                            0,
+                            enabled,
+                        );
+                    }
+                }
+                ControlKind::LockScreen => {
+                    if activate {
+                        // Swap the panel for the lock overlay; the keyboard and
+                        // pointer grabs stay in place for the lock screen.
+                        self.features.system_ui = crate::jwm::features::SystemUiState::lock();
+                        self.sync_system_ui(backend);
+                        return;
+                    }
+                }
+            }
+        }
+        self.sync_system_ui(backend);
+    }
+
     pub(crate) fn on_key_press_internal(
         &mut self,
         backend: &mut dyn Backend,
@@ -300,6 +375,10 @@ impl Jwm {
                     }
                 }
                 self.sync_system_ui(backend);
+                return Ok(());
+            }
+            if let Some(control) = self.features.system_ui.selected_control() {
+                self.handle_control_center_key(backend, control, keysym);
                 return Ok(());
             }
             if keysym == keys::KEY_BackSpace || keysym == keys::KEY_Delete {

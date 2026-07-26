@@ -3,11 +3,11 @@ use crate::config::CONFIG;
 use crate::core::layout::LayoutEnum;
 use crate::core::models::{MonitorKey, Pertag, WMMonitor};
 use log::{error, info, warn};
-use xbar_core::shared_structures::SharedRingBufferOptions;
 use std::collections::HashSet;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::time::Instant;
+use xbar_core::shared_structures::SharedRingBufferOptions;
 
 use super::Jwm;
 

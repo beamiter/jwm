@@ -453,6 +453,9 @@ where
     // --- Toast notifications (top-right stacked cards) ---
     toast_stack: crate::backend::compositor_common::toast::ToastStack,
     toast_textures: HashMap<u64, [Option<(glow::Texture, u32, u32)>; 2]>,
+    osd_slot: crate::backend::compositor_common::osd::OsdSlot,
+    /// Cached OSD label texture keyed by its text ("icon  label").
+    osd_texture: Option<(String, glow::Texture, u32, u32)>,
     hud_text_width: u32,
     hud_text_height: u32,
     hud_text_cache: String,
@@ -905,6 +908,9 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 for slot in slots.into_iter().flatten() {
                     self.gl.delete_texture(slot.0);
                 }
+            }
+            if let Some((_, tex, _, _)) = self.osd_texture.take() {
+                self.gl.delete_texture(tex);
             }
             if let Some(tex) = self.hud_text_texture.take() {
                 self.gl.delete_texture(tex);

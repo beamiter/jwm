@@ -157,6 +157,10 @@ impl<C: CompositorConnection> Compositor<C> {
         if !self.toast_stack.is_empty() {
             return true;
         }
+        // Same for the volume/brightness OSD card.
+        if !self.osd_slot.is_empty() {
+            return true;
+        }
         // Need render while a rotating gradient border is visible
         if self.border_gradient_enabled
             && self.border_gradient_speed != 0.0

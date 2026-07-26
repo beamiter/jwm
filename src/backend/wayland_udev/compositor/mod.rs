@@ -948,6 +948,9 @@ pub(crate) struct WaylandCompositor {
     // --- Toast notifications (top-right stacked cards) ---
     toast_stack: crate::backend::compositor_common::toast::ToastStack,
     toast_textures: HashMap<u64, [Option<(u32, u32, u32)>; 2]>,
+    osd_slot: crate::backend::compositor_common::osd::OsdSlot,
+    /// Cached OSD label texture keyed by its text ("icon  label").
+    osd_texture: Option<(String, u32, u32, u32)>,
     /// Toast ids evicted outside the render pass; their textures are freed
     /// on the next frame while a GL context is current.
     toast_retired: Vec<u64>,
@@ -1194,8 +1197,11 @@ impl WaylandCompositor {
             )?;
             let hud_program =
                 create_program(gl, shaders::VERTEX_SHADER, shaders::HUD_FRAGMENT_SHADER)?;
-            let sysui_text_program =
-                create_program(gl, shaders::VERTEX_SHADER, shaders::HUD_TEXT_FRAGMENT_SHADER)?;
+            let sysui_text_program = create_program(
+                gl,
+                shaders::VERTEX_SHADER,
+                shaders::HUD_TEXT_FRAGMENT_SHADER,
+            )?;
             let temporal_blur_mix_program = create_program(
                 gl,
                 shaders::TEMPORAL_BLUR_MIX_VERTEX,
@@ -1848,6 +1854,8 @@ impl WaylandCompositor {
                 toast_stack: Default::default(),
                 toast_textures: HashMap::new(),
                 toast_retired: Vec::new(),
+                osd_slot: Default::default(),
+                osd_texture: None,
                 hud_text_width: 0,
                 hud_text_height: 0,
                 hud_text_cache: String::new(),

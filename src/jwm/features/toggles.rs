@@ -16,6 +16,103 @@ use log::{error, info};
 use std::process::Command;
 
 impl Jwm {
+    /// Adjust the default sink volume by the binding's Int argument
+    /// (percentage points) and show the OSD with the result.
+    pub(crate) fn volume_adjust(
+        &mut self,
+        backend: &mut dyn Backend,
+        arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let delta = match arg {
+            WMArgEnum::Int(delta) if *delta != 0 => *delta,
+            _ => 5,
+        };
+        let Some(state) = crate::jwm::features::system_controls::volume_adjust(delta) else {
+            return Err("no working volume control (wpctl/pactl/amixer)".into());
+        };
+        self.show_volume_osd(backend, state);
+        Ok(())
+    }
+
+    /// Toggle the default sink's mute state and show the OSD with the result.
+    pub(crate) fn volume_mute(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(state) = crate::jwm::features::system_controls::volume_toggle_mute() else {
+            return Err("no working volume control (wpctl/pactl/amixer)".into());
+        };
+        self.show_volume_osd(backend, state);
+        Ok(())
+    }
+
+    /// Adjust the backlight by the binding's Int argument (percentage points)
+    /// and show the OSD with the result.
+    pub(crate) fn brightness_adjust(
+        &mut self,
+        backend: &mut dyn Backend,
+        arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let delta = match arg {
+            WMArgEnum::Int(delta) if *delta != 0 => *delta,
+            _ => 5,
+        };
+        let Some(percent) = crate::jwm::features::system_controls::brightness_adjust(delta) else {
+            return Err("no backlight control (brightnessctl or /sys/class/backlight)".into());
+        };
+        backend.compositor_show_osd(crate::backend::api::OsdKind::Brightness, percent);
+        Ok(())
+    }
+
+    fn show_volume_osd(
+        &mut self,
+        backend: &mut dyn Backend,
+        state: crate::jwm::features::system_controls::AudioState,
+    ) {
+        let kind = if state.muted {
+            crate::backend::api::OsdKind::VolumeMuted
+        } else {
+            crate::backend::api::OsdKind::Volume
+        };
+        backend.compositor_show_osd(kind, state.percent);
+    }
+
+    /// Open the DMS/Noctalia-style control center: volume/brightness sliders
+    /// plus quick toggles, driven entirely by the keyboard.
+    pub(crate) fn control_center(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.features.system_ui.is_active() {
+            return Ok(());
+        }
+        if !backend.has_compositor() {
+            return Err("control center requires the JWM compositor".into());
+        }
+        if let Some(root) = backend.root_window() {
+            backend.key_ops().grab_keyboard(root)?;
+            if !backend.input_ops().grab_pointer(
+                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
+                None,
+            )? {
+                let _ = backend.key_ops().ungrab_keyboard();
+                return Err("could not grab pointer for control center".into());
+            }
+        }
+        let volume = crate::jwm::features::system_controls::volume_state()
+            .map(|state| (state.percent, state.muted));
+        let brightness = crate::jwm::features::system_controls::brightness_percent();
+        self.features.system_ui = crate::jwm::features::SystemUiState::control_center(
+            volume,
+            brightness,
+            self.do_not_disturb,
+        );
+        self.sync_system_ui(backend);
+        Ok(())
+    }
+
     pub(crate) fn app_launcher(
         &mut self,
         backend: &mut dyn Backend,

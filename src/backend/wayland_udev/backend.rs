@@ -3283,6 +3283,12 @@ impl CompositorWorkspaceEffects for UdevBackend {
         }
         self.request_render();
     }
+    fn compositor_show_osd(&mut self, kind: crate::backend::api::OsdKind, percent: u8) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.show_osd(kind, percent);
+        }
+        self.request_render();
+    }
     fn compositor_notify_tag_switch(
         &mut self,
         duration: Duration,

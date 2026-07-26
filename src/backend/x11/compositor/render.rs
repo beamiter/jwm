@@ -1095,8 +1095,13 @@ impl<C: CompositorConnection> Compositor<C> {
                 );
                 self.gl
                     .uniform_2_f32(self.hud_uniforms.size.as_ref(), screen_w, screen_h);
-                self.gl
-                    .uniform_4_f32(self.hud_uniforms.rect.as_ref(), 0.0, 0.0, screen_w, screen_h);
+                self.gl.uniform_4_f32(
+                    self.hud_uniforms.rect.as_ref(),
+                    0.0,
+                    0.0,
+                    screen_w,
+                    screen_h,
+                );
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
 
@@ -1211,10 +1216,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.gradient_border_uniforms.gradient_angle.as_ref(),
                 self.border_gradient_angle.to_radians(),
             );
-            self.gl.uniform_1_f32(
-                self.gradient_border_uniforms.radius.as_ref(),
-                radius + ring,
-            );
+            self.gl
+                .uniform_1_f32(self.gradient_border_uniforms.radius.as_ref(), radius + ring);
             self.gl.uniform_2_f32(
                 self.gradient_border_uniforms.size.as_ref(),
                 panel_w + 2.0 * ring,
@@ -1468,6 +1471,186 @@ impl<C: CompositorConnection> Compositor<C> {
 
                 top += card_h + gap;
             }
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+        }
+    }
+
+    /// Rasterize (and cache) the OSD label texture; re-render only when the
+    /// text changed (key repeat updates the percent every event).
+    fn update_osd_texture(&mut self, text: &str) {
+        if self
+            .osd_texture
+            .as_ref()
+            .is_some_and(|(cached, _, _, _)| cached == text)
+        {
+            return;
+        }
+        if let Some((_, tex, _, _)) = self.osd_texture.take() {
+            unsafe { self.gl.delete_texture(tex) };
+        }
+        let config = crate::config::CONFIG.load();
+        let description = config.system_ui_font();
+        let size = crate::backend::compositor_font::ui_font_pixel_size(description);
+        let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
+            text,
+            description,
+            size,
+            [232, 238, 250, 255],
+        );
+        if w == 0 || h == 0 {
+            return;
+        }
+        unsafe {
+            if let Ok(tex) = self.gl.create_texture() {
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                self.gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA8 as i32,
+                    w as i32,
+                    h as i32,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&pixels)),
+                );
+                for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+                    self.gl
+                        .tex_parameter_i32(glow::TEXTURE_2D, filter, glow::LINEAR as i32);
+                }
+                self.gl.bind_texture(glow::TEXTURE_2D, None);
+                self.osd_texture = Some((text.to_string(), tex, w, h));
+            }
+        }
+    }
+
+    /// Volume/brightness OSD: one replace-in-place pill card at the bottom
+    /// center — icon+percent label on the left, progress bar on the right —
+    /// with the hold+fade envelope shared with the Wayland backend.
+    fn render_osd(&mut self, proj: &[f32; 16]) {
+        let now = std::time::Instant::now();
+        if self.osd_slot.prune(now) {
+            if let Some((_, tex, _, _)) = self.osd_texture.take() {
+                unsafe { self.gl.delete_texture(tex) };
+            }
+        }
+        let Some(osd) = self.osd_slot.get() else {
+            return;
+        };
+        let a = osd.alpha(now);
+        let (icon, label) = osd.icon_and_label();
+        let fill = osd.fill();
+        let text = format!("{icon}  {label}");
+        self.update_osd_texture(&text);
+        let Some((tex, text_w, text_h)) =
+            self.osd_texture.as_ref().map(|&(_, tex, w, h)| (tex, w, h))
+        else {
+            return;
+        };
+
+        let card_w = 360.0f32;
+        let card_h = 64.0f32;
+        let radius = 18.0;
+        let pad = 24.0;
+        // Fixed label zone so the bar does not shift as digits change.
+        let label_zone = 118.0;
+        let x = (self.screen_w as f32 - card_w) / 2.0;
+        let y = self.screen_h as f32 - 148.0;
+        let accent = self.border_gradient_color_a;
+
+        unsafe {
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+
+            self.gl.use_program(Some(self.shadow_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.shadow_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+            let spread = 32.0;
+            self.gl
+                .uniform_1_f32(self.shadow_uniforms.spread.as_ref(), spread);
+            self.gl.uniform_4_f32(
+                self.shadow_uniforms.shadow_color.as_ref(),
+                0.0,
+                0.0,
+                0.0,
+                0.45 * a,
+            );
+            self.gl
+                .uniform_1_f32(self.shadow_uniforms.radius.as_ref(), radius);
+            self.gl
+                .uniform_2_f32(self.shadow_uniforms.size.as_ref(), card_w, card_h);
+            self.gl.uniform_4_f32(
+                self.shadow_uniforms.rect.as_ref(),
+                x - spread,
+                y - spread + 8.0,
+                card_w + 2.0 * spread,
+                card_h + 2.0 * spread,
+            );
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+            self.gl.use_program(Some(self.border_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.border_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+            self.sysui_fill_rounded(
+                x,
+                y,
+                card_w,
+                card_h,
+                radius,
+                [0.075, 0.086, 0.118, 0.97 * a],
+            );
+
+            // Progress bar: dim track + accent fill.
+            let bar_x = x + label_zone;
+            let bar_w = card_w - label_zone - pad;
+            let bar_h = 6.0;
+            let bar_y = y + (card_h - bar_h) / 2.0;
+            self.sysui_fill_rounded(
+                bar_x,
+                bar_y,
+                bar_w,
+                bar_h,
+                bar_h / 2.0,
+                [0.22, 0.25, 0.33, 0.9 * a],
+            );
+            if fill > 0.0 {
+                self.sysui_fill_rounded(
+                    bar_x,
+                    bar_y,
+                    (bar_w * fill).max(bar_h),
+                    bar_h,
+                    bar_h / 2.0,
+                    [accent[0], accent[1], accent[2], 0.95 * a],
+                );
+            }
+
+            self.gl.use_program(Some(self.hud_text_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.hud_text_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+            self.gl
+                .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
+            self.gl
+                .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), a);
+            self.gl.active_texture(glow::TEXTURE0);
+            self.gl.uniform_4_f32(
+                self.hud_text_uniforms.rect.as_ref(),
+                x + pad,
+                y + (card_h - text_h as f32) / 2.0,
+                text_w as f32,
+                text_h as f32,
+            );
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
         }
@@ -1991,9 +2174,9 @@ impl<C: CompositorConnection> Compositor<C> {
             && self.border_width > 0.0
             && self.windows.len() > 1;
         let overview_animating = self.overview_animation_pending();
-        // Toasts fade on a wall-clock envelope; keep frames coming while any
-        // card is visible (bounded by the toast timeout).
-        let toasts_active = !self.toast_stack.is_empty();
+        // Toasts and the OSD fade on a wall-clock envelope; keep frames coming
+        // while any card is visible (bounded by the toast/OSD timeout).
+        let toasts_active = !self.toast_stack.is_empty() || !self.osd_slot.is_empty();
 
         // Tick Phase 5 animations
         let expose_animating = self.tick_expose();
@@ -3302,8 +3485,7 @@ impl<C: CompositorConnection> Compositor<C> {
                                 self.gl
                                     .uniform_1_f32(self.win_uniforms.opacity.as_ref(), fade);
                                 self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
-                                self.gl
-                                    .uniform_1_f32(self.win_uniforms.desat.as_ref(), 0.0);
+                                self.gl.uniform_1_f32(self.win_uniforms.desat.as_ref(), 0.0);
                                 self.gl
                                     .uniform_2_f32(self.win_uniforms.size.as_ref(), bw, bh);
                                 self.gl.uniform_4_f32(
@@ -3701,10 +3883,15 @@ impl<C: CompositorConnection> Compositor<C> {
                                     color[2],
                                     color[3] * fade,
                                 );
-                                self.gl
-                                    .uniform_1_f32(self.border_uniforms.radius.as_ref(), outer_radius);
-                                self.gl
-                                    .uniform_2_f32(self.border_uniforms.size.as_ref(), bdr_w, bdr_h);
+                                self.gl.uniform_1_f32(
+                                    self.border_uniforms.radius.as_ref(),
+                                    outer_radius,
+                                );
+                                self.gl.uniform_2_f32(
+                                    self.border_uniforms.size.as_ref(),
+                                    bdr_w,
+                                    bdr_h,
+                                );
                                 self.gl.uniform_4_f32(
                                     self.border_uniforms.rect.as_ref(),
                                     bdr_x,
@@ -4663,6 +4850,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // Toast cards sit above clients but under the modal system UI (its
         // scrim dims them; the lock screen hides them).
         self.render_toasts(&proj);
+        self.render_osd(&proj);
 
         // System UI is always the final visual layer, above transitions and clients.
         if self.system_ui.is_some() {

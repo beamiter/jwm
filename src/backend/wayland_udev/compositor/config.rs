@@ -85,6 +85,11 @@ impl WaylandCompositor {
         self.needs_render = true;
     }
 
+    pub(crate) fn show_osd(&mut self, kind: crate::backend::api::OsdKind, percent: u8) {
+        self.osd_slot.show(kind, percent, std::time::Instant::now());
+        self.needs_render = true;
+    }
+
     pub(crate) fn has_system_ui(&self) -> bool {
         self.system_ui.is_some()
     }

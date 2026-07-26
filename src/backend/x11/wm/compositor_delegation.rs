@@ -129,9 +129,7 @@ macro_rules! delegate_compositor_capabilities {
                     .map(|compositor| compositor.set_waterlily_palette(palette))
             }
 
-            fn compositor_waterlily_status(
-                &self,
-            ) -> Option<crate::backend::api::WaterlilyStatus> {
+            fn compositor_waterlily_status(&self) -> Option<crate::backend::api::WaterlilyStatus> {
                 self.compositor
                     .as_ref()
                     .map(|compositor| compositor.waterlily_status())
@@ -264,6 +262,12 @@ macro_rules! delegate_compositor_capabilities {
             fn compositor_push_toast(&mut self, toast: crate::backend::api::ToastNotification) {
                 if let Some(compositor) = self.compositor.as_mut() {
                     compositor.push_toast(toast);
+                }
+            }
+
+            fn compositor_show_osd(&mut self, kind: crate::backend::api::OsdKind, percent: u8) {
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor.show_osd(kind, percent);
                 }
             }
 

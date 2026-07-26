@@ -1228,6 +1228,8 @@ fn key_function_is_repeatable(function: &str) -> bool {
             | "setcfact"
             | "incnmaster"
             | "movestack"
+            | "volume_adjust"
+            | "brightness_adjust"
             | "cyclelayout"
             | "scrolling_focus_column"
             | "scrolling_move_column"
@@ -1574,6 +1576,44 @@ impl Config {
                 modifier: vec!["Mod1".to_string(), "Control".to_string()],
                 key: "Escape".to_string(),
                 function: "lock_screen".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            // Volume / brightness OSD on the dedicated media keys, plus a
+            // DMS/Noctalia-style control center.
+            KeyConfig {
+                modifier: vec![],
+                key: "XF86AudioRaiseVolume".to_string(),
+                function: "volume_adjust".to_string(),
+                argument: ArgumentConfig::Int(5),
+            },
+            KeyConfig {
+                modifier: vec![],
+                key: "XF86AudioLowerVolume".to_string(),
+                function: "volume_adjust".to_string(),
+                argument: ArgumentConfig::Int(-5),
+            },
+            KeyConfig {
+                modifier: vec![],
+                key: "XF86AudioMute".to_string(),
+                function: "volume_mute".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
+                modifier: vec![],
+                key: "XF86MonBrightnessUp".to_string(),
+                function: "brightness_adjust".to_string(),
+                argument: ArgumentConfig::Int(5),
+            },
+            KeyConfig {
+                modifier: vec![],
+                key: "XF86MonBrightnessDown".to_string(),
+                function: "brightness_adjust".to_string(),
+                argument: ArgumentConfig::Int(-5),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string()],
+                key: "F10".to_string(),
+                function: "control_center".to_string(),
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
@@ -2467,6 +2507,10 @@ impl Config {
             "restore_session" => Some(Jwm::restore_session),
             "toggle_expose" => Some(Jwm::toggle_expose),
             "toggle_recording" => Some(Jwm::toggle_recording),
+            "volume_adjust" => Some(Jwm::volume_adjust),
+            "volume_mute" => Some(Jwm::volume_mute),
+            "brightness_adjust" => Some(Jwm::brightness_adjust),
+            "control_center" => Some(Jwm::control_center),
             "adjust_recording_region" => Some(Jwm::adjust_recording_region),
             "toggle_audio_recording" => Some(Jwm::toggle_audio_recording),
 
@@ -2556,6 +2600,13 @@ impl Config {
             "Delete" => k::KEY_Delete,
             "Home" => k::KEY_Home,
             "End" => k::KEY_End,
+
+            // Media keys (dedicated laptop/keyboard function row).
+            "XF86AudioRaiseVolume" => k::KEY_XF86AudioRaiseVolume,
+            "XF86AudioLowerVolume" => k::KEY_XF86AudioLowerVolume,
+            "XF86AudioMute" => k::KEY_XF86AudioMute,
+            "XF86MonBrightnessUp" => k::KEY_XF86MonBrightnessUp,
+            "XF86MonBrightnessDown" => k::KEY_XF86MonBrightnessDown,
             _ => return None,
         };
         Some(ks)
