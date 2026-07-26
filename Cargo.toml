@@ -6,6 +6,6 @@ edition = "2024"
 [dependencies]
 iced = { git = "https://github.com/iced-rs/iced.git", branch = "master", features = ["advanced", "debug", "lazy", "smol"] }
 log = "0.4.33"
-xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.7.0", default-features = false, features = ["clock-chrono", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
-xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.7.0" }
+xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.7.1", default-features = false, features = ["clock-chrono", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
+xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.7.1" }
 anyhow = "1.0.102"
