@@ -57,7 +57,7 @@ impl SharedTransport {
     /// or queue booleans to the frontend.
     pub fn execute(&self, command: WmCommand) -> io::Result<SendOutcome> {
         self.buffer
-            .send_command(command_to_shared(command))
+            .try_send_command(command_to_shared(command))
             .map(|sent| {
                 if sent {
                     SendOutcome::Sent

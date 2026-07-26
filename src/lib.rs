@@ -38,6 +38,15 @@ pub mod transport;
 #[cfg(all(feature = "runtime-linux", feature = "transport-shared"))]
 pub mod wake;
 
+/// Canonical entry point for the shared-memory wire protocol.
+///
+/// Compositors and bars must reach `shared_structures` through this
+/// re-export instead of declaring their own dependency, so a single
+/// `xbar_core` resolution decides the protocol revision for both sides
+/// of the ring buffer.
+#[cfg(feature = "transport-shared")]
+pub use shared_structures;
+
 pub use controls::{
     BarPresentation, ControlSpec, ControlState, InputBindings, PresentationProjector,
     STATUS_ORDER_RIGHT_TO_LEFT, UNKNOWN_VALUE,
