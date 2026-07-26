@@ -28,6 +28,22 @@ fn transformed_overlays_require_full_redraw(
     overview_active || overview_closing || expose_active || has_expose_entries
 }
 
+/// Whether a composited window participates in the smart-border rule (a lone
+/// client draws no border) and may itself receive one.
+///
+/// The status bar is chrome, and override-redirect windows are unmanaged
+/// overlays the WM never tiles: IME candidate lists and the input-method
+/// switcher (fcitx5 creates those with `override_redirect`), menus, tooltips
+/// and drag icons. Counting them would draw a border around the single client
+/// of a tag for as long as the popup is up — e.g. the whole time a user types
+/// Chinese — and drop it again when the popup closes.
+fn counts_for_smart_borders(class_name: &str, status_bar_name: &str, is_or: bool) -> bool {
+    if is_or {
+        return false;
+    }
+    !(class_name == status_bar_name || class_name.contains(status_bar_name))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TransitionCapturePlan {
     src: (i32, i32, i32, i32),
@@ -3130,7 +3146,10 @@ impl<C: CompositorConnection> Compositor<C> {
         // === Pass 2: Draw window textures ===
         let wm_border_px = frame_cfg.border_px() as f32;
 
-        // Count actual client windows (excluding statusbar) to apply smart borders
+        // Count actual client windows to apply smart borders. Only windows
+        // that can carry a border themselves count, so transient overlays
+        // (IME candidate lists, menus, tooltips) cannot flip a lone tiled
+        // client into the bordered multi-window case.
         let status_bar_name = frame_status_bar_name;
         let client_window_count = visible_scene
             .iter()
@@ -3138,8 +3157,11 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.windows
                     .get(&win)
                     .map(|wt| {
-                        !(wt.class_name == status_bar_name
-                            || wt.class_name.contains(status_bar_name))
+                        counts_for_smart_borders(
+                            &wt.class_name,
+                            status_bar_name,
+                            wt.is_override_redirect,
+                        )
                     })
                     .unwrap_or(false)
             })
@@ -3750,10 +3772,14 @@ impl<C: CompositorConnection> Compositor<C> {
                         }
                     }
 
-                    if !is_statusbar
-                        && !wt.is_override_redirect
-                        && ((effective_border_enabled && base_border_width > 0.0)
-                            || has_special_border)
+                    // Same predicate that fed `client_window_count`: only
+                    // windows counted for smart borders can receive one.
+                    if counts_for_smart_borders(
+                        &wt.class_name,
+                        status_bar_name_main,
+                        wt.is_override_redirect,
+                    ) && ((effective_border_enabled && base_border_width > 0.0)
+                        || has_special_border)
                     {
                         let focus_style = focus_highlight_active_for_win.then(|| {
                             let elapsed_ms =
@@ -5026,11 +5052,22 @@ impl<C: CompositorConnection> Compositor<C> {
 mod tests {
     use super::{
         DirtyRect, PresentedSceneCopyPlan, PresentedSceneStatus, TransitionCapturePlan,
-        blur_sampling_margin, dirty_below_affects_backdrop, dirty_below_requires_full_blur_redraw,
-        focus_highlight_style, intersect_gl_scissors, is_opaque_occluder,
+        blur_sampling_margin, counts_for_smart_borders, dirty_below_affects_backdrop,
+        dirty_below_requires_full_blur_redraw, focus_highlight_style, intersect_gl_scissors,
+        is_opaque_occluder,
         presented_scene_copy_plan, rect_covers_output, transformed_overlays_require_full_redraw,
         transition_capture_plan, wallpaper_blend_plan,
     };
+
+    #[test]
+    fn ime_popups_do_not_count_toward_smart_borders() {
+        // A lone tiled client is the only window that counts, so the smart
+        // border stays off while an fcitx5 candidate list or the input-method
+        // switcher (both override-redirect) is on screen.
+        assert!(counts_for_smart_borders("Alacritty", "jwm-bar", false));
+        assert!(!counts_for_smart_borders("fcitx", "jwm-bar", true));
+        assert!(!counts_for_smart_borders("jwm-bar", "jwm-bar", false));
+    }
 
     #[test]
     fn presented_scene_only_becomes_usable_after_a_successful_capture() {
