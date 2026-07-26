@@ -77,6 +77,7 @@ pub(super) struct WindowUniforms {
     pub(super) radius: Option<glow::UniformLocation>,
     pub(super) size: Option<glow::UniformLocation>,
     pub(super) dim: Option<glow::UniformLocation>,
+    pub(super) desat: Option<glow::UniformLocation>,
     pub(super) uv_rect: Option<glow::UniformLocation>,
     pub(super) ripple_progress: Option<glow::UniformLocation>,
     pub(super) ripple_amplitude: Option<glow::UniformLocation>,
@@ -147,6 +148,17 @@ pub(super) struct BorderUniforms {
     pub(super) projection: Option<glow::UniformLocation>,
     pub(super) rect: Option<glow::UniformLocation>,
     pub(super) border_color: Option<glow::UniformLocation>,
+    pub(super) size: Option<glow::UniformLocation>,
+    pub(super) radius: Option<glow::UniformLocation>,
+    pub(super) border_width: Option<glow::UniformLocation>,
+}
+
+pub(super) struct GradientBorderUniforms {
+    pub(super) projection: Option<glow::UniformLocation>,
+    pub(super) rect: Option<glow::UniformLocation>,
+    pub(super) color_a: Option<glow::UniformLocation>,
+    pub(super) color_b: Option<glow::UniformLocation>,
+    pub(super) gradient_angle: Option<glow::UniformLocation>,
     pub(super) size: Option<glow::UniformLocation>,
     pub(super) radius: Option<glow::UniformLocation>,
     pub(super) border_width: Option<glow::UniformLocation>,

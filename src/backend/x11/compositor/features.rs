@@ -454,6 +454,7 @@ impl<C: CompositorConnection> Compositor<C> {
                                 radius: self.gl.get_uniform_location(new_program, "u_radius"),
                                 size: self.gl.get_uniform_location(new_program, "u_size"),
                                 dim: self.gl.get_uniform_location(new_program, "u_dim"),
+                                desat: self.gl.get_uniform_location(new_program, "u_desat"),
                                 uv_rect: self.gl.get_uniform_location(new_program, "u_uv_rect"),
                                 ripple_progress: self
                                     .gl

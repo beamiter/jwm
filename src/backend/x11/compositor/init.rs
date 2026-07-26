@@ -127,6 +127,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 radius: gl.get_uniform_location(program, "u_radius"),
                 size: gl.get_uniform_location(program, "u_size"),
                 dim: gl.get_uniform_location(program, "u_dim"),
+                desat: gl.get_uniform_location(program, "u_desat"),
                 uv_rect: gl.get_uniform_location(program, "u_uv_rect"),
                 ripple_progress: gl.get_uniform_location(program, "u_ripple_progress"),
                 ripple_amplitude: gl.get_uniform_location(program, "u_ripple_amplitude"),
@@ -204,6 +205,26 @@ impl<C: CompositorConnection> Compositor<C> {
                 size: gl.get_uniform_location(border_program, "u_size"),
                 radius: gl.get_uniform_location(border_program, "u_radius"),
                 border_width: gl.get_uniform_location(border_program, "u_border_width"),
+            }
+        };
+
+        // Compile gradient border shader (focused-window gradient ring)
+        let gradient_border_program = shader_cache.get_or_compile(
+            &gl,
+            "gradient_border",
+            shaders::VERTEX_SHADER,
+            shaders::GRADIENT_BORDER_FRAGMENT_SHADER,
+        )?;
+        let gradient_border_uniforms = unsafe {
+            GradientBorderUniforms {
+                projection: gl.get_uniform_location(gradient_border_program, "u_projection"),
+                rect: gl.get_uniform_location(gradient_border_program, "u_rect"),
+                color_a: gl.get_uniform_location(gradient_border_program, "u_color_a"),
+                color_b: gl.get_uniform_location(gradient_border_program, "u_color_b"),
+                gradient_angle: gl.get_uniform_location(gradient_border_program, "u_gradient_angle"),
+                size: gl.get_uniform_location(gradient_border_program, "u_size"),
+                radius: gl.get_uniform_location(gradient_border_program, "u_radius"),
+                border_width: gl.get_uniform_location(gradient_border_program, "u_border_width"),
             }
         };
 
@@ -739,6 +760,7 @@ impl<C: CompositorConnection> Compositor<C> {
             shadow_radius: behavior.shadow_radius,
             shadow_offset: behavior.shadow_offset,
             shadow_color: behavior.shadow_color,
+            shadow_inactive_opacity: finite_clamp(behavior.shadow_inactive_opacity, 0.0, 1.0, 1.0),
             inactive_opacity: behavior.inactive_opacity,
             active_opacity: behavior.active_opacity,
             blur_enabled: behavior.blur_enabled,
@@ -777,6 +799,13 @@ impl<C: CompositorConnection> Compositor<C> {
             border_width: behavior.border_width,
             border_color_focused: behavior.border_color_focused,
             border_color_unfocused: behavior.border_color_unfocused,
+            gradient_border_program,
+            gradient_border_uniforms,
+            border_gradient_enabled: behavior.border_gradient_enabled,
+            border_gradient_color_a: behavior.border_gradient_color_a,
+            border_gradient_color_b: behavior.border_gradient_color_b,
+            border_gradient_angle: behavior.border_gradient_angle,
+            border_gradient_speed: behavior.border_gradient_speed,
             // Feature 3: per-window corner radius
             corner_radius_rules,
             // Feature 4: scale
@@ -860,6 +889,7 @@ impl<C: CompositorConnection> Compositor<C> {
             window_animation_scale: finite_clamp(behavior.window_animation_scale, 0.1, 2.0, 0.92),
             // Dim inactive
             inactive_dim: finite_clamp(behavior.inactive_dim, 0.0, 1.0, 1.0),
+            inactive_desaturate: finite_clamp(behavior.inactive_desaturate, 0.0, 1.0, 0.0),
             // Mouse position
             mouse_x: 0.0,
             mouse_y: 0.0,

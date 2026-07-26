@@ -1555,6 +1555,13 @@ impl<C: CompositorConnection> Compositor<C> {
                 || (self.tilt_current_y - self.tilt_target_y).abs() > 0.0001);
         let attention_active =
             self.attention_animation && self.windows.values().any(|wt| wt.is_urgent);
+        // A rotating gradient border needs continuous frames while a border
+        // can actually be drawn (smart borders require >1 client window).
+        let gradient_border_animating = self.border_gradient_enabled
+            && self.border_gradient_speed != 0.0
+            && self.border_enabled
+            && self.border_width > 0.0
+            && self.windows.len() > 1;
         let overview_animating = self.overview_animation_pending();
 
         // Tick Phase 5 animations
@@ -1582,7 +1589,8 @@ impl<C: CompositorConnection> Compositor<C> {
             || ripples_active
             || focus_highlight_active
             || wallpaper_crossfade_active
-            || attention_active;
+            || attention_active
+            || gradient_border_animating;
         self.damage_tracker
             .update_state(self.windows.len(), any_animating);
 
@@ -2107,6 +2115,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.gl
                         .uniform_1_f32(self.win_uniforms.radius.as_ref(), 0.0);
                     self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
+                    self.gl.uniform_1_f32(self.win_uniforms.desat.as_ref(), 0.0);
                     self.gl
                         .uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
                     self.gl.active_texture(glow::TEXTURE0);
@@ -2318,9 +2327,15 @@ impl<C: CompositorConnection> Compositor<C> {
                     if wt.has_rgba {
                         continue;
                     }
-                    // Fade: modulate shadow alpha
+                    // Fade: modulate shadow alpha; unfocused windows can
+                    // cast a weaker shadow so the focused one reads deeper.
                     let fade = wt.fade_opacity;
-                    let sa_faded = sa * fade;
+                    let focus_scale = if focused == Some(win) {
+                        1.0
+                    } else {
+                        self.shadow_inactive_opacity
+                    };
+                    let sa_faded = sa * fade * focus_scale;
                     if sa_faded <= 0.0 {
                         continue;
                     }
@@ -2608,6 +2623,11 @@ impl<C: CompositorConnection> Compositor<C> {
                             self.inactive_dim
                         };
                     let dim = inactive_dim_factor;
+                    let desat = if is_statusbar || is_focused || wt.is_override_redirect {
+                        0.0
+                    } else {
+                        self.inactive_desaturate
+                    };
                     let layer_opacity = (rule_opacity * fade * peek_mul).clamp(0.0, 1.0);
 
                     // detect_client_opacity: if window manages its own alpha, don't force opacity.
@@ -2851,6 +2871,8 @@ impl<C: CompositorConnection> Compositor<C> {
                                     .uniform_1_f32(self.win_uniforms.opacity.as_ref(), fade);
                                 self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
                                 self.gl
+                                    .uniform_1_f32(self.win_uniforms.desat.as_ref(), 0.0);
+                                self.gl
                                     .uniform_2_f32(self.win_uniforms.size.as_ref(), bw, bh);
                                 self.gl.uniform_4_f32(
                                     self.win_uniforms.rect.as_ref(),
@@ -2898,6 +2920,7 @@ impl<C: CompositorConnection> Compositor<C> {
                                 },
                             );
                             self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 0.7);
+                            self.gl.uniform_1_f32(self.win_uniforms.desat.as_ref(), 0.0);
                             self.gl.uniform_4_f32(
                                 self.win_uniforms.rect.as_ref(),
                                 sample.x as f32,
@@ -3078,6 +3101,8 @@ impl<C: CompositorConnection> Compositor<C> {
                             .uniform_1_f32(self.win_uniforms.opacity.as_ref(), opacity);
                         self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), dim);
                         self.gl
+                            .uniform_1_f32(self.win_uniforms.desat.as_ref(), desat);
+                        self.gl
                             .uniform_2_f32(self.win_uniforms.size.as_ref(), draw_w, draw_h);
                         self.gl.uniform_4_f32(
                             self.win_uniforms.rect.as_ref(),
@@ -3161,33 +3186,101 @@ impl<C: CompositorConnection> Compositor<C> {
                             let bdr_y = draw_y - bw;
                             let bdr_w = draw_w + 2.0 * bw;
                             let bdr_h = draw_h + 2.0 * bw;
+                            // Concentric corners: the ring's inner edge sits bw
+                            // inside the outer rect, so the outer radius must be
+                            // radius + bw for the inner curve to match the
+                            // window's radius (no wedge gap at corners).
+                            let outer_radius = if radius > 0.0 { radius + bw } else { 0.0 };
 
-                            self.gl.use_program(Some(self.border_program));
-                            self.gl.uniform_matrix_4_f32_slice(
-                                self.border_uniforms.projection.as_ref(),
-                                false,
-                                &proj,
-                            );
-                            self.gl
-                                .uniform_1_f32(self.border_uniforms.border_width.as_ref(), bw);
-                            self.gl.uniform_4_f32(
-                                self.border_uniforms.border_color.as_ref(),
-                                color[0],
-                                color[1],
-                                color[2],
-                                color[3] * fade,
-                            );
-                            self.gl
-                                .uniform_1_f32(self.border_uniforms.radius.as_ref(), radius);
-                            self.gl
-                                .uniform_2_f32(self.border_uniforms.size.as_ref(), bdr_w, bdr_h);
-                            self.gl.uniform_4_f32(
-                                self.border_uniforms.rect.as_ref(),
-                                bdr_x,
-                                bdr_y,
-                                bdr_w,
-                                bdr_h,
-                            );
+                            // The focused window's ordinary border upgrades to
+                            // the two-color gradient ring. Special borders
+                            // (focus pulse, attention, PiP) keep their flat
+                            // signal colors.
+                            let use_gradient = self.border_gradient_enabled
+                                && is_focused
+                                && focus_style.is_none()
+                                && !attention_active_for_win
+                                && !wt.is_pip;
+
+                            if use_gradient {
+                                let angle = (self.border_gradient_angle
+                                    + self.border_gradient_speed
+                                        * self.compositor_start_time.elapsed().as_secs_f32())
+                                .to_radians();
+                                let [ar, ag, ab, aa] = self.border_gradient_color_a;
+                                let [br, bg, bb, ba] = self.border_gradient_color_b;
+                                self.gl.use_program(Some(self.gradient_border_program));
+                                self.gl.uniform_matrix_4_f32_slice(
+                                    self.gradient_border_uniforms.projection.as_ref(),
+                                    false,
+                                    &proj,
+                                );
+                                self.gl.uniform_1_f32(
+                                    self.gradient_border_uniforms.border_width.as_ref(),
+                                    bw,
+                                );
+                                self.gl.uniform_4_f32(
+                                    self.gradient_border_uniforms.color_a.as_ref(),
+                                    ar,
+                                    ag,
+                                    ab,
+                                    aa * fade,
+                                );
+                                self.gl.uniform_4_f32(
+                                    self.gradient_border_uniforms.color_b.as_ref(),
+                                    br,
+                                    bg,
+                                    bb,
+                                    ba * fade,
+                                );
+                                self.gl.uniform_1_f32(
+                                    self.gradient_border_uniforms.gradient_angle.as_ref(),
+                                    angle,
+                                );
+                                self.gl.uniform_1_f32(
+                                    self.gradient_border_uniforms.radius.as_ref(),
+                                    outer_radius,
+                                );
+                                self.gl.uniform_2_f32(
+                                    self.gradient_border_uniforms.size.as_ref(),
+                                    bdr_w,
+                                    bdr_h,
+                                );
+                                self.gl.uniform_4_f32(
+                                    self.gradient_border_uniforms.rect.as_ref(),
+                                    bdr_x,
+                                    bdr_y,
+                                    bdr_w,
+                                    bdr_h,
+                                );
+                            } else {
+                                self.gl.use_program(Some(self.border_program));
+                                self.gl.uniform_matrix_4_f32_slice(
+                                    self.border_uniforms.projection.as_ref(),
+                                    false,
+                                    &proj,
+                                );
+                                self.gl
+                                    .uniform_1_f32(self.border_uniforms.border_width.as_ref(), bw);
+                                self.gl.uniform_4_f32(
+                                    self.border_uniforms.border_color.as_ref(),
+                                    color[0],
+                                    color[1],
+                                    color[2],
+                                    color[3] * fade,
+                                );
+                                self.gl
+                                    .uniform_1_f32(self.border_uniforms.radius.as_ref(), outer_radius);
+                                self.gl
+                                    .uniform_2_f32(self.border_uniforms.size.as_ref(), bdr_w, bdr_h);
+                                self.gl.uniform_4_f32(
+                                    self.border_uniforms.rect.as_ref(),
+                                    bdr_x,
+                                    bdr_y,
+                                    bdr_w,
+                                    bdr_h,
+                                );
+                            }
                             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
 
                             self.gl.use_program(Some(self.program));

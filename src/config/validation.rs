@@ -487,6 +487,30 @@ impl Config {
                 1.0,
             ),
             ("behavior.inactive_dim", behavior.inactive_dim, 0.0, 1.0),
+            (
+                "behavior.shadow_inactive_opacity",
+                behavior.shadow_inactive_opacity,
+                0.0,
+                1.0,
+            ),
+            (
+                "behavior.inactive_desaturate",
+                behavior.inactive_desaturate,
+                0.0,
+                1.0,
+            ),
+            (
+                "behavior.border_gradient_angle",
+                behavior.border_gradient_angle,
+                -360.0,
+                360.0,
+            ),
+            (
+                "behavior.border_gradient_speed",
+                behavior.border_gradient_speed,
+                -720.0,
+                720.0,
+            ),
         ] {
             validate_f32_range(&mut diagnostics, path, value, min, max);
         }
@@ -744,6 +768,14 @@ impl Config {
                 behavior.border_color_unfocused,
             ),
             ("behavior.border_glow_color", behavior.border_glow_color),
+            (
+                "behavior.border_gradient_color_a",
+                behavior.border_gradient_color_a,
+            ),
+            (
+                "behavior.border_gradient_color_b",
+                behavior.border_gradient_color_b,
+            ),
             ("behavior.edge_glow_color", behavior.edge_glow_color),
             ("behavior.attention_color", behavior.attention_color),
             ("behavior.pip_border_color", behavior.pip_border_color),

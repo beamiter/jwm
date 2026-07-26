@@ -367,6 +367,11 @@ fn wayland_shaders() -> Vec<(&'static str, Stage, &'static str)> {
         ("BOX_BLUR_FRAGMENT", F, s::BOX_BLUR_FRAGMENT),
         ("BORDER_FRAGMENT_SHADER", F, s::BORDER_FRAGMENT_SHADER),
         (
+            "GRADIENT_BORDER_FRAGMENT_SHADER",
+            F,
+            s::GRADIENT_BORDER_FRAGMENT_SHADER,
+        ),
+        (
             "POSTPROCESS_FRAGMENT_SHADER",
             F,
             s::POSTPROCESS_FRAGMENT_SHADER,
@@ -425,6 +430,11 @@ fn x11_shaders() -> Vec<(&'static str, Stage, &'static str)> {
         ("BLUR_UP_FRAGMENT", F, s::BLUR_UP_FRAGMENT),
         ("BOX_BLUR_FRAGMENT", F, s::BOX_BLUR_FRAGMENT),
         ("BORDER_FRAGMENT_SHADER", F, s::BORDER_FRAGMENT_SHADER),
+        (
+            "GRADIENT_BORDER_FRAGMENT_SHADER",
+            F,
+            s::GRADIENT_BORDER_FRAGMENT_SHADER,
+        ),
         (
             "POSTPROCESS_FRAGMENT_SHADER",
             F,
@@ -1003,4 +1013,239 @@ fn postprocess_identity_and_grayscale() {
     assert_pixel(got, [118, 118, 118, 255], 2, "postprocess-grayscale");
 
     unsafe { gl.delete_program(prog) };
+}
+
+/// The shadow shader must produce a gaussian penumbra: full coverage well
+/// inside the window rect, half coverage exactly at the rect edge, a smooth
+/// decay outward, and an exact zero before the expanded quad edge (where the
+/// geometry clips). Probes the falloff along the horizontal midline by
+/// sliding the quad so each probe point lands on the readback pixel.
+fn assert_shadow_gaussian_falloff(api: GlApi, what: &str, vs: &'static str, fs: &'static str) {
+    const W: i32 = 16;
+    const H: i32 = 16;
+    // Window 64x64, spread 24, sharp corners. In expanded-quad pixel
+    // coordinates the quad spans [0, 112], the window [24, 88].
+    const SIZE: f32 = 64.0;
+    const SPREAD: f32 = 24.0;
+    const EXPANDED: f32 = SIZE + 2.0 * SPREAD;
+
+    let Some(h) = HeadlessGl::new(api) else {
+        eprintln!("headless GL unavailable - skipping {what}");
+        return;
+    };
+    let gl = &h.gl;
+
+    let prog = link(gl, vs, fs).unwrap_or_else(|log| panic!("{what}: shadow must link:\n{log}"));
+
+    // Alpha of the shadow field at horizontal quad coordinate qx (midline).
+    let sample = |qx: f32| -> [u8; 4] {
+        render_quad(gl, prog, [0, 0, 0, 0], W, H, |gl| unsafe {
+            let u = |n: &str| gl.get_uniform_location(prog, n);
+            // Land quad point (qx, EXPANDED/2) on the center pixel's center.
+            let cx = W as f32 / 2.0 + 0.5;
+            let cy = H as f32 / 2.0 + 0.5;
+            gl.uniform_4_f32(
+                u("u_rect").as_ref(),
+                cx - qx,
+                cy - EXPANDED * 0.5,
+                EXPANDED,
+                EXPANDED,
+            );
+            gl.uniform_matrix_4_f32_slice(
+                u("u_projection").as_ref(),
+                false,
+                &ortho(W as f32, H as f32),
+            );
+            gl.uniform_4_f32(u("u_shadow_color").as_ref(), 0.0, 0.0, 0.0, 0.8);
+            gl.uniform_2_f32(u("u_size").as_ref(), SIZE, SIZE);
+            gl.uniform_1_f32(u("u_radius").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_spread").as_ref(), SPREAD);
+        })
+    };
+
+    // Deep inside the window rect: full shadow color (0.8 * 255 = 204).
+    assert_pixel(sample(56.0), [0, 0, 0, 204], 3, "shadow deep inside");
+    // Exactly at the window edge (dist = 0): half coverage, the signature of
+    // a blurred edge rather than a hard outline (0.5 * 0.8 * 255 = 102).
+    assert_pixel(sample(88.0), [0, 0, 0, 102], 4, "shadow at window edge");
+    // Mid penumbra (dist = spread/2 = 1.5 sigma): logistic decay ~0.072
+    // (0.072 * 0.8 * 255 = 15).
+    assert_pixel(sample(100.0), [0, 0, 0, 15], 4, "shadow mid penumbra");
+    // One pixel before the quad edge: forced to (near) zero so the clipped
+    // quad never shows a seam.
+    assert_pixel(sample(111.0), [0, 0, 0, 0], 2, "shadow near quad edge");
+
+    unsafe { gl.delete_program(prog) };
+}
+
+#[test]
+fn wayland_shadow_shader_has_gaussian_penumbra() {
+    use super::shaders as s;
+    assert_shadow_gaussian_falloff(
+        GlApi::Gles3,
+        "wayland_shadow_shader_has_gaussian_penumbra",
+        s::VERTEX_SHADER,
+        s::SHADOW_FRAGMENT_SHADER,
+    );
+}
+
+#[cfg(feature = "x11-backends")]
+#[test]
+fn x11_shadow_shader_has_gaussian_penumbra() {
+    use crate::backend::x11::compositor::shaders as s;
+    assert_shadow_gaussian_falloff(
+        GlApi::GlCore33,
+        "x11_shadow_shader_has_gaussian_penumbra",
+        s::VERTEX_SHADER,
+        s::SHADOW_FRAGMENT_SHADER,
+    );
+}
+
+/// The gradient border shader must interpolate color A → color B along the
+/// gradient direction, and must mask out the ring's interior. Uses a filled
+/// quad (border width == quad size) to probe interior gradient values, and a
+/// thin ring to check the center stays transparent.
+fn assert_gradient_border_interpolates(api: GlApi, what: &str, vs: &'static str, fs: &'static str) {
+    const W: i32 = 16;
+    const H: i32 = 16;
+    const SIZE: f32 = 100.0; // quad is SIZE x SIZE
+
+    let Some(h) = HeadlessGl::new(api) else {
+        eprintln!("headless GL unavailable - skipping {what}");
+        return;
+    };
+    let gl = &h.gl;
+
+    let prog = link(gl, vs, fs).unwrap_or_else(|log| panic!("{what}: gradient must link:\n{log}"));
+
+    // Renders the quad so its local point (qx, qy) lands on the readback
+    // pixel; angle in degrees, bw = ring thickness (SIZE = filled quad).
+    let sample = |qx: f32, qy: f32, angle_deg: f32, bw: f32| -> [u8; 4] {
+        render_quad(gl, prog, [0, 0, 0, 0], W, H, |gl| unsafe {
+            let u = |n: &str| gl.get_uniform_location(prog, n);
+            let cx = W as f32 / 2.0 + 0.5;
+            let cy = H as f32 / 2.0 + 0.5;
+            gl.uniform_4_f32(u("u_rect").as_ref(), cx - qx, cy - qy, SIZE, SIZE);
+            gl.uniform_matrix_4_f32_slice(
+                u("u_projection").as_ref(),
+                false,
+                &ortho(W as f32, H as f32),
+            );
+            gl.uniform_4_f32(u("u_color_a").as_ref(), 1.0, 0.0, 0.0, 1.0);
+            gl.uniform_4_f32(u("u_color_b").as_ref(), 0.0, 0.0, 1.0, 1.0);
+            gl.uniform_1_f32(u("u_gradient_angle").as_ref(), angle_deg.to_radians());
+            gl.uniform_2_f32(u("u_size").as_ref(), SIZE, SIZE);
+            gl.uniform_1_f32(u("u_radius").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_border_width").as_ref(), bw);
+            // Wayland variant only; ignored (None location) on the X11 one.
+            gl.uniform_1_i32(u("u_scene_linear").as_ref(), 0);
+        })
+    };
+
+    // Horizontal gradient (angle 0): t == v_uv.x, red → blue.
+    assert_pixel(sample(10.0, 50.0, 0.0, SIZE), [230, 0, 26, 255], 3, "gradient left");
+    assert_pixel(sample(50.0, 50.0, 0.0, SIZE), [128, 0, 128, 255], 3, "gradient middle");
+    assert_pixel(sample(90.0, 50.0, 0.0, SIZE), [26, 0, 230, 255], 3, "gradient right");
+    // Vertical gradient (angle 90): t == v_uv.y.
+    assert_pixel(sample(50.0, 10.0, 90.0, SIZE), [230, 0, 26, 255], 3, "gradient top");
+    assert_pixel(sample(50.0, 90.0, 90.0, SIZE), [26, 0, 230, 255], 3, "gradient bottom");
+    // Thin ring: the interior is masked out. Blending is disabled in
+    // render_quad, so the fully transparent fragment lands as-is.
+    assert_pixel(sample(50.0, 50.0, 0.0, 4.0), [0, 0, 0, 0], 2, "ring interior");
+
+    unsafe { gl.delete_program(prog) };
+}
+
+#[test]
+fn wayland_gradient_border_shader_interpolates() {
+    use super::shaders as s;
+    assert_gradient_border_interpolates(
+        GlApi::Gles3,
+        "wayland_gradient_border_shader_interpolates",
+        s::VERTEX_SHADER,
+        s::GRADIENT_BORDER_FRAGMENT_SHADER,
+    );
+}
+
+#[cfg(feature = "x11-backends")]
+#[test]
+fn x11_gradient_border_shader_interpolates() {
+    use crate::backend::x11::compositor::shaders as s;
+    assert_gradient_border_interpolates(
+        GlApi::GlCore33,
+        "x11_gradient_border_shader_interpolates",
+        s::VERTEX_SHADER,
+        s::GRADIENT_BORDER_FRAGMENT_SHADER,
+    );
+}
+
+/// The main window shader's inactive desaturation must be a pure luminance
+/// mix: off at 0, full grayscale at 1, and a linear blend in between.
+fn assert_window_shader_desaturates(api: GlApi, what: &str, vs: &'static str, fs: &'static str) {
+    const W: i32 = 16;
+    const H: i32 = 16;
+
+    let Some(h) = HeadlessGl::new(api) else {
+        eprintln!("headless GL unavailable - skipping {what}");
+        return;
+    };
+    let gl = &h.gl;
+
+    let prog = link(gl, vs, fs).unwrap_or_else(|log| panic!("{what}: window must link:\n{log}"));
+
+    let input = [200u8, 100, 50, 255];
+    let sample = |desat: f32| -> [u8; 4] {
+        render_quad(gl, prog, input, W, H, |gl| unsafe {
+            let u = |n: &str| gl.get_uniform_location(prog, n);
+            gl.uniform_4_f32(u("u_rect").as_ref(), 0.0, 0.0, W as f32, H as f32);
+            gl.uniform_matrix_4_f32_slice(
+                u("u_projection").as_ref(),
+                false,
+                &ortho(W as f32, H as f32),
+            );
+            gl.uniform_1_i32(u("u_texture").as_ref(), 0);
+            gl.uniform_1_f32(u("u_opacity").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_radius").as_ref(), 0.0);
+            gl.uniform_2_f32(u("u_size").as_ref(), W as f32, H as f32);
+            gl.uniform_1_f32(u("u_dim").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_desat").as_ref(), desat);
+            gl.uniform_4_f32(u("u_uv_rect").as_ref(), 0.0, 0.0, 1.0, 1.0);
+            gl.uniform_1_f32(u("u_ripple_amplitude").as_ref(), 0.0);
+            // Wayland-only color-management uniforms; None (no-op) on X11.
+            gl.uniform_1_i32(u("u_color_managed").as_ref(), 0);
+            gl.uniform_1_i32(u("u_scene_linear").as_ref(), 0);
+        })
+    };
+
+    // Off: exact passthrough.
+    assert_pixel(sample(0.0), input, 2, "desat off");
+    // Full: rgb collapse to luminance dot(rgb, 0.2126/0.7152/0.0722) ≈ 118.
+    assert_pixel(sample(1.0), [118, 118, 118, 255], 2, "desat full");
+    // Half: linear midpoint between passthrough and grayscale.
+    assert_pixel(sample(0.5), [159, 109, 84, 255], 2, "desat half");
+
+    unsafe { gl.delete_program(prog) };
+}
+
+#[test]
+fn wayland_window_shader_desaturates_inactive() {
+    use super::shaders as s;
+    assert_window_shader_desaturates(
+        GlApi::Gles3,
+        "wayland_window_shader_desaturates_inactive",
+        s::VERTEX_SHADER,
+        s::FRAGMENT_SHADER,
+    );
+}
+
+#[cfg(feature = "x11-backends")]
+#[test]
+fn x11_window_shader_desaturates_inactive() {
+    use crate::backend::x11::compositor::shaders as s;
+    assert_window_shader_desaturates(
+        GlApi::GlCore33,
+        "x11_window_shader_desaturates_inactive",
+        s::VERTEX_SHADER,
+        s::FRAGMENT_SHADER,
+    );
 }

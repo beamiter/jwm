@@ -201,6 +201,7 @@ pub(crate) struct WindowUniforms {
     pub radius: i32,
     pub size: i32,
     pub dim: i32,
+    pub desat: i32,
     pub uv_rect: i32,
     pub ripple_progress: i32,
     pub ripple_amplitude: i32,
@@ -245,6 +246,18 @@ pub(crate) struct BorderUniforms {
     pub rect: i32,
     pub projection: i32,
     pub border_color: i32,
+    pub size: i32,
+    pub radius: i32,
+    pub border_width: i32,
+    pub scene_linear: i32,
+}
+
+pub(crate) struct GradientBorderUniforms {
+    pub rect: i32,
+    pub projection: i32,
+    pub color_a: i32,
+    pub color_b: i32,
+    pub gradient_angle: i32,
     pub size: i32,
     pub radius: i32,
     pub border_width: i32,
@@ -559,6 +572,7 @@ pub(crate) struct WaylandCompositor {
     blur_down_program: u32,
     blur_up_program: u32,
     border_program: u32,
+    gradient_border_program: u32,
     postprocess_program: u32,
     // SOTA #2 Phase 2.2: scene-linear encode (linear FBO → encoded
     // output_fbo) and decode (encoded output_fbo → linear FBO) passes.
@@ -591,6 +605,7 @@ pub(crate) struct WaylandCompositor {
     shadow_uniforms: ShadowUniforms,
     blur_uniforms: BlurUniforms,
     border_uniforms: BorderUniforms,
+    gradient_border_uniforms: GradientBorderUniforms,
     postprocess_uniforms: PostprocessUniforms,
     transition_uniforms: TransitionUniforms,
     cube_uniforms: CubeUniforms,
@@ -655,10 +670,12 @@ pub(crate) struct WaylandCompositor {
     shadow_radius: f32,
     shadow_offset: [f32; 2],
     shadow_color: [f32; 4],
+    shadow_inactive_opacity: f32,
     shadow_spread: f32,
     inactive_opacity: f32,
     active_opacity: f32,
     inactive_dim: f32,
+    inactive_desaturate: f32,
     blur_enabled: bool,
     blur_strength: u32,
     fade_in_step: f32,
@@ -905,6 +922,11 @@ pub(crate) struct WaylandCompositor {
     border_width: f32,
     border_color_focused: [f32; 4],
     border_color_unfocused: [f32; 4],
+    border_gradient_enabled: bool,
+    border_gradient_color_a: [f32; 4],
+    border_gradient_color_b: [f32; 4],
+    border_gradient_angle: f32,
+    border_gradient_speed: f32,
 
     // --- Screenshot ---
     screenshot_requests: crate::backend::compositor_common::screenshot::ScreenshotQueue,
@@ -1103,6 +1125,11 @@ impl WaylandCompositor {
                 create_program(gl, shaders::BLUR_DOWN_VERTEX, shaders::BLUR_UP_FRAGMENT)?;
             let border_program =
                 create_program(gl, shaders::VERTEX_SHADER, shaders::BORDER_FRAGMENT_SHADER)?;
+            let gradient_border_program = create_program(
+                gl,
+                shaders::VERTEX_SHADER,
+                shaders::GRADIENT_BORDER_FRAGMENT_SHADER,
+            )?;
             let postprocess_program = create_program(
                 gl,
                 shaders::VERTEX_SHADER,
@@ -1185,6 +1212,7 @@ impl WaylandCompositor {
                 radius: get_uniform_loc(gl, program, "u_radius"),
                 size: get_uniform_loc(gl, program, "u_size"),
                 dim: get_uniform_loc(gl, program, "u_dim"),
+                desat: get_uniform_loc(gl, program, "u_desat"),
                 uv_rect: get_uniform_loc(gl, program, "u_uv_rect"),
                 ripple_progress: get_uniform_loc(gl, program, "u_ripple_progress"),
                 ripple_amplitude: get_uniform_loc(gl, program, "u_ripple_amplitude"),
@@ -1221,6 +1249,18 @@ impl WaylandCompositor {
                 radius: get_uniform_loc(gl, border_program, "u_radius"),
                 border_width: get_uniform_loc(gl, border_program, "u_border_width"),
                 scene_linear: get_uniform_loc(gl, border_program, "u_scene_linear"),
+            };
+
+            let gradient_border_uniforms = GradientBorderUniforms {
+                rect: get_uniform_loc(gl, gradient_border_program, "u_rect"),
+                projection: get_uniform_loc(gl, gradient_border_program, "u_projection"),
+                color_a: get_uniform_loc(gl, gradient_border_program, "u_color_a"),
+                color_b: get_uniform_loc(gl, gradient_border_program, "u_color_b"),
+                gradient_angle: get_uniform_loc(gl, gradient_border_program, "u_gradient_angle"),
+                size: get_uniform_loc(gl, gradient_border_program, "u_size"),
+                radius: get_uniform_loc(gl, gradient_border_program, "u_radius"),
+                border_width: get_uniform_loc(gl, gradient_border_program, "u_border_width"),
+                scene_linear: get_uniform_loc(gl, gradient_border_program, "u_scene_linear"),
             };
 
             let postprocess_uniforms = PostprocessUniforms {
@@ -1464,6 +1504,7 @@ impl WaylandCompositor {
                 blur_down_program,
                 blur_up_program,
                 border_program,
+                gradient_border_program,
                 postprocess_program,
                 scene_linear_encode_program,
                 scene_linear_decode_program,
@@ -1486,6 +1527,7 @@ impl WaylandCompositor {
                 shadow_uniforms,
                 blur_uniforms,
                 border_uniforms,
+                gradient_border_uniforms,
                 postprocess_uniforms,
                 transition_uniforms,
                 cube_uniforms,
@@ -1533,10 +1575,12 @@ impl WaylandCompositor {
                 shadow_radius: 24.0,
                 shadow_offset: [4.0, 4.0],
                 shadow_color: [0.0, 0.0, 0.0, 0.5],
+                shadow_inactive_opacity: 0.65,
                 shadow_spread: 20.0,
                 inactive_opacity: 1.0,
                 active_opacity: 1.0,
                 inactive_dim: 1.0,
+                inactive_desaturate: 0.25,
                 blur_enabled: false,
                 blur_strength: 3,
                 fade_in_step: 0.03,
@@ -1767,6 +1811,11 @@ impl WaylandCompositor {
                 border_width: 2.0,
                 border_color_focused: [0.3, 0.6, 1.0, 0.8],
                 border_color_unfocused: [0.3, 0.3, 0.3, 0.5],
+                border_gradient_enabled: true,
+                border_gradient_color_a: [0.24, 0.65, 1.0, 1.0],
+                border_gradient_color_b: [0.72, 0.35, 1.0, 1.0],
+                border_gradient_angle: 45.0,
+                border_gradient_speed: 0.0,
 
                 // Screenshot
                 screenshot_requests: Default::default(),

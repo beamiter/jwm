@@ -100,11 +100,13 @@ impl WaylandCompositor {
         self.shadow_radius = b.shadow_radius;
         self.shadow_offset = b.shadow_offset;
         self.shadow_color = b.shadow_color;
+        self.shadow_inactive_opacity = finite_clamp(b.shadow_inactive_opacity, 0.0, 1.0, 1.0);
         self.blur_enabled = b.blur_enabled;
         self.blur_strength = b.blur_strength;
         self.inactive_opacity = finite_clamp(b.inactive_opacity, 0.0, 1.0, 0.9);
         self.active_opacity = finite_clamp(b.active_opacity, 0.0, 1.0, 1.0);
         self.inactive_dim = finite_clamp(b.inactive_dim, 0.0, 1.0, 1.0);
+        self.inactive_desaturate = finite_clamp(b.inactive_desaturate, 0.0, 1.0, 0.0);
         self.fade_in_step = finite_clamp(b.fade_in_step, 0.0001, 1.0, 0.03);
         self.fade_out_step = finite_clamp(b.fade_out_step, 0.0001, 1.0, 0.03);
 
@@ -161,6 +163,11 @@ impl WaylandCompositor {
         self.border_width = b.border_width;
         self.border_color_focused = b.border_color_focused;
         self.border_color_unfocused = b.border_color_unfocused;
+        self.border_gradient_enabled = b.border_gradient_enabled;
+        self.border_gradient_color_a = b.border_gradient_color_a;
+        self.border_gradient_color_b = b.border_gradient_color_b;
+        self.border_gradient_angle = b.border_gradient_angle;
+        self.border_gradient_speed = b.border_gradient_speed;
 
         // --- Fullscreen unredirect ---
         // Note: the `fullscreen_unredirect` behavior flag is consumed directly

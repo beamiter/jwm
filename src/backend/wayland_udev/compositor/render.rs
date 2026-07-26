@@ -412,6 +412,7 @@ impl WaylandCompositor {
                 gl.Uniform2f(self.win_uniforms.size, draw_w, draw_h);
                 gl.Uniform1f(self.win_uniforms.opacity, opacity);
                 gl.Uniform1f(self.win_uniforms.dim, 1.0);
+                gl.Uniform1f(self.win_uniforms.desat, 0.0);
                 gl.Uniform1f(self.win_uniforms.radius, radius);
                 gl.Uniform4f(self.win_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
                 gl.ActiveTexture(ffi::TEXTURE0);
@@ -1203,9 +1204,15 @@ impl WaylandCompositor {
                         continue;
                     }
 
-                    // Modulate shadow alpha by fade
+                    // Modulate shadow alpha by fade; unfocused windows can
+                    // cast a weaker shadow so the focused one reads deeper.
                     let fade = wt.fade_opacity;
-                    let sa_faded = sa * fade;
+                    let focus_scale = if focused == Some(win_id) {
+                        1.0
+                    } else {
+                        self.shadow_inactive_opacity
+                    };
+                    let sa_faded = sa * fade * focus_scale;
                     if sa_faded <= 0.0 {
                         continue;
                     }
@@ -1533,6 +1540,11 @@ impl WaylandCompositor {
                 // --- Compute dim factor ---
                 let inactive_dim_factor = if is_focused { 1.0 } else { self.inactive_dim };
                 let dim = inactive_dim_factor;
+                let desat = if is_focused {
+                    0.0
+                } else {
+                    self.inactive_desaturate
+                };
                 let layer_opacity = (rule_opacity * fade).clamp(0.0, 1.0);
                 let opacity = if use_texture_alpha {
                     -layer_opacity
@@ -1586,6 +1598,7 @@ impl WaylandCompositor {
                     gl.Uniform4f(self.win_uniforms.uv_rect, uv_sx, uv_sy, uv_sw, uv_sh);
                     gl.Uniform1f(self.win_uniforms.opacity, blur_opacity);
                     gl.Uniform1f(self.win_uniforms.dim, 1.0);
+                    gl.Uniform1f(self.win_uniforms.desat, 0.0);
                     gl.Uniform1f(self.win_uniforms.radius, radius);
                     gl.Uniform2f(self.win_uniforms.size, draw_w, draw_h);
                     self.set_rect_uniform(
@@ -1637,6 +1650,7 @@ impl WaylandCompositor {
                             },
                         );
                         gl.Uniform1f(self.win_uniforms.dim, 0.7);
+                        gl.Uniform1f(self.win_uniforms.desat, 0.0);
                         self.set_rect_uniform(
                             gl,
                             self.win_uniforms.rect,
@@ -1753,6 +1767,7 @@ impl WaylandCompositor {
                     // Standard window draw
                     gl.Uniform1f(self.win_uniforms.opacity, opacity);
                     gl.Uniform1f(self.win_uniforms.dim, dim);
+                    gl.Uniform1f(self.win_uniforms.desat, desat);
                     gl.Uniform1f(self.win_uniforms.radius, radius);
                     gl.Uniform2f(self.win_uniforms.size, draw_w, draw_h);
                     self.set_rect_uniform(
@@ -2014,26 +2029,96 @@ impl WaylandCompositor {
                     let bdr_w = draw_w + 2.0 * border_width;
                     let bdr_h = draw_h + 2.0 * border_width;
 
-                    gl.Uniform4f(
-                        self.border_uniforms.border_color,
-                        border_color[0],
-                        border_color[1],
-                        border_color[2],
-                        border_color[3],
-                    );
-                    gl.Uniform1f(self.border_uniforms.border_width, border_width);
-                    gl.Uniform1f(self.border_uniforms.radius, radius);
-                    gl.Uniform2f(self.border_uniforms.size, bdr_w, bdr_h);
-                    self.set_rect_uniform(
-                        gl,
-                        self.border_uniforms.rect,
-                        bdr_x,
-                        bdr_y,
-                        bdr_w,
-                        bdr_h,
-                    );
+                    // Concentric corners: the ring's inner edge sits border_width
+                    // inside the outer rect, so the outer radius must be
+                    // radius + border_width for the inner curve to match the
+                    // window's radius (no wedge gap at corners).
+                    let outer_radius = if radius > 0.0 {
+                        radius + border_width
+                    } else {
+                        0.0
+                    };
 
-                    gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                    // The focused window's ordinary border upgrades to the
+                    // two-color gradient ring. Focus pulse and urgent borders
+                    // keep their flat signal colors.
+                    let use_gradient =
+                        self.border_gradient_enabled && !highlight_for_win && !wt.is_urgent;
+
+                    if use_gradient {
+                        let angle = (self.border_gradient_angle
+                            + self.border_gradient_speed
+                                * self.compositor_start_time.elapsed().as_secs_f32())
+                        .to_radians();
+                        let [ar, ag, ab, aa] = self.border_gradient_color_a;
+                        let [br, bg, bb, ba] = self.border_gradient_color_b;
+                        gl.UseProgram(self.gradient_border_program);
+                        self.set_projection_uniform(
+                            gl,
+                            self.gradient_border_uniforms.projection,
+                            &projection,
+                        );
+                        gl.Uniform1i(
+                            self.gradient_border_uniforms.scene_linear,
+                            if scene_linear_active && hw_encode_active {
+                                1
+                            } else {
+                                0
+                            },
+                        );
+                        gl.Uniform4f(
+                            self.gradient_border_uniforms.color_a,
+                            ar,
+                            ag,
+                            ab,
+                            aa * fade,
+                        );
+                        gl.Uniform4f(
+                            self.gradient_border_uniforms.color_b,
+                            br,
+                            bg,
+                            bb,
+                            ba * fade,
+                        );
+                        gl.Uniform1f(self.gradient_border_uniforms.gradient_angle, angle);
+                        gl.Uniform1f(self.gradient_border_uniforms.border_width, border_width);
+                        gl.Uniform1f(self.gradient_border_uniforms.radius, outer_radius);
+                        gl.Uniform2f(self.gradient_border_uniforms.size, bdr_w, bdr_h);
+                        self.set_rect_uniform(
+                            gl,
+                            self.gradient_border_uniforms.rect,
+                            bdr_x,
+                            bdr_y,
+                            bdr_w,
+                            bdr_h,
+                        );
+                        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                        // Restore the flat border program; its projection and
+                        // scene_linear uniforms are per-program state and stay
+                        // valid from the pre-loop setup.
+                        gl.UseProgram(self.border_program);
+                    } else {
+                        gl.Uniform4f(
+                            self.border_uniforms.border_color,
+                            border_color[0],
+                            border_color[1],
+                            border_color[2],
+                            border_color[3],
+                        );
+                        gl.Uniform1f(self.border_uniforms.border_width, border_width);
+                        gl.Uniform1f(self.border_uniforms.radius, outer_radius);
+                        gl.Uniform2f(self.border_uniforms.size, bdr_w, bdr_h);
+                        self.set_rect_uniform(
+                            gl,
+                            self.border_uniforms.rect,
+                            bdr_x,
+                            bdr_y,
+                            bdr_w,
+                            bdr_h,
+                        );
+
+                        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                    }
                 }
 
                 gl.BindVertexArray(0);
@@ -2512,6 +2597,7 @@ impl WaylandCompositor {
                 gl.Uniform1i(self.win_uniforms.texture, 0);
                 gl.Uniform1f(self.win_uniforms.opacity, 0.85);
                 gl.Uniform1f(self.win_uniforms.dim, 1.0);
+                gl.Uniform1f(self.win_uniforms.desat, 0.0);
                 gl.Uniform1f(self.win_uniforms.radius, 4.0);
                 gl.Uniform2f(
                     self.win_uniforms.size,
@@ -2617,6 +2703,7 @@ impl WaylandCompositor {
             gl.Uniform1i(self.win_uniforms.texture, 0);
             gl.Uniform1f(self.win_uniforms.opacity, 1.0);
             gl.Uniform1f(self.win_uniforms.dim, 1.0);
+            gl.Uniform1f(self.win_uniforms.desat, 0.0);
             gl.Uniform1f(self.win_uniforms.radius, 0.0);
             gl.Uniform2f(self.win_uniforms.size, tw, th);
             self.set_rect_uniform(gl, self.win_uniforms.rect, x + pad, y + pad, tw, th);

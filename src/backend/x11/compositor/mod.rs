@@ -347,6 +347,7 @@ where
     shadow_radius: f32,
     shadow_offset: [f32; 2],
     shadow_color: [f32; 4],
+    shadow_inactive_opacity: f32,
     inactive_opacity: f32,
     active_opacity: f32,
     // Blur settings
@@ -390,6 +391,15 @@ where
     border_width: f32,
     border_color_focused: [f32; 4],
     border_color_unfocused: [f32; 4],
+
+    // --- Gradient border for the focused window ---
+    gradient_border_program: glow::Program,
+    gradient_border_uniforms: GradientBorderUniforms,
+    border_gradient_enabled: bool,
+    border_gradient_color_a: [f32; 4],
+    border_gradient_color_b: [f32; 4],
+    border_gradient_angle: f32,
+    border_gradient_speed: f32,
 
     // --- Feature 3: Per-window corner radius rules ---
     corner_radius_rules: Vec<CornerRadiusRule>,
@@ -495,6 +505,7 @@ where
 
     // --- Dim inactive ---
     inactive_dim: f32,
+    inactive_desaturate: f32,
 
     // --- Mouse position (shared by magnifier, tilt, edge glow) ---
     mouse_x: f32,
@@ -872,6 +883,7 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
             self.gl.delete_program(self.blur_up_program);
             self.gl.delete_program(self.temporal_blur_mix_program);
             self.gl.delete_program(self.border_program);
+            self.gl.delete_program(self.gradient_border_program);
             self.gl.delete_program(self.postprocess_program);
             self.gl.delete_program(self.waterlily_program);
             self.gl.delete_program(self.hud_program);

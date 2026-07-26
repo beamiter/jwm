@@ -205,6 +205,13 @@ pub struct BehaviorConfig {
     /// Shadow color as [r, g, b, a] in 0.0..1.0 range.
     #[serde(default = "default_shadow_color")]
     pub shadow_color: [f32; 4],
+
+    /// Multiplier on the shadow alpha of unfocused windows (0.0..1.0).
+    /// 1.0 keeps every shadow equally strong; lower values let the focused
+    /// window cast a visibly deeper shadow, a subtle depth cue
+    /// (default 0.65).
+    #[serde(default = "default_shadow_inactive_opacity")]
+    pub shadow_inactive_opacity: f32,
     /// Opacity for unfocused windows (0.0..1.0). 1.0 = fully opaque (no dim).
     #[serde(default = "default_inactive_opacity")]
     pub inactive_opacity: f32,
@@ -374,6 +381,26 @@ pub struct BehaviorConfig {
     #[serde(default)]
     pub border_glow_exclude: Vec<String>,
 
+    // --- Gradient border (focused window) ---
+    /// Draw the focused window's border as a two-color linear gradient
+    /// instead of the flat `border_color_focused`. Enabled by default.
+    #[serde(default = "default_true")]
+    pub border_gradient_enabled: bool,
+    /// Gradient start color as [r, g, b, a] in the 0.0..1.0 range.
+    #[serde(default = "default_border_gradient_color_a")]
+    pub border_gradient_color_a: [f32; 4],
+    /// Gradient end color as [r, g, b, a] in the 0.0..1.0 range.
+    #[serde(default = "default_border_gradient_color_b")]
+    pub border_gradient_color_b: [f32; 4],
+    /// Gradient direction in degrees. 0 = left→right, 90 = top→bottom.
+    #[serde(default = "default_border_gradient_angle")]
+    pub border_gradient_angle: f32,
+    /// Gradient rotation speed in degrees per second. 0 keeps the gradient
+    /// static; non-zero slowly rotates the direction (costs continuous
+    /// redraws while a focused window is visible).
+    #[serde(default)]
+    pub border_gradient_speed: f32,
+
     // --- Feature 3: Per-window corner radius ---
     /// Per-window corner radius rules, e.g. ["0:Alacritty", "20:firefox"].
     /// Format: "radius:class_name".
@@ -486,6 +513,14 @@ pub struct BehaviorConfig {
     // --- Dim inactive windows ---
     #[serde(default = "default_one")]
     pub inactive_dim: f32,
+
+    // --- Desaturate inactive windows ---
+    /// How far unfocused windows shift toward grayscale: 0.0 keeps full
+    /// color, 1.0 renders them fully desaturated (default 0.25). Combines
+    /// with `inactive_dim` and `inactive_opacity` to make the focused
+    /// window pop.
+    #[serde(default = "default_inactive_desaturate")]
+    pub inactive_desaturate: f32,
 
     // --- Screen edge glow ---
     #[serde(default)]
@@ -869,6 +904,21 @@ fn default_border_glow_intensity() -> f32 {
 }
 fn default_border_glow_color() -> [f32; 4] {
     [0.0, 0.55, 1.0, 0.38]
+}
+fn default_border_gradient_color_a() -> [f32; 4] {
+    [0.24, 0.65, 1.0, 1.0]
+}
+fn default_border_gradient_color_b() -> [f32; 4] {
+    [0.72, 0.35, 1.0, 1.0]
+}
+fn default_border_gradient_angle() -> f32 {
+    45.0
+}
+fn default_inactive_desaturate() -> f32 {
+    0.25
+}
+fn default_shadow_inactive_opacity() -> f32 {
+    0.65
 }
 fn default_one() -> f32 {
     1.0
@@ -1257,6 +1307,7 @@ impl Default for Config {
                     shadow_radius: default_shadow_radius(),
                     shadow_offset: default_shadow_offset(),
                     shadow_color: default_shadow_color(),
+                    shadow_inactive_opacity: default_shadow_inactive_opacity(),
                     inactive_opacity: default_inactive_opacity(),
                     active_opacity: default_active_opacity(),
                     blur_enabled: false,
@@ -1305,6 +1356,11 @@ impl Default for Config {
                     border_glow_color: default_border_glow_color(),
                     border_glow_include: Vec::new(),
                     border_glow_exclude: Vec::new(),
+                    border_gradient_enabled: true,
+                    border_gradient_color_a: default_border_gradient_color_a(),
+                    border_gradient_color_b: default_border_gradient_color_b(),
+                    border_gradient_angle: default_border_gradient_angle(),
+                    border_gradient_speed: 0.0,
                     corner_radius_rules: Vec::new(),
                     scale_rules: Vec::new(),
                     color_temperature: 0.0,
@@ -1329,6 +1385,7 @@ impl Default for Config {
                     window_animation: false,
                     window_animation_scale: default_window_animation_scale(),
                     inactive_dim: default_one(),
+                    inactive_desaturate: default_inactive_desaturate(),
                     edge_glow: false,
                     edge_glow_color: default_edge_glow_color(),
                     edge_glow_width: default_edge_glow_width(),

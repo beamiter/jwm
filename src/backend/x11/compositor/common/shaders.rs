@@ -21,6 +21,7 @@ uniform float u_opacity; // 1.0 for RGB windows (force opaque), negative to use 
 uniform float u_radius;  // corner radius in pixels (0 = sharp)
 uniform vec2  u_size;    // window size in pixels (w, h)
 uniform float u_dim;     // dim multiplier (1.0 = no dim, <1.0 = darken)
+uniform float u_desat;   // desaturation toward luminance (0 = off, 1 = grayscale)
 uniform vec4  u_uv_rect; // x, y, w, h in UV space
 uniform float u_ripple_progress;  // 0.0 = start, 1.0 = done, <0 = inactive
 uniform float u_ripple_amplitude; // UV distortion strength (0 = no ripple)
@@ -71,9 +72,22 @@ void main() {
         vec2 pixel_pos = v_uv * u_size;
         vec2 center = u_size * 0.5;
         float dist = rounded_rect_sdf(pixel_pos - center, center, u_radius);
-        float aa = 1.0 - smoothstep(-1.0, 1.0, dist);
+        // Screen-space AA width: u_size is the logical window size, so when
+        // the quad is drawn scaled (expose/overview thumbnails, PiP,
+        // open/close animations) a fixed ±1 local-pixel band lands narrower
+        // or wider than one screen pixel. fwidth keeps the band exactly one
+        // screen pixel at any scale.
+        float aa_w = max(fwidth(dist), 0.5);
+        float aa = 1.0 - smoothstep(-aa_w, aa_w, dist);
         a *= aa;
         texel.rgb *= aa;
+    }
+
+    // Inactive desaturation toward luminance. A linear per-channel mix, so
+    // it commutes with the premultiplied alpha already folded into rgb.
+    if (u_desat > 0.0) {
+        float luma = dot(texel.rgb, vec3(0.2126, 0.7152, 0.0722));
+        texel.rgb = mix(texel.rgb, vec3(luma), clamp(u_desat, 0.0, 1.0));
     }
 
     // The compositor uses premultiplied-alpha blending. Layer opacity must
@@ -82,7 +96,7 @@ void main() {
 }
 "#;
 
-/// Shadow quad: draws a soft rectangular shadow using SDF + gaussian-ish falloff.
+/// Shadow quad: draws a soft rectangular shadow using SDF + gaussian falloff.
 pub const SHADOW_FRAGMENT_SHADER: &str = r#"#version 330 core
 
 uniform vec4  u_shadow_color;  // shadow RGBA
@@ -105,9 +119,15 @@ void main() {
     vec2 center = expanded * 0.5;
     // SDF relative to the inner (window) rect
     float dist = rounded_rect_sdf(pixel_pos - center, u_size * 0.5, u_radius);
-    // Smooth falloff: fully opaque at dist<=0, fades out over u_spread
-    float alpha = 1.0 - smoothstep(0.0, u_spread, dist);
-    alpha = alpha * alpha; // softer falloff
+    // Gaussian penumbra: model the rect edge blurred with sigma = spread / 3,
+    // approximating the normal CDF with a logistic curve. Coverage is ~1 well
+    // inside the rect, 0.5 at the rect edge, and decays smoothly outward —
+    // a diffuse pool instead of a dark outline hugging the window.
+    float sigma = max(u_spread, 1.0) / 3.0;
+    float alpha = 1.0 / (1.0 + exp(1.702 * dist / sigma));
+    // The quad clips at dist == u_spread; force an exact zero before the edge
+    // so the cutoff can never show as a seam.
+    alpha *= 1.0 - smoothstep(0.85, 1.0, dist / max(u_spread, 1.0));
     float final_alpha = u_shadow_color.a * alpha;
     frag_color = vec4(u_shadow_color.rgb * final_alpha, final_alpha);
 }
@@ -264,6 +284,48 @@ void main() {
     float border_mask = outer - inner;
     float a = u_border_color.a * border_mask;
     frag_color = vec4(u_border_color.rgb * a, a);  // premultiplied alpha
+}
+"#;
+
+/// Two-color linear-gradient border ring for the focused window.
+///
+/// Same SDF ring mask as `BORDER_FRAGMENT_SHADER`'s positive-width branch,
+/// but the color interpolates between `u_color_a` and `u_color_b` along
+/// `u_gradient_angle` (radians; 0 = left→right, π/2 = top→bottom). Kept as a
+/// dedicated program so the many other users of the plain border shader never
+/// inherit stale gradient state.
+pub const GRADIENT_BORDER_FRAGMENT_SHADER: &str = r#"#version 330 core
+
+uniform vec4  u_color_a;        // gradient start RGBA
+uniform vec4  u_color_b;        // gradient end RGBA
+uniform float u_gradient_angle; // radians
+uniform vec2  u_size;           // outline quad size
+uniform float u_radius;         // outer corner radius (0 = sharp)
+uniform float u_border_width;   // ring thickness in pixels
+in vec2 v_uv;
+out vec4 frag_color;
+
+float rounded_rect_sdf(vec2 p, vec2 half_size, float r) {
+    vec2 d = abs(p) - half_size + vec2(r);
+    return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;
+}
+
+void main() {
+    vec2 pixel_pos = v_uv * u_size;
+    vec2 center = u_size * 0.5;
+    float dist = rounded_rect_sdf(pixel_pos - center, center, u_radius);
+    float outer = 1.0 - smoothstep(-1.0, 1.0, dist);
+    float inner = 1.0 - smoothstep(-1.0, 1.0, dist + u_border_width);
+    float border_mask = outer - inner;
+
+    // Project onto the gradient direction; the |dx|+|dy| norm maps the quad's
+    // extreme corners to exactly t = 0 and t = 1 for every angle.
+    vec2 dir = vec2(cos(u_gradient_angle), sin(u_gradient_angle));
+    float t = 0.5 + dot(v_uv - vec2(0.5), dir) / (abs(dir.x) + abs(dir.y));
+    vec4 col = mix(u_color_a, u_color_b, clamp(t, 0.0, 1.0));
+
+    float a = col.a * border_mask;
+    frag_color = vec4(col.rgb * a, a); // premultiplied alpha
 }
 "#;
 

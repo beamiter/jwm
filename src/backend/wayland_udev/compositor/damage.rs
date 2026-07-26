@@ -234,6 +234,16 @@ impl WaylandCompositor {
         if self.transition_active {
             return true;
         }
+        // A rotating gradient border needs continuous frames while any
+        // window that could carry a border is mapped.
+        if self.border_gradient_enabled
+            && self.border_gradient_speed != 0.0
+            && self.border_enabled
+            && self.border_width > 0.0
+            && !self.windows.is_empty()
+        {
+            return true;
+        }
         // Check particles
         if !self.particle_systems.is_empty() {
             return true;

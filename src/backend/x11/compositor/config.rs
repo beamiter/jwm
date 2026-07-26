@@ -153,6 +153,15 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             }
         }
+        // Need render while a rotating gradient border is visible
+        if self.border_gradient_enabled
+            && self.border_gradient_speed != 0.0
+            && self.border_enabled
+            && self.border_width > 0.0
+            && self.windows.len() > 1
+        {
+            return true;
+        }
         // The worker wake thread must be observable even while fullscreen
         // unredirect/direct-scanout has stopped regular XDamage rendering.
         if self
@@ -330,6 +339,8 @@ impl<C: CompositorConnection> Compositor<C> {
         self.shadow_radius = behavior.shadow_radius;
         self.shadow_offset = behavior.shadow_offset;
         self.shadow_color = behavior.shadow_color;
+        self.shadow_inactive_opacity =
+            finite_clamp(behavior.shadow_inactive_opacity, 0.0, 1.0, 1.0);
         self.shadow_bottom_extra = behavior.shadow_bottom_extra;
         self.inactive_opacity = behavior.inactive_opacity;
         self.active_opacity = behavior.active_opacity;
@@ -460,6 +471,11 @@ impl<C: CompositorConnection> Compositor<C> {
         self.border_width = behavior.border_width;
         self.border_color_focused = behavior.border_color_focused;
         self.border_color_unfocused = behavior.border_color_unfocused;
+        self.border_gradient_enabled = behavior.border_gradient_enabled;
+        self.border_gradient_color_a = behavior.border_gradient_color_a;
+        self.border_gradient_color_b = behavior.border_gradient_color_b;
+        self.border_gradient_angle = behavior.border_gradient_angle;
+        self.border_gradient_speed = behavior.border_gradient_speed;
 
         // --- Color post-processing (use existing setters for postprocess FBO management) ---
         self.set_color_temperature(behavior.color_temperature);
@@ -484,6 +500,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // --- Dim inactive ---
         self.inactive_dim = finite_clamp(behavior.inactive_dim, 0.0, 1.0, 1.0);
+        self.inactive_desaturate = finite_clamp(behavior.inactive_desaturate, 0.0, 1.0, 0.0);
 
         // --- Edge glow ---
         self.edge_glow = behavior.edge_glow;
