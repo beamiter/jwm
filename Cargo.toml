@@ -11,5 +11,5 @@ winit = "0.30"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 log = "0.4"
 anyhow = "1"
-xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.7.0", default-features = false, features = ["clock-chrono", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
-xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.7.0" }
+xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.7.1", default-features = false, features = ["clock-chrono", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
+xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.7.1" }
