@@ -11,16 +11,32 @@
 # built, julia with the waterlily project instantiated, xdotool for the mouse
 # segments (skipped with a warning if missing).
 #
+# Usage: record_waterlily_showcase.sh [acts]
+#   acts  comma-separated subset of: cases,palettes,stylus,waltz (default: all)
+#   e.g. `record_waterlily_showcase.sh stylus` records only the stylus act.
+#
 # Environment overrides:
 #   OUT_DIR       output directory       (default: ~/Videos/jwm-waterlily)
 #   SIM_SIZE      worker --sim-size      (default: 1280x800)
 #   WORKER_FPS    worker --fps           (default: 30)
 #   CASE_DWELL    seconds per case       (default: 12)
 #   PALETTE_DWELL seconds per palette    (default: 10)
-#   STYLUS_DWELL  seconds of mouse play  (default: 20)
+#   STYLUS_DWELL  seconds per stylus palette (sith/fluent/mica) (default: 60)
 #   WALTZ_DWELL   seconds of waltz play  (default: 24)
 
 set -euo pipefail
+
+ACTS="${1:-all}"
+wants() { [[ "$ACTS" == "all" || ",$ACTS," == *",$1,"* ]]; }
+for act in ${ACTS//,/ }; do
+    case "$act" in
+    all | cases | palettes | stylus | waltz) ;;
+    *)
+        echo "unknown act '$act'; valid: cases,palettes,stylus,waltz (or all)" >&2
+        exit 1
+        ;;
+    esac
+done
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${OUT_DIR:-$HOME/Videos/jwm-waterlily}"
@@ -28,7 +44,7 @@ SIM_SIZE="${SIM_SIZE:-1280x800}"
 WORKER_FPS="${WORKER_FPS:-30}"
 CASE_DWELL="${CASE_DWELL:-12}"
 PALETTE_DWELL="${PALETTE_DWELL:-10}"
-STYLUS_DWELL="${STYLUS_DWELL:-20}"
+STYLUS_DWELL="${STYLUS_DWELL:-60}"
 WALTZ_DWELL="${WALTZ_DWELL:-24}"
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -45,6 +61,8 @@ GPU_MIN_FREE_MB="${GPU_MIN_FREE_MB:-3000}"
 CASES=(cylinder tandem diamond dance flap orbit hover wander)
 # 粉丝点名的三个配色,在涡街最丰富的 cylinder 上循环展示。
 PALETTES=(fluent sith mica)
+# stylus 长段的配色轮换:每种 STYLUS_DWELL 秒;mica 放最后衔接 waltz 珠光。
+STYLUS_PALETTES=(sith fluent mica)
 
 log() { printf '[showcase %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
@@ -245,8 +263,13 @@ else
     ipc toggle_waterlily
     EFFECT_TOGGLED=1
 fi
+# 开场就切到第一幕会用的 case,避免录进一段无关的开机画面。
+OPENING_CASE=cylinder
+if ! wants cases && ! wants palettes; then
+    if wants stylus; then OPENING_CASE=stylus; else OPENING_CASE=waltz; fi
+fi
 ipc waterlily_palette --args '"auto"'
-ipc waterlily_case --args '"cylinder"'
+ipc waterlily_case --args "\"$OPENING_CASE\""
 ((HAVE_XDOTOOL)) && read -r W H < <(screen_geometry) && xdotool mousemove "$((W - 4))" "$((H - 4))"
 
 # 等 worker 的帧真正上屏(active 含义:特效开 + worker 连接 + 纹理在屏)。
@@ -268,41 +291,47 @@ RECORDING=1
 RECORD_EPOCH="$(date +%s.%N)"
 
 # 第一幕:八种经典流场巡礼
-for case_name in "${CASES[@]}"; do
-    ipc waterlily_case --args "\"$case_name\""
-    chapter "case:$case_name"
-    sleep "$CASE_DWELL"
-done
+if wants cases; then
+    for case_name in "${CASES[@]}"; do
+        ipc waterlily_case --args "\"$case_name\""
+        chapter "case:$case_name"
+        sleep "$CASE_DWELL"
+    done
+fi
 
 # 第二幕:回到卡门涡街,循环粉丝配色
-ipc waterlily_case --args '"cylinder"'
-sleep 2
-for palette in "${PALETTES[@]}"; do
-    ipc waterlily_palette --args "\"$palette\""
-    chapter "palette:$palette"
-    sleep "$PALETTE_DWELL"
-done
-ipc waterlily_palette --args '"auto"'
+if wants palettes; then
+    ipc waterlily_case --args '"cylinder"'
+    sleep 2
+    for palette in "${PALETTES[@]}"; do
+        ipc waterlily_palette --args "\"$palette\""
+        chapter "palette:$palette"
+        sleep "$PALETTE_DWELL"
+    done
+    ipc waterlily_palette --args '"auto"'
+fi
 
-# 第三幕:stylus 交互——鼠标画圆、写 8、拖尾迹
-ipc waterlily_case --args '"stylus"'
-chapter "case:stylus (fluent, mouse-driven)"
-sleep 2
-stylus_performance "$STYLUS_DWELL"
-
-# 第四幕:云母珠光里的 stylus
-ipc waterlily_palette --args '"mica"'
-chapter "case:stylus + mica shimmer"
-sleep 2
-stylus_performance "$STYLUS_DWELL"
+# 第三幕:stylus 交互长段——三种粉丝配色各一分钟,每种都完整走一遍
+# 画圆、写 8、拖尾迹;mica 收尾正好衔接终幕 waltz 的默认珠光。
+if wants stylus; then
+    ipc waterlily_case --args '"stylus"'
+    sleep 2
+    for palette in "${STYLUS_PALETTES[@]}"; do
+        ipc waterlily_palette --args "\"$palette\""
+        chapter "stylus:$palette (mouse-driven)"
+        stylus_performance "$STYLUS_DWELL"
+    done
+fi
 
 # 终幕:waltz——dance 的横摆骑在追踪弹簧上;palette auto 落回其默认 mica,
 # 珠光闪烁里编织尾迹追着鼠标跑。
-ipc waterlily_palette --args '"auto"'
-ipc waterlily_case --args '"waltz"'
-chapter "finale:waltz (mica, mouse-led braided wake)"
-sleep 2
-waltz_performance "$WALTZ_DWELL"
+if wants waltz; then
+    ipc waterlily_palette --args '"auto"'
+    ipc waterlily_case --args '"waltz"'
+    chapter "finale:waltz (mica, mouse-led braided wake)"
+    sleep 2
+    waltz_performance "$WALTZ_DWELL"
+fi
 
 # --- finalize ----------------------------------------------------------------
 

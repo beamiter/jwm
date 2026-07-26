@@ -50,9 +50,13 @@ end
 # time), so 9.0 feels attached to the cursor without teleporting.
 const STYLUS_RATE = 9.0
 # Peak body speed as a multiple of the velocity scale U. WaterLily's adaptive
-# time step keeps a fast body stable but pays for it in substeps; 3U keeps
-# the chase brisk at real-time frame budgets.
-const STYLUS_MAX_SPEED = 3.0
+# time step keeps a fast body stable but pays for it in substeps: at 3U the
+# CFL step collapses to ~0.1 in a developed wake and a megapixel canvas runs
+# at a third of real time, which also slows the chase itself (the spring
+# lives in simulation time). 1.5U keeps the whole loop inside the frame
+# budget, and a real-time chase feels closer to the cursor than a fast one
+# in slow motion.
+const STYLUS_MAX_SPEED = 1.5
 
 """
 A cylinder that chases the mouse pointer through quiescent fluid: the
