@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Record a continuous WaterLily showcase: hot-switch every simulation case,
 # cycle the fan-requested palettes (fluent / sith / mica), and drive the mouse
-# through the stylus case so the pointer-chasing cylinder shows itself.
+# through the interactive cases — the pointer-chasing stylus and the waltz
+# finale, whose heaving body trails dance's braided wake behind the cursor.
 #
 # One take, one .mp4, plus a .chapters.csv (offset seconds, label) for editing
 # and subtitles. Everything is driven over jwm IPC — no manual hotkeys.
@@ -17,6 +18,7 @@
 #   CASE_DWELL    seconds per case       (default: 12)
 #   PALETTE_DWELL seconds per palette    (default: 10)
 #   STYLUS_DWELL  seconds of mouse play  (default: 20)
+#   WALTZ_DWELL   seconds of waltz play  (default: 24)
 
 set -euo pipefail
 
@@ -27,6 +29,7 @@ WORKER_FPS="${WORKER_FPS:-30}"
 CASE_DWELL="${CASE_DWELL:-12}"
 PALETTE_DWELL="${PALETTE_DWELL:-10}"
 STYLUS_DWELL="${STYLUS_DWELL:-20}"
+WALTZ_DWELL="${WALTZ_DWELL:-24}"
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT_FILE="$OUT_DIR/waterlily-showcase-$STAMP.mp4"
@@ -35,8 +38,10 @@ WORKER_LOG="$OUT_DIR/waterlily-worker-$STAMP.log"
 # 冷启动的 GPU 探测/编译可能要几分钟;已有进程未连接时给 STALE_GRACE 秒机会。
 WORKER_WAIT="${WORKER_WAIT:-240}"
 STALE_GRACE="${STALE_GRACE:-45}"
+# CUDA 连上下文都建不起来时抛的是 OOM 堆栈;起飞前先确认有这么多空闲显存(MiB)。
+GPU_MIN_FREE_MB="${GPU_MIN_FREE_MB:-3000}"
 
-# 展示顺序:经典卡门涡街开场,游走类推进,最后进入交互 stylus。
+# 展示顺序:经典卡门涡街开场,游走类推进,交互 stylus 承接,waltz 压轴。
 CASES=(cylinder tandem diamond dance flap orbit hover wander)
 # 粉丝点名的三个配色,在涡街最丰富的 cylinder 上循环展示。
 PALETTES=(fluent sith mica)
@@ -108,6 +113,16 @@ stylus_performance() {
     trace "$third" 'printf "%d %d", W*0.08 + W*0.84*t, H/2 + H*0.10*sin(2*3.14159265*3*t)'
 }
 
+# 慢速华尔兹:大椭圆一圈,再顺流横渡。waltz 的身体自带横向摆动,均匀来流把
+# 编织尾迹从光标向下游拖出,所以轨迹要比 stylus 慢,给尾迹留出铺开的时间。
+waltz_performance() {
+    local seconds="$1"
+    local half=$((seconds / 2))
+    ((HAVE_XDOTOOL)) || { log "xdotool missing; waltz segment plays without mouse motion"; sleep "$seconds"; return; }
+    trace "$half" 'a = 2 * 3.14159265 * t; printf "%d %d", W/2 + W*0.30*cos(a), H/2 + H*0.22*sin(a)'
+    trace "$half" 'printf "%d %d", W*0.15 + W*0.70*t, H/2 + H*0.18*sin(2*3.14159265*t)'
+}
+
 # --- worker lifecycle --------------------------------------------------------
 
 worker_pids() { pgrep -f "julia.*waterlily/runner" || true; }
@@ -140,6 +155,22 @@ wait_for_worker() {
     return 1
 }
 
+# 显存被别的进程占满时,worker 会在 cuDevicePrimaryCtxRetain 就 OOM 崩掉;
+# 与其让用户读 Julia 堆栈,不如起飞前点名占显存的进程。
+gpu_preflight() {
+    command -v nvidia-smi >/dev/null 2>&1 || return 0
+    local free_mb
+    free_mb="$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -1)" || return 0
+    [[ "$free_mb" =~ ^[0-9]+$ ]] || return 0
+    if ((free_mb < GPU_MIN_FREE_MB)); then
+        echo "GPU has only ${free_mb}MiB free (need ${GPU_MIN_FREE_MB}MiB); current consumers:" >&2
+        nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv >&2 || true
+        echo "free GPU memory (or lower GPU_MIN_FREE_MB) and re-run" >&2
+        exit 1
+    fi
+    log "GPU preflight OK (${free_mb}MiB free)"
+}
+
 SPAWNED_WORKER=0
 ensure_worker() {
     # 任一控制命令都会触发压缩器懒重绑 wake socket(重启竞态自愈)。
@@ -157,6 +188,7 @@ ensure_worker() {
         log "replacing unresponsive worker"
         kill_workers
     fi
+    gpu_preflight
     log "starting WaterLily worker (--sim-size $SIM_SIZE --fps $WORKER_FPS, device auto)"
     nohup julia --project="$REPO/waterlily" "$REPO/waterlily/runner.jl" \
         --device auto --fps "$WORKER_FPS" --sim-size "$SIM_SIZE" \
@@ -258,11 +290,19 @@ chapter "case:stylus (fluent, mouse-driven)"
 sleep 2
 stylus_performance "$STYLUS_DWELL"
 
-# 终幕:云母珠光里的 stylus
+# 第四幕:云母珠光里的 stylus
 ipc waterlily_palette --args '"mica"'
-chapter "finale:stylus + mica shimmer"
+chapter "case:stylus + mica shimmer"
 sleep 2
 stylus_performance "$STYLUS_DWELL"
+
+# 终幕:waltz——dance 的横摆骑在追踪弹簧上;palette auto 落回其默认 mica,
+# 珠光闪烁里编织尾迹追着鼠标跑。
+ipc waterlily_palette --args '"auto"'
+ipc waterlily_case --args '"waltz"'
+chapter "finale:waltz (mica, mouse-led braided wake)"
+sleep 2
+waltz_performance "$WALTZ_DWELL"
 
 # --- finalize ----------------------------------------------------------------
 
