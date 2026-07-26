@@ -4,7 +4,7 @@ use crate::backend::common_define::WindowId;
 use crate::backend::common_define::{KeySym, Mods, MouseButton};
 use crate::core::layout::LayoutEnum;
 use crate::core::models::ClientKey;
-use shared_structures::SharedRingBuffer;
+use xbar_core::shared_structures::SharedRingBuffer;
 use std::process::Child;
 use std::rc::Rc;
 use std::time::Instant;

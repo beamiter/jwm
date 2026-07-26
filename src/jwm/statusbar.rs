@@ -5,7 +5,7 @@
 
 use crate::config::CONFIG;
 use crate::core::models::{ClientKey, MonitorKey, WMClient, WMMonitor};
-use shared_structures::{MonitorInfo, SharedMessage, TagStatus};
+use xbar_core::shared_structures::{MonitorInfo, SharedMessage, TagStatus};
 
 /// 状态栏消息构建器
 pub struct StatusBarBuilder;

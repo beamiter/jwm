@@ -72,9 +72,9 @@ use crate::core::models::{ClientKey, MonitorKey, ScrollingState, WMClient, WMMon
 use crate::ipc_server::IpcServer;
 
 use crate::core::animation::AnimationManager;
-use shared_structures::CommandType;
-use shared_structures::SharedCommand;
-use shared_structures::{MonitorInfo, SharedMessage, TagStatus};
+use xbar_core::shared_structures::CommandType;
+use xbar_core::shared_structures::SharedCommand;
+use xbar_core::shared_structures::{MonitorInfo, SharedMessage, TagStatus};
 
 lazy_static::lazy_static! {
     pub static ref BUTTONMASK: EventMaskBits  = EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE;
@@ -1169,8 +1169,15 @@ impl Jwm {
 
         // Read commands from all per-monitor status bars
         for bar in self.secondary_bars.values_mut() {
-            while let Some(cmd) = bar.shmem.receive_command() {
-                commands_to_process.push(cmd);
+            loop {
+                match bar.shmem.try_receive_command() {
+                    Ok(Some(cmd)) => commands_to_process.push(cmd),
+                    Ok(None) => break,
+                    Err(e) => {
+                        warn!("[process_commands] failed to receive bar command: {}", e);
+                        break;
+                    }
+                }
             }
         }
 

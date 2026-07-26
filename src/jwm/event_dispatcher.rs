@@ -1054,7 +1054,7 @@ mod tests {
     use crate::core::animation::AnimationManager;
     use crate::core::state::WMState;
     use crate::jwm::features::FeatureStates;
-    use shared_structures::SharedMessage;
+    use xbar_core::shared_structures::SharedMessage;
     use slotmap::SecondaryMap;
     use std::any::Any;
     use std::collections::{HashMap, HashSet};

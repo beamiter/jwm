@@ -3,7 +3,7 @@ use crate::config::CONFIG;
 use crate::core::layout::LayoutEnum;
 use crate::core::models::{MonitorKey, Pertag, WMMonitor};
 use log::{error, info, warn};
-use shared_structures::SharedRingBuffer;
+use xbar_core::shared_structures::SharedRingBufferOptions;
 use std::collections::HashSet;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
@@ -181,7 +181,7 @@ impl Jwm {
         let shared_path = format!("/dev/shm/jwm_bar_mon_{}", monitor_id);
 
         // Create shared memory
-        let ring_buffer = match SharedRingBuffer::create_aux(&shared_path, None, None) {
+        let ring_buffer = match SharedRingBufferOptions::new().create(&shared_path) {
             Ok(rb) => rb,
             Err(e) => {
                 error!(
