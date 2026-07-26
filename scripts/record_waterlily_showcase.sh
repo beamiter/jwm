@@ -63,9 +63,9 @@ GPU_MIN_FREE_MB="${GPU_MIN_FREE_MB:-3000}"
 # 展示顺序:经典卡门涡街开场,游走类推进,交互 stylus 承接,waltz 压轴。
 CASES=(cylinder tandem diamond dance flap orbit hover wander)
 # 粉丝点名的三个配色,在涡街最丰富的 cylinder 上循环展示。
-PALETTES=(fluent sith mica)
-# stylus 长段的配色轮换:每种 STYLUS_DWELL 秒;mica 放最后衔接 waltz 珠光。
-STYLUS_PALETTES=(sith fluent mica)
+PALETTES=(mica sith fluent)
+# stylus 长段的配色轮换:每种 STYLUS_DWELL 秒,顺序与第二幕一致。
+STYLUS_PALETTES=(mica sith fluent)
 
 log() { printf '[showcase %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
@@ -368,8 +368,7 @@ if wants palettes; then
     ipc waterlily_palette --args '"auto"'
 fi
 
-# 第三幕:stylus 交互长段——三种粉丝配色各一分钟,每种都完整走一遍
-# 画圆、写 8、拖尾迹;mica 收尾正好衔接终幕 waltz 的默认珠光。
+# 第三幕:stylus 交互长段——三种粉丝配色各一分钟,每种画一幅完整海螺。
 if wants stylus; then
     ipc waterlily_case --args '"stylus"'
     sleep 2
