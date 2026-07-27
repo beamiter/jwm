@@ -116,6 +116,10 @@ pub enum ControlKind {
     Media,
     Volume,
     Brightness,
+    /// Read-only battery readout; no interaction.
+    Battery,
+    /// Power profile selector: Left/Right cycles the driver's profiles.
+    PowerProfile,
     NightLight,
     DoNotDisturb,
     LockScreen,
@@ -133,6 +137,22 @@ pub struct ControlEntry {
     /// Pre-rendered text for rows whose content is not derived from
     /// `percent`/`enabled` — currently the media row.
     pub label: String,
+}
+
+/// Everything the control center renders from. A struct rather than a long
+/// positional argument list: rows come and go as hardware appears, and a
+/// mis-ordered bool would silently light the wrong toggle.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ControlCenterInputs<'a> {
+    pub media: Option<&'a crate::jwm::features::MediaState>,
+    /// Percentage and mute state, when a working audio control exists.
+    pub volume: Option<(u8, bool)>,
+    pub brightness: Option<u8>,
+    pub battery: Option<&'a crate::jwm::features::BatteryState>,
+    /// Name of the active power profile, when this machine has profiles.
+    pub power_profile: Option<&'a str>,
+    pub night_light: bool,
+    pub do_not_disturb: bool,
 }
 
 impl ControlEntry {
@@ -266,13 +286,16 @@ impl SystemUiState {
 
     /// Build the control center from the currently available controls.
     /// Volume/brightness rows appear only when a working control exists.
-    pub fn control_center(
-        media: Option<&crate::jwm::features::MediaState>,
-        volume: Option<(u8, bool)>,
-        brightness: Option<u8>,
-        night_light: bool,
-        do_not_disturb: bool,
-    ) -> Self {
+    pub fn control_center(inputs: &ControlCenterInputs<'_>) -> Self {
+        let ControlCenterInputs {
+            media,
+            volume,
+            brightness,
+            battery,
+            power_profile,
+            night_light,
+            do_not_disturb,
+        } = *inputs;
         let mut entries = Vec::new();
         if let Some(media) = media {
             entries.push(ControlEntry {
@@ -291,6 +314,22 @@ impl SystemUiState {
                 percent,
                 false,
             ));
+        }
+        if let Some(battery) = battery {
+            entries.push(ControlEntry {
+                kind: ControlKind::Battery,
+                percent: battery.percent,
+                enabled: matches!(battery.status, crate::jwm::features::ChargeStatus::Charging),
+                label: crate::jwm::features::power::control_row(battery),
+            });
+        }
+        if let Some(profile) = power_profile {
+            entries.push(ControlEntry {
+                kind: ControlKind::PowerProfile,
+                percent: 0,
+                enabled: false,
+                label: crate::jwm::features::power::profile_row(profile),
+            });
         }
         entries.push(ControlEntry::simple(
             ControlKind::NightLight,
@@ -846,7 +885,9 @@ impl SystemUiState {
                 let items = entries
                     .iter()
                     .map(|entry| match entry.kind {
-                        ControlKind::Media => entry.label.clone(),
+                        ControlKind::Media | ControlKind::Battery | ControlKind::PowerProfile => {
+                            entry.label.clone()
+                        }
                         ControlKind::Volume => {
                             let icon = if entry.enabled {
                                 "\u{f6a9}" // fa-volume-mute
@@ -1521,7 +1562,12 @@ mod tests {
     #[test]
     fn control_center_builds_rows_for_available_controls() {
         // Volume and brightness present, DND on, night light off.
-        let state = SystemUiState::control_center(None, Some((45, false)), Some(60), false, true);
+        let state = SystemUiState::control_center(&ControlCenterInputs {
+            volume: Some((45, false)),
+            brightness: Some(60),
+            do_not_disturb: true,
+            ..Default::default()
+        });
         assert_eq!(state.selected_control(), Some(ControlKind::Volume));
         let parts = state.overlay_parts();
         // volume, brightness, night light, DND, lock, session
@@ -1532,7 +1578,7 @@ mod tests {
         assert!(parts.items[3].contains("[ on ]"), "DND on");
 
         // No audio, no backlight: only the toggles and actions remain.
-        let state = SystemUiState::control_center(None, None, None, false, false);
+        let state = SystemUiState::control_center(&ControlCenterInputs::default());
         assert_eq!(state.selected_control(), Some(ControlKind::NightLight));
         assert_eq!(state.overlay_parts().items.len(), 4);
     }
@@ -1600,8 +1646,37 @@ mod tests {
     }
 
     #[test]
+    fn battery_and_profile_rows_appear_only_with_the_hardware() {
+        let battery = crate::jwm::features::BatteryState {
+            percent: 64,
+            status: crate::jwm::features::ChargeStatus::Discharging,
+            time_remaining_mins: Some(95),
+        };
+        let state = SystemUiState::control_center(&ControlCenterInputs {
+            battery: Some(&battery),
+            power_profile: Some("balanced"),
+            ..Default::default()
+        });
+        let parts = state.overlay_parts();
+
+        assert_eq!(state.selected_control(), Some(ControlKind::Battery));
+        assert!(parts.items[0].contains("64%"));
+        assert!(parts.items[0].contains("1h 35m left"));
+        assert!(parts.items[1].contains("balanced"));
+
+        // A desktop with neither shows neither row.
+        let bare = SystemUiState::control_center(&ControlCenterInputs::default());
+        let items = bare.overlay_parts().items;
+        assert!(!items.iter().any(|row| row.contains("Battery")));
+        assert!(!items.iter().any(|row| row.contains("Power Profile")));
+    }
+
+    #[test]
     fn the_night_light_row_reflects_the_live_state() {
-        let state = SystemUiState::control_center(None, None, None, true, false);
+        let state = SystemUiState::control_center(&ControlCenterInputs {
+            night_light: true,
+            ..Default::default()
+        });
         assert!(state.overlay_parts().items[0].contains("[ on ]"));
     }
 
@@ -1616,8 +1691,11 @@ mod tests {
             can_go_next: true,
             can_go_previous: true,
         };
-        let state =
-            SystemUiState::control_center(Some(&media), Some((45, false)), None, false, false);
+        let state = SystemUiState::control_center(&ControlCenterInputs {
+            media: Some(&media),
+            volume: Some((45, false)),
+            ..Default::default()
+        });
 
         assert_eq!(state.selected_control(), Some(ControlKind::Media));
         let parts = state.overlay_parts();
@@ -1629,15 +1707,18 @@ mod tests {
     fn restoring_the_selection_clamps_when_rows_disappear() {
         // Selection sat past the end of a shorter, rebuilt panel; it must land
         // on the last row instead of pointing nowhere.
-        let mut rebuilt = SystemUiState::control_center(None, None, None, false, false);
+        let mut rebuilt = SystemUiState::control_center(&ControlCenterInputs::default());
         rebuilt.restore_control_selection(9);
         assert_eq!(rebuilt.selected_control(), Some(ControlKind::Session));
     }
 
     #[test]
     fn control_center_selection_wraps_and_updates_write_back() {
-        let mut state =
-            SystemUiState::control_center(None, Some((45, false)), Some(60), false, false);
+        let mut state = SystemUiState::control_center(&ControlCenterInputs {
+            volume: Some((45, false)),
+            brightness: Some(60),
+            ..Default::default()
+        });
         state.move_selection(-1);
         assert_eq!(state.selected_control(), Some(ControlKind::Session));
         state.move_selection(1);
@@ -1662,7 +1743,10 @@ mod tests {
 
     #[test]
     fn control_center_ignores_text_input() {
-        let mut state = SystemUiState::control_center(None, Some((45, false)), None, false, false);
+        let mut state = SystemUiState::control_center(&ControlCenterInputs {
+            volume: Some((45, false)),
+            ..Default::default()
+        });
         state.push_char('x');
         state.backspace();
         assert_eq!(state.selected_control(), Some(ControlKind::Volume));

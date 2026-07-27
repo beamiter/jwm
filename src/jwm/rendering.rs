@@ -110,6 +110,16 @@ impl Jwm {
                 };
                 backend.compositor_set_color_temperature(temp);
             }
+
+            // --- Battery: re-read on its own, slower interval ---
+            let should_poll = match self.last_battery_poll {
+                Some(last) => last.elapsed() >= crate::jwm::features::power::POLL_INTERVAL,
+                None => true,
+            };
+            if should_poll {
+                self.last_battery_poll = Some(Instant::now());
+                self.poll_battery(backend);
+            }
         }
 
         let composited = backend.has_compositor();

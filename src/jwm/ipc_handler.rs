@@ -1068,6 +1068,28 @@ impl Jwm {
             return IpcResponse::ok(Some(serde_json::json!({ "active": active })));
         }
 
+        // Special command: set_power_profile — switch the platform profile.
+        if name == "set_power_profile" {
+            let Some(profile) = args.get("profile").and_then(|value| value.as_str()) else {
+                return IpcResponse::err("set_power_profile: expected string field 'profile'");
+            };
+            let Some((available, _)) = crate::jwm::features::power::profiles() else {
+                return IpcResponse::err("this machine has no power profile control");
+            };
+            if !available.iter().any(|name| name == profile) {
+                return IpcResponse::err(format!(
+                    "unknown power profile {profile:?} (have {})",
+                    available.join(", ")
+                ));
+            }
+            if !crate::jwm::features::power::set_profile(profile) {
+                return IpcResponse::err(format!("could not switch to power profile {profile:?}"));
+            }
+            self.refresh_open_control_center();
+            self.broadcast_ipc_event("power/profile", serde_json::json!({ "active": profile }));
+            return IpcResponse::ok(None);
+        }
+
         // Special command: media_control — drive the active player.
         if name == "media_control" {
             let Some(action) = args.get("action").and_then(|value| value.as_str()) else {
@@ -1340,6 +1362,7 @@ impl Jwm {
             }))),
             "get_notifications" => IpcResponse::ok(Some(self.notifications_json())),
             "get_media_status" => IpcResponse::ok(Some(self.media_status_json())),
+            "get_power_status" => IpcResponse::ok(Some(self.power_status_json())),
             "get_recording_status" => {
                 let output_path = self.features.recording.output_path.clone();
                 let active = self.features.recording.active;

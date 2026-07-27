@@ -177,6 +177,8 @@ pub struct Jwm {
     /// User override for night light: `None` follows the configured
     /// schedule, `Some` forces it on or off until toggled back.
     pub(crate) night_light_override: Option<bool>,
+    /// Last time the battery was re-read.
+    pub(crate) last_battery_poll: Option<std::time::Instant>,
 
     /// 所有特殊功能的状态（截图、overview、录制、放大镜等）
     pub features: FeatureStates,
@@ -583,6 +585,7 @@ impl Jwm {
             scrolling_states: HashMap::new(),
             last_night_light_update: None,
             night_light_override: None,
+            last_battery_poll: None,
             features: FeatureStates::new(),
             event_coalescer:
                 crate::backend::compositor_common::event_coalescer::EventCoalescer::new(),

@@ -267,6 +267,23 @@ impl Jwm {
                         }
                     }
                 }
+                ControlKind::Battery => {
+                    // Read-only: the row is information, not a control.
+                }
+                ControlKind::PowerProfile => {
+                    if let Some(delta) = slider_delta
+                        && let Some((available, active)) = crate::jwm::features::power::profiles()
+                        && let Some(next) = crate::jwm::features::power::cycle_profile(
+                            &available,
+                            &active,
+                            delta.signum() as isize,
+                        )
+                        && crate::jwm::features::power::set_profile(&next)
+                    {
+                        // Rebuild so the row shows what actually took effect.
+                        self.refresh_open_control_center();
+                    }
+                }
                 ControlKind::NightLight => {
                     if activate {
                         let enabled = !self.night_light_active();

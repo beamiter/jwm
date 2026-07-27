@@ -20,6 +20,7 @@ pub mod media;
 pub mod notifications;
 pub mod overview;
 pub mod overview_plan;
+pub mod power;
 pub mod recording;
 pub mod recording_plan;
 pub mod screenshot;
@@ -39,11 +40,14 @@ pub use media::{MediaCommand, MediaState, MediaStatus, PlaybackStatus};
 pub use notifications::{NotificationCenter, NotificationRecord, NotificationRequest};
 pub use overview::OverviewState;
 pub use overview_plan::CyclePlan;
+pub use power::{BatteryState, ChargeStatus, LowBatteryWarner};
 pub use recording::RecordingState;
 pub use recording_plan::FinalizationPlan;
 pub use screenshot::ScreenshotState;
 pub use session::SessionAction;
-pub use system_ui::{ControlKind, MonitorDirection, MonitorLayoutEntry, SystemUiState};
+pub use system_ui::{
+    ControlCenterInputs, ControlKind, MonitorDirection, MonitorLayoutEntry, SystemUiState,
+};
 
 /// 所有特性的组合状态
 #[derive(Debug, Default)]
@@ -56,6 +60,10 @@ pub struct FeatureStates {
     pub magnifier: MagnifierState,
     /// Last known MPRIS player, pushed in by the bridge. Not a mode.
     pub media: MediaStatus,
+    /// Latest battery reading, refreshed by the poll in `tick_animations`.
+    pub battery: Option<BatteryState>,
+    /// Which low-battery warning has already been posted.
+    pub low_battery: LowBatteryWarner,
     /// Bounded history behind the notification center. Not a mode: it
     /// survives `disable_all` and never counts as an active feature.
     pub notifications: NotificationCenter,

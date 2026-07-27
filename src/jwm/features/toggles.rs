@@ -155,13 +155,17 @@ impl Jwm {
         let volume = crate::jwm::features::system_controls::volume_state()
             .map(|state| (state.percent, state.muted));
         let brightness = crate::jwm::features::system_controls::brightness_percent();
-        let night_light = self.night_light_active();
+        let profiles = crate::jwm::features::power::profiles();
         self.features.system_ui = crate::jwm::features::SystemUiState::control_center(
-            self.features.media.get(),
-            volume,
-            brightness,
-            night_light,
-            self.do_not_disturb,
+            &crate::jwm::features::ControlCenterInputs {
+                media: self.features.media.get(),
+                volume,
+                brightness,
+                battery: self.features.battery.as_ref(),
+                power_profile: profiles.as_ref().map(|(_, active)| active.as_str()),
+                night_light: self.night_light_active(),
+                do_not_disturb: self.do_not_disturb,
+            },
         );
         self.sync_system_ui(backend);
         Ok(())
@@ -183,13 +187,17 @@ impl Jwm {
         let volume = crate::jwm::features::system_controls::volume_state()
             .map(|state| (state.percent, state.muted));
         let brightness = crate::jwm::features::system_controls::brightness_percent();
-        let night_light = self.night_light_active();
+        let profiles = crate::jwm::features::power::profiles();
         let mut rebuilt = crate::jwm::features::SystemUiState::control_center(
-            self.features.media.get(),
-            volume,
-            brightness,
-            night_light,
-            self.do_not_disturb,
+            &crate::jwm::features::ControlCenterInputs {
+                media: self.features.media.get(),
+                volume,
+                brightness,
+                battery: self.features.battery.as_ref(),
+                power_profile: profiles.as_ref().map(|(_, active)| active.as_str()),
+                night_light: self.night_light_active(),
+                do_not_disturb: self.do_not_disturb,
+            },
         );
         rebuilt.restore_control_selection(selected);
         self.features.system_ui = rebuilt;

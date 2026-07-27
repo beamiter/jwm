@@ -1209,6 +1209,7 @@ mod tests {
             scrolling_states: HashMap::new(),
             last_night_light_update: None,
             night_light_override: None,
+            last_battery_poll: None,
             features: FeatureStates::new(),
             event_coalescer:
                 crate::backend::compositor_common::event_coalescer::EventCoalescer::new(),
