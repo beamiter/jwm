@@ -305,14 +305,46 @@ impl Jwm {
                     }
                 }
                 ControlKind::Bluetooth => {
-                    // Switching Bluetooth off can take the keyboard with it,
-                    // so `activate_control` withholds the row until a second
-                    // Enter confirms; switching it on fires immediately.
-                    if activate && self.features.system_ui.activate_control().is_some() {
-                        let enabled = !self.features.connectivity.bluetooth.powered;
-                        if crate::jwm::features::connectivity::set_bluetooth(enabled) {
-                            self.refresh_connectivity();
+                    use crate::jwm::features::connectivity::{self, BluetoothRowAction};
+
+                    let powered = self.features.connectivity.bluetooth.powered;
+                    match connectivity::plan_bluetooth_row(
+                        powered,
+                        activate,
+                        slider_delta.is_some(),
+                    ) {
+                        BluetoothRowAction::OpenPicker => {
+                            if let Some(scan) = connectivity::start_device_scan() {
+                                self.features.bluetooth_scan = Some(scan);
+                                self.features.system_ui =
+                                    crate::jwm::features::SystemUiState::bluetooth_picker(
+                                        "Reading devices\u{2026}",
+                                    );
+                                self.sync_system_ui(backend);
+                                return;
+                            }
                         }
+                        BluetoothRowAction::PowerOn => {
+                            if connectivity::set_bluetooth(true) {
+                                self.refresh_connectivity();
+                            }
+                        }
+                        // Powering down can take a Bluetooth keyboard with it,
+                        // so `activate_control` withholds it until a second
+                        // press confirms.
+                        BluetoothRowAction::SetPower(false) => {
+                            if self.features.system_ui.activate_control().is_some()
+                                && connectivity::set_bluetooth(false)
+                            {
+                                self.refresh_connectivity();
+                            }
+                        }
+                        BluetoothRowAction::SetPower(true) => {
+                            if connectivity::set_bluetooth(true) {
+                                self.refresh_connectivity();
+                            }
+                        }
+                        BluetoothRowAction::Nothing => {}
                     }
                 }
                 ControlKind::Battery => {
@@ -466,6 +498,34 @@ impl Jwm {
         self.sync_system_ui(backend);
     }
 
+    /// Key handling while the Bluetooth picker is open: Up/Down select,
+    /// Return connects or disconnects, `r` re-reads the list.
+    fn handle_bluetooth_picker_key(&mut self, backend: &mut dyn Backend, keysym: u32) {
+        if keysym == keys::KEY_Return || keysym == keys::KEY_space {
+            self.activate_selected_bluetooth(backend);
+            return;
+        }
+        if keysym == keys::KEY_Up {
+            self.features.system_ui.move_selection(-1);
+        } else if keysym == keys::KEY_Down || keysym == keys::KEY_Tab {
+            self.features.system_ui.move_selection(1);
+        } else if keysym == keys::KEY_r {
+            match crate::jwm::features::connectivity::start_device_scan() {
+                Some(scan) => {
+                    self.features.bluetooth_scan = Some(scan);
+                    self.features
+                        .system_ui
+                        .set_bluetooth_message("Reading devices\u{2026}");
+                }
+                None => self
+                    .features
+                    .system_ui
+                    .set_bluetooth_message("bluetoothctl is not available"),
+            }
+        }
+        self.sync_system_ui(backend);
+    }
+
     pub(crate) fn on_key_press_internal(
         &mut self,
         backend: &mut dyn Backend,
@@ -590,6 +650,10 @@ impl Jwm {
             }
             if self.features.system_ui.is_wifi_picker() {
                 self.handle_wifi_picker_key(backend, keysym, clean_state);
+                return Ok(());
+            }
+            if self.features.system_ui.is_bluetooth_picker() {
+                self.handle_bluetooth_picker_key(backend, keysym);
                 return Ok(());
             }
             if keysym == keys::KEY_BackSpace || keysym == keys::KEY_Delete {

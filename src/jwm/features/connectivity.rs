@@ -540,6 +540,171 @@ pub fn plan_connect(network: &WifiNetwork, saved: bool, passphrase: Option<&str>
     ConnectPlan::NeedsPassphrase
 }
 
+// ---------------------------------------------------------------------------
+// Bluetooth devices
+// ---------------------------------------------------------------------------
+
+/// One known Bluetooth device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BluetoothDevice {
+    /// Controller address, `AA:BB:CC:DD:EE:FF`, used for every command.
+    pub address: String,
+    pub name: String,
+    pub connected: bool,
+    pub paired: bool,
+}
+
+/// Parse `bluetoothctl devices`: one `Device <address> <name>` line each.
+///
+/// Names may contain spaces, so only the first two fields are split off. A
+/// device whose name is unknown reports its address again, which is left as
+/// is — it is still the only handle the user has.
+#[must_use]
+pub fn parse_devices(output: &str) -> Vec<BluetoothDevice> {
+    let mut devices = Vec::new();
+    for line in output.lines() {
+        let mut parts = line.trim().splitn(3, ' ');
+        if parts.next() != Some("Device") {
+            continue;
+        }
+        let Some(address) = parts.next().filter(|address| address.contains(':')) else {
+            continue;
+        };
+        let name = parts.next().unwrap_or(address).trim();
+        devices.push(BluetoothDevice {
+            address: address.to_string(),
+            name: if name.is_empty() {
+                address.to_string()
+            } else {
+                name.to_string()
+            },
+            connected: false,
+            paired: false,
+        });
+    }
+    devices
+}
+
+/// Read `Connected:`/`Paired:` out of `bluetoothctl info <address>`.
+#[must_use]
+pub fn parse_device_info(output: &str) -> (bool, bool) {
+    let mut connected = false;
+    let mut paired = false;
+    for line in output.lines() {
+        match line.trim() {
+            "Connected: yes" => connected = true,
+            "Paired: yes" | "Bonded: yes" => paired = true,
+            _ => {}
+        }
+    }
+    (connected, paired)
+}
+
+/// Sort devices the way the picker lists them: connected first, then paired,
+/// then by name, so the thing the user is most likely to act on is on top.
+pub fn sort_devices(devices: &mut [BluetoothDevice]) {
+    devices.sort_by(|a, b| {
+        b.connected
+            .cmp(&a.connected)
+            .then_with(|| b.paired.cmp(&a.paired))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+}
+
+/// One Bluetooth picker row.
+#[must_use]
+pub fn device_row(device: &BluetoothDevice) -> String {
+    let marker = if device.connected {
+        "\u{f00c}" // fa-check
+    } else {
+        " "
+    };
+    let state = if device.connected {
+        "connected"
+    } else if device.paired {
+        "paired"
+    } else {
+        ""
+    };
+    format!(
+        "\u{f293} {marker} {:<34} {state}",
+        device.name.chars().take(34).collect::<String>()
+    )
+}
+
+/// Whether activating a device should connect or disconnect it.
+#[must_use]
+pub fn device_action(device: &BluetoothDevice) -> &'static str {
+    if device.connected {
+        "disconnect"
+    } else {
+        "connect"
+    }
+}
+
+/// List known devices with their live state, on a worker thread.
+///
+/// `bluetoothctl info` is one process per device, which is why this does not
+/// run inline: a handful of remembered devices would otherwise stall a frame.
+#[must_use]
+pub fn start_device_scan() -> Option<BackgroundJob<Vec<BluetoothDevice>>> {
+    if bluetooth_tool() != Some(BluetoothTool::Bluetoothctl) {
+        return None;
+    }
+    Some(BackgroundJob::spawn(|| {
+        let mut devices = run("bluetoothctl", &["devices"])
+            .map(|output| parse_devices(&output))
+            .unwrap_or_default();
+        for device in &mut devices {
+            if let Some(info) = run("bluetoothctl", &["info", &device.address]) {
+                let (connected, paired) = parse_device_info(&info);
+                device.connected = connected;
+                device.paired = paired;
+            }
+        }
+        sort_devices(&mut devices);
+        devices
+    }))
+}
+
+/// Connect or disconnect one device on a worker thread.
+#[must_use]
+pub fn start_device_action(
+    address: &str,
+    action: &'static str,
+) -> BackgroundJob<Result<String, String>> {
+    let address = address.to_string();
+    BackgroundJob::spawn(move || {
+        match Command::new("bluetoothctl")
+            .args([action, &address])
+            .output()
+        {
+            // bluetoothctl exits 0 even when the attempt failed, so the
+            // outcome has to be read out of what it printed.
+            Ok(output) => {
+                let text = String::from_utf8_lossy(&output.stdout);
+                if text.contains("Failed to") || text.contains("not available") {
+                    Err(summarize_bluetoothctl_error(&text))
+                } else {
+                    Ok(address)
+                }
+            }
+            Err(error) => Err(format!("could not run bluetoothctl: {error}")),
+        }
+    })
+}
+
+/// Condense bluetoothctl's chatter into the one line that matters.
+#[must_use]
+pub fn summarize_bluetoothctl_error(output: &str) -> String {
+    let line = output
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("Failed to") || line.contains("not available"))
+        .unwrap_or("the device did not respond");
+    line.chars().take(72).collect()
+}
+
 /// What activating the control center's Network row should do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkRowAction {
@@ -572,6 +737,37 @@ pub fn plan_network_row(radio_on: bool, activate: bool, adjust: bool) -> Network
         NetworkRowAction::OpenPicker
     } else {
         NetworkRowAction::EnableRadio
+    }
+}
+
+/// What activating the control center's Bluetooth row should do. Mirrors
+/// [`NetworkRowAction`] so the two connectivity rows behave the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BluetoothRowAction {
+    /// Show the remembered devices.
+    OpenPicker,
+    /// Power the controller on; there is nothing to list while it is off.
+    PowerOn,
+    /// Power it the other way (explicit Left/Right).
+    SetPower(bool),
+    Nothing,
+}
+
+/// Decide what the Bluetooth row does. As with Wi-Fi, `Enter` never switches a
+/// working controller *off* — that can take a Bluetooth keyboard with it —
+/// so powering down is explicit via Left/Right, and confirmed separately.
+#[must_use]
+pub fn plan_bluetooth_row(powered: bool, activate: bool, adjust: bool) -> BluetoothRowAction {
+    if adjust {
+        return BluetoothRowAction::SetPower(!powered);
+    }
+    if !activate {
+        return BluetoothRowAction::Nothing;
+    }
+    if powered {
+        BluetoothRowAction::OpenPicker
+    } else {
+        BluetoothRowAction::PowerOn
     }
 }
 
@@ -970,6 +1166,98 @@ mod tests {
         }
     }
 
+    fn device(name: &str, connected: bool, paired: bool) -> BluetoothDevice {
+        BluetoothDevice {
+            address: "AA:BB:CC:DD:EE:FF".to_string(),
+            name: name.to_string(),
+            connected,
+            paired,
+        }
+    }
+
+    #[test]
+    fn device_lists_keep_names_containing_spaces() {
+        let output =
+            "Device AA:BB:CC:DD:EE:FF Ada's WH-1000XM4\nDevice 11:22:33:44:55:66 Magic Keyboard\n";
+        let devices = parse_devices(output);
+
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].address, "AA:BB:CC:DD:EE:FF");
+        assert_eq!(devices[0].name, "Ada's WH-1000XM4");
+        assert_eq!(devices[1].name, "Magic Keyboard");
+    }
+
+    #[test]
+    fn a_nameless_device_falls_back_to_its_address() {
+        let devices = parse_devices("Device AA:BB:CC:DD:EE:FF\n");
+        assert_eq!(devices[0].name, "AA:BB:CC:DD:EE:FF");
+    }
+
+    #[test]
+    fn non_device_chatter_is_ignored() {
+        // bluetoothctl prints banners and prompts around the list.
+        let output = "Agent registered\nDevice AA:BB:CC:DD:EE:FF Speaker\n[bluetooth]# \n";
+        assert_eq!(parse_devices(output).len(), 1);
+        assert!(parse_devices("").is_empty());
+    }
+
+    #[test]
+    fn device_info_reports_connection_and_pairing() {
+        let output =
+            "Device AA:BB:CC:DD:EE:FF (public)\n\tName: Speaker\n\tPaired: yes\n\tConnected: yes\n";
+        assert_eq!(parse_device_info(output), (true, true));
+
+        let idle = "\tPaired: yes\n\tConnected: no\n";
+        assert_eq!(parse_device_info(idle), (false, true));
+        assert_eq!(parse_device_info(""), (false, false));
+    }
+
+    #[test]
+    fn bonded_counts_as_paired() {
+        // Newer bluetoothctl reports Bonded rather than Paired.
+        assert_eq!(parse_device_info("\tBonded: yes\n"), (false, true));
+    }
+
+    #[test]
+    fn the_list_puts_connected_devices_first() {
+        let mut devices = vec![
+            device("Zeta", false, false),
+            device("Alpha", false, true),
+            device("Beta", true, true),
+        ];
+        sort_devices(&mut devices);
+        let names: Vec<&str> = devices.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["Beta", "Alpha", "Zeta"]);
+    }
+
+    #[test]
+    fn activating_a_device_toggles_its_connection() {
+        assert_eq!(device_action(&device("Speaker", false, true)), "connect");
+        assert_eq!(device_action(&device("Speaker", true, true)), "disconnect");
+    }
+
+    #[test]
+    fn device_rows_mark_the_connected_one() {
+        let row = device_row(&device("Speaker", true, true));
+        assert!(row.contains("Speaker"));
+        assert!(row.contains("connected"));
+        assert!(row.contains('\u{f00c}'));
+        assert!(!device_row(&device("Speaker", false, true)).contains('\u{f00c}'));
+        assert!(device_row(&device("Speaker", false, true)).contains("paired"));
+    }
+
+    #[test]
+    fn bluetoothctl_failures_are_condensed() {
+        let output = "Attempting to connect to AA:BB\nFailed to connect: org.bluez.Error.Failed br-connection-profile-unavailable\n";
+        let message = summarize_bluetoothctl_error(output);
+        assert!(message.starts_with("Failed to connect"));
+        assert!(message.chars().count() <= 72);
+        assert_eq!(
+            summarize_bluetoothctl_error("Attempting to connect\n"),
+            "the device did not respond"
+        );
+    }
+
     #[test]
     fn enter_on_a_working_radio_opens_the_picker_and_never_switches_it_off() {
         // The regression this guards: Enter used to toggle, so selecting the
@@ -982,6 +1270,27 @@ mod tests {
             let action = plan_network_row(radio_on, true, false);
             assert_ne!(action, NetworkRowAction::SetRadio(false));
         }
+    }
+
+    #[test]
+    fn the_bluetooth_row_mirrors_the_network_row() {
+        // Enter opens the list, never powers a working controller down.
+        assert_eq!(
+            plan_bluetooth_row(true, true, false),
+            BluetoothRowAction::OpenPicker
+        );
+        assert_eq!(
+            plan_bluetooth_row(false, true, false),
+            BluetoothRowAction::PowerOn
+        );
+        assert_eq!(
+            plan_bluetooth_row(true, false, true),
+            BluetoothRowAction::SetPower(false)
+        );
+        assert_eq!(
+            plan_bluetooth_row(true, false, false),
+            BluetoothRowAction::Nothing
+        );
     }
 
     #[test]

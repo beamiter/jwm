@@ -12,7 +12,7 @@ controls.
 | --- | --- | --- |
 | Media | An MPRIS player is running | `Left`/`Right` skip, `Enter` play/pause |
 | Network | A wireless radio exists (`nmcli` or `rfkill`) | `Enter` opens the picker, `Left`/`Right` toggles the radio |
-| Bluetooth | A controller exists (`bluetoothctl` or `rfkill`) | `Enter` toggles power (off needs confirming) |
+| Bluetooth | A controller exists (`bluetoothctl` or `rfkill`) | `Enter` opens the picker, `Left`/`Right` toggles power |
 | Volume | `wpctl`, `pactl`, or `amixer` works | `Left`/`Right` adjust, `Enter`/`m` mute |
 | Brightness | `brightnessctl` or `/sys/class/backlight` | `Left`/`Right` adjust |
 | Battery | A `power_supply` device of type `Battery` exists | read-only |
@@ -40,7 +40,11 @@ Bridges, tunnels, and loopback are never treated as "connected".
 Bluetooth uses `bluetoothctl show`, falling back to `rfkill`. Without a
 controller the row is hidden rather than shown dead.
 
-Switching Bluetooth **off** needs a second `Enter` to confirm; the row says
+Both connectivity rows behave the same way: `Enter` opens the corresponding
+picker (or switches the radio on when it is off), and `Left`/`Right` toggles
+the radio itself.
+
+Switching Bluetooth **off** then needs a second press to confirm; the row says
 so while armed, and moving the selection cancels it. The test is not whether
 an action is destructive but whether the user can undo it with the input they
 have left: on a machine driven by a Bluetooth keyboard, switching the
@@ -94,6 +98,23 @@ to the worker thread.
 
 A failed join leaves the picker open with nmcli's reason on one line, so a
 mistyped passphrase can be retried without rescanning.
+
+## Bluetooth picker
+
+`Alt+Ctrl+F12` (`bluetooth_picker`), or `Enter` on the Bluetooth row, lists
+the devices the controller remembers: connected first, then paired, then by
+name. `Enter` connects the selected device, or disconnects it if it is already
+connected; `r` re-reads the list; `Esc` closes.
+
+Reading the list is one `bluetoothctl info` per device, so it runs on a worker
+thread like the Wi-Fi scan and the panel shows `Reading devices…` until it
+lands. After a connect or disconnect the list is re-read, so the row shows
+what actually took rather than what was asked — `bluetoothctl` exits 0 even
+when the attempt failed, so the outcome is read out of what it printed.
+
+Pairing a *new* device is out of scope: it needs interactive agent
+confirmation. Pair once with `bluetoothctl`, and the device shows up here
+afterwards.
 
 ## Battery
 

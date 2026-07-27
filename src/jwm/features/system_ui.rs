@@ -100,6 +100,13 @@ pub enum SystemUiState {
         /// Status line: scanning, connecting, or why it failed.
         message: String,
     },
+    BluetoothPicker {
+        /// Rendered rows; empty while the list is still being read.
+        entries: Vec<BluetoothEntry>,
+        selected: usize,
+        /// Status line: scanning, connecting, or why it failed.
+        message: String,
+    },
     SessionMenu {
         entries: Vec<crate::jwm::features::SessionAction>,
         selected: usize,
@@ -118,6 +125,15 @@ pub struct NotificationEntry {
     pub row: String,
     /// Action key the sender marked as default, invoked on Return.
     pub default_action: Option<String>,
+}
+
+/// One Bluetooth picker row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BluetoothEntry {
+    pub address: String,
+    pub row: String,
+    /// `connect` or `disconnect`, decided when the list was built.
+    pub action: &'static str,
 }
 
 /// One Wi-Fi picker row: the rendered text plus what joining it needs.
@@ -292,6 +308,15 @@ impl Clone for SystemUiState {
                 entries: entries.clone(),
                 selected: *selected,
                 passphrase: passphrase.as_ref().map(|_| String::new()),
+                message: message.clone(),
+            },
+            Self::BluetoothPicker {
+                entries,
+                selected,
+                message,
+            } => Self::BluetoothPicker {
+                entries: entries.clone(),
+                selected: *selected,
                 message: message.clone(),
             },
             Self::SessionMenu {
@@ -483,6 +508,63 @@ impl SystemUiState {
         if let Self::NotificationCenter { entries, selected } = self {
             entries.clear();
             *selected = 0;
+        }
+    }
+
+    /// Open the Bluetooth picker while its device list is being read.
+    pub fn bluetooth_picker(message: impl Into<String>) -> Self {
+        Self::BluetoothPicker {
+            entries: Vec::new(),
+            selected: 0,
+            message: message.into(),
+        }
+    }
+
+    pub fn is_bluetooth_picker(&self) -> bool {
+        matches!(self, Self::BluetoothPicker { .. })
+    }
+
+    /// Fill in a finished device list, keeping the selection on the same
+    /// device when it is still known.
+    pub fn set_bluetooth_devices(&mut self, devices: &[crate::jwm::features::BluetoothDevice]) {
+        let Self::BluetoothPicker {
+            entries,
+            selected,
+            message,
+        } = self
+        else {
+            return;
+        };
+        let previous = entries.get(*selected).map(|entry| entry.address.clone());
+        *entries = devices
+            .iter()
+            .map(|device| BluetoothEntry {
+                address: device.address.clone(),
+                row: crate::jwm::features::connectivity::device_row(device),
+                action: crate::jwm::features::connectivity::device_action(device),
+            })
+            .collect();
+        *selected = previous
+            .and_then(|address| entries.iter().position(|entry| entry.address == address))
+            .unwrap_or(0);
+        message.clear();
+    }
+
+    /// The device the selection rests on.
+    pub fn selected_bluetooth(&self) -> Option<&BluetoothEntry> {
+        let Self::BluetoothPicker {
+            entries, selected, ..
+        } = self
+        else {
+            return None;
+        };
+        entries.get(*selected)
+    }
+
+    /// Replace the Bluetooth picker's status line.
+    pub fn set_bluetooth_message(&mut self, text: impl Into<String>) {
+        if let Self::BluetoothPicker { message, .. } = self {
+            *message = text.into();
         }
     }
 
@@ -979,6 +1061,7 @@ impl SystemUiState {
             | Self::ControlCenter { .. }
             | Self::NotificationCenter { .. }
             | Self::WifiPicker { .. }
+            | Self::BluetoothPicker { .. }
             | Self::SessionMenu { .. } => return,
         }
         self.refresh_matches();
@@ -1007,6 +1090,7 @@ impl SystemUiState {
             | Self::ControlCenter { .. }
             | Self::NotificationCenter { .. }
             | Self::WifiPicker { .. }
+            | Self::BluetoothPicker { .. }
             | Self::SessionMenu { .. } => return,
         }
         self.refresh_matches();
@@ -1043,6 +1127,15 @@ impl SystemUiState {
             }
             *selected = (*selected as isize + delta).rem_euclid(entries.len() as isize) as usize;
         } else if let Self::NotificationCenter { entries, selected } = self {
+            if entries.is_empty() {
+                *selected = 0;
+                return;
+            }
+            *selected = (*selected as isize + delta).rem_euclid(entries.len() as isize) as usize;
+        } else if let Self::BluetoothPicker {
+            entries, selected, ..
+        } = self
+        {
             if entries.is_empty() {
                 *selected = 0;
                 return;
@@ -1288,6 +1381,41 @@ impl SystemUiState {
                     hint,
                 }
             }
+            Self::BluetoothPicker {
+                entries,
+                selected,
+                message,
+            } => {
+                let mut items: Vec<String> = if entries.is_empty() {
+                    vec![format!(
+                        "  {}",
+                        if message.is_empty() {
+                            "No remembered devices"
+                        } else {
+                            message
+                        }
+                    )]
+                } else {
+                    let start = selected.saturating_sub(11);
+                    entries
+                        .iter()
+                        .skip(start)
+                        .take(12)
+                        .map(|entry| entry.row.clone())
+                        .collect()
+                };
+                if !message.is_empty() && !entries.is_empty() {
+                    items.push(String::new());
+                    items.push(format!("  {message}"));
+                }
+                OverlayParts {
+                    title: "\u{f293}  BLUETOOTH".into(),
+                    query: None,
+                    selected: (!entries.is_empty()).then(|| selected - selected.saturating_sub(11)),
+                    items,
+                    hint: "Enter  connect/disconnect    r  refresh    Esc  close".into(),
+                }
+            }
             Self::SessionMenu {
                 entries,
                 selected,
@@ -1427,6 +1555,7 @@ impl SystemUiState {
             | Self::ControlCenter { .. }
             | Self::NotificationCenter { .. }
             | Self::WifiPicker { .. }
+            | Self::BluetoothPicker { .. }
             | Self::SessionMenu { .. } => {}
         }
     }

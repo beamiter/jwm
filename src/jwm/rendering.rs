@@ -127,6 +127,7 @@ impl Jwm {
         // their results here rather than blocking a frame on nmcli.
         if backend.has_compositor() {
             self.poll_wifi_jobs(backend);
+            self.poll_bluetooth_jobs(backend);
         }
 
         let composited = backend.has_compositor();

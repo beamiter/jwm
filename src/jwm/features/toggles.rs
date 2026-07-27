@@ -310,6 +310,103 @@ impl Jwm {
         Ok(())
     }
 
+    /// Open the Bluetooth picker and read the device list on a worker thread.
+    pub(crate) fn bluetooth_picker(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.features.system_ui.is_active() {
+            return Ok(());
+        }
+        if !backend.has_compositor() {
+            return Err("Bluetooth picker requires the JWM compositor".into());
+        }
+        let Some(scan) = crate::jwm::features::connectivity::start_device_scan() else {
+            return Err("no bluetoothctl to list devices with".into());
+        };
+        if let Some(root) = backend.root_window() {
+            backend.key_ops().grab_keyboard(root)?;
+            if !backend.input_ops().grab_pointer(
+                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
+                None,
+            )? {
+                let _ = backend.key_ops().ungrab_keyboard();
+                return Err("could not grab pointer for the Bluetooth picker".into());
+            }
+        }
+        self.features.bluetooth_scan = Some(scan);
+        self.features.system_ui =
+            crate::jwm::features::SystemUiState::bluetooth_picker("Reading devices\u{2026}");
+        self.sync_system_ui(backend);
+        Ok(())
+    }
+
+    /// Adopt a finished device list or connect/disconnect attempt.
+    pub(crate) fn poll_bluetooth_jobs(&mut self, backend: &mut dyn Backend) {
+        if !self.features.system_ui.is_bluetooth_picker() {
+            self.features.bluetooth_scan = None;
+            self.features.bluetooth_action = None;
+            return;
+        }
+        let mut changed = false;
+
+        if let Some(devices) = self
+            .features
+            .bluetooth_scan
+            .as_ref()
+            .and_then(crate::jwm::features::connectivity::BackgroundJob::take)
+        {
+            self.features.bluetooth_scan = None;
+            self.features.system_ui.set_bluetooth_devices(&devices);
+            changed = true;
+        }
+
+        if let Some(result) = self
+            .features
+            .bluetooth_action
+            .as_ref()
+            .and_then(crate::jwm::features::connectivity::BackgroundJob::take)
+        {
+            self.features.bluetooth_action = None;
+            match result {
+                Ok(address) => {
+                    log::info!("Bluetooth: {address} done");
+                    // Re-read so the row shows the state that actually took.
+                    if let Some(scan) = crate::jwm::features::connectivity::start_device_scan() {
+                        self.features.bluetooth_scan = Some(scan);
+                    }
+                    self.refresh_connectivity();
+                }
+                Err(error) => {
+                    log::warn!("Bluetooth: {error}");
+                    self.features.system_ui.set_bluetooth_message(error);
+                }
+            }
+            changed = true;
+        }
+
+        if changed {
+            self.sync_system_ui(backend);
+        }
+    }
+
+    /// Connect or disconnect the selected device.
+    pub(crate) fn activate_selected_bluetooth(&mut self, backend: &mut dyn Backend) {
+        let Some(entry) = self.features.system_ui.selected_bluetooth() else {
+            return;
+        };
+        let address = entry.address.clone();
+        let action = entry.action;
+        self.features
+            .system_ui
+            .set_bluetooth_message(format!("{action}ing\u{2026}"));
+        self.features.bluetooth_action = Some(
+            crate::jwm::features::connectivity::start_device_action(&address, action),
+        );
+        self.sync_system_ui(backend);
+    }
+
     /// Adopt a finished scan or connection attempt. Called from the frame
     /// tick; does nothing unless the picker is open with work outstanding.
     pub(crate) fn poll_wifi_jobs(&mut self, backend: &mut dyn Backend) {
