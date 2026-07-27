@@ -1353,12 +1353,6 @@ pub trait CompositorWorkspaceEffects: Send {
     fn compositor_push_toast(&mut self, _toast: ToastNotification) {}
 
     /// Show (or refresh in place) the volume/brightness OSD card.
-    /// Put `text` on the clipboard, returning whether the backend could.
-    /// Implemented per backend: X11 must own the CLIPBOARD selection,
-    /// Wayland sets its data device selection.
-    fn set_clipboard_text(&mut self, _text: &str) -> bool {
-        false
-    }
     fn compositor_show_osd(&mut self, _kind: OsdKind, _percent: u8) {}
     /// Show the media OSD card with a track label instead of a value bar.
     fn compositor_show_media_osd(&mut self, _label: &str) {}
@@ -1517,6 +1511,20 @@ pub trait Backend:
     fn root_window(&self) -> Option<WindowId>;
     fn as_any(&self) -> &dyn Any;
     fn check_existing_wm(&self) -> Result<(), BackendError>;
+
+    /// Put `text` on the clipboard, returning whether the backend could.
+    /// X11 must own the CLIPBOARD selection to do it; Wayland sets its data
+    /// device selection. Backends without clipboard support say so.
+    fn set_clipboard_text(&mut self, _text: &str) -> bool {
+        false
+    }
+
+    /// Text copied by other applications since the last call, oldest first.
+    /// The backend has already dropped offers marked as secrets and anything
+    /// that is not text, so a password never reaches the history.
+    fn drain_clipboard(&mut self) -> Vec<String> {
+        Vec::new()
+    }
 
     // Ops Getters
     fn window_ops(&self) -> &dyn WindowOps;

@@ -78,6 +78,7 @@ pub struct X11rbBackend {
     compositor_loop_signal: Option<calloop::LoopSignal>,
 
     systray: Option<super::systray::SystemTray<RustConnection>>,
+    clipboard: Option<super::clipboard::Clipboard>,
 
     benchmark_auto_exit: bool,
 
@@ -317,9 +318,17 @@ impl X11rbBackend {
             compositor,
             compositor_loop_signal: None,
             systray: None,
+            clipboard: None,
             benchmark_auto_exit: false,
             scratch_x11_scene: Vec::new(),
         };
+
+        // Watch CLIPBOARD on its own connection and thread. Failing here
+        // costs the clipboard history, not the session.
+        match super::clipboard::Clipboard::start() {
+            Ok(clipboard) => backend.clipboard = Some(clipboard),
+            Err(error) => log::warn!("clipboard: history unavailable: {error}"),
+        }
 
         // Initialize system tray
         let screen_num = backend.screen_num;
@@ -605,6 +614,19 @@ impl RenderScheduler for X11rbBackend {
 }
 
 impl Backend for X11rbBackend {
+    fn set_clipboard_text(&mut self, text: &str) -> bool {
+        self.clipboard
+            .as_ref()
+            .is_some_and(|clipboard| clipboard.set_text(text))
+    }
+
+    fn drain_clipboard(&mut self) -> Vec<String> {
+        self.clipboard
+            .as_ref()
+            .map(super::clipboard::Clipboard::drain_captured)
+            .unwrap_or_default()
+    }
+
     fn capabilities(&self) -> Capabilities {
         self.caps
     }

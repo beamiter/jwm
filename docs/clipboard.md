@@ -46,18 +46,31 @@ clipboard_history = false
 
 With it off, nothing is recorded and the picker refuses to open.
 
-## Status: capture is backend work in progress
+## How capture works
 
-The history, the picker, the configuration, and the IPC are complete. What
-does **not** work yet is JWM noticing a copy on its own:
+On X11 the clipboard is not storage but a protocol: the copying application
+keeps the data and hands it over on request. JWM therefore watches CLIPBOARD
+ownership through XFIXES, asks each new owner for its target list, and only
+requests the payload when that list is text and carries no secret marker.
+Putting an entry back means *becoming* the owner and answering requests for
+as long as JWM holds the selection.
 
-- X11 needs XFIXES monitoring of the CLIPBOARD selection, and JWM must own
-  that selection to serve an entry back.
-- Wayland needs the selection hooked off JWM's own data device.
+That runs on **its own X connection and thread**, not the window manager's.
+Selection traffic is a conversation with other clients — a conversion waits
+for the owner to answer — and a slow or hostile clipboard owner must never be
+able to delay a frame.
 
-Until those land, entries arrive only through `clipboard_record`, and
-activating a row reports that the backend cannot set the clipboard rather
-than pretending to have done it.
+Support by backend:
+
+| Backend | Capture | Serve |
+| --- | --- | --- |
+| `x11rb` | yes | yes |
+| `xcb` | not yet | not yet |
+| `wayland-udev` | not yet | not yet |
+
+Where it is not wired, nothing is recorded and activating a row reports that
+the backend cannot set the clipboard rather than pretending to have done it.
+Entries can still arrive through `clipboard_record`.
 
 ## IPC
 

@@ -123,6 +123,12 @@ impl Jwm {
             }
         }
 
+        // Clipboard capture runs on its own thread and connection; adopt what
+        // it copied here.
+        for text in backend.drain_clipboard() {
+            self.record_clipboard(&text);
+        }
+
         // The Wi-Fi picker's scan and connect run on worker threads; adopt
         // their results here rather than blocking a frame on nmcli.
         if backend.has_compositor() {

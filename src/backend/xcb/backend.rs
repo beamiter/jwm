@@ -1748,6 +1748,17 @@ impl RenderScheduler for XcbBackend {
 }
 
 impl Backend for XcbBackend {
+    /// The clipboard history watches CLIPBOARD on the x11rb transport only so
+    /// far. Saying so keeps the picker honest — it reports that this backend
+    /// cannot set the clipboard instead of appearing to work.
+    fn set_clipboard_text(&mut self, _text: &str) -> bool {
+        false
+    }
+
+    fn drain_clipboard(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
     fn capabilities(&self) -> Capabilities {
         self.caps
     }
