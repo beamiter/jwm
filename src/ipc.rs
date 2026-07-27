@@ -88,6 +88,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
     dispatch_commands: &[
         "app_launcher",
         "bluetooth_picker",
+        "calendar",
         "control_center",
         "cycle_overview",
         "cyclelayout",
@@ -408,6 +409,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "toggle_wifi" => Ok((Jwm::toggle_wifi as WMFuncType, WMArgEnum::Int(0))),
         "wifi_picker" => Ok((Jwm::wifi_picker as WMFuncType, WMArgEnum::Int(0))),
         "bluetooth_picker" => Ok((Jwm::bluetooth_picker as WMFuncType, WMArgEnum::Int(0))),
+        "calendar" => Ok((Jwm::calendar as WMFuncType, WMArgEnum::Int(0))),
         "toggle_bluetooth" => Ok((Jwm::toggle_bluetooth as WMFuncType, WMArgEnum::Int(0))),
         "monitor_layout" => Ok((Jwm::monitor_layout as WMFuncType, WMArgEnum::Int(0))),
         "lock_screen" => Ok((Jwm::lock_screen as WMFuncType, WMArgEnum::Int(0))),

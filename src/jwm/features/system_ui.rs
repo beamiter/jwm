@@ -100,6 +100,11 @@ pub enum SystemUiState {
         /// Status line: scanning, connecting, or why it failed.
         message: String,
     },
+    Calendar {
+        view: crate::jwm::features::CalendarView,
+        /// The clock line above the grid, captured when the card opened.
+        clock: String,
+    },
     BluetoothPicker {
         /// Rendered rows; empty while the list is still being read.
         entries: Vec<BluetoothEntry>,
@@ -310,6 +315,10 @@ impl Clone for SystemUiState {
                 passphrase: passphrase.as_ref().map(|_| String::new()),
                 message: message.clone(),
             },
+            Self::Calendar { view, clock } => Self::Calendar {
+                view: *view,
+                clock: clock.clone(),
+            },
             Self::BluetoothPicker {
                 entries,
                 selected,
@@ -508,6 +517,34 @@ impl SystemUiState {
         if let Self::NotificationCenter { entries, selected } = self {
             entries.clear();
             *selected = 0;
+        }
+    }
+
+    /// Open the calendar card on the month containing `today`.
+    pub fn calendar(now: chrono::NaiveDateTime) -> Self {
+        Self::Calendar {
+            view: crate::jwm::features::CalendarView::new(now.date()),
+            clock: crate::jwm::features::calendar::clock_line(&now),
+        }
+    }
+
+    pub fn is_calendar(&self) -> bool {
+        matches!(self, Self::Calendar { .. })
+    }
+
+    /// Step the shown month, year, or jump back to today.
+    pub fn shift_calendar(&mut self, months: i32, years: i32, to_today: bool) {
+        if let Self::Calendar { view, .. } = self {
+            if to_today {
+                view.reset();
+                return;
+            }
+            if months != 0 {
+                view.shift_month(months);
+            }
+            if years != 0 {
+                view.shift_year(years);
+            }
         }
     }
 
@@ -1062,6 +1099,7 @@ impl SystemUiState {
             | Self::NotificationCenter { .. }
             | Self::WifiPicker { .. }
             | Self::BluetoothPicker { .. }
+            | Self::Calendar { .. }
             | Self::SessionMenu { .. } => return,
         }
         self.refresh_matches();
@@ -1091,6 +1129,7 @@ impl SystemUiState {
             | Self::NotificationCenter { .. }
             | Self::WifiPicker { .. }
             | Self::BluetoothPicker { .. }
+            | Self::Calendar { .. }
             | Self::SessionMenu { .. } => return,
         }
         self.refresh_matches();
@@ -1381,6 +1420,18 @@ impl SystemUiState {
                     hint,
                 }
             }
+            Self::Calendar { view, clock } => {
+                let mut items = vec![clock.clone(), String::new()];
+                items.extend(crate::jwm::features::calendar::month_grid(view));
+                OverlayParts {
+                    title: format!("\u{f073}  {}", view.title()),
+                    query: None,
+                    items,
+                    selected: None,
+                    hint: "\u{f060}/\u{f061}  month    \u{f062}/\u{f063}  year    t  today    Esc  close"
+                        .into(),
+                }
+            }
             Self::BluetoothPicker {
                 entries,
                 selected,
@@ -1556,6 +1607,7 @@ impl SystemUiState {
             | Self::NotificationCenter { .. }
             | Self::WifiPicker { .. }
             | Self::BluetoothPicker { .. }
+            | Self::Calendar { .. }
             | Self::SessionMenu { .. } => {}
         }
     }

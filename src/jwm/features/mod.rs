@@ -12,6 +12,7 @@
 // helpers stay for the gated engines.
 #[cfg_attr(not(feature = "media-audio"), allow(dead_code))]
 pub mod audio_recording;
+pub mod calendar;
 pub mod capture;
 pub mod capture_plan;
 pub mod connectivity;
@@ -31,6 +32,7 @@ pub mod system_ui;
 pub mod toggles;
 
 pub use audio_recording::AudioRecordingState;
+pub use calendar::CalendarView;
 pub use capture::{CaptureInteractionState, CaptureTarget};
 pub use capture_plan::{
     CaptureCompletion, CaptureExecution, CapturePlan, execute_capture_plan, plan_capture_completion,

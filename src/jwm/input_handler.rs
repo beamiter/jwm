@@ -656,6 +656,21 @@ impl Jwm {
                 self.handle_bluetooth_picker_key(backend, keysym);
                 return Ok(());
             }
+            if self.features.system_ui.is_calendar() {
+                // Left/Right step months, Up/Down step years, t returns to
+                // today; nothing here can leave the card in a bad state.
+                let (months, years, today) = match keysym {
+                    keys::KEY_Left => (-1, 0, false),
+                    keys::KEY_Right => (1, 0, false),
+                    keys::KEY_Up => (0, -1, false),
+                    keys::KEY_Down => (0, 1, false),
+                    keys::KEY_t | keys::KEY_Home => (0, 0, true),
+                    _ => (0, 0, false),
+                };
+                self.features.system_ui.shift_calendar(months, years, today);
+                self.sync_system_ui(backend);
+                return Ok(());
+            }
             if keysym == keys::KEY_BackSpace || keysym == keys::KEY_Delete {
                 self.features.system_ui.backspace();
             } else if keysym == keys::KEY_Up {

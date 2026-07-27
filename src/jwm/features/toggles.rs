@@ -310,6 +310,34 @@ impl Jwm {
         Ok(())
     }
 
+    /// Open the calendar card on the current month.
+    pub(crate) fn calendar(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.features.system_ui.is_active() {
+            return Ok(());
+        }
+        if !backend.has_compositor() {
+            return Err("calendar requires the JWM compositor".into());
+        }
+        if let Some(root) = backend.root_window() {
+            backend.key_ops().grab_keyboard(root)?;
+            if !backend.input_ops().grab_pointer(
+                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
+                None,
+            )? {
+                let _ = backend.key_ops().ungrab_keyboard();
+                return Err("could not grab pointer for the calendar".into());
+            }
+        }
+        self.features.system_ui =
+            crate::jwm::features::SystemUiState::calendar(chrono::Local::now().naive_local());
+        self.sync_system_ui(backend);
+        Ok(())
+    }
+
     /// Open the Bluetooth picker and read the device list on a worker thread.
     pub(crate) fn bluetooth_picker(
         &mut self,
