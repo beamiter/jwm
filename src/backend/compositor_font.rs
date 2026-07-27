@@ -6,12 +6,136 @@
 //! once; each backend uploads the returned RGBA buffer to a texture in its own
 //! API-specific way.
 
-use ab_glyph::{Font, FontArc, ScaleFont, point};
-use std::collections::HashMap;
+use ab_glyph::{Font, FontArc, GlyphId, ScaleFont, point};
+use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
 
 static UI_FONTS: LazyLock<Mutex<HashMap<String, Option<FontArc>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Fonts pulled in to cover glyphs the configured UI font lacks — CJK, emoji,
+/// anything outside a typical programming face. Kept in discovery order and
+/// scanned in memory, so covering a whole script costs one `fc-match` rather
+/// than one per character.
+static FALLBACK_FONTS: LazyLock<Mutex<Vec<FontArc>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// Codepoints no installed font could cover. Remembered so a single missing
+/// glyph does not spawn `fc-match` on every repaint.
+static FALLBACK_MISSES: LazyLock<Mutex<HashSet<u32>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// The fontconfig pattern that asks for any font covering `ch`.
+///
+/// Split out because it is the one piece of the fallback path that can be
+/// tested without knowing which fonts happen to be installed.
+fn charset_pattern(ch: char) -> String {
+    format!(":charset={:x}", ch as u32)
+}
+
+/// Load a font covering `ch`, if fontconfig can find one.
+fn load_fallback_font(ch: char) -> Option<FontArc> {
+    let path = std::process::Command::new("fc-match")
+        .args(["-f", "%{file}\n", &charset_pattern(ch)])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|output| output.lines().next().map(str::trim).map(str::to_owned))
+        .filter(|path| !path.is_empty())?;
+    let font = FontArc::try_from_vec(std::fs::read(path).ok()?).ok()?;
+    // fc-match always answers with *something*; only keep it if it actually
+    // covers the character we asked about.
+    (font.glyph_id(ch).0 != 0).then_some(font)
+}
+
+/// Which font draws a character.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GlyphSource {
+    /// The configured UI font covers it.
+    Primary,
+    /// Index into [`FALLBACK_FONTS`].
+    Fallback(usize),
+    /// Nothing installed covers it.
+    Missing,
+}
+
+/// Decide which font draws `ch`, pulling in a fallback the first time a
+/// script turns up.
+fn source_for_char(primary: &FontArc, ch: char) -> GlyphSource {
+    if primary.glyph_id(ch).0 != 0 {
+        return GlyphSource::Primary;
+    }
+    if let Ok(fonts) = FALLBACK_FONTS.lock()
+        && let Some(index) = fonts.iter().position(|font| font.glyph_id(ch).0 != 0)
+    {
+        return GlyphSource::Fallback(index);
+    }
+    if FALLBACK_MISSES
+        .lock()
+        .is_ok_and(|misses| misses.contains(&(ch as u32)))
+    {
+        return GlyphSource::Missing;
+    }
+    let Some(font) = load_fallback_font(ch) else {
+        if let Ok(mut misses) = FALLBACK_MISSES.lock() {
+            misses.insert(ch as u32);
+        }
+        return GlyphSource::Missing;
+    };
+    let Ok(mut fonts) = FALLBACK_FONTS.lock() else {
+        return GlyphSource::Missing;
+    };
+    fonts.push(font);
+    GlyphSource::Fallback(fonts.len() - 1)
+}
+
+/// The font behind a source, cloned out of the cache.
+fn font_for_source(primary: &FontArc, source: GlyphSource) -> Option<FontArc> {
+    match source {
+        GlyphSource::Primary | GlyphSource::Missing => Some(primary.clone()),
+        GlyphSource::Fallback(index) => FALLBACK_FONTS.lock().ok()?.get(index).cloned(),
+    }
+}
+
+/// One line resolved to (font index, glyph) pairs, plus the fonts used.
+///
+/// Resolving up front means the width pass and the draw pass agree on which
+/// font drew what, which is what keeps advances and kerning consistent.
+struct ResolvedLine {
+    glyphs: Vec<(usize, GlyphId)>,
+}
+
+fn resolve_line(
+    fonts: &mut Vec<FontArc>,
+    sources: &mut Vec<GlyphSource>,
+    primary: &FontArc,
+    line: &str,
+) -> ResolvedLine {
+    let mut glyphs = Vec::with_capacity(line.chars().count());
+    for ch in line.chars() {
+        let source = source_for_char(primary, ch);
+        // Sources are compared, not font handles: `FontArc` has no pointer
+        // identity to compare, and the source *is* the identity.
+        let index = if let Some(index) = sources.iter().position(|known| *known == source) {
+            index
+        } else {
+            let Some(font) = font_for_source(primary, source) else {
+                continue;
+            };
+            fonts.push(font);
+            sources.push(source);
+            fonts.len() - 1
+        };
+        let id = match source {
+            // Nothing installed covers it: a question mark in the primary
+            // font is still better than a blank.
+            GlyphSource::Missing => primary.glyph_id('?'),
+            _ => fonts[index].glyph_id(ch),
+        };
+        glyphs.push((index, id));
+    }
+    ResolvedLine { glyphs }
+}
 
 /// Extract the conventional trailing point size from a fontconfig pattern.
 /// `SauceCodePro Nerd Font Regular 11` becomes 11pt (about 18 physical px for
@@ -83,26 +207,40 @@ pub(crate) fn render_ui_text_to_rgba(
         return (Vec::new(), 0, 0);
     }
 
+    // Line metrics come from the configured font even when a fallback draws a
+    // glyph, so rows stay on the same baseline whatever script they mix.
     let scaled = font.as_scaled(pixel_size);
     let ascent = scaled.ascent();
     let line_height = (ascent - scaled.descent() + scaled.line_gap())
         .ceil()
         .max(1.0);
     let lines: Vec<&str> = text.lines().collect();
+    let mut fonts: Vec<FontArc> = Vec::with_capacity(2);
+    let mut sources: Vec<GlyphSource> = Vec::with_capacity(2);
+    let resolved: Vec<ResolvedLine> = lines
+        .iter()
+        .map(|line| resolve_line(&mut fonts, &mut sources, &font, line))
+        .collect();
+
+    let advance =
+        |font_index: usize, id: GlyphId| fonts[font_index].as_scaled(pixel_size).h_advance(id);
+    // Kerning is a property of one font's pairs; across a fallback boundary
+    // there is no pair to look up.
+    let kern = |previous: Option<(usize, GlyphId)>, font_index: usize, id: GlyphId| match previous {
+        Some((prev_index, prev_id)) if prev_index == font_index => {
+            fonts[font_index].as_scaled(pixel_size).kern(prev_id, id)
+        }
+        _ => 0.0,
+    };
+
     let mut line_widths = Vec::with_capacity(lines.len());
-    for line in &lines {
+    for line in &resolved {
         let mut width = 0.0;
         let mut previous = None;
-        for ch in line.chars() {
-            let mut id = scaled.glyph_id(ch);
-            if id.0 == 0 && ch != '\0' {
-                id = scaled.glyph_id('?');
-            }
-            if let Some(prev) = previous {
-                width += scaled.kern(prev, id);
-            }
-            width += scaled.h_advance(id);
-            previous = Some(id);
+        for &(font_index, id) in &line.glyphs {
+            width += kern(previous, font_index, id);
+            width += advance(font_index, id);
+            previous = Some((font_index, id));
         }
         line_widths.push(width.ceil() as u32);
     }
@@ -112,20 +250,14 @@ pub(crate) fn render_ui_text_to_rgba(
         return (Vec::new(), 0, 0);
     }
     let mut pixels = vec![0u8; width as usize * height as usize * 4];
-    for (line_index, line) in lines.iter().enumerate() {
+    for (line_index, line) in resolved.iter().enumerate() {
         let baseline = 2.0 + ascent + line_index as f32 * line_height;
         let mut x = 2.0;
         let mut previous = None;
-        for ch in line.chars() {
-            let mut id = scaled.glyph_id(ch);
-            if id.0 == 0 && ch != '\0' {
-                id = scaled.glyph_id('?');
-            }
-            if let Some(prev) = previous {
-                x += scaled.kern(prev, id);
-            }
+        for &(font_index, id) in &line.glyphs {
+            x += kern(previous, font_index, id);
             let glyph = id.with_scale_and_position(pixel_size, point(x, baseline));
-            if let Some(outlined) = font.outline_glyph(glyph) {
+            if let Some(outlined) = fonts[font_index].outline_glyph(glyph) {
                 let bounds = outlined.px_bounds();
                 outlined.draw(|gx, gy, coverage| {
                     let px = bounds.min.x as i32 + gx as i32;
@@ -141,8 +273,8 @@ pub(crate) fn render_ui_text_to_rgba(
                     }
                 });
             }
-            x += scaled.h_advance(id);
-            previous = Some(id);
+            x += advance(font_index, id);
+            previous = Some((font_index, id));
         }
     }
     (pixels, width, height)
@@ -460,6 +592,24 @@ mod tests {
             px.chunks_exact(4).any(|p| p == [0, 0, 0, 0]),
             "expected some transparent pixels"
         );
+    }
+
+    #[test]
+    fn charset_patterns_ask_fontconfig_by_codepoint() {
+        assert_eq!(charset_pattern('\u{4e2d}'), ":charset=4e2d");
+        assert_eq!(charset_pattern('A'), ":charset=41");
+        // Astral-plane characters (emoji) use their full codepoint.
+        assert_eq!(charset_pattern('\u{1f600}'), ":charset=1f600");
+    }
+
+    #[test]
+    fn glyph_sources_are_comparable_identities() {
+        // Resolution keys fonts by source rather than by handle, so the
+        // comparison has to distinguish the slots.
+        assert_eq!(GlyphSource::Primary, GlyphSource::Primary);
+        assert_ne!(GlyphSource::Primary, GlyphSource::Fallback(0));
+        assert_ne!(GlyphSource::Fallback(0), GlyphSource::Fallback(1));
+        assert_ne!(GlyphSource::Missing, GlyphSource::Primary);
     }
 
     #[test]
