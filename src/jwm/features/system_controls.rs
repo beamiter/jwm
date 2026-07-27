@@ -218,6 +218,312 @@ pub fn volume_set(percent: u8) -> Option<AudioState> {
 }
 
 // ---------------------------------------------------------------------------
+// Audio devices
+// ---------------------------------------------------------------------------
+
+/// Which end of the audio pipeline a device sits on. The two are listed and
+/// switched by different subcommands but are otherwise identical, so every
+/// function below takes the direction rather than being written twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioDirection {
+    /// Speakers, headphones, HDMI — a sink.
+    Output,
+    /// Microphones — a source.
+    Input,
+}
+
+impl AudioDirection {
+    fn wpctl_section(self) -> &'static str {
+        match self {
+            Self::Output => "Sinks:",
+            Self::Input => "Sources:",
+        }
+    }
+
+    fn pactl_noun(self) -> &'static str {
+        match self {
+            Self::Output => "sinks",
+            Self::Input => "sources",
+        }
+    }
+
+    /// Label for messages and the picker title.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Output => "output",
+            Self::Input => "input",
+        }
+    }
+}
+
+/// One selectable audio device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioDevice {
+    /// What the tool needs to make this the default: a wpctl node id or a
+    /// PulseAudio node name. Opaque to everything above this module.
+    pub id: String,
+    /// Human-readable name, as the sound server presents it.
+    pub description: String,
+    pub is_default: bool,
+}
+
+/// `wpctl status`, restricted to the requested section of the audio tree.
+///
+/// The Video tree has a `Sources:` section too — cameras — so the scan only
+/// runs between the `Audio` heading and the next top-level one. Getting this
+/// wrong would offer a webcam as a microphone.
+fn parse_wpctl_devices(status: &str, direction: AudioDirection) -> Vec<AudioDevice> {
+    let mut devices = Vec::new();
+    let mut in_audio = false;
+    let mut in_section = false;
+
+    for line in status.lines() {
+        // Top-level headings carry no indentation and no tree drawing.
+        let heading = line.trim_end();
+        if !heading.starts_with(char::is_whitespace) && !heading.is_empty() {
+            let heading = heading.trim();
+            if heading.ends_with(':') || heading.contains('[') {
+                // "PipeWire 'pipewire-0' [...]" and the like.
+                continue;
+            }
+            in_audio = heading.eq_ignore_ascii_case("Audio");
+            in_section = false;
+            continue;
+        }
+
+        let content = line
+            .trim_matches(|c: char| c.is_whitespace() || "│├└─".contains(c))
+            .trim();
+        if content.is_empty() {
+            continue;
+        }
+        if content.ends_with(':') {
+            in_section = in_audio && content == direction.wpctl_section();
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+
+        let is_default = content.starts_with('*');
+        let entry = content.trim_start_matches('*').trim();
+        let Some((id, rest)) = entry.split_once('.') else {
+            continue;
+        };
+        let Ok(id) = id.trim().parse::<u32>() else {
+            continue;
+        };
+        // The volume suffix is state, not identity; the row shows the name.
+        let description = rest
+            .split('[')
+            .next()
+            .unwrap_or(rest)
+            .trim()
+            .trim_end_matches(char::is_whitespace)
+            .to_string();
+        if description.is_empty() {
+            continue;
+        }
+        devices.push(AudioDevice {
+            id: id.to_string(),
+            description,
+            is_default,
+        });
+    }
+    devices
+}
+
+/// `pactl list sinks` / `list sources`, whose blocks carry both the name the
+/// tool needs and the description a person reads.
+///
+/// `default_name` is what `pactl get-default-sink` reported; monitor sources
+/// are dropped because recording a sink's own output is not what "pick a
+/// microphone" means.
+fn parse_pactl_devices(listing: &str, default_name: &str) -> Vec<AudioDevice> {
+    fn flush(
+        name: &mut Option<String>,
+        description: &mut Option<String>,
+        is_monitor: &mut bool,
+        devices: &mut Vec<AudioDevice>,
+        default_name: &str,
+    ) {
+        if let Some(id) = name.take() {
+            let description = description.take().unwrap_or_else(|| id.clone());
+            if !*is_monitor {
+                devices.push(AudioDevice {
+                    is_default: id == default_name,
+                    id,
+                    description,
+                });
+            }
+        }
+        *is_monitor = false;
+    }
+
+    let mut devices = Vec::new();
+    let mut name: Option<String> = None;
+    let mut description: Option<String> = None;
+    let mut is_monitor = false;
+
+    for line in listing.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("Sink #") || trimmed.starts_with("Source #") {
+            flush(
+                &mut name,
+                &mut description,
+                &mut is_monitor,
+                &mut devices,
+                default_name,
+            );
+        } else if let Some(value) = trimmed.strip_prefix("Name:") {
+            let value = value.trim();
+            is_monitor = value.ends_with(".monitor");
+            name = Some(value.to_string());
+        } else if let Some(value) = trimmed.strip_prefix("Description:") {
+            description = Some(value.trim().to_string());
+        }
+    }
+    flush(
+        &mut name,
+        &mut description,
+        &mut is_monitor,
+        &mut devices,
+        default_name,
+    );
+    devices
+}
+
+/// Leading indices of `pactl list short …` output, one per line.
+fn parse_short_indices(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|field| field.chars().all(|c| c.is_ascii_digit()))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Selectable devices for `direction`, most preferred first, or an empty list
+/// when this session's audio tool cannot switch devices at all (ALSA's
+/// `amixer` has no notion of a default device).
+#[must_use]
+pub fn audio_devices(direction: AudioDirection) -> Vec<AudioDevice> {
+    match detect_volume_tool() {
+        Some(VolumeTool::Wpctl) => run("wpctl", &["status"])
+            .map(|status| parse_wpctl_devices(&status, direction))
+            .unwrap_or_default(),
+        Some(VolumeTool::Pactl) => {
+            let default = run(
+                "pactl",
+                &[match direction {
+                    AudioDirection::Output => "get-default-sink",
+                    AudioDirection::Input => "get-default-source",
+                }],
+            )
+            .unwrap_or_default();
+            run("pactl", &["list", direction.pactl_noun()])
+                .map(|listing| parse_pactl_devices(&listing, default.trim()))
+                .unwrap_or_default()
+        }
+        Some(VolumeTool::Amixer) | None => Vec::new(),
+    }
+}
+
+/// The device currently in use, for the control-center row.
+#[must_use]
+pub fn default_audio_device(direction: AudioDirection) -> Option<AudioDevice> {
+    audio_devices(direction)
+        .into_iter()
+        .find(|device| device.is_default)
+}
+
+/// The devices in use at both ends, cached by the caller.
+///
+/// The control center is rebuilt on every media push, and listing devices
+/// means spawning the audio tool — so the rows read from a snapshot taken
+/// when the panel opens and after a switch, not on every repaint.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AudioDefaults {
+    pub output: Option<AudioDevice>,
+    pub input: Option<AudioDevice>,
+}
+
+impl AudioDefaults {
+    /// Read both ends from the sound server.
+    #[must_use]
+    pub fn read() -> Self {
+        Self {
+            output: default_audio_device(AudioDirection::Output),
+            input: default_audio_device(AudioDirection::Input),
+        }
+    }
+
+    /// Name of the device in use, or `None` when this session cannot switch
+    /// devices and the row should not appear at all.
+    #[must_use]
+    pub fn name(&self, direction: AudioDirection) -> Option<&str> {
+        match direction {
+            AudioDirection::Output => self.output.as_ref(),
+            AudioDirection::Input => self.input.as_ref(),
+        }
+        .map(|device| device.description.as_str())
+    }
+}
+
+/// Make `id` the default device, taking already-playing streams with it.
+///
+/// Moving the streams is the whole point of the switch: plugging in
+/// headphones and having the music stay in the speakers is the failure this
+/// avoids. WirePlumber does it on its own; PulseAudio needs to be told.
+pub fn set_audio_device(direction: AudioDirection, id: &str) -> bool {
+    match detect_volume_tool() {
+        Some(VolumeTool::Wpctl) => run_ok("wpctl", &["set-default", id]),
+        Some(VolumeTool::Pactl) => {
+            let (set, list, move_stream) = match direction {
+                AudioDirection::Output => ("set-default-sink", "sink-inputs", "move-sink-input"),
+                AudioDirection::Input => {
+                    ("set-default-source", "source-outputs", "move-source-output")
+                }
+            };
+            if !run_ok("pactl", &[set, id]) {
+                return false;
+            }
+            let streams = run("pactl", &["list", "short", list]).unwrap_or_default();
+            for index in parse_short_indices(&streams) {
+                // A stream that refuses to move (a dead client, a filter) is
+                // not a reason to report the switch as failed.
+                let _ = run_ok("pactl", &[move_stream, &index, id]);
+            }
+            true
+        }
+        Some(VolumeTool::Amixer) | None => false,
+    }
+}
+
+/// One picker row: a filled marker for the device in use, hollow otherwise.
+#[must_use]
+pub fn device_row(device: &AudioDevice) -> String {
+    let marker = if device.is_default {
+        "\u{f192}" // fa-dot-circle-o
+    } else {
+        "\u{f10c}" // fa-circle-o
+    };
+    format!("{marker}  {}", device.description)
+}
+
+/// The control-center row for the device currently in use.
+#[must_use]
+pub fn device_control_row(direction: AudioDirection, device: Option<&AudioDevice>) -> String {
+    let (icon, label) = match direction {
+        AudioDirection::Output => ("\u{f028}", "Output"), // fa-volume-up
+        AudioDirection::Input => ("\u{f130}", "Input"),   // fa-microphone
+    };
+    let name = device.map_or("none", |device| device.description.as_str());
+    format!("{icon}  {label:<12} {name}")
+}
+
+// ---------------------------------------------------------------------------
 // Brightness
 // ---------------------------------------------------------------------------
 
@@ -322,6 +628,29 @@ pub fn brightness_set(percent: u8) -> Option<u8> {
     }
 }
 
+impl crate::jwm::Jwm {
+    /// Both device lists, with the one in use marked. Bars and scripts use
+    /// this to build their own audio menus.
+    pub(crate) fn audio_devices_json(&self) -> serde_json::Value {
+        let list = |direction: AudioDirection| {
+            audio_devices(direction)
+                .into_iter()
+                .map(|device| {
+                    serde_json::json!({
+                        "id": device.id,
+                        "description": device.description,
+                        "default": device.is_default,
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        serde_json::json!({
+            "output": list(AudioDirection::Output),
+            "input": list(AudioDirection::Input),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,6 +702,137 @@ mod tests {
                 muted: true
             })
         );
+    }
+
+    const WPCTL_STATUS: &str = "\
+PipeWire 'pipewire-0' [1.0.5, ubuntu@host, cookie:1234]
+ └─ Clients:
+        32. WirePlumber                         [pid:900]
+
+Audio
+ ├─ Devices:
+ │      46. Built-in Audio                      [alsa]
+ │
+ ├─ Sinks:
+ │  *   49. Built-in Audio Analog Stereo        [vol: 0.45]
+ │      52. GA104 High Definition Audio         [vol: 1.00]
+ │
+ ├─ Sources:
+ │  *   50. Built-in Audio Analog Stereo        [vol: 1.00]
+ │      51. Yeti Stereo Microphone              [vol: 0.80]
+ │
+ ├─ Filters:
+ │
+ └─ Streams:
+
+Video
+ ├─ Devices:
+ │      47. Integrated Camera                   [v4l2]
+ │
+ └─ Sources:
+     *  48. Integrated Camera                   [v4l2]
+
+Settings
+ └─ Default Configured Devices:
+         0. Audio/Sink    alsa_output.pci-0000_00_1f.3.analog-stereo
+";
+
+    #[test]
+    fn wpctl_status_lists_sinks_with_the_default_marked() {
+        let sinks = parse_wpctl_devices(WPCTL_STATUS, AudioDirection::Output);
+        assert_eq!(sinks.len(), 2);
+        assert_eq!(sinks[0].id, "49");
+        assert_eq!(sinks[0].description, "Built-in Audio Analog Stereo");
+        assert!(sinks[0].is_default);
+        assert_eq!(sinks[1].id, "52");
+        assert!(!sinks[1].is_default);
+    }
+
+    /// The Video tree has a `Sources:` section of its own, and a camera is
+    /// not a microphone.
+    #[test]
+    fn wpctl_status_never_offers_cameras_as_audio_sources() {
+        let sources = parse_wpctl_devices(WPCTL_STATUS, AudioDirection::Input);
+        assert_eq!(
+            sources
+                .iter()
+                .map(|device| device.description.as_str())
+                .collect::<Vec<_>>(),
+            ["Built-in Audio Analog Stereo", "Yeti Stereo Microphone"]
+        );
+    }
+
+    #[test]
+    fn wpctl_status_without_an_audio_tree_lists_nothing() {
+        assert!(
+            parse_wpctl_devices("PipeWire 'pipewire-0' [1.0.5]\n", AudioDirection::Output)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn pactl_listing_pairs_names_with_descriptions() {
+        let listing = "\
+Sink #49
+\tState: RUNNING
+\tName: alsa_output.pci-0000_00_1f.3.analog-stereo
+\tDescription: Built-in Audio Analog Stereo
+\tDriver: PipeWire
+Sink #52
+\tState: SUSPENDED
+\tName: alsa_output.pci-0000_01_00.1.hdmi-stereo
+\tDescription: GA104 High Definition Audio
+";
+        let devices = parse_pactl_devices(listing, "alsa_output.pci-0000_01_00.1.hdmi-stereo");
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].description, "Built-in Audio Analog Stereo");
+        assert!(!devices[0].is_default);
+        assert!(devices[1].is_default);
+    }
+
+    /// A sink's monitor is a legitimate PulseAudio source, but offering it in
+    /// a microphone picker would hand the user their own output back.
+    #[test]
+    fn pactl_listing_drops_monitor_sources() {
+        let listing = "\
+Source #50
+\tName: alsa_output.pci-0000_00_1f.3.analog-stereo.monitor
+\tDescription: Monitor of Built-in Audio
+Source #51
+\tName: alsa_input.usb-Blue_Yeti.analog-stereo
+\tDescription: Yeti Stereo Microphone
+";
+        let devices = parse_pactl_devices(listing, "");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].description, "Yeti Stereo Microphone");
+    }
+
+    #[test]
+    fn short_listings_yield_stream_indices() {
+        let output = "\
+5\talsa_output.pci.analog-stereo\tPipeWire\ts16le 2ch 48000Hz\tRUNNING
+7\talsa_output.pci.analog-stereo\tPipeWire\tfloat32le 2ch 48000Hz\tRUNNING
+";
+        assert_eq!(parse_short_indices(output), ["5", "7"]);
+        assert!(parse_short_indices("No streams available.\n").is_empty());
+    }
+
+    #[test]
+    fn rows_mark_the_device_in_use() {
+        let default = AudioDevice {
+            id: "49".to_string(),
+            description: "Built-in Audio".to_string(),
+            is_default: true,
+        };
+        let other = AudioDevice {
+            is_default: false,
+            ..default.clone()
+        };
+        assert!(device_row(&default).starts_with('\u{f192}'));
+        assert!(device_row(&other).starts_with('\u{f10c}'));
+        assert!(device_row(&default).ends_with("Built-in Audio"));
+        assert!(device_control_row(AudioDirection::Output, Some(&default)).contains("Built-in"));
+        assert!(device_control_row(AudioDirection::Input, None).ends_with("none"));
     }
 
     #[test]

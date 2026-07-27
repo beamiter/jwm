@@ -2623,6 +2623,8 @@ impl Config {
             "toggle_night_light" => Some(Jwm::toggle_night_light),
             "toggle_wifi" => Some(Jwm::toggle_wifi),
             "wifi_picker" => Some(Jwm::wifi_picker),
+            "audio_output_picker" => Some(Jwm::audio_output_picker),
+            "audio_input_picker" => Some(Jwm::audio_input_picker),
             "bluetooth_picker" => Some(Jwm::bluetooth_picker),
             "calendar" => Some(Jwm::calendar),
             "clipboard_picker" => Some(Jwm::clipboard_picker),

@@ -347,6 +347,25 @@ impl Jwm {
                         BluetoothRowAction::Nothing => {}
                     }
                 }
+                ControlKind::AudioOutput | ControlKind::AudioInput => {
+                    if activate {
+                        let direction = if control == ControlKind::AudioOutput {
+                            system_controls::AudioDirection::Output
+                        } else {
+                            system_controls::AudioDirection::Input
+                        };
+                        let devices = system_controls::audio_devices(direction);
+                        if !devices.is_empty() {
+                            // Swap the panel for the picker; the grabs stay.
+                            self.features.system_ui =
+                                crate::jwm::features::SystemUiState::audio_picker(
+                                    direction, &devices,
+                                );
+                            self.sync_system_ui(backend);
+                            return;
+                        }
+                    }
+                }
                 ControlKind::Battery => {
                     // Read-only: the row is information, not a control.
                 }
@@ -649,6 +668,19 @@ impl Jwm {
             }
             if self.features.system_ui.is_bluetooth_picker() {
                 self.handle_bluetooth_picker_key(backend, keysym);
+                return Ok(());
+            }
+            if self.features.system_ui.audio_picker_direction().is_some() {
+                if keysym == keys::KEY_Return || keysym == keys::KEY_space {
+                    self.use_selected_audio_device(backend);
+                } else {
+                    if keysym == keys::KEY_Up {
+                        self.features.system_ui.move_selection(-1);
+                    } else if keysym == keys::KEY_Down || keysym == keys::KEY_Tab {
+                        self.features.system_ui.move_selection(1);
+                    }
+                    self.sync_system_ui(backend);
+                }
                 return Ok(());
             }
             if self.features.system_ui.is_clipboard_picker() {

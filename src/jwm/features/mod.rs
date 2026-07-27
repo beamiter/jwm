@@ -73,6 +73,9 @@ pub struct FeatureStates {
     pub battery: Option<BatteryState>,
     /// Clipboard history. Memory only, never written to disk.
     pub clipboard: ClipboardHistory,
+    /// Audio devices in use at both ends, refreshed when the control center
+    /// opens and after a switch.
+    pub audio_defaults: system_controls::AudioDefaults,
     /// Latest Wi-Fi/Bluetooth reading, refreshed on the same poll and
     /// whenever the control center opens.
     pub connectivity: ConnectivityState,

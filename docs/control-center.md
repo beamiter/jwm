@@ -14,6 +14,8 @@ controls.
 | Network | A wireless radio exists (`nmcli` or `rfkill`) | `Enter` opens the picker, `Left`/`Right` toggles the radio |
 | Bluetooth | A controller exists (`bluetoothctl` or `rfkill`) | `Enter` opens the picker, `Left`/`Right` toggles power |
 | Volume | `wpctl`, `pactl`, or `amixer` works | `Left`/`Right` adjust, `Enter`/`m` mute |
+| Output | The sound server can switch devices (`wpctl` or `pactl`) | `Enter` opens the [device picker](#audio-device-pickers) |
+| Input | Same | `Enter` opens the input picker |
 | Brightness | `brightnessctl` or `/sys/class/backlight` | `Left`/`Right` adjust |
 | Battery | A `power_supply` device of type `Battery` exists | read-only |
 | Power Profile | `powerprofilesctl` or ACPI `platform_profile` | `Left`/`Right` cycle |
@@ -116,6 +118,37 @@ Pairing a *new* device is out of scope: it needs interactive agent
 confirmation. Pair once with `bluetoothctl`, and the device shows up here
 afterwards.
 
+## Audio device pickers
+
+`audio_output_picker` and `audio_input_picker`, or `Enter` on the Output/Input
+row, list what this machine can play to and record from — speakers, HDMI
+outputs, headsets, microphones — with a filled marker on the device in use.
+`Up`/`Down` move, `Enter` switches, `Esc` closes. Neither has a default
+binding; bind them like any other action if you want them without opening the
+control center first.
+
+The list comes from `wpctl status` (PipeWire) or `pactl list` (PulseAudio),
+whichever the volume control already settled on. A monitor source — a sink's
+own output, offered by PulseAudio as if it were a microphone — is dropped:
+picking one would hand you back what you are playing. `amixer`-only sessions
+get no rows at all, because ALSA has no notion of a default device to switch.
+
+Switching moves the streams that are already playing to the new device.
+Plugging in headphones and having the music stay in the speakers is the
+failure this avoids; WirePlumber does it on its own, PulseAudio has to be told
+one stream at a time.
+
+### The exit code is not the answer
+
+A sound server will accept a switch to a device that is not really there — an
+HDMI output with no monitor, a headset microphone with no headset — and then
+quietly put the default back. `pactl` exits 0 either way. So the picker
+re-reads the device list afterwards and reports what it finds: the marker
+moves only if the switch actually took, and the panel says
+`Unavailable — still using …` when it did not. `set_audio_device` over IPC
+fails with the same reasoning rather than reporting a success that did not
+happen.
+
 ## Battery
 
 The battery is read from `/sys/class/power_supply`, polled every 30 seconds on
@@ -152,6 +185,8 @@ jwm-msg '{"query": "get_power_status"}'
 jwm-msg '{"command": "set_power_profile", "args": {"profile": "power-saver"}}'
 jwm-msg '{"query": "get_connectivity"}'
 jwm-msg '{"command": "toggle_wifi"}'
+jwm-msg '{"query": "get_audio_devices"}'
+jwm-msg '{"command": "set_audio_device", "args": {"direction": "output", "id": "49"}}'
 ```
 
 `get_power_status` reports the battery and the available/active profiles.
@@ -159,3 +194,8 @@ jwm-msg '{"command": "toggle_wifi"}'
 does. The `power` subscription topic carries `power/battery` (only when the
 reading actually changed) and `power/profile`; the `network` topic carries
 `network/status`, likewise only on a real change.
+
+`get_audio_devices` lists both ends with the device in use marked; the `id` it
+reports is what `set_audio_device` takes — a wpctl node id or a PulseAudio
+node name, depending on which tool the session uses. The `audio` subscription
+topic carries `audio/devices` after a switch.

@@ -1108,6 +1108,51 @@ impl Jwm {
         }
 
         // Special command: set_power_profile — switch the platform profile.
+        if name == "set_audio_device" {
+            use crate::jwm::features::system_controls::{self, AudioDirection};
+
+            let direction = match args.get("direction").and_then(|value| value.as_str()) {
+                Some("output") | None => AudioDirection::Output,
+                Some("input") => AudioDirection::Input,
+                Some(other) => {
+                    return IpcResponse::err(format!(
+                        "set_audio_device: unknown direction {other:?} (want 'output' or 'input')"
+                    ));
+                }
+            };
+            let Some(id) = args.get("id").and_then(|value| value.as_str()) else {
+                return IpcResponse::err("set_audio_device: expected string field 'id'");
+            };
+            let devices = system_controls::audio_devices(direction);
+            if !devices.iter().any(|device| device.id == id) {
+                return IpcResponse::err(format!(
+                    "set_audio_device: no {} device with id {id:?}",
+                    direction.label()
+                ));
+            }
+            if !system_controls::set_audio_device(direction, id) {
+                return IpcResponse::err(format!(
+                    "could not switch the audio {}",
+                    direction.label()
+                ));
+            }
+            // Re-read rather than trust the exit code: sound servers accept a
+            // switch to an unavailable device and then quietly revert it.
+            self.features.audio_defaults = system_controls::AudioDefaults::read();
+            if !system_controls::audio_devices(direction)
+                .iter()
+                .any(|device| device.id == id && device.is_default)
+            {
+                return IpcResponse::err(format!(
+                    "the sound server did not keep {id:?} as the {} device; it is likely unavailable",
+                    direction.label()
+                ));
+            }
+            self.refresh_open_control_center();
+            self.broadcast_ipc_event("audio/devices", self.audio_devices_json());
+            return IpcResponse::ok(None);
+        }
+
         if name == "set_power_profile" {
             let Some(profile) = args.get("profile").and_then(|value| value.as_str()) else {
                 return IpcResponse::err("set_power_profile: expected string field 'profile'");
@@ -1403,6 +1448,7 @@ impl Jwm {
             "get_media_status" => IpcResponse::ok(Some(self.media_status_json())),
             "get_power_status" => IpcResponse::ok(Some(self.power_status_json())),
             "get_connectivity" => IpcResponse::ok(Some(self.connectivity_json())),
+            "get_audio_devices" => IpcResponse::ok(Some(self.audio_devices_json())),
             "get_clipboard" => IpcResponse::ok(Some(self.clipboard_json())),
             "get_recording_status" => {
                 let output_path = self.features.recording.output_path.clone();

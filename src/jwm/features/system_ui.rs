@@ -136,6 +136,8 @@ pub enum ListKind {
     Wifi,
     Bluetooth,
     Wallpaper,
+    AudioOutput,
+    AudioInput,
 }
 
 impl ListKind {
@@ -146,6 +148,8 @@ impl ListKind {
             Self::Wifi => "\u{f1eb}  WI-FI",
             Self::Bluetooth => "\u{f293}  BLUETOOTH",
             Self::Wallpaper => "\u{f03e}  WALLPAPER",
+            Self::AudioOutput => "\u{f028}  AUDIO OUTPUT",
+            Self::AudioInput => "\u{f130}  AUDIO INPUT",
         }
     }
 
@@ -159,6 +163,9 @@ impl ListKind {
             Self::Wifi => "Enter  join    \u{f062}/\u{f063}  select    Esc  close",
             Self::Bluetooth => "Enter  connect/disconnect    r  refresh    Esc  close",
             Self::Wallpaper => "Enter  apply    \u{f062}/\u{f063}  select    Esc  close",
+            Self::AudioOutput | Self::AudioInput => {
+                "Enter  use    \u{f062}/\u{f063}  select    Esc  close"
+            }
         }
     }
 
@@ -193,6 +200,8 @@ pub enum RowData {
         action: &'static str,
     },
     Wallpaper,
+    /// The device id lives in the row's key, the way the wallpaper path does.
+    AudioDevice,
 }
 
 /// One row of a list panel.
@@ -218,6 +227,10 @@ pub enum ControlKind {
     Bluetooth,
     Volume,
     Brightness,
+    /// Opens the output-device picker; the label carries the device in use.
+    AudioOutput,
+    /// Opens the input-device picker.
+    AudioInput,
     /// Read-only battery readout; no interaction.
     Battery,
     /// Power profile selector: Left/Right cycles the driver's profiles.
@@ -251,6 +264,10 @@ pub struct ControlCenterInputs<'a> {
     /// Percentage and mute state, when a working audio control exists.
     pub volume: Option<(u8, bool)>,
     pub brightness: Option<u8>,
+    /// Audio output and input device names, when the sound server can switch
+    /// devices at all. `amixer`-only sessions get no rows.
+    pub audio_output: Option<&'a str>,
+    pub audio_input: Option<&'a str>,
     pub battery: Option<&'a crate::jwm::features::BatteryState>,
     /// Wi-Fi state, when this machine has a radio to report on.
     pub network: Option<&'a crate::jwm::features::NetworkState>,
@@ -437,6 +454,8 @@ impl SystemUiState {
             media,
             volume,
             brightness,
+            audio_output,
+            audio_input,
             battery,
             network,
             bluetooth,
@@ -462,6 +481,25 @@ impl SystemUiState {
                 percent,
                 false,
             ));
+        }
+        for (kind, name) in [
+            (ControlKind::AudioOutput, audio_output),
+            (ControlKind::AudioInput, audio_input),
+        ] {
+            if let Some(name) = name {
+                entries.push(ControlEntry {
+                    kind,
+                    percent: 0,
+                    enabled: false,
+                    label: format!(
+                        "{}  {name}",
+                        match kind {
+                            ControlKind::AudioOutput => "\u{f028}  Output      ",
+                            _ => "\u{f130}  Input       ",
+                        }
+                    ),
+                });
+            }
         }
         if let Some(network) = network {
             entries.push(ControlEntry {
@@ -911,6 +949,95 @@ impl SystemUiState {
         Some(self.selected_row(ListKind::Wallpaper)?.key.as_str())
     }
 
+    // --- Audio device pickers ---
+
+    /// Build a device picker for one end of the audio pipeline, starting on
+    /// the device already in use so reopening the panel keeps the user's
+    /// place.
+    pub fn audio_picker(
+        direction: crate::jwm::features::system_controls::AudioDirection,
+        devices: &[crate::jwm::features::system_controls::AudioDevice],
+    ) -> Self {
+        let rows: Vec<ListRow> = devices
+            .iter()
+            .map(|device| ListRow {
+                key: device.id.clone(),
+                text: crate::jwm::features::system_controls::device_row(device),
+                data: RowData::AudioDevice,
+            })
+            .collect();
+        let selected = devices
+            .iter()
+            .position(|device| device.is_default)
+            .unwrap_or(0);
+        Self::ListPanel {
+            kind: Self::audio_kind(direction),
+            rows,
+            selected,
+            message: String::new(),
+            prompt: None,
+            empty: format!("No audio {} devices to choose from", direction.label()),
+        }
+    }
+
+    fn audio_kind(direction: crate::jwm::features::system_controls::AudioDirection) -> ListKind {
+        match direction {
+            crate::jwm::features::system_controls::AudioDirection::Output => ListKind::AudioOutput,
+            crate::jwm::features::system_controls::AudioDirection::Input => ListKind::AudioInput,
+        }
+    }
+
+    /// Which audio picker is open, if either.
+    pub fn audio_picker_direction(
+        &self,
+    ) -> Option<crate::jwm::features::system_controls::AudioDirection> {
+        use crate::jwm::features::system_controls::AudioDirection;
+        match self {
+            Self::ListPanel {
+                kind: ListKind::AudioOutput,
+                ..
+            } => Some(AudioDirection::Output),
+            Self::ListPanel {
+                kind: ListKind::AudioInput,
+                ..
+            } => Some(AudioDirection::Input),
+            _ => None,
+        }
+    }
+
+    /// The device the selection rests on, as the audio tool identifies it.
+    pub fn selected_audio_device(&self) -> Option<String> {
+        let kind = Self::audio_kind(self.audio_picker_direction()?);
+        Some(self.selected_row(kind)?.key.clone())
+    }
+
+    /// Replace an audio picker's rows after a switch, so the marker moves to
+    /// the device that actually took effect.
+    pub fn set_audio_devices(
+        &mut self,
+        direction: crate::jwm::features::system_controls::AudioDirection,
+        devices: &[crate::jwm::features::system_controls::AudioDevice],
+    ) {
+        let rows = devices
+            .iter()
+            .map(|device| ListRow {
+                key: device.id.clone(),
+                text: crate::jwm::features::system_controls::device_row(device),
+                data: RowData::AudioDevice,
+            })
+            .collect();
+        self.set_rows(Self::audio_kind(direction), rows);
+    }
+
+    /// Replace an audio picker's status line.
+    pub fn set_audio_message(
+        &mut self,
+        direction: crate::jwm::features::system_controls::AudioDirection,
+        text: impl Into<String>,
+    ) {
+        self.set_list_message(Self::audio_kind(direction), text);
+    }
+
     /// Build the session menu from what this machine can actually do.
     pub fn session_menu() -> Self {
         Self::SessionMenu {
@@ -955,7 +1082,9 @@ impl SystemUiState {
             | ControlKind::Battery
             | ControlKind::PowerProfile
             | ControlKind::Network
-            | ControlKind::Bluetooth => entry.label.clone(),
+            | ControlKind::Bluetooth
+            | ControlKind::AudioOutput
+            | ControlKind::AudioInput => entry.label.clone(),
             ControlKind::Volume => {
                 let icon = if entry.enabled {
                     "\u{f026}" // fa-volume-off (muted)
@@ -2193,6 +2322,7 @@ unsafe fn authenticate_pam(password: &str) -> Result<bool, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jwm::features::system_controls::{AudioDevice, AudioDirection};
 
     #[test]
     fn control_center_builds_rows_for_available_controls() {
@@ -2832,5 +2962,52 @@ mod tests {
         assert!(text.contains(">  eDP-1"));
         assert!(text.contains(" * HDMI-1"));
         assert!(text.contains("apply with xrandr"));
+    }
+
+    fn audio_device(id: &str, description: &str, is_default: bool) -> AudioDevice {
+        AudioDevice {
+            id: id.to_string(),
+            description: description.to_string(),
+            is_default,
+        }
+    }
+
+    #[test]
+    fn audio_picker_opens_on_the_device_in_use() {
+        let devices = [
+            audio_device("49", "HDMI", false),
+            audio_device("52", "Speakers", true),
+        ];
+        let state = SystemUiState::audio_picker(AudioDirection::Output, &devices);
+        assert_eq!(state.audio_picker_direction(), Some(AudioDirection::Output));
+        assert_eq!(state.selected_audio_device().as_deref(), Some("52"));
+        // The other picker must not answer for this one.
+        assert!(!state.is_list(ListKind::AudioInput));
+    }
+
+    /// After a switch the rows are replaced, and the marker has to follow the
+    /// device that actually became default rather than the one asked for.
+    #[test]
+    fn refilled_audio_rows_move_the_marker() {
+        let mut state = SystemUiState::audio_picker(
+            AudioDirection::Input,
+            &[
+                audio_device("1", "Built-in Mic", true),
+                audio_device("2", "Headset Mic", false),
+            ],
+        );
+        state.move_selection(1);
+        assert_eq!(state.selected_audio_device().as_deref(), Some("2"));
+        state.set_audio_devices(
+            AudioDirection::Input,
+            &[
+                audio_device("1", "Built-in Mic", false),
+                audio_device("2", "Headset Mic", true),
+            ],
+        );
+        let parts = state.overlay_parts();
+        assert!(parts.items[1].starts_with('\u{f192}'));
+        assert!(parts.items[0].starts_with('\u{f10c}'));
+        assert_eq!(state.selected_audio_device().as_deref(), Some("2"));
     }
 }

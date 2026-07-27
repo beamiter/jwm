@@ -87,6 +87,8 @@ pub struct IpcRegistry {
 pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
     dispatch_commands: &[
         "app_launcher",
+        "audio_input_picker",
+        "audio_output_picker",
         "bluetooth_picker",
         "calendar",
         "clipboard_picker",
@@ -171,6 +173,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "set_config",
         "set_config_batch",
         "set_hdr_metadata",
+        "set_audio_device",
         "set_media_status",
         "set_power_profile",
         "set_recording_region",
@@ -181,6 +184,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
     ],
     queries: &[
         "benchmark_report",
+        "get_audio_devices",
         "get_audio_recording_status",
         "get_blur_status",
         "get_capabilities",
@@ -214,6 +218,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
     ],
     subscription_topics: &[
         "*",
+        "audio",
         "audio_recording",
         "clipboard",
         "config",
@@ -415,6 +420,8 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "toggle_night_light" => Ok((Jwm::toggle_night_light as WMFuncType, WMArgEnum::Int(0))),
         "toggle_wifi" => Ok((Jwm::toggle_wifi as WMFuncType, WMArgEnum::Int(0))),
         "wifi_picker" => Ok((Jwm::wifi_picker as WMFuncType, WMArgEnum::Int(0))),
+        "audio_output_picker" => Ok((Jwm::audio_output_picker as WMFuncType, WMArgEnum::Int(0))),
+        "audio_input_picker" => Ok((Jwm::audio_input_picker as WMFuncType, WMArgEnum::Int(0))),
         "bluetooth_picker" => Ok((Jwm::bluetooth_picker as WMFuncType, WMArgEnum::Int(0))),
         "calendar" => Ok((Jwm::calendar as WMFuncType, WMArgEnum::Int(0))),
         "clipboard_picker" => Ok((Jwm::clipboard_picker as WMFuncType, WMArgEnum::Int(0))),

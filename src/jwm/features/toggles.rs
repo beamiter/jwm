@@ -155,6 +155,7 @@ impl Jwm {
         let volume = crate::jwm::features::system_controls::volume_state()
             .map(|state| (state.percent, state.muted));
         let brightness = crate::jwm::features::system_controls::brightness_percent();
+        self.features.audio_defaults = crate::jwm::features::system_controls::AudioDefaults::read();
         self.features.connectivity = crate::jwm::features::connectivity::read_state();
         let profiles = crate::jwm::features::power::profiles();
         self.features.system_ui = crate::jwm::features::SystemUiState::control_center(
@@ -162,6 +163,14 @@ impl Jwm {
                 media: self.features.media.get(),
                 volume,
                 brightness,
+                audio_output: self
+                    .features
+                    .audio_defaults
+                    .name(crate::jwm::features::system_controls::AudioDirection::Output),
+                audio_input: self
+                    .features
+                    .audio_defaults
+                    .name(crate::jwm::features::system_controls::AudioDirection::Input),
                 battery: self.features.battery.as_ref(),
                 network: self.features.connectivity.network.as_ref(),
                 bluetooth: Some(&self.features.connectivity.bluetooth),
@@ -196,6 +205,14 @@ impl Jwm {
                 media: self.features.media.get(),
                 volume,
                 brightness,
+                audio_output: self
+                    .features
+                    .audio_defaults
+                    .name(crate::jwm::features::system_controls::AudioDirection::Output),
+                audio_input: self
+                    .features
+                    .audio_defaults
+                    .name(crate::jwm::features::system_controls::AudioDirection::Input),
                 battery: self.features.battery.as_ref(),
                 network: self.features.connectivity.network.as_ref(),
                 bluetooth: Some(&self.features.connectivity.bluetooth),
@@ -276,6 +293,119 @@ impl Jwm {
             Ok(_) => Ok(()),
             Err(error) => Err(format!("could not run {command:?}: {error}").into()),
         }
+    }
+
+    /// Open the audio output picker.
+    pub(crate) fn audio_output_picker(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.open_audio_picker(
+            backend,
+            crate::jwm::features::system_controls::AudioDirection::Output,
+        )
+    }
+
+    /// Open the audio input picker.
+    pub(crate) fn audio_input_picker(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.open_audio_picker(
+            backend,
+            crate::jwm::features::system_controls::AudioDirection::Input,
+        )
+    }
+
+    /// Shared entry point for both audio pickers.
+    ///
+    /// Listing devices is a local socket round-trip, unlike a Wi-Fi scan, so
+    /// it happens inline and the panel opens already filled.
+    pub(crate) fn open_audio_picker(
+        &mut self,
+        backend: &mut dyn Backend,
+        direction: crate::jwm::features::system_controls::AudioDirection,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.features.system_ui.is_active() {
+            return Ok(());
+        }
+        if !backend.has_compositor() {
+            return Err("audio device picker requires the JWM compositor".into());
+        }
+        let devices = crate::jwm::features::system_controls::audio_devices(direction);
+        if devices.is_empty() {
+            return Err(format!(
+                "no sound server that can switch audio {} devices",
+                direction.label()
+            )
+            .into());
+        }
+        if let Some(root) = backend.root_window() {
+            backend.key_ops().grab_keyboard(root)?;
+            if !backend.input_ops().grab_pointer(
+                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
+                None,
+            )? {
+                let _ = backend.key_ops().ungrab_keyboard();
+                return Err("could not grab pointer for the audio device picker".into());
+            }
+        }
+        self.features.system_ui =
+            crate::jwm::features::SystemUiState::audio_picker(direction, &devices);
+        self.sync_system_ui(backend);
+        Ok(())
+    }
+
+    /// Make the selected device the default, then re-read so the marker
+    /// shows what actually took effect rather than what was asked for.
+    pub(crate) fn use_selected_audio_device(&mut self, backend: &mut dyn Backend) {
+        use crate::jwm::features::system_controls;
+
+        let Some(direction) = self.features.system_ui.audio_picker_direction() else {
+            return;
+        };
+        let Some(id) = self.features.system_ui.selected_audio_device() else {
+            return;
+        };
+        let asked = system_controls::set_audio_device(direction, &id);
+        // The tool's exit code is not evidence: a sound server routinely
+        // accepts the request and then puts the default back, because the
+        // device is not actually available — an HDMI output with no monitor,
+        // a headset microphone with no headset. Believe the re-read.
+        let devices = system_controls::audio_devices(direction);
+        let took = devices
+            .iter()
+            .any(|device| device.id == id && device.is_default);
+        self.features
+            .system_ui
+            .set_audio_devices(direction, &devices);
+        self.features.audio_defaults = system_controls::AudioDefaults::read();
+        let in_use = self
+            .features
+            .audio_defaults
+            .name(direction)
+            .map(str::to_string);
+        let message = match (took, in_use) {
+            (true, Some(name)) => {
+                log::info!("audio: {} is now {name}", direction.label());
+                format!("Using {name}")
+            }
+            (false, Some(name)) => {
+                log::warn!(
+                    "audio: {} stayed on {name} after asking for {id}",
+                    direction.label()
+                );
+                format!("Unavailable \u{2014} still using {name}")
+            }
+            (_, None) if asked => "Switched, but nothing reports as default".to_string(),
+            (_, None) => "Could not switch device".to_string(),
+        };
+        self.features
+            .system_ui
+            .set_audio_message(direction, message);
+        self.sync_system_ui(backend);
     }
 
     /// Open the Wi-Fi picker and start a scan on a worker thread.
