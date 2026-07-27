@@ -12,7 +12,7 @@ controls.
 | --- | --- | --- |
 | Media | An MPRIS player is running | `Left`/`Right` skip, `Enter` play/pause |
 | Network | A wireless radio exists (`nmcli` or `rfkill`) | `Enter` opens the picker, `Left`/`Right` toggles the radio |
-| Bluetooth | A controller exists (`bluetoothctl` or `rfkill`) | `Enter` toggles power |
+| Bluetooth | A controller exists (`bluetoothctl` or `rfkill`) | `Enter` toggles power (off needs confirming) |
 | Volume | `wpctl`, `pactl`, or `amixer` works | `Left`/`Right` adjust, `Enter`/`m` mute |
 | Brightness | `brightnessctl` or `/sys/class/backlight` | `Left`/`Right` adjust |
 | Battery | A `power_supply` device of type `Battery` exists | read-only |
@@ -39,6 +39,13 @@ Bridges, tunnels, and loopback are never treated as "connected".
 
 Bluetooth uses `bluetoothctl show`, falling back to `rfkill`. Without a
 controller the row is hidden rather than shown dead.
+
+Switching Bluetooth **off** needs a second `Enter` to confirm; the row says
+so while armed, and moving the selection cancels it. The test is not whether
+an action is destructive but whether the user can undo it with the input they
+have left: on a machine driven by a Bluetooth keyboard, switching the
+controller off removes the very keys needed to switch it back on. Switching it
+on fires immediately.
 
 `Enter` on the Network row opens the [Wi-Fi picker](#wi-fi-picker); it never
 switches a working radio *off*. Dropping the network — and anything running

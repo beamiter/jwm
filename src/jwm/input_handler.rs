@@ -305,7 +305,10 @@ impl Jwm {
                     }
                 }
                 ControlKind::Bluetooth => {
-                    if activate {
+                    // Switching Bluetooth off can take the keyboard with it,
+                    // so `activate_control` withholds the row until a second
+                    // Enter confirms; switching it on fires immediately.
+                    if activate && self.features.system_ui.activate_control().is_some() {
                         let enabled = !self.features.connectivity.bluetooth.powered;
                         if crate::jwm::features::connectivity::set_bluetooth(enabled) {
                             self.refresh_connectivity();

@@ -82,6 +82,10 @@ pub enum SystemUiState {
     ControlCenter {
         entries: Vec<ControlEntry>,
         selected: usize,
+        /// Whether the selected row has been armed by a first Enter, for the
+        /// rows whose "off" state the user cannot recover from. Moving the
+        /// selection disarms it.
+        armed: bool,
     },
     NotificationCenter {
         entries: Vec<NotificationEntry>,
@@ -182,6 +186,19 @@ pub struct ControlCenterInputs<'a> {
     pub do_not_disturb: bool,
 }
 
+/// Whether activating this row needs a second Enter to confirm.
+///
+/// The test is not "is this destructive" but "can the user undo it with the
+/// input they have left". Switching Bluetooth off on a machine driven by a
+/// Bluetooth keyboard removes the very keys needed to switch it back on, so
+/// turning it *off* confirms; turning it on never does. Everything else in
+/// the panel is either recoverable from the keyboard or has its own
+/// confirmation further in (the session menu).
+#[must_use]
+pub fn needs_confirmation(kind: ControlKind, currently_enabled: bool) -> bool {
+    matches!(kind, ControlKind::Bluetooth) && currently_enabled
+}
+
 impl ControlEntry {
     fn simple(kind: ControlKind, percent: u8, enabled: bool) -> Self {
         Self {
@@ -252,9 +269,14 @@ impl Clone for SystemUiState {
                 password: String::new(),
                 message: message.clone(),
             },
-            Self::ControlCenter { entries, selected } => Self::ControlCenter {
+            Self::ControlCenter {
+                entries,
+                selected,
+                armed,
+            } => Self::ControlCenter {
                 entries: entries.clone(),
                 selected: *selected,
+                armed: *armed,
             },
             Self::NotificationCenter { entries, selected } => Self::NotificationCenter {
                 entries: entries.clone(),
@@ -408,6 +430,7 @@ impl SystemUiState {
         Self::ControlCenter {
             entries,
             selected: 0,
+            armed: false,
         }
     }
 
@@ -605,17 +628,92 @@ impl SystemUiState {
         Some(action)
     }
 
+    /// Render one control-center row. Rows whose content is not derived from
+    /// `percent`/`enabled` carry it pre-rendered in `label`.
+    fn control_row_text(entry: &ControlEntry) -> String {
+        match entry.kind {
+            ControlKind::Media
+            | ControlKind::Battery
+            | ControlKind::PowerProfile
+            | ControlKind::Network
+            | ControlKind::Bluetooth => entry.label.clone(),
+            ControlKind::Volume => {
+                let icon = if entry.enabled {
+                    "\u{f026}" // fa-volume-off (muted)
+                } else {
+                    "\u{f028}" // fa-volume-up
+                };
+                let value = if entry.enabled {
+                    "  mute".to_string()
+                } else {
+                    format!("{:>4}%", entry.percent)
+                };
+                format!(
+                    "{icon}  Volume       {}  {value}",
+                    slider_bar(if entry.enabled { 0 } else { entry.percent })
+                )
+            }
+            ControlKind::Brightness => format!(
+                "\u{f185}  Brightness   {}  {:>4}%",
+                slider_bar(entry.percent),
+                entry.percent
+            ),
+            ControlKind::NightLight => format!(
+                "\u{f186}  Night Light{:>26}",
+                if entry.enabled { "[ on ]" } else { "[ off ]" }
+            ),
+            ControlKind::DoNotDisturb => format!(
+                "\u{f1f6}  Do Not Disturb{:>23}",
+                if entry.enabled { "[ on ]" } else { "[ off ]" }
+            ),
+            ControlKind::LockScreen => "\u{f023}  Lock Screen".to_string(),
+            ControlKind::Session => "\u{f011}  Session\u{2026}".to_string(),
+        }
+    }
+
+    /// Activate the selected control, returning it only once confirmed.
+    /// Rows that need confirming arm on the first Enter and fire on the
+    /// second; everything else fires immediately.
+    pub fn activate_control(&mut self) -> Option<ControlKind> {
+        let Self::ControlCenter {
+            entries,
+            selected,
+            armed,
+        } = self
+        else {
+            return None;
+        };
+        let entry = entries.get(*selected)?;
+        if needs_confirmation(entry.kind, entry.enabled) && !*armed {
+            *armed = true;
+            return None;
+        }
+        *armed = false;
+        Some(entry.kind)
+    }
+
+    /// Whether the selected control row is armed for confirmation.
+    pub fn control_is_armed(&self) -> bool {
+        matches!(self, Self::ControlCenter { armed: true, .. })
+    }
+
     /// Put the selection back on a rebuilt control center, clamped in case the
     /// row count shrank (a player that went away drops the media row).
     pub fn restore_control_selection(&mut self, previous: usize) {
-        if let Self::ControlCenter { entries, selected } = self {
+        if let Self::ControlCenter {
+            entries, selected, ..
+        } = self
+        {
             *selected = previous.min(entries.len().saturating_sub(1));
         }
     }
 
     /// The control the selection currently rests on, if the panel is open.
     pub fn selected_control(&self) -> Option<ControlKind> {
-        let Self::ControlCenter { entries, selected } = self else {
+        let Self::ControlCenter {
+            entries, selected, ..
+        } = self
+        else {
             return None;
         };
         entries.get(*selected).map(|entry| entry.kind)
@@ -930,7 +1028,15 @@ impl SystemUiState {
         {
             let max = matches.len().saturating_sub(28);
             *offset = (*offset as isize + delta).clamp(0, max as isize) as usize;
-        } else if let Self::ControlCenter { entries, selected } = self {
+        } else if let Self::ControlCenter {
+            entries,
+            selected,
+            armed,
+        } = self
+        {
+            // Moving off an armed row cancels the confirmation: it belonged to
+            // the row the user was looking at.
+            *armed = false;
             if entries.is_empty() {
                 *selected = 0;
                 return;
@@ -1078,46 +1184,21 @@ impl SystemUiState {
                             .into(),
                 }
             }
-            Self::ControlCenter { entries, selected } => {
+            Self::ControlCenter {
+                entries,
+                selected,
+                armed,
+            } => {
                 let items = entries
                     .iter()
-                    .map(|entry| match entry.kind {
-                        ControlKind::Media
-                        | ControlKind::Battery
-                        | ControlKind::PowerProfile
-                        | ControlKind::Network
-                        | ControlKind::Bluetooth => entry.label.clone(),
-                        ControlKind::Volume => {
-                            let icon = if entry.enabled {
-                                "\u{f026}" // fa-volume-off (muted)
-                            } else {
-                                "\u{f028}" // fa-volume-up
-                            };
-                            let value = if entry.enabled {
-                                "  mute".to_string()
-                            } else {
-                                format!("{:>4}%", entry.percent)
-                            };
-                            format!(
-                                "{icon}  Volume       {}  {value}",
-                                slider_bar(if entry.enabled { 0 } else { entry.percent })
-                            )
+                    .enumerate()
+                    .map(|(index, entry)| {
+                        let row = Self::control_row_text(entry);
+                        if *armed && index == *selected {
+                            format!("{row}   \u{2190} Enter to confirm")
+                        } else {
+                            row
                         }
-                        ControlKind::Brightness => format!(
-                            "\u{f185}  Brightness   {}  {:>4}%",
-                            slider_bar(entry.percent),
-                            entry.percent
-                        ),
-                        ControlKind::NightLight => format!(
-                            "\u{f186}  Night Light{:>26}",
-                            if entry.enabled { "[ on ]" } else { "[ off ]" }
-                        ),
-                        ControlKind::DoNotDisturb => format!(
-                            "\u{f1f6}  Do Not Disturb{:>23}",
-                            if entry.enabled { "[ on ]" } else { "[ off ]" }
-                        ),
-                        ControlKind::LockScreen => "\u{f023}  Lock Screen".to_string(),
-                        ControlKind::Session => "\u{f011}  Session\u{2026}".to_string(),
                     })
                     .collect();
                 OverlayParts {
@@ -1125,7 +1206,11 @@ impl SystemUiState {
                     query: None,
                     items,
                     selected: Some((*selected).min(entries.len().saturating_sub(1))),
-                    hint: "\u{f060}/\u{f061}  adjust    Enter  toggle    Esc  close".into(),
+                    hint: if *armed {
+                        "Enter  confirm    Esc  close".into()
+                    } else {
+                        "\u{f060}/\u{f061}  adjust    Enter  toggle    Esc  close".into()
+                    },
                 }
             }
             Self::NotificationCenter { entries, selected } => {
@@ -1897,6 +1982,82 @@ mod tests {
         assert_eq!(menu.activate_session_entry(), None);
         menu.move_selection(1);
         assert!(menu.is_session_menu());
+    }
+
+    #[test]
+    fn switching_bluetooth_off_needs_a_second_enter() {
+        let powered = crate::jwm::features::BluetoothState {
+            present: true,
+            powered: true,
+        };
+        let mut panel = SystemUiState::control_center(&ControlCenterInputs {
+            bluetooth: Some(&powered),
+            ..Default::default()
+        });
+        assert_eq!(panel.selected_control(), Some(ControlKind::Bluetooth));
+
+        // First Enter arms and says so; nothing is switched.
+        assert_eq!(panel.activate_control(), None);
+        assert!(panel.control_is_armed());
+        assert!(panel.overlay_parts().items[0].contains("Enter to confirm"));
+        assert!(panel.overlay_parts().hint.contains("confirm"));
+
+        // Second Enter goes through.
+        assert_eq!(panel.activate_control(), Some(ControlKind::Bluetooth));
+        assert!(!panel.control_is_armed());
+    }
+
+    #[test]
+    fn switching_bluetooth_on_is_immediate() {
+        let off = crate::jwm::features::BluetoothState {
+            present: true,
+            powered: false,
+        };
+        let mut panel = SystemUiState::control_center(&ControlCenterInputs {
+            bluetooth: Some(&off),
+            ..Default::default()
+        });
+        // Nothing to strand: turning the radio on cannot cost the user keys.
+        assert_eq!(panel.activate_control(), Some(ControlKind::Bluetooth));
+    }
+
+    #[test]
+    fn moving_off_an_armed_control_cancels_it() {
+        let powered = crate::jwm::features::BluetoothState {
+            present: true,
+            powered: true,
+        };
+        let mut panel = SystemUiState::control_center(&ControlCenterInputs {
+            bluetooth: Some(&powered),
+            ..Default::default()
+        });
+        assert_eq!(panel.activate_control(), None);
+        panel.move_selection(1);
+        panel.move_selection(-1);
+
+        assert!(!panel.control_is_armed());
+        assert_eq!(
+            panel.activate_control(),
+            None,
+            "it must arm again, not fire"
+        );
+    }
+
+    #[test]
+    fn ordinary_toggles_never_ask_for_confirmation() {
+        for (kind, enabled) in [
+            (ControlKind::NightLight, true),
+            (ControlKind::DoNotDisturb, true),
+            (ControlKind::LockScreen, false),
+            (ControlKind::Session, false),
+            (ControlKind::Volume, true),
+            (ControlKind::Network, true),
+        ] {
+            assert!(
+                !needs_confirmation(kind, enabled),
+                "{kind:?} must not need confirming"
+            );
+        }
     }
 
     #[test]
