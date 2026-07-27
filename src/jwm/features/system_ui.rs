@@ -83,6 +83,21 @@ pub enum SystemUiState {
         entries: Vec<ControlEntry>,
         selected: usize,
     },
+    NotificationCenter {
+        entries: Vec<NotificationEntry>,
+        selected: usize,
+    },
+}
+
+/// One notification-center row: the pre-rendered text plus what activating it
+/// needs. Rendering happens when the panel opens, so the compositor never
+/// reaches back into the history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationEntry {
+    pub id: u32,
+    pub row: String,
+    /// Action key the sender marked as default, invoked on Return.
+    pub default_action: Option<String>,
 }
 
 /// One row of the control center: sliders react to Left/Right, toggles and
@@ -167,6 +182,10 @@ impl Clone for SystemUiState {
                 entries: entries.clone(),
                 selected: *selected,
             },
+            Self::NotificationCenter { entries, selected } => Self::NotificationCenter {
+                entries: entries.clone(),
+                selected: *selected,
+            },
         }
     }
 }
@@ -244,6 +263,58 @@ impl SystemUiState {
         Self::ControlCenter {
             entries,
             selected: 0,
+        }
+    }
+
+    /// Build the notification center from the live history, newest first.
+    pub fn notification_center(
+        center: &crate::jwm::features::NotificationCenter,
+        now_unix_ms: u64,
+    ) -> Self {
+        let entries = center
+            .recent()
+            .map(|record| NotificationEntry {
+                id: record.id,
+                row: crate::jwm::features::notifications::panel_row(record, now_unix_ms),
+                default_action: record.default_action.clone(),
+            })
+            .collect();
+        Self::NotificationCenter {
+            entries,
+            selected: 0,
+        }
+    }
+
+    pub fn is_notification_center(&self) -> bool {
+        matches!(self, Self::NotificationCenter { .. })
+    }
+
+    /// The notification the selection rests on, if the center is open.
+    pub fn selected_notification(&self) -> Option<&NotificationEntry> {
+        let Self::NotificationCenter { entries, selected } = self else {
+            return None;
+        };
+        entries.get(*selected)
+    }
+
+    /// Drop one row after its notification was dismissed, keeping the
+    /// selection on the row that slid into its place.
+    pub fn remove_notification(&mut self, id: u32) {
+        let Self::NotificationCenter { entries, selected } = self else {
+            return;
+        };
+        let Some(index) = entries.iter().position(|entry| entry.id == id) else {
+            return;
+        };
+        entries.remove(index);
+        *selected = (*selected).min(entries.len().saturating_sub(1));
+    }
+
+    /// Empty the open notification center after a clear-all.
+    pub fn clear_notifications(&mut self) {
+        if let Self::NotificationCenter { entries, selected } = self {
+            entries.clear();
+            *selected = 0;
         }
     }
 
@@ -501,7 +572,10 @@ impl SystemUiState {
                 password.push(ch);
                 message.clear();
             }
-            Self::Inactive | Self::MonitorLayout { .. } | Self::ControlCenter { .. } => return,
+            Self::Inactive
+            | Self::MonitorLayout { .. }
+            | Self::ControlCenter { .. }
+            | Self::NotificationCenter { .. } => return,
         }
         self.refresh_matches();
     }
@@ -515,7 +589,10 @@ impl SystemUiState {
                 password.pop();
                 message.clear();
             }
-            Self::Inactive | Self::MonitorLayout { .. } | Self::ControlCenter { .. } => return,
+            Self::Inactive
+            | Self::MonitorLayout { .. }
+            | Self::ControlCenter { .. }
+            | Self::NotificationCenter { .. } => return,
         }
         self.refresh_matches();
     }
@@ -537,6 +614,12 @@ impl SystemUiState {
             let max = matches.len().saturating_sub(28);
             *offset = (*offset as isize + delta).clamp(0, max as isize) as usize;
         } else if let Self::ControlCenter { entries, selected } = self {
+            if entries.is_empty() {
+                *selected = 0;
+                return;
+            }
+            *selected = (*selected as isize + delta).rem_euclid(entries.len() as isize) as usize;
+        } else if let Self::NotificationCenter { entries, selected } = self {
             if entries.is_empty() {
                 *selected = 0;
                 return;
@@ -695,6 +778,27 @@ impl SystemUiState {
                     hint: "\u{f060}/\u{f061}  adjust    Enter  toggle    Esc  close".into(),
                 }
             }
+            Self::NotificationCenter { entries, selected } => {
+                // Long histories scroll with the selection, like the launcher.
+                let start = selected.saturating_sub(13);
+                let items: Vec<String> = if entries.is_empty() {
+                    vec!["  No notifications".into()]
+                } else {
+                    entries
+                        .iter()
+                        .skip(start)
+                        .take(14)
+                        .map(|entry| entry.row.clone())
+                        .collect()
+                };
+                OverlayParts {
+                    title: "\u{f0f3}  NOTIFICATIONS".into(),
+                    query: None,
+                    items,
+                    selected: (!entries.is_empty()).then(|| selected - start),
+                    hint: "Enter  activate    d  dismiss    c  clear all    Esc  close".into(),
+                }
+            }
             Self::MonitorLayout {
                 entries,
                 selected,
@@ -803,7 +907,8 @@ impl SystemUiState {
             Self::Inactive
             | Self::Locked { .. }
             | Self::MonitorLayout { .. }
-            | Self::ControlCenter { .. } => {}
+            | Self::ControlCenter { .. }
+            | Self::NotificationCenter { .. } => {}
         }
     }
 }

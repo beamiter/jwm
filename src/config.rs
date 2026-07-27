@@ -1617,6 +1617,12 @@ impl Config {
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
+                modifier: vec!["Mod1".to_string()],
+                key: "F11".to_string(),
+                function: "notification_center".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
                 key: "Return".to_string(),
                 function: "spawn".to_string(),
@@ -2511,6 +2517,7 @@ impl Config {
             "volume_mute" => Some(Jwm::volume_mute),
             "brightness_adjust" => Some(Jwm::brightness_adjust),
             "control_center" => Some(Jwm::control_center),
+            "notification_center" => Some(Jwm::notification_center),
             "adjust_recording_region" => Some(Jwm::adjust_recording_region),
             "toggle_audio_recording" => Some(Jwm::toggle_audio_recording),
 

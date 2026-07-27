@@ -113,6 +113,37 @@ impl Jwm {
         Ok(())
     }
 
+    /// Open the notification center: the bounded history JWM kept while
+    /// toasts came and went, including what Do-Not-Disturb suppressed.
+    pub(crate) fn notification_center(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.features.system_ui.is_active() {
+            return Ok(());
+        }
+        if !backend.has_compositor() {
+            return Err("notification center requires the JWM compositor".into());
+        }
+        if let Some(root) = backend.root_window() {
+            backend.key_ops().grab_keyboard(root)?;
+            if !backend.input_ops().grab_pointer(
+                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
+                None,
+            )? {
+                let _ = backend.key_ops().ungrab_keyboard();
+                return Err("could not grab pointer for notification center".into());
+            }
+        }
+        self.features.system_ui = crate::jwm::features::SystemUiState::notification_center(
+            &self.features.notifications,
+            crate::jwm::features::notifications::now_unix_ms(),
+        );
+        self.sync_system_ui(backend);
+        Ok(())
+    }
+
     pub(crate) fn app_launcher(
         &mut self,
         backend: &mut dyn Backend,

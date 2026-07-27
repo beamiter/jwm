@@ -1007,13 +1007,56 @@ impl Jwm {
                 .and_then(|value| value.as_u64())
                 .and_then(|value| u32::try_from(value).ok())
                 .unwrap_or(0);
-            backend.compositor_push_toast(crate::backend::api::ToastNotification {
-                title: title.to_string(),
+            // `app`, `replaces_id`, and `default_action` are what the
+            // freedesktop bridge forwards; scripts may omit all three.
+            let request = crate::jwm::features::NotificationRequest {
+                app: args
+                    .get("app")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                summary: title.to_string(),
                 body: body.to_string(),
                 urgency,
-                timeout_ms,
-            });
-            return IpcResponse::ok(None);
+                replaces_id: args
+                    .get("replaces_id")
+                    .and_then(|value| value.as_u64())
+                    .and_then(|value| u32::try_from(value).ok())
+                    .unwrap_or(0),
+                default_action: args
+                    .get("default_action")
+                    .and_then(|value| value.as_str())
+                    .filter(|action| !action.is_empty())
+                    .map(str::to_string),
+            };
+            let id = self.post_notification(backend, &request, timeout_ms);
+            return IpcResponse::ok(Some(serde_json::json!({ "id": id })));
+        }
+
+        // Special command: close_notification — drop one history record and
+        // tell subscribers, so the bridge can emit NotificationClosed.
+        if name == "close_notification" {
+            let Some(id) = args
+                .get("id")
+                .and_then(|value| value.as_u64())
+                .and_then(|value| u32::try_from(value).ok())
+            else {
+                return IpcResponse::err("close_notification: expected integer field 'id'");
+            };
+            let reason = match args.get("reason").and_then(|value| value.as_u64()) {
+                Some(1) => crate::jwm::features::notifications::CloseReason::Expired,
+                Some(2) => crate::jwm::features::notifications::CloseReason::Dismissed,
+                Some(4) => crate::jwm::features::notifications::CloseReason::Undefined,
+                _ => crate::jwm::features::notifications::CloseReason::Requested,
+            };
+            let closed = self.close_notification(id, reason);
+            return IpcResponse::ok(Some(serde_json::json!({ "closed": closed })));
+        }
+
+        // Special command: clear_notifications — empty the history.
+        if name == "clear_notifications" {
+            let cleared = self.clear_notifications();
+            return IpcResponse::ok(Some(serde_json::json!({ "cleared": cleared })));
         }
 
         // Special command: benchmark (requires mutable backend)
@@ -1270,6 +1313,7 @@ impl Jwm {
             "get_dnd" => IpcResponse::ok(Some(serde_json::json!({
                 "enabled": self.do_not_disturb,
             }))),
+            "get_notifications" => IpcResponse::ok(Some(self.notifications_json())),
             "get_recording_status" => {
                 let output_path = self.features.recording.output_path.clone();
                 let active = self.features.recording.active;

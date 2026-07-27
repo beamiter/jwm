@@ -16,6 +16,7 @@ pub mod capture;
 pub mod capture_plan;
 pub mod expose_plan;
 pub mod magnifier;
+pub mod notifications;
 pub mod overview;
 pub mod overview_plan;
 pub mod recording;
@@ -32,6 +33,7 @@ pub use capture_plan::{
 };
 pub use expose_plan::ExposeAction;
 pub use magnifier::MagnifierState;
+pub use notifications::{NotificationCenter, NotificationRecord, NotificationRequest};
 pub use overview::OverviewState;
 pub use overview_plan::CyclePlan;
 pub use recording::RecordingState;
@@ -48,6 +50,9 @@ pub struct FeatureStates {
     pub overview: OverviewState,
     pub recording: RecordingState,
     pub magnifier: MagnifierState,
+    /// Bounded history behind the notification center. Not a mode: it
+    /// survives `disable_all` and never counts as an active feature.
+    pub notifications: NotificationCenter,
     /// Built-in lock screen, application launcher, and display layout UI.
     pub system_ui: SystemUiState,
     /// Peek 模式 (Boss Key) - 所有窗口淡出

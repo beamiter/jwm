@@ -273,6 +273,43 @@ impl Jwm {
         self.sync_system_ui(backend);
     }
 
+    /// Key handling while the notification center is open: Up/Down select,
+    /// Return invokes the sender's default action, `d`/Delete dismisses one
+    /// row, `c` clears the history.
+    fn handle_notification_center_key(&mut self, backend: &mut dyn Backend, keysym: u32) {
+        use crate::jwm::features::notifications::CloseReason;
+
+        if keysym == keys::KEY_Up {
+            self.features.system_ui.move_selection(-1);
+        } else if keysym == keys::KEY_Down || keysym == keys::KEY_Tab {
+            self.features.system_ui.move_selection(1);
+        } else if keysym == keys::KEY_c {
+            self.clear_notifications();
+        } else if let Some((id, action)) = self
+            .features
+            .system_ui
+            .selected_notification()
+            .map(|entry| (entry.id, entry.default_action.clone()))
+        {
+            if keysym == keys::KEY_Return || keysym == keys::KEY_space {
+                match action {
+                    // Without an action there is nothing to hand back to the
+                    // sender, so Return just dismisses like `d`.
+                    Some(action) => self.invoke_notification_action(id, &action),
+                    None => {
+                        self.close_notification(id, CloseReason::Dismissed);
+                    }
+                }
+            } else if keysym == keys::KEY_d
+                || keysym == keys::KEY_Delete
+                || keysym == keys::KEY_BackSpace
+            {
+                self.close_notification(id, CloseReason::Dismissed);
+            }
+        }
+        self.sync_system_ui(backend);
+    }
+
     pub(crate) fn on_key_press_internal(
         &mut self,
         backend: &mut dyn Backend,
@@ -379,6 +416,10 @@ impl Jwm {
             }
             if let Some(control) = self.features.system_ui.selected_control() {
                 self.handle_control_center_key(backend, control, keysym);
+                return Ok(());
+            }
+            if self.features.system_ui.is_notification_center() {
+                self.handle_notification_center_key(backend, keysym);
                 return Ok(());
             }
             if keysym == keys::KEY_BackSpace || keysym == keys::KEY_Delete {

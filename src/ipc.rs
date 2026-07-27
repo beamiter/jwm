@@ -87,6 +87,7 @@ pub struct IpcRegistry {
 pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
     dispatch_commands: &[
         "app_launcher",
+        "control_center",
         "cycle_overview",
         "cyclelayout",
         "focus_none",
@@ -100,6 +101,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "loopview",
         "monitor_layout",
         "movestack",
+        "notification_center",
         "quit",
         "refocus",
         "restart",
@@ -143,6 +145,8 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
     special_commands: &[
         "batch",
         "benchmark",
+        "clear_notifications",
+        "close_notification",
         "command_batch",
         "move_window_to_monitor",
         "notify",
@@ -171,6 +175,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_hdr_status",
         "get_metrics",
         "get_monitors",
+        "get_notifications",
         "get_recording_status",
         "get_scrolling_status",
         "get_session_lock",
@@ -191,6 +196,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "dnd",
         "layout",
         "monitor",
+        "notification",
         "recording",
         "scrolling",
         "tag",
@@ -371,6 +377,8 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         // --- Window management ---
         "focusstack" => Ok((Jwm::focusstack as WMFuncType, parse_int_arg(args, 1)?)),
         "app_launcher" => Ok((Jwm::app_launcher as WMFuncType, WMArgEnum::Int(0))),
+        "control_center" => Ok((Jwm::control_center as WMFuncType, WMArgEnum::Int(0))),
+        "notification_center" => Ok((Jwm::notification_center as WMFuncType, WMArgEnum::Int(0))),
         "monitor_layout" => Ok((Jwm::monitor_layout as WMFuncType, WMArgEnum::Int(0))),
         "lock_screen" => Ok((Jwm::lock_screen as WMFuncType, WMArgEnum::Int(0))),
         "killclient" => Ok((Jwm::killclient, parse_int_arg(args, 0)?)),

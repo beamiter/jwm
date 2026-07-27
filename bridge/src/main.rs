@@ -1,0 +1,50 @@
+//! jwm-bridge — freedesktop D-Bus services backed by jwm's built-in shell.
+//!
+//! jwm draws notifications itself and keeps their history, but applications
+//! speak `org.freedesktop.Notifications` on the session bus. This process is
+//! the translation layer, deliberately outside the compositor: the window
+//! manager's event loop stays synchronous and D-Bus-free, and a wedged bus
+//! cannot stall a frame.
+//!
+//! Process model:
+//!   tokio runtime hosts the zbus service and the signal pump.
+//!   One OS thread owns the blocking jwm event subscription.
+//!   Commands run on `spawn_blocking` with bounded socket timeouts.
+
+mod jwm_ipc;
+mod notifications;
+
+use jwm_ipc::JwmIpc;
+
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp_secs()
+        .init();
+
+    log::info!("jwm-bridge {} starting", env!("CARGO_PKG_VERSION"));
+
+    let ipc = JwmIpc::new();
+    // Fail loudly at startup rather than silently swallowing every
+    // notification: without the compositor there is nothing to bridge to.
+    if let Err(error) = ipc.query("get_version") {
+        log::warn!(
+            "jwm is not answering on {} yet ({error}); serving anyway and retrying per request",
+            ipc.socket().display()
+        );
+    }
+
+    let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    jwm_ipc::subscribe(ipc.clone(), &["notification"], events_tx);
+
+    let connection = zbus::connection::Builder::session()?
+        .name(notifications::NAME)?
+        .serve_at(notifications::PATH, notifications::Notifications::new(ipc))?
+        .build()
+        .await?;
+    log::info!("D-Bus service registered as {}", notifications::NAME);
+
+    notifications::pump_signals(connection, events_rx).await;
+    log::warn!("jwm-bridge event pump ended");
+    Ok(())
+}
