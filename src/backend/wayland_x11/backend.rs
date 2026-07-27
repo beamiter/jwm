@@ -2002,6 +2002,14 @@ impl RenderScheduler for WaylandX11Backend {
 }
 
 impl Backend for WaylandX11Backend {
+    fn set_clipboard_text(&mut self, text: &str) -> bool {
+        self.state.offer_clipboard_text(text)
+    }
+
+    fn drain_clipboard(&mut self) -> Vec<String> {
+        self.state.drain_clipboard_captured()
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             can_warp_pointer: false,

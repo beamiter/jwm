@@ -1079,6 +1079,28 @@ impl Jwm {
             return IpcResponse::ok(Some(serde_json::json!({ "recorded": recorded })));
         }
 
+        // Special command: clipboard_copy — put a history entry back on the
+        // clipboard by index, the same thing the picker's Enter does.
+        if name == "clipboard_copy" {
+            let index = args
+                .get("index")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0) as usize;
+            let Some(text) = self
+                .features
+                .clipboard
+                .get(index)
+                .map(|entry| entry.text.clone())
+            else {
+                return IpcResponse::err(format!("clipboard_copy: no entry at index {index}"));
+            };
+            if !backend.set_clipboard_text(&text) {
+                return IpcResponse::err("this backend cannot set the clipboard");
+            }
+            self.record_clipboard(&text);
+            return IpcResponse::ok(None);
+        }
+
         // Special command: clear_clipboard — forget everything copied.
         if name == "clear_clipboard" {
             let cleared = self.clear_clipboard_history();

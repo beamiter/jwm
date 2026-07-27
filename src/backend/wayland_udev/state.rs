@@ -258,6 +258,18 @@ impl CaptureCounters {
 
 pub struct JwmWaylandState {
     pub display_handle: DisplayHandle,
+    /// Text copied by clients, waiting to be drained into the history. Filled
+    /// by the reader threads started in `SelectionHandler::new_selection`.
+    pub clipboard_captured: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Entry JWM is currently offering as the selection source, if any.
+    /// `send_selection` writes this; a client taking the selection clears it.
+    pub clipboard_offered: Option<String>,
+    /// MIME types of a selection to read on the next tick.
+    ///
+    /// `new_selection` fires *before* smithay stores the new selection on the
+    /// seat, so asking for it from inside the handler always answers
+    /// `NoSelection`. The request is deferred by one turn of the event loop.
+    pub clipboard_pending: Option<Vec<String>>,
     pub loop_handle: smithay::reexports::calloop::LoopHandle<'static, JwmWaylandState>,
     pub pending_events: Arc<Mutex<std::collections::VecDeque<BackendEvent>>>,
 
@@ -1760,6 +1772,9 @@ impl JwmWaylandState {
         Ok((
             Self {
                 display_handle: dh.clone(),
+                clipboard_captured: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                clipboard_offered: None,
+                clipboard_pending: None,
                 loop_handle: handle.clone(),
                 pending_events,
                 compositor_dead_windows: Vec::new(),
@@ -3125,6 +3140,14 @@ impl SelectionHandler for JwmWaylandState {
         source: Option<SelectionSource>,
         _seat: Seat<Self>,
     ) {
+        if ty == SelectionTarget::Clipboard {
+            // A client owns the clipboard now, so whatever JWM was offering
+            // is no longer current.
+            self.clipboard_offered = None;
+            if let Some(source) = source.as_ref() {
+                self.clipboard_pending = Some(source.mime_types());
+            }
+        }
         if let Some(xwm) = self.x11_wm.as_mut() {
             if let Err(err) = xwm.new_selection(ty, source.map(|s| s.mime_types())) {
                 warn!("Failed to set Xwayland selection {ty:?}: {err:?}");
@@ -3140,11 +3163,125 @@ impl SelectionHandler for JwmWaylandState {
         _seat: Seat<Self>,
         _user_data: &(),
     ) {
+        // A history entry JWM is offering is served here; anything else is
+        // XWayland's selection and stays its business.
+        if ty == SelectionTarget::Clipboard
+            && let Some(text) = self.clipboard_offered.clone()
+        {
+            write_selection_async(text, fd);
+            return;
+        }
         if let Some(xwm) = self.x11_wm.as_mut() {
             if let Err(err) = xwm.send_selection(ty, mime_type, fd) {
                 warn!("Failed to send selection (X11 -> Wayland): {err:?}");
             }
         }
+    }
+}
+
+/// MIME types JWM advertises when it offers a history entry.
+pub(crate) const CLIPBOARD_OFFER_MIMES: [&str; 4] = [
+    "text/plain;charset=utf-8",
+    "text/plain",
+    "UTF8_STRING",
+    "STRING",
+];
+
+/// Hand `text` to a client on `fd` without blocking the compositor.
+///
+/// The reader is another process and may be slow or may never read at all,
+/// so the write happens on a thread that simply goes away if the pipe closes.
+fn write_selection_async(text: String, fd: std::os::fd::OwnedFd) {
+    std::thread::Builder::new()
+        .name("jwm-clipboard-write".to_string())
+        .spawn(move || {
+            use std::io::Write as _;
+            let mut file = std::fs::File::from(fd);
+            let _ = file.write_all(text.as_bytes());
+            let _ = file.flush();
+        })
+        .ok();
+}
+
+impl JwmWaylandState {
+    /// Ask the selection owner for its text and record it in the history.
+    ///
+    /// Offers marked as secrets never get this far, and the payload is read
+    /// on a thread: the owning client writes at its own pace, and a
+    /// compositor that waited would stall every other client with it.
+    fn capture_clipboard(&mut self, mime_types: &[String]) {
+        if !crate::config::CONFIG.load().behavior().clipboard_history {
+            return;
+        }
+        if crate::jwm::features::clipboard::is_secret(mime_types) {
+            debug!("clipboard: offer marked secret, not reading it");
+            return;
+        }
+        let Some(mime) = crate::jwm::features::clipboard::preferred_text_mime(mime_types) else {
+            return;
+        };
+        let (read, write) = match std::io::pipe() {
+            Ok(pair) => pair,
+            Err(error) => {
+                warn!("clipboard: pipe failed: {error}");
+                return;
+            }
+        };
+        if let Err(error) = request_data_device_client_selection(&self.seat, mime, write.into()) {
+            warn!("clipboard: requesting the selection failed: {error:?}");
+            return;
+        }
+
+        let captured = std::sync::Arc::clone(&self.clipboard_captured);
+        std::thread::Builder::new()
+            .name("jwm-clipboard-read".to_string())
+            .spawn(move || {
+                use std::io::Read as _;
+                let mut buffer = Vec::new();
+                let reader = std::fs::File::from(std::os::fd::OwnedFd::from(read));
+                // Cap the read: the history refuses anything larger anyway,
+                // and a client could otherwise stream without end.
+                let limit = crate::jwm::features::clipboard::MAX_TEXT_BYTES as u64 + 1;
+                if reader.take(limit).read_to_end(&mut buffer).is_err() {
+                    return;
+                }
+                let Ok(text) = String::from_utf8(buffer) else {
+                    return;
+                };
+                if let Ok(mut captured) = captured.lock() {
+                    captured.push(text);
+                }
+            })
+            .ok();
+    }
+
+    /// Text copied since the last call, oldest first.
+    ///
+    /// Also starts the read for a selection announced since the last call:
+    /// by now smithay has stored it on the seat and it can be asked for.
+    pub fn drain_clipboard_captured(&mut self) -> Vec<String> {
+        if let Some(mime_types) = self.clipboard_pending.take() {
+            self.capture_clipboard(&mime_types);
+        }
+        self.clipboard_captured
+            .lock()
+            .map(|mut captured| std::mem::take(&mut *captured))
+            .unwrap_or_default()
+    }
+
+    /// Offer `text` to clients as the clipboard selection.
+    pub fn offer_clipboard_text(&mut self, text: &str) -> bool {
+        self.clipboard_offered = Some(text.to_string());
+        set_data_device_selection(
+            &self.display_handle,
+            &self.seat,
+            CLIPBOARD_OFFER_MIMES
+                .iter()
+                .map(|m| (*m).to_string())
+                .collect(),
+            (),
+        );
+        true
     }
 }
 

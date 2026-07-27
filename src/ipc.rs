@@ -160,6 +160,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "benchmark",
         "clear_clipboard",
         "clear_notifications",
+        "clipboard_copy",
         "clipboard_record",
         "close_notification",
         "command_batch",

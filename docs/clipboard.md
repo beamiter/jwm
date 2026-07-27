@@ -55,7 +55,17 @@ requests the payload when that list is text and carries no secret marker.
 Putting an entry back means *becoming* the owner and answering requests for
 as long as JWM holds the selection.
 
-That runs on **its own X connection and thread**, not the window manager's.
+On Wayland JWM *is* the selection owner's counterpart: a client setting the
+clipboard is announced through smithay's selection handler, and JWM asks that
+client for the text over a pipe. The announcement arrives one step before
+smithay records the selection, so the read is deferred by one turn of the
+event loop — asking inside the handler always answers "no selection". Reading
+and writing both happen on threads: the other end is another process that
+writes at its own pace, and a compositor that waited would stall every client
+with it.
+
+The X11 watcher runs on **its own X connection and thread**, not the window
+manager's.
 Selection traffic is a conversation with other clients — a conversion waits
 for the owner to answer — and a slow or hostile clipboard owner must never be
 able to delay a frame.
@@ -65,8 +75,8 @@ Support by backend:
 | Backend | Capture | Serve |
 | --- | --- | --- |
 | `x11rb` | yes | yes |
+| `wayland-udev`, `wayland-x11`, `wayland-winit` | yes | yes |
 | `xcb` | not yet | not yet |
-| `wayland-udev` | not yet | not yet |
 
 Where it is not wired, nothing is recorded and activating a row reports that
 the backend cannot set the clipboard rather than pretending to have done it.
@@ -76,9 +86,13 @@ Entries can still arrive through `clipboard_record`.
 
 ```sh
 jwm-msg '{"query": "get_clipboard"}'
+jwm-msg '{"command": "clipboard_copy", "args": {"index": 1}}'
 jwm-msg '{"command": "clipboard_record", "args": {"text": "hello"}}'
 jwm-msg '{"command": "clear_clipboard"}'
 ```
+
+`clipboard_copy` puts a history entry back on the clipboard by index — the
+same thing the picker's `Enter` does, available to bars and scripts.
 
 `clipboard_record` is how a backend helper or a script feeds the history;
 callers are responsible for dropping secret-marked offers before calling it.
