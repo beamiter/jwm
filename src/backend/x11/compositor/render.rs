@@ -2370,6 +2370,14 @@ impl<C: CompositorConnection> Compositor<C> {
             || motion_trails_active
             || tilt_pending
             || attention_active
+            // Toast cards, the OSD, and the modal system UI animate on their
+            // own timeline and own no window, so no client damage marks them
+            // dirty. Without them here the push frame draws the card at the
+            // very start of its fade and the gate below throws every later
+            // frame away, leaving it frozen at ~0 alpha and invisible.
+            || !self.toast_stack.is_empty()
+            || !self.osd_slot.is_empty()
+            || self.system_ui.is_some()
             || explicit_render;
         let hash = Self::scene_hash(scene, focused);
         let scene_changed = hash != self.last_scene_hash;
